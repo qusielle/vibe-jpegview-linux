@@ -70,3 +70,8 @@ the core controls from JPEGView's Windows navigation panel (first/previous/next/
 and fullscreen). Right-click opens the core JPEGView context menu; it also supports keyboard
 selection with the arrow keys and Return. `0` fits the image; `1` shows it at actual size; `F`
 toggles fullscreen; `R` reloads; `Esc` or `Q` quits.
+
+The context menu and navigation panel also provide the first Windows-command parity for editing:
+rotate ±90 degrees and mirror horizontally or vertically. These transformations affect the
+displayed image in memory; saving processed images is not ported yet, so the source file remains
+unchanged.

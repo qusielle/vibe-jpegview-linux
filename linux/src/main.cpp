@@ -39,6 +39,10 @@ enum class ViewerAction {
 	Last,
 	ToggleFit,
 	ToggleFullscreen,
+	RotateClockwise,
+	RotateCounterclockwise,
+	MirrorHorizontal,
+	MirrorVertical,
 	Open,
 	Reload,
 	ToggleControls,
@@ -325,6 +329,52 @@ struct Image {
 		}
 		return stored;
 	}
+
+	bool Rotate(bool clockwise) {
+		if (width <= 0 || height <= 0) return false;
+		const int newWidth = height;
+		const int newHeight = width;
+		std::vector<std::uint8_t> transformed;
+		try {
+			transformed.resize(bgra.size());
+		} catch (const std::exception&) {
+			return false;
+		}
+		for (int sourceY = 0; sourceY < height; ++sourceY) {
+			for (int sourceX = 0; sourceX < width; ++sourceX) {
+				const int targetX = clockwise ? height - sourceY - 1 : sourceY;
+				const int targetY = clockwise ? sourceX : width - sourceX - 1;
+				const std::size_t sourceOffset = (static_cast<std::size_t>(sourceY) * width + sourceX) * 4;
+				const std::size_t targetOffset = (static_cast<std::size_t>(targetY) * newWidth + targetX) * 4;
+				std::copy_n(bgra.data() + sourceOffset, 4, transformed.data() + targetOffset);
+			}
+		}
+		width = newWidth;
+		height = newHeight;
+		bgra.swap(transformed);
+		return true;
+	}
+
+	bool Mirror(bool horizontal) {
+		if (width <= 0 || height <= 0) return false;
+		std::vector<std::uint8_t> transformed;
+		try {
+			transformed.resize(bgra.size());
+		} catch (const std::exception&) {
+			return false;
+		}
+		for (int sourceY = 0; sourceY < height; ++sourceY) {
+			for (int sourceX = 0; sourceX < width; ++sourceX) {
+				const int targetX = horizontal ? width - sourceX - 1 : sourceX;
+				const int targetY = horizontal ? sourceY : height - sourceY - 1;
+				const std::size_t sourceOffset = (static_cast<std::size_t>(sourceY) * width + sourceX) * 4;
+				const std::size_t targetOffset = (static_cast<std::size_t>(targetY) * width + targetX) * 4;
+				std::copy_n(bgra.data() + sourceOffset, 4, transformed.data() + targetOffset);
+			}
+		}
+		bgra.swap(transformed);
+		return true;
+	}
 };
 
 std::string FormatPercent(double zoom) {
@@ -428,21 +478,57 @@ private:
 		if (texture_ != nullptr) {
 			SDL_DestroyTexture(texture_);
 		}
-		texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-			image_.width, image_.height);
-		if (texture_ == nullptr) {
-			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
-			return false;
-		}
-		if (SDL_UpdateTexture(texture_, nullptr, image_.bgra.data(), image_.width * 4) != 0) {
-			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
-			return false;
-		}
+		texture_ = nullptr;
+		if (!UpdateTexture()) return false;
 
 		FitToWindow();
 		lastInteractionTick_ = SDL_GetTicks();
+		imageModified_ = false;
 		SetTitle();
 		return true;
+	}
+
+	bool UpdateTexture() {
+		SDL_Texture* newTexture = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+			image_.width, image_.height);
+		if (newTexture == nullptr) {
+			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
+			return false;
+		}
+		if (SDL_UpdateTexture(newTexture, nullptr, image_.bgra.data(), image_.width * 4) != 0) {
+			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
+			SDL_DestroyTexture(newTexture);
+			return false;
+		}
+		if (texture_ != nullptr) SDL_DestroyTexture(texture_);
+		texture_ = newTexture;
+		return true;
+	}
+
+	void ApplyTransform(ViewerAction action) {
+		bool transformed = false;
+		switch (action) {
+		case ViewerAction::RotateClockwise:
+			transformed = image_.Rotate(true);
+			break;
+		case ViewerAction::RotateCounterclockwise:
+			transformed = image_.Rotate(false);
+			break;
+		case ViewerAction::MirrorHorizontal:
+			transformed = image_.Mirror(true);
+			break;
+		case ViewerAction::MirrorVertical:
+			transformed = image_.Mirror(false);
+			break;
+		default:
+			return;
+		}
+		if (!transformed || !UpdateTexture()) {
+			SetTitle("Image transform failed");
+			return;
+		}
+		imageModified_ = true;
+		FitToWindow();
 	}
 
 	void SetTitle(const std::string& title) {
@@ -452,6 +538,7 @@ private:
 	void SetTitle() {
 		std::ostringstream title;
 		title << "JPEGView Linux — " << files_[index_].filename().string()
+			<< (imageModified_ ? " *" : "")
 			<< " [" << index_ + 1 << '/' << files_.size() << "] "
 			<< image_.width << 'x' << image_.height << " @ " << FormatPercent(zoom_)
 			<< " — arrows: navigate, wheel: zoom, drag: pan, 0: fit, 1: actual, F: fullscreen, Esc: quit";
@@ -570,7 +657,8 @@ private:
 		const int gap = 5;
 		const int margin = 8;
 		const int separator = 12;
-		const int panelWidth = margin * 2 + buttonSize * 6 + gap * 4 + separator * 2;
+		const int buttonCount = 8;
+		const int panelWidth = margin * 2 + buttonSize * buttonCount + gap * (buttonCount - 2) + separator * 2;
 		return SDL_Rect{
 			(windowWidth - panelWidth) / 2,
 			windowHeight - buttonSize - margin * 2,
@@ -587,14 +675,15 @@ private:
 		const int separator = 12;
 		const ViewerAction actions[] = {
 			ViewerAction::First, ViewerAction::Previous, ViewerAction::Next,
-			ViewerAction::Last, ViewerAction::ToggleFit, ViewerAction::ToggleFullscreen
+			ViewerAction::Last, ViewerAction::ToggleFit, ViewerAction::ToggleFullscreen,
+			ViewerAction::RotateClockwise, ViewerAction::RotateCounterclockwise
 		};
 		buttons.clear();
 		int x = panel.x + margin;
 		for (std::size_t i = 0; i < std::size(actions); ++i) {
 			buttons.push_back(ControlButton{SDL_Rect{x, panel.y + margin, buttonSize, buttonSize}, actions[i]});
 			x += buttonSize + gap;
-			if (i == 3 || i == 4) x += separator;
+			if (i == 3 || i == 5) x += separator;
 		}
 	}
 
@@ -627,6 +716,10 @@ private:
 			case ViewerAction::ToggleFullscreen:
 				ToggleFullscreen();
 				break;
+			case ViewerAction::RotateClockwise:
+			case ViewerAction::RotateCounterclockwise:
+				ApplyTransform(button.action);
+				break;
 			default:
 				break;
 			}
@@ -655,6 +748,12 @@ private:
 			break;
 		case ViewerAction::ToggleFullscreen:
 			ToggleFullscreen();
+			break;
+		case ViewerAction::RotateClockwise:
+		case ViewerAction::RotateCounterclockwise:
+		case ViewerAction::MirrorHorizontal:
+		case ViewerAction::MirrorVertical:
+			ApplyTransform(action);
 			break;
 		case ViewerAction::Open:
 			OpenFileDialog();
@@ -690,6 +789,11 @@ private:
 			{"Fit to screen / Actual size", ViewerAction::ToggleFit, false, fitToWindow_},
 			{"Full screen mode", ViewerAction::ToggleFullscreen, false, fullscreen_},
 			{"Show navigation panel", ViewerAction::ToggleControls, false, navigationPanelEnabled_},
+			{nullptr, ViewerAction::Next, true},
+			{"Rotate +90", ViewerAction::RotateClockwise},
+			{"Rotate -90", ViewerAction::RotateCounterclockwise},
+			{"Mirror horizontally", ViewerAction::MirrorHorizontal},
+			{"Mirror vertically", ViewerAction::MirrorVertical},
 			{nullptr, ViewerAction::Next, true},
 			{slideshowSeconds_ > 0.0 ? "Stop slide show/movie" : "Start slideshow (3 sec)", ViewerAction::ToggleSlideshow},
 			{nullptr, ViewerAction::Next, true},
@@ -1034,6 +1138,20 @@ private:
 			DrawRect(SDL_Rect{left, top, right - left, bottom - top});
 			DrawLine(left, top + 7, right, top + 7);
 			break;
+		case ViewerAction::RotateClockwise:
+			DrawLine(left + 4, bottom - 2, right - 2, bottom - 2);
+			DrawLine(right - 2, bottom - 2, right - 2, top + 7);
+			DrawLine(right - 2, top + 7, right - 9, top + 7);
+			DrawLine(right - 9, top + 7, right - 5, top + 3);
+			DrawLine(right - 9, top + 7, right - 5, top + 11);
+			break;
+		case ViewerAction::RotateCounterclockwise:
+			DrawLine(left + 2, top + 7, left + 2, bottom - 2);
+			DrawLine(left + 2, bottom - 2, right - 4, bottom - 2);
+			DrawLine(left + 2, top + 7, left + 9, top + 7);
+			DrawLine(left + 9, top + 7, left + 5, top + 3);
+			DrawLine(left + 9, top + 7, left + 5, top + 11);
+			break;
 		default:
 			break;
 		}
@@ -1285,13 +1403,14 @@ private:
 	int contextMenuY_ = 0;
 	int menuSelected_ = -1;
 	std::vector<MenuItem> contextMenuItems_;
-		bool quitRequested_ = false;
-		bool fileDialogOpen_ = false;
-		fs::path fileDialogDirectory_;
-		std::vector<FileDialogEntry> fileDialogEntries_;
-		int fileDialogSelected_ = 0;
-		int fileDialogScroll_ = 0;
-		std::vector<std::string> pendingDroppedFiles_;
+	bool imageModified_ = false;
+	bool quitRequested_ = false;
+	bool fileDialogOpen_ = false;
+	fs::path fileDialogDirectory_;
+	std::vector<FileDialogEntry> fileDialogEntries_;
+	int fileDialogSelected_ = 0;
+	int fileDialogScroll_ = 0;
+	std::vector<std::string> pendingDroppedFiles_;
 	int lastMouseX_ = kDefaultWidth / 2;
 	int lastMouseY_ = kDefaultHeight / 2;
 	int imageCenterX_ = kDefaultWidth / 2;
