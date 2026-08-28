@@ -84,7 +84,8 @@ the filename overlay. Ctrl+O opens the native in-app file browser, Ctrl+R reload
 toggles the panel. Ctrl+C copies the displayed image, Ctrl+X copies it at original size, Ctrl+Shift+C
 copies its path, Ctrl+V pastes a PNG image, Ctrl+P sends the processed image to `lp`, and Delete
 opens the move-to-trash confirmation. Ctrl+Shift+M/E set the modification date to now/EXIF date;
-R/T perform lossless JPEG rotations when bundled `jpegtran` is available. Move the pointer to
+R/T perform lossless JPEG rotations when bundled `jpegtran` is available; Ctrl+Shift+R opens the
+image resize dialog. Move the pointer to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, fit/actual, and fullscreen). The checked panel
 remains visible until Ctrl+N disables it; it is temporarily suppressed while a modal menu or
@@ -113,6 +114,10 @@ are discovered from the user and system application directories at menu-open tim
 `Batch rename/copy...` is also available: select images, preview a Windows-compatible target pattern,
 save it as a template, and rename within the folder or copy into newly-created subdirectories without
 overwriting existing files. Its `%pictures%` placeholder maps to `$XDG_PICTURES_DIR` or `$HOME/Pictures`.
+`Change size...` is ported from the Windows Resize dialog: percentage, width, and height edits retain
+the aspect ratio, and the point, Lanczos/Bicubic, sharpen-low, and sharpen-medium filters are available.
+The resize is applied to the processed image in memory and can then be saved with `Ctrl+S`; `Ctrl+Shift+R`
+opens the same dialog directly.
 The AppImage bundles `xclip`, `wl-copy`/`wl-paste`, and `jpegtran` when the build environment provides
 them. `lp`, `gsettings`, `feh`, and `nitrogen` remain host desktop integrations. The clipboard tools
 are also needed for image copy/paste in a local non-AppImage build.

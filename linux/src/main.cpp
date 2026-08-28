@@ -59,6 +59,15 @@ constexpr int kBatchPreview = 2;
 constexpr int kBatchSavePattern = 3;
 constexpr int kBatchRename = 4;
 constexpr int kBatchClose = 5;
+constexpr int kResizePercent = 0;
+constexpr int kResizeWidth = 1;
+constexpr int kResizeHeight = 2;
+constexpr int kResizeFilter = 3;
+constexpr int kResizeApply = 0;
+constexpr int kResizeCancel = 1;
+constexpr int kResizeFilterCount = 4;
+constexpr std::uint64_t kMaxImagePixels = 100ull * 1024ull * 1024ull;
+constexpr int kMaxImageDimension = 65535;
 
 struct ControlButton {
 	SDL_Rect rect{};
@@ -355,9 +364,67 @@ struct Image {
 		return true;
 	}
 
-	bool Resize(int newWidth, int newHeight) {
+	// Resample using the same four choices exposed by JPEGView's ResizeDlg:
+	// point sampling, Lanczos, and two sharpened best-quality kernels.
+	bool Resize(int newWidth, int newHeight, int filter = 3) {
 		if (width <= 0 || height <= 0 || newWidth <= 0 || newHeight <= 0) return false;
+		if (newWidth > kMaxImageDimension || newHeight > kMaxImageDimension ||
+			static_cast<std::uint64_t>(newWidth) * static_cast<std::uint64_t>(newHeight) > kMaxImagePixels) return false;
 		if (newWidth == width && newHeight == height) return true;
+		filter = std::clamp(filter, 0, kResizeFilterCount - 1);
+		// JPEGView breaks very large reductions into several passes. This avoids
+		// an excessively wide filter kernel and preserves detail better than a
+		// single extreme reduction.
+		const double totalReduction = static_cast<double>(width) / newWidth;
+		if (filter != 0 && totalReduction > 5.0) {
+			const int steps = std::max(2, static_cast<int>(std::ceil(std::log(totalReduction) / std::log(5.0))));
+			const double factor = std::pow(totalReduction, 1.0 / steps);
+			int passWidth = width;
+			int passHeight = height;
+			for (int pass = 0; pass < steps; ++pass) {
+				const int nextWidth = pass == steps - 1 ? newWidth :
+					std::max(newWidth, static_cast<int>(passWidth / factor));
+				const int nextHeight = pass == steps - 1 ? newHeight :
+					std::max(newHeight, static_cast<int>(passHeight / factor));
+				const int passFilter = pass == steps - 1 ? filter : (filter == 3 ? 2 : 1);
+				if (nextWidth == passWidth && nextHeight == passHeight) continue;
+				if (!Resize(nextWidth, nextHeight, passFilter)) return false;
+				passWidth = nextWidth;
+				passHeight = nextHeight;
+			}
+			return true;
+		}
+
+		if (filter == 0) {
+			std::vector<std::uint8_t> sampled;
+			try {
+				sampled.resize(static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(newHeight) * 4);
+			} catch (const std::exception&) {
+				return false;
+			}
+			const auto sourceCoordinate = [](int target, int sourceSize, int targetSize) {
+				if (targetSize <= sourceSize) {
+					return std::min(sourceSize - 1,
+						static_cast<int>((static_cast<std::uint64_t>(target) * sourceSize) / targetSize));
+				}
+				if (targetSize == 1 || sourceSize == 1) return 0;
+				return std::min(sourceSize - 1,
+					static_cast<int>((static_cast<std::uint64_t>(target) * (sourceSize - 1)) / (targetSize - 1)));
+			};
+			for (int targetY = 0; targetY < newHeight; ++targetY) {
+				const int sourceY = sourceCoordinate(targetY, height, newHeight);
+				for (int targetX = 0; targetX < newWidth; ++targetX) {
+					const int sourceX = sourceCoordinate(targetX, width, newWidth);
+					const std::size_t sourceOffset = (static_cast<std::size_t>(sourceY) * width + sourceX) * 4;
+					const std::size_t targetOffset = (static_cast<std::size_t>(targetY) * newWidth + targetX) * 4;
+					std::copy_n(bgra.data() + sourceOffset, 4, sampled.data() + targetOffset);
+				}
+			}
+			width = newWidth;
+			height = newHeight;
+			bgra.swap(sampled);
+			return true;
+		}
 
 		struct Sample {
 			int index = 0;
@@ -388,6 +455,14 @@ struct Image {
 			const double value = 2.0 * distance - 3.0;
 			return -sharpen * (1.0 - value * value);
 		};
+		const auto lanczos = [](double distance, double sharpen) {
+			if (distance < -2.0 || distance > 2.0) return 0.0;
+			if (std::abs(distance) < 1e-6) return 1.0;
+			const double pi = 3.14159265358979323846;
+			const double value = (2.0 * std::sin(pi * distance) * std::sin(0.5 * pi * distance)) /
+				(pi * pi * distance * distance);
+			return std::abs(distance) < 1.0 ? value : sharpen * value;
+		};
 		const auto integratedBestQuality = [&bestQuality](double distance, double multiplier, double sharpen) {
 			// JPEGView convolves its downsampling kernel with a one-pixel box.
 			// The 32-point integration is the same approximation used by the
@@ -402,7 +477,7 @@ struct Image {
 			}
 			return sum;
 		};
-		const auto buildKernels = [&cubic, &integratedBestQuality](int sourceSize, int targetSize) {
+		const auto buildKernels = [&cubic, &lanczos, &integratedBestQuality, filter](int sourceSize, int targetSize) {
 			std::vector<Kernel> kernels(static_cast<std::size_t>(targetSize));
 			if (sourceSize == targetSize) {
 				for (int target = 0; target < targetSize; ++target) {
@@ -414,10 +489,11 @@ struct Image {
 			const bool downsampling = targetSize < sourceSize;
 			const double scale = static_cast<double>(targetSize) / sourceSize;
 			const double sourcePerTarget = 1.0 / scale;
-			const double sharpen = 0.3; // JPEGView.ini default for display downsampling.
-			const double downsamplingMultiplier = downsampling ?
+			const bool useLanczos = filter == 1;
+			const double sharpen = filter == 2 ? 0.15 : 0.3;
+			const double downsamplingMultiplier = downsampling ? (useLanczos ? sourcePerTarget :
 				(sourcePerTarget < 2.0 ? 1.0 / (sourcePerTarget - 0.5) :
-				1.0 / ((sourcePerTarget + 1.0) * 0.5)) : 1.0;
+				1.0 / ((sourcePerTarget + 1.0) * 0.5))) : 1.0;
 			for (int target = 0; target < targetSize; ++target) {
 				// Downsampling uses the source-space center of each destination
 				// pixel. Upsampling follows JPEGView's endpoint-preserving
@@ -428,16 +504,17 @@ struct Image {
 					static_cast<double>(target) * (sourceSize - 1) / (targetSize - 1);
 				const int integerCenter = static_cast<int>(std::floor(center));
 				const double fraction = center - integerCenter;
-				const int filterLength = downsampling ? std::min(64, static_cast<int>(
-					4.0 * (sourcePerTarget + 1.0) * 0.5 + 0.99)) : 4;
+				const int filterLength = downsampling ? std::min(64, static_cast<int>(useLanczos ?
+					5.0 * sourcePerTarget : 4.0 * (sourcePerTarget + 1.0) * 0.5 + 0.99)) : 4;
 				const int filterOffset = downsampling ? (filterLength - 1) / 2 : 1;
 				const int first = integerCenter - filterOffset;
 				const int last = first + filterLength - 1;
 				double weightSum = 0.0;
 				for (int source = first; source <= last; ++source) {
 					if (source < 0 || source >= sourceSize) continue;
-					const double weight = downsampling ?
-						integratedBestQuality(source - integerCenter - fraction, downsamplingMultiplier, sharpen) :
+					const double weight = downsampling ? (useLanczos ?
+						lanczos((source - integerCenter - fraction) * downsamplingMultiplier, 1.0) :
+						integratedBestQuality(source - integerCenter - fraction, downsamplingMultiplier, sharpen)) :
 						cubic(center - source);
 					if (std::abs(weight) < 1e-12) continue;
 					kernels[static_cast<std::size_t>(target)].samples.push_back(Sample{source, weight});
@@ -2159,6 +2236,9 @@ private:
 		case IDM_MIRROR_V:
 			ApplyTransform(command);
 			break;
+		case IDM_CHANGESIZE:
+			OpenResizeDialog();
+			break;
 		case IDM_ROTATE_90_LOSSLESS:
 		case IDM_ROTATE_90_LOSSLESS_CONFIRM:
 		case IDM_ROTATE_270_LOSSLESS:
@@ -2438,6 +2518,7 @@ private:
 		if (ctrl && !shift && key == 's') return IDM_SAVE_ALLOW_NO_PROMPT;
 		if (ctrl && shift && key == 's') return IDM_SAVE_SCREEN;
 		if (ctrl && !shift && key == SDLK_r) return IDM_RELOAD;
+		if (ctrl && shift && key == SDLK_r) return IDM_CHANGESIZE;
 		if (ctrl && shift && key == 'm') return IDM_TOUCH_IMAGE;
 		if (ctrl && shift && key == 'e') return IDM_TOUCH_IMAGE_EXIF;
 		if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;
@@ -2553,7 +2634,7 @@ private:
 			{"  Rotate +90", IDM_ROTATE_90, false, false, true, "Down"},
 			{"  Rotate -90", IDM_ROTATE_270, false, false, true, "Up"},
 			{"  Rotate...", IDM_ROTATE, false, false, false},
-			{"  Change size...", IDM_CHANGESIZE, false, false, false},
+			{"  Change size...", IDM_CHANGESIZE, false, false, image_.width > 0, "Ctrl+Shift+R"},
 			{"  Perspective correction...", IDM_PERSPECTIVE, false, false, false},
 			{"  Mirror horizontally", IDM_MIRROR_H},
 			{"  Mirror vertically", IDM_MIRROR_V},
@@ -3198,6 +3279,292 @@ private:
 		RenderBatchButton(kBatchClose, "CLOSE");
 	}
 
+	SDL_Rect ResizeDialogRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(620, std::max(470, windowWidth - 40));
+		const int height = std::min(360, std::max(320, windowHeight - 40));
+		return SDL_Rect{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+	}
+
+	SDL_Rect ResizeFieldRect(int field) const {
+		const SDL_Rect dialog = ResizeDialogRect();
+		return SDL_Rect{dialog.x + 190, dialog.y + 70 + field * 42, 220, 28};
+	}
+
+	SDL_Rect ResizeButtonRect(int button) const {
+		const SDL_Rect dialog = ResizeDialogRect();
+		const int y = dialog.y + dialog.h - 48;
+		if (button == kResizeApply) return SDL_Rect{dialog.x + dialog.w - 198, y, 86, 30};
+		if (button == kResizeCancel) return SDL_Rect{dialog.x + dialog.w - 102, y, 86, 30};
+		return SDL_Rect{};
+	}
+
+	const char* ResizeFilterName() const {
+		static constexpr const char* names[kResizeFilterCount] = {
+			"BOX / POINT", "LANCZOS / BICUBIC", "SHARPEN LOW", "SHARPEN MEDIUM"
+		};
+		return names[std::clamp(resizeFilter_, 0, kResizeFilterCount - 1)];
+	}
+
+	std::string& ResizeFieldText(int field) {
+		if (field == kResizeWidth) return resizeWidthText_;
+		if (field == kResizeHeight) return resizeHeightText_;
+		return resizePercentText_;
+	}
+
+	bool ParseResizePercent(double& percent) const {
+		try {
+			std::size_t parsedCharacters = 0;
+			percent = std::stod(resizePercentText_, &parsedCharacters);
+			return parsedCharacters == resizePercentText_.size() && std::isfinite(percent) && percent > 0.0;
+		} catch (const std::exception&) {
+			return false;
+		}
+	}
+
+	bool ParseResizeInteger(const std::string& text, int& value) const {
+		try {
+			std::size_t parsedCharacters = 0;
+			const long long parsed = std::stoll(text, &parsedCharacters);
+			if (parsedCharacters != text.size() || parsed <= 0 || parsed > kMaxImageDimension) return false;
+			value = static_cast<int>(parsed);
+			return true;
+		} catch (const std::exception&) {
+			return false;
+		}
+	}
+
+	bool ValidResizeSize(int width, int height) const {
+		return width > 0 && height > 0 && width <= kMaxImageDimension && height <= kMaxImageDimension &&
+			static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) <= kMaxImagePixels;
+	}
+
+	void UpdateResizeFieldsFrom(int changedField) {
+		if (resizeOriginalWidth_ <= 0 || resizeOriginalHeight_ <= 0) return;
+		int width = 0;
+		int height = 0;
+		double percent = 0.0;
+		if (changedField == kResizePercent) {
+			if (!ParseResizePercent(percent)) return;
+			width = static_cast<int>(std::llround(resizeOriginalWidth_ * percent / 100.0));
+			height = static_cast<int>(std::llround(resizeOriginalHeight_ * percent / 100.0));
+		} else if (changedField == kResizeWidth) {
+			if (!ParseResizeInteger(resizeWidthText_, width)) return;
+			percent = 100.0 * width / resizeOriginalWidth_;
+			height = static_cast<int>(std::llround(resizeOriginalHeight_ * percent / 100.0));
+		} else if (changedField == kResizeHeight) {
+			if (!ParseResizeInteger(resizeHeightText_, height)) return;
+			percent = 100.0 * height / resizeOriginalHeight_;
+			width = static_cast<int>(std::llround(resizeOriginalWidth_ * percent / 100.0));
+		}
+		if (!ValidResizeSize(width, height)) {
+			resizeMessage_ = "Size must be positive and no larger than 65535 x 65535 / 100 MP";
+			return;
+		}
+		resizePercentText_ = std::to_string(std::max(1, static_cast<int>(std::llround(percent))));
+		resizeWidthText_ = std::to_string(width);
+		resizeHeightText_ = std::to_string(height);
+		resizeMessage_.clear();
+	}
+
+	bool ResizeTarget(int& width, int& height) const {
+		return ParseResizeInteger(resizeWidthText_, width) && ParseResizeInteger(resizeHeightText_, height) &&
+			ValidResizeSize(width, height);
+	}
+
+	void OpenResizeDialog() {
+		if (image_.width <= 0 || image_.height <= 0) return;
+		resizeOriginalWidth_ = image_.width;
+		resizeOriginalHeight_ = image_.height;
+		resizePercentText_ = "100";
+		resizeWidthText_ = std::to_string(image_.width);
+		resizeHeightText_ = std::to_string(image_.height);
+		resizeFilter_ = 2; // CResizeDlg remembers Sharpen low by default.
+		resizeField_ = kResizePercent;
+		resizeInputPrimed_ = true;
+		resizeMessage_.clear();
+		resizeDialogOpen_ = true;
+		contextMenuOpen_ = false;
+		fileDialogOpen_ = false;
+		batchCopyOpen_ = false;
+		SDL_StartTextInput();
+	}
+
+	void CloseResizeDialog() {
+		SDL_StopTextInput();
+		resizeDialogOpen_ = false;
+		resizeInputPrimed_ = false;
+		resizeMessage_.clear();
+	}
+
+	void ApplyResizeDialog() {
+		int width = 0;
+		int height = 0;
+		if (!ResizeTarget(width, height)) {
+			resizeMessage_ = "Enter a valid size (maximum 65535 x 65535 / 100 MP)";
+			return;
+		}
+		if (width == image_.width && height == image_.height) {
+			CloseResizeDialog();
+			return;
+		}
+		const bool wasFitToWindow = fitToWindow_;
+		const bool wasFillWithCrop = fillWithCrop_;
+		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
+		const double manualZoom = zoom_;
+		if (!image_.Resize(width, height, resizeFilter_)) {
+			resizeMessage_ = "Resizing failed: not enough memory or the image is too large";
+			return;
+		}
+		image_.originalWidth = width;
+		image_.originalHeight = height;
+		if (!UpdateTexture()) {
+			resizeMessage_ = "Resizing failed: could not update the display texture";
+			return;
+		}
+		imageModified_ = true;
+		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		SetTitle();
+		CloseResizeDialog();
+	}
+
+	void PrepareResizeTextInput() {
+		if (!resizeInputPrimed_ || resizeField_ > kResizeHeight) return;
+		ResizeFieldText(resizeField_).clear();
+		resizeInputPrimed_ = false;
+	}
+
+	void CycleResizeFilter(int direction) {
+		resizeFilter_ = (resizeFilter_ + direction + kResizeFilterCount) % kResizeFilterCount;
+		resizeField_ = kResizeFilter;
+	}
+
+	void HandleResizeDialogEvents(const SDL_Event& event, bool& running) {
+		switch (event.type) {
+		case SDL_QUIT:
+			running = false;
+			break;
+		case SDL_KEYDOWN: {
+			if (event.key.repeat != 0) break;
+			const Uint16 modifiers = event.key.keysym.mod;
+			const bool shift = (modifiers & 0x0003u) != 0;
+			const bool ctrl = (modifiers & 0x00C0u) != 0;
+			if (event.key.keysym.sym == SDLK_ESCAPE) {
+				CloseResizeDialog();
+			} else if (event.key.keysym.sym == SDLK_RETURN) {
+				ApplyResizeDialog();
+			} else if (event.key.keysym.sym == SDLK_TAB) {
+				resizeField_ = (resizeField_ + (shift ? kResizeFilterCount - 1 : 1)) % kResizeFilterCount;
+				resizeInputPrimed_ = true;
+			} else if (ctrl && event.key.keysym.sym == 'a') {
+				if (resizeField_ <= kResizeHeight) {
+					ResizeFieldText(resizeField_).clear();
+					resizeInputPrimed_ = false;
+				}
+			} else if (resizeField_ <= kResizeHeight && event.key.keysym.sym == SDLK_BACKSPACE) {
+				PrepareResizeTextInput();
+				std::string& text = ResizeFieldText(resizeField_);
+				if (!text.empty()) text.pop_back();
+				UpdateResizeFieldsFrom(resizeField_);
+			} else if (resizeField_ == kResizeFilter && event.key.keysym.sym == SDLK_LEFT) {
+				CycleResizeFilter(-1);
+			} else if (resizeField_ == kResizeFilter && event.key.keysym.sym == SDLK_RIGHT) {
+				CycleResizeFilter(1);
+			} else if (event.key.keysym.sym == SDLK_UP || event.key.keysym.sym == SDLK_LEFT) {
+				resizeField_ = (resizeField_ + kResizeFilterCount - 1) % kResizeFilterCount;
+				resizeInputPrimed_ = true;
+			} else if (event.key.keysym.sym == SDLK_DOWN || event.key.keysym.sym == SDLK_RIGHT) {
+				resizeField_ = (resizeField_ + 1) % kResizeFilterCount;
+				resizeInputPrimed_ = true;
+			}
+			break;
+		}
+		case SDL_TEXTINPUT:
+			if (resizeField_ <= kResizeHeight) {
+				PrepareResizeTextInput();
+				std::string& text = ResizeFieldText(resizeField_);
+				for (const unsigned char character : std::string(event.text.text)) {
+					if (std::isdigit(character) != 0 || (resizeField_ == kResizePercent && character == '.')) {
+						text.push_back(static_cast<char>(character));
+					}
+				}
+				UpdateResizeFieldsFrom(resizeField_);
+			}
+			break;
+		case SDL_MOUSEMOTION:
+			lastMouseX_ = event.motion.x;
+			lastMouseY_ = event.motion.y;
+			break;
+		case SDL_MOUSEBUTTONDOWN:
+			if (event.button.button != SDL_BUTTON_LEFT) break;
+			if (PointInRect(event.button.x, event.button.y, ResizeButtonRect(kResizeApply))) {
+				ApplyResizeDialog();
+			} else if (PointInRect(event.button.x, event.button.y, ResizeButtonRect(kResizeCancel))) {
+				CloseResizeDialog();
+			} else {
+				for (int field = kResizePercent; field <= kResizeFilter; ++field) {
+					if (!PointInRect(event.button.x, event.button.y, ResizeFieldRect(field))) continue;
+					if (field == kResizeFilter) CycleResizeFilter(1);
+					else {
+						resizeField_ = field;
+						resizeInputPrimed_ = true;
+					}
+					break;
+				}
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	void RenderResizeButton(int button, const char* label) {
+		const SDL_Rect rect = ResizeButtonRect(button);
+		const bool hovered = PointInRect(lastMouseX_, lastMouseY_, rect);
+		SDL_SetRenderDrawColor(renderer_, hovered ? 52 : 28, hovered ? 78 : 28, hovered ? 108 : 28, 220);
+		SDL_RenderFillRect(renderer_, &rect);
+		DrawRect(rect, 125, 145, 165);
+		DrawText(label, rect.x + 12, rect.y + 10, kUiTextScale, 255, 255, 255);
+	}
+
+	void RenderResizeDialog() {
+		if (!resizeDialogOpen_) return;
+		const SDL_Rect dialog = ResizeDialogRect();
+		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 232);
+		SDL_RenderFillRect(renderer_, &dialog);
+		DrawRect(dialog, 190, 190, 190);
+		DrawText("RESIZE IMAGE", dialog.x + 20, dialog.y + 16, kUiTextScale, 255, 255, 255);
+		DrawText("ORIGINAL SIZE", dialog.x + 20, dialog.y + 43, kUiTextScale, 180, 195, 215);
+		DrawText(std::to_string(resizeOriginalWidth_) + "X" + std::to_string(resizeOriginalHeight_),
+			dialog.x + 190, dialog.y + 43, kUiTextScale, 220, 220, 220);
+
+		const char* labels[] = {"NEW SIZE", "NEW WIDTH", "NEW HEIGHT", "FILTER"};
+		for (int field = kResizePercent; field <= kResizeFilter; ++field) {
+			const SDL_Rect rect = ResizeFieldRect(field);
+			const bool focused = resizeField_ == field;
+			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 225);
+			SDL_RenderFillRect(renderer_, &rect);
+			DrawRect(rect, focused ? 100 : 75, focused ? 130 : 75, focused ? 165 : 75);
+			DrawText(labels[field], dialog.x + 20, rect.y + 9, kUiTextScale, 205, 215, 230);
+			const std::string value = field == kResizeFilter ? ResizeFilterName() : ResizeFieldText(field);
+			DrawText(ClipText(value, rect.w - 16), rect.x + 8, rect.y + 9, kUiTextScale, 255, 255, 255);
+			if (field == kResizePercent) DrawText("%", rect.x + rect.w + 10, rect.y + 9, kUiTextScale, 185, 185, 185);
+			if (field == kResizeWidth || field == kResizeHeight) {
+				DrawText("PIXELS", rect.x + rect.w + 10, rect.y + 9, kUiTextScale, 185, 185, 185);
+			}
+		}
+		if (!resizeMessage_.empty()) {
+			DrawText(ClipText(resizeMessage_, dialog.w - 40), dialog.x + 20, dialog.y + dialog.h - 82,
+				kUiTextScale, 235, 180, 130);
+		}
+		DrawText("TAB: NEXT FIELD   ARROWS: CHANGE FILTER/FIELD   ENTER: APPLY   ESC: CANCEL",
+			dialog.x + 20, dialog.y + dialog.h - 62, kUiTextScale, 160, 160, 160);
+		RenderResizeButton(kResizeApply, "APPLY");
+		RenderResizeButton(kResizeCancel, "CANCEL");
+	}
+
 	SDL_Rect FileDialogRect() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
@@ -3597,7 +3964,7 @@ private:
 	}
 
 	void RenderFileName() {
-		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_) return;
+		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_ || resizeDialogOpen_) return;
 		int windowWidth = 0;
 		SDL_GetWindowSize(window_, &windowWidth, nullptr);
 		std::ostringstream text;
@@ -3620,7 +3987,7 @@ private:
 	}
 
 	void RenderImageInfo() {
-		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_) return;
+		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_ || resizeDialogOpen_) return;
 		std::vector<std::string> lines = ImageInfoLines();
 		if (lines.empty()) return;
 
@@ -3654,7 +4021,7 @@ private:
 	}
 
 	void RenderControls() {
-		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_) return;
+		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_ || resizeDialogOpen_) return;
 		std::vector<ControlButton> buttons;
 		LayoutControls(buttons);
 		const SDL_Rect panel = ControlPanelRect();
@@ -3822,6 +4189,10 @@ private:
 				HandleBatchCopyEvents(event, running);
 				continue;
 			}
+			if (resizeDialogOpen_) {
+				HandleResizeDialogEvents(event, running);
+				continue;
+			}
 			if (contextMenuOpen_) {
 				switch (event.type) {
 				case SDL_QUIT:
@@ -3980,6 +4351,7 @@ private:
 		RenderContextMenu();
 		RenderFileDialog();
 		RenderBatchCopy();
+		RenderResizeDialog();
 		RenderConfirmation();
 		RenderAbout();
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
@@ -4053,6 +4425,16 @@ private:
 	std::vector<BatchCopyItem> batchCopyEntries_;
 	std::size_t batchCopyScroll_ = 0;
 	int batchCopyCursor_ = 0;
+	bool resizeDialogOpen_ = false;
+	int resizeField_ = kResizePercent;
+	bool resizeInputPrimed_ = false;
+	int resizeOriginalWidth_ = 0;
+	int resizeOriginalHeight_ = 0;
+	int resizeFilter_ = 2;
+	std::string resizePercentText_;
+	std::string resizeWidthText_;
+	std::string resizeHeightText_;
+	std::string resizeMessage_;
 	std::vector<std::string> pendingDroppedFiles_;
 	std::unique_ptr<jpegview_linux::FileList> fileListBeforeClipboard_;
 	fs::path clipboardTempFile_;
