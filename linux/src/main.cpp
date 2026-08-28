@@ -1,5 +1,10 @@
 #include "sdl_abi.h"
 
+// Keep Linux command dispatch aligned with the original Windows application.
+// resource.h is deliberately platform-neutral: it contains the command IDs
+// shared by JPEGView.rc, CMainDlg::ExecuteCommand, and KeyMap.txt.default.
+#include "../../src/JPEGView/resource.h"
+
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_HDR
 #define STBI_NO_LINEAR
@@ -32,32 +37,14 @@ constexpr double kMinZoom = 0.01;
 constexpr double kMaxZoom = 32.0;
 constexpr Uint32 kControlPanelTimeoutMs = 2400;
 
-enum class ViewerAction {
-	First,
-	Previous,
-	Next,
-	Last,
-	ToggleFit,
-	ToggleFullscreen,
-	RotateClockwise,
-	RotateCounterclockwise,
-	MirrorHorizontal,
-	MirrorVertical,
-	Open,
-	Reload,
-	ToggleControls,
-	ToggleSlideshow,
-	Quit,
-};
-
 struct ControlButton {
 	SDL_Rect rect{};
-	ViewerAction action = ViewerAction::Next;
+	int command = IDM_NEXT;
 };
 
 struct MenuItem {
 	const char* label = nullptr;
-	ViewerAction action = ViewerAction::Next;
+	int command = IDM_NEXT;
 	bool separator = false;
 	bool checked = false;
 };
@@ -391,7 +378,8 @@ std::string FormatPercent(double zoom) {
 class Viewer {
 public:
 	Viewer(std::vector<fs::path> files, std::size_t initialIndex, double slideshowSeconds, bool startFullscreen)
-		: files_(std::move(files)), index_(initialIndex), slideshowSeconds_(slideshowSeconds), startFullscreen_(startFullscreen) {}
+		: files_(std::move(files)), index_(initialIndex), slideshowSeconds_(slideshowSeconds),
+		  lastSlideshowSeconds_(slideshowSeconds > 0.0 ? slideshowSeconds : 3.0), startFullscreen_(startFullscreen) {}
 
 	int Run() {
 		if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -505,19 +493,19 @@ private:
 		return true;
 	}
 
-	void ApplyTransform(ViewerAction action) {
+	void ApplyTransform(int command) {
 		bool transformed = false;
-		switch (action) {
-		case ViewerAction::RotateClockwise:
+		switch (command) {
+		case IDM_ROTATE_90:
 			transformed = image_.Rotate(true);
 			break;
-		case ViewerAction::RotateCounterclockwise:
+		case IDM_ROTATE_270:
 			transformed = image_.Rotate(false);
 			break;
-		case ViewerAction::MirrorHorizontal:
+		case IDM_MIRROR_H:
 			transformed = image_.Mirror(true);
 			break;
-		case ViewerAction::MirrorVertical:
+		case IDM_MIRROR_V:
 			transformed = image_.Mirror(false);
 			break;
 		default:
@@ -541,7 +529,7 @@ private:
 			<< (imageModified_ ? " *" : "")
 			<< " [" << index_ + 1 << '/' << files_.size() << "] "
 			<< image_.width << 'x' << image_.height << " @ " << FormatPercent(zoom_)
-			<< " — arrows: navigate, wheel: zoom, drag: pan, 0: fit, 1: actual, F: fullscreen, Esc: quit";
+			<< " — arrows: navigate/rotate, wheel: zoom, drag: pan, Space: fit/actual, F11: fullscreen, Esc: quit";
 		SetTitle(title.str());
 	}
 
@@ -643,6 +631,13 @@ private:
 		}
 	}
 
+	void StartSlideshow(double seconds) {
+		slideshowSeconds_ = std::max(0.1, seconds);
+		lastSlideshowSeconds_ = slideshowSeconds_;
+		lastInteractionTick_ = SDL_GetTicks();
+		SetTitle();
+	}
+
 	void ShowControls() {
 		if (!navigationPanelEnabled_) return;
 		controlsVisible_ = true;
@@ -673,15 +668,15 @@ private:
 		const int gap = 5;
 		const int margin = 8;
 		const int separator = 12;
-		const ViewerAction actions[] = {
-			ViewerAction::First, ViewerAction::Previous, ViewerAction::Next,
-			ViewerAction::Last, ViewerAction::ToggleFit, ViewerAction::ToggleFullscreen,
-			ViewerAction::RotateClockwise, ViewerAction::RotateCounterclockwise
+		const int commands[] = {
+			IDM_FIRST, IDM_PREV, IDM_NEXT,
+			IDM_LAST, IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, IDM_FULL_SCREEN_MODE,
+			IDM_ROTATE_90, IDM_ROTATE_270
 		};
 		buttons.clear();
 		int x = panel.x + margin;
-		for (std::size_t i = 0; i < std::size(actions); ++i) {
-			buttons.push_back(ControlButton{SDL_Rect{x, panel.y + margin, buttonSize, buttonSize}, actions[i]});
+		for (std::size_t i = 0; i < std::size(commands); ++i) {
+			buttons.push_back(ControlButton{SDL_Rect{x, panel.y + margin, buttonSize, buttonSize}, commands[i]});
 			x += buttonSize + gap;
 			if (i == 3 || i == 5) x += separator;
 		}
@@ -697,107 +692,189 @@ private:
 		LayoutControls(buttons);
 		for (const ControlButton& button : buttons) {
 			if (!PointInRect(x, y, button.rect)) continue;
-			switch (button.action) {
-			case ViewerAction::First:
-				FirstImage();
-				break;
-			case ViewerAction::Previous:
-				PreviousImage();
-				break;
-			case ViewerAction::Next:
-				NextImage();
-				break;
-			case ViewerAction::Last:
-				LastImage();
-				break;
-			case ViewerAction::ToggleFit:
-				if (fitToWindow_) ActualSize(); else FitToWindow();
-				break;
-			case ViewerAction::ToggleFullscreen:
-				ToggleFullscreen();
-				break;
-			case ViewerAction::RotateClockwise:
-			case ViewerAction::RotateCounterclockwise:
-				ApplyTransform(button.action);
-				break;
-			default:
-				break;
-			}
+			ExecuteCommand(button.command);
 			ShowControls();
 			return true;
 		}
 		return PointInRect(x, y, ControlPanelRect());
 	}
 
-	void ExecuteAction(ViewerAction action) {
-		switch (action) {
-		case ViewerAction::First:
+	void ExecuteCommand(int command) {
+		switch (command) {
+		case IDM_FIRST:
 			FirstImage();
 			break;
-		case ViewerAction::Previous:
+		case IDM_PREV:
 			PreviousImage();
 			break;
-		case ViewerAction::Next:
+		case IDM_NEXT:
 			NextImage();
 			break;
-		case ViewerAction::Last:
+		case IDM_LAST:
 			LastImage();
 			break;
-		case ViewerAction::ToggleFit:
+		case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
 			if (fitToWindow_) ActualSize(); else FitToWindow();
 			break;
-		case ViewerAction::ToggleFullscreen:
+		case IDM_FIT_TO_SCREEN:
+			FitToWindow();
+			break;
+		case IDM_ZOOM_100:
+			ActualSize();
+			break;
+		case IDM_FULL_SCREEN_MODE:
 			ToggleFullscreen();
 			break;
-		case ViewerAction::RotateClockwise:
-		case ViewerAction::RotateCounterclockwise:
-		case ViewerAction::MirrorHorizontal:
-		case ViewerAction::MirrorVertical:
-			ApplyTransform(action);
+		case IDM_ROTATE_90:
+		case IDM_ROTATE_270:
+		case IDM_MIRROR_H:
+		case IDM_MIRROR_V:
+			ApplyTransform(command);
 			break;
-		case ViewerAction::Open:
+		case IDM_OPEN:
 			OpenFileDialog();
 			break;
-		case ViewerAction::Reload:
+		case IDM_RELOAD:
 			LoadCurrent();
 			break;
-		case ViewerAction::ToggleControls:
+		case IDM_SHOW_NAVPANEL:
 			navigationPanelEnabled_ = !navigationPanelEnabled_;
 			if (navigationPanelEnabled_) ShowControls(); else controlsVisible_ = false;
 			break;
-		case ViewerAction::ToggleSlideshow:
-			slideshowSeconds_ = slideshowSeconds_ > 0.0 ? 0.0 : 3.0;
+		case IDM_STOP_MOVIE:
+			slideshowSeconds_ = 0.0;
 			lastInteractionTick_ = SDL_GetTicks();
 			SetTitle();
 			break;
-		case ViewerAction::Quit:
+		case IDM_SLIDESHOW_RESUME:
+			StartSlideshow(lastSlideshowSeconds_);
+			break;
+		case IDM_SLIDESHOW_START:
+			StartSlideshow(3.0);
+			break;
+		case IDM_SLIDESHOW_1:
+		case IDM_SLIDESHOW_2:
+		case IDM_SLIDESHOW_3:
+		case IDM_SLIDESHOW_4:
+		case IDM_SLIDESHOW_5:
+		case IDM_SLIDESHOW_7:
+		case IDM_SLIDESHOW_10:
+		case IDM_SLIDESHOW_20:
+			StartSlideshow(static_cast<double>(command - IDM_SLIDESHOW_START));
+			break;
+		case IDM_ZOOM_400:
+			ZoomAt(4.0 / zoom_, imageCenterX_, imageCenterY_);
+			break;
+		case IDM_ZOOM_200:
+			ZoomAt(2.0 / zoom_, imageCenterX_, imageCenterY_);
+			break;
+		case IDM_ZOOM_50:
+			ZoomAt(0.5 / zoom_, imageCenterX_, imageCenterY_);
+			break;
+		case IDM_ZOOM_25:
+			ZoomAt(0.25 / zoom_, imageCenterX_, imageCenterY_);
+			break;
+		case IDM_ZOOM_INC:
+			ZoomAt(1.2, imageCenterX_, imageCenterY_);
+			break;
+		case IDM_ZOOM_DEC:
+			ZoomAt(1.0 / 1.2, imageCenterX_, imageCenterY_);
+			break;
+		case IDM_EXIT:
 			quitRequested_ = true;
+			break;
+		case IDM_DEFAULT_ESC:
+			if (slideshowSeconds_ > 0.0) {
+				slideshowSeconds_ = 0.0;
+				lastInteractionTick_ = SDL_GetTicks();
+				SetTitle();
+			} else {
+				quitRequested_ = true;
+			}
+			break;
+		default:
+			// The command is known to the Windows resource/key-map files but is
+			// not implemented by the focused Linux viewer yet.
 			break;
 		}
 	}
 
+	// This is the supported portion of Config/KeyMap.txt.default expressed in
+	// SDL key symbols.  It deliberately returns the original Windows command
+	// IDs, just like CKeyMap::GetCommandIdForKey does on Windows.
+	int CommandForKey(const SDL_KeyboardEvent& event) const {
+		const Sint32 key = event.keysym.sym;
+		const Uint16 modifiers = event.keysym.mod;
+		const bool ctrl = (modifiers & 0x00C0u) != 0;
+		const bool shift = (modifiers & 0x0003u) != 0;
+		const bool alt = (modifiers & 0x0300u) != 0;
+		if (alt) return 0;
+
+		if (key == SDLK_ESCAPE) return slideshowSeconds_ > 0.0 ? IDM_DEFAULT_ESC : IDM_EXIT;
+		if (!ctrl && !shift && key == SDLK_q) return IDM_EXIT; // Linux viewer convenience alias.
+		if (ctrl && !shift && key == SDLK_o) return IDM_OPEN;
+		if (ctrl && !shift && key == SDLK_r) return IDM_RELOAD;
+		if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;
+
+		if (!ctrl && !shift && (key == SDLK_RIGHT || key == SDLK_PAGEDOWN)) return IDM_NEXT;
+		if (!ctrl && !shift && (key == SDLK_LEFT || key == SDLK_PAGEUP)) return IDM_PREV;
+		if (!ctrl && !shift && key == SDLK_HOME) return IDM_FIRST;
+		if (!ctrl && !shift && key == SDLK_END) return IDM_LAST;
+		if (!ctrl && !shift && key == SDLK_SPACE) return IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS;
+		if (!ctrl && !shift && key == SDLK_RETURN) return IDM_FIT_TO_SCREEN;
+		if (!ctrl && !shift && key == SDLK_DOWN) return IDM_ROTATE_90;
+		if (!ctrl && !shift && key == SDLK_UP) return IDM_ROTATE_270;
+		if (ctrl && key == SDLK_DOWN) return IDM_ZOOM_DEC;
+		if (ctrl && key == SDLK_UP) return IDM_ZOOM_INC;
+		if (!ctrl && !shift && key == SDLK_F11) return IDM_FULL_SCREEN_MODE;
+
+		if (!ctrl && !shift && key == SDLK_0) return IDM_FIT_TO_SCREEN; // retained compatibility alias.
+		if (!ctrl && !shift && key == SDLK_f) return IDM_FULL_SCREEN_MODE; // retained compatibility alias.
+
+		const bool plus = key == SDLK_EQUALS || key == SDLK_KP_PLUS;
+		if (plus && !ctrl && !alt) return IDM_ZOOM_INC;
+		if ((key == SDLK_MINUS || key == SDLK_KP_MINUS) && !ctrl && !alt) return IDM_ZOOM_DEC;
+		return 0;
+	}
+
 	std::vector<MenuItem> ContextMenuItems() const {
 		return {
-			{"Open image...", ViewerAction::Open},
-			{"Reload image", ViewerAction::Reload},
-			{nullptr, ViewerAction::Next, true},
-			{"First image", ViewerAction::First},
-			{"Previous image", ViewerAction::Previous},
-			{"Next image", ViewerAction::Next},
-			{"Last image", ViewerAction::Last},
-			{nullptr, ViewerAction::Next, true},
-			{"Fit to screen / Actual size", ViewerAction::ToggleFit, false, fitToWindow_},
-			{"Full screen mode", ViewerAction::ToggleFullscreen, false, fullscreen_},
-			{"Show navigation panel", ViewerAction::ToggleControls, false, navigationPanelEnabled_},
-			{nullptr, ViewerAction::Next, true},
-			{"Rotate +90", ViewerAction::RotateClockwise},
-			{"Rotate -90", ViewerAction::RotateCounterclockwise},
-			{"Mirror horizontally", ViewerAction::MirrorHorizontal},
-			{"Mirror vertically", ViewerAction::MirrorVertical},
-			{nullptr, ViewerAction::Next, true},
-			{slideshowSeconds_ > 0.0 ? "Stop slide show/movie" : "Start slideshow (3 sec)", ViewerAction::ToggleSlideshow},
-			{nullptr, ViewerAction::Next, true},
-			{"Exit", ViewerAction::Quit},
+			// This is the supported subset of the PopupMenu resource in
+			// JPEGView.rc.  The numeric IDs are the original IDs, so all
+			// frontends enter the same ExecuteCommand path.
+			{"Open image...", IDM_OPEN},
+			{"Reload image", IDM_RELOAD},
+			{nullptr, 0, true},
+			{"Next image", IDM_NEXT},
+			{"Previous image", IDM_PREV},
+			{"First image", IDM_FIRST},
+			{"Last image", IDM_LAST},
+			{nullptr, 0, true},
+			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_},
+			{nullptr, 0, true},
+			{"Transform image", 0},
+			{"  Rotate +90", IDM_ROTATE_90},
+			{"  Rotate -90", IDM_ROTATE_270},
+			{"  Mirror horizontally", IDM_MIRROR_H},
+			{"  Mirror vertically", IDM_MIRROR_V},
+			{nullptr, 0, true},
+			{"Zoom", 0},
+			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_},
+			{"  400 %", IDM_ZOOM_400},
+			{"  200 %", IDM_ZOOM_200},
+			{"  100 %", IDM_ZOOM_100, false, !fitToWindow_ && std::abs(zoom_ - 1.0) < 0.01},
+			{"  50 %", IDM_ZOOM_50},
+			{"  25 %", IDM_ZOOM_25},
+			{"  Full screen mode", IDM_FULL_SCREEN_MODE, false, fullscreen_},
+			{nullptr, 0, true},
+			{"Play folder as slideshow/movie", 0},
+			{slideshowSeconds_ > 0.0 ? "  Stop slide show/movie" : "  Slideshow", slideshowSeconds_ > 0.0 ? IDM_STOP_MOVIE : IDM_SLIDESHOW_START},
+			{"  Waiting time 1 sec", IDM_SLIDESHOW_1},
+			{"  Waiting time 3 sec", IDM_SLIDESHOW_3},
+			{"  Waiting time 5 sec", IDM_SLIDESHOW_5},
+			{"  Waiting time 10 sec", IDM_SLIDESHOW_10},
+			{nullptr, 0, true},
+			{"Exit", IDM_EXIT},
 		};
 	}
 
@@ -834,7 +911,9 @@ private:
 		for (std::size_t i = 0; i < contextMenuItems_.size(); ++i) {
 			const MenuItem& item = contextMenuItems_[i];
 			const int itemHeight = item.separator ? 9 : 28;
-			if (y >= itemTop && y < itemTop + itemHeight) return item.separator ? -1 : static_cast<int>(i);
+			if (y >= itemTop && y < itemTop + itemHeight) {
+				return item.separator || item.command == 0 ? -1 : static_cast<int>(i);
+			}
 			itemTop += itemHeight;
 		}
 		return -1;
@@ -859,7 +938,7 @@ private:
 			candidate += direction;
 			if (candidate < 0) candidate = static_cast<int>(contextMenuItems_.size()) - 1;
 			if (candidate >= static_cast<int>(contextMenuItems_.size())) candidate = 0;
-			if (!contextMenuItems_[candidate].separator) {
+			if (!contextMenuItems_[candidate].separator && contextMenuItems_[candidate].command != 0) {
 				menuSelected_ = candidate;
 				return;
 			}
@@ -868,13 +947,13 @@ private:
 
 	void ActivateContextMenuSelection(bool& running) {
 		if (menuSelected_ < 0 || menuSelected_ >= static_cast<int>(contextMenuItems_.size()) ||
-			contextMenuItems_[menuSelected_].separator) {
+			contextMenuItems_[menuSelected_].separator || contextMenuItems_[menuSelected_].command == 0) {
 			return;
 		}
-		const ViewerAction action = contextMenuItems_[menuSelected_].action;
+		const int command = contextMenuItems_[menuSelected_].command;
 		contextMenuOpen_ = false;
-		ExecuteAction(action);
-		if (action == ViewerAction::Quit) running = false;
+		ExecuteCommand(command);
+		if (command == IDM_EXIT) running = false;
 	}
 
 	SDL_Rect FileDialogRect() const {
@@ -1092,30 +1171,30 @@ private:
 		const int top = r.y + 8;
 		const int bottom = r.y + r.h - 8;
 		const int middle = r.y + r.h / 2;
-		switch (button.action) {
-		case ViewerAction::First:
+		switch (button.command) {
+		case IDM_FIRST:
 			DrawLine(left, top, left, bottom);
 			DrawLine(left + 8, top, left + 8, bottom);
 			DrawLine(right, top, right - 10, middle);
 			DrawLine(right - 10, middle, right, bottom);
 			break;
-		case ViewerAction::Previous:
+		case IDM_PREV:
 			DrawLine(left + 5, top, left + 5, bottom);
 			DrawLine(right - 1, top, right - 12, middle);
 			DrawLine(right - 12, middle, right - 1, bottom);
 			break;
-		case ViewerAction::Next:
+		case IDM_NEXT:
 			DrawLine(left + 1, top, left + 12, middle);
 			DrawLine(left + 12, middle, left + 1, bottom);
 			DrawLine(right - 5, top, right - 5, bottom);
 			break;
-		case ViewerAction::Last:
+		case IDM_LAST:
 			DrawLine(left, top, left + 10, middle);
 			DrawLine(left + 10, middle, left, bottom);
 			DrawLine(right - 8, top, right - 8, bottom);
 			DrawLine(right, top, right, bottom);
 			break;
-		case ViewerAction::ToggleFit:
+		case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
 			if (fitToWindow_) {
 				DrawLine(left + 5, top + 4, left + 14, top + 4);
 				DrawLine(left + 5, top + 4, left + 5, top + 13);
@@ -1134,18 +1213,18 @@ private:
 				DrawLine(right - 7, bottom - 3, right - 16, bottom - 3);
 			}
 			break;
-		case ViewerAction::ToggleFullscreen:
+		case IDM_FULL_SCREEN_MODE:
 			DrawRect(SDL_Rect{left, top, right - left, bottom - top});
 			DrawLine(left, top + 7, right, top + 7);
 			break;
-		case ViewerAction::RotateClockwise:
+		case IDM_ROTATE_90:
 			DrawLine(left + 4, bottom - 2, right - 2, bottom - 2);
 			DrawLine(right - 2, bottom - 2, right - 2, top + 7);
 			DrawLine(right - 2, top + 7, right - 9, top + 7);
 			DrawLine(right - 9, top + 7, right - 5, top + 3);
 			DrawLine(right - 9, top + 7, right - 5, top + 11);
 			break;
-		case ViewerAction::RotateCounterclockwise:
+		case IDM_ROTATE_270:
 			DrawLine(left + 2, top + 7, left + 2, bottom - 2);
 			DrawLine(left + 2, bottom - 2, right - 4, bottom - 2);
 			DrawLine(left + 2, top + 7, left + 9, top + 7);
@@ -1196,7 +1275,8 @@ private:
 				SDL_Rect selection{menu.x + 3, itemTop, menu.w - 6, 28};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
-			DrawText(MenuLabel(item), menu.x + 14, itemTop + 6, 2);
+			const Uint8 textColor = item.command == 0 ? 135 : 235;
+			DrawText(MenuLabel(item), menu.x + 14, itemTop + 6, 2, textColor, textColor, textColor);
 			itemTop += 28;
 		}
 	}
@@ -1257,49 +1337,21 @@ private:
 				}
 				break;
 			case SDL_KEYDOWN:
+			{
 				if (event.key.repeat != 0) break;
-				if ((event.key.keysym.mod & 0x00C0u) != 0 && event.key.keysym.sym == SDLK_o) {
-					OpenFileDialog();
+				const Uint16 modifiers = event.key.keysym.mod;
+				const bool plainKey = (modifiers & 0x03C3u) == 0;
+				if (plainKey && event.key.keysym.sym >= '1' && event.key.keysym.sym <= '9') {
+					// CMainDlg::OnKeyDown reserves the number row for quick
+					// slideshow intervals before consulting KeyMap.txt.default.
+					StartSlideshow(static_cast<double>(event.key.keysym.sym - '0'));
 					break;
 				}
-				switch (event.key.keysym.sym) {
-				case SDLK_ESCAPE:
-				case SDLK_q:
-					running = false;
-					break;
-				case SDLK_RIGHT:
-				case SDLK_DOWN:
-				case SDLK_SPACE:
-					NextImage();
-					break;
-				case SDLK_LEFT:
-				case SDLK_UP:
-					PreviousImage();
-					break;
-				case SDLK_EQUALS:
-				case SDLK_KP_PLUS:
-					ZoomAt(1.2, imageCenterX_, imageCenterY_);
-					break;
-				case SDLK_MINUS:
-				case SDLK_KP_MINUS:
-					ZoomAt(1.0 / 1.2, imageCenterX_, imageCenterY_);
-					break;
-				case SDLK_0:
-					FitToWindow();
-					break;
-				case SDLK_1:
-					ActualSize();
-					break;
-				case SDLK_f:
-					ToggleFullscreen();
-					break;
-				case SDLK_r:
-					LoadCurrent();
-					break;
-				default:
-					break;
-				}
+				const int command = CommandForKey(event.key);
+				if (command != 0) ExecuteCommand(command);
+				if (quitRequested_) running = false;
 				break;
+			}
 			case SDL_MOUSEBUTTONDOWN:
 				if (event.button.button == SDL_BUTTON_LEFT) {
 					if (HandleControlClick(event.button.x, event.button.y)) {
@@ -1383,6 +1435,7 @@ private:
 	std::vector<fs::path> files_;
 	std::size_t index_ = 0;
 	double slideshowSeconds_ = 0.0;
+	double lastSlideshowSeconds_ = 3.0;
 	bool startFullscreen_ = false;
 	Uint32 lastInteractionTick_ = 0;
 	Image image_;
@@ -1424,8 +1477,9 @@ void PrintUsage(const char* program) {
 		<< "  --slideshow N      Advance every N seconds\n"
 		<< "  --decode-check     Decode inputs and exit (useful for CI)\n"
 		<< "  --help             Show this help\n\n"
-		<< "Controls: arrows/space navigate, mouse wheel zooms, left-drag pans, drop files to open,\n"
-		<< "          0 fits, 1 shows actual size, F toggles fullscreen, R reloads, Ctrl+O opens,\n"
+		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel zooms, left-drag pans, drop files to open,\n"
+		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
+		<< "          Ctrl+O opens, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
 		<< "          right-click opens the context menu, Esc or Q quits.\n";
 }
 

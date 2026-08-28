@@ -8,7 +8,7 @@ STATIC_RUNTIME ?= -static-libstdc++ -static-libgcc
 
 BUILD_DIR ?= build
 TARGET := $(BUILD_DIR)/jpegview-linux
-SOURCES := src/main.cpp src/sdl_abi.h third_party/stb_image.h
+SOURCES := src/main.cpp src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
 
 .PHONY: all clean run appimage
 

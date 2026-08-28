@@ -64,14 +64,26 @@ intended Docker environment.
 
 ## Controls
 
-Arrow keys or Space navigate; mouse wheel zooms around the cursor; left-drag pans; dropped files
-open in the viewer. Move the pointer to reveal the transient navigation panel, whose buttons mirror
-the core controls from JPEGView's Windows navigation panel (first/previous/next/last, fit/actual,
-and fullscreen). Right-click opens the core JPEGView context menu; it also supports keyboard
-selection with the arrow keys and Return. `0` fits the image; `1` shows it at actual size; `F`
-toggles fullscreen; `R` reloads; `Esc` or `Q` quits.
+Right/Left or PageUp/PageDown navigate; Up/Down rotate 90 degrees; mouse wheel zooms around the
+cursor; left-drag pans; dropped files open in the viewer. Space toggles fit/actual, Return fits,
+and F11 toggles fullscreen (`0`, `F`, and `Q` remain convenience aliases; `1`–`9` start a
+slideshow at that interval). Ctrl+O opens the
+native in-app file browser, Ctrl+R reloads, and Ctrl+N toggles the panel. Move the pointer to
+reveal the transient navigation panel, whose buttons mirror the core controls from JPEGView's
+Windows navigation panel (first/previous/next/last, fit/actual, and fullscreen). Right-click
+opens the core JPEGView context menu; it also supports keyboard selection with the arrow keys and
+Return. Esc stops an active slideshow first, matching the Windows default escape command, and
+otherwise quits.
 
 The context menu and navigation panel also provide the first Windows-command parity for editing:
 rotate ±90 degrees and mirror horizontally or vertically. These transformations affect the
 displayed image in memory; saving processed images is not ported yet, so the source file remains
 unchanged.
+
+The Linux command dispatcher uses the original numeric `IDM_*` values from
+`src/JPEGView/resource.h`, and the supported keyboard bindings follow the corresponding entries
+in `src/JPEGView/Config/KeyMap.txt.default`. This keeps the portable SDL input layer translating
+into the same command vocabulary as the Windows `CMainDlg::ExecuteCommand` path. The context menu
+is currently a native Linux rendering of the supported subset of the Windows `PopupMenu` resource;
+Windows-only commands remain intentionally unavailable until their underlying functionality is
+ported.
