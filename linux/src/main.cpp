@@ -49,6 +49,9 @@ constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr double kMinZoom = 0.01;
 constexpr double kMaxZoom = 32.0;
+constexpr int kContextMenuTextScale = 1;
+constexpr int kContextMenuItemHeight = 18;
+constexpr int kContextMenuSeparatorHeight = 7;
 
 struct ControlButton {
 	SDL_Rect rect{};
@@ -1888,7 +1891,7 @@ private:
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		return std::max(1, std::min(22, (windowHeight - 32) / 28));
+		return std::max(1, std::min(36, (windowHeight - 24) / kContextMenuItemHeight));
 	}
 
 	SDL_Rect ContextMenuRect() const {
@@ -1896,18 +1899,18 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		int width = 260;
-		int height = 16;
+		int height = 12;
 		const int visibleCount = ContextMenuVisibleCount();
 		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
 			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
 		for (std::size_t index = contextMenuScroll_; index < visibleEnd; ++index) {
 			const MenuItem& item = contextMenuItems_[index];
 			if (item.separator) {
-				height += 9;
+				height += kContextMenuSeparatorHeight;
 				continue;
 			}
-			width = std::max(width, TextWidth(MenuLabel(item), 2) + 28);
-			height += 28;
+			width = std::max(width, TextWidth(MenuLabel(item), kContextMenuTextScale) + 24);
+			height += kContextMenuItemHeight;
 		}
 		int x = contextMenuX_;
 		int y = contextMenuY_;
@@ -1921,13 +1924,13 @@ private:
 	int ContextMenuItemAt(int x, int y) const {
 		const SDL_Rect menu = ContextMenuRect();
 		if (!PointInRect(x, y, menu)) return -1;
-		int itemTop = menu.y + 8;
+		int itemTop = menu.y + 6;
 		const int visibleCount = ContextMenuVisibleCount();
 		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
 			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
 		for (std::size_t i = contextMenuScroll_; i < visibleEnd; ++i) {
 			const MenuItem& item = contextMenuItems_[i];
-			const int itemHeight = item.separator ? 9 : 28;
+			const int itemHeight = item.separator ? kContextMenuSeparatorHeight : kContextMenuItemHeight;
 			if (y >= itemTop && y < itemTop + itemHeight) {
 				return item.separator || item.command == 0 || !item.enabled ? -1 : static_cast<int>(i);
 			}
@@ -2501,7 +2504,7 @@ private:
 		SDL_RenderFillRect(renderer_, &menu);
 		DrawRect(menu, 185, 185, 185);
 
-		int itemTop = menu.y + 8;
+		int itemTop = menu.y + 6;
 		const int visibleCount = ContextMenuVisibleCount();
 		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
 			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
@@ -2509,17 +2512,18 @@ private:
 			const MenuItem& item = contextMenuItems_[i];
 			if (item.separator) {
 				DrawLine(menu.x + 10, itemTop + 4, menu.x + menu.w - 10, itemTop + 4, 75, 75, 75);
-				itemTop += 9;
+				itemTop += kContextMenuSeparatorHeight;
 				continue;
 			}
 			if (static_cast<int>(i) == menuSelected_) {
 				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 255);
-				SDL_Rect selection{menu.x + 3, itemTop, menu.w - 6, 28};
+				SDL_Rect selection{menu.x + 3, itemTop, menu.w - 6, kContextMenuItemHeight};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
 			const Uint8 textColor = item.command == 0 ? 135 : (item.enabled ? 235 : 100);
-			DrawText(MenuLabel(item), menu.x + 14, itemTop + 6, 2, textColor, textColor, textColor);
-			itemTop += 28;
+			DrawText(MenuLabel(item), menu.x + 12, itemTop + 4, kContextMenuTextScale,
+				textColor, textColor, textColor);
+			itemTop += kContextMenuItemHeight;
 		}
 	}
 
