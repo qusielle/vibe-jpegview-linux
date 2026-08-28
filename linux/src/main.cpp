@@ -29,6 +29,21 @@ constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr double kMinZoom = 0.01;
 constexpr double kMaxZoom = 32.0;
+constexpr Uint32 kControlPanelTimeoutMs = 2400;
+
+enum class ControlAction {
+	First,
+	Previous,
+	Next,
+	Last,
+	ToggleFit,
+	ToggleFullscreen,
+};
+
+struct ControlButton {
+	SDL_Rect rect{};
+	ControlAction action = ControlAction::Next;
+};
 
 std::string Lower(std::string value) {
 	std::transform(value.begin(), value.end(), value.begin(),
@@ -273,6 +288,7 @@ public:
 			Cleanup();
 			return 1;
 		}
+		ShowControls();
 
 		bool running = true;
 		while (running) {
@@ -425,6 +441,18 @@ private:
 		LoadCurrent();
 	}
 
+	void FirstImage() {
+		if (files_.empty() || index_ == 0) return;
+		index_ = 0;
+		LoadCurrent();
+	}
+
+	void LastImage() {
+		if (files_.empty() || index_ + 1 == files_.size()) return;
+		index_ = files_.size() - 1;
+		LoadCurrent();
+	}
+
 	void ToggleFullscreen() {
 		fullscreen_ = !fullscreen_;
 		SDL_SetWindowFullscreen(window_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : static_cast<Uint32>(0));
@@ -432,6 +460,186 @@ private:
 			FitToWindow();
 		} else {
 			SetTitle();
+		}
+	}
+
+	void ShowControls() {
+		controlsVisible_ = true;
+		controlsDeadline_ = SDL_GetTicks() + kControlPanelTimeoutMs;
+	}
+
+	SDL_Rect ControlPanelRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int buttonSize = 40;
+		const int gap = 5;
+		const int margin = 8;
+		const int separator = 12;
+		const int panelWidth = margin * 2 + buttonSize * 6 + gap * 4 + separator * 2;
+		return SDL_Rect{
+			(windowWidth - panelWidth) / 2,
+			windowHeight - buttonSize - margin * 2,
+			panelWidth,
+			buttonSize + margin * 2
+		};
+	}
+
+	void LayoutControls(std::vector<ControlButton>& buttons) const {
+		const SDL_Rect panel = ControlPanelRect();
+		const int buttonSize = 40;
+		const int gap = 5;
+		const int margin = 8;
+		const int separator = 12;
+		const ControlAction actions[] = {
+			ControlAction::First, ControlAction::Previous, ControlAction::Next,
+			ControlAction::Last, ControlAction::ToggleFit, ControlAction::ToggleFullscreen
+		};
+		buttons.clear();
+		int x = panel.x + margin;
+		for (std::size_t i = 0; i < std::size(actions); ++i) {
+			buttons.push_back(ControlButton{SDL_Rect{x, panel.y + margin, buttonSize, buttonSize}, actions[i]});
+			x += buttonSize + gap;
+			if (i == 3 || i == 4) x += separator;
+		}
+	}
+
+	static bool PointInRect(int x, int y, const SDL_Rect& rect) {
+		return x >= rect.x && y >= rect.y && x < rect.x + rect.w && y < rect.y + rect.h;
+	}
+
+	bool HandleControlClick(int x, int y) {
+		if (!controlsVisible_) return false;
+		std::vector<ControlButton> buttons;
+		LayoutControls(buttons);
+		for (const ControlButton& button : buttons) {
+			if (!PointInRect(x, y, button.rect)) continue;
+			switch (button.action) {
+			case ControlAction::First:
+				FirstImage();
+				break;
+			case ControlAction::Previous:
+				PreviousImage();
+				break;
+			case ControlAction::Next:
+				NextImage();
+				break;
+			case ControlAction::Last:
+				LastImage();
+				break;
+			case ControlAction::ToggleFit:
+				if (fitToWindow_) ActualSize(); else FitToWindow();
+				break;
+			case ControlAction::ToggleFullscreen:
+				ToggleFullscreen();
+				break;
+			}
+			ShowControls();
+			return true;
+		}
+		return PointInRect(x, y, ControlPanelRect());
+	}
+
+	void DrawLine(int x1, int y1, int x2, int y2, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
+		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
+		SDL_RenderDrawLine(renderer_, x1, y1, x2, y2);
+	}
+
+	void DrawRect(const SDL_Rect& rect, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
+		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
+		SDL_RenderDrawRect(renderer_, &rect);
+	}
+
+	void DrawArrow(int x, int y, int direction, int size) {
+		const int center = x + size / 2;
+		const int top = y + size / 4;
+		const int bottom = y + size * 3 / 4;
+		if (direction < 0) {
+			DrawLine(center + size / 5, top, center - size / 5, y + size / 2);
+			DrawLine(center - size / 5, y + size / 2, center + size / 5, bottom);
+		} else {
+			DrawLine(center - size / 5, top, center + size / 5, y + size / 2);
+			DrawLine(center + size / 5, y + size / 2, center - size / 5, bottom);
+		}
+	}
+
+	void DrawNavigationIcon(const ControlButton& button, bool hovered) {
+		const SDL_Rect r = button.rect;
+		if (hovered) {
+			SDL_SetRenderDrawColor(renderer_, 65, 65, 65, 255);
+			SDL_RenderFillRect(renderer_, &r);
+		}
+		DrawRect(r, 150, 150, 150);
+		const int left = r.x + 8;
+		const int right = r.x + r.w - 8;
+		const int top = r.y + 8;
+		const int bottom = r.y + r.h - 8;
+		const int middle = r.y + r.h / 2;
+		switch (button.action) {
+		case ControlAction::First:
+			DrawLine(left, top, left, bottom);
+			DrawLine(left + 8, top, left + 8, bottom);
+			DrawLine(right, top, right - 10, middle);
+			DrawLine(right - 10, middle, right, bottom);
+			break;
+		case ControlAction::Previous:
+			DrawLine(left + 5, top, left + 5, bottom);
+			DrawLine(right - 1, top, right - 12, middle);
+			DrawLine(right - 12, middle, right - 1, bottom);
+			break;
+		case ControlAction::Next:
+			DrawLine(left + 1, top, left + 12, middle);
+			DrawLine(left + 12, middle, left + 1, bottom);
+			DrawLine(right - 5, top, right - 5, bottom);
+			break;
+		case ControlAction::Last:
+			DrawLine(left, top, left + 10, middle);
+			DrawLine(left + 10, middle, left, bottom);
+			DrawLine(right - 8, top, right - 8, bottom);
+			DrawLine(right, top, right, bottom);
+			break;
+		case ControlAction::ToggleFit:
+			if (fitToWindow_) {
+				DrawLine(left + 5, top + 4, left + 14, top + 4);
+				DrawLine(left + 5, top + 4, left + 5, top + 13);
+				DrawLine(right - 5, top + 4, right - 14, top + 4);
+				DrawLine(right - 5, top + 4, right - 5, top + 13);
+				DrawLine(left + 5, bottom - 4, left + 14, bottom - 4);
+				DrawLine(left + 5, bottom - 4, left + 5, bottom - 13);
+				DrawLine(right - 5, bottom - 4, right - 14, bottom - 4);
+				DrawLine(right - 5, bottom - 4, right - 5, bottom - 13);
+			} else {
+				DrawLine(left + 7, top + 3, left + 7, bottom - 3);
+				DrawLine(left + 7, top + 3, left + 16, top + 3);
+				DrawLine(left + 7, bottom - 3, left + 16, bottom - 3);
+				DrawLine(right - 7, top + 3, right - 7, bottom - 3);
+				DrawLine(right - 7, top + 3, right - 16, top + 3);
+				DrawLine(right - 7, bottom - 3, right - 16, bottom - 3);
+			}
+			break;
+		case ControlAction::ToggleFullscreen:
+			DrawRect(SDL_Rect{left, top, right - left, bottom - top});
+			DrawLine(left, top + 7, right, top + 7);
+			break;
+		}
+	}
+
+	void RenderControls() {
+		if (!controlsVisible_) return;
+		const Uint32 now = SDL_GetTicks();
+		std::vector<ControlButton> buttons;
+		LayoutControls(buttons);
+		const SDL_Rect panel = ControlPanelRect();
+		if (now >= controlsDeadline_ && !PointInRect(lastMouseX_, lastMouseY_, panel)) {
+			controlsVisible_ = false;
+			return;
+		}
+
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 105, 105, 105);
+		for (const ControlButton& button : buttons) {
+			DrawNavigationIcon(button, PointInRect(lastMouseX_, lastMouseY_, button.rect));
 		}
 	}
 
@@ -490,6 +698,10 @@ private:
 				break;
 			case SDL_MOUSEBUTTONDOWN:
 				if (event.button.button == SDL_BUTTON_LEFT) {
+					if (HandleControlClick(event.button.x, event.button.y)) {
+						dragging_ = false;
+						break;
+					}
 					dragging_ = true;
 					lastMouseX_ = event.button.x;
 					lastMouseY_ = event.button.y;
@@ -503,6 +715,7 @@ private:
 			case SDL_MOUSEMOTION:
 				imageCenterX_ = event.motion.x;
 				imageCenterY_ = event.motion.y;
+				ShowControls();
 				if (dragging_) {
 					offsetX_ += event.motion.xrel;
 					offsetY_ += event.motion.yrel;
@@ -555,6 +768,7 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
 		SDL_RenderClear(renderer_);
 		SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+		RenderControls();
 		SDL_RenderPresent(renderer_);
 	}
 
@@ -573,6 +787,8 @@ private:
 	bool fitToWindow_ = true;
 	bool fullscreen_ = false;
 	bool dragging_ = false;
+	bool controlsVisible_ = true;
+	Uint32 controlsDeadline_ = 0;
 	std::vector<std::string> pendingDroppedFiles_;
 	int lastMouseX_ = kDefaultWidth / 2;
 	int lastMouseY_ = kDefaultHeight / 2;
