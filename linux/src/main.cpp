@@ -1,5 +1,6 @@
 #include "sdl_abi.h"
 #include "file_list.h"
+#include "exif_reader.h"
 #include "image_writer.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
@@ -17,16 +18,19 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <dlfcn.h>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -151,6 +155,8 @@ fs::path AbsoluteNormalized(const fs::path& path) {
 struct Image {
 	int width = 0;
 	int height = 0;
+	int originalWidth = 0;
+	int originalHeight = 0;
 	std::vector<std::uint8_t> bgra;
 
 	bool StoreRGBA(const unsigned char* rgbaPixels, int imageWidth, int imageHeight) {
@@ -174,6 +180,8 @@ struct Image {
 		}
 		width = imageWidth;
 		height = imageHeight;
+		originalWidth = imageWidth;
+		originalHeight = imageHeight;
 		for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
 			const unsigned char* source = rgbaPixels + pixel * 4;
 			std::uint8_t* target = bgra.data() + pixel * 4;
@@ -340,6 +348,42 @@ std::string FormatPercent(double zoom) {
 	return stream.str();
 }
 
+std::string InfoText(const std::string& value) {
+	std::string result;
+	result.reserve(value.size());
+	for (const unsigned char character : value) {
+		result.push_back(character >= 32 && character < 127 ? static_cast<char>(character) : '?');
+	}
+	return result;
+}
+
+std::string FormatFileTime(const fs::path& filename) {
+	struct stat status{};
+	if (stat(filename.c_str(), &status) != 0) return {};
+	std::tm localTime{};
+	if (localtime_r(&status.st_mtime, &localTime) == nullptr) return {};
+	char formatted[32]{};
+	if (std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S", &localTime) == 0) return {};
+	return formatted;
+}
+
+std::string FormatFileSize(std::uintmax_t size) {
+	static constexpr const char* suffixes[] = {"B", "KB", "MB", "GB"};
+	double value = static_cast<double>(size);
+	std::size_t suffix = 0;
+	while (value >= 1024.0 && suffix + 1 < std::size(suffixes)) {
+		value /= 1024.0;
+		++suffix;
+	}
+	std::ostringstream stream;
+	if (suffix == 0) {
+		stream << size << ' ' << suffixes[suffix];
+	} else {
+		stream << std::fixed << std::setprecision(value >= 10.0 ? 0 : 1) << value << ' ' << suffixes[suffix];
+	}
+	return stream.str();
+}
+
 class Viewer {
 public:
 	Viewer(jpegview_linux::FileList fileList, double slideshowSeconds, bool startFullscreen)
@@ -421,12 +465,15 @@ private:
 		if (fileList_.Empty()) {
 			return false;
 		}
+		metadata_ = {};
+		jpegComment_.clear();
 		std::string errorMessage;
 		if (!image_.Load(fileList_.Current(), errorMessage)) {
 			SetTitle(fileList_.Current().filename().string() + " — decode failed: " + errorMessage);
 			std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
 			return false;
 		}
+		jpegview_linux::ReadJpegMetadata(fileList_.Current(), metadata_, jpegComment_);
 
 		if (texture_ != nullptr) {
 			SDL_DestroyTexture(texture_);
@@ -648,6 +695,64 @@ private:
 		controlsVisible_ = true;
 	}
 
+	std::vector<std::string> ImageInfoLines() const {
+		std::vector<std::string> lines;
+		if (fileList_.Empty()) return lines;
+
+		std::ostringstream title;
+		title << '[' << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
+			<< InfoText(fileList_.Current().filename().string());
+		lines.push_back(title.str());
+
+		lines.push_back("Image width: " + std::to_string(image_.originalWidth));
+		lines.push_back("Image height: " + std::to_string(image_.originalHeight));
+		if (image_.width != image_.originalWidth || image_.height != image_.originalHeight) {
+			lines.push_back("Displayed size: " + std::to_string(image_.width) + " x " + std::to_string(image_.height));
+		}
+		std::error_code fileError;
+		const std::uintmax_t fileSize = fs::file_size(fileList_.Current(), fileError);
+		if (!fileError) lines.push_back("File size: " + FormatFileSize(fileSize));
+
+		const std::string modificationDate = FormatFileTime(fileList_.Current());
+		if (!metadata_.acquisitionDate.empty()) {
+			lines.push_back("Acquisition date: " + InfoText(metadata_.acquisitionDate));
+		} else if (!metadata_.dateTime.empty()) {
+			lines.push_back("Exif Date Time: " + InfoText(metadata_.dateTime));
+		} else if (!modificationDate.empty()) {
+			lines.push_back("Modification date: " + modificationDate);
+		}
+		if (!metadata_.cameraModel.empty()) lines.push_back("Camera model: " + InfoText(metadata_.cameraModel));
+		if (!metadata_.exposureTime.empty()) lines.push_back("Exposure time (s): " + metadata_.exposureTime);
+		if (metadata_.hasExposureBias) {
+			std::ostringstream value;
+			value << std::fixed << std::setprecision(2) << metadata_.exposureBias;
+			lines.push_back("Exposure bias (EV): " + value.str());
+		}
+		if (metadata_.hasFlash) lines.push_back(std::string("Flash fired: ") + (metadata_.flashFired ? "yes" : "no"));
+		if (metadata_.hasFocalLength) {
+			std::ostringstream value;
+			value << std::fixed << std::setprecision(1) << metadata_.focalLength;
+			lines.push_back("Focal length (mm): " + value.str());
+		}
+		if (metadata_.hasFNumber) {
+			std::ostringstream value;
+			value << std::fixed << std::setprecision(1) << metadata_.fNumber;
+			lines.push_back("F-Number: " + value.str());
+		}
+		if (metadata_.isoSpeed > 0) lines.push_back("ISO Speed: " + std::to_string(metadata_.isoSpeed));
+		if (!metadata_.software.empty()) lines.push_back("Software: " + InfoText(metadata_.software));
+		if (!metadata_.imageDescription.empty()) lines.push_back("Description: " + InfoText(metadata_.imageDescription));
+		if (!metadata_.userComment.empty()) lines.push_back("Comment: " + InfoText(metadata_.userComment));
+		if (!jpegComment_.empty() && metadata_.userComment.empty()) lines.push_back("Comment: " + InfoText(jpegComment_));
+		if (metadata_.hasGps) lines.push_back("Location: " + metadata_.gpsLocation);
+		if (metadata_.hasAltitude) {
+			std::ostringstream value;
+			value << std::fixed << std::setprecision(0) << metadata_.altitude;
+			lines.push_back("Altitude (m): " + value.str());
+		}
+		return lines;
+	}
+
 	SDL_Rect ControlPanelRect() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
@@ -747,6 +852,9 @@ private:
 			break;
 		case IDM_RELOAD:
 			if (fileList_.Reload()) LoadCurrent();
+			break;
+		case IDM_SHOW_FILEINFO:
+			infoVisible_ = !infoVisible_;
 			break;
 		case IDM_SHOW_NAVPANEL:
 			navigationPanelEnabled_ = !navigationPanelEnabled_;
@@ -873,6 +981,7 @@ private:
 		if (ctrl && shift && key == 's') return IDM_SAVE_SCREEN;
 		if (ctrl && !shift && key == SDLK_r) return IDM_RELOAD;
 		if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;
+		if (!ctrl && !shift && key == SDLK_F2) return IDM_SHOW_FILEINFO;
 		if (!ctrl && !shift && key == 'c') return IDM_SORT_CREATION_DATE;
 		if (!ctrl && !shift && key == 'n') return IDM_SORT_NAME;
 		if (!ctrl && !shift && key == 'm') return IDM_SORT_MOD_DATE;
@@ -917,6 +1026,7 @@ private:
 			{"First image", IDM_FIRST},
 			{"Last image", IDM_LAST},
 			{nullptr, 0, true},
+			{"Show picture info (EXIF)", IDM_SHOW_FILEINFO, false, infoVisible_},
 			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_},
 			{nullptr, 0, true},
 			{"Navigation", 0},
@@ -1421,6 +1531,37 @@ private:
 		}
 	}
 
+	void RenderImageInfo() {
+		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_) return;
+		std::vector<std::string> lines = ImageInfoLines();
+		if (lines.empty()) return;
+
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int panelWidth = std::min(std::max(260, windowWidth - 16), 620);
+		const int textWidth = panelWidth - 20;
+		for (std::string& line : lines) {
+			line = InfoText(line);
+			if (TextWidth(line, 2) <= textWidth) continue;
+			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3, textWidth / 12));
+			line.resize(maximumCharacters - 3);
+			line += "...";
+		}
+
+		const int lineHeight = 18;
+		const int panelHeight = std::min(windowHeight - 16, 20 + static_cast<int>(lines.size()) * lineHeight);
+		SDL_Rect panel{8, 8, panelWidth, panelHeight};
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 105, 105, 105);
+		const int visibleLines = std::max(0, (panelHeight - 12) / lineHeight);
+		for (int index = 0; index < visibleLines && index < static_cast<int>(lines.size()); ++index) {
+			DrawText(lines[static_cast<std::size_t>(index)], panel.x + 10, panel.y + 10 + index * lineHeight, 2,
+				index == 0 ? 255 : 243, index == 0 ? 255 : 242, index == 0 ? 255 : 231);
+		}
+	}
+
 	void RenderControls() {
 		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_) return;
 		std::vector<ControlButton> buttons;
@@ -1616,6 +1757,7 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
 		SDL_RenderClear(renderer_);
 		SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+		RenderImageInfo();
 		RenderControls();
 		RenderContextMenu();
 		RenderFileDialog();
@@ -1639,6 +1781,9 @@ private:
 	bool dragging_ = false;
 	bool controlsVisible_ = true;
 	bool navigationPanelEnabled_ = true;
+	bool infoVisible_ = false;
+	jpegview_linux::ExifInfo metadata_;
+	std::string jpegComment_;
 	bool contextMenuOpen_ = false;
 	int contextMenuX_ = 0;
 	int contextMenuY_ = 0;
@@ -1674,7 +1819,7 @@ void PrintUsage(const char* program) {
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, N/M/C/Z select display order,\n"
-		<< "          Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
+		<< "          F2 toggles picture information, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
 		<< "          right-click opens the context menu, Esc or Q quits.\n";
 }
 

@@ -67,7 +67,7 @@ intended Docker environment.
 Right/Left or PageUp/PageDown navigate; Up/Down rotate 90 degrees; mouse wheel zooms around the
 cursor; left-drag pans; dropped files open in the viewer. Space toggles fit/actual, Return fits,
 and F11 toggles fullscreen (`0`, `F`, and `Q` remain convenience aliases; `1`–`9` start a
-slideshow at that interval). Ctrl+O opens the
+slideshow at that interval). F2 toggles the top-left picture information panel. Ctrl+O opens the
 native in-app file browser, Ctrl+R reloads, and Ctrl+N toggles the panel. Move the pointer to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, fit/actual, and fullscreen). The checked panel
