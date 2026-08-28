@@ -48,6 +48,12 @@ Supported formats are JPEG, PNG, GIF, BMP, TGA, PSD, PNM-family files, and WebP.
 is provided by the vendored public-domain/MIT `stb_image` single-header library; WebP is loaded
 through the system or bundled `libwebp` at runtime.
 
+Display resizing follows JPEGView's high-quality path: downsampling uses its integrated
+best-quality filter with the default sharpening value, and enlargement uses endpoint-preserving
+Catmull-Rom bicubic interpolation. The resulting display-size bitmap is cached until the image or
+target size changes, so SDL does not have to scale the original texture with nearest-neighbor
+sampling on every frame.
+
 ## AppImage
 
 The packaging script creates an AppDir, bundles the SDL2 shared library, and invokes

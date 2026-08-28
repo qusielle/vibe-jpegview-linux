@@ -325,21 +325,142 @@ struct Image {
 	bool Resize(int newWidth, int newHeight) {
 		if (width <= 0 || height <= 0 || newWidth <= 0 || newHeight <= 0) return false;
 		if (newWidth == width && newHeight == height) return true;
-		const std::size_t pixelCount = static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(newHeight);
-		if (pixelCount > std::numeric_limits<std::size_t>::max() / 4) return false;
+
+		struct Sample {
+			int index = 0;
+			double weight = 0.0;
+		};
+		struct Kernel {
+			std::vector<Sample> samples;
+		};
+		const auto cubic = [](double distance) {
+			constexpr double parameter = -0.5; // Catmull-Rom, matching JPEGView's bicubic upsampling.
+			const double value = std::abs(distance);
+			if (value < 1.0) {
+				return (parameter + 2.0) * value * value * value - (parameter + 3.0) * value * value + 1.0;
+			}
+			if (value < 2.0) {
+				return parameter * value * value * value - 5.0 * parameter * value * value +
+					8.0 * parameter * value - 4.0 * parameter;
+			}
+			return 0.0;
+		};
+		const auto bestQuality = [](double distance, double sharpen) {
+			if (distance < -2.0 || distance > 2.0) return 0.0;
+			if (distance < -1.0) {
+				const double value = 2.0 * distance + 3.0;
+				return -sharpen * (1.0 - value * value);
+			}
+			if (distance < 1.0) return 1.0 - distance * distance;
+			const double value = 2.0 * distance - 3.0;
+			return -sharpen * (1.0 - value * value);
+		};
+		const auto integratedBestQuality = [&bestQuality](double distance, double multiplier, double sharpen) {
+			// JPEGView convolves its downsampling kernel with a one-pixel box.
+			// The 32-point integration is the same approximation used by the
+			// original ResizeFilter implementation.
+			constexpr int steps = 32;
+			double position = distance * multiplier - multiplier * 0.5;
+			const double step = multiplier / (steps - 1);
+			double sum = 0.0;
+			for (int i = 0; i < steps; ++i) {
+				sum += bestQuality(position, sharpen);
+				position += step;
+			}
+			return sum;
+		};
+		const auto buildKernels = [&cubic, &integratedBestQuality](int sourceSize, int targetSize) {
+			std::vector<Kernel> kernels(static_cast<std::size_t>(targetSize));
+			if (sourceSize == targetSize) {
+				for (int target = 0; target < targetSize; ++target) {
+					kernels[static_cast<std::size_t>(target)].samples.push_back(Sample{target, 1.0});
+				}
+				return kernels;
+			}
+
+			const bool downsampling = targetSize < sourceSize;
+			const double scale = static_cast<double>(targetSize) / sourceSize;
+			const double sourcePerTarget = 1.0 / scale;
+			const double sharpen = 0.3; // JPEGView.ini default for display downsampling.
+			const double downsamplingMultiplier = downsampling ?
+				(sourcePerTarget < 2.0 ? 1.0 / (sourcePerTarget - 0.5) :
+				1.0 / ((sourcePerTarget + 1.0) * 0.5)) : 1.0;
+			for (int target = 0; target < targetSize; ++target) {
+				// Downsampling uses the source-space center of each destination
+				// pixel. Upsampling follows JPEGView's endpoint-preserving
+				// bicubic mapping, so the first and last source pixels stay sharp.
+				const double center = downsampling ?
+					(target + 0.5) * sourcePerTarget - 0.5 :
+					(sourceSize == 1 || targetSize == 1) ? 0.0 :
+					static_cast<double>(target) * (sourceSize - 1) / (targetSize - 1);
+				const int integerCenter = static_cast<int>(std::floor(center));
+				const double fraction = center - integerCenter;
+				const int filterLength = downsampling ? std::min(64, static_cast<int>(
+					4.0 * (sourcePerTarget + 1.0) * 0.5 + 0.99)) : 4;
+				const int filterOffset = downsampling ? (filterLength - 1) / 2 : 1;
+				const int first = integerCenter - filterOffset;
+				const int last = first + filterLength - 1;
+				double weightSum = 0.0;
+				for (int source = first; source <= last; ++source) {
+					if (source < 0 || source >= sourceSize) continue;
+					const double weight = downsampling ?
+						integratedBestQuality(source - integerCenter - fraction, downsamplingMultiplier, sharpen) :
+						cubic(center - source);
+					if (std::abs(weight) < 1e-12) continue;
+					kernels[static_cast<std::size_t>(target)].samples.push_back(Sample{source, weight});
+					weightSum += weight;
+				}
+				if (std::abs(weightSum) < 1e-12) {
+					kernels[static_cast<std::size_t>(target)].samples.push_back(
+						Sample{std::clamp(static_cast<int>(std::round(center)), 0, sourceSize - 1), 1.0});
+				} else {
+					for (Sample& sample : kernels[static_cast<std::size_t>(target)].samples) sample.weight /= weightSum;
+				}
+			}
+			return kernels;
+		};
+
+		const std::size_t bytesPerPixel = 4;
+		const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+		if (static_cast<std::size_t>(newWidth) > maximum / bytesPerPixel ||
+			static_cast<std::size_t>(height) > maximum / (static_cast<std::size_t>(newWidth) * bytesPerPixel) ||
+			static_cast<std::size_t>(newHeight) > maximum / (static_cast<std::size_t>(newWidth) * bytesPerPixel)) return false;
+		const std::size_t horizontalBytes = static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(height) * bytesPerPixel;
+		const std::size_t outputBytes = static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(newHeight) * bytesPerPixel;
+		std::vector<std::uint8_t> horizontal;
 		std::vector<std::uint8_t> resized;
 		try {
-			resized.resize(pixelCount * 4);
+			horizontal.resize(horizontalBytes);
+			resized.resize(outputBytes);
 		} catch (const std::exception&) {
 			return false;
 		}
-		for (int y = 0; y < newHeight; ++y) {
-			const int sourceY = std::min(height - 1, static_cast<int>((static_cast<std::int64_t>(y) * height) / newHeight));
+		const std::vector<Kernel> horizontalKernels = buildKernels(width, newWidth);
+		const std::vector<Kernel> verticalKernels = buildKernels(height, newHeight);
+		for (int y = 0; y < height; ++y) {
 			for (int x = 0; x < newWidth; ++x) {
-				const int sourceX = std::min(width - 1, static_cast<int>((static_cast<std::int64_t>(x) * width) / newWidth));
-				const std::size_t sourceOffset = (static_cast<std::size_t>(sourceY) * width + sourceX) * 4;
+				std::array<double, 4> values{};
+				for (const Sample& sample : horizontalKernels[static_cast<std::size_t>(x)].samples) {
+					const std::size_t sourceOffset = (static_cast<std::size_t>(y) * width + sample.index) * 4;
+					for (int channel = 0; channel < 4; ++channel) values[static_cast<std::size_t>(channel)] +=
+						sample.weight * bgra[sourceOffset + static_cast<std::size_t>(channel)];
+				}
 				const std::size_t targetOffset = (static_cast<std::size_t>(y) * newWidth + x) * 4;
-				std::copy_n(bgra.data() + sourceOffset, 4, resized.data() + targetOffset);
+				for (int channel = 0; channel < 4; ++channel) horizontal[targetOffset + static_cast<std::size_t>(channel)] =
+					static_cast<std::uint8_t>(std::clamp(std::lround(values[static_cast<std::size_t>(channel)]), 0l, 255l));
+			}
+		}
+		for (int y = 0; y < newHeight; ++y) {
+			for (int x = 0; x < newWidth; ++x) {
+				std::array<double, 4> values{};
+				for (const Sample& sample : verticalKernels[static_cast<std::size_t>(y)].samples) {
+					const std::size_t sourceOffset = (static_cast<std::size_t>(sample.index) * newWidth + x) * 4;
+					for (int channel = 0; channel < 4; ++channel) values[static_cast<std::size_t>(channel)] +=
+						sample.weight * horizontal[sourceOffset + static_cast<std::size_t>(channel)];
+				}
+				const std::size_t targetOffset = (static_cast<std::size_t>(y) * newWidth + x) * 4;
+				for (int channel = 0; channel < 4; ++channel) resized[targetOffset + static_cast<std::size_t>(channel)] =
+					static_cast<std::uint8_t>(std::clamp(std::lround(values[static_cast<std::size_t>(channel)]), 0l, 255l));
 			}
 		}
 		width = newWidth;
@@ -508,6 +629,7 @@ public:
 			return 1;
 		}
 
+		SDL_SetHint("SDL_RENDER_SCALE_QUALITY", "2");
 		renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 		if (renderer_ == nullptr) {
 			// This is useful for software-only systems and also makes the viewer
@@ -559,6 +681,7 @@ private:
 			SDL_DestroyTexture(texture_);
 			texture_ = nullptr;
 		}
+		ClearDisplayTexture();
 		ClearTransition();
 		if (renderer_ != nullptr) {
 			SDL_DestroyRenderer(renderer_);
@@ -605,6 +728,7 @@ private:
 			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
 			return false;
 		}
+		ClearDisplayTexture();
 		if (texture_ != nullptr) SDL_DestroyTexture(texture_);
 		texture_ = newTexture;
 		return true;
@@ -620,6 +744,39 @@ private:
 			return nullptr;
 		}
 		return result;
+	}
+
+	void ClearDisplayTexture() {
+		if (displayTexture_ != nullptr) {
+			SDL_DestroyTexture(displayTexture_);
+			displayTexture_ = nullptr;
+		}
+		displayTextureWidth_ = 0;
+		displayTextureHeight_ = 0;
+		displayImage_ = {};
+	}
+
+	SDL_Texture* DisplayTextureFor(int width, int height) {
+		if (texture_ == nullptr || image_.width <= 0 || image_.height <= 0) return texture_;
+		if (width >= image_.width && height >= image_.height) return texture_;
+		if (displayTexture_ != nullptr && displayTextureWidth_ == width && displayTextureHeight_ == height) {
+			return displayTexture_;
+		}
+
+		ClearDisplayTexture();
+		displayImage_ = image_;
+		if (!displayImage_.Resize(width, height)) {
+			displayImage_ = {};
+			return texture_;
+		}
+		displayTexture_ = CreateTexture(displayImage_);
+		if (displayTexture_ == nullptr) {
+			displayImage_ = {};
+			return texture_;
+		}
+		displayTextureWidth_ = width;
+		displayTextureHeight_ = height;
+		return displayTexture_;
 	}
 
 	void ClearTransition() {
@@ -2448,9 +2605,9 @@ private:
 		DrawText("PRESS ESC TO CLOSE", panel.x + 18, panel.y + 156, 2, 180, 180, 180);
 	}
 
-	void RenderImageTransition(const SDL_Rect& destination, int windowWidth, int windowHeight) {
+	void RenderImageTransition(const SDL_Rect& destination, int windowWidth, int windowHeight, SDL_Texture* currentTexture) {
 		if (transitionTexture_ == nullptr || transitionStartTick_ == 0) {
-			SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+			SDL_RenderCopy(renderer_, currentTexture, nullptr, &destination);
 			return;
 		}
 		const Uint32 elapsed = SDL_GetTicks() - transitionStartTick_;
@@ -2458,7 +2615,7 @@ private:
 			static_cast<double>(transitionDurationMs_));
 		if (progress >= 1.0) {
 			ClearTransition();
-			SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+			SDL_RenderCopy(renderer_, currentTexture, nullptr, &destination);
 			return;
 		}
 
@@ -2489,12 +2646,13 @@ private:
 		}
 
 		SDL_SetTextureAlphaMod(transitionTexture_, 255);
-		SDL_SetTextureAlphaMod(texture_, 255);
+		SDL_SetTextureBlendMode(currentTexture, SDL_BLENDMODE_BLEND);
+		SDL_SetTextureAlphaMod(currentTexture, 255);
 		if (effect == IDM_EFFECT_BLEND) {
 			SDL_SetTextureAlphaMod(transitionTexture_, static_cast<Uint8>(std::round(255.0 * (1.0 - progress))));
 		}
 		SDL_RenderCopy(renderer_, transitionTexture_, nullptr, &oldDestination);
-		SDL_RenderCopy(renderer_, texture_, nullptr, &enteringDestination);
+		SDL_RenderCopy(renderer_, currentTexture, nullptr, &enteringDestination);
 	}
 
 	void RenderContextMenu() {
@@ -2686,9 +2844,10 @@ private:
 			renderWidth,
 			renderHeight
 		};
+		SDL_Texture* renderTexture = DisplayTextureFor(renderWidth, renderHeight);
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
 		SDL_RenderClear(renderer_);
-		RenderImageTransition(destination, windowWidth, windowHeight);
+		RenderImageTransition(destination, windowWidth, windowHeight, renderTexture);
 		RenderFileName();
 		RenderImageInfo();
 		RenderControls();
@@ -2711,6 +2870,10 @@ private:
 	SDL_Window* window_ = nullptr;
 	SDL_Renderer* renderer_ = nullptr;
 	SDL_Texture* texture_ = nullptr;
+	Image displayImage_;
+	SDL_Texture* displayTexture_ = nullptr;
+	int displayTextureWidth_ = 0;
+	int displayTextureHeight_ = 0;
 	Image transitionImage_;
 	SDL_Texture* transitionTexture_ = nullptr;
 	double zoom_ = 1.0;

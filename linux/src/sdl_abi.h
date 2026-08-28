@@ -221,6 +221,7 @@ void SDL_StartTextInput();
 void SDL_StopTextInput();
 void SDL_free(void* memory);
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, int index, Uint32 flags);
+int SDL_SetHint(const char* name, const char* value);
 void SDL_DestroyRenderer(SDL_Renderer* renderer);
 SDL_Texture* SDL_CreateTexture(SDL_Renderer* renderer, Uint32 format, int access, int w, int h);
 void SDL_DestroyTexture(SDL_Texture* texture);
