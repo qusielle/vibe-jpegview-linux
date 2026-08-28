@@ -39,6 +39,7 @@ enum class ViewerAction {
 	Last,
 	ToggleFit,
 	ToggleFullscreen,
+	Open,
 	Reload,
 	ToggleControls,
 	ToggleSlideshow,
@@ -55,6 +56,12 @@ struct MenuItem {
 	ViewerAction action = ViewerAction::Next;
 	bool separator = false;
 	bool checked = false;
+};
+
+struct FileDialogEntry {
+	fs::path path;
+	bool directory = false;
+	bool parent = false;
 };
 
 struct FontGlyph {
@@ -472,6 +479,7 @@ private:
 		files_ = std::move(droppedImageFiles);
 		index_ = droppedIndex;
 		dragging_ = false;
+		fileDialogOpen_ = false;
 		LoadCurrent();
 	}
 
@@ -648,6 +656,9 @@ private:
 		case ViewerAction::ToggleFullscreen:
 			ToggleFullscreen();
 			break;
+		case ViewerAction::Open:
+			OpenFileDialog();
+			break;
 		case ViewerAction::Reload:
 			LoadCurrent();
 			break;
@@ -668,6 +679,7 @@ private:
 
 	std::vector<MenuItem> ContextMenuItems() const {
 		return {
+			{"Open image...", ViewerAction::Open},
 			{"Reload image", ViewerAction::Reload},
 			{nullptr, ViewerAction::Next, true},
 			{"First image", ViewerAction::First},
@@ -761,6 +773,183 @@ private:
 		if (action == ViewerAction::Quit) running = false;
 	}
 
+	SDL_Rect FileDialogRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(900, std::max(320, windowWidth - 40));
+		const int height = std::min(650, std::max(260, windowHeight - 40));
+		return SDL_Rect{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+	}
+
+	int FileDialogListTop() const {
+		return FileDialogRect().y + 72;
+	}
+
+	int FileDialogVisibleRows() const {
+		return std::max(1, (FileDialogRect().h - 128) / 26);
+	}
+
+	void RefreshFileDialog() {
+		fileDialogEntries_.clear();
+		std::error_code error;
+		const fs::path parent = fileDialogDirectory_.parent_path();
+		if (!parent.empty() && parent != fileDialogDirectory_) {
+			fileDialogEntries_.push_back(FileDialogEntry{parent, true, true});
+		}
+
+		for (const fs::directory_entry& entry : fs::directory_iterator(fileDialogDirectory_, error)) {
+			if (error) break;
+			std::error_code statusError;
+			const bool directory = entry.is_directory(statusError);
+			if (statusError || (!directory && (!entry.is_regular_file(statusError) || !IsImagePath(entry.path())))) {
+				continue;
+			}
+			fileDialogEntries_.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory, false});
+		}
+
+		std::sort(fileDialogEntries_.begin(), fileDialogEntries_.end(), [](const FileDialogEntry& left, const FileDialogEntry& right) {
+			if (left.parent != right.parent) return left.parent;
+			if (left.directory != right.directory) return left.directory;
+			const std::string leftName = Lower(left.path.filename().string());
+			const std::string rightName = Lower(right.path.filename().string());
+			return leftName == rightName ? left.path.string() < right.path.string() : leftName < rightName;
+		});
+		fileDialogSelected_ = 0;
+		fileDialogScroll_ = 0;
+	}
+
+	void OpenFileDialog() {
+		std::error_code error;
+		fs::path directory = fs::current_path(error);
+		if (!files_.empty() && index_ < files_.size()) {
+			const fs::path currentDirectory = files_[index_].parent_path();
+			if (!currentDirectory.empty()) directory = currentDirectory;
+		}
+		if (error || directory.empty()) directory = fs::path(".");
+		fileDialogDirectory_ = AbsoluteNormalized(directory);
+		fileDialogOpen_ = true;
+		contextMenuOpen_ = false;
+		RefreshFileDialog();
+	}
+
+	std::string FileDialogEntryLabel(const FileDialogEntry& entry) const {
+		if (entry.parent) return "[..]";
+		return entry.directory ? std::string("[DIR] ") + entry.path.filename().string() : entry.path.filename().string();
+	}
+
+	int FileDialogItemAt(int x, int y) const {
+		const SDL_Rect dialog = FileDialogRect();
+		const int listTop = FileDialogListTop();
+		const int rows = FileDialogVisibleRows();
+		if (!PointInRect(x, y, SDL_Rect{dialog.x + 12, listTop, dialog.w - 24, rows * 26})) return -1;
+		const int row = (y - listTop) / 26;
+		const int item = fileDialogScroll_ + row;
+		return item >= 0 && item < static_cast<int>(fileDialogEntries_.size()) ? item : -1;
+	}
+
+	void EnsureFileDialogSelectionVisible() {
+		const int rows = FileDialogVisibleRows();
+		if (fileDialogSelected_ < fileDialogScroll_) fileDialogScroll_ = fileDialogSelected_;
+		if (fileDialogSelected_ >= fileDialogScroll_ + rows) fileDialogScroll_ = fileDialogSelected_ - rows + 1;
+		const int maximumScroll = std::max(0, static_cast<int>(fileDialogEntries_.size()) - rows);
+		fileDialogScroll_ = std::clamp(fileDialogScroll_, 0, maximumScroll);
+	}
+
+	void MoveFileDialogSelection(int direction) {
+		if (fileDialogEntries_.empty()) return;
+		fileDialogSelected_ = std::clamp(fileDialogSelected_ + direction, 0,
+			static_cast<int>(fileDialogEntries_.size()) - 1);
+		EnsureFileDialogSelectionVisible();
+	}
+
+	void ActivateFileDialogSelection() {
+		if (fileDialogSelected_ < 0 || fileDialogSelected_ >= static_cast<int>(fileDialogEntries_.size())) return;
+		const FileDialogEntry entry = fileDialogEntries_[fileDialogSelected_];
+		if (entry.directory) {
+			fileDialogDirectory_ = entry.path;
+			RefreshFileDialog();
+			return;
+		}
+		OpenDroppedFiles({entry.path.string()});
+	}
+
+	void HandleFileDialogEvents(const SDL_Event& event, bool& running) {
+		switch (event.type) {
+		case SDL_QUIT:
+			running = false;
+			break;
+		case SDL_KEYDOWN:
+			if (event.key.repeat != 0) break;
+			if (event.key.keysym.sym == SDLK_ESCAPE) {
+				fileDialogOpen_ = false;
+			} else if (event.key.keysym.sym == SDLK_UP) {
+				MoveFileDialogSelection(-1);
+			} else if (event.key.keysym.sym == SDLK_DOWN) {
+				MoveFileDialogSelection(1);
+			} else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE) {
+				ActivateFileDialogSelection();
+			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
+				const fs::path parent = fileDialogDirectory_.parent_path();
+				if (!parent.empty() && parent != fileDialogDirectory_) {
+					fileDialogDirectory_ = parent;
+					RefreshFileDialog();
+				}
+			}
+			break;
+		case SDL_MOUSEMOTION: {
+			const int item = FileDialogItemAt(event.motion.x, event.motion.y);
+			if (item >= 0) {
+				fileDialogSelected_ = item;
+				EnsureFileDialogSelectionVisible();
+			}
+			break;
+		}
+		case SDL_MOUSEBUTTONDOWN:
+			if (event.button.button == SDL_BUTTON_RIGHT ||
+			(event.button.button == SDL_BUTTON_LEFT && FileDialogItemAt(event.button.x, event.button.y) < 0)) {
+				fileDialogOpen_ = false;
+			} else if (event.button.button == SDL_BUTTON_LEFT) {
+				fileDialogSelected_ = FileDialogItemAt(event.button.x, event.button.y);
+				if (event.button.clicks >= 2) ActivateFileDialogSelection();
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	void RenderFileDialog() {
+		if (!fileDialogOpen_) return;
+		const SDL_Rect dialog = FileDialogRect();
+		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 255);
+		SDL_RenderFillRect(renderer_, &dialog);
+		DrawRect(dialog, 190, 190, 190);
+		DrawText("OPEN IMAGE", dialog.x + 18, dialog.y + 14, 2);
+		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, 2, 170, 170, 170);
+
+		const int listTop = FileDialogListTop();
+		const int rows = FileDialogVisibleRows();
+		SDL_Rect listRect{dialog.x + 12, listTop, dialog.w - 24, rows * 26};
+		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 255);
+		SDL_RenderFillRect(renderer_, &listRect);
+		DrawRect(listRect, 75, 75, 75);
+		for (int row = 0; row < rows; ++row) {
+			const int item = fileDialogScroll_ + row;
+			if (item >= static_cast<int>(fileDialogEntries_.size())) break;
+			const FileDialogEntry& entry = fileDialogEntries_[item];
+			const int rowTop = listTop + row * 26;
+			if (item == fileDialogSelected_) {
+				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 255);
+				SDL_Rect selection{listRect.x + 2, rowTop + 1, listRect.w - 4, 24};
+				SDL_RenderFillRect(renderer_, &selection);
+			}
+			DrawText(FileDialogEntryLabel(entry), listRect.x + 10, rowTop + 5, 2,
+				entry.directory ? 185 : 235, entry.directory ? 205 : 235, entry.directory ? 235 : 235);
+		}
+		DrawText("ENTER OPEN   BACKSPACE PARENT   ESC CANCEL", dialog.x + 18, dialog.y + dialog.h - 34, 2, 170, 170, 170);
+	}
+
 	void DrawText(const std::string& text, int x, int y, int scale, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
 		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
 		int cursorX = x;
@@ -851,7 +1040,7 @@ private:
 	}
 
 	void RenderControls() {
-		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_) return;
+		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_) return;
 		const Uint32 now = SDL_GetTicks();
 		std::vector<ControlButton> buttons;
 		LayoutControls(buttons);
@@ -898,6 +1087,10 @@ private:
 		SDL_Event event{};
 		while (SDL_PollEvent(&event) != 0) {
 			lastInteractionTick_ = SDL_GetTicks();
+			if (fileDialogOpen_) {
+				HandleFileDialogEvents(event, running);
+				continue;
+			}
 			if (contextMenuOpen_) {
 				switch (event.type) {
 				case SDL_QUIT:
@@ -947,6 +1140,10 @@ private:
 				break;
 			case SDL_KEYDOWN:
 				if (event.key.repeat != 0) break;
+				if ((event.key.keysym.mod & 0x00C0u) != 0 && event.key.keysym.sym == SDLK_o) {
+					OpenFileDialog();
+					break;
+				}
 				switch (event.key.keysym.sym) {
 				case SDLK_ESCAPE:
 				case SDLK_q:
@@ -1061,6 +1258,7 @@ private:
 		SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
 		RenderControls();
 		RenderContextMenu();
+		RenderFileDialog();
 		SDL_RenderPresent(renderer_);
 	}
 
@@ -1087,8 +1285,13 @@ private:
 	int contextMenuY_ = 0;
 	int menuSelected_ = -1;
 	std::vector<MenuItem> contextMenuItems_;
-	bool quitRequested_ = false;
-	std::vector<std::string> pendingDroppedFiles_;
+		bool quitRequested_ = false;
+		bool fileDialogOpen_ = false;
+		fs::path fileDialogDirectory_;
+		std::vector<FileDialogEntry> fileDialogEntries_;
+		int fileDialogSelected_ = 0;
+		int fileDialogScroll_ = 0;
+		std::vector<std::string> pendingDroppedFiles_;
 	int lastMouseX_ = kDefaultWidth / 2;
 	int lastMouseY_ = kDefaultHeight / 2;
 	int imageCenterX_ = kDefaultWidth / 2;

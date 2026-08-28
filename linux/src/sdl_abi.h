@@ -159,11 +159,13 @@ enum : Uint8 {
 
 enum : Sint32 {
 	SDLK_ESCAPE = 27,
+	SDLK_BACKSPACE = 8,
 	SDLK_RETURN = 13,
 	SDLK_SPACE = 32,
 	SDLK_0 = '0',
 	SDLK_1 = '1',
 	SDLK_f = 'f',
+	SDLK_o = 'o',
 	SDLK_q = 'q',
 	SDLK_r = 'r',
 	SDLK_EQUALS = '=',
