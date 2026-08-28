@@ -57,6 +57,18 @@ if [ -z "$SDL2_LIBRARY" ] || [ ! -f "$SDL2_LIBRARY" ]; then
 fi
 copy_runtime_dependencies "$BUILD_DIR/jpegview-linux"
 
+# Keep the Linux equivalents of Windows clipboard and lossless-JPEG helpers
+# inside the AppImage when they are available in the build environment. They
+# are selected through PATH by the frontend, so this also works on hosts that
+# do not have the tools installed themselves.
+for helper in xclip wl-copy wl-paste jpegtran; do
+	helper_path=$(command -v "$helper" 2>/dev/null || true)
+	if [ -n "$helper_path" ] && [ -f "$helper_path" ]; then
+		cp -L "$helper_path" "$APPDIR/usr/bin/$helper"
+		copy_runtime_dependencies "$helper_path"
+	fi
+done
+
 # WebP is intentionally loaded at runtime so the normal build does not need
 # WebP development headers. Bundle it when it is present on the build host.
 WEBP_LIBRARY=${WEBP_LIBRARY:-}

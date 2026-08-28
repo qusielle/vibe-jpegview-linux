@@ -6,7 +6,7 @@ ARG APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/
 ARG APPIMAGETOOL_SHA256=
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends g++ make curl ca-certificates file patchelf libsdl2-2.0-0 libwebp6 libjpeg-dev libpng-dev \
+ && apt-get install -y --no-install-recommends g++ make curl ca-certificates file patchelf libsdl2-2.0-0 libwebp6 libjpeg-dev libpng-dev libjpeg-turbo-progs xclip wl-clipboard \
  && curl --fail --location --retry 3 "$APPIMAGETOOL_URL" --output /usr/local/bin/appimagetool \
  && chmod 755 /usr/local/bin/appimagetool \
  && if [ -n "$APPIMAGETOOL_SHA256" ]; then echo "$APPIMAGETOOL_SHA256  /usr/local/bin/appimagetool" | sha256sum --check; fi \

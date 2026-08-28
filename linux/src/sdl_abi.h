@@ -143,6 +143,7 @@ enum : Uint32 {
 	SDL_RENDERER_PRESENTVSYNC = 0x00000004u,
 	SDL_PIXELFORMAT_ARGB8888 = 372645892u,
 	SDL_TEXTUREACCESS_STREAMING = 1u,
+	SDL_BLENDMODE_BLEND = 1u,
 };
 
 enum : Uint32 {
@@ -170,6 +171,7 @@ enum : Uint8 {
 enum : Sint32 {
 	SDLK_ESCAPE = 27,
 	SDLK_BACKSPACE = 8,
+	SDLK_DELETE = 127,
 	SDLK_RETURN = 13,
 	SDLK_SPACE = 32,
 	SDLK_0 = '0',
@@ -194,7 +196,12 @@ enum : Sint32 {
 	SDLK_F8 = 1073741889,
 	SDLK_F9 = 1073741890,
 	SDLK_F2 = 1073741883,
+	SDLK_F3 = 1073741884,
+	SDLK_F4 = 1073741885,
+	SDLK_F5 = 1073741886,
+	SDLK_F6 = 1073741887,
 	SDLK_F11 = 1073741892,
+	SDLK_F12 = 1073741893,
 };
 
 extern "C" {
@@ -205,7 +212,11 @@ SDL_Window* SDL_CreateWindow(const char* title, int x, int y, int w, int h, Uint
 void SDL_DestroyWindow(SDL_Window* window);
 int SDL_SetWindowFullscreen(SDL_Window* window, Uint32 flags);
 void SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
+void SDL_SetWindowSize(SDL_Window* window, int w, int h);
 void SDL_SetWindowTitle(SDL_Window* window, const char* title);
+void SDL_SetWindowBordered(SDL_Window* window, int bordered);
+void SDL_SetWindowAlwaysOnTop(SDL_Window* window, int onTop);
+int SDL_SetClipboardText(const char* text);
 void SDL_StartTextInput();
 void SDL_StopTextInput();
 void SDL_free(void* memory);
@@ -214,6 +225,8 @@ void SDL_DestroyRenderer(SDL_Renderer* renderer);
 SDL_Texture* SDL_CreateTexture(SDL_Renderer* renderer, Uint32 format, int access, int w, int h);
 void SDL_DestroyTexture(SDL_Texture* texture);
 int SDL_UpdateTexture(SDL_Texture* texture, const SDL_Rect* rect, const void* pixels, int pitch);
+int SDL_SetTextureBlendMode(SDL_Texture* texture, int blendMode);
+int SDL_SetTextureAlphaMod(SDL_Texture* texture, Uint8 alpha);
 int SDL_RenderClear(SDL_Renderer* renderer);
 int SDL_RenderCopy(SDL_Renderer* renderer, SDL_Texture* texture, const SDL_Rect* src, const SDL_Rect* dst);
 int SDL_RenderDrawLine(SDL_Renderer* renderer, int x1, int y1, int x2, int y2);

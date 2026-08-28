@@ -39,12 +39,16 @@ if command -v apt-get >/dev/null 2>&1 && [ "${SET_ENV_SKIP_APT:-0}" != "1" ]; th
 		git \
 		imagemagick \
 		libjpeg-dev \
+		libjpeg-turbo-progs \
 		libpng-dev \
 		libsdl2-2.0-0 \
 		make \
 		patchelf \
 		pkg-config \
 		squashfs-tools \
+		wl-clipboard \
+		xclip \
+		x11-apps \
 		x11-utils \
 		xdotool \
 		xvfb \

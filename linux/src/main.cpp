@@ -1,6 +1,7 @@
 #include "sdl_abi.h"
 #include "file_list.h"
 #include "exif_reader.h"
+#include "clipboard.h"
 #include "image_writer.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
@@ -15,22 +16,29 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 #include <cstdint>
 #include <ctime>
 #include <dlfcn.h>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/wait.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -52,6 +60,7 @@ struct MenuItem {
 	int command = IDM_NEXT;
 	bool separator = false;
 	bool checked = false;
+	bool enabled = true;
 };
 
 struct FileDialogEntry {
@@ -384,6 +393,98 @@ std::string FormatFileSize(std::uintmax_t size) {
 	return stream.str();
 }
 
+bool HasExecutable(const std::string& executable) {
+	const char* path = std::getenv("PATH");
+	if (path == nullptr) return false;
+	const std::string searchPath(path);
+	std::size_t begin = 0;
+	while (begin <= searchPath.size()) {
+		const std::size_t end = searchPath.find(':', begin);
+		const fs::path directory = searchPath.substr(begin,
+			end == std::string::npos ? std::string::npos : end - begin);
+		const fs::path candidate = (directory.empty() ? fs::path(".") : directory) / executable;
+		if (access(candidate.c_str(), X_OK) == 0) return true;
+		if (end == std::string::npos) break;
+		begin = end + 1;
+	}
+	return false;
+}
+
+[[noreturn]] void ExecProcess(const std::string& executable, const std::vector<std::string>& arguments) {
+	std::vector<char*> argv;
+	argv.reserve(arguments.size() + 2);
+	argv.push_back(const_cast<char*>(executable.c_str()));
+	for (const std::string& argument : arguments) argv.push_back(const_cast<char*>(argument.c_str()));
+	argv.push_back(nullptr);
+	execvp(executable.c_str(), argv.data());
+	_exit(127);
+}
+
+bool RunProcess(const std::string& executable, const std::vector<std::string>& arguments,
+	std::string& errorMessage) {
+	if (!HasExecutable(executable)) {
+		errorMessage = executable + " is not installed";
+		return false;
+	}
+	const pid_t child = fork();
+	if (child < 0) {
+		errorMessage = "cannot start " + executable;
+		return false;
+	}
+	if (child == 0) ExecProcess(executable, arguments);
+	int status = 0;
+	while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		errorMessage = executable + " failed";
+		return false;
+	}
+	return true;
+}
+
+bool StartDetachedProcess(const std::string& executable, const std::vector<std::string>& arguments,
+	std::string& errorMessage) {
+	if (!HasExecutable(executable)) {
+		errorMessage = executable + " is not installed";
+		return false;
+	}
+	const pid_t child = fork();
+	if (child < 0) {
+		errorMessage = "cannot start " + executable;
+		return false;
+	}
+	if (child == 0) {
+		const pid_t detached = fork();
+		if (detached < 0) _exit(127);
+		if (detached > 0) _exit(0);
+		setsid();
+		ExecProcess(executable, arguments);
+	}
+	int status = 0;
+	while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		errorMessage = executable + " failed to start";
+		return false;
+	}
+	return true;
+}
+
+std::string FileUri(const fs::path& filename) {
+	const std::string path = AbsoluteNormalized(filename).string();
+	std::ostringstream uri;
+	uri << "file://";
+	for (const unsigned char character : path) {
+		if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '-' || character == '_' ||
+			character == '.' || character == '/' || character == '~') {
+			uri << static_cast<char>(character);
+		} else {
+			static constexpr char hex[] = "0123456789ABCDEF";
+			uri << '%' << hex[character >> 4] << hex[character & 15];
+		}
+	}
+	return uri.str();
+}
+
 class Viewer {
 public:
 	Viewer(jpegview_linux::FileList fileList, double slideshowSeconds, bool startFullscreen)
@@ -446,10 +547,16 @@ public:
 
 private:
 	void Cleanup() {
+		if (clipboardMode_) {
+			std::error_code removeError;
+			fs::remove(clipboardTempFile_, removeError);
+			if (!clipboardTempDirectory_.empty()) fs::remove(clipboardTempDirectory_, removeError);
+		}
 		if (texture_ != nullptr) {
 			SDL_DestroyTexture(texture_);
 			texture_ = nullptr;
 		}
+		ClearTransition();
 		if (renderer_ != nullptr) {
 			SDL_DestroyRenderer(renderer_);
 			renderer_ = nullptr;
@@ -467,6 +574,7 @@ private:
 		}
 		metadata_ = {};
 		jpegComment_.clear();
+		ClearTransition();
 		std::string errorMessage;
 		if (!image_.Load(fileList_.Current(), errorMessage)) {
 			SetTitle(fileList_.Current().filename().string() + " — decode failed: " + errorMessage);
@@ -481,7 +589,7 @@ private:
 		texture_ = nullptr;
 		if (!UpdateTexture()) return false;
 
-		FitToWindow();
+		FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
 		lastInteractionTick_ = SDL_GetTicks();
 		imageModified_ = false;
 		SetTitle();
@@ -489,20 +597,49 @@ private:
 	}
 
 	bool UpdateTexture() {
-		SDL_Texture* newTexture = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-			image_.width, image_.height);
+		SDL_Texture* newTexture = CreateTexture(image_);
 		if (newTexture == nullptr) {
 			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
-			return false;
-		}
-		if (SDL_UpdateTexture(newTexture, nullptr, image_.bgra.data(), image_.width * 4) != 0) {
-			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
-			SDL_DestroyTexture(newTexture);
 			return false;
 		}
 		if (texture_ != nullptr) SDL_DestroyTexture(texture_);
 		texture_ = newTexture;
 		return true;
+	}
+
+	SDL_Texture* CreateTexture(const Image& source) {
+		SDL_Texture* result = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+			source.width, source.height);
+		if (result == nullptr) return nullptr;
+		if (SDL_UpdateTexture(result, nullptr, source.bgra.data(), source.width * 4) != 0) {
+			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
+			SDL_DestroyTexture(result);
+			return nullptr;
+		}
+		return result;
+	}
+
+	void ClearTransition() {
+		if (transitionTexture_ != nullptr) {
+			SDL_DestroyTexture(transitionTexture_);
+			transitionTexture_ = nullptr;
+		}
+		transitionImage_ = {};
+		transitionStartTick_ = 0;
+	}
+
+	void StartTransition(const Image& previousImage) {
+		ClearTransition();
+		if (transitionEffect_ == IDM_EFFECT_NONE || previousImage.width <= 0 || previousImage.height <= 0) return;
+		transitionImage_ = previousImage;
+		transitionTexture_ = CreateTexture(transitionImage_);
+		if (transitionTexture_ == nullptr) {
+			transitionImage_ = {};
+			return;
+		}
+		SDL_SetTextureBlendMode(transitionTexture_, SDL_BLENDMODE_BLEND);
+		SDL_SetTextureBlendMode(texture_, SDL_BLENDMODE_BLEND);
+		transitionStartTick_ = SDL_GetTicks();
 	}
 
 	void ApplyTransform(int command) {
@@ -528,7 +665,76 @@ private:
 			return;
 		}
 		imageModified_ = true;
-		FitToWindow();
+		FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
+	}
+
+	void ApplyLosslessJpegTransform(int command) {
+		if (fileList_.Empty() || clipboardMode_) return;
+		const std::string extension = Lower(fileList_.Current().extension().string());
+		if (extension != ".jpg" && extension != ".jpeg" && extension != ".jpe") {
+			SetTitle("Lossless JPEG transformation requires a JPEG image");
+			return;
+		}
+		std::string operation;
+		switch (command) {
+		case IDM_ROTATE_90_LOSSLESS:
+		case IDM_ROTATE_90_LOSSLESS_CONFIRM:
+			operation = "90";
+			break;
+		case IDM_ROTATE_270_LOSSLESS:
+		case IDM_ROTATE_270_LOSSLESS_CONFIRM:
+			operation = "270";
+			break;
+		case IDM_ROTATE_180_LOSSLESS:
+			operation = "180";
+			break;
+		default:
+			break;
+		}
+		const bool horizontalFlip = command == IDM_MIRROR_H_LOSSLESS;
+		const bool verticalFlip = command == IDM_MIRROR_V_LOSSLESS;
+		if (operation.empty() && !horizontalFlip && !verticalFlip) return;
+		if (!HasExecutable("jpegtran")) {
+			SetTitle("Lossless JPEG transformation requires jpegtran");
+			return;
+		}
+
+		char temporaryDirectoryName[] = "/tmp/jpegview-jpegtran-XXXXXX";
+		if (mkdtemp(temporaryDirectoryName) == nullptr) {
+			SetTitle("Lossless JPEG transformation failed: cannot create temporary file");
+			return;
+		}
+		const fs::path temporaryDirectory(temporaryDirectoryName);
+		const fs::path temporaryFile = temporaryDirectory / "transformed.jpg";
+		std::vector<std::string> arguments{"-copy", "all"};
+		if (!operation.empty()) {
+			arguments.push_back("-rotate");
+			arguments.push_back(operation);
+		} else {
+			arguments.push_back("-flip");
+			arguments.push_back(horizontalFlip ? "horizontal" : "vertical");
+		}
+		arguments.push_back("-outfile");
+		arguments.push_back(temporaryFile.string());
+		arguments.push_back(fileList_.Current().string());
+		std::string errorMessage;
+		const bool transformed = RunProcess("jpegtran", arguments, errorMessage);
+		if (!transformed) {
+			std::error_code removeError;
+			fs::remove_all(temporaryDirectory, removeError);
+			SetTitle("Lossless JPEG transformation failed: " + errorMessage);
+			return;
+		}
+		if (::rename(temporaryFile.c_str(), fileList_.Current().c_str()) != 0) {
+			std::error_code removeError;
+			fs::remove_all(temporaryDirectory, removeError);
+			SetTitle("Lossless JPEG transformation failed: cannot replace original file");
+			return;
+		}
+		std::error_code removeError;
+		fs::remove_all(temporaryDirectory, removeError);
+		ReloadAfterFileChange();
+		SetTitle("Applied lossless JPEG transformation");
 	}
 
 	void SetTitle(const std::string& title) {
@@ -549,6 +755,7 @@ private:
 		if (droppedFiles.empty()) {
 			return;
 		}
+		RestoreClipboardImage();
 
 		try {
 			jpegview_linux::FileList droppedFileList(
@@ -614,14 +821,333 @@ private:
 		SetTitle("Saved processed image: " + savedName);
 	}
 
-	void FitToWindow() {
+	void CopyCurrentImage(bool fullSize) {
+		if (image_.width <= 0 || image_.height <= 0) return;
+		Image copied = image_;
+		if (!fullSize) {
+			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * zoom_)));
+			const int outputHeight = std::max(1, static_cast<int>(std::round(image_.height * zoom_)));
+			if (!copied.Resize(outputWidth, outputHeight)) {
+				SetTitle("Copy failed: image is too large");
+				return;
+			}
+		}
+		std::string errorMessage;
+		if (jpegview_linux::CopyImageToClipboard(copied.bgra.data(), copied.width, copied.height, errorMessage)) {
+			SetTitle(fullSize ? "Copied original-size image to clipboard" : "Copied displayed image to clipboard");
+		} else {
+			SetTitle("Copy image failed: " + errorMessage);
+		}
+	}
+
+	void CopyCurrentPath() {
+		if (fileList_.Empty() || clipboardMode_) return;
+		std::string errorMessage;
+		if (jpegview_linux::CopyTextToClipboard(fileList_.Current().string(), errorMessage)) {
+			SetTitle("Copied image path to clipboard");
+		} else {
+			SetTitle("Copy path failed: " + errorMessage);
+		}
+	}
+
+	void OpenContainingFolder() {
+		if (fileList_.Empty() || clipboardMode_) return;
+		const fs::path directory = fileList_.Current().parent_path();
+		std::string errorMessage;
+		if (StartDetachedProcess("xdg-open", {directory.string()}, errorMessage) ||
+			StartDetachedProcess("gio", {"open", directory.string()}, errorMessage)) {
+			SetTitle("Opened containing folder");
+		} else {
+			SetTitle("Cannot open containing folder: " + errorMessage);
+		}
+	}
+
+	void PrintCurrentImage() {
+		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		char temporaryDirectoryName[] = "/tmp/jpegview-print-XXXXXX";
+		if (mkdtemp(temporaryDirectoryName) == nullptr) {
+			SetTitle("Print failed: cannot create temporary file");
+			return;
+		}
+		const fs::path temporaryDirectory(temporaryDirectoryName);
+		const fs::path temporaryFile = temporaryDirectory / "image.png";
+		jpegview_linux::ImageWriteOptions options;
+		std::string errorMessage;
+		const bool written = jpegview_linux::WriteImage(temporaryFile, image_.bgra.data(), image_.width,
+			image_.height, options, errorMessage);
+		if (!written) {
+			std::error_code removeError;
+			fs::remove_all(temporaryDirectory, removeError);
+			SetTitle("Print failed: " + errorMessage);
+			return;
+		}
+		const bool printed = RunProcess("lp", {temporaryFile.string()}, errorMessage);
+		std::error_code removeError;
+		fs::remove_all(temporaryDirectory, removeError);
+		SetTitle(printed ? "Sent image to the default printer" : "Print failed: " + errorMessage);
+	}
+
+	static bool ParseExifTimestamp(const std::string& value, std::time_t& result) {
+		int year = 0;
+		int month = 0;
+		int day = 0;
+		int hour = 0;
+		int minute = 0;
+		int second = 0;
+		if (std::sscanf(value.c_str(), "%d:%d:%d %d:%d:%d", &year, &month, &day,
+			&hour, &minute, &second) != 6) return false;
+		std::tm localTime{};
+		localTime.tm_year = year - 1900;
+		localTime.tm_mon = month - 1;
+		localTime.tm_mday = day;
+		localTime.tm_hour = hour;
+		localTime.tm_min = minute;
+		localTime.tm_sec = second;
+		localTime.tm_isdst = -1;
+		const std::time_t converted = std::mktime(&localTime);
+		if (converted == static_cast<std::time_t>(-1)) return false;
+		result = converted;
+		return true;
+	}
+
+	static bool SetFileModificationTime(const fs::path& filename, std::time_t timestamp) {
+		const timespec times[2] = {
+			{0, UTIME_OMIT},
+			{timestamp, 0},
+		};
+		return utimensat(AT_FDCWD, filename.c_str(), times, 0) == 0;
+	}
+
+	void ReloadAfterFileChange() {
+		if (fileList_.Reload()) LoadCurrent();
+	}
+
+	void TouchCurrentImage(bool useExifDate) {
+		if (fileList_.Empty() || clipboardMode_) return;
+		std::time_t timestamp = std::time(nullptr);
+		if (useExifDate) {
+			const std::string& exifDate = !metadata_.acquisitionDate.empty() ? metadata_.acquisitionDate : metadata_.dateTime;
+			if (exifDate.empty() || !ParseExifTimestamp(exifDate, timestamp)) {
+				SetTitle("Cannot set date: image has no usable EXIF date");
+				return;
+			}
+		}
+		if (!SetFileModificationTime(fileList_.Current(), timestamp)) {
+			SetTitle("Cannot set image modification date");
+			return;
+		}
+		ReloadAfterFileChange();
+		SetTitle(useExifDate ? "Set modification date to EXIF date" : "Set modification date to current date");
+	}
+
+	void TouchFolderImagesToExifDate() {
+		if (fileList_.Empty() || clipboardMode_) return;
+		const fs::path directory = fileList_.Current().parent_path();
+		int updated = 0;
+		std::error_code iteratorError;
+		for (const fs::directory_entry& entry : fs::directory_iterator(directory, iteratorError)) {
+			if (iteratorError) break;
+			if (!entry.is_regular_file(iteratorError) || iteratorError || !IsImagePath(entry.path())) continue;
+			jpegview_linux::ExifInfo info;
+			std::string comment;
+			jpegview_linux::ReadJpegMetadata(entry.path(), info, comment);
+			const std::string& exifDate = !info.acquisitionDate.empty() ? info.acquisitionDate : info.dateTime;
+			std::time_t timestamp = 0;
+			if (!exifDate.empty() && ParseExifTimestamp(exifDate, timestamp) &&
+				SetFileModificationTime(entry.path(), timestamp)) {
+				++updated;
+			}
+		}
+		ReloadAfterFileChange();
+		SetTitle("Set EXIF dates for " + std::to_string(updated) + " image(s)");
+	}
+
+	void SetWallpaper(bool processed) {
+		if (fileList_.Empty()) return;
+		fs::path wallpaperFile = fileList_.Current();
+		std::error_code error;
+		if (processed) {
+			const char* cacheHome = std::getenv("XDG_CACHE_HOME");
+			fs::path cacheDirectory;
+			if (cacheHome != nullptr && *cacheHome != '\0') {
+				cacheDirectory = fs::path(cacheHome) / "jpegview-linux";
+			} else {
+				const char* home = std::getenv("HOME");
+				if (home == nullptr || *home == '\0') {
+					SetTitle("Set wallpaper failed: home directory is unknown");
+					return;
+				}
+				cacheDirectory = fs::path(home) / ".cache" / "jpegview-linux";
+			}
+			fs::create_directories(cacheDirectory, error);
+			if (error) {
+				SetTitle("Set wallpaper failed: cannot create cache directory");
+				return;
+			}
+			wallpaperFile = cacheDirectory / "wallpaper.png";
+			jpegview_linux::ImageWriteOptions options;
+			std::string writeError;
+			if (!jpegview_linux::WriteImage(wallpaperFile, image_.bgra.data(), image_.width, image_.height,
+				options, writeError)) {
+				SetTitle("Set wallpaper failed: " + writeError);
+				return;
+			}
+		}
+
+		std::string errorMessage;
+		bool applied = false;
+		if (HasExecutable("gsettings")) {
+			applied = RunProcess("gsettings", {"set", "org.gnome.desktop.background", "picture-uri", FileUri(wallpaperFile)}, errorMessage);
+			if (applied) {
+				// GNOME 42+ also consults the dark-mode URI.  Older versions simply
+				// report an unknown key; the light-mode setting above is sufficient.
+				std::string ignoredError;
+				RunProcess("gsettings", {"set", "org.gnome.desktop.background", "picture-uri-dark", FileUri(wallpaperFile)}, ignoredError);
+			}
+		}
+		if (!applied && HasExecutable("feh")) {
+			applied = RunProcess("feh", {"--bg-fill", wallpaperFile.string()}, errorMessage);
+		}
+		if (!applied && HasExecutable("nitrogen")) {
+			applied = RunProcess("nitrogen", {"--set-zoom-fill", wallpaperFile.string()}, errorMessage);
+		}
+		SetTitle(applied ? "Set desktop wallpaper" : "Set wallpaper failed: install gsettings, feh, or nitrogen");
+	}
+
+	void RequestConfirmation(int command, const std::string& message) {
+		confirmationCommand_ = command;
+		confirmationMessage_ = message;
+		confirmationOpen_ = true;
+		contextMenuOpen_ = false;
+		fileDialogOpen_ = false;
+	}
+
+	void MoveCurrentToTrash() {
+		if (fileList_.Empty() || clipboardMode_) return;
+		const fs::path filename = fileList_.Current();
+		std::string errorMessage;
+		bool moved = false;
+		if (HasExecutable("gio")) {
+			moved = RunProcess("gio", {"trash", filename.string()}, errorMessage);
+		} else if (HasExecutable("trash-put")) {
+			moved = RunProcess("trash-put", {filename.string()}, errorMessage);
+		}
+		if (!moved && !HasExecutable("gio") && !HasExecutable("trash-put")) {
+			// The confirmation dialog has already made this an explicit user
+			// action.  This fallback keeps the key binding useful on minimal
+			// systems that do not ship a freedesktop trash helper.
+			std::error_code removeError;
+			moved = fs::remove(filename, removeError);
+			if (!moved) errorMessage = "cannot remove file";
+		}
+		if (!moved) {
+			SetTitle("Delete failed: " + errorMessage);
+			return;
+		}
+		if (fileList_.Reload()) {
+			LoadCurrent();
+		} else {
+			quitRequested_ = true;
+		}
+		SetTitle("Moved image to trash");
+	}
+
+	void HandleConfirmationEvents(const SDL_Event& event) {
+		if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+			if (event.key.keysym.sym == SDLK_ESCAPE) {
+				confirmationOpen_ = false;
+			} else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE) {
+				const int command = confirmationCommand_;
+				confirmationOpen_ = false;
+				if (command == IDM_MOVE_TO_RECYCLE_BIN || command == IDM_MOVE_TO_RECYCLE_BIN_CONFIRM ||
+					command == IDM_MOVE_TO_RECYCLE_BIN_CONFIRM_PERMANENT_DELETE) {
+					MoveCurrentToTrash();
+				}
+			}
+		}
+	}
+
+	void OpenAbout() {
+		aboutOpen_ = true;
+		contextMenuOpen_ = false;
+		SetTitle("About JPEGView Linux");
+	}
+
+	void HandleAboutEvents(const SDL_Event& event) {
+		if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+			(event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_RETURN ||
+			 event.key.keysym.sym == SDLK_SPACE)) {
+			aboutOpen_ = false;
+			SetTitle();
+		} else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+			aboutOpen_ = false;
+			SetTitle();
+		}
+	}
+
+	void RestoreClipboardImage() {
+		if (!clipboardMode_) return;
+		const fs::path temporaryFile = clipboardTempFile_;
+		const fs::path temporaryDirectory = clipboardTempDirectory_;
+		if (fileListBeforeClipboard_) {
+			fileList_ = std::move(*fileListBeforeClipboard_);
+			fileListBeforeClipboard_.reset();
+		}
+		clipboardMode_ = false;
+		clipboardTempFile_.clear();
+		clipboardTempDirectory_.clear();
+		std::error_code removeError;
+		if (!temporaryFile.empty()) fs::remove(temporaryFile, removeError);
+		if (!temporaryDirectory.empty()) fs::remove(temporaryDirectory, removeError);
+	}
+
+	void PasteCurrentImage() {
+		std::vector<std::uint8_t> encodedPng;
+		std::string errorMessage;
+		if (!jpegview_linux::PasteImageFromClipboard(encodedPng, errorMessage)) {
+			SetTitle("Paste image failed: " + errorMessage);
+			return;
+		}
+		char temporaryDirectoryName[] = "/tmp/jpegview-paste-XXXXXX";
+		if (mkdtemp(temporaryDirectoryName) == nullptr) {
+			SetTitle("Paste image failed: cannot create temporary file");
+			return;
+		}
+		const fs::path temporaryDirectory(temporaryDirectoryName);
+		const fs::path temporaryFile = temporaryDirectory / "clipboard.png";
+		std::ofstream output(temporaryFile, std::ios::binary);
+		output.write(reinterpret_cast<const char*>(encodedPng.data()), static_cast<std::streamsize>(encodedPng.size()));
+		const bool written = static_cast<bool>(output);
+		output.close();
+		std::error_code removeError;
+		if (!written) {
+			fs::remove(temporaryFile, removeError);
+			fs::remove(temporaryDirectory, removeError);
+			SetTitle("Paste image failed: cannot write temporary file");
+			return;
+		}
+
+		RestoreClipboardImage();
+		fileListBeforeClipboard_ = std::make_unique<jpegview_linux::FileList>(std::move(fileList_));
+		fileList_ = jpegview_linux::FileList({temporaryFile.string()});
+		clipboardTempFile_ = temporaryFile;
+		clipboardTempDirectory_ = temporaryDirectory;
+		clipboardMode_ = true;
+		LoadCurrent();
+		SetTitle("Clipboard image — press next/previous to return to the file list");
+	}
+
+	void FitToWindow(bool fillCrop = false, bool noEnlarge = false) {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		const double widthScale = static_cast<double>(std::max(1, windowWidth - 16)) / image_.width;
 		const double heightScale = static_cast<double>(std::max(1, windowHeight - 16)) / image_.height;
-		zoom_ = std::clamp(std::min(widthScale, heightScale), kMinZoom, kMaxZoom);
+		const double windowScale = fillCrop ? std::max(widthScale, heightScale) : std::min(widthScale, heightScale);
+		zoom_ = std::clamp(noEnlarge ? std::min(1.0, windowScale) : windowScale, kMinZoom, kMaxZoom);
 		fitToWindow_ = true;
+		fillWithCrop_ = fillCrop;
+		autoZoomNoEnlarge_ = noEnlarge;
 		offsetX_ = 0.0;
 		offsetY_ = 0.0;
 		SetTitle();
@@ -630,6 +1156,8 @@ private:
 	void ActualSize() {
 		zoom_ = 1.0;
 		fitToWindow_ = false;
+		fillWithCrop_ = false;
+		autoZoomNoEnlarge_ = false;
 		offsetX_ = 0.0;
 		offsetY_ = 0.0;
 		SetTitle();
@@ -649,25 +1177,35 @@ private:
 		offsetX_ = mouseX - (windowWidth - image_.width * zoom_) / 2.0 - imageX * zoom_;
 		offsetY_ = mouseY - (windowHeight - image_.height * zoom_) / 2.0 - imageY * zoom_;
 		fitToWindow_ = false;
+		fillWithCrop_ = false;
+		autoZoomNoEnlarge_ = false;
 		lastInteractionTick_ = SDL_GetTicks();
 		SetTitle();
 	}
 
 	void NextImage() {
-		if (fileList_.Next()) LoadCurrent();
+		if (clipboardMode_) RestoreClipboardImage();
+		const bool animate = slideshowSeconds_ > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
+		Image previousImage = animate ? image_ : Image{};
+		if (fileList_.Next() && LoadCurrent() && animate) StartTransition(previousImage);
 	}
 
 	void PreviousImage() {
-		if (fileList_.Previous()) LoadCurrent();
+		if (clipboardMode_) RestoreClipboardImage();
+		const bool animate = slideshowSeconds_ > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
+		Image previousImage = animate ? image_ : Image{};
+		if (fileList_.Previous() && LoadCurrent() && animate) StartTransition(previousImage);
 	}
 
 	void FirstImage() {
+		if (clipboardMode_) RestoreClipboardImage();
 		if (fileList_.Empty() || fileList_.CurrentIndex() == 0) return;
 		fileList_.First();
 		LoadCurrent();
 	}
 
 	void LastImage() {
+		if (clipboardMode_) RestoreClipboardImage();
 		if (fileList_.Empty() || fileList_.CurrentIndex() + 1 == fileList_.Size()) return;
 		fileList_.Last();
 		LoadCurrent();
@@ -677,10 +1215,30 @@ private:
 		fullscreen_ = !fullscreen_;
 		SDL_SetWindowFullscreen(window_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : static_cast<Uint32>(0));
 		if (fitToWindow_) {
-			FitToWindow();
+			FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
 		} else {
 			SetTitle();
 		}
+	}
+
+	void FitWindowToImage() {
+		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		const int width = std::clamp(image_.width + 16, 160, 4096);
+		const int height = std::clamp(image_.height + 16, 120, 4096);
+		SDL_SetWindowSize(window_, width, height);
+		FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
+	}
+
+	void ToggleTitleBar() {
+		borderless_ = !borderless_;
+		SDL_SetWindowBordered(window_, borderless_ ? 0 : 1);
+		SetTitle();
+	}
+
+	void ToggleAlwaysOnTop() {
+		alwaysOnTop_ = !alwaysOnTop_;
+		SDL_SetWindowAlwaysOnTop(window_, alwaysOnTop_ ? 1 : 0);
+		SetTitle();
 	}
 
 	void StartSlideshow(double seconds) {
@@ -840,8 +1398,59 @@ private:
 		case IDM_MIRROR_V:
 			ApplyTransform(command);
 			break;
+		case IDM_ROTATE_90_LOSSLESS:
+		case IDM_ROTATE_90_LOSSLESS_CONFIRM:
+		case IDM_ROTATE_270_LOSSLESS:
+		case IDM_ROTATE_270_LOSSLESS_CONFIRM:
+		case IDM_ROTATE_180_LOSSLESS:
+		case IDM_MIRROR_H_LOSSLESS:
+		case IDM_MIRROR_V_LOSSLESS:
+			ApplyLosslessJpegTransform(command);
+			break;
 		case IDM_OPEN:
 			OpenFileDialog();
+			break;
+		case IDM_EXPLORE:
+			OpenContainingFolder();
+			break;
+		case IDM_PRINT:
+			PrintCurrentImage();
+			break;
+		case IDM_COPY:
+			CopyCurrentImage(false);
+			break;
+		case IDM_COPY_FULL:
+			CopyCurrentImage(true);
+			break;
+		case IDM_COPY_PATH:
+			CopyCurrentPath();
+			break;
+		case IDM_PASTE:
+			PasteCurrentImage();
+			break;
+		case IDM_TOUCH_IMAGE:
+			TouchCurrentImage(false);
+			break;
+		case IDM_TOUCH_IMAGE_EXIF:
+			TouchCurrentImage(true);
+			break;
+		case IDM_TOUCH_IMAGE_EXIF_FOLDER:
+			TouchFolderImagesToExifDate();
+			break;
+		case IDM_SET_WALLPAPER_ORIG:
+			SetWallpaper(false);
+			break;
+		case IDM_SET_WALLPAPER_DISPLAY:
+			SetWallpaper(true);
+			break;
+		case IDM_MOVE_TO_RECYCLE_BIN:
+			MoveCurrentToTrash();
+			break;
+		case IDM_MOVE_TO_RECYCLE_BIN_CONFIRM:
+		case IDM_MOVE_TO_RECYCLE_BIN_CONFIRM_PERMANENT_DELETE:
+			if (!fileList_.Empty() && !clipboardMode_) {
+				RequestConfirmation(command, "Move current image to the desktop trash?");
+			}
 			break;
 		case IDM_SAVE:
 		case IDM_SAVE_ALLOW_NO_PROMPT:
@@ -855,6 +1464,9 @@ private:
 			break;
 		case IDM_SHOW_FILEINFO:
 			infoVisible_ = !infoVisible_;
+			break;
+		case IDM_SHOW_FILENAME:
+			showFileName_ = !showFileName_;
 			break;
 		case IDM_SHOW_NAVPANEL:
 			navigationPanelEnabled_ = !navigationPanelEnabled_;
@@ -944,6 +1556,82 @@ private:
 		case IDM_ZOOM_DEC:
 			ZoomAt(1.0 / 1.2, imageCenterX_, imageCenterY_);
 			break;
+		case IDM_FILL_WITH_CROP:
+			FitToWindow(true, false);
+			break;
+		case IDM_FIT_TO_SCREEN_NO_ENLARGE:
+			FitToWindow(false, true);
+			break;
+		case IDM_SPAN_SCREENS:
+			ToggleFullscreen();
+			break;
+		case IDM_FIT_WINDOW_TO_IMAGE:
+			FitWindowToImage();
+			break;
+		case IDM_HIDE_TITLE_BAR:
+			ToggleTitleBar();
+			break;
+		case IDM_ALWAYS_ON_TOP:
+			ToggleAlwaysOnTop();
+			break;
+		case IDM_AUTO_ZOOM_FIT_NO_ZOOM:
+			FitToWindow(false, true);
+			break;
+		case IDM_AUTO_ZOOM_FILL_NO_ZOOM:
+			FitToWindow(true, true);
+			break;
+		case IDM_AUTO_ZOOM_FIT:
+			FitToWindow(false, false);
+			break;
+		case IDM_AUTO_ZOOM_FILL:
+			FitToWindow(true, false);
+			break;
+		case IDM_ABOUT:
+			OpenAbout();
+			break;
+		case IDM_MOVIE_START_FPS:
+			StartSlideshow(1.0 / 25.0);
+			break;
+		case IDM_MOVIE_5_FPS:
+		case IDM_MOVIE_10_FPS:
+		case IDM_MOVIE_25_FPS:
+		case IDM_MOVIE_30_FPS:
+		case IDM_MOVIE_50_FPS:
+		case IDM_MOVIE_100_FPS:
+			StartSlideshow(1.0 / static_cast<double>(command - IDM_MOVIE_START_FPS));
+			break;
+		case IDM_EFFECT_NONE:
+		case IDM_EFFECT_BLEND:
+		case IDM_EFFECT_SLIDE_RL:
+		case IDM_EFFECT_SLIDE_LR:
+		case IDM_EFFECT_SLIDE_TB:
+		case IDM_EFFECT_SLIDE_BT:
+		case IDM_EFFECT_ROLL_RL:
+		case IDM_EFFECT_ROLL_LR:
+		case IDM_EFFECT_ROLL_TB:
+		case IDM_EFFECT_ROLL_BT:
+		case IDM_EFFECT_SCROLL_RL:
+		case IDM_EFFECT_SCROLL_LR:
+		case IDM_EFFECT_SCROLL_TB:
+		case IDM_EFFECT_SCROLL_BT:
+			transitionEffect_ = command;
+			SetTitle();
+			break;
+		case IDM_EFFECTTIME_VERY_FAST:
+			transitionDurationMs_ = 100;
+			break;
+		case IDM_EFFECTTIME_FAST:
+			transitionDurationMs_ = 250;
+			break;
+		case IDM_EFFECTTIME_NORMAL:
+			transitionDurationMs_ = 500;
+			break;
+		case IDM_EFFECTTIME_SLOW:
+			transitionDurationMs_ = 1000;
+			break;
+		case IDM_EFFECTTIME_VERY_SLOW:
+			transitionDurationMs_ = 2000;
+			break;
 		case IDM_EXIT:
 			quitRequested_ = true;
 			break;
@@ -977,11 +1665,23 @@ private:
 		if (key == SDLK_ESCAPE) return slideshowSeconds_ > 0.0 ? IDM_DEFAULT_ESC : IDM_EXIT;
 		if (!ctrl && !shift && key == SDLK_q) return IDM_EXIT; // Linux viewer convenience alias.
 		if (ctrl && !shift && key == SDLK_o) return IDM_OPEN;
+		if (ctrl && !shift && key == SDLK_F2) return IDM_SHOW_FILENAME;
+		if (ctrl && !shift && key == 'c') return IDM_COPY;
+		if (ctrl && shift && key == 'c') return IDM_COPY_PATH;
+		if (ctrl && !shift && key == 'x') return IDM_COPY_FULL;
+		if (ctrl && !shift && key == 'v') return IDM_PASTE;
+		if (ctrl && !shift && key == 'p') return IDM_PRINT;
 		if (ctrl && !shift && key == 's') return IDM_SAVE_ALLOW_NO_PROMPT;
 		if (ctrl && shift && key == 's') return IDM_SAVE_SCREEN;
 		if (ctrl && !shift && key == SDLK_r) return IDM_RELOAD;
+		if (ctrl && shift && key == 'm') return IDM_TOUCH_IMAGE;
+		if (ctrl && shift && key == 'e') return IDM_TOUCH_IMAGE_EXIF;
 		if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;
 		if (!ctrl && !shift && key == SDLK_F2) return IDM_SHOW_FILEINFO;
+		if (!ctrl && !shift && key == SDLK_F3) return IDM_TOGGLE_RESAMPLING_QUALITY;
+		if (!ctrl && !shift && key == SDLK_F4) return IDM_KEEP_PARAMETERS;
+		if (!ctrl && !shift && key == SDLK_F5) return IDM_AUTO_CORRECTION;
+		if (!ctrl && !shift && key == SDLK_F6) return IDM_LDC;
 		if (!ctrl && !shift && key == 'c') return IDM_SORT_CREATION_DATE;
 		if (!ctrl && !shift && key == 'n') return IDM_SORT_NAME;
 		if (!ctrl && !shift && key == 'm') return IDM_SORT_MOD_DATE;
@@ -989,6 +1689,8 @@ private:
 		if (!ctrl && !shift && key == SDLK_F7) return IDM_LOOP_FOLDER;
 		if (!ctrl && !shift && key == SDLK_F8) return IDM_LOOP_RECURSIVELY;
 		if (!ctrl && !shift && key == SDLK_F9) return IDM_LOOP_SIBLINGS;
+		if (!ctrl && !shift && key == SDLK_DELETE) return IDM_MOVE_TO_RECYCLE_BIN_CONFIRM;
+		if (!ctrl && !shift && key == 'w') return IDM_EXPLORE;
 
 		if (!ctrl && !shift && (key == SDLK_RIGHT || key == SDLK_PAGEDOWN)) return IDM_NEXT;
 		if (!ctrl && !shift && (key == SDLK_LEFT || key == SDLK_PAGEUP)) return IDM_PREV;
@@ -1001,6 +1703,13 @@ private:
 		if (ctrl && key == SDLK_DOWN) return IDM_ZOOM_DEC;
 		if (ctrl && key == SDLK_UP) return IDM_ZOOM_INC;
 		if (!ctrl && !shift && key == SDLK_F11) return IDM_FULL_SCREEN_MODE;
+		if (shift && !ctrl && key == SDLK_F11) return IDM_HIDE_TITLE_BAR;
+		if (ctrl && !shift && key == SDLK_F11) return IDM_FIT_WINDOW_TO_IMAGE;
+		if (!ctrl && !shift && key == SDLK_F12) return IDM_SPAN_SCREENS;
+		if (shift && !ctrl && key == SDLK_F12) return IDM_ALWAYS_ON_TOP;
+		if (ctrl && !shift && key == SDLK_RETURN) return IDM_FILL_WITH_CROP;
+		if (!ctrl && !shift && key == 'r') return IDM_ROTATE_90_LOSSLESS_CONFIRM;
+		if (!ctrl && !shift && key == 't') return IDM_ROTATE_270_LOSSLESS_CONFIRM;
 
 		if (!ctrl && !shift && key == SDLK_0) return IDM_FIT_TO_SCREEN; // retained compatibility alias.
 		if (!ctrl && !shift && key == SDLK_f) return IDM_FULL_SCREEN_MODE; // retained compatibility alias.
@@ -1012,22 +1721,46 @@ private:
 	}
 
 	std::vector<MenuItem> ContextMenuItems() const {
+		const std::string extension = fileList_.Empty() ? std::string() : Lower(fileList_.Current().extension().string());
+		const bool losslessJpegAvailable = !clipboardMode_ && HasExecutable("jpegtran") &&
+			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
 		return {
-			// This is the supported subset of the PopupMenu resource in
-			// JPEGView.rc.  The numeric IDs are the original IDs, so all
-			// frontends enter the same ExecuteCommand path.
+			// This is a flattened rendering of the complete Windows PopupMenu
+			// resource.  Indented entries are the portable equivalent of its
+			// submenus. Unsupported Windows-only commands remain visible but
+			// disabled instead of silently doing nothing.
+			{"Stop slide show/movie", IDM_STOP_MOVIE, false, false, slideshowSeconds_ > 0.0},
+			{nullptr, 0, true},
 			{"Open image...", IDM_OPEN},
-			{"Reload image", IDM_RELOAD},
+			{"Open image with", 0},
+			{"  (no configured applications)", 0, false, false, false},
 			{"Save processed image...", IDM_SAVE},
 			{"Save displayed image...", IDM_SAVE_SCREEN},
+			{"Reload image", IDM_RELOAD},
+			{"Open containing folder", IDM_EXPLORE},
+			{"Print image...", IDM_PRINT},
+			{"Batch rename/copy...", IDM_BATCH_COPY, false, false, false},
+			{"Set modification date", 0},
+			{"  To current date", IDM_TOUCH_IMAGE},
+			{"  To EXIF date", IDM_TOUCH_IMAGE_EXIF},
+			{"  To EXIF date all files in folder", IDM_TOUCH_IMAGE_EXIF_FOLDER},
+			{"Set as desktop wallpaper", 0},
+			{"  Use original image", IDM_SET_WALLPAPER_ORIG},
+			{"  Use processed image as displayed", IDM_SET_WALLPAPER_DISPLAY},
+			{nullptr, 0, true},
+			{"Copy to clipboard", IDM_COPY},
+			{"Copy original size image", IDM_COPY_FULL},
+			{"Copy file path", IDM_COPY_PATH},
+			{"Paste from clipboard", IDM_PASTE},
+			{nullptr, 0, true},
+			{"Show picture info (EXIF)", IDM_SHOW_FILEINFO, false, infoVisible_},
+			{"Show filename", IDM_SHOW_FILENAME, false, showFileName_},
+			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_},
 			{nullptr, 0, true},
 			{"Next image", IDM_NEXT},
 			{"Previous image", IDM_PREV},
 			{"First image", IDM_FIRST},
 			{"Last image", IDM_LAST},
-			{nullptr, 0, true},
-			{"Show picture info (EXIF)", IDM_SHOW_FILEINFO, false, infoVisible_},
-			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_},
 			{nullptr, 0, true},
 			{"Navigation", 0},
 			{"  Loop folder", IDM_LOOP_FOLDER, false,
@@ -1053,24 +1786,94 @@ private:
 			{"Transform image", 0},
 			{"  Rotate +90", IDM_ROTATE_90},
 			{"  Rotate -90", IDM_ROTATE_270},
+			{"  Rotate...", IDM_ROTATE, false, false, false},
+			{"  Change size...", IDM_CHANGESIZE, false, false, false},
+			{"  Perspective correction...", IDM_PERSPECTIVE, false, false, false},
 			{"  Mirror horizontally", IDM_MIRROR_H},
 			{"  Mirror vertically", IDM_MIRROR_V},
+			{"Lossless JPEG transformations", 0},
+			{"  Rotate +90", IDM_ROTATE_90_LOSSLESS, false, false, losslessJpegAvailable},
+			{"  Rotate -90", IDM_ROTATE_270_LOSSLESS, false, false, losslessJpegAvailable},
+			{"  Rotate 180", IDM_ROTATE_180_LOSSLESS, false, false, losslessJpegAvailable},
+			{"  Mirror horizontally", IDM_MIRROR_H_LOSSLESS, false, false, losslessJpegAvailable},
+			{"  Mirror vertically", IDM_MIRROR_V_LOSSLESS, false, false, losslessJpegAvailable},
+			{"Auto correction", IDM_AUTO_CORRECTION, false, false, false},
+			{"Local density correction", IDM_LDC, false, false, false},
+			{"Keep parameters", IDM_KEEP_PARAMETERS, false, false, false},
+			{"Save parameters to DB", IDM_SAVE_PARAM_DB, false, false, false},
+			{"Clear parameters from DB", IDM_CLEAR_PARAM_DB, false, false, false},
 			{nullptr, 0, true},
 			{"Zoom", 0},
-			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_},
+			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_ && !fillWithCrop_},
+			{"  Fill with crop", IDM_FILL_WITH_CROP, false, fitToWindow_ && fillWithCrop_},
+			{"  Span all screens", IDM_SPAN_SCREENS, false, fullscreen_},
 			{"  400 %", IDM_ZOOM_400},
 			{"  200 %", IDM_ZOOM_200},
 			{"  100 %", IDM_ZOOM_100, false, !fitToWindow_ && std::abs(zoom_ - 1.0) < 0.01},
 			{"  50 %", IDM_ZOOM_50},
 			{"  25 %", IDM_ZOOM_25},
 			{"  Full screen mode", IDM_FULL_SCREEN_MODE, false, fullscreen_},
+			{"  Fit window to image", IDM_FIT_WINDOW_TO_IMAGE},
+			{"  Hide window title bar", IDM_HIDE_TITLE_BAR, false, borderless_},
+			{"  Set window always on top", IDM_ALWAYS_ON_TOP, false, alwaysOnTop_},
+			{"Auto zoom mode", 0},
+			{"  Fit to screen no zoom", IDM_AUTO_ZOOM_FIT_NO_ZOOM, false, fitToWindow_ && !fillWithCrop_ && autoZoomNoEnlarge_},
+			{"  Fill with crop no zoom", IDM_AUTO_ZOOM_FILL_NO_ZOOM, false, fitToWindow_ && fillWithCrop_ && autoZoomNoEnlarge_},
+			{"  Fit to screen", IDM_AUTO_ZOOM_FIT, false, fitToWindow_ && !fillWithCrop_ && !autoZoomNoEnlarge_},
+			{"  Fill with crop", IDM_AUTO_ZOOM_FILL, false, fitToWindow_ && fillWithCrop_ && !autoZoomNoEnlarge_},
 			{nullptr, 0, true},
 			{"Play folder as slideshow/movie", 0},
 			{slideshowSeconds_ > 0.0 ? "  Stop slide show/movie" : "  Slideshow", slideshowSeconds_ > 0.0 ? IDM_STOP_MOVIE : IDM_SLIDESHOW_START},
-			{"  Waiting time 1 sec", IDM_SLIDESHOW_1},
-			{"  Waiting time 3 sec", IDM_SLIDESHOW_3},
-			{"  Waiting time 5 sec", IDM_SLIDESHOW_5},
-			{"  Waiting time 10 sec", IDM_SLIDESHOW_10},
+			{"  Waiting time 1 sec", IDM_SLIDESHOW_1, false, false, true},
+			{"  Waiting time 2 sec", IDM_SLIDESHOW_2, false, false, true},
+			{"  Waiting time 3 sec", IDM_SLIDESHOW_3, false, false, true},
+			{"  Waiting time 4 sec", IDM_SLIDESHOW_4, false, false, true},
+			{"  Waiting time 5 sec", IDM_SLIDESHOW_5, false, false, true},
+			{"  Waiting time 7 sec", IDM_SLIDESHOW_7, false, false, true},
+			{"  Waiting time 10 sec", IDM_SLIDESHOW_10, false, false, true},
+			{"  Waiting time 20 sec", IDM_SLIDESHOW_20, false, false, true},
+			{"  Transition effect", 0},
+			{"    None", IDM_EFFECT_NONE, false, transitionEffect_ == IDM_EFFECT_NONE, true},
+			{"    Blend", IDM_EFFECT_BLEND, false, transitionEffect_ == IDM_EFFECT_BLEND, true},
+			{"    Slide from right", IDM_EFFECT_SLIDE_RL, false, transitionEffect_ == IDM_EFFECT_SLIDE_RL, true},
+			{"    Slide from left", IDM_EFFECT_SLIDE_LR, false, transitionEffect_ == IDM_EFFECT_SLIDE_LR, true},
+			{"    Slide from top", IDM_EFFECT_SLIDE_TB, false, transitionEffect_ == IDM_EFFECT_SLIDE_TB, true},
+			{"    Slide from bottom", IDM_EFFECT_SLIDE_BT, false, transitionEffect_ == IDM_EFFECT_SLIDE_BT, true},
+			{"    Roll from right", IDM_EFFECT_ROLL_RL, false, transitionEffect_ == IDM_EFFECT_ROLL_RL, true},
+			{"    Roll from left", IDM_EFFECT_ROLL_LR, false, transitionEffect_ == IDM_EFFECT_ROLL_LR, true},
+			{"    Roll from top", IDM_EFFECT_ROLL_TB, false, transitionEffect_ == IDM_EFFECT_ROLL_TB, true},
+			{"    Roll from bottom", IDM_EFFECT_ROLL_BT, false, transitionEffect_ == IDM_EFFECT_ROLL_BT, true},
+			{"    Scroll from right", IDM_EFFECT_SCROLL_RL, false, transitionEffect_ == IDM_EFFECT_SCROLL_RL, true},
+			{"    Scroll from left", IDM_EFFECT_SCROLL_LR, false, transitionEffect_ == IDM_EFFECT_SCROLL_LR, true},
+			{"    Scroll from top", IDM_EFFECT_SCROLL_TB, false, transitionEffect_ == IDM_EFFECT_SCROLL_TB, true},
+			{"    Scroll from bottom", IDM_EFFECT_SCROLL_BT, false, transitionEffect_ == IDM_EFFECT_SCROLL_BT, true},
+			{"  Transition speed", 0},
+			{"    Very fast", IDM_EFFECTTIME_VERY_FAST, false, transitionDurationMs_ == 100, true},
+			{"    Fast", IDM_EFFECTTIME_FAST, false, transitionDurationMs_ == 250, true},
+			{"    Normal", IDM_EFFECTTIME_NORMAL, false, transitionDurationMs_ == 500, true},
+			{"    Slow", IDM_EFFECTTIME_SLOW, false, transitionDurationMs_ == 1000, true},
+			{"    Very slow", IDM_EFFECTTIME_VERY_SLOW, false, transitionDurationMs_ == 2000, true},
+			{"  Movie", IDM_MOVIE_START_FPS},
+			{"  Playback speed 5 fps", IDM_MOVIE_5_FPS, false, false, false},
+			{"  Playback speed 10 fps", IDM_MOVIE_10_FPS, false, false, false},
+			{"  Playback speed 25 fps", IDM_MOVIE_25_FPS, false, false, false},
+			{"  Playback speed 30 fps", IDM_MOVIE_30_FPS, false, false, false},
+			{"  Playback speed 50 fps", IDM_MOVIE_50_FPS, false, false, false},
+			{"  Playback speed 100 fps", IDM_MOVIE_100_FPS, false, false, false},
+			{nullptr, 0, true},
+			{"Settings Admin", 0},
+			{"  Edit global settings...", IDM_EDIT_GLOBAL_CONFIG, false, false, false},
+			{"  Edit user settings...", IDM_EDIT_USER_CONFIG, false, false, false},
+			{"  Update user settings...", IDM_UPDATE_USER_CONFIG, false, false, false},
+			{"  Manage Open image with menu...", IDM_MANAGE_OPEN_WITH_MENU, false, false, false},
+			{"  Set current parameters as default...", IDM_SAVE_PARAMETERS, false, false, false},
+			{"  Set as default viewer...", IDM_SET_AS_DEFAULT_VIEWER, false, false, false},
+			{"  Backup parameter DB...", IDM_BACKUP_PARAMDB, false, false, false},
+			{"  Restore parameter DB...", IDM_RESTORE_PARAMDB, false, false, false},
+			{"User commands", 0},
+			{"  (none configured)", 0, false, false, false},
+			{nullptr, 0, true},
+			{"About JPEGView...", IDM_ABOUT},
 			{nullptr, 0, true},
 			{"Exit", IDM_EXIT},
 		};
@@ -1126,7 +1929,7 @@ private:
 			const MenuItem& item = contextMenuItems_[i];
 			const int itemHeight = item.separator ? 9 : 28;
 			if (y >= itemTop && y < itemTop + itemHeight) {
-				return item.separator || item.command == 0 ? -1 : static_cast<int>(i);
+				return item.separator || item.command == 0 || !item.enabled ? -1 : static_cast<int>(i);
 			}
 			itemTop += itemHeight;
 		}
@@ -1165,7 +1968,8 @@ private:
 			candidate += direction;
 			if (candidate < 0) candidate = static_cast<int>(contextMenuItems_.size()) - 1;
 			if (candidate >= static_cast<int>(contextMenuItems_.size())) candidate = 0;
-			if (!contextMenuItems_[candidate].separator && contextMenuItems_[candidate].command != 0) {
+			if (!contextMenuItems_[candidate].separator && contextMenuItems_[candidate].command != 0 &&
+				contextMenuItems_[candidate].enabled) {
 				menuSelected_ = candidate;
 				EnsureContextMenuSelectionVisible();
 				return;
@@ -1175,7 +1979,8 @@ private:
 
 	void ActivateContextMenuSelection(bool& running) {
 		if (menuSelected_ < 0 || menuSelected_ >= static_cast<int>(contextMenuItems_.size()) ||
-			contextMenuItems_[menuSelected_].separator || contextMenuItems_[menuSelected_].command == 0) {
+			contextMenuItems_[menuSelected_].separator || contextMenuItems_[menuSelected_].command == 0 ||
+			!contextMenuItems_[menuSelected_].enabled) {
 			return;
 		}
 		const int command = contextMenuItems_[menuSelected_].command;
@@ -1531,6 +2336,28 @@ private:
 		}
 	}
 
+	void RenderFileName() {
+		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_) return;
+		int windowWidth = 0;
+		SDL_GetWindowSize(window_, &windowWidth, nullptr);
+		std::ostringstream text;
+		text << '[' << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
+			<< InfoText(fileList_.Current().filename().string());
+		std::string label = text.str();
+		const int panelWidth = std::min(std::max(260, windowWidth - 16), 900);
+		const int textWidth = panelWidth - 20;
+		if (TextWidth(label, 2) > textWidth) {
+			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3, textWidth / 12));
+			label.resize(maximumCharacters - 3);
+			label += "...";
+		}
+		const SDL_Rect panel{8, 8, panelWidth, 28};
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 105, 105, 105);
+		DrawText(label, panel.x + 10, panel.y + 6, 2, 255, 255, 255);
+	}
+
 	void RenderImageInfo() {
 		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_) return;
 		std::vector<std::string> lines = ImageInfoLines();
@@ -1551,7 +2378,8 @@ private:
 
 		const int lineHeight = 18;
 		const int panelHeight = std::min(windowHeight - 16, 20 + static_cast<int>(lines.size()) * lineHeight);
-		SDL_Rect panel{8, 8, panelWidth, panelHeight};
+		const int panelTop = showFileName_ ? 42 : 8;
+		SDL_Rect panel{8, panelTop, panelWidth, panelHeight};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
@@ -1574,6 +2402,96 @@ private:
 		for (const ControlButton& button : buttons) {
 			DrawNavigationIcon(button, PointInRect(lastMouseX_, lastMouseY_, button.rect));
 		}
+	}
+
+	void RenderConfirmation() {
+		if (!confirmationOpen_) return;
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(760, std::max(360, windowWidth - 40));
+		const int height = 136;
+		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 245);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 220, 170, 110);
+		DrawText("CONFIRM ACTION", panel.x + 18, panel.y + 14, 2, 255, 220, 150);
+		DrawText(confirmationMessage_, panel.x + 18, panel.y + 42, 2);
+		std::string filename = fileList_.Empty() ? std::string() : InfoText(fileList_.Current().filename().string());
+		const int maximumCharacters = std::max(3, (width - 36) / 12);
+		if (static_cast<int>(filename.size()) > maximumCharacters) {
+			filename.resize(static_cast<std::size_t>(maximumCharacters - 3));
+			filename += "...";
+		}
+		DrawText(filename, panel.x + 18, panel.y + 68, 2, 220, 220, 220);
+		DrawText("ENTER or SPACE: YES     ESC: CANCEL", panel.x + 18, panel.y + 104, 2, 180, 180, 180);
+	}
+
+	void RenderAbout() {
+		if (!aboutOpen_) return;
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(620, std::max(360, windowWidth - 40));
+		const int height = 196;
+		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 245);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 160, 190, 225);
+		DrawText("JPEGVIEW LINUX", panel.x + 18, panel.y + 16, 2, 255, 255, 255);
+		DrawText("NATIVE SDL2 VIEWER", panel.x + 18, panel.y + 48, 2, 210, 225, 250);
+		DrawText("PORT OF JPEGVIEW 1.3.46", panel.x + 18, panel.y + 80, 2, 210, 225, 250);
+		DrawText("FOLDER NAVIGATION AND IMAGE VIEWING", panel.x + 18, panel.y + 112, 2, 185, 205, 220);
+		DrawText("PRESS ESC TO CLOSE", panel.x + 18, panel.y + 156, 2, 180, 180, 180);
+	}
+
+	void RenderImageTransition(const SDL_Rect& destination, int windowWidth, int windowHeight) {
+		if (transitionTexture_ == nullptr || transitionStartTick_ == 0) {
+			SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+			return;
+		}
+		const Uint32 elapsed = SDL_GetTicks() - transitionStartTick_;
+		const double progress = std::min(1.0, static_cast<double>(elapsed) /
+			static_cast<double>(transitionDurationMs_));
+		if (progress >= 1.0) {
+			ClearTransition();
+			SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+			return;
+		}
+
+		SDL_Rect oldDestination{
+			static_cast<int>(std::round((windowWidth - transitionImage_.width * zoom_) / 2.0 + offsetX_)),
+			static_cast<int>(std::round((windowHeight - transitionImage_.height * zoom_) / 2.0 + offsetY_)),
+			std::max(1, static_cast<int>(std::round(transitionImage_.width * zoom_))),
+			std::max(1, static_cast<int>(std::round(transitionImage_.height * zoom_))),
+		};
+		SDL_Rect enteringDestination = destination;
+		const int horizontalDistance = std::max(windowWidth, destination.w);
+		const int verticalDistance = std::max(windowHeight, destination.h);
+		const int effect = transitionEffect_;
+		const bool fromRight = effect == IDM_EFFECT_SLIDE_RL || effect == IDM_EFFECT_ROLL_RL || effect == IDM_EFFECT_SCROLL_RL;
+		const bool fromLeft = effect == IDM_EFFECT_SLIDE_LR || effect == IDM_EFFECT_ROLL_LR || effect == IDM_EFFECT_SCROLL_LR;
+		const bool fromTop = effect == IDM_EFFECT_SLIDE_TB || effect == IDM_EFFECT_ROLL_TB || effect == IDM_EFFECT_SCROLL_TB;
+		const bool fromBottom = effect == IDM_EFFECT_SLIDE_BT || effect == IDM_EFFECT_ROLL_BT || effect == IDM_EFFECT_SCROLL_BT;
+		if (fromRight || fromLeft) {
+			const int distance = static_cast<int>(std::round(horizontalDistance * (1.0 - progress)));
+			enteringDestination.x += fromRight ? distance : -distance;
+			oldDestination.x += fromRight ? -static_cast<int>(std::round(horizontalDistance * progress)) :
+				static_cast<int>(std::round(horizontalDistance * progress));
+		} else if (fromTop || fromBottom) {
+			const int distance = static_cast<int>(std::round(verticalDistance * (1.0 - progress)));
+			enteringDestination.y += fromBottom ? distance : -distance;
+			oldDestination.y += fromBottom ? -static_cast<int>(std::round(verticalDistance * progress)) :
+				static_cast<int>(std::round(verticalDistance * progress));
+		}
+
+		SDL_SetTextureAlphaMod(transitionTexture_, 255);
+		SDL_SetTextureAlphaMod(texture_, 255);
+		if (effect == IDM_EFFECT_BLEND) {
+			SDL_SetTextureAlphaMod(transitionTexture_, static_cast<Uint8>(std::round(255.0 * (1.0 - progress))));
+		}
+		SDL_RenderCopy(renderer_, transitionTexture_, nullptr, &oldDestination);
+		SDL_RenderCopy(renderer_, texture_, nullptr, &enteringDestination);
 	}
 
 	void RenderContextMenu() {
@@ -1599,7 +2517,7 @@ private:
 				SDL_Rect selection{menu.x + 3, itemTop, menu.w - 6, 28};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
-			const Uint8 textColor = item.command == 0 ? 135 : 235;
+			const Uint8 textColor = item.command == 0 ? 135 : (item.enabled ? 235 : 100);
 			DrawText(MenuLabel(item), menu.x + 14, itemTop + 6, 2, textColor, textColor, textColor);
 			itemTop += 28;
 		}
@@ -1609,6 +2527,16 @@ private:
 		SDL_Event event{};
 		while (SDL_PollEvent(&event) != 0) {
 			lastInteractionTick_ = SDL_GetTicks();
+			if (confirmationOpen_) {
+				if (event.type == SDL_QUIT) running = false;
+				else HandleConfirmationEvents(event);
+				continue;
+			}
+			if (aboutOpen_) {
+				if (event.type == SDL_QUIT) running = false;
+				else HandleAboutEvents(event);
+				continue;
+			}
 			if (fileDialogOpen_) {
 				HandleFileDialogEvents(event, running);
 				continue;
@@ -1664,7 +2592,7 @@ private:
 				break;
 			case SDL_WINDOWEVENT:
 				if (event.window.event == SDL_WINDOWEVENT_RESIZED || event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-					if (fitToWindow_) FitToWindow();
+					if (fitToWindow_) FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
 				}
 				break;
 			case SDL_KEYDOWN:
@@ -1756,32 +2684,49 @@ private:
 		};
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
 		SDL_RenderClear(renderer_);
-		SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+		RenderImageTransition(destination, windowWidth, windowHeight);
+		RenderFileName();
 		RenderImageInfo();
 		RenderControls();
 		RenderContextMenu();
 		RenderFileDialog();
+		RenderConfirmation();
+		RenderAbout();
 		SDL_RenderPresent(renderer_);
 	}
 
 	jpegview_linux::FileList fileList_;
 	double slideshowSeconds_ = 0.0;
 	double lastSlideshowSeconds_ = 3.0;
+	int transitionEffect_ = IDM_EFFECT_NONE;
+	Uint32 transitionDurationMs_ = 500;
+	Uint32 transitionStartTick_ = 0;
 	bool startFullscreen_ = false;
 	Uint32 lastInteractionTick_ = 0;
 	Image image_;
 	SDL_Window* window_ = nullptr;
 	SDL_Renderer* renderer_ = nullptr;
 	SDL_Texture* texture_ = nullptr;
+	Image transitionImage_;
+	SDL_Texture* transitionTexture_ = nullptr;
 	double zoom_ = 1.0;
 	double offsetX_ = 0.0;
 	double offsetY_ = 0.0;
 	bool fitToWindow_ = true;
+	bool fillWithCrop_ = false;
+	bool autoZoomNoEnlarge_ = false;
 	bool fullscreen_ = false;
+	bool borderless_ = false;
+	bool alwaysOnTop_ = false;
 	bool dragging_ = false;
 	bool controlsVisible_ = true;
 	bool navigationPanelEnabled_ = true;
 	bool infoVisible_ = false;
+	bool showFileName_ = false;
+	bool confirmationOpen_ = false;
+	int confirmationCommand_ = 0;
+	std::string confirmationMessage_;
+	bool aboutOpen_ = false;
 	jpegview_linux::ExifInfo metadata_;
 	std::string jpegComment_;
 	bool contextMenuOpen_ = false;
@@ -1803,6 +2748,10 @@ private:
 	int fileDialogSelected_ = 0;
 	int fileDialogScroll_ = 0;
 	std::vector<std::string> pendingDroppedFiles_;
+	std::unique_ptr<jpegview_linux::FileList> fileListBeforeClipboard_;
+	fs::path clipboardTempFile_;
+	fs::path clipboardTempDirectory_;
+	bool clipboardMode_ = false;
 	int lastMouseX_ = kDefaultWidth / 2;
 	int lastMouseY_ = kDefaultHeight / 2;
 	int imageCenterX_ = kDefaultWidth / 2;

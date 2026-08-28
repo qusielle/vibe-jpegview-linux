@@ -11,7 +11,7 @@ the frontend uses the small SDL2 ABI declared in `src/sdl_abi.h`.
 On Ubuntu 20.04, install the compiler, make, and SDL2 runtime first:
 
 ```sh
-sudo apt install g++ make libsdl2-2.0-0 libjpeg-dev libpng-dev
+sudo apt install g++ make libsdl2-2.0-0 libjpeg-dev libpng-dev libjpeg-turbo-progs xclip wl-clipboard
 ```
 
 ```sh
@@ -67,8 +67,12 @@ intended Docker environment.
 Right/Left or PageUp/PageDown navigate; Up/Down rotate 90 degrees; mouse wheel zooms around the
 cursor; left-drag pans; dropped files open in the viewer. Space toggles fit/actual, Return fits,
 and F11 toggles fullscreen (`0`, `F`, and `Q` remain convenience aliases; `1`–`9` start a
-slideshow at that interval). F2 toggles the top-left picture information panel. Ctrl+O opens the
-native in-app file browser, Ctrl+R reloads, and Ctrl+N toggles the panel. Move the pointer to
+slideshow at that interval). F2 toggles the top-left picture information panel; Ctrl+F2 toggles
+the filename overlay. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N
+toggles the panel. Ctrl+C copies the displayed image, Ctrl+X copies it at original size, Ctrl+Shift+C
+copies its path, Ctrl+V pastes a PNG image, Ctrl+P sends the processed image to `lp`, and Delete
+opens the move-to-trash confirmation. Ctrl+Shift+M/E set the modification date to now/EXIF date;
+R/T perform lossless JPEG rotations when bundled `jpegtran` is available. Move the pointer to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, fit/actual, and fullscreen). The checked panel
 remains visible until Ctrl+N disables it; it is temporarily suppressed while a modal menu or
@@ -83,17 +87,30 @@ and random order. `F7` loops the current folder, `F8` traverses non-empty subfol
 traverses sibling folders. The context menu exposes the same navigation and display-order commands.
 Previous-folder history is retained when recursive or sibling navigation enters another directory.
 
-The context menu and navigation panel also provide the first Windows-command parity for editing:
-rotate ±90 degrees and mirror horizontally or vertically. `Ctrl+S` opens the native save dialog
-for a full-size processed image; `Ctrl+Shift+S` saves the displayed screen-size result. JPEG, PNG,
-BMP, TGA, and WebP output are supported, with the default filename following Windows JPEGView's
-`<name>_proc.jpg` convention. Existing files require a second Enter to confirm replacement.
-The source file itself remains unchanged.
+The context menu is a native rendering of the Windows `PopupMenu` resource, including its navigation,
+sorting, slideshow/movie, transform, zoom, auto-zoom, settings, and administration sections. The
+portable commands include folder opening, printing through `lp`, modification-date updates, GNOME/
+`feh`/`nitrogen` wallpaper integration, text/image clipboard copy and paste, filename and EXIF
+overlays, slideshow transitions, window mode toggles, and `jpegtran`-backed lossless JPEG transforms.
+The AppImage bundles `xclip`, `wl-copy`/`wl-paste`, and `jpegtran` when the build environment provides
+them. `lp`, `gsettings`, `feh`, and `nitrogen` remain host desktop integrations. The clipboard tools
+are also needed for image copy/paste in a local non-AppImage build.
+
+The context menu keeps Windows-only operations visible but disabled where their underlying Windows
+subsystem has no Linux implementation yet: batch rename/copy dialogs, free rotation, perspective
+correction, the original JPEGView image-processing parameter engine, parameter databases, settings
+editors, Open-With management, default-viewer registration, and user-command configuration. This
+makes the remaining port boundary explicit while preserving the original command vocabulary.
+
+`Ctrl+S` opens the native save dialog for a full-size processed image; `Ctrl+Shift+S` saves the
+displayed screen-size result. JPEG, PNG, BMP, TGA, and WebP output are supported, with the default
+filename following Windows JPEGView's `<name>_proc.jpg` convention. Existing files require a second
+Enter to confirm replacement. The source file itself remains unchanged unless a lossless JPEG
+transform or confirmed delete is explicitly selected.
 
 The Linux command dispatcher uses the original numeric `IDM_*` values from
 `src/JPEGView/resource.h`, and the supported keyboard bindings follow the corresponding entries
 in `src/JPEGView/Config/KeyMap.txt.default`. This keeps the portable SDL input layer translating
 into the same command vocabulary as the Windows `CMainDlg::ExecuteCommand` path. The context menu
-is currently a native Linux rendering of the supported subset of the Windows `PopupMenu` resource;
-Windows-only commands remain intentionally unavailable until their underlying functionality is
-ported.
+is currently a native Linux rendering of the complete Windows `PopupMenu` resource; unsupported
+Windows-only commands are shown disabled rather than being silently ignored.
