@@ -49,7 +49,7 @@ constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr double kMinZoom = 0.01;
 constexpr double kMaxZoom = 32.0;
-constexpr int kContextMenuTextScale = 1;
+constexpr int kUiTextScale = 1;
 constexpr int kContextMenuItemHeight = 18;
 constexpr int kContextMenuSeparatorHeight = 7;
 
@@ -2077,7 +2077,7 @@ private:
 				height += kContextMenuSeparatorHeight;
 				continue;
 			}
-			width = std::max(width, TextWidth(MenuLabel(item), kContextMenuTextScale) + 24);
+			width = std::max(width, TextWidth(MenuLabel(item), kUiTextScale) + 24);
 			height += kContextMenuItemHeight;
 		}
 		int x = contextMenuX_;
@@ -2367,15 +2367,15 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 255);
 		SDL_RenderFillRect(renderer_, &dialog);
 		DrawRect(dialog, 190, 190, 190);
-		DrawText(fileDialogSave_ ? "SAVE PROCESSED IMAGE" : "OPEN IMAGE", dialog.x + 18, dialog.y + 14, 2);
-		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, 2, 170, 170, 170);
+		DrawText(fileDialogSave_ ? "SAVE PROCESSED IMAGE" : "OPEN IMAGE", dialog.x + 18, dialog.y + 14, kUiTextScale);
+		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
 		if (fileDialogSave_) {
-			DrawText("FILE NAME", dialog.x + 18, dialog.y + 68, 2, 190, 190, 190);
+			DrawText("FILE NAME", dialog.x + 18, dialog.y + 68, kUiTextScale, 190, 190, 190);
 			SDL_Rect inputRect{dialog.x + 12, dialog.y + 86, dialog.w - 24, 28};
 			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 255);
 			SDL_RenderFillRect(renderer_, &inputRect);
 			DrawRect(inputRect, 100, 130, 165);
-			DrawText(fileDialogFilename_, inputRect.x + 10, inputRect.y + 6, 2);
+			DrawText(fileDialogFilename_, inputRect.x + 10, inputRect.y + 6, kUiTextScale);
 		}
 
 		const int listTop = FileDialogListTop();
@@ -2394,14 +2394,14 @@ private:
 				SDL_Rect selection{listRect.x + 2, rowTop + 1, listRect.w - 4, 24};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
-			DrawText(FileDialogEntryLabel(entry), listRect.x + 10, rowTop + 5, 2,
+			DrawText(FileDialogEntryLabel(entry), listRect.x + 10, rowTop + 5, kUiTextScale,
 				entry.directory ? 185 : 235, entry.directory ? 205 : 235, entry.directory ? 235 : 235);
 		}
 		if (!fileDialogMessage_.empty()) {
-			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, 2, 235, 150, 120);
+			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
 		DrawText(fileDialogSave_ ? "ENTER SAVE   BACKSPACE EDIT/PARENT   ESC CANCEL" :
-			"ENTER OPEN   BACKSPACE PARENT   ESC CANCEL", dialog.x + 18, dialog.y + dialog.h - 34, 2, 170, 170, 170);
+			"ENTER OPEN   BACKSPACE PARENT   ESC CANCEL", dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 	}
 
 	void DrawText(const std::string& text, int x, int y, int scale, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
@@ -2517,8 +2517,9 @@ private:
 		std::string label = text.str();
 		const int panelWidth = std::min(std::max(260, windowWidth - 16), 900);
 		const int textWidth = panelWidth - 20;
-		if (TextWidth(label, 2) > textWidth) {
-			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3, textWidth / 12));
+		if (TextWidth(label, kUiTextScale) > textWidth) {
+			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
+				textWidth / (6 * kUiTextScale)));
 			label.resize(maximumCharacters - 3);
 			label += "...";
 		}
@@ -2526,7 +2527,7 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
-		DrawText(label, panel.x + 10, panel.y + 6, 2, 255, 255, 255);
+		DrawText(label, panel.x + 10, panel.y + 6, kUiTextScale, 255, 255, 255);
 	}
 
 	void RenderImageInfo() {
@@ -2541,9 +2542,9 @@ private:
 		const int textWidth = panelWidth - 20;
 		for (std::string& line : lines) {
 			line = InfoText(line);
-			if (TextWidth(line, kContextMenuTextScale) <= textWidth) continue;
+			if (TextWidth(line, kUiTextScale) <= textWidth) continue;
 			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
-				textWidth / (6 * kContextMenuTextScale)));
+				textWidth / (6 * kUiTextScale)));
 			line.resize(maximumCharacters - 3);
 			line += "...";
 		}
@@ -2558,7 +2559,7 @@ private:
 		const int visibleLines = std::max(0, (panelHeight - 12) / lineHeight);
 		for (int index = 0; index < visibleLines && index < static_cast<int>(lines.size()); ++index) {
 			DrawText(lines[static_cast<std::size_t>(index)], panel.x + 10, panel.y + 10 + index * lineHeight,
-				kContextMenuTextScale,
+				kUiTextScale,
 				index == 0 ? 255 : 243, index == 0 ? 255 : 242, index == 0 ? 255 : 231);
 		}
 	}
@@ -2588,16 +2589,16 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 245);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 220, 170, 110);
-		DrawText("CONFIRM ACTION", panel.x + 18, panel.y + 14, 2, 255, 220, 150);
-		DrawText(confirmationMessage_, panel.x + 18, panel.y + 42, 2);
+		DrawText("CONFIRM ACTION", panel.x + 18, panel.y + 14, kUiTextScale, 255, 220, 150);
+		DrawText(confirmationMessage_, panel.x + 18, panel.y + 42, kUiTextScale);
 		std::string filename = fileList_.Empty() ? std::string() : InfoText(fileList_.Current().filename().string());
-		const int maximumCharacters = std::max(3, (width - 36) / 12);
+		const int maximumCharacters = std::max(3, (width - 36) / (6 * kUiTextScale));
 		if (static_cast<int>(filename.size()) > maximumCharacters) {
 			filename.resize(static_cast<std::size_t>(maximumCharacters - 3));
 			filename += "...";
 		}
-		DrawText(filename, panel.x + 18, panel.y + 68, 2, 220, 220, 220);
-		DrawText("ENTER or SPACE: YES     ESC: CANCEL", panel.x + 18, panel.y + 104, 2, 180, 180, 180);
+		DrawText(filename, panel.x + 18, panel.y + 68, kUiTextScale, 220, 220, 220);
+		DrawText("ENTER or SPACE: YES     ESC: CANCEL", panel.x + 18, panel.y + 104, kUiTextScale, 180, 180, 180);
 	}
 
 	void RenderAbout() {
@@ -2611,11 +2612,11 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 245);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 160, 190, 225);
-		DrawText("JPEGVIEW LINUX", panel.x + 18, panel.y + 16, 2, 255, 255, 255);
-		DrawText("NATIVE SDL2 VIEWER", panel.x + 18, panel.y + 48, 2, 210, 225, 250);
-		DrawText("PORT OF JPEGVIEW 1.3.46", panel.x + 18, panel.y + 80, 2, 210, 225, 250);
-		DrawText("FOLDER NAVIGATION AND IMAGE VIEWING", panel.x + 18, panel.y + 112, 2, 185, 205, 220);
-		DrawText("PRESS ESC TO CLOSE", panel.x + 18, panel.y + 156, 2, 180, 180, 180);
+		DrawText("JPEGVIEW LINUX", panel.x + 18, panel.y + 16, kUiTextScale, 255, 255, 255);
+		DrawText("NATIVE SDL2 VIEWER", panel.x + 18, panel.y + 48, kUiTextScale, 210, 225, 250);
+		DrawText("PORT OF JPEGVIEW 1.3.46", panel.x + 18, panel.y + 80, kUiTextScale, 210, 225, 250);
+		DrawText("FOLDER NAVIGATION AND IMAGE VIEWING", panel.x + 18, panel.y + 112, kUiTextScale, 185, 205, 220);
+		DrawText("PRESS ESC TO CLOSE", panel.x + 18, panel.y + 156, kUiTextScale, 180, 180, 180);
 	}
 
 	void RenderImageTransition(const SDL_Rect& destination, int windowWidth, int windowHeight, SDL_Texture* currentTexture) {
@@ -2692,7 +2693,7 @@ private:
 				SDL_RenderFillRect(renderer_, &selection);
 			}
 			const Uint8 textColor = item.command == 0 ? 135 : (item.enabled ? 235 : 100);
-			DrawText(MenuLabel(item), menu.x + 12, itemTop + 4, kContextMenuTextScale,
+			DrawText(MenuLabel(item), menu.x + 12, itemTop + 4, kUiTextScale,
 				textColor, textColor, textColor);
 			itemTop += kContextMenuItemHeight;
 		}
