@@ -84,8 +84,8 @@ the filename overlay. Ctrl+O opens the native in-app file browser, Ctrl+R reload
 toggles the panel. Ctrl+C copies the displayed image, Ctrl+X copies it at original size, Ctrl+Shift+C
 copies its path, Ctrl+V pastes a PNG image, Ctrl+P sends the processed image to `lp`, and Delete
 opens the move-to-trash confirmation. Ctrl+Shift+M/E set the modification date to now/EXIF date;
-R/T perform lossless JPEG rotations when bundled `jpegtran` is available; Ctrl+Shift+R opens the
-image resize dialog. Move the pointer to
+R/T perform lossless JPEG rotations when bundled `jpegtran` is available; F5 toggles the ported
+automatic histogram contrast correction, and Ctrl+Shift+R opens the image resize dialog. Move the pointer to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, fit/actual, and fullscreen). The checked panel
 remains visible until Ctrl+N disables it; it is temporarily suppressed while a modal menu or
@@ -108,6 +108,8 @@ sorting, slideshow/movie, transform, zoom, auto-zoom, settings, and administrati
 portable commands include folder opening, printing through `lp`, modification-date updates, GNOME/
 `feh`/`nitrogen` wallpaper integration, text/image clipboard copy and paste, filename and EXIF
 overlays, slideshow transitions, window mode toggles, and `jpegtran`-backed lossless JPEG transforms.
+The `Auto correction` command uses the Windows histogram-derived RGB correction LUT and can be toggled
+with `F5`; it remains non-destructive until the processed result is explicitly saved.
 The `Open image with` submenu is populated from matching freedesktop `.desktop` applications and
 launches them with the current image, including standard `%f`/`%F` and URI placeholders. Applications
 are discovered from the user and system application directories at menu-open time.
@@ -124,7 +126,8 @@ are also needed for image copy/paste in a local non-AppImage build.
 
 The context menu keeps Windows-only operations visible but disabled where their underlying Windows
 subsystem has no Linux implementation yet: free rotation, perspective
-correction, the original JPEGView image-processing parameter engine, parameter databases, settings
+correction, local density correction, the remaining JPEGView image-processing parameter engine,
+parameter databases, settings
 editors, Open-With menu management, default-viewer registration, and user-command configuration. This
 makes the remaining port boundary explicit while preserving the original command vocabulary.
 

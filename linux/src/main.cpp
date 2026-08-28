@@ -578,6 +578,156 @@ struct Image {
 		bgra.swap(resized);
 		return true;
 	}
+
+	// Port of JPEGView's CHistogram/CHistogramCorr path. The correction is
+	// deliberately applied to a copy by Viewer, so toggling it never changes
+	// the decoded source pixels.
+	bool AutoContrast() {
+		if (width <= 0 || height <= 0 || bgra.empty()) return false;
+
+		std::array<int, 256> channelB{};
+		std::array<int, 256> channelG{};
+		std::array<int, 256> channelR{};
+		std::array<int, 256> channelGrey{};
+		long long sumB = 0;
+		long long sumG = 0;
+		long long sumR = 0;
+		const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+		const int grid = std::max(1, static_cast<int>(0.5 + std::sqrt(1.0 + pixelCount / 50000.0)));
+		const int pixelsPerLine = std::max(1, width / grid);
+		const int lines = std::max(1, height / grid);
+		int sampledPixels = 0;
+		for (int line = 0; line < lines; ++line) {
+			const int y = std::min(height - 1, line * grid);
+			for (int column = 0; column < pixelsPerLine; ++column) {
+				const int x = std::min(width - 1, column * grid);
+				const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * 4;
+				const int blue = bgra[offset];
+				const int green = bgra[offset + 1];
+				const int red = bgra[offset + 2];
+				++channelB[static_cast<std::size_t>(blue)];
+				++channelG[static_cast<std::size_t>(green)];
+				++channelR[static_cast<std::size_t>(red)];
+				channelGrey[static_cast<std::size_t>((blue * 128 + green * 640 + red * 256) >> 10)]++;
+				sumB += blue;
+				sumG += green;
+				sumR += red;
+				++sampledPixels;
+			}
+		}
+		if (sampledPixels <= 0) return false;
+
+		const auto calculateBlackWhite = [sampledPixels](const std::array<int, 256>& values) {
+			const int level = static_cast<int>(sampledPixels * 0.001 + 0.5);
+			int sum = 0;
+			int index = 0;
+			while (sum < level && index < 256) sum += values[static_cast<std::size_t>(index++)];
+			const double black = index == 0 ? 0.0 : (index - 1) / 255.0;
+			sum = 0;
+			index = 255;
+			while (sum < level && index >= 0) sum += values[static_cast<std::size_t>(index--)];
+			const double white = index == 255 ? 1.0 : (index + 1) / 255.0;
+			return std::array<double, 2>{black, white};
+		};
+
+		const std::array<double, 2> bwB = calculateBlackWhite(channelB);
+		const std::array<double, 2> bwG = calculateBlackWhite(channelG);
+		const std::array<double, 2> bwR = calculateBlackWhite(channelR);
+		const std::array<double, 2> bwGrey = calculateBlackWhite(channelGrey);
+		constexpr double contrastStrength = 0.5; // JPEGView's default AutoContrastCorrectionAmount.
+		constexpr double brightnessStrength = 0.2; // JPEGView's default AutoBrightnessCorrectionAmount.
+		constexpr double contrastFactor = 0.5; // default ContrastCorrectionFactor.
+		const double logHalf = std::log10(0.5);
+		const double strength = std::max(1e-4, (std::log10(contrastStrength) / logHalf) *
+			(std::log10(contrastFactor) / logHalf));
+		const double histogramWidth = std::max(0.0, bwGrey[1] - bwGrey[0]);
+		const double widthFactor = std::pow(histogramWidth, strength * 0.5);
+		double blackB = bwB[0] * std::pow((1.0 - bwB[0]) * (1.0 - bwGrey[0]), strength) * widthFactor;
+		double blackG = bwG[0] * std::pow((1.0 - bwG[0]) * (1.0 - bwGrey[0]), strength) * widthFactor;
+		double blackR = bwR[0] * std::pow((1.0 - bwR[0]) * (1.0 - bwGrey[0]), strength) * widthFactor;
+		double whiteB = 1.0 - (1.0 - bwB[1]) * std::pow(bwB[1] * bwGrey[1], strength) * widthFactor;
+		double whiteG = 1.0 - (1.0 - bwG[1]) * std::pow(bwG[1] * bwGrey[1], strength) * widthFactor;
+		double whiteR = 1.0 - (1.0 - bwR[1]) * std::pow(bwR[1] * bwGrey[1], strength) * widthFactor;
+		const double meanBlack = (blackB + blackG + blackR) / 3.0;
+		const double meanWhite = (whiteB + whiteG + whiteR) / 3.0;
+		const double meanRange = meanWhite - meanBlack;
+		const double correctionA = 1.0 / std::max(0.001, meanRange);
+		const double correctionB = -meanBlack * correctionA;
+		const double midPoint = (meanWhite + meanBlack) * 0.5;
+		double correction = midPoint * (1.0 - correctionA) - correctionB;
+		correction = std::max(0.0, correction);
+
+		const double meanB = static_cast<double>(sumB) / sampledPixels;
+		const double meanG = static_cast<double>(sumG) / sampledPixels;
+		const double meanR = static_cast<double>(sumR) / sampledPixels;
+		const double middleGrey = (meanB + meanG + meanR) / (255.0 * 3.0);
+		const double blueCast = meanB / 255.0 - middleGrey;
+		const double greenCast = meanG / 255.0 - middleGrey;
+		const double redCast = meanR / 255.0 - middleGrey;
+		const auto colorCastCorrection = [](int channel, double cast) {
+			static constexpr double strengths[6] = {0.2, 0.1, 0.3, 0.3, 0.3, 0.15};
+			if (channel == 0) return cast * strengths[cast > 0.0 ? 2 : 5];
+			if (channel == 1) return cast * strengths[cast > 0.0 ? 1 : 4];
+			return cast * strengths[cast > 0.0 ? 0 : 3];
+		};
+		const double castB = colorCastCorrection(0, blueCast);
+		const double castG = colorCastCorrection(1, greenCast);
+		const double castR = colorCastCorrection(2, redCast);
+		const double castMean = (castB + castG + castR) / 3.0;
+		const double maxCast = std::max(std::abs(castB - castMean),
+			std::max(std::abs(castG - castMean), std::abs(castR - castMean)));
+		const double castFactor = 0.05 / std::max(0.00001, maxCast);
+		constexpr double colorCorrectionFactor = 0.0; // Linux currently uses JPEGView's default.
+		const double castMultiplier = 2.0 * (castFactor + 1.0) * colorCorrectionFactor + 1.0;
+		const double yMean = correctionA * midPoint + correctionB;
+		const auto bwCompensation = [midPoint](double black, double white) {
+			const double a = 1.0 / std::max(0.001, white - black);
+			return a * midPoint - black * a;
+		};
+		double correctionBlue = yMean - bwCompensation(blackB, whiteB) - castMultiplier * castB + 0.3 * 0.0;
+		double correctionGreen = yMean - bwCompensation(blackG, whiteG) - castMultiplier * castG + 0.3 * 0.0;
+		double correctionRed = yMean - bwCompensation(blackR, whiteR) - castMultiplier * castR + 0.3 * 0.0;
+		const double meanGrey = (meanB * 0.1 + meanG * 0.6 + meanR * 0.3) / 255.0;
+		const double brightnessAdd = meanGrey < 0.5 ? (0.5 - meanGrey) * brightnessStrength : 0.0;
+		correction = (correction - correctionBlue) * 0.1 + (correction - correctionGreen) * 0.6 +
+			(correction - correctionRed) * 0.3 + brightnessAdd;
+
+		const auto calculateLut = [](double black, double white, double brightness, double mid) {
+			std::array<std::uint8_t, 256> lut{};
+			if (white - black < 0.001) {
+				black = 0.0;
+				white = 1.0;
+			}
+			const double a = 1.0 / (white - black);
+			const double b = -black * a;
+			for (int index = 0; index < 256; ++index) {
+				const double x = index / 255.0;
+				const double y = a * x + b;
+				double target = y;
+				if (y > 0.0 && y < 1.0) {
+					if (x < mid) {
+						const double value = (x - mid) / std::max(0.001, mid - black);
+						target = y + brightness * (1.0 - value * value);
+					} else {
+						const double value = (x - mid) / std::max(0.001, white - mid);
+						target = y + brightness * (1.0 - value * value);
+					}
+				}
+				lut[static_cast<std::size_t>(index)] = static_cast<std::uint8_t>(std::lround(
+					std::clamp(target, 0.0, 1.0) * 255.0));
+			}
+			return lut;
+		};
+		const std::array<std::uint8_t, 256> lutB = calculateLut(blackB, whiteB, correctionBlue + correction, midPoint);
+		const std::array<std::uint8_t, 256> lutG = calculateLut(blackG, whiteG, correctionGreen + correction, midPoint);
+		const std::array<std::uint8_t, 256> lutR = calculateLut(blackR, whiteR, correctionRed + correction, midPoint);
+		for (std::size_t offset = 0; offset < bgra.size(); offset += 4) {
+			bgra[offset] = lutB[bgra[offset]];
+			bgra[offset + 1] = lutG[bgra[offset + 1]];
+			bgra[offset + 2] = lutR[bgra[offset + 2]];
+		}
+		return true;
+	}
 };
 
 std::string InfoText(const std::string& value) {
@@ -1239,6 +1389,8 @@ private:
 				maximized_ = value == "1" || value == "true";
 			} else if (key == "navigation_panel_enabled") {
 				navigationPanelEnabled_ = value == "1" || value == "true";
+			} else if (key == "auto_contrast") {
+				autoContrastEnabled_ = value == "1" || value == "true";
 			}
 		}
 		copyRenamePattern_ = copyRenamePattern;
@@ -1294,6 +1446,7 @@ private:
 			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n'
 			       << "maximized=" << (lastMaximized ? 1 : 0) << '\n'
 			       << "navigation_panel_enabled=" << (navigationPanelEnabled_ ? 1 : 0) << '\n'
+			       << "auto_contrast=" << (autoContrastEnabled_ ? 1 : 0) << '\n'
 			       << "copy_rename_pattern=" << copyRenamePattern_ << '\n';
 			if (!output) {
 				output.close();
@@ -1321,6 +1474,12 @@ private:
 		if (!image_.Load(fileList_.Current(), errorMessage)) {
 			SetTitle(fileList_.Current().filename().string() + " — decode failed: " + errorMessage);
 			std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
+			return false;
+		}
+		correctionBase_ = image_;
+		correctionBaseValid_ = true;
+		if (autoContrastEnabled_ && !image_.AutoContrast()) {
+			SetTitle(fileList_.Current().filename().string() + " — automatic correction failed");
 			return false;
 		}
 		jpegview_linux::ReadJpegMetadata(fileList_.Current(), metadata_, jpegComment_);
@@ -1418,34 +1577,52 @@ private:
 		transitionStartTick_ = SDL_GetTicks();
 	}
 
+	bool TransformImage(Image& image, int command) {
+		switch (command) {
+		case IDM_ROTATE_90: return image.Rotate(true);
+		case IDM_ROTATE_270: return image.Rotate(false);
+		case IDM_MIRROR_H: return image.Mirror(true);
+		case IDM_MIRROR_V: return image.Mirror(false);
+		default: return false;
+		}
+	}
+
 	void ApplyTransform(int command) {
 		const bool wasFitToWindow = fitToWindow_;
 		const bool wasFillWithCrop = fillWithCrop_;
 		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
 		const double manualZoom = zoom_;
-		bool transformed = false;
-		switch (command) {
-		case IDM_ROTATE_90:
-			transformed = image_.Rotate(true);
-			break;
-		case IDM_ROTATE_270:
-			transformed = image_.Rotate(false);
-			break;
-		case IDM_MIRROR_H:
-			transformed = image_.Mirror(true);
-			break;
-		case IDM_MIRROR_V:
-			transformed = image_.Mirror(false);
-			break;
-		default:
-			return;
-		}
-		if (!transformed || !UpdateTexture()) {
+		if (!TransformImage(image_, command) ||
+			(correctionBaseValid_ && !TransformImage(correctionBase_, command)) || !UpdateTexture()) {
 			SetTitle("Image transform failed");
 			return;
 		}
 		imageModified_ = true;
 		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+	}
+
+	void RebuildAutoContrastImage(bool wasFitToWindow, bool wasFillWithCrop,
+		bool wasAutoZoomNoEnlarge, double manualZoom) {
+		if (!correctionBaseValid_) return;
+		image_ = correctionBase_;
+		if (autoContrastEnabled_) image_.AutoContrast();
+		if (!UpdateTexture()) {
+			SetTitle("Automatic correction failed: could not update the display texture");
+			return;
+		}
+		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		SetTitle();
+	}
+
+	void ToggleAutoContrast() {
+		if (!correctionBaseValid_) return;
+		const bool wasFitToWindow = fitToWindow_;
+		const bool wasFillWithCrop = fillWithCrop_;
+		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
+		const double manualZoom = zoom_;
+		autoContrastEnabled_ = !autoContrastEnabled_;
+		RebuildAutoContrastImage(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		SaveSettings();
 	}
 
 	void ApplyLosslessJpegTransform(int command) {
@@ -2239,6 +2416,9 @@ private:
 		case IDM_CHANGESIZE:
 			OpenResizeDialog();
 			break;
+		case IDM_AUTO_CORRECTION:
+			ToggleAutoContrast();
+			break;
 		case IDM_ROTATE_90_LOSSLESS:
 		case IDM_ROTATE_90_LOSSLESS_CONFIRM:
 		case IDM_ROTATE_270_LOSSLESS:
@@ -2644,7 +2824,7 @@ private:
 			{"  Rotate 180", IDM_ROTATE_180_LOSSLESS, false, false, losslessJpegAvailable},
 			{"  Mirror horizontally", IDM_MIRROR_H_LOSSLESS, false, false, losslessJpegAvailable},
 			{"  Mirror vertically", IDM_MIRROR_V_LOSSLESS, false, false, losslessJpegAvailable},
-			{"Auto correction", IDM_AUTO_CORRECTION, false, false, false},
+			{"Auto correction", IDM_AUTO_CORRECTION, false, autoContrastEnabled_, image_.width > 0, "F5"},
 			{"Local density correction", IDM_LDC, false, false, false},
 			{"Keep parameters", IDM_KEEP_PARAMETERS, false, false, false},
 			{"Save parameters to DB", IDM_SAVE_PARAM_DB, false, false, false},
@@ -3414,12 +3594,17 @@ private:
 		const bool wasFillWithCrop = fillWithCrop_;
 		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
 		const double manualZoom = zoom_;
-		if (!image_.Resize(width, height, resizeFilter_)) {
+		Image resizedImage = correctionBaseValid_ ? correctionBase_ : image_;
+		if (!resizedImage.Resize(width, height, resizeFilter_)) {
 			resizeMessage_ = "Resizing failed: not enough memory or the image is too large";
 			return;
 		}
-		image_.originalWidth = width;
-		image_.originalHeight = height;
+		resizedImage.originalWidth = width;
+		resizedImage.originalHeight = height;
+		correctionBase_ = std::move(resizedImage);
+		correctionBaseValid_ = true;
+		image_ = correctionBase_;
+		if (autoContrastEnabled_) image_.AutoContrast();
 		if (!UpdateTexture()) {
 			resizeMessage_ = "Resizing failed: could not update the display texture";
 			return;
@@ -4367,6 +4552,8 @@ private:
 	bool startFullscreen_ = false;
 	Uint32 lastInteractionTick_ = 0;
 	Image image_;
+	Image correctionBase_;
+	bool correctionBaseValid_ = false;
 	SDL_Window* window_ = nullptr;
 	SDL_Renderer* renderer_ = nullptr;
 	SDL_Texture* texture_ = nullptr;
@@ -4406,6 +4593,7 @@ private:
 	std::vector<OpenWithApplication> openWithApplications_;
 	std::deque<std::string> openWithLabels_;
 	bool imageModified_ = false;
+	bool autoContrastEnabled_ = false;
 	bool quitRequested_ = false;
 	bool fileDialogOpen_ = false;
 	bool fileDialogSave_ = false;
