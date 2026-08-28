@@ -29,6 +29,14 @@ if command -v apt-get >/dev/null 2>&1 && [ "${SET_ENV_SKIP_APT:-0}" != "1" ]; th
 	if ! apt-cache show "$WEBP_PACKAGE" >/dev/null 2>&1; then
 		WEBP_PACKAGE=libwebp7
 	fi
+	CODEC_PACKAGES=
+	for package in \
+		libgif-dev libtiff-dev libwebp-dev libheif-dev libraw-dev libjxr-dev libjxr-tools \
+		libavif-dev libjxl-dev liblcms2-dev libheif-plugin-libde265 libheif-plugin-x265 libheif-examples; do
+		if apt-cache show "$package" >/dev/null 2>&1; then
+			CODEC_PACKAGES="$CODEC_PACKAGES $package"
+		fi
+	done
 
 	echo "Installing Linux build, packaging, and headless-X11 test tools..."
 	apt_run install -y --no-install-recommends \
@@ -52,7 +60,8 @@ if command -v apt-get >/dev/null 2>&1 && [ "${SET_ENV_SKIP_APT:-0}" != "1" ]; th
 		x11-utils \
 		xdotool \
 		xvfb \
-		"$WEBP_PACKAGE"
+		"$WEBP_PACKAGE" \
+		$CODEC_PACKAGES
 elif [ "${SET_ENV_SKIP_APT:-0}" = "1" ]; then
 	echo "Skipping apt installation because SET_ENV_SKIP_APT=1"
 else
@@ -84,6 +93,8 @@ Useful commands:
   make -C "$SCRIPT_DIR/linux" clean && make -C "$SCRIPT_DIR/linux"
   "$SCRIPT_DIR/linux/build/jpegview-linux" --help
   "$SCRIPT_DIR/linux/build/jpegview-linux" --decode-check /path/to/image-or-folder
+  # Decode every supported file in a fixture directory, including animation frame counts:
+  "$SCRIPT_DIR/linux/build/jpegview-linux" --decode-check /path/to/fixture-directory
   sh -n "$SCRIPT_DIR/linux/AppRun" "$SCRIPT_DIR/linux/package-appimage.sh" "$SCRIPT_DIR/linux/docker-build.sh"
 
 Ubuntu 20.04 Docker build (Docker must be available to the host/container):

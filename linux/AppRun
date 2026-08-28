@@ -5,4 +5,7 @@ export CDPATH
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH="$HERE/usr/bin${PATH:+:$PATH}"
+# Newer libheif releases load codec plugins separately from libheif itself.
+# Keep those plugins inside the AppImage when the packaging host provides them.
+export LIBHEIF_PLUGIN_PATH="$HERE/usr/lib/libheif/plugins${LIBHEIF_PLUGIN_PATH:+:$LIBHEIF_PLUGIN_PATH}"
 exec "$HERE/usr/bin/jpegview-linux" "$@"

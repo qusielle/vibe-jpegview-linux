@@ -25,8 +25,10 @@ toolchain does not provide those static runtime archives.
 
 ## Isolated Docker build
 
-The Ubuntu 20.04 Dockerfile contains the compiler, SDL2/WebP runtime, and AppImage tool. The
-host only needs Docker; build outputs are written to a host `out/` directory:
+The Ubuntu 20.04 Dockerfile contains the compiler, SDL2 and all optional codec development
+libraries. It builds JPEG XL and AVIF from pinned sources because those development packages are
+not present in the Ubuntu 20.04 archive. The host only needs Docker; build outputs are written to
+a host `out/` directory:
 
 ```sh
 mkdir -p out
@@ -44,9 +46,12 @@ If SDL2 is installed in a non-standard location, override the linker settings:
 make -C linux SDL2_LIBS='-L/path/to/lib -lSDL2'
 ```
 
-Supported formats are JPEG, PNG, GIF, BMP, TGA, PSD, PNM-family files, and WebP. Image decoding
-is provided by the vendored public-domain/MIT `stb_image` single-header library; WebP is loaded
-through the system or bundled `libwebp` at runtime.
+Supported input formats are JPEG, PNG/APNG (including animation), GIF (including animation), BMP, TGA, PSD, PNM-family files,
+QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
+formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. JPEG, PNG, BMP, TGA, WebP, GIF, TIFF, PSD,
+PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL can also be written from the save dialog; RAW and JPEG XR are
+decode-only. Common single-frame formats use the vendored public-domain/MIT `stb_image`
+single-header library, while the additional formats use their native codec libraries.
 
 Display resizing follows JPEGView's high-quality path: downsampling uses its integrated
 best-quality filter with the default sharpening value, and enlargement uses endpoint-preserving
@@ -124,6 +129,12 @@ The AppImage bundles `xclip`, `wl-copy`/`wl-paste`, and `jpegtran` when the buil
 them. `lp`, `gsettings`, `feh`, and `nitrogen` remain host desktop integrations. The clipboard tools
 are also needed for image copy/paste in a local non-AppImage build.
 
+Animated GIF, APNG, WebP, AVIF, and JPEG XL images start playing automatically at their embedded frame
+delays. The `Movie` menu plays animated or multi-page images at a selected fixed rate (5, 10, 25,
+30, 50, or 100 fps), and advances a folder of still images when the current image has no frames.
+The original frame loop count is honored when a format provides one. `Alt+R` resumes stopped playback.
+`Esc` stops animation, movie, or slideshow playback before it closes the viewer.
+
 The context menu keeps Windows-only operations visible but disabled where their underlying Windows
 subsystem has no Linux implementation yet: free rotation, perspective
 correction, local density correction, the remaining JPEGView image-processing parameter engine,
@@ -132,10 +143,10 @@ editors, Open-With menu management, default-viewer registration, and user-comman
 makes the remaining port boundary explicit while preserving the original command vocabulary.
 
 `Ctrl+S` opens the native save dialog for a full-size processed image; `Ctrl+Shift+S` saves the
-displayed screen-size result. JPEG, PNG, BMP, TGA, and WebP output are supported, with the default
-filename following Windows JPEGView's `<name>_proc.jpg` convention. Existing files require a second
-Enter to confirm replacement. The source file itself remains unchanged unless a lossless JPEG
-transform or confirmed delete is explicitly selected.
+displayed screen-size result. The additional output formats listed above are selected by their
+filename extension, with the default filename following Windows JPEGView's `<name>_proc.jpg`
+convention. Existing files require a second Enter to confirm replacement. The source file itself
+remains unchanged unless a lossless JPEG transform or confirmed delete is explicitly selected.
 
 The Linux command dispatcher uses the original numeric `IDM_*` values from
 `src/JPEGView/resource.h`, and the supported keyboard bindings follow the corresponding entries

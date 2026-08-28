@@ -57,6 +57,22 @@ if [ -z "$SDL2_LIBRARY" ] || [ ! -f "$SDL2_LIBRARY" ]; then
 fi
 copy_runtime_dependencies "$BUILD_DIR/jpegview-linux"
 
+# Ubuntu releases with modular libheif packages keep the HEVC/AV1 codec
+# plugins outside libheif.so. Copy them beside the bundled libraries and let
+# AppRun point libheif at this private directory.
+for plugin_directory in \
+	/usr/lib/*/libheif/plugins \
+	/usr/local/lib/libheif/plugins \
+	/usr/lib/libheif/plugins; do
+	[ -d "$plugin_directory" ] || continue
+	mkdir -p "$APPDIR/usr/lib/libheif/plugins"
+	for plugin in "$plugin_directory"/*.so; do
+		[ -f "$plugin" ] || continue
+		cp -L "$plugin" "$APPDIR/usr/lib/libheif/plugins/$(basename "$plugin")"
+		copy_runtime_dependencies "$plugin"
+	done
+done
+
 # Keep the Linux equivalents of Windows clipboard and lossless-JPEG helpers
 # inside the AppImage when they are available in the build environment. They
 # are selected through PATH by the frontend, so this also works on hosts that
