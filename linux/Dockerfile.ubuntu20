@@ -6,6 +6,7 @@ ARG APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/
 ARG APPIMAGETOOL_SHA256=
 ARG HIGHWAY_VERSION=1.0.7
 ARG LIBJXL_VERSION=0.7.0
+ARG LIBJXL_SKCMS_VERSION=64374756e03700d649f897dbd98c95e78c30c7da
 ARG LIBAVIF_VERSION=0.9.3
 
 RUN apt-get update \
@@ -23,7 +24,9 @@ RUN apt-get update \
 # Focal has the native GIF/TIFF/WebP/HEIF/RAW/JPEG-XR development packages,
 # but JPEG XL and AVIF development packages were introduced later. Build the
 # two missing codec libraries once in the Ubuntu 20 image so the resulting
-# binary and AppImage retain the complete additional-format support.
+# binary and AppImage retain the complete additional-format support. These
+# are separate layers so a codec configure/build failure identifies its stage
+# and successful stages remain cached on subsequent builds.
 RUN mkdir -p /tmp/jpegview-codecs \
  && curl --fail --location --retry 3 "https://github.com/google/highway/archive/refs/tags/${HIGHWAY_VERSION}.tar.gz" \
     --output /tmp/jpegview-codecs/highway.tar.gz \
@@ -31,18 +34,28 @@ RUN mkdir -p /tmp/jpegview-codecs \
  && cmake -S "/tmp/jpegview-codecs/highway-${HIGHWAY_VERSION}" -B /tmp/jpegview-codecs/highway-build -GNinja \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DHWY_ENABLE_TESTS=OFF -DHWY_ENABLE_CONTRIB=OFF \
  && cmake --build /tmp/jpegview-codecs/highway-build --parallel \
- && cmake --install /tmp/jpegview-codecs/highway-build \
- && curl --fail --location --retry 3 "https://github.com/libjxl/libjxl/archive/refs/tags/v${LIBJXL_VERSION}.tar.gz" \
+ && cmake --install /tmp/jpegview-codecs/highway-build
+
+RUN curl --fail --location --retry 3 "https://github.com/libjxl/libjxl/archive/refs/tags/v${LIBJXL_VERSION}.tar.gz" \
     --output /tmp/jpegview-codecs/libjxl.tar.gz \
  && tar -xzf /tmp/jpegview-codecs/libjxl.tar.gz -C /tmp/jpegview-codecs \
+ && mkdir -p "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}/third_party/skcms" \
+ && curl --fail --location --retry 3 \
+    "https://skia.googlesource.com/skcms/+archive/${LIBJXL_SKCMS_VERSION}.tar.gz" \
+    --output /tmp/jpegview-codecs/skcms.tar.gz \
+ && tar -xzf /tmp/jpegview-codecs/skcms.tar.gz \
+    -C "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}/third_party/skcms" \
  && cmake -S "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}" -B /tmp/jpegview-codecs/libjxl-build -GNinja \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF \
     -DJPEGXL_ENABLE_TOOLS=OFF -DJPEGXL_ENABLE_EXAMPLES=OFF -DJPEGXL_ENABLE_BENCHMARK=OFF \
-    -DJPEGXL_ENABLE_JNI=OFF -DJPEGXL_FORCE_SYSTEM_BROTLI=ON -DJPEGXL_FORCE_SYSTEM_LCMS2=ON \
+    -DJPEGXL_ENABLE_JNI=OFF -DJPEGXL_ENABLE_SKCMS=ON -DJPEGXL_ENABLE_SJPEG=OFF \
+    -DJPEGXL_ENABLE_OPENEXR=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_ENABLE_MANPAGES=OFF \
+    -DJPEGXL_FORCE_SYSTEM_BROTLI=ON -DJPEGXL_FORCE_SYSTEM_LCMS2=ON \
     -DJPEGXL_FORCE_SYSTEM_HWY=ON \
  && cmake --build /tmp/jpegview-codecs/libjxl-build --parallel \
- && cmake --install /tmp/jpegview-codecs/libjxl-build \
- && curl --fail --location --retry 3 "https://github.com/AOMediaCodec/libavif/archive/refs/tags/v${LIBAVIF_VERSION}.tar.gz" \
+ && cmake --install /tmp/jpegview-codecs/libjxl-build
+
+RUN curl --fail --location --retry 3 "https://github.com/AOMediaCodec/libavif/archive/refs/tags/v${LIBAVIF_VERSION}.tar.gz" \
     --output /tmp/jpegview-codecs/libavif.tar.gz \
  && tar -xzf /tmp/jpegview-codecs/libavif.tar.gz -C /tmp/jpegview-codecs \
  && cmake -S "/tmp/jpegview-codecs/libavif-${LIBAVIF_VERSION}" -B /tmp/jpegview-codecs/libavif-build -GNinja \
