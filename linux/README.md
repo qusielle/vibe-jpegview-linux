@@ -84,7 +84,8 @@ navigation panel (first/previous/next/last, fit/actual, and fullscreen). The che
 remains visible until Ctrl+N disables it; it is temporarily suppressed while a modal menu or
 file browser is open. Right-click
 opens the core JPEGView context menu; it also supports keyboard selection with the arrow keys and
-Return. Esc stops an active slideshow first, matching the Windows default escape command, and
+Return. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
+next or previous image. Esc stops an active slideshow first, matching the Windows default escape command, and
 otherwise quits.
 
 The port follows the Windows `CFileList` navigation model: the default display order is ascending

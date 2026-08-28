@@ -698,6 +698,10 @@ private:
 		if (fileList_.Empty()) {
 			return false;
 		}
+		const bool wasFitToWindow = fitToWindow_;
+		const bool wasFillWithCrop = fillWithCrop_;
+		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
+		const double manualZoom = zoom_;
 		metadata_ = {};
 		jpegComment_.clear();
 		ClearTransition();
@@ -715,7 +719,7 @@ private:
 		texture_ = nullptr;
 		if (!UpdateTexture()) return false;
 
-		FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
+		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
 		lastInteractionTick_ = SDL_GetTicks();
 		imageModified_ = false;
 		SetTitle();
@@ -803,6 +807,10 @@ private:
 	}
 
 	void ApplyTransform(int command) {
+		const bool wasFitToWindow = fitToWindow_;
+		const bool wasFillWithCrop = fillWithCrop_;
+		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
+		const double manualZoom = zoom_;
 		bool transformed = false;
 		switch (command) {
 		case IDM_ROTATE_90:
@@ -825,7 +833,7 @@ private:
 			return;
 		}
 		imageModified_ = true;
-		FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
+		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
 	}
 
 	void ApplyLosslessJpegTransform(int command) {
@@ -1295,6 +1303,20 @@ private:
 		clipboardMode_ = true;
 		LoadCurrent();
 		SetTitle("Clipboard image — press next/previous to return to the file list");
+	}
+
+	void RestoreScaleMode(bool wasFitToWindow, bool fillCrop, bool noEnlarge, double manualZoom) {
+		if (wasFitToWindow) {
+			FitToWindow(fillCrop, noEnlarge);
+			return;
+		}
+		zoom_ = std::clamp(manualZoom, kMinZoom, kMaxZoom);
+		fitToWindow_ = false;
+		fillWithCrop_ = false;
+		autoZoomNoEnlarge_ = false;
+		offsetX_ = 0.0;
+		offsetY_ = 0.0;
+		SetTitle();
 	}
 
 	void FitToWindow(bool fillCrop = false, bool noEnlarge = false) {
@@ -1974,13 +1996,13 @@ private:
 			{"Save parameters to DB", IDM_SAVE_PARAM_DB, false, false, false},
 			{"Clear parameters from DB", IDM_CLEAR_PARAM_DB, false, false, false},
 			{nullptr, 0, true},
-			{"Zoom", 0},
-			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_ && !fillWithCrop_},
-			{"  Fill with crop", IDM_FILL_WITH_CROP, false, fitToWindow_ && fillWithCrop_},
+			{"Scale / zoom", 0},
+			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_ && !fillWithCrop_ && !autoZoomNoEnlarge_},
+			{"  Fill with crop", IDM_FILL_WITH_CROP, false, fitToWindow_ && fillWithCrop_ && !autoZoomNoEnlarge_},
 			{"  Span all screens", IDM_SPAN_SCREENS, false, fullscreen_},
 			{"  400 %", IDM_ZOOM_400},
 			{"  200 %", IDM_ZOOM_200},
-			{"  100 %", IDM_ZOOM_100, false, !fitToWindow_ && std::abs(zoom_ - 1.0) < 0.01},
+			{"  Actual size (100 %)", IDM_ZOOM_100, false, !fitToWindow_ && std::abs(zoom_ - 1.0) < 0.01},
 			{"  50 %", IDM_ZOOM_50},
 			{"  25 %", IDM_ZOOM_25},
 			{"  Full screen mode", IDM_FULL_SCREEN_MODE, false, fullscreen_},
