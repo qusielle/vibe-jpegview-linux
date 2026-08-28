@@ -75,6 +75,12 @@ opens the core JPEGView context menu; it also supports keyboard selection with t
 Return. Esc stops an active slideshow first, matching the Windows default escape command, and
 otherwise quits.
 
+The port follows the Windows `CFileList` navigation model: the default display order is ascending
+last-modification time; `N`, `M`, `C`, and `Z` select filename, modification date, creation date,
+and random order. `F7` loops the current folder, `F8` traverses non-empty subfolders, and `F9`
+traverses sibling folders. The context menu exposes the same navigation and display-order commands.
+Previous-folder history is retained when recursive or sibling navigation enters another directory.
+
 The context menu and navigation panel also provide the first Windows-command parity for editing:
 rotate ±90 degrees and mirror horizontally or vertically. These transformations affect the
 displayed image in memory; saving processed images is not ported yet, so the source file remains

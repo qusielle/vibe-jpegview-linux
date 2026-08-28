@@ -1,4 +1,5 @@
 #include "sdl_abi.h"
+#include "file_list.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -145,68 +146,6 @@ fs::path AbsoluteNormalized(const fs::path& path) {
 	std::error_code error;
 	const fs::path absolute = fs::absolute(path, error);
 	return (error ? path : absolute).lexically_normal();
-}
-
-std::vector<fs::path> ImagesInDirectory(const fs::path& directory) {
-	std::vector<fs::path> result;
-	std::error_code error;
-	for (const fs::directory_entry& entry : fs::directory_iterator(directory, error)) {
-		if (error) {
-			break;
-		}
-		std::error_code statusError;
-		if (entry.is_regular_file(statusError) && IsImagePath(entry.path())) {
-			result.push_back(AbsoluteNormalized(entry.path()));
-		}
-	}
-	std::sort(result.begin(), result.end(), [](const fs::path& left, const fs::path& right) {
-		const std::string leftName = Lower(left.filename().string());
-		const std::string rightName = Lower(right.filename().string());
-		return leftName == rightName ? left.string() < right.string() : leftName < rightName;
-	});
-	return result;
-}
-
-std::vector<fs::path> BuildFileList(const std::vector<std::string>& inputs, std::size_t& initialIndex) {
-	std::vector<fs::path> files;
-	initialIndex = 0;
-
-	if (inputs.empty()) {
-		return ImagesInDirectory(fs::current_path());
-	}
-
-	if (inputs.size() == 1) {
-		const fs::path input = AbsoluteNormalized(inputs.front());
-		std::error_code error;
-		if (fs::is_directory(input, error)) {
-			return ImagesInDirectory(input);
-		}
-		if (fs::is_regular_file(input, error) && IsImagePath(input)) {
-			std::vector<fs::path> result = ImagesInDirectory(input.parent_path());
-			const auto it = std::find(result.begin(), result.end(), input);
-			if (it != result.end()) {
-				initialIndex = static_cast<std::size_t>(std::distance(result.begin(), it));
-			}
-			return result;
-		}
-	}
-
-	std::vector<fs::path> result;
-	for (const std::string& inputString : inputs) {
-		const fs::path input = AbsoluteNormalized(inputString);
-		std::error_code error;
-		if (fs::is_directory(input, error)) {
-			std::vector<fs::path> directoryFiles = ImagesInDirectory(input);
-			result.insert(result.end(), directoryFiles.begin(), directoryFiles.end());
-		} else if (fs::is_regular_file(input, error) && IsImagePath(input)) {
-			result.push_back(input);
-		}
-	}
-	std::sort(result.begin(), result.end(), [](const fs::path& left, const fs::path& right) {
-		return Lower(left.string()) < Lower(right.string());
-	});
-	result.erase(std::unique(result.begin(), result.end()), result.end());
-	return result;
 }
 
 struct Image {
@@ -377,8 +316,8 @@ std::string FormatPercent(double zoom) {
 
 class Viewer {
 public:
-	Viewer(std::vector<fs::path> files, std::size_t initialIndex, double slideshowSeconds, bool startFullscreen)
-		: files_(std::move(files)), index_(initialIndex), slideshowSeconds_(slideshowSeconds),
+	Viewer(jpegview_linux::FileList fileList, double slideshowSeconds, bool startFullscreen)
+		: fileList_(std::move(fileList)), slideshowSeconds_(slideshowSeconds),
 		  lastSlideshowSeconds_(slideshowSeconds > 0.0 ? slideshowSeconds : 3.0), startFullscreen_(startFullscreen) {}
 
 	int Run() {
@@ -453,13 +392,13 @@ private:
 	}
 
 	bool LoadCurrent() {
-		if (files_.empty() || index_ >= files_.size()) {
+		if (fileList_.Empty()) {
 			return false;
 		}
 		std::string errorMessage;
-		if (!image_.Load(files_[index_], errorMessage)) {
-			SetTitle(files_[index_].filename().string() + " — decode failed: " + errorMessage);
-			std::cerr << files_[index_] << ": " << errorMessage << '\n';
+		if (!image_.Load(fileList_.Current(), errorMessage)) {
+			SetTitle(fileList_.Current().filename().string() + " — decode failed: " + errorMessage);
+			std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
 			return false;
 		}
 
@@ -525,9 +464,9 @@ private:
 
 	void SetTitle() {
 		std::ostringstream title;
-		title << "JPEGView Linux — " << files_[index_].filename().string()
+		title << "JPEGView Linux — " << fileList_.Current().filename().string()
 			<< (imageModified_ ? " *" : "")
-			<< " [" << index_ + 1 << '/' << files_.size() << "] "
+			<< " [" << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
 			<< image_.width << 'x' << image_.height << " @ " << FormatPercent(zoom_)
 			<< " — arrows: navigate/rotate, wheel: zoom, drag: pan, Space: fit/actual, F11: fullscreen, Esc: quit";
 		SetTitle(title.str());
@@ -538,21 +477,23 @@ private:
 			return;
 		}
 
-		std::size_t droppedIndex = 0;
-		std::vector<fs::path> droppedImageFiles;
 		try {
-			droppedImageFiles = BuildFileList(droppedFiles, droppedIndex);
+			jpegview_linux::FileList droppedFileList(
+				droppedFiles, fileList_.GetSorting(), fileList_.IsSortedAscending(), fileList_.WrapAroundFolder());
+			// Construction performs the same initial-file/folder discovery as
+			// the Windows CFileList constructor.
+			if (droppedFileList.Empty()) {
+				SetTitle("No supported images in dropped input");
+				return;
+			}
+
+			const jpegview_linux::FileList::NavigationMode navigationMode = fileList_.GetNavigationMode();
+			fileList_ = std::move(droppedFileList);
+			fileList_.SetNavigationMode(navigationMode);
 		} catch (const fs::filesystem_error& error) {
 			SetTitle(std::string("Cannot open dropped input: ") + error.what());
 			return;
 		}
-		if (droppedImageFiles.empty()) {
-			SetTitle("No supported images in dropped input");
-			return;
-		}
-
-		files_ = std::move(droppedImageFiles);
-		index_ = droppedIndex;
 		dragging_ = false;
 		fileDialogOpen_ = false;
 		LoadCurrent();
@@ -598,26 +539,22 @@ private:
 	}
 
 	void NextImage() {
-		if (files_.empty()) return;
-		index_ = (index_ + 1) % files_.size();
-		LoadCurrent();
+		if (fileList_.Next()) LoadCurrent();
 	}
 
 	void PreviousImage() {
-		if (files_.empty()) return;
-		index_ = index_ == 0 ? files_.size() - 1 : index_ - 1;
-		LoadCurrent();
+		if (fileList_.Previous()) LoadCurrent();
 	}
 
 	void FirstImage() {
-		if (files_.empty() || index_ == 0) return;
-		index_ = 0;
+		if (fileList_.Empty() || fileList_.CurrentIndex() == 0) return;
+		fileList_.First();
 		LoadCurrent();
 	}
 
 	void LastImage() {
-		if (files_.empty() || index_ + 1 == files_.size()) return;
-		index_ = files_.size() - 1;
+		if (fileList_.Empty() || fileList_.CurrentIndex() + 1 == fileList_.Size()) return;
+		fileList_.Last();
 		LoadCurrent();
 	}
 
@@ -735,11 +672,56 @@ private:
 			OpenFileDialog();
 			break;
 		case IDM_RELOAD:
-			LoadCurrent();
+			if (fileList_.Reload()) LoadCurrent();
 			break;
 		case IDM_SHOW_NAVPANEL:
 			navigationPanelEnabled_ = !navigationPanelEnabled_;
 			if (navigationPanelEnabled_) ShowControls(); else controlsVisible_ = false;
+			break;
+		case IDM_LOOP_FOLDER:
+			fileList_.SetNavigationMode(jpegview_linux::FileList::NavigationMode::LoopDirectory);
+			SetTitle();
+			break;
+		case IDM_LOOP_RECURSIVELY:
+			fileList_.SetNavigationMode(jpegview_linux::FileList::NavigationMode::LoopSubDirectories);
+			SetTitle();
+			break;
+		case IDM_LOOP_SIBLINGS:
+			fileList_.SetNavigationMode(jpegview_linux::FileList::NavigationMode::LoopSameDirectoryLevel);
+			SetTitle();
+			break;
+		case IDM_SORT_MOD_DATE:
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::LastModificationTime,
+				fileList_.IsSortedAscending());
+			SetTitle();
+			break;
+		case IDM_SORT_CREATION_DATE:
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::CreationTime,
+				fileList_.IsSortedAscending());
+			SetTitle();
+			break;
+		case IDM_SORT_NAME:
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileName,
+				fileList_.IsSortedAscending());
+			SetTitle();
+			break;
+		case IDM_SORT_RANDOM:
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::Random,
+				fileList_.IsSortedAscending());
+			SetTitle();
+			break;
+		case IDM_SORT_SIZE:
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileSize,
+				fileList_.IsSortedAscending());
+			SetTitle();
+			break;
+		case IDM_SORT_ASCENDING:
+			fileList_.SetSorting(fileList_.GetSorting(), true);
+			SetTitle();
+			break;
+		case IDM_SORT_DESCENDING:
+			fileList_.SetSorting(fileList_.GetSorting(), false);
+			SetTitle();
 			break;
 		case IDM_STOP_MOVIE:
 			slideshowSeconds_ = 0.0;
@@ -815,6 +797,13 @@ private:
 		if (ctrl && !shift && key == SDLK_o) return IDM_OPEN;
 		if (ctrl && !shift && key == SDLK_r) return IDM_RELOAD;
 		if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;
+		if (!ctrl && !shift && key == 'c') return IDM_SORT_CREATION_DATE;
+		if (!ctrl && !shift && key == 'n') return IDM_SORT_NAME;
+		if (!ctrl && !shift && key == 'm') return IDM_SORT_MOD_DATE;
+		if (!ctrl && !shift && key == 'z') return IDM_SORT_RANDOM;
+		if (!ctrl && !shift && key == SDLK_F7) return IDM_LOOP_FOLDER;
+		if (!ctrl && !shift && key == SDLK_F8) return IDM_LOOP_RECURSIVELY;
+		if (!ctrl && !shift && key == SDLK_F9) return IDM_LOOP_SIBLINGS;
 
 		if (!ctrl && !shift && (key == SDLK_RIGHT || key == SDLK_PAGEDOWN)) return IDM_NEXT;
 		if (!ctrl && !shift && (key == SDLK_LEFT || key == SDLK_PAGEUP)) return IDM_PREV;
@@ -852,6 +841,27 @@ private:
 			{nullptr, 0, true},
 			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_},
 			{nullptr, 0, true},
+			{"Navigation", 0},
+			{"  Loop folder", IDM_LOOP_FOLDER, false,
+				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopDirectory},
+			{"  Loop recursively", IDM_LOOP_RECURSIVELY, false,
+				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopSubDirectories},
+			{"  Loop siblings", IDM_LOOP_SIBLINGS, false,
+				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopSameDirectoryLevel},
+			{"Display order", 0},
+			{"  Modification date", IDM_SORT_MOD_DATE, false,
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::LastModificationTime},
+			{"  Creation date", IDM_SORT_CREATION_DATE, false,
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::CreationTime},
+			{"  File name", IDM_SORT_NAME, false,
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName},
+			{"  File size", IDM_SORT_SIZE, false,
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileSize},
+			{"  Random", IDM_SORT_RANDOM, false,
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::Random},
+			{"  Ascending", IDM_SORT_ASCENDING, false, fileList_.IsSortedAscending()},
+			{"  Descending", IDM_SORT_DESCENDING, false, !fileList_.IsSortedAscending()},
+			{nullptr, 0, true},
 			{"Transform image", 0},
 			{"  Rotate +90", IDM_ROTATE_90},
 			{"  Rotate -90", IDM_ROTATE_270},
@@ -883,13 +893,24 @@ private:
 		return item.label == nullptr ? std::string() : item.label;
 	}
 
+	int ContextMenuVisibleCount() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		return std::max(1, std::min(22, (windowHeight - 32) / 28));
+	}
+
 	SDL_Rect ContextMenuRect() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		int width = 260;
 		int height = 16;
-		for (const MenuItem& item : contextMenuItems_) {
+		const int visibleCount = ContextMenuVisibleCount();
+		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
+			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
+		for (std::size_t index = contextMenuScroll_; index < visibleEnd; ++index) {
+			const MenuItem& item = contextMenuItems_[index];
 			if (item.separator) {
 				height += 9;
 				continue;
@@ -901,6 +922,8 @@ private:
 		int y = contextMenuY_;
 		if (x + width > windowWidth) x = windowWidth - width - 4;
 		if (y + height > windowHeight) y = windowHeight - height - 4;
+		x = std::max(4, x);
+		y = std::max(4, y);
 		return SDL_Rect{x, y, width, height};
 	}
 
@@ -908,7 +931,10 @@ private:
 		const SDL_Rect menu = ContextMenuRect();
 		if (!PointInRect(x, y, menu)) return -1;
 		int itemTop = menu.y + 8;
-		for (std::size_t i = 0; i < contextMenuItems_.size(); ++i) {
+		const int visibleCount = ContextMenuVisibleCount();
+		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
+			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
+		for (std::size_t i = contextMenuScroll_; i < visibleEnd; ++i) {
 			const MenuItem& item = contextMenuItems_[i];
 			const int itemHeight = item.separator ? 9 : 28;
 			if (y >= itemTop && y < itemTop + itemHeight) {
@@ -927,8 +953,21 @@ private:
 		contextMenuItems_ = ContextMenuItems();
 		contextMenuX_ = x;
 		contextMenuY_ = y;
+		contextMenuScroll_ = 0;
 		contextMenuOpen_ = true;
 		menuSelected_ = -1;
+	}
+
+	void EnsureContextMenuSelectionVisible() {
+		const std::size_t visibleCount = static_cast<std::size_t>(ContextMenuVisibleCount());
+		if (menuSelected_ >= 0) {
+			const std::size_t selected = static_cast<std::size_t>(menuSelected_);
+			if (selected < contextMenuScroll_) contextMenuScroll_ = selected;
+			if (selected >= contextMenuScroll_ + visibleCount) contextMenuScroll_ = selected - visibleCount + 1;
+		}
+		const std::size_t maximumScroll = contextMenuItems_.size() > visibleCount ?
+			contextMenuItems_.size() - visibleCount : 0;
+		contextMenuScroll_ = std::min(contextMenuScroll_, maximumScroll);
 	}
 
 	void MoveContextMenuSelection(int direction) {
@@ -940,6 +979,7 @@ private:
 			if (candidate >= static_cast<int>(contextMenuItems_.size())) candidate = 0;
 			if (!contextMenuItems_[candidate].separator && contextMenuItems_[candidate].command != 0) {
 				menuSelected_ = candidate;
+				EnsureContextMenuSelectionVisible();
 				return;
 			}
 		}
@@ -1005,8 +1045,8 @@ private:
 	void OpenFileDialog() {
 		std::error_code error;
 		fs::path directory = fs::current_path(error);
-		if (!files_.empty() && index_ < files_.size()) {
-			const fs::path currentDirectory = files_[index_].parent_path();
+		if (!fileList_.Empty()) {
+			const fs::path currentDirectory = fileList_.Current().parent_path();
 			if (!currentDirectory.empty()) directory = currentDirectory;
 		}
 		if (error || directory.empty()) directory = fs::path(".");
@@ -1263,7 +1303,10 @@ private:
 		DrawRect(menu, 185, 185, 185);
 
 		int itemTop = menu.y + 8;
-		for (std::size_t i = 0; i < contextMenuItems_.size(); ++i) {
+		const int visibleCount = ContextMenuVisibleCount();
+		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
+			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
+		for (std::size_t i = contextMenuScroll_; i < visibleEnd; ++i) {
 			const MenuItem& item = contextMenuItems_[i];
 			if (item.separator) {
 				DrawLine(menu.x + 10, itemTop + 4, menu.x + menu.w - 10, itemTop + 4, 75, 75, 75);
@@ -1309,6 +1352,13 @@ private:
 				case SDL_MOUSEMOTION:
 					UpdateContextMenuSelection(event.motion.x, event.motion.y);
 					break;
+				case SDL_MOUSEWHEEL: {
+					const int maximumScroll = std::max(0, static_cast<int>(contextMenuItems_.size()) - ContextMenuVisibleCount());
+					contextMenuScroll_ = static_cast<std::size_t>(std::clamp(
+						static_cast<int>(contextMenuScroll_) - event.wheel.y, 0, maximumScroll));
+					menuSelected_ = -1;
+					break;
+				}
 				case SDL_MOUSEBUTTONDOWN:
 					if (event.button.button == SDL_BUTTON_LEFT) {
 						const int item = ContextMenuItemAt(event.button.x, event.button.y);
@@ -1432,8 +1482,7 @@ private:
 		SDL_RenderPresent(renderer_);
 	}
 
-	std::vector<fs::path> files_;
-	std::size_t index_ = 0;
+	jpegview_linux::FileList fileList_;
 	double slideshowSeconds_ = 0.0;
 	double lastSlideshowSeconds_ = 3.0;
 	bool startFullscreen_ = false;
@@ -1454,6 +1503,7 @@ private:
 	bool contextMenuOpen_ = false;
 	int contextMenuX_ = 0;
 	int contextMenuY_ = 0;
+	std::size_t contextMenuScroll_ = 0;
 	int menuSelected_ = -1;
 	std::vector<MenuItem> contextMenuItems_;
 	bool imageModified_ = false;
@@ -1479,6 +1529,7 @@ void PrintUsage(const char* program) {
 		<< "  --help             Show this help\n\n"
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
+		<< "          F7/F8/F9 select folder/recursive/sibling navigation, N/M/C/Z select display order,\n"
 		<< "          Ctrl+O opens, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
 		<< "          right-click opens the context menu, Esc or Q quits.\n";
 }
@@ -1531,20 +1582,14 @@ int main(int argc, char** argv) {
 		inputs.push_back(value);
 	}
 
-	std::size_t initialIndex = 0;
-	std::vector<fs::path> files;
-	try {
-		files = BuildFileList(inputs, initialIndex);
-	} catch (const fs::filesystem_error& error) {
-		std::cerr << "Cannot enumerate input: " << error.what() << '\n';
-		return 2;
-	}
-	if (files.empty()) {
+	jpegview_linux::FileList fileList(inputs);
+	if (fileList.Empty()) {
 		std::cerr << "No supported images found.\n";
 		return 2;
 	}
+
 	if (decodeCheck) {
-		for (const fs::path& file : files) {
+		for (const fs::path& file : fileList.Files()) {
 			Image image;
 			std::string errorMessage;
 			if (!image.Load(file, errorMessage)) {
@@ -1556,7 +1601,7 @@ int main(int argc, char** argv) {
 		return 0;
 	}
 
-	Viewer viewer(std::move(files), initialIndex, slideshowSeconds, startFullscreen);
+	Viewer viewer(std::move(fileList), slideshowSeconds, startFullscreen);
 	const int result = viewer.Run();
 	return result;
 }
