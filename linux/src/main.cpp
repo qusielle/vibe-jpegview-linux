@@ -64,6 +64,7 @@ struct MenuItem {
 	bool separator = false;
 	bool checked = false;
 	bool enabled = true;
+	const char* shortcut = nullptr;
 };
 
 struct FileDialogEntry {
@@ -1922,71 +1923,71 @@ private:
 			// resource.  Indented entries are the portable equivalent of its
 			// submenus. Unsupported Windows-only commands remain visible but
 			// disabled instead of silently doing nothing.
-			{"Stop slide show/movie", IDM_STOP_MOVIE, false, false, slideshowSeconds_ > 0.0},
+			{"Stop slide show/movie", IDM_STOP_MOVIE, false, false, slideshowSeconds_ > 0.0, "Esc"},
 			{nullptr, 0, true},
-			{"Open image...", IDM_OPEN},
+			{"Open image...", IDM_OPEN, false, false, true, "Ctrl+O"},
 			{"Open image with", 0},
 			{"  (no configured applications)", 0, false, false, false},
-			{"Save processed image...", IDM_SAVE},
-			{"Save displayed image...", IDM_SAVE_SCREEN},
-			{"Reload image", IDM_RELOAD},
-			{"Open containing folder", IDM_EXPLORE},
-			{"Print image...", IDM_PRINT},
+			{"Save processed image...", IDM_SAVE, false, false, true, "Ctrl+S"},
+			{"Save displayed image...", IDM_SAVE_SCREEN, false, false, true, "Ctrl+Shift+S"},
+			{"Reload image", IDM_RELOAD, false, false, true, "Ctrl+R"},
+			{"Open containing folder", IDM_EXPLORE, false, false, true, "W"},
+			{"Print image...", IDM_PRINT, false, false, true, "Ctrl+P"},
 			{"Batch rename/copy...", IDM_BATCH_COPY, false, false, false},
 			{"Set modification date", 0},
-			{"  To current date", IDM_TOUCH_IMAGE},
-			{"  To EXIF date", IDM_TOUCH_IMAGE_EXIF},
+			{"  To current date", IDM_TOUCH_IMAGE, false, false, true, "Ctrl+Shift+M"},
+			{"  To EXIF date", IDM_TOUCH_IMAGE_EXIF, false, false, true, "Ctrl+Shift+E"},
 			{"  To EXIF date all files in folder", IDM_TOUCH_IMAGE_EXIF_FOLDER},
 			{"Set as desktop wallpaper", 0},
 			{"  Use original image", IDM_SET_WALLPAPER_ORIG},
 			{"  Use processed image as displayed", IDM_SET_WALLPAPER_DISPLAY},
 			{nullptr, 0, true},
-			{"Copy to clipboard", IDM_COPY},
-			{"Copy original size image", IDM_COPY_FULL},
-			{"Copy file path", IDM_COPY_PATH},
-			{"Paste from clipboard", IDM_PASTE},
+			{"Copy to clipboard", IDM_COPY, false, false, true, "Ctrl+C"},
+			{"Copy original size image", IDM_COPY_FULL, false, false, true, "Ctrl+X"},
+			{"Copy file path", IDM_COPY_PATH, false, false, true, "Ctrl+Shift+C"},
+			{"Paste from clipboard", IDM_PASTE, false, false, true, "Ctrl+V"},
 			{nullptr, 0, true},
-			{"Show picture info (EXIF)", IDM_SHOW_FILEINFO, false, infoVisible_},
-			{"Show filename", IDM_SHOW_FILENAME, false, showFileName_},
-			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_},
+			{"Show picture info (EXIF)", IDM_SHOW_FILEINFO, false, infoVisible_, true, "F2"},
+			{"Show filename", IDM_SHOW_FILENAME, false, showFileName_, true, "Ctrl+F2"},
+			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_, true, "Ctrl+N"},
 			{nullptr, 0, true},
-			{"Next image", IDM_NEXT},
-			{"Previous image", IDM_PREV},
-			{"First image", IDM_FIRST},
-			{"Last image", IDM_LAST},
+			{"Next image", IDM_NEXT, false, false, true, "Right/PgDn"},
+			{"Previous image", IDM_PREV, false, false, true, "Left/PgUp"},
+			{"First image", IDM_FIRST, false, false, true, "Home"},
+			{"Last image", IDM_LAST, false, false, true, "End"},
 			{nullptr, 0, true},
 			{"Navigation", 0},
 			{"  Loop folder", IDM_LOOP_FOLDER, false,
-				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopDirectory},
+				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopDirectory, true, "F7"},
 			{"  Loop recursively", IDM_LOOP_RECURSIVELY, false,
-				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopSubDirectories},
+				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopSubDirectories, true, "F8"},
 			{"  Loop siblings", IDM_LOOP_SIBLINGS, false,
-				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopSameDirectoryLevel},
+				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopSameDirectoryLevel, true, "F9"},
 			{"Display order", 0},
 			{"  Modification date", IDM_SORT_MOD_DATE, false,
-				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::LastModificationTime},
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::LastModificationTime, true, "M"},
 			{"  Creation date", IDM_SORT_CREATION_DATE, false,
-				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::CreationTime},
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::CreationTime, true, "C"},
 			{"  File name", IDM_SORT_NAME, false,
-				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName},
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName, true, "N"},
 			{"  File size", IDM_SORT_SIZE, false,
 				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileSize},
 			{"  Random", IDM_SORT_RANDOM, false,
-				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::Random},
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::Random, true, "Z"},
 			{"  Ascending", IDM_SORT_ASCENDING, false, fileList_.IsSortedAscending()},
 			{"  Descending", IDM_SORT_DESCENDING, false, !fileList_.IsSortedAscending()},
 			{nullptr, 0, true},
 			{"Transform image", 0},
-			{"  Rotate +90", IDM_ROTATE_90},
-			{"  Rotate -90", IDM_ROTATE_270},
+			{"  Rotate +90", IDM_ROTATE_90, false, false, true, "Down"},
+			{"  Rotate -90", IDM_ROTATE_270, false, false, true, "Up"},
 			{"  Rotate...", IDM_ROTATE, false, false, false},
 			{"  Change size...", IDM_CHANGESIZE, false, false, false},
 			{"  Perspective correction...", IDM_PERSPECTIVE, false, false, false},
 			{"  Mirror horizontally", IDM_MIRROR_H},
 			{"  Mirror vertically", IDM_MIRROR_V},
 			{"Lossless JPEG transformations", 0},
-			{"  Rotate +90", IDM_ROTATE_90_LOSSLESS, false, false, losslessJpegAvailable},
-			{"  Rotate -90", IDM_ROTATE_270_LOSSLESS, false, false, losslessJpegAvailable},
+			{"  Rotate +90", IDM_ROTATE_90_LOSSLESS, false, false, losslessJpegAvailable, "R"},
+			{"  Rotate -90", IDM_ROTATE_270_LOSSLESS, false, false, losslessJpegAvailable, "T"},
 			{"  Rotate 180", IDM_ROTATE_180_LOSSLESS, false, false, losslessJpegAvailable},
 			{"  Mirror horizontally", IDM_MIRROR_H_LOSSLESS, false, false, losslessJpegAvailable},
 			{"  Mirror vertically", IDM_MIRROR_V_LOSSLESS, false, false, losslessJpegAvailable},
@@ -1997,18 +1998,18 @@ private:
 			{"Clear parameters from DB", IDM_CLEAR_PARAM_DB, false, false, false},
 			{nullptr, 0, true},
 			{"Scale / zoom", 0},
-			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_ && !fillWithCrop_ && !autoZoomNoEnlarge_},
-			{"  Fill with crop", IDM_FILL_WITH_CROP, false, fitToWindow_ && fillWithCrop_ && !autoZoomNoEnlarge_},
-			{"  Span all screens", IDM_SPAN_SCREENS, false, fullscreen_},
+			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_ && !fillWithCrop_ && !autoZoomNoEnlarge_, true, "Return/0"},
+			{"  Fill with crop", IDM_FILL_WITH_CROP, false, fitToWindow_ && fillWithCrop_ && !autoZoomNoEnlarge_, true, "Ctrl+Return"},
+			{"  Span all screens", IDM_SPAN_SCREENS, false, fullscreen_, true, "F12"},
 			{"  400 %", IDM_ZOOM_400},
 			{"  200 %", IDM_ZOOM_200},
-			{"  Actual size (100 %)", IDM_ZOOM_100, false, !fitToWindow_ && std::abs(zoom_ - 1.0) < 0.01},
+			{"  Actual size (100 %)", IDM_ZOOM_100, false, !fitToWindow_ && std::abs(zoom_ - 1.0) < 0.01, true, "Space"},
 			{"  50 %", IDM_ZOOM_50},
 			{"  25 %", IDM_ZOOM_25},
-			{"  Full screen mode", IDM_FULL_SCREEN_MODE, false, fullscreen_},
-			{"  Fit window to image", IDM_FIT_WINDOW_TO_IMAGE},
-			{"  Hide window title bar", IDM_HIDE_TITLE_BAR, false, borderless_},
-			{"  Set window always on top", IDM_ALWAYS_ON_TOP, false, alwaysOnTop_},
+			{"  Full screen mode", IDM_FULL_SCREEN_MODE, false, fullscreen_, true, "F11/F"},
+			{"  Fit window to image", IDM_FIT_WINDOW_TO_IMAGE, false, false, true, "Ctrl+F11"},
+			{"  Hide window title bar", IDM_HIDE_TITLE_BAR, false, borderless_, true, "Shift+F11"},
+			{"  Set window always on top", IDM_ALWAYS_ON_TOP, false, alwaysOnTop_, true, "Shift+F12"},
 			{"Auto zoom mode", 0},
 			{"  Fit to screen no zoom", IDM_AUTO_ZOOM_FIT_NO_ZOOM, false, fitToWindow_ && !fillWithCrop_ && autoZoomNoEnlarge_},
 			{"  Fill with crop no zoom", IDM_AUTO_ZOOM_FILL_NO_ZOOM, false, fitToWindow_ && fillWithCrop_ && autoZoomNoEnlarge_},
@@ -2017,12 +2018,12 @@ private:
 			{nullptr, 0, true},
 			{"Play folder as slideshow/movie", 0},
 			{slideshowSeconds_ > 0.0 ? "  Stop slide show/movie" : "  Slideshow", slideshowSeconds_ > 0.0 ? IDM_STOP_MOVIE : IDM_SLIDESHOW_START},
-			{"  Waiting time 1 sec", IDM_SLIDESHOW_1, false, false, true},
-			{"  Waiting time 2 sec", IDM_SLIDESHOW_2, false, false, true},
-			{"  Waiting time 3 sec", IDM_SLIDESHOW_3, false, false, true},
-			{"  Waiting time 4 sec", IDM_SLIDESHOW_4, false, false, true},
-			{"  Waiting time 5 sec", IDM_SLIDESHOW_5, false, false, true},
-			{"  Waiting time 7 sec", IDM_SLIDESHOW_7, false, false, true},
+			{"  Waiting time 1 sec", IDM_SLIDESHOW_1, false, false, true, "1"},
+			{"  Waiting time 2 sec", IDM_SLIDESHOW_2, false, false, true, "2"},
+			{"  Waiting time 3 sec", IDM_SLIDESHOW_3, false, false, true, "3"},
+			{"  Waiting time 4 sec", IDM_SLIDESHOW_4, false, false, true, "4"},
+			{"  Waiting time 5 sec", IDM_SLIDESHOW_5, false, false, true, "5"},
+			{"  Waiting time 7 sec", IDM_SLIDESHOW_7, false, false, true, "7"},
 			{"  Waiting time 10 sec", IDM_SLIDESHOW_10, false, false, true},
 			{"  Waiting time 20 sec", IDM_SLIDESHOW_20, false, false, true},
 			{"  Transition effect", 0},
@@ -2068,13 +2069,17 @@ private:
 			{nullptr, 0, true},
 			{"About JPEGView...", IDM_ABOUT},
 			{nullptr, 0, true},
-			{"Exit", IDM_EXIT},
+			{"Exit", IDM_EXIT, false, false, true, "Q/Esc"},
 		};
 	}
 
 	std::string MenuLabel(const MenuItem& item) const {
 		if (item.checked) return std::string("[X] ") + item.label;
 		return item.label == nullptr ? std::string() : item.label;
+	}
+
+	std::string MenuShortcut(const MenuItem& item) const {
+		return item.shortcut == nullptr ? std::string() : item.shortcut;
 	}
 
 	int ContextMenuVisibleCount() const {
@@ -2099,7 +2104,9 @@ private:
 				height += kContextMenuSeparatorHeight;
 				continue;
 			}
-			width = std::max(width, TextWidth(MenuLabel(item), kUiTextScale) + 24);
+			const int labelWidth = TextWidth(MenuLabel(item), kUiTextScale);
+			const int shortcutWidth = TextWidth(MenuShortcut(item), kUiTextScale);
+			width = std::max(width, labelWidth + shortcutWidth + (shortcutWidth > 0 ? 40 : 24));
 			height += kContextMenuItemHeight;
 		}
 		int x = contextMenuX_;
@@ -2770,8 +2777,16 @@ private:
 				SDL_RenderFillRect(renderer_, &selection);
 			}
 			const Uint8 textColor = item.command == 0 ? 135 : (item.enabled ? 235 : 100);
-			DrawText(MenuLabel(item), menu.x + 12, itemTop + 4, kUiTextScale,
+			const std::string label = MenuLabel(item);
+			const std::string shortcut = MenuShortcut(item);
+			DrawText(label, menu.x + 12, itemTop + 4, kUiTextScale,
 				textColor, textColor, textColor);
+			if (!shortcut.empty()) {
+				const int shortcutWidth = TextWidth(shortcut, kUiTextScale);
+				const Uint8 shortcutColor = item.enabled ? 175 : 90;
+				DrawText(shortcut, menu.x + menu.w - 12 - shortcutWidth, itemTop + 4, kUiTextScale,
+					shortcutColor, shortcutColor, shortcutColor);
+			}
 			itemTop += kContextMenuItemHeight;
 		}
 	}
