@@ -215,7 +215,6 @@ void SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
 void SDL_SetWindowSize(SDL_Window* window, int w, int h);
 void SDL_SetWindowTitle(SDL_Window* window, const char* title);
 void SDL_SetWindowBordered(SDL_Window* window, int bordered);
-void SDL_SetWindowAlwaysOnTop(SDL_Window* window, int onTop);
 int SDL_SetClipboardText(const char* text);
 void SDL_StartTextInput();
 void SDL_StopTextInput();

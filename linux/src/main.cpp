@@ -1396,8 +1396,19 @@ private:
 	}
 
 	void ToggleAlwaysOnTop() {
+		// SDL_SetWindowAlwaysOnTop is not exported by every SDL2 runtime that
+		// can be found on the supported Ubuntu releases. Resolve it lazily so
+		// the viewer still links and runs when that optional window-manager
+		// feature is unavailable.
+		using SetWindowAlwaysOnTop = void (*)(SDL_Window*, int);
+		static const SetWindowAlwaysOnTop setWindowAlwaysOnTop =
+			reinterpret_cast<SetWindowAlwaysOnTop>(dlsym(RTLD_DEFAULT, "SDL_SetWindowAlwaysOnTop"));
+		if (setWindowAlwaysOnTop == nullptr) {
+			SetTitle("Always-on-top is not supported by this SDL2 runtime");
+			return;
+		}
 		alwaysOnTop_ = !alwaysOnTop_;
-		SDL_SetWindowAlwaysOnTop(window_, alwaysOnTop_ ? 1 : 0);
+		setWindowAlwaysOnTop(window_, alwaysOnTop_ ? 1 : 0);
 		SetTitle();
 	}
 
