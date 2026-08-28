@@ -69,8 +69,10 @@ cursor; left-drag pans; dropped files open in the viewer. Space toggles fit/actu
 and F11 toggles fullscreen (`0`, `F`, and `Q` remain convenience aliases; `1`–`9` start a
 slideshow at that interval). Ctrl+O opens the
 native in-app file browser, Ctrl+R reloads, and Ctrl+N toggles the panel. Move the pointer to
-reveal the transient navigation panel, whose buttons mirror the core controls from JPEGView's
-Windows navigation panel (first/previous/next/last, fit/actual, and fullscreen). Right-click
+show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
+navigation panel (first/previous/next/last, fit/actual, and fullscreen). The checked panel
+remains visible until Ctrl+N disables it; it is temporarily suppressed while a modal menu or
+file browser is open. Right-click
 opens the core JPEGView context menu; it also supports keyboard selection with the arrow keys and
 Return. Esc stops an active slideshow first, matching the Windows default escape command, and
 otherwise quits.

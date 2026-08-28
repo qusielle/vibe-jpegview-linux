@@ -37,7 +37,6 @@ constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr double kMinZoom = 0.01;
 constexpr double kMaxZoom = 32.0;
-constexpr Uint32 kControlPanelTimeoutMs = 2400;
 
 struct ControlButton {
 	SDL_Rect rect{};
@@ -647,7 +646,6 @@ private:
 	void ShowControls() {
 		if (!navigationPanelEnabled_) return;
 		controlsVisible_ = true;
-		controlsDeadline_ = SDL_GetTicks() + kControlPanelTimeoutMs;
 	}
 
 	SDL_Rect ControlPanelRect() const {
@@ -1425,14 +1423,9 @@ private:
 
 	void RenderControls() {
 		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_) return;
-		const Uint32 now = SDL_GetTicks();
 		std::vector<ControlButton> buttons;
 		LayoutControls(buttons);
 		const SDL_Rect panel = ControlPanelRect();
-		if (now >= controlsDeadline_ && !PointInRect(lastMouseX_, lastMouseY_, panel)) {
-			controlsVisible_ = false;
-			return;
-		}
 
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
 		SDL_RenderFillRect(renderer_, &panel);
@@ -1645,7 +1638,6 @@ private:
 	bool fullscreen_ = false;
 	bool dragging_ = false;
 	bool controlsVisible_ = true;
-	Uint32 controlsDeadline_ = 0;
 	bool navigationPanelEnabled_ = true;
 	bool contextMenuOpen_ = false;
 	int contextMenuX_ = 0;
