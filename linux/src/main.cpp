@@ -2529,6 +2529,57 @@ private:
 		}
 	}
 
+	std::string ControlTooltip(int command) const {
+		switch (command) {
+		case IDM_FIRST:
+			return "Show first image in folder (Home)";
+		case IDM_PREV:
+			return "Show previous image (Left)";
+		case IDM_NEXT:
+			return "Show next image (Right)";
+		case IDM_LAST:
+			return "Show last image in folder (End)";
+		case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
+			return fitToWindow_ ? "Actual size of image (Space)" : "Fit image to screen (Space)";
+		case IDM_FULL_SCREEN_MODE:
+			return fullscreen_ ? "Window mode (F11)" : "Full screen mode (F11)";
+		case IDM_ROTATE_90:
+			return "Rotate image 90 deg clockwise (Down)";
+		case IDM_ROTATE_270:
+			return "Rotate image 90 deg counter-clockwise (Up)";
+		default:
+			return {};
+		}
+	}
+
+	void RenderControlTooltip(const SDL_Rect& anchor, const std::string& text) {
+		if (text.empty()) return;
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int maximumWidth = std::max(1, windowWidth - 8);
+		std::string label = text;
+		const int availableTextWidth = std::max(1, maximumWidth - 16);
+		if (TextWidth(label, kUiTextScale) > availableTextWidth) {
+			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
+				availableTextWidth / (6 * kUiTextScale)));
+			label.resize(maximumCharacters - 3);
+			label += "...";
+		}
+		const int tooltipWidth = std::min(maximumWidth, TextWidth(label, kUiTextScale) + 16);
+		const int tooltipHeight = 22;
+		int x = anchor.x + (anchor.w - tooltipWidth) / 2;
+		x = std::clamp(x, 4, std::max(4, windowWidth - tooltipWidth - 4));
+		int y = anchor.y - tooltipHeight - 6;
+		if (y < 4) y = anchor.y + anchor.h + 6;
+		if (y + tooltipHeight > windowHeight) y = std::max(4, windowHeight - tooltipHeight - 4);
+		const SDL_Rect tooltip{x, y, tooltipWidth, tooltipHeight};
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 245);
+		SDL_RenderFillRect(renderer_, &tooltip);
+		DrawRect(tooltip, 190, 190, 190);
+		DrawText(label, tooltip.x + 8, tooltip.y + 7, kUiTextScale, 255, 255, 255);
+	}
+
 	void RenderFileName() {
 		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_) return;
 		int windowWidth = 0;
@@ -2591,13 +2642,17 @@ private:
 		std::vector<ControlButton> buttons;
 		LayoutControls(buttons);
 		const SDL_Rect panel = ControlPanelRect();
+		const ControlButton* hoveredButton = nullptr;
 
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
 		for (const ControlButton& button : buttons) {
-			DrawNavigationIcon(button, PointInRect(lastMouseX_, lastMouseY_, button.rect));
+			const bool hovered = PointInRect(lastMouseX_, lastMouseY_, button.rect);
+			if (hovered) hoveredButton = &button;
+			DrawNavigationIcon(button, hovered);
 		}
+		if (hoveredButton != nullptr) RenderControlTooltip(hoveredButton->rect, ControlTooltip(hoveredButton->command));
 	}
 
 	void RenderConfirmation() {
