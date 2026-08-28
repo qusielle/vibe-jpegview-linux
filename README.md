@@ -4,6 +4,19 @@
 
 # JPEGView - Image Viewer and Editor
 
+## Linux
+
+The `linux/` directory contains a native SDL2 frontend and an Ubuntu 20.04 build environment.
+It is a focused viewer port of v1.3.46 with folder navigation, common image formats, zoom/pan,
+and fullscreen support. Build it with:
+
+```sh
+make -C linux
+linux/build/jpegview-linux /path/to/image-or-folder
+```
+
+See [`linux/README.md`](linux/README.md) for controls and AppImage packaging instructions.
+
 This is the official re-release of JPEGView.
 
 ## Description

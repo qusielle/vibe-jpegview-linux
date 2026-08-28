@@ -1,0 +1,6 @@
+.git
+**/build
+out/
+**/*.o
+appimagetool-*.AppImage
+headless.out

@@ -1,0 +1,670 @@
+#include "sdl_abi.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#include "../third_party/stb_image.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <dlfcn.h>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace fs = std::filesystem;
+
+namespace {
+
+constexpr int kDefaultWidth = 1280;
+constexpr int kDefaultHeight = 800;
+constexpr double kMinZoom = 0.01;
+constexpr double kMaxZoom = 32.0;
+
+std::string Lower(std::string value) {
+	std::transform(value.begin(), value.end(), value.begin(),
+		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return value;
+}
+
+bool IsImagePath(const fs::path& path) {
+	static const std::set<std::string> extensions = {
+		".jpg", ".jpeg", ".jpe", ".png", ".gif", ".bmp", ".tga",
+		".psd", ".pnm", ".ppm", ".pgm", ".pic", ".webp"
+	};
+	return extensions.find(Lower(path.extension().string())) != extensions.end();
+}
+
+fs::path AbsoluteNormalized(const fs::path& path) {
+	std::error_code error;
+	const fs::path absolute = fs::absolute(path, error);
+	return (error ? path : absolute).lexically_normal();
+}
+
+std::vector<fs::path> ImagesInDirectory(const fs::path& directory) {
+	std::vector<fs::path> result;
+	std::error_code error;
+	for (const fs::directory_entry& entry : fs::directory_iterator(directory, error)) {
+		if (error) {
+			break;
+		}
+		std::error_code statusError;
+		if (entry.is_regular_file(statusError) && IsImagePath(entry.path())) {
+			result.push_back(AbsoluteNormalized(entry.path()));
+		}
+	}
+	std::sort(result.begin(), result.end(), [](const fs::path& left, const fs::path& right) {
+		const std::string leftName = Lower(left.filename().string());
+		const std::string rightName = Lower(right.filename().string());
+		return leftName == rightName ? left.string() < right.string() : leftName < rightName;
+	});
+	return result;
+}
+
+std::vector<fs::path> BuildFileList(const std::vector<std::string>& inputs, std::size_t& initialIndex) {
+	std::vector<fs::path> files;
+	initialIndex = 0;
+
+	if (inputs.empty()) {
+		return ImagesInDirectory(fs::current_path());
+	}
+
+	if (inputs.size() == 1) {
+		const fs::path input = AbsoluteNormalized(inputs.front());
+		std::error_code error;
+		if (fs::is_directory(input, error)) {
+			return ImagesInDirectory(input);
+		}
+		if (fs::is_regular_file(input, error) && IsImagePath(input)) {
+			std::vector<fs::path> result = ImagesInDirectory(input.parent_path());
+			const auto it = std::find(result.begin(), result.end(), input);
+			if (it != result.end()) {
+				initialIndex = static_cast<std::size_t>(std::distance(result.begin(), it));
+			}
+			return result;
+		}
+	}
+
+	std::vector<fs::path> result;
+	for (const std::string& inputString : inputs) {
+		const fs::path input = AbsoluteNormalized(inputString);
+		std::error_code error;
+		if (fs::is_directory(input, error)) {
+			std::vector<fs::path> directoryFiles = ImagesInDirectory(input);
+			result.insert(result.end(), directoryFiles.begin(), directoryFiles.end());
+		} else if (fs::is_regular_file(input, error) && IsImagePath(input)) {
+			result.push_back(input);
+		}
+	}
+	std::sort(result.begin(), result.end(), [](const fs::path& left, const fs::path& right) {
+		return Lower(left.string()) < Lower(right.string());
+	});
+	result.erase(std::unique(result.begin(), result.end()), result.end());
+	return result;
+}
+
+struct Image {
+	int width = 0;
+	int height = 0;
+	std::vector<std::uint8_t> bgra;
+
+	bool StoreRGBA(const unsigned char* rgbaPixels, int imageWidth, int imageHeight) {
+		if (rgbaPixels == nullptr || imageWidth <= 0 || imageHeight <= 0 ||
+			imageWidth > std::numeric_limits<int>::max() / 4) {
+			return false;
+		}
+		const std::size_t widthValue = static_cast<std::size_t>(imageWidth);
+		const std::size_t heightValue = static_cast<std::size_t>(imageHeight);
+		if (widthValue > std::numeric_limits<std::size_t>::max() / heightValue) {
+			return false;
+		}
+		const std::size_t pixelCount = widthValue * heightValue;
+		if (pixelCount > std::numeric_limits<std::size_t>::max() / 4) {
+			return false;
+		}
+		try {
+			bgra.resize(pixelCount * 4);
+		} catch (const std::exception&) {
+			return false;
+		}
+		width = imageWidth;
+		height = imageHeight;
+		for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+			const unsigned char* source = rgbaPixels + pixel * 4;
+			std::uint8_t* target = bgra.data() + pixel * 4;
+			target[0] = source[2];
+			target[1] = source[1];
+			target[2] = source[0];
+			target[3] = source[3];
+		}
+		return true;
+	}
+
+	bool LoadWebP(const fs::path& filename, std::string& errorMessage) {
+		std::ifstream input(filename, std::ios::binary);
+		if (!input) {
+			errorMessage = "cannot open file";
+			return false;
+		}
+		const std::vector<std::uint8_t> encoded((std::istreambuf_iterator<char>(input)), {});
+		if (encoded.empty()) {
+			errorMessage = "empty file";
+			return false;
+		}
+
+		using DecodeRGBA = unsigned char* (*)(const std::uint8_t*, std::size_t, int*, int*);
+		using FreePixels = void (*)(void*);
+		const char* libraryNames[] = {"libwebp.so.7", "libwebp.so.6", "libwebp.so"};
+		void* library = nullptr;
+		for (const char* libraryName : libraryNames) {
+			library = dlopen(libraryName, RTLD_NOW | RTLD_LOCAL);
+			if (library != nullptr) break;
+		}
+		if (library == nullptr) {
+			errorMessage = "WebP decoder library not available";
+			return false;
+		}
+
+		auto decodeRGBA = reinterpret_cast<DecodeRGBA>(dlsym(library, "WebPDecodeRGBA"));
+		auto freePixels = reinterpret_cast<FreePixels>(dlsym(library, "WebPFree"));
+		if (decodeRGBA == nullptr || freePixels == nullptr) {
+			dlclose(library);
+			errorMessage = "incompatible WebP decoder library";
+			return false;
+		}
+
+		int decodedWidth = 0;
+		int decodedHeight = 0;
+		unsigned char* rgba = decodeRGBA(encoded.data(), encoded.size(), &decodedWidth, &decodedHeight);
+		if (rgba == nullptr) {
+			dlclose(library);
+			errorMessage = "invalid WebP image";
+			return false;
+		}
+		const bool stored = StoreRGBA(rgba, decodedWidth, decodedHeight);
+		freePixels(rgba);
+		dlclose(library);
+		if (!stored) {
+			errorMessage = "image is too large";
+		}
+		return stored;
+	}
+
+	bool Load(const fs::path& filename, std::string& errorMessage) {
+		if (Lower(filename.extension().string()) == ".webp") {
+			return LoadWebP(filename, errorMessage);
+		}
+		int channels = 0;
+		int decodedWidth = 0;
+		int decodedHeight = 0;
+		unsigned char* rgba = stbi_load(filename.string().c_str(), &decodedWidth, &decodedHeight, &channels, 4);
+		if (rgba == nullptr) {
+			errorMessage = stbi_failure_reason() == nullptr ? "unknown decoder error" : stbi_failure_reason();
+			return false;
+		}
+
+		const bool stored = StoreRGBA(rgba, decodedWidth, decodedHeight);
+		stbi_image_free(rgba);
+		if (!stored) {
+			errorMessage = "image is too large";
+		}
+		return stored;
+	}
+};
+
+std::string FormatPercent(double zoom) {
+	std::ostringstream stream;
+	if (zoom >= 10.0) {
+		stream.precision(0);
+	} else {
+		stream.precision(1);
+	}
+	stream << std::fixed << zoom * 100.0 << "%";
+	return stream.str();
+}
+
+class Viewer {
+public:
+	Viewer(std::vector<fs::path> files, std::size_t initialIndex, double slideshowSeconds, bool startFullscreen)
+		: files_(std::move(files)), index_(initialIndex), slideshowSeconds_(slideshowSeconds), startFullscreen_(startFullscreen) {}
+
+	int Run() {
+		if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+			std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
+			return 1;
+		}
+
+		window_ = SDL_CreateWindow("JPEGView Linux", 0x2FFF0000, 0x2FFF0000,
+			kDefaultWidth, kDefaultHeight, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+		if (window_ == nullptr) {
+			std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << '\n';
+			SDL_Quit();
+			return 1;
+		}
+
+		renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+		if (renderer_ == nullptr) {
+			// This is useful for software-only systems and also makes the viewer
+			// testable with SDL_VIDEODRIVER=dummy in CI.
+			renderer_ = SDL_CreateRenderer(window_, -1, 0);
+			if (renderer_ == nullptr) {
+				std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << '\n';
+				SDL_DestroyWindow(window_);
+				SDL_Quit();
+				return 1;
+			}
+		}
+
+		if (startFullscreen_) {
+			fullscreen_ = true;
+			SDL_SetWindowFullscreen(window_, SDL_WINDOW_FULLSCREEN_DESKTOP);
+		}
+
+		if (!LoadCurrent()) {
+			Cleanup();
+			return 1;
+		}
+
+		bool running = true;
+		while (running) {
+			HandleEvents(running);
+			if (slideshowSeconds_ > 0.0 &&
+				static_cast<double>(SDL_GetTicks() - lastInteractionTick_) >= slideshowSeconds_ * 1000.0) {
+				NextImage();
+			}
+			Render();
+			SDL_Delay(4);
+		}
+
+		Cleanup();
+		return 0;
+	}
+
+private:
+	void Cleanup() {
+		if (texture_ != nullptr) {
+			SDL_DestroyTexture(texture_);
+			texture_ = nullptr;
+		}
+		if (renderer_ != nullptr) {
+			SDL_DestroyRenderer(renderer_);
+			renderer_ = nullptr;
+		}
+		if (window_ != nullptr) {
+			SDL_DestroyWindow(window_);
+			window_ = nullptr;
+		}
+		SDL_Quit();
+	}
+
+	bool LoadCurrent() {
+		if (files_.empty() || index_ >= files_.size()) {
+			return false;
+		}
+		std::string errorMessage;
+		if (!image_.Load(files_[index_], errorMessage)) {
+			SetTitle(files_[index_].filename().string() + " — decode failed: " + errorMessage);
+			std::cerr << files_[index_] << ": " << errorMessage << '\n';
+			return false;
+		}
+
+		if (texture_ != nullptr) {
+			SDL_DestroyTexture(texture_);
+		}
+		texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+			image_.width, image_.height);
+		if (texture_ == nullptr) {
+			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
+			return false;
+		}
+		if (SDL_UpdateTexture(texture_, nullptr, image_.bgra.data(), image_.width * 4) != 0) {
+			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
+			return false;
+		}
+
+		FitToWindow();
+		lastInteractionTick_ = SDL_GetTicks();
+		SetTitle();
+		return true;
+	}
+
+	void SetTitle(const std::string& title) {
+		SDL_SetWindowTitle(window_, title.c_str());
+	}
+
+	void SetTitle() {
+		std::ostringstream title;
+		title << "JPEGView Linux — " << files_[index_].filename().string()
+			<< " [" << index_ + 1 << '/' << files_.size() << "] "
+			<< image_.width << 'x' << image_.height << " @ " << FormatPercent(zoom_)
+			<< " — arrows: navigate, wheel: zoom, drag: pan, 0: fit, 1: actual, F: fullscreen, Esc: quit";
+		SetTitle(title.str());
+	}
+
+	void OpenDroppedFiles(const std::vector<std::string>& droppedFiles) {
+		if (droppedFiles.empty()) {
+			return;
+		}
+
+		std::size_t droppedIndex = 0;
+		std::vector<fs::path> droppedImageFiles;
+		try {
+			droppedImageFiles = BuildFileList(droppedFiles, droppedIndex);
+		} catch (const fs::filesystem_error& error) {
+			SetTitle(std::string("Cannot open dropped input: ") + error.what());
+			return;
+		}
+		if (droppedImageFiles.empty()) {
+			SetTitle("No supported images in dropped input");
+			return;
+		}
+
+		files_ = std::move(droppedImageFiles);
+		index_ = droppedIndex;
+		dragging_ = false;
+		LoadCurrent();
+	}
+
+	void FitToWindow() {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const double widthScale = static_cast<double>(std::max(1, windowWidth - 16)) / image_.width;
+		const double heightScale = static_cast<double>(std::max(1, windowHeight - 16)) / image_.height;
+		zoom_ = std::clamp(std::min(widthScale, heightScale), kMinZoom, kMaxZoom);
+		fitToWindow_ = true;
+		offsetX_ = 0.0;
+		offsetY_ = 0.0;
+		SetTitle();
+	}
+
+	void ActualSize() {
+		zoom_ = 1.0;
+		fitToWindow_ = false;
+		offsetX_ = 0.0;
+		offsetY_ = 0.0;
+		SetTitle();
+	}
+
+	void ZoomAt(double factor, int mouseX, int mouseY) {
+		if (image_.width == 0 || image_.height == 0) {
+			return;
+		}
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const double oldZoom = zoom_;
+		const double imageX = (mouseX - (windowWidth - image_.width * oldZoom) / 2.0 - offsetX_) / oldZoom;
+		const double imageY = (mouseY - (windowHeight - image_.height * oldZoom) / 2.0 - offsetY_) / oldZoom;
+		zoom_ = std::clamp(oldZoom * factor, kMinZoom, kMaxZoom);
+		offsetX_ = mouseX - (windowWidth - image_.width * zoom_) / 2.0 - imageX * zoom_;
+		offsetY_ = mouseY - (windowHeight - image_.height * zoom_) / 2.0 - imageY * zoom_;
+		fitToWindow_ = false;
+		lastInteractionTick_ = SDL_GetTicks();
+		SetTitle();
+	}
+
+	void NextImage() {
+		if (files_.empty()) return;
+		index_ = (index_ + 1) % files_.size();
+		LoadCurrent();
+	}
+
+	void PreviousImage() {
+		if (files_.empty()) return;
+		index_ = index_ == 0 ? files_.size() - 1 : index_ - 1;
+		LoadCurrent();
+	}
+
+	void ToggleFullscreen() {
+		fullscreen_ = !fullscreen_;
+		SDL_SetWindowFullscreen(window_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : static_cast<Uint32>(0));
+		if (fitToWindow_) {
+			FitToWindow();
+		} else {
+			SetTitle();
+		}
+	}
+
+	void HandleEvents(bool& running) {
+		SDL_Event event{};
+		while (SDL_PollEvent(&event) != 0) {
+			lastInteractionTick_ = SDL_GetTicks();
+			switch (event.type) {
+			case SDL_QUIT:
+				running = false;
+				break;
+			case SDL_WINDOWEVENT:
+				if (event.window.event == SDL_WINDOWEVENT_RESIZED || event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+					if (fitToWindow_) FitToWindow();
+				}
+				break;
+			case SDL_KEYDOWN:
+				if (event.key.repeat != 0) break;
+				switch (event.key.keysym.sym) {
+				case SDLK_ESCAPE:
+				case SDLK_q:
+					running = false;
+					break;
+				case SDLK_RIGHT:
+				case SDLK_DOWN:
+				case SDLK_SPACE:
+					NextImage();
+					break;
+				case SDLK_LEFT:
+				case SDLK_UP:
+					PreviousImage();
+					break;
+				case SDLK_EQUALS:
+				case SDLK_KP_PLUS:
+					ZoomAt(1.2, imageCenterX_, imageCenterY_);
+					break;
+				case SDLK_MINUS:
+				case SDLK_KP_MINUS:
+					ZoomAt(1.0 / 1.2, imageCenterX_, imageCenterY_);
+					break;
+				case SDLK_0:
+					FitToWindow();
+					break;
+				case SDLK_1:
+					ActualSize();
+					break;
+				case SDLK_f:
+					ToggleFullscreen();
+					break;
+				case SDLK_r:
+					LoadCurrent();
+					break;
+				default:
+					break;
+				}
+				break;
+			case SDL_MOUSEBUTTONDOWN:
+				if (event.button.button == SDL_BUTTON_LEFT) {
+					dragging_ = true;
+					lastMouseX_ = event.button.x;
+					lastMouseY_ = event.button.y;
+					imageCenterX_ = event.button.x;
+					imageCenterY_ = event.button.y;
+				}
+				break;
+			case SDL_MOUSEBUTTONUP:
+				if (event.button.button == SDL_BUTTON_LEFT) dragging_ = false;
+				break;
+			case SDL_MOUSEMOTION:
+				imageCenterX_ = event.motion.x;
+				imageCenterY_ = event.motion.y;
+				if (dragging_) {
+					offsetX_ += event.motion.xrel;
+					offsetY_ += event.motion.yrel;
+					fitToWindow_ = false;
+					SetTitle();
+				}
+				lastMouseX_ = event.motion.x;
+				lastMouseY_ = event.motion.y;
+				break;
+			case SDL_MOUSEWHEEL:
+				if (event.wheel.y > 0) {
+					ZoomAt(1.2, lastMouseX_, lastMouseY_);
+				} else if (event.wheel.y < 0) {
+					ZoomAt(1.0 / 1.2, lastMouseX_, lastMouseY_);
+				}
+				break;
+			case SDL_DROPBEGIN:
+				pendingDroppedFiles_.clear();
+				break;
+			case SDL_DROPFILE:
+				if (event.drop.file != nullptr) {
+					pendingDroppedFiles_.emplace_back(event.drop.file);
+					SDL_free(event.drop.file);
+				}
+				break;
+			case SDL_DROPCOMPLETE:
+				OpenDroppedFiles(pendingDroppedFiles_);
+				pendingDroppedFiles_.clear();
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
+	void Render() {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		imageCenterX_ = windowWidth / 2;
+		imageCenterY_ = windowHeight / 2;
+		const int renderWidth = std::max(1, static_cast<int>(std::round(image_.width * zoom_)));
+		const int renderHeight = std::max(1, static_cast<int>(std::round(image_.height * zoom_)));
+		SDL_Rect destination{
+			static_cast<int>(std::round((windowWidth - renderWidth) / 2.0 + offsetX_)),
+			static_cast<int>(std::round((windowHeight - renderHeight) / 2.0 + offsetY_)),
+			renderWidth,
+			renderHeight
+		};
+		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
+		SDL_RenderClear(renderer_);
+		SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
+		SDL_RenderPresent(renderer_);
+	}
+
+	std::vector<fs::path> files_;
+	std::size_t index_ = 0;
+	double slideshowSeconds_ = 0.0;
+	bool startFullscreen_ = false;
+	Uint32 lastInteractionTick_ = 0;
+	Image image_;
+	SDL_Window* window_ = nullptr;
+	SDL_Renderer* renderer_ = nullptr;
+	SDL_Texture* texture_ = nullptr;
+	double zoom_ = 1.0;
+	double offsetX_ = 0.0;
+	double offsetY_ = 0.0;
+	bool fitToWindow_ = true;
+	bool fullscreen_ = false;
+	bool dragging_ = false;
+	std::vector<std::string> pendingDroppedFiles_;
+	int lastMouseX_ = kDefaultWidth / 2;
+	int lastMouseY_ = kDefaultHeight / 2;
+	int imageCenterX_ = kDefaultWidth / 2;
+	int imageCenterY_ = kDefaultHeight / 2;
+};
+
+void PrintUsage(const char* program) {
+	std::cout << "Usage: " << program << " [options] [image-or-directory ...]\n\n"
+		<< "Options:\n"
+		<< "  --fullscreen       Start fullscreen\n"
+		<< "  --slideshow N      Advance every N seconds\n"
+		<< "  --decode-check     Decode inputs and exit (useful for CI)\n"
+		<< "  --help             Show this help\n\n"
+		<< "Controls: arrows/space navigate, mouse wheel zooms, left-drag pans, drop files to open,\n"
+		<< "          0 fits, 1 shows actual size, F toggles fullscreen, R reloads, Esc quits.\n";
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+	bool startFullscreen = false;
+	double slideshowSeconds = 0.0;
+	bool decodeCheck = false;
+	std::vector<std::string> inputs;
+	for (int argument = 1; argument < argc; ++argument) {
+		const std::string value = argv[argument];
+		if (value == "--help" || value == "-h") {
+			PrintUsage(argv[0]);
+			return 0;
+		}
+		if (value == "--fullscreen" || value == "-f") {
+			startFullscreen = true;
+			continue;
+		}
+		if (value == "--slideshow") {
+			if (argument + 1 >= argc) {
+				std::cerr << "--slideshow requires a positive duration in seconds.\n";
+				return 2;
+			}
+			try {
+				const std::string duration = argv[++argument];
+				std::size_t parsedCharacters = 0;
+				const double parsedDuration = std::stod(duration, &parsedCharacters);
+				if (parsedCharacters != duration.size() || !std::isfinite(parsedDuration) || parsedDuration <= 0.0) {
+					throw std::invalid_argument("invalid slideshow duration");
+				}
+				slideshowSeconds = std::max(0.1, parsedDuration);
+			} catch (const std::exception&) {
+				std::cerr << "--slideshow requires a positive duration in seconds.\n";
+				return 2;
+			}
+			continue;
+		}
+		if (value == "--decode-check") {
+			decodeCheck = true;
+			continue;
+		}
+		if (!value.empty() && value[0] == '-') {
+			std::cerr << "Unknown option: " << value << '\n';
+			PrintUsage(argv[0]);
+			return 2;
+		}
+		inputs.push_back(value);
+	}
+
+	std::size_t initialIndex = 0;
+	std::vector<fs::path> files;
+	try {
+		files = BuildFileList(inputs, initialIndex);
+	} catch (const fs::filesystem_error& error) {
+		std::cerr << "Cannot enumerate input: " << error.what() << '\n';
+		return 2;
+	}
+	if (files.empty()) {
+		std::cerr << "No supported images found.\n";
+		return 2;
+	}
+	if (decodeCheck) {
+		for (const fs::path& file : files) {
+			Image image;
+			std::string errorMessage;
+			if (!image.Load(file, errorMessage)) {
+				std::cerr << file << ": " << errorMessage << '\n';
+				return 1;
+			}
+			std::cout << file << ": " << image.width << 'x' << image.height << '\n';
+		}
+		return 0;
+	}
+
+	Viewer viewer(std::move(files), initialIndex, slideshowSeconds, startFullscreen);
+	const int result = viewer.Run();
+	return result;
+}
