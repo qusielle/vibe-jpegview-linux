@@ -471,17 +471,6 @@ struct Image {
 	}
 };
 
-std::string FormatPercent(double zoom) {
-	std::ostringstream stream;
-	if (zoom >= 10.0) {
-		stream.precision(0);
-	} else {
-		stream.precision(1);
-	}
-	stream << std::fixed << zoom * 100.0 << "%";
-	return stream.str();
-}
-
 std::string InfoText(const std::string& value) {
 	std::string result;
 	result.reserve(value.size());
@@ -1039,12 +1028,17 @@ private:
 	}
 
 	void SetTitle() {
+		if (fileList_.Empty() || image_.originalWidth <= 0 || image_.originalHeight <= 0) {
+			SetTitle("JPEGView");
+			return;
+		}
+		std::error_code fileError;
+		const std::uintmax_t fileSize = fs::file_size(fileList_.Current(), fileError);
 		std::ostringstream title;
-		title << "JPEGView Linux — " << fileList_.Current().filename().string()
-			<< (imageModified_ ? " *" : "")
-			<< " [" << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
-			<< image_.width << 'x' << image_.height << " @ " << FormatPercent(zoom_)
-			<< " — arrows: navigate/rotate, wheel: zoom, drag: pan, Space: fit/actual, F11: fullscreen, Esc: quit";
+		title << fileList_.Current().filename().string()
+			<< " (" << image_.originalWidth << 'x' << image_.originalHeight;
+		if (!fileError) title << ", " << FormatFileSize(fileSize);
+		title << ") - JPEGView";
 		SetTitle(title.str());
 	}
 
