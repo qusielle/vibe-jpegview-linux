@@ -2541,8 +2541,9 @@ private:
 		const int textWidth = panelWidth - 20;
 		for (std::string& line : lines) {
 			line = InfoText(line);
-			if (TextWidth(line, 2) <= textWidth) continue;
-			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3, textWidth / 12));
+			if (TextWidth(line, kContextMenuTextScale) <= textWidth) continue;
+			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
+				textWidth / (6 * kContextMenuTextScale)));
 			line.resize(maximumCharacters - 3);
 			line += "...";
 		}
@@ -2556,7 +2557,8 @@ private:
 		DrawRect(panel, 105, 105, 105);
 		const int visibleLines = std::max(0, (panelHeight - 12) / lineHeight);
 		for (int index = 0; index < visibleLines && index < static_cast<int>(lines.size()); ++index) {
-			DrawText(lines[static_cast<std::size_t>(index)], panel.x + 10, panel.y + 10 + index * lineHeight, 2,
+			DrawText(lines[static_cast<std::size_t>(index)], panel.x + 10, panel.y + 10 + index * lineHeight,
+				kContextMenuTextScale,
 				index == 0 ? 255 : 243, index == 0 ? 255 : 242, index == 0 ? 255 : 231);
 		}
 	}
