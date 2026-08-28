@@ -6,6 +6,7 @@
 #include "../third_party/stb_image.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -31,19 +32,102 @@ constexpr double kMinZoom = 0.01;
 constexpr double kMaxZoom = 32.0;
 constexpr Uint32 kControlPanelTimeoutMs = 2400;
 
-enum class ControlAction {
+enum class ViewerAction {
 	First,
 	Previous,
 	Next,
 	Last,
 	ToggleFit,
 	ToggleFullscreen,
+	Reload,
+	ToggleControls,
+	ToggleSlideshow,
+	Quit,
 };
 
 struct ControlButton {
 	SDL_Rect rect{};
-	ControlAction action = ControlAction::Next;
+	ViewerAction action = ViewerAction::Next;
 };
+
+struct MenuItem {
+	const char* label = nullptr;
+	ViewerAction action = ViewerAction::Next;
+	bool separator = false;
+	bool checked = false;
+};
+
+struct FontGlyph {
+	char character;
+	std::array<Uint8, 7> rows;
+};
+
+// A small built-in 5x7 font keeps the native SDL frontend independent of a
+// host font or an additional text-rendering shared library.  The Windows
+// popup menu is text based too; this is its portable drawing equivalent.
+const std::array<Uint8, 7>& GlyphRows(char character) {
+	static const std::array<Uint8, 7> empty{};
+	static const std::array<FontGlyph, 49> glyphs = {{
+		{'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+		{'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
+		{'C', {0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F}},
+		{'D', {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E}},
+		{'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}},
+		{'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
+		{'G', {0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0F}},
+		{'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+		{'I', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F}},
+		{'J', {0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0E}},
+		{'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}},
+		{'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}},
+		{'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
+		{'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}},
+		{'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+		{'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
+		{'Q', {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}},
+		{'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
+		{'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
+		{'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
+		{'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+		{'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}},
+		{'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11}},
+		{'X', {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11}},
+		{'Y', {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04}},
+		{'Z', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F}},
+		{'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+		{'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+		{'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
+		{'3', {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E}},
+		{'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
+		{'5', {0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E}},
+		{'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+		{'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+		{'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
+		{'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+		{'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06}},
+		{':', {0x00, 0x06, 0x06, 0x00, 0x06, 0x06, 0x00}},
+		{'?', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}},
+		{'!', {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04}},
+		{'%', {0x19, 0x19, 0x02, 0x04, 0x08, 0x13, 0x13}},
+		{'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
+		{'/', {0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10}},
+		{'[', {0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E}},
+		{']', {0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E}},
+		{'(', {0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02}},
+		{')', {0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08}},
+		{'+', {0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00}},
+		{'=', {0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00, 0x00}},
+	}};
+	const char upper = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
+	for (const FontGlyph& glyph : glyphs) {
+		if (glyph.character == upper) return glyph.rows;
+	}
+	return empty;
+}
+
+int TextWidth(const std::string& text, int scale) {
+	return text.empty() ? 0 : static_cast<int>(text.size()) * (5 * scale + scale) - scale;
+}
 
 std::string Lower(std::string value) {
 	std::transform(value.begin(), value.end(), value.begin(),
@@ -293,6 +377,7 @@ public:
 		bool running = true;
 		while (running) {
 			HandleEvents(running);
+			if (quitRequested_) running = false;
 			if (slideshowSeconds_ > 0.0 &&
 				static_cast<double>(SDL_GetTicks() - lastInteractionTick_) >= slideshowSeconds_ * 1000.0) {
 				NextImage();
@@ -464,6 +549,7 @@ private:
 	}
 
 	void ShowControls() {
+		if (!navigationPanelEnabled_) return;
 		controlsVisible_ = true;
 		controlsDeadline_ = SDL_GetTicks() + kControlPanelTimeoutMs;
 	}
@@ -491,9 +577,9 @@ private:
 		const int gap = 5;
 		const int margin = 8;
 		const int separator = 12;
-		const ControlAction actions[] = {
-			ControlAction::First, ControlAction::Previous, ControlAction::Next,
-			ControlAction::Last, ControlAction::ToggleFit, ControlAction::ToggleFullscreen
+		const ViewerAction actions[] = {
+			ViewerAction::First, ViewerAction::Previous, ViewerAction::Next,
+			ViewerAction::Last, ViewerAction::ToggleFit, ViewerAction::ToggleFullscreen
 		};
 		buttons.clear();
 		int x = panel.x + margin;
@@ -509,35 +595,186 @@ private:
 	}
 
 	bool HandleControlClick(int x, int y) {
-		if (!controlsVisible_) return false;
+		if (!navigationPanelEnabled_ || !controlsVisible_) return false;
 		std::vector<ControlButton> buttons;
 		LayoutControls(buttons);
 		for (const ControlButton& button : buttons) {
 			if (!PointInRect(x, y, button.rect)) continue;
 			switch (button.action) {
-			case ControlAction::First:
+			case ViewerAction::First:
 				FirstImage();
 				break;
-			case ControlAction::Previous:
+			case ViewerAction::Previous:
 				PreviousImage();
 				break;
-			case ControlAction::Next:
+			case ViewerAction::Next:
 				NextImage();
 				break;
-			case ControlAction::Last:
+			case ViewerAction::Last:
 				LastImage();
 				break;
-			case ControlAction::ToggleFit:
+			case ViewerAction::ToggleFit:
 				if (fitToWindow_) ActualSize(); else FitToWindow();
 				break;
-			case ControlAction::ToggleFullscreen:
+			case ViewerAction::ToggleFullscreen:
 				ToggleFullscreen();
+				break;
+			default:
 				break;
 			}
 			ShowControls();
 			return true;
 		}
 		return PointInRect(x, y, ControlPanelRect());
+	}
+
+	void ExecuteAction(ViewerAction action) {
+		switch (action) {
+		case ViewerAction::First:
+			FirstImage();
+			break;
+		case ViewerAction::Previous:
+			PreviousImage();
+			break;
+		case ViewerAction::Next:
+			NextImage();
+			break;
+		case ViewerAction::Last:
+			LastImage();
+			break;
+		case ViewerAction::ToggleFit:
+			if (fitToWindow_) ActualSize(); else FitToWindow();
+			break;
+		case ViewerAction::ToggleFullscreen:
+			ToggleFullscreen();
+			break;
+		case ViewerAction::Reload:
+			LoadCurrent();
+			break;
+		case ViewerAction::ToggleControls:
+			navigationPanelEnabled_ = !navigationPanelEnabled_;
+			if (navigationPanelEnabled_) ShowControls(); else controlsVisible_ = false;
+			break;
+		case ViewerAction::ToggleSlideshow:
+			slideshowSeconds_ = slideshowSeconds_ > 0.0 ? 0.0 : 3.0;
+			lastInteractionTick_ = SDL_GetTicks();
+			SetTitle();
+			break;
+		case ViewerAction::Quit:
+			quitRequested_ = true;
+			break;
+		}
+	}
+
+	std::vector<MenuItem> ContextMenuItems() const {
+		return {
+			{"Reload image", ViewerAction::Reload},
+			{nullptr, ViewerAction::Next, true},
+			{"First image", ViewerAction::First},
+			{"Previous image", ViewerAction::Previous},
+			{"Next image", ViewerAction::Next},
+			{"Last image", ViewerAction::Last},
+			{nullptr, ViewerAction::Next, true},
+			{"Fit to screen / Actual size", ViewerAction::ToggleFit, false, fitToWindow_},
+			{"Full screen mode", ViewerAction::ToggleFullscreen, false, fullscreen_},
+			{"Show navigation panel", ViewerAction::ToggleControls, false, navigationPanelEnabled_},
+			{nullptr, ViewerAction::Next, true},
+			{slideshowSeconds_ > 0.0 ? "Stop slide show/movie" : "Start slideshow (3 sec)", ViewerAction::ToggleSlideshow},
+			{nullptr, ViewerAction::Next, true},
+			{"Exit", ViewerAction::Quit},
+		};
+	}
+
+	std::string MenuLabel(const MenuItem& item) const {
+		if (item.checked) return std::string("[X] ") + item.label;
+		return item.label == nullptr ? std::string() : item.label;
+	}
+
+	SDL_Rect ContextMenuRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		int width = 260;
+		int height = 16;
+		for (const MenuItem& item : contextMenuItems_) {
+			if (item.separator) {
+				height += 9;
+				continue;
+			}
+			width = std::max(width, TextWidth(MenuLabel(item), 2) + 28);
+			height += 28;
+		}
+		int x = contextMenuX_;
+		int y = contextMenuY_;
+		if (x + width > windowWidth) x = windowWidth - width - 4;
+		if (y + height > windowHeight) y = windowHeight - height - 4;
+		return SDL_Rect{x, y, width, height};
+	}
+
+	int ContextMenuItemAt(int x, int y) const {
+		const SDL_Rect menu = ContextMenuRect();
+		if (!PointInRect(x, y, menu)) return -1;
+		int itemTop = menu.y + 8;
+		for (std::size_t i = 0; i < contextMenuItems_.size(); ++i) {
+			const MenuItem& item = contextMenuItems_[i];
+			const int itemHeight = item.separator ? 9 : 28;
+			if (y >= itemTop && y < itemTop + itemHeight) return item.separator ? -1 : static_cast<int>(i);
+			itemTop += itemHeight;
+		}
+		return -1;
+	}
+
+	void UpdateContextMenuSelection(int x, int y) {
+		menuSelected_ = ContextMenuItemAt(x, y);
+	}
+
+	void OpenContextMenu(int x, int y) {
+		contextMenuItems_ = ContextMenuItems();
+		contextMenuX_ = x;
+		contextMenuY_ = y;
+		contextMenuOpen_ = true;
+		menuSelected_ = -1;
+	}
+
+	void MoveContextMenuSelection(int direction) {
+		if (contextMenuItems_.empty()) return;
+		int candidate = menuSelected_;
+		for (std::size_t tries = 0; tries < contextMenuItems_.size(); ++tries) {
+			candidate += direction;
+			if (candidate < 0) candidate = static_cast<int>(contextMenuItems_.size()) - 1;
+			if (candidate >= static_cast<int>(contextMenuItems_.size())) candidate = 0;
+			if (!contextMenuItems_[candidate].separator) {
+				menuSelected_ = candidate;
+				return;
+			}
+		}
+	}
+
+	void ActivateContextMenuSelection(bool& running) {
+		if (menuSelected_ < 0 || menuSelected_ >= static_cast<int>(contextMenuItems_.size()) ||
+			contextMenuItems_[menuSelected_].separator) {
+			return;
+		}
+		const ViewerAction action = contextMenuItems_[menuSelected_].action;
+		contextMenuOpen_ = false;
+		ExecuteAction(action);
+		if (action == ViewerAction::Quit) running = false;
+	}
+
+	void DrawText(const std::string& text, int x, int y, int scale, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
+		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
+		int cursorX = x;
+		for (const char character : text) {
+			const std::array<Uint8, 7>& rows = GlyphRows(character);
+			for (int row = 0; row < 7; ++row) {
+				for (int column = 0; column < 5; ++column) {
+					if ((rows[row] & (1u << (4 - column))) == 0) continue;
+					SDL_Rect pixel{cursorX + column * scale, y + row * scale, scale, scale};
+					SDL_RenderFillRect(renderer_, &pixel);
+				}
+			}
+			cursorX += 6 * scale;
+		}
 	}
 
 	void DrawLine(int x1, int y1, int x2, int y2, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
@@ -548,19 +785,6 @@ private:
 	void DrawRect(const SDL_Rect& rect, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
 		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
 		SDL_RenderDrawRect(renderer_, &rect);
-	}
-
-	void DrawArrow(int x, int y, int direction, int size) {
-		const int center = x + size / 2;
-		const int top = y + size / 4;
-		const int bottom = y + size * 3 / 4;
-		if (direction < 0) {
-			DrawLine(center + size / 5, top, center - size / 5, y + size / 2);
-			DrawLine(center - size / 5, y + size / 2, center + size / 5, bottom);
-		} else {
-			DrawLine(center - size / 5, top, center + size / 5, y + size / 2);
-			DrawLine(center + size / 5, y + size / 2, center - size / 5, bottom);
-		}
 	}
 
 	void DrawNavigationIcon(const ControlButton& button, bool hovered) {
@@ -576,29 +800,29 @@ private:
 		const int bottom = r.y + r.h - 8;
 		const int middle = r.y + r.h / 2;
 		switch (button.action) {
-		case ControlAction::First:
+		case ViewerAction::First:
 			DrawLine(left, top, left, bottom);
 			DrawLine(left + 8, top, left + 8, bottom);
 			DrawLine(right, top, right - 10, middle);
 			DrawLine(right - 10, middle, right, bottom);
 			break;
-		case ControlAction::Previous:
+		case ViewerAction::Previous:
 			DrawLine(left + 5, top, left + 5, bottom);
 			DrawLine(right - 1, top, right - 12, middle);
 			DrawLine(right - 12, middle, right - 1, bottom);
 			break;
-		case ControlAction::Next:
+		case ViewerAction::Next:
 			DrawLine(left + 1, top, left + 12, middle);
 			DrawLine(left + 12, middle, left + 1, bottom);
 			DrawLine(right - 5, top, right - 5, bottom);
 			break;
-		case ControlAction::Last:
+		case ViewerAction::Last:
 			DrawLine(left, top, left + 10, middle);
 			DrawLine(left + 10, middle, left, bottom);
 			DrawLine(right - 8, top, right - 8, bottom);
 			DrawLine(right, top, right, bottom);
 			break;
-		case ControlAction::ToggleFit:
+		case ViewerAction::ToggleFit:
 			if (fitToWindow_) {
 				DrawLine(left + 5, top + 4, left + 14, top + 4);
 				DrawLine(left + 5, top + 4, left + 5, top + 13);
@@ -617,15 +841,17 @@ private:
 				DrawLine(right - 7, bottom - 3, right - 16, bottom - 3);
 			}
 			break;
-		case ControlAction::ToggleFullscreen:
+		case ViewerAction::ToggleFullscreen:
 			DrawRect(SDL_Rect{left, top, right - left, bottom - top});
 			DrawLine(left, top + 7, right, top + 7);
+			break;
+		default:
 			break;
 		}
 	}
 
 	void RenderControls() {
-		if (!controlsVisible_) return;
+		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_) return;
 		const Uint32 now = SDL_GetTicks();
 		std::vector<ControlButton> buttons;
 		LayoutControls(buttons);
@@ -643,10 +869,73 @@ private:
 		}
 	}
 
+	void RenderContextMenu() {
+		if (!contextMenuOpen_) return;
+		const SDL_Rect menu = ContextMenuRect();
+		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 255);
+		SDL_RenderFillRect(renderer_, &menu);
+		DrawRect(menu, 185, 185, 185);
+
+		int itemTop = menu.y + 8;
+		for (std::size_t i = 0; i < contextMenuItems_.size(); ++i) {
+			const MenuItem& item = contextMenuItems_[i];
+			if (item.separator) {
+				DrawLine(menu.x + 10, itemTop + 4, menu.x + menu.w - 10, itemTop + 4, 75, 75, 75);
+				itemTop += 9;
+				continue;
+			}
+			if (static_cast<int>(i) == menuSelected_) {
+				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 255);
+				SDL_Rect selection{menu.x + 3, itemTop, menu.w - 6, 28};
+				SDL_RenderFillRect(renderer_, &selection);
+			}
+			DrawText(MenuLabel(item), menu.x + 14, itemTop + 6, 2);
+			itemTop += 28;
+		}
+	}
+
 	void HandleEvents(bool& running) {
 		SDL_Event event{};
 		while (SDL_PollEvent(&event) != 0) {
 			lastInteractionTick_ = SDL_GetTicks();
+			if (contextMenuOpen_) {
+				switch (event.type) {
+				case SDL_QUIT:
+					running = false;
+					break;
+				case SDL_KEYDOWN:
+					if (event.key.repeat != 0) break;
+					if (event.key.keysym.sym == SDLK_ESCAPE) {
+						contextMenuOpen_ = false;
+					} else if (event.key.keysym.sym == SDLK_UP) {
+						MoveContextMenuSelection(-1);
+					} else if (event.key.keysym.sym == SDLK_DOWN) {
+						MoveContextMenuSelection(1);
+					} else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE) {
+						ActivateContextMenuSelection(running);
+					}
+					break;
+				case SDL_MOUSEMOTION:
+					UpdateContextMenuSelection(event.motion.x, event.motion.y);
+					break;
+				case SDL_MOUSEBUTTONDOWN:
+					if (event.button.button == SDL_BUTTON_LEFT) {
+						const int item = ContextMenuItemAt(event.button.x, event.button.y);
+						if (item >= 0) {
+							menuSelected_ = item;
+							ActivateContextMenuSelection(running);
+						} else {
+							contextMenuOpen_ = false;
+						}
+					} else {
+						contextMenuOpen_ = false;
+					}
+					break;
+				default:
+					break;
+				}
+				continue;
+			}
 			switch (event.type) {
 			case SDL_QUIT:
 				running = false;
@@ -707,6 +996,8 @@ private:
 					lastMouseY_ = event.button.y;
 					imageCenterX_ = event.button.x;
 					imageCenterY_ = event.button.y;
+				} else if (event.button.button == SDL_BUTTON_RIGHT) {
+					OpenContextMenu(event.button.x, event.button.y);
 				}
 				break;
 			case SDL_MOUSEBUTTONUP:
@@ -769,6 +1060,7 @@ private:
 		SDL_RenderClear(renderer_);
 		SDL_RenderCopy(renderer_, texture_, nullptr, &destination);
 		RenderControls();
+		RenderContextMenu();
 		SDL_RenderPresent(renderer_);
 	}
 
@@ -789,6 +1081,13 @@ private:
 	bool dragging_ = false;
 	bool controlsVisible_ = true;
 	Uint32 controlsDeadline_ = 0;
+	bool navigationPanelEnabled_ = true;
+	bool contextMenuOpen_ = false;
+	int contextMenuX_ = 0;
+	int contextMenuY_ = 0;
+	int menuSelected_ = -1;
+	std::vector<MenuItem> contextMenuItems_;
+	bool quitRequested_ = false;
 	std::vector<std::string> pendingDroppedFiles_;
 	int lastMouseX_ = kDefaultWidth / 2;
 	int lastMouseY_ = kDefaultHeight / 2;

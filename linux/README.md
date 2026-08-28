@@ -65,5 +65,8 @@ intended Docker environment.
 ## Controls
 
 Arrow keys or Space navigate; mouse wheel zooms around the cursor; left-drag pans; dropped files
-open in the viewer; `0` fits the image; `1` shows it at actual size; `F` toggles fullscreen;
-`R` reloads; `Esc` or `Q` quits.
+open in the viewer. Move the pointer to reveal the transient navigation panel, whose buttons mirror
+the core controls from JPEGView's Windows navigation panel (first/previous/next/last, fit/actual,
+and fullscreen). Right-click opens the core JPEGView context menu; it also supports keyboard
+selection with the arrow keys and Return. `0` fits the image; `1` shows it at actual size; `F`
+toggles fullscreen; `R` reloads; `Esc` or `Q` quits.
