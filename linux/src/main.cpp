@@ -1425,7 +1425,8 @@ void PrintUsage(const char* program) {
 		<< "  --decode-check     Decode inputs and exit (useful for CI)\n"
 		<< "  --help             Show this help\n\n"
 		<< "Controls: arrows/space navigate, mouse wheel zooms, left-drag pans, drop files to open,\n"
-		<< "          0 fits, 1 shows actual size, F toggles fullscreen, R reloads, Esc quits.\n";
+		<< "          0 fits, 1 shows actual size, F toggles fullscreen, R reloads, Ctrl+O opens,\n"
+		<< "          right-click opens the context menu, Esc or Q quits.\n";
 }
 
 } // namespace
