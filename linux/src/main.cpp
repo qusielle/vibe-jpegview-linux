@@ -627,20 +627,21 @@ public:
 		  lastSlideshowSeconds_(slideshowSeconds > 0.0 ? slideshowSeconds : 3.0), startFullscreen_(startFullscreen) {}
 
 	int Run() {
-		LoadScaleSettings();
+		LoadSettings();
 		if (SDL_Init(SDL_INIT_VIDEO) != 0) {
 			std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
 			return 1;
 		}
 
+		Uint32 windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+		if (maximized_ && !startFullscreen_) windowFlags |= SDL_WINDOW_MAXIMIZED;
 		window_ = SDL_CreateWindow("JPEGView Linux", 0x2FFF0000, 0x2FFF0000,
-			kDefaultWidth, kDefaultHeight, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+			kDefaultWidth, kDefaultHeight, windowFlags);
 		if (window_ == nullptr) {
 			std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << '\n';
 			SDL_Quit();
 			return 1;
 		}
-
 		SDL_SetHint("SDL_RENDER_SCALE_QUALITY", "2");
 		renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 		if (renderer_ == nullptr) {
@@ -665,10 +666,17 @@ public:
 			return 1;
 		}
 		ShowControls();
+		bool restoreMaximizedPending = maximized_ && !startFullscreen_;
+		const Uint32 restoreMaximizedAt = SDL_GetTicks() + 250;
 
 		bool running = true;
 		while (running) {
 			HandleEvents(running);
+			if (restoreMaximizedPending && SDL_GetTicks() >= restoreMaximizedAt) {
+				SDL_RestoreWindow(window_);
+				SDL_MaximizeWindow(window_);
+				restoreMaximizedPending = false;
+			}
 			if (quitRequested_) running = false;
 			if (slideshowSeconds_ > 0.0 &&
 				static_cast<double>(SDL_GetTicks() - lastInteractionTick_) >= slideshowSeconds_ * 1000.0) {
@@ -684,7 +692,7 @@ public:
 
 private:
 	void Cleanup() {
-		SaveScaleSettings();
+		SaveSettings();
 		if (clipboardMode_) {
 			std::error_code removeError;
 			fs::remove(clipboardTempFile_, removeError);
@@ -707,7 +715,7 @@ private:
 		SDL_Quit();
 	}
 
-	void LoadScaleSettings() {
+	void LoadSettings() {
 		const fs::path settingsPath = ScaleSettingsPath();
 		if (settingsPath.empty()) return;
 
@@ -749,6 +757,8 @@ private:
 				} catch (const std::exception&) {
 					// Ignore malformed settings and retain the built-in default.
 				}
+			} else if (key == "maximized") {
+				maximized_ = value == "1" || value == "true";
 			}
 		}
 
@@ -784,7 +794,7 @@ private:
 		return "fit";
 	}
 
-	void SaveScaleSettings() const {
+	void SaveSettings() const {
 		const fs::path settingsPath = ScaleSettingsPath();
 		if (settingsPath.empty()) return;
 
@@ -794,12 +804,14 @@ private:
 
 		fs::path temporaryPath = settingsPath;
 		temporaryPath += ".tmp";
+		bool lastMaximized = maximized_;
 		{
 			std::ofstream output(temporaryPath, std::ios::trunc);
 			if (!output) return;
 			output << "# JPEGView Linux display scaling\n"
 			       << "scale_mode=" << CurrentScaleMode() << '\n'
-			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n';
+			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n'
+			       << "maximized=" << (lastMaximized ? 1 : 0) << '\n';
 			if (!output) {
 				output.close();
 				fs::remove(temporaryPath, error);
@@ -2975,7 +2987,12 @@ private:
 				running = false;
 				break;
 			case SDL_WINDOWEVENT:
-				if (event.window.event == SDL_WINDOWEVENT_RESIZED || event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+				if (event.window.event == SDL_WINDOWEVENT_MAXIMIZED) {
+					maximized_ = true;
+				} else if (event.window.event == SDL_WINDOWEVENT_RESTORED) {
+					maximized_ = false;
+				} else if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+					event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
 					if (fitToWindow_) FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
 				}
 				break;
@@ -3105,6 +3122,7 @@ private:
 	bool fillWithCrop_ = false;
 	bool autoZoomNoEnlarge_ = false;
 	bool fullscreen_ = false;
+	bool maximized_ = false;
 	bool borderless_ = false;
 	bool alwaysOnTop_ = false;
 	bool dragging_ = false;

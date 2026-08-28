@@ -137,6 +137,7 @@ enum : Uint32 {
 	SDL_INIT_VIDEO = 0x00000020u,
 	SDL_WINDOW_SHOWN = 0x00000004u,
 	SDL_WINDOW_RESIZABLE = 0x00000020u,
+	SDL_WINDOW_MAXIMIZED = 0x00000040u,
 	SDL_WINDOW_ALLOW_HIGHDPI = 0x00002000u,
 	SDL_WINDOW_FULLSCREEN_DESKTOP = 0x00001001u,
 	SDL_RENDERER_ACCELERATED = 0x00000002u,
@@ -164,6 +165,8 @@ enum : Uint32 {
 enum : Uint8 {
 	SDL_WINDOWEVENT_RESIZED = 0x05u,
 	SDL_WINDOWEVENT_SIZE_CHANGED = 0x06u,
+	SDL_WINDOWEVENT_MAXIMIZED = 0x08u,
+	SDL_WINDOWEVENT_RESTORED = 0x09u,
 	SDL_BUTTON_LEFT = 1u,
 	SDL_BUTTON_RIGHT = 3u,
 };
@@ -211,6 +214,8 @@ const char* SDL_GetError();
 SDL_Window* SDL_CreateWindow(const char* title, int x, int y, int w, int h, Uint32 flags);
 void SDL_DestroyWindow(SDL_Window* window);
 int SDL_SetWindowFullscreen(SDL_Window* window, Uint32 flags);
+void SDL_MaximizeWindow(SDL_Window* window);
+void SDL_RestoreWindow(SDL_Window* window);
 void SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
 void SDL_SetWindowSize(SDL_Window* window, int w, int h);
 void SDL_SetWindowTitle(SDL_Window* window, const char* title);
