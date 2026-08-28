@@ -2521,7 +2521,7 @@ private:
 	void RenderFileDialog() {
 		if (!fileDialogOpen_) return;
 		const SDL_Rect dialog = FileDialogRect();
-		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 255);
+		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
 		SDL_RenderFillRect(renderer_, &dialog);
 		DrawRect(dialog, 190, 190, 190);
 		DrawText(fileDialogSave_ ? "SAVE PROCESSED IMAGE" : "OPEN IMAGE", dialog.x + 18, dialog.y + 14, kUiTextScale);
@@ -2529,7 +2529,7 @@ private:
 		if (fileDialogSave_) {
 			DrawText("FILE NAME", dialog.x + 18, dialog.y + 68, kUiTextScale, 190, 190, 190);
 			SDL_Rect inputRect{dialog.x + 12, dialog.y + 86, dialog.w - 24, 28};
-			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 255);
+			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
 			SDL_RenderFillRect(renderer_, &inputRect);
 			DrawRect(inputRect, 100, 130, 165);
 			DrawText(fileDialogFilename_, inputRect.x + 10, inputRect.y + 6, kUiTextScale);
@@ -2538,7 +2538,7 @@ private:
 		const int listTop = FileDialogListTop();
 		const int rows = FileDialogVisibleRows();
 		SDL_Rect listRect{dialog.x + 12, listTop, dialog.w - 24, rows * 26};
-		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 255);
+		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 210);
 		SDL_RenderFillRect(renderer_, &listRect);
 		DrawRect(listRect, 75, 75, 75);
 		for (int row = 0; row < rows; ++row) {
@@ -2547,7 +2547,7 @@ private:
 			const FileDialogEntry& entry = fileDialogEntries_[item];
 			const int rowTop = listTop + row * 26;
 			if (item == fileDialogSelected_) {
-				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 255);
+				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
 				SDL_Rect selection{listRect.x + 2, rowTop + 1, listRect.w - 4, 24};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
@@ -2590,7 +2590,7 @@ private:
 	void DrawNavigationIcon(const ControlButton& button, bool hovered) {
 		const SDL_Rect r = button.rect;
 		if (hovered) {
-			SDL_SetRenderDrawColor(renderer_, 65, 65, 65, 255);
+			SDL_SetRenderDrawColor(renderer_, 65, 65, 65, 165);
 			SDL_RenderFillRect(renderer_, &r);
 		}
 		DrawRect(r, 150, 150, 150);
@@ -2709,7 +2709,7 @@ private:
 		if (y < 4) y = anchor.y + anchor.h + 6;
 		if (y + tooltipHeight > windowHeight) y = std::max(4, windowHeight - tooltipHeight - 4);
 		const SDL_Rect tooltip{x, y, tooltipWidth, tooltipHeight};
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 245);
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 215);
 		SDL_RenderFillRect(renderer_, &tooltip);
 		DrawRect(tooltip, 190, 190, 190);
 		DrawText(label, tooltip.x + 8, tooltip.y + 7, kUiTextScale, 255, 255, 255);
@@ -2732,7 +2732,7 @@ private:
 			label += "...";
 		}
 		const SDL_Rect panel{8, 8, panelWidth, 28};
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
 		DrawText(label, panel.x + 10, panel.y + 6, kUiTextScale, 255, 255, 255);
@@ -2761,7 +2761,7 @@ private:
 		const int panelHeight = std::min(windowHeight - 16, 20 + static_cast<int>(lines.size()) * lineHeight);
 		const int panelTop = showFileName_ ? 42 : 8;
 		SDL_Rect panel{8, panelTop, panelWidth, panelHeight};
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
 		const int visibleLines = std::max(0, (panelHeight - 12) / lineHeight);
@@ -2779,7 +2779,7 @@ private:
 		const SDL_Rect panel = ControlPanelRect();
 		const ControlButton* hoveredButton = nullptr;
 
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
 		for (const ControlButton& button : buttons) {
@@ -2798,7 +2798,7 @@ private:
 		const int width = std::min(760, std::max(360, windowWidth - 40));
 		const int height = 136;
 		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 245);
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 220);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 220, 170, 110);
 		DrawText("CONFIRM ACTION", panel.x + 18, panel.y + 14, kUiTextScale, 255, 220, 150);
@@ -2821,7 +2821,7 @@ private:
 		const int width = std::min(620, std::max(360, windowWidth - 40));
 		const int height = 196;
 		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 245);
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 220);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 160, 190, 225);
 		DrawText("JPEGVIEW LINUX", panel.x + 18, panel.y + 16, kUiTextScale, 255, 255, 255);
@@ -2884,7 +2884,7 @@ private:
 	void RenderContextMenu() {
 		if (!contextMenuOpen_) return;
 		const SDL_Rect menu = ContextMenuRect();
-		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 255);
+		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
 		SDL_RenderFillRect(renderer_, &menu);
 		DrawRect(menu, 185, 185, 185);
 
@@ -2900,7 +2900,7 @@ private:
 				continue;
 			}
 			if (static_cast<int>(i) == menuSelected_) {
-				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 255);
+				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
 				SDL_Rect selection{menu.x + 3, itemTop, menu.w - 6, kContextMenuItemHeight};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
@@ -3084,9 +3084,11 @@ private:
 			renderHeight
 		};
 		SDL_Texture* renderTexture = DisplayTextureFor(renderWidth, renderHeight);
+		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
 		SDL_RenderClear(renderer_);
 		RenderImageTransition(destination, windowWidth, windowHeight, renderTexture);
+		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderFileName();
 		RenderImageInfo();
 		RenderControls();
@@ -3094,6 +3096,7 @@ private:
 		RenderFileDialog();
 		RenderConfirmation();
 		RenderAbout();
+		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_RenderPresent(renderer_);
 	}
 

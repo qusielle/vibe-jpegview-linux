@@ -54,6 +54,9 @@ Catmull-Rom bicubic interpolation. The resulting display-size bitmap is cached u
 target size changes, so SDL does not have to scale the original texture with nearest-neighbor
 sampling on every frame.
 
+The native navigation panel, menus, tooltips, information overlays, and modal dialogs use
+semi-transparent backgrounds so the image remains partially visible underneath them.
+
 ## AppImage
 
 The packaging script creates an AppDir, bundles the SDL2 shared library, and invokes

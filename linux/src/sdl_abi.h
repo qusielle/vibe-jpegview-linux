@@ -134,6 +134,7 @@ static_assert(offsetof(SDL_MouseWheelEvent, y) == 20, "unexpected SDL wheel offs
 static_assert(sizeof(SDL_Event) == 56, "unexpected SDL_Event layout");
 
 enum : Uint32 {
+	SDL_BLENDMODE_NONE = 0u,
 	SDL_INIT_VIDEO = 0x00000020u,
 	SDL_WINDOW_SHOWN = 0x00000004u,
 	SDL_WINDOW_RESIZABLE = 0x00000020u,
@@ -237,6 +238,7 @@ int SDL_RenderCopy(SDL_Renderer* renderer, SDL_Texture* texture, const SDL_Rect*
 int SDL_RenderDrawLine(SDL_Renderer* renderer, int x1, int y1, int x2, int y2);
 int SDL_RenderDrawRect(SDL_Renderer* renderer, const SDL_Rect* rect);
 int SDL_RenderFillRect(SDL_Renderer* renderer, const SDL_Rect* rect);
+int SDL_SetRenderDrawBlendMode(SDL_Renderer* renderer, int blendMode);
 void SDL_RenderPresent(SDL_Renderer* renderer);
 int SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
 int SDL_PollEvent(SDL_Event* event);
