@@ -85,8 +85,9 @@ remains visible until Ctrl+N disables it; it is temporarily suppressed while a m
 file browser is open. Right-click
 opens the core JPEGView context menu; it also supports keyboard selection with the arrow keys and
 Return. Hovering over a lower navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
-next or previous image. Esc stops an active slideshow first, matching the Windows default escape command, and
-otherwise quits.
+next or previous image and is saved between application runs. The setting is stored in
+`${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. Esc stops an active slideshow first,
+matching the Windows default escape command, and otherwise quits.
 
 The port follows the Windows `CFileList` navigation model: the default display order is ascending
 last-modification time; `N`, `M`, `C`, and `Z` select filename, modification date, creation date,

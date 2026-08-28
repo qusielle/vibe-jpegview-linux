@@ -610,6 +610,16 @@ std::string FileUri(const fs::path& filename) {
 	return uri.str();
 }
 
+fs::path ScaleSettingsPath() {
+	if (const char* configHome = std::getenv("XDG_CONFIG_HOME"); configHome != nullptr && *configHome != '\0') {
+		return fs::path(configHome) / "jpegview-linux" / "settings.conf";
+	}
+	if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+		return fs::path(home) / ".config" / "jpegview-linux" / "settings.conf";
+	}
+	return {};
+}
+
 class Viewer {
 public:
 	Viewer(jpegview_linux::FileList fileList, double slideshowSeconds, bool startFullscreen)
@@ -617,6 +627,7 @@ public:
 		  lastSlideshowSeconds_(slideshowSeconds > 0.0 ? slideshowSeconds : 3.0), startFullscreen_(startFullscreen) {}
 
 	int Run() {
+		LoadScaleSettings();
 		if (SDL_Init(SDL_INIT_VIDEO) != 0) {
 			std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
 			return 1;
@@ -673,6 +684,7 @@ public:
 
 private:
 	void Cleanup() {
+		SaveScaleSettings();
 		if (clipboardMode_) {
 			std::error_code removeError;
 			fs::remove(clipboardTempFile_, removeError);
@@ -693,6 +705,110 @@ private:
 			window_ = nullptr;
 		}
 		SDL_Quit();
+	}
+
+	void LoadScaleSettings() {
+		const fs::path settingsPath = ScaleSettingsPath();
+		if (settingsPath.empty()) return;
+
+		std::ifstream input(settingsPath);
+		if (!input) return;
+
+		std::string scaleMode;
+		double manualZoom = zoom_;
+		bool hasManualZoom = false;
+		std::string line;
+		while (std::getline(input, line)) {
+			if (line.empty() || line[0] == '#') continue;
+			const std::size_t separator = line.find('=');
+			if (separator == std::string::npos) continue;
+			std::string key = line.substr(0, separator);
+			std::string value = line.substr(separator + 1);
+			const auto trim = [](std::string text) {
+				const auto first = std::find_if_not(text.begin(), text.end(), [](unsigned char character) {
+					return std::isspace(character) != 0;
+				});
+				const auto last = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char character) {
+					return std::isspace(character) != 0;
+				}).base();
+				if (first >= last) return std::string{};
+				return std::string(first, last);
+			};
+			key = trim(std::move(key));
+			value = trim(std::move(value));
+			if (key == "scale_mode") {
+				scaleMode = value;
+			} else if (key == "manual_zoom") {
+				try {
+					std::size_t parsedCharacters = 0;
+					const double parsedZoom = std::stod(value, &parsedCharacters);
+					if (parsedCharacters == value.size() && std::isfinite(parsedZoom)) {
+						manualZoom = std::clamp(parsedZoom, kMinZoom, kMaxZoom);
+						hasManualZoom = true;
+					}
+				} catch (const std::exception&) {
+					// Ignore malformed settings and retain the built-in default.
+				}
+			}
+		}
+
+		if (scaleMode == "fit") {
+			fitToWindow_ = true;
+			fillWithCrop_ = false;
+			autoZoomNoEnlarge_ = false;
+		} else if (scaleMode == "fill") {
+			fitToWindow_ = true;
+			fillWithCrop_ = true;
+			autoZoomNoEnlarge_ = false;
+		} else if (scaleMode == "fit_no_enlarge") {
+			fitToWindow_ = true;
+			fillWithCrop_ = false;
+			autoZoomNoEnlarge_ = true;
+		} else if (scaleMode == "fill_no_enlarge") {
+			fitToWindow_ = true;
+			fillWithCrop_ = true;
+			autoZoomNoEnlarge_ = true;
+		} else if (scaleMode == "manual") {
+			fitToWindow_ = false;
+			fillWithCrop_ = false;
+			autoZoomNoEnlarge_ = false;
+			if (hasManualZoom) zoom_ = manualZoom;
+		}
+	}
+
+	const char* CurrentScaleMode() const {
+		if (!fitToWindow_) return "manual";
+		if (fillWithCrop_ && autoZoomNoEnlarge_) return "fill_no_enlarge";
+		if (fillWithCrop_) return "fill";
+		if (autoZoomNoEnlarge_) return "fit_no_enlarge";
+		return "fit";
+	}
+
+	void SaveScaleSettings() const {
+		const fs::path settingsPath = ScaleSettingsPath();
+		if (settingsPath.empty()) return;
+
+		std::error_code error;
+		fs::create_directories(settingsPath.parent_path(), error);
+		if (error) return;
+
+		fs::path temporaryPath = settingsPath;
+		temporaryPath += ".tmp";
+		{
+			std::ofstream output(temporaryPath, std::ios::trunc);
+			if (!output) return;
+			output << "# JPEGView Linux display scaling\n"
+			       << "scale_mode=" << CurrentScaleMode() << '\n'
+			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n';
+			if (!output) {
+				output.close();
+				fs::remove(temporaryPath, error);
+				return;
+			}
+		}
+
+		fs::rename(temporaryPath, settingsPath, error);
+		if (error) fs::remove(temporaryPath, error);
 	}
 
 	bool LoadCurrent() {
