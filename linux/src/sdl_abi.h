@@ -175,6 +175,7 @@ enum : Uint8 {
 enum : Sint32 {
 	SDLK_ESCAPE = 27,
 	SDLK_BACKSPACE = 8,
+	SDLK_TAB = 9,
 	SDLK_DELETE = 127,
 	SDLK_RETURN = 13,
 	SDLK_SPACE = 32,

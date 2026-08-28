@@ -43,6 +43,7 @@ public:
 	void First();
 	void Last();
 	bool Reload();
+	bool Reload(const std::filesystem::path& preferredPath);
 
 	void SetSorting(SortMode sortMode, bool sortAscending);
 	SortMode GetSorting() const { return sortMode_; }

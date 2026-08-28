@@ -110,12 +110,15 @@ overlays, slideshow transitions, window mode toggles, and `jpegtran`-backed loss
 The `Open image with` submenu is populated from matching freedesktop `.desktop` applications and
 launches them with the current image, including standard `%f`/`%F` and URI placeholders. Applications
 are discovered from the user and system application directories at menu-open time.
+`Batch rename/copy...` is also available: select images, preview a Windows-compatible target pattern,
+save it as a template, and rename within the folder or copy into newly-created subdirectories without
+overwriting existing files. Its `%pictures%` placeholder maps to `$XDG_PICTURES_DIR` or `$HOME/Pictures`.
 The AppImage bundles `xclip`, `wl-copy`/`wl-paste`, and `jpegtran` when the build environment provides
 them. `lp`, `gsettings`, `feh`, and `nitrogen` remain host desktop integrations. The clipboard tools
 are also needed for image copy/paste in a local non-AppImage build.
 
 The context menu keeps Windows-only operations visible but disabled where their underlying Windows
-subsystem has no Linux implementation yet: batch rename/copy dialogs, free rotation, perspective
+subsystem has no Linux implementation yet: free rotation, perspective
 correction, the original JPEGView image-processing parameter engine, parameter databases, settings
 editors, Open-With menu management, default-viewer registration, and user-command configuration. This
 makes the remaining port boundary explicit while preserving the original command vocabulary.

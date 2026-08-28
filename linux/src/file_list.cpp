@@ -408,7 +408,11 @@ void FileList::Last() {
 }
 
 bool FileList::Reload() {
-	const fs::path selected = Current();
+	return Reload(Current());
+}
+
+bool FileList::Reload(const fs::path& preferredPath) {
+	const fs::path selected = preferredPath;
 	if (selected.empty()) return false;
 	if (multipleInputMode_) {
 		Initialize(inputs_);

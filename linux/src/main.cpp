@@ -53,6 +53,12 @@ constexpr double kMaxZoom = 32.0;
 constexpr int kUiTextScale = 1;
 constexpr int kContextMenuItemHeight = 18;
 constexpr int kContextMenuSeparatorHeight = 7;
+constexpr int kBatchSelectAll = 0;
+constexpr int kBatchSelectNone = 1;
+constexpr int kBatchPreview = 2;
+constexpr int kBatchSavePattern = 3;
+constexpr int kBatchRename = 4;
+constexpr int kBatchClose = 5;
 
 struct ControlButton {
 	SDL_Rect rect{};
@@ -79,6 +85,15 @@ struct FileDialogEntry {
 	fs::path path;
 	bool directory = false;
 	bool parent = false;
+};
+
+struct BatchCopyItem {
+	fs::path source;
+	std::time_t modificationTime = 0;
+	bool selected = false;
+	bool copy = false;
+	fs::path destination;
+	std::string destinationText;
 };
 
 struct FontGlyph {
@@ -151,6 +166,15 @@ const std::array<Uint8, 7>& GlyphRows(char character) {
 
 int TextWidth(const std::string& text, int scale) {
 	return text.empty() ? 0 : static_cast<int>(text.size()) * (5 * scale + scale) - scale;
+}
+
+std::string ClipText(const std::string& value, int maximumWidth, int scale = kUiTextScale) {
+	if (maximumWidth <= 0) return {};
+	if (TextWidth(value, scale) <= maximumWidth) return value;
+	const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
+		maximumWidth / (6 * scale)));
+	if (maximumCharacters <= 3) return value.substr(0, 1) + "...";
+	return value.substr(0, maximumCharacters - 3) + "...";
 }
 
 std::string Lower(std::string value) {
@@ -496,6 +520,98 @@ std::string FormatFileTime(const fs::path& filename) {
 	char formatted[32]{};
 	if (std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S", &localTime) == 0) return {};
 	return formatted;
+}
+
+std::time_t FileModificationTime(const fs::path& filename) {
+	struct stat status{};
+	if (stat(filename.c_str(), &status) != 0) return 0;
+	return status.st_mtime;
+}
+
+std::string FormatBatchDate(std::time_t timestamp) {
+	if (timestamp == 0) return {};
+	std::tm localTime{};
+	if (localtime_r(&timestamp, &localTime) == nullptr) return {};
+	char formatted[32]{};
+	if (std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S", &localTime) == 0) return {};
+	return formatted;
+}
+
+void ReplaceAll(std::string& value, const std::string& from, const std::string& to) {
+	if (from.empty()) return;
+	std::size_t position = 0;
+	while ((position = value.find(from, position)) != std::string::npos) {
+		value.replace(position, from.size(), to);
+		position += to.size();
+	}
+}
+
+std::string FirstNumber(const std::string& filename) {
+	std::size_t start = std::string::npos;
+	for (std::size_t index = 0; index < filename.size(); ++index) {
+		if (std::isdigit(static_cast<unsigned char>(filename[index]))) {
+			if (start == std::string::npos) start = index;
+		} else if (start != std::string::npos) {
+			return filename.substr(start, index - start);
+		}
+	}
+	return start == std::string::npos ? std::string() : filename.substr(start);
+}
+
+fs::path PicturesDirectory() {
+	if (const char* pictures = std::getenv("XDG_PICTURES_DIR"); pictures != nullptr && *pictures != '\0') {
+		return AbsoluteNormalized(fs::path(pictures));
+	}
+	if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+		return AbsoluteNormalized(fs::path(home) / "Pictures");
+	}
+	return {};
+}
+
+std::string ExpandBatchPattern(const std::string& pattern, std::size_t selectedIndex,
+	const fs::path& source, std::time_t modificationTime) {
+	std::string result = pattern;
+	const std::string title = source.filename().string();
+	const std::string stem = source.stem().string();
+	const std::string extension = source.extension().string();
+	const std::string number = FirstNumber(title);
+	ReplaceAll(result, "%x", std::to_string(selectedIndex + 1));
+	ReplaceAll(result, "%n", number);
+	for (int digits = 2; digits <= 9; ++digits) {
+		std::ostringstream formatted;
+		formatted << std::setw(digits) << std::setfill('0') << selectedIndex + 1;
+		ReplaceAll(result, "%" + std::to_string(digits) + "x", formatted.str());
+	}
+	ReplaceAll(result, "%f", title);
+	ReplaceAll(result, "%F", stem);
+	ReplaceAll(result, "%e", extension.empty() ? std::string() : extension.substr(1));
+
+	std::tm localTime{};
+	if (modificationTime != 0) localtime_r(&modificationTime, &localTime);
+	char datePart[32]{};
+	if (modificationTime != 0) {
+		std::strftime(datePart, sizeof(datePart), "%H", &localTime);
+		ReplaceAll(result, "%h", datePart);
+		std::strftime(datePart, sizeof(datePart), "%M", &localTime);
+		ReplaceAll(result, "%min", datePart);
+		std::strftime(datePart, sizeof(datePart), "%d", &localTime);
+		ReplaceAll(result, "%d", datePart);
+		std::strftime(datePart, sizeof(datePart), "%m", &localTime);
+		ReplaceAll(result, "%m", datePart);
+		std::strftime(datePart, sizeof(datePart), "%Y", &localTime);
+		ReplaceAll(result, "%y", datePart);
+		std::strftime(datePart, sizeof(datePart), "%y", &localTime);
+		ReplaceAll(result, "%2y", datePart);
+		std::strftime(datePart, sizeof(datePart), "%B", &localTime);
+		ReplaceAll(result, "%3M", std::string(datePart).substr(0, 3));
+		ReplaceAll(result, "%M", datePart);
+	}
+	const fs::path pictures = PicturesDirectory();
+	if (!pictures.empty()) ReplaceAll(result, "%pictures%", pictures.string());
+	// Windows JPEGView patterns use backslashes for subdirectories. Accept
+	// those templates on Linux while still allowing the native '/' separator.
+	std::replace(result.begin(), result.end(), '\\', '/');
+	return result;
 }
 
 std::string FormatFileSize(std::uintmax_t size) {
@@ -1005,6 +1121,7 @@ private:
 		if (!input) return;
 
 		std::string scaleMode;
+		std::string copyRenamePattern;
 		double manualZoom = zoom_;
 		bool hasManualZoom = false;
 		std::string line;
@@ -1028,6 +1145,8 @@ private:
 			value = trim(std::move(value));
 			if (key == "scale_mode") {
 				scaleMode = value;
+			} else if (key == "copy_rename_pattern") {
+				copyRenamePattern = value;
 			} else if (key == "manual_zoom") {
 				try {
 					std::size_t parsedCharacters = 0;
@@ -1045,6 +1164,7 @@ private:
 				navigationPanelEnabled_ = value == "1" || value == "true";
 			}
 		}
+		copyRenamePattern_ = copyRenamePattern;
 
 		if (scaleMode == "fit") {
 			fitToWindow_ = true;
@@ -1092,11 +1212,12 @@ private:
 		{
 			std::ofstream output(temporaryPath, std::ios::trunc);
 			if (!output) return;
-			output << "# JPEGView Linux display scaling\n"
+			output << "# JPEGView Linux display and batch-operation settings\n"
 			       << "scale_mode=" << CurrentScaleMode() << '\n'
 			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n'
 			       << "maximized=" << (lastMaximized ? 1 : 0) << '\n'
-			       << "navigation_panel_enabled=" << (navigationPanelEnabled_ ? 1 : 0) << '\n';
+			       << "navigation_panel_enabled=" << (navigationPanelEnabled_ ? 1 : 0) << '\n'
+			       << "copy_rename_pattern=" << copyRenamePattern_ << '\n';
 			if (!output) {
 				output.close();
 				fs::remove(temporaryPath, error);
@@ -2056,6 +2177,9 @@ private:
 		case IDM_PRINT:
 			PrintCurrentImage();
 			break;
+		case IDM_BATCH_COPY:
+			OpenBatchCopyDialog();
+			break;
 		case IDM_COPY:
 			CopyCurrentImage(false);
 			break;
@@ -2381,7 +2505,7 @@ private:
 			{"Reload image", IDM_RELOAD, false, false, true, "Ctrl+R"},
 			{"Open containing folder", IDM_EXPLORE, false, false, true, "W"},
 			{"Print image...", IDM_PRINT, false, false, true, "Ctrl+P"},
-			{"Batch rename/copy...", IDM_BATCH_COPY, false, false, false},
+			{"Batch rename/copy...", IDM_BATCH_COPY, false, false, true},
 			{"Set modification date", 0},
 			{"  To current date", IDM_TOUCH_IMAGE, false, false, true, "Ctrl+Shift+M"},
 			{"  To EXIF date", IDM_TOUCH_IMAGE_EXIF, false, false, true, "Ctrl+Shift+E"},
@@ -2652,6 +2776,426 @@ private:
 		contextMenuOpen_ = false;
 		ExecuteCommand(command);
 		if (command == IDM_EXIT) running = false;
+	}
+
+	SDL_Rect BatchCopyRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(1120, std::max(760, windowWidth - 40));
+		const int height = std::min(760, std::max(520, windowHeight - 40));
+		return SDL_Rect{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+	}
+
+	SDL_Rect BatchCopyListRect() const {
+		const SDL_Rect dialog = BatchCopyRect();
+		const int listWidth = std::max(400, dialog.w * 3 / 5);
+		return SDL_Rect{dialog.x + 14, dialog.y + 64, listWidth, dialog.h - 136};
+	}
+
+	int BatchCopyRightX() const {
+		const SDL_Rect list = BatchCopyListRect();
+		return list.x + list.w + 20;
+	}
+
+	int BatchCopyRightWidth() const {
+		const SDL_Rect dialog = BatchCopyRect();
+		return std::max(200, dialog.x + dialog.w - BatchCopyRightX() - 14);
+	}
+
+	SDL_Rect BatchCopyPatternRect() const {
+		const SDL_Rect dialog = BatchCopyRect();
+		return SDL_Rect{BatchCopyRightX(), dialog.y + 236, BatchCopyRightWidth(), 30};
+	}
+
+	SDL_Rect BatchCopyButtonRect(int button) const {
+		const SDL_Rect dialog = BatchCopyRect();
+		const SDL_Rect list = BatchCopyListRect();
+		const int y = dialog.y + dialog.h - 54;
+		const int height = 30;
+		switch (button) {
+		case kBatchSelectAll: return SDL_Rect{list.x, y, 100, height};
+		case kBatchSelectNone: return SDL_Rect{list.x + 108, y, 108, height};
+		case kBatchPreview: return SDL_Rect{list.x + 224, y, 90, height};
+		case kBatchSavePattern: return SDL_Rect{list.x + 322, y, 118, height};
+		case kBatchRename: return SDL_Rect{list.x + 448, y, 118, height};
+		case kBatchClose: return SDL_Rect{list.x + 574, y, 80, height};
+		default: return SDL_Rect{};
+		}
+	}
+
+	int BatchCopyEntryAt(int x, int y) const {
+		const SDL_Rect list = BatchCopyListRect();
+		if (!PointInRect(x, y, list)) return -1;
+		const int row = (y - list.y - 22) / 24;
+		if (row < 0) return -1;
+		const int item = static_cast<int>(batchCopyScroll_) + row;
+		return item >= 0 && item < static_cast<int>(batchCopyEntries_.size()) ? item : -1;
+	}
+
+	int BatchCopyButtonAt(int x, int y) const {
+		for (int button = kBatchSelectAll; button <= kBatchClose; ++button) {
+			if (PointInRect(x, y, BatchCopyButtonRect(button))) return button;
+		}
+		return -1;
+	}
+
+	int BatchCopyVisibleRows() const {
+		const SDL_Rect list = BatchCopyListRect();
+		return std::max(1, (list.h - 22) / 24);
+	}
+
+	void EnsureBatchCopySelectionVisible() {
+		const int rows = BatchCopyVisibleRows();
+		if (batchCopyCursor_ < static_cast<int>(batchCopyScroll_)) batchCopyScroll_ = batchCopyCursor_;
+		if (batchCopyCursor_ >= static_cast<int>(batchCopyScroll_) + rows) {
+			batchCopyScroll_ = static_cast<std::size_t>(batchCopyCursor_ - rows + 1);
+		}
+		const int maximumScroll = std::max(0, static_cast<int>(batchCopyEntries_.size()) - rows);
+		batchCopyScroll_ = std::min(batchCopyScroll_, static_cast<std::size_t>(maximumScroll));
+	}
+
+	void PopulateBatchCopyEntries() {
+		batchCopyEntries_.clear();
+		for (const fs::path& filename : fileList_.Files()) {
+			BatchCopyItem item;
+			item.source = filename;
+			item.modificationTime = FileModificationTime(filename);
+			batchCopyEntries_.push_back(std::move(item));
+		}
+		if (batchCopyEntries_.empty()) {
+			batchCopyCursor_ = 0;
+			batchCopyScroll_ = 0;
+			return;
+		}
+		batchCopyCursor_ = std::min(fileList_.CurrentIndex(), batchCopyEntries_.size() - 1);
+		batchCopyScroll_ = 0;
+		EnsureBatchCopySelectionVisible();
+	}
+
+	fs::path BatchCopyDestination(const BatchCopyItem& item, std::size_t selectedIndex) const {
+		if (batchCopyPattern_.empty()) return {};
+		const std::string expanded = ExpandBatchPattern(batchCopyPattern_, selectedIndex,
+			item.source, item.modificationTime);
+		if (expanded.empty()) return {};
+		const fs::path target(expanded);
+		return AbsoluteNormalized(target.is_absolute() ? target : item.source.parent_path() / target);
+	}
+
+	void UpdateBatchCopyPreview() {
+		std::size_t selectedIndex = 0;
+		for (BatchCopyItem& item : batchCopyEntries_) {
+			item.destination = fs::path{};
+			item.destinationText.clear();
+			item.copy = false;
+			if (!item.selected) continue;
+			item.destinationText = ExpandBatchPattern(batchCopyPattern_, selectedIndex,
+				item.source, item.modificationTime);
+			if (!item.destinationText.empty()) {
+				item.destination = BatchCopyDestination(item, selectedIndex);
+				item.copy = item.destination.parent_path() != item.source.parent_path();
+			}
+			++selectedIndex;
+		}
+	}
+
+	void PreviewBatchCopy() {
+		UpdateBatchCopyPreview();
+		if (batchCopyPattern_.empty()) {
+			batchCopyMessage_ = "Enter a target pattern first";
+			return;
+		}
+		int selected = 0;
+		int copies = 0;
+		for (const BatchCopyItem& item : batchCopyEntries_) {
+			if (!item.selected) continue;
+			++selected;
+			if (item.copy) ++copies;
+		}
+		batchCopyMessage_ = selected == 0 ? "Select one or more files" :
+			"Preview: " + std::to_string(selected) + " selected, " + std::to_string(copies) + " copied, " +
+			std::to_string(selected - copies) + " renamed";
+	}
+
+	void SaveBatchCopyPattern() {
+		if (batchCopyPattern_.empty()) {
+			batchCopyMessage_ = "Enter a target pattern first";
+			return;
+		}
+		copyRenamePattern_ = batchCopyPattern_;
+		SaveSettings();
+		batchCopyMessage_ = "Saved batch pattern";
+	}
+
+	void PerformBatchCopy() {
+		if (batchCopyPattern_.empty()) {
+			batchCopyMessage_ = "Enter a target pattern first";
+			return;
+		}
+		UpdateBatchCopyPreview();
+		fs::path preferredCurrentPath = fileList_.Current();
+		int renamed = 0;
+		int copied = 0;
+		int createdDirectories = 0;
+		int failed = 0;
+		std::string firstFailure;
+		for (BatchCopyItem& item : batchCopyEntries_) {
+			if (!item.selected) continue;
+			if (item.destination.empty() || item.destination == item.source) {
+				++failed;
+				if (firstFailure.empty()) firstFailure = item.source.filename().string() + " has no distinct target";
+				continue;
+			}
+			std::error_code error;
+			if (fs::exists(item.destination, error) || error) {
+				++failed;
+				if (firstFailure.empty()) firstFailure = item.destination.filename().string() + " already exists";
+				continue;
+			}
+			if (item.copy) {
+				const fs::path parent = item.destination.parent_path();
+				if (!parent.empty()) {
+					const bool created = fs::create_directories(parent, error);
+					if (error) {
+						++failed;
+						if (firstFailure.empty()) firstFailure = "cannot create " + parent.string();
+						continue;
+					}
+					if (created) ++createdDirectories;
+				}
+				if (!fs::copy_file(item.source, item.destination, fs::copy_options::none, error) || error) {
+					++failed;
+					if (firstFailure.empty()) firstFailure = "cannot copy " + item.source.filename().string();
+					continue;
+				}
+				++copied;
+			} else {
+				fs::rename(item.source, item.destination, error);
+				if (error) {
+					++failed;
+					if (firstFailure.empty()) firstFailure = "cannot rename " + item.source.filename().string();
+					continue;
+				}
+				if (item.source == preferredCurrentPath) preferredCurrentPath = item.destination;
+				++renamed;
+			}
+		}
+
+		if (renamed > 0 || copied > 0) {
+			if (fileList_.Reload(preferredCurrentPath)) LoadCurrent();
+		}
+		PopulateBatchCopyEntries();
+		for (BatchCopyItem& item : batchCopyEntries_) item.selected = false;
+		UpdateBatchCopyPreview();
+		batchCopyMessage_ = "Completed: " + std::to_string(renamed) + " renamed, " +
+			std::to_string(copied) + " copied, " + std::to_string(createdDirectories) + " folder(s) created";
+		if (failed > 0) batchCopyMessage_ += "; " + std::to_string(failed) + " failed" +
+			(firstFailure.empty() ? std::string() : ": " + firstFailure);
+	}
+
+	void OpenBatchCopyDialog() {
+		if (fileList_.Empty() || clipboardMode_) return;
+		PopulateBatchCopyEntries();
+		batchCopyPattern_ = copyRenamePattern_;
+		batchCopyMessage_.clear();
+		batchCopyOpen_ = true;
+		batchCopyPatternFocused_ = true;
+		contextMenuOpen_ = false;
+		fileDialogOpen_ = false;
+		SDL_StartTextInput();
+	}
+
+	void CloseBatchCopyDialog() {
+		SDL_StopTextInput();
+		batchCopyOpen_ = false;
+		batchCopyPatternFocused_ = false;
+	}
+
+	void HandleBatchCopyButton(int button) {
+		switch (button) {
+		case kBatchSelectAll:
+			for (BatchCopyItem& item : batchCopyEntries_) item.selected = true;
+			PreviewBatchCopy();
+			break;
+		case kBatchSelectNone:
+			for (BatchCopyItem& item : batchCopyEntries_) item.selected = false;
+			PreviewBatchCopy();
+			break;
+		case kBatchPreview:
+			PreviewBatchCopy();
+			break;
+		case kBatchSavePattern:
+			SaveBatchCopyPattern();
+			break;
+		case kBatchRename:
+			PerformBatchCopy();
+			break;
+		case kBatchClose:
+			CloseBatchCopyDialog();
+			break;
+		default:
+			break;
+		}
+	}
+
+	void HandleBatchCopyEvents(const SDL_Event& event, bool& running) {
+		switch (event.type) {
+		case SDL_QUIT:
+			running = false;
+			break;
+		case SDL_KEYDOWN: {
+			if (event.key.repeat != 0) break;
+			const Uint16 modifiers = event.key.keysym.mod;
+			const bool ctrl = (modifiers & 0x00C0u) != 0;
+			if (event.key.keysym.sym == SDLK_ESCAPE) {
+				CloseBatchCopyDialog();
+			} else if (ctrl && event.key.keysym.sym == 'a') {
+				for (BatchCopyItem& item : batchCopyEntries_) item.selected = true;
+				PreviewBatchCopy();
+			} else if (event.key.keysym.sym == SDLK_TAB) {
+				batchCopyPatternFocused_ = !batchCopyPatternFocused_;
+			} else if (batchCopyPatternFocused_ && event.key.keysym.sym == SDLK_BACKSPACE) {
+				if (!batchCopyPattern_.empty()) batchCopyPattern_.pop_back();
+				PreviewBatchCopy();
+			} else if (!batchCopyPatternFocused_ && event.key.keysym.sym == SDLK_UP) {
+				batchCopyCursor_ = std::max(0, batchCopyCursor_ - 1);
+				EnsureBatchCopySelectionVisible();
+			} else if (!batchCopyPatternFocused_ && event.key.keysym.sym == SDLK_DOWN) {
+				if (!batchCopyEntries_.empty()) batchCopyCursor_ = std::min(
+					static_cast<int>(batchCopyEntries_.size()) - 1, batchCopyCursor_ + 1);
+				EnsureBatchCopySelectionVisible();
+			} else if (!batchCopyPatternFocused_ && event.key.keysym.sym == SDLK_SPACE) {
+				if (batchCopyCursor_ >= 0 && batchCopyCursor_ < static_cast<int>(batchCopyEntries_.size())) {
+					BatchCopyItem& item = batchCopyEntries_[static_cast<std::size_t>(batchCopyCursor_)];
+					item.selected = !item.selected;
+					PreviewBatchCopy();
+				}
+			} else if (event.key.keysym.sym == SDLK_RETURN) {
+				PreviewBatchCopy();
+			}
+			break;
+		}
+		case SDL_TEXTINPUT:
+			if (batchCopyPatternFocused_) {
+				batchCopyPattern_ += event.text.text;
+				PreviewBatchCopy();
+			}
+			break;
+		case SDL_MOUSEWHEEL: {
+			const int rows = BatchCopyVisibleRows();
+			const int maximumScroll = std::max(0, static_cast<int>(batchCopyEntries_.size()) - rows);
+			batchCopyScroll_ = static_cast<std::size_t>(std::clamp(
+				static_cast<int>(batchCopyScroll_) - event.wheel.y, 0, maximumScroll));
+			break;
+		}
+		case SDL_MOUSEMOTION: {
+			const int item = BatchCopyEntryAt(event.motion.x, event.motion.y);
+			if (item >= 0) batchCopyCursor_ = item;
+			break;
+		}
+		case SDL_MOUSEBUTTONDOWN:
+			if (event.button.button != SDL_BUTTON_LEFT) break;
+			if (const int button = BatchCopyButtonAt(event.button.x, event.button.y); button >= 0) {
+				HandleBatchCopyButton(button);
+				break;
+			}
+			if (PointInRect(event.button.x, event.button.y, BatchCopyPatternRect())) {
+				batchCopyPatternFocused_ = true;
+				break;
+			}
+			if (const int item = BatchCopyEntryAt(event.button.x, event.button.y); item >= 0) {
+				batchCopyCursor_ = item;
+				batchCopyPatternFocused_ = false;
+				batchCopyEntries_[static_cast<std::size_t>(item)].selected =
+					!batchCopyEntries_[static_cast<std::size_t>(item)].selected;
+				PreviewBatchCopy();
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	void RenderBatchButton(int button, const std::string& label) {
+		const SDL_Rect rect = BatchCopyButtonRect(button);
+		const bool hovered = PointInRect(lastMouseX_, lastMouseY_, rect);
+		SDL_SetRenderDrawColor(renderer_, hovered ? 52 : 28, hovered ? 78 : 28, hovered ? 108 : 28, 220);
+		SDL_RenderFillRect(renderer_, &rect);
+		DrawRect(rect, 125, 145, 165);
+		DrawText(ClipText(label, rect.w - 12), rect.x + 6, rect.y + 10, kUiTextScale,
+			255, 255, 255);
+	}
+
+	void RenderBatchCopy() {
+		if (!batchCopyOpen_) return;
+		const SDL_Rect dialog = BatchCopyRect();
+		const SDL_Rect list = BatchCopyListRect();
+		const int rightX = BatchCopyRightX();
+		const int rightWidth = BatchCopyRightWidth();
+		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 224);
+		SDL_RenderFillRect(renderer_, &dialog);
+		DrawRect(dialog, 190, 190, 190);
+		DrawText("BATCH RENAME/COPY OF FILES", dialog.x + 18, dialog.y + 14, kUiTextScale);
+		const std::string directory = fileList_.Empty() ? std::string() : fileList_.Current().parent_path().string();
+		DrawText(ClipText("IMAGE FILES IN " + directory, dialog.w - 36), dialog.x + 18, dialog.y + 38,
+			kUiTextScale, 170, 170, 170);
+
+		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 215);
+		SDL_RenderFillRect(renderer_, &list);
+		DrawRect(list, 75, 75, 75);
+		DrawText("SEL", list.x + 8, list.y + 7, kUiTextScale, 170, 170, 170);
+		DrawText("OLD NAME", list.x + 42, list.y + 7, kUiTextScale, 170, 170, 170);
+		DrawText("DATE", list.x + 245, list.y + 7, kUiTextScale, 170, 170, 170);
+		DrawText("NEW NAME (>> COPY)", list.x + 380, list.y + 7, kUiTextScale, 170, 170, 170);
+
+		const int rows = BatchCopyVisibleRows();
+		for (int row = 0; row < rows; ++row) {
+			const int itemIndex = static_cast<int>(batchCopyScroll_) + row;
+			if (itemIndex >= static_cast<int>(batchCopyEntries_.size())) break;
+			const BatchCopyItem& item = batchCopyEntries_[static_cast<std::size_t>(itemIndex)];
+			const int rowTop = list.y + 22 + row * 24;
+			if (itemIndex == batchCopyCursor_) {
+				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
+				SDL_Rect selection{list.x + 2, rowTop, list.w - 4, 22};
+				SDL_RenderFillRect(renderer_, &selection);
+			}
+			DrawText(item.selected ? "[X]" : "[ ]", list.x + 8, rowTop + 6, kUiTextScale,
+				item.selected ? 255 : 150, item.selected ? 255 : 150, item.selected ? 255 : 150);
+			DrawText(ClipText(InfoText(item.source.filename().string()), 190), list.x + 42, rowTop + 6,
+				kUiTextScale, 235, 235, 235);
+			DrawText(ClipText(FormatBatchDate(item.modificationTime), 125), list.x + 245, rowTop + 6,
+				kUiTextScale, 210, 210, 210);
+			const std::string destination = item.destinationText.empty() ? "-" :
+				std::string(item.copy ? ">> " : "") + InfoText(item.destinationText);
+			DrawText(ClipText(destination, list.w - 390), list.x + 380, rowTop + 6, kUiTextScale,
+				item.copy ? 255 : 220, item.copy ? 220 : 220, item.copy ? 150 : 220);
+		}
+
+		DrawText("PLACEHOLDERS", rightX, dialog.y + 68, kUiTextScale, 190, 210, 235);
+		DrawText("%x  consecutive number   %Nx  padded number", rightX, dialog.y + 92, kUiTextScale, 205, 205, 205);
+		DrawText("%n  number from filename  %f  original filename", rightX, dialog.y + 110, kUiTextScale, 205, 205, 205);
+		DrawText("%F  filename without ext  %e  extension", rightX, dialog.y + 128, kUiTextScale, 205, 205, 205);
+		DrawText("%d %m %y  day/month/year   %2y  short year", rightX, dialog.y + 146, kUiTextScale, 205, 205, 205);
+		DrawText("%h %min  hour/minute       %M %3M  month text", rightX, dialog.y + 164, kUiTextScale, 205, 205, 205);
+		DrawText("%pictures%  HOME/Pictures or XDG_PICTURES_DIR", rightX, dialog.y + 182, kUiTextScale, 205, 205, 205);
+		DrawText("TARGET PATTERN (use / for folders)", rightX, dialog.y + 216, kUiTextScale, 190, 210, 235);
+		const SDL_Rect patternRect = BatchCopyPatternRect();
+		SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
+		SDL_RenderFillRect(renderer_, &patternRect);
+		DrawRect(patternRect, batchCopyPatternFocused_ ? 100 : 75, batchCopyPatternFocused_ ? 130 : 75,
+			batchCopyPatternFocused_ ? 165 : 75);
+		DrawText(ClipText(batchCopyPattern_, patternRect.w - 16), patternRect.x + 8, patternRect.y + 10,
+			kUiTextScale);
+		if (!batchCopyMessage_.empty()) {
+			DrawText(ClipText(batchCopyMessage_, rightWidth), rightX, dialog.y + dialog.h - 88, kUiTextScale,
+				235, 180, 130);
+		}
+		RenderBatchButton(kBatchSelectAll, "SELECT ALL");
+		RenderBatchButton(kBatchSelectNone, "SELECT NONE");
+		RenderBatchButton(kBatchPreview, "PREVIEW");
+		RenderBatchButton(kBatchSavePattern, "SAVE TEMPLATE");
+		RenderBatchButton(kBatchRename, "RENAME/COPY");
+		RenderBatchButton(kBatchClose, "CLOSE");
 	}
 
 	SDL_Rect FileDialogRect() const {
@@ -3053,7 +3597,7 @@ private:
 	}
 
 	void RenderFileName() {
-		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_) return;
+		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_) return;
 		int windowWidth = 0;
 		SDL_GetWindowSize(window_, &windowWidth, nullptr);
 		std::ostringstream text;
@@ -3076,7 +3620,7 @@ private:
 	}
 
 	void RenderImageInfo() {
-		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_) return;
+		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_) return;
 		std::vector<std::string> lines = ImageInfoLines();
 		if (lines.empty()) return;
 
@@ -3110,7 +3654,7 @@ private:
 	}
 
 	void RenderControls() {
-		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_) return;
+		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_) return;
 		std::vector<ControlButton> buttons;
 		LayoutControls(buttons);
 		const SDL_Rect panel = ControlPanelRect();
@@ -3274,6 +3818,10 @@ private:
 				HandleFileDialogEvents(event, running);
 				continue;
 			}
+			if (batchCopyOpen_) {
+				HandleBatchCopyEvents(event, running);
+				continue;
+			}
 			if (contextMenuOpen_) {
 				switch (event.type) {
 				case SDL_QUIT:
@@ -3431,6 +3979,7 @@ private:
 		RenderControls();
 		RenderContextMenu();
 		RenderFileDialog();
+		RenderBatchCopy();
 		RenderConfirmation();
 		RenderAbout();
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
@@ -3496,6 +4045,14 @@ private:
 	std::vector<FileDialogEntry> fileDialogEntries_;
 	int fileDialogSelected_ = 0;
 	int fileDialogScroll_ = 0;
+	bool batchCopyOpen_ = false;
+	bool batchCopyPatternFocused_ = false;
+	std::string copyRenamePattern_;
+	std::string batchCopyPattern_;
+	std::string batchCopyMessage_;
+	std::vector<BatchCopyItem> batchCopyEntries_;
+	std::size_t batchCopyScroll_ = 0;
+	int batchCopyCursor_ = 0;
 	std::vector<std::string> pendingDroppedFiles_;
 	std::unique_ptr<jpegview_linux::FileList> fileListBeforeClipboard_;
 	fs::path clipboardTempFile_;
