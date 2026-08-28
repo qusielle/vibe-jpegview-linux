@@ -3,16 +3,12 @@
 #include "exif_reader.h"
 #include "clipboard.h"
 #include "image_writer.h"
+#include "image_decoder.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
 // shared by JPEGView.rc, CMainDlg::ExecuteCommand, and KeyMap.txt.default.
 #include "../../src/JPEGView/resource.h"
-
-#define STB_IMAGE_IMPLEMENTATION
-#define STBI_NO_HDR
-#define STBI_NO_LINEAR
-#include "../third_party/stb_image.h"
 
 #include <algorithm>
 #include <array>
@@ -195,7 +191,12 @@ std::string Lower(std::string value) {
 bool IsImagePath(const fs::path& path) {
 	static const std::set<std::string> extensions = {
 		".jpg", ".jpeg", ".jpe", ".png", ".gif", ".bmp", ".tga",
-		".psd", ".pnm", ".ppm", ".pgm", ".pic", ".webp"
+		".psd", ".pnm", ".pbm", ".pgm", ".ppm", ".pam", ".pic", ".qoi", ".apng", ".webp",
+		".tif", ".tiff", ".heic", ".heif", ".hif", ".avif", ".avifs", ".jxl",
+		".jxr", ".wdp", ".hdp", ".mdp", ".pef", ".dng", ".crw", ".nef", ".cr2",
+		".mrw", ".rw2", ".orf", ".x3f", ".arw", ".kdc", ".nrw", ".dcr", ".sr2",
+		".raf", ".kc2", ".erf", ".3fr", ".raw", ".mef", ".mos", ".mdc", ".cr3",
+		".iiq", ".rwl"
 	};
 	return extensions.find(Lower(path.extension().string())) != extensions.end();
 }
@@ -213,22 +214,13 @@ struct Image {
 	int originalHeight = 0;
 	std::vector<std::uint8_t> bgra;
 
-	bool StoreRGBA(const unsigned char* rgbaPixels, int imageWidth, int imageHeight) {
-		if (rgbaPixels == nullptr || imageWidth <= 0 || imageHeight <= 0 ||
-			imageWidth > std::numeric_limits<int>::max() / 4) {
-			return false;
-		}
-		const std::size_t widthValue = static_cast<std::size_t>(imageWidth);
-		const std::size_t heightValue = static_cast<std::size_t>(imageHeight);
-		if (widthValue > std::numeric_limits<std::size_t>::max() / heightValue) {
-			return false;
-		}
-		const std::size_t pixelCount = widthValue * heightValue;
-		if (pixelCount > std::numeric_limits<std::size_t>::max() / 4) {
-			return false;
-		}
+	bool StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageHeight) {
+		if (bgraPixels == nullptr || imageWidth <= 0 || imageHeight <= 0) return false;
+		const std::size_t pixelCount = static_cast<std::size_t>(imageWidth) *
+			static_cast<std::size_t>(imageHeight);
+		if (pixelCount > std::numeric_limits<std::size_t>::max() / 4) return false;
 		try {
-			bgra.resize(pixelCount * 4);
+			bgra.assign(bgraPixels, bgraPixels + pixelCount * 4);
 		} catch (const std::exception&) {
 			return false;
 		}
@@ -236,86 +228,7 @@ struct Image {
 		height = imageHeight;
 		originalWidth = imageWidth;
 		originalHeight = imageHeight;
-		for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
-			const unsigned char* source = rgbaPixels + pixel * 4;
-			std::uint8_t* target = bgra.data() + pixel * 4;
-			target[0] = source[2];
-			target[1] = source[1];
-			target[2] = source[0];
-			target[3] = source[3];
-		}
 		return true;
-	}
-
-	bool LoadWebP(const fs::path& filename, std::string& errorMessage) {
-		std::ifstream input(filename, std::ios::binary);
-		if (!input) {
-			errorMessage = "cannot open file";
-			return false;
-		}
-		const std::vector<std::uint8_t> encoded((std::istreambuf_iterator<char>(input)), {});
-		if (encoded.empty()) {
-			errorMessage = "empty file";
-			return false;
-		}
-
-		using DecodeRGBA = unsigned char* (*)(const std::uint8_t*, std::size_t, int*, int*);
-		using FreePixels = void (*)(void*);
-		const char* libraryNames[] = {"libwebp.so.7", "libwebp.so.6", "libwebp.so"};
-		void* library = nullptr;
-		for (const char* libraryName : libraryNames) {
-			library = dlopen(libraryName, RTLD_NOW | RTLD_LOCAL);
-			if (library != nullptr) break;
-		}
-		if (library == nullptr) {
-			errorMessage = "WebP decoder library not available";
-			return false;
-		}
-
-		auto decodeRGBA = reinterpret_cast<DecodeRGBA>(dlsym(library, "WebPDecodeRGBA"));
-		auto freePixels = reinterpret_cast<FreePixels>(dlsym(library, "WebPFree"));
-		if (decodeRGBA == nullptr || freePixels == nullptr) {
-			dlclose(library);
-			errorMessage = "incompatible WebP decoder library";
-			return false;
-		}
-
-		int decodedWidth = 0;
-		int decodedHeight = 0;
-		unsigned char* rgba = decodeRGBA(encoded.data(), encoded.size(), &decodedWidth, &decodedHeight);
-		if (rgba == nullptr) {
-			dlclose(library);
-			errorMessage = "invalid WebP image";
-			return false;
-		}
-		const bool stored = StoreRGBA(rgba, decodedWidth, decodedHeight);
-		freePixels(rgba);
-		dlclose(library);
-		if (!stored) {
-			errorMessage = "image is too large";
-		}
-		return stored;
-	}
-
-	bool Load(const fs::path& filename, std::string& errorMessage) {
-		if (Lower(filename.extension().string()) == ".webp") {
-			return LoadWebP(filename, errorMessage);
-		}
-		int channels = 0;
-		int decodedWidth = 0;
-		int decodedHeight = 0;
-		unsigned char* rgba = stbi_load(filename.string().c_str(), &decodedWidth, &decodedHeight, &channels, 4);
-		if (rgba == nullptr) {
-			errorMessage = stbi_failure_reason() == nullptr ? "unknown decoder error" : stbi_failure_reason();
-			return false;
-		}
-
-		const bool stored = StoreRGBA(rgba, decodedWidth, decodedHeight);
-		stbi_image_free(rgba);
-		if (!stored) {
-			errorMessage = "image is too large";
-		}
-		return stored;
 	}
 
 	bool Rotate(bool clockwise) {
@@ -1303,10 +1216,7 @@ public:
 				restoreMaximizedPending = false;
 			}
 			if (quitRequested_) running = false;
-			if (slideshowSeconds_ > 0.0 &&
-				static_cast<double>(SDL_GetTicks() - lastInteractionTick_) >= slideshowSeconds_ * 1000.0) {
-				NextImage();
-			}
+			TickPlayback();
 			Render();
 			SDL_Delay(4);
 		}
@@ -1316,6 +1226,12 @@ public:
 	}
 
 private:
+	enum class PlaybackMode {
+		None,
+		Slideshow,
+		Movie,
+	};
+
 	void Cleanup() {
 		SaveSettings();
 		if (clipboardMode_) {
@@ -1471,11 +1387,33 @@ private:
 		jpegComment_.clear();
 		ClearTransition();
 		std::string errorMessage;
-		if (!image_.Load(fileList_.Current(), errorMessage)) {
+		jpegview_linux::DecodedImage decoded;
+		if (!jpegview_linux::DecodeImage(fileList_.Current(), decoded, errorMessage) || decoded.frames.empty()) {
 			SetTitle(fileList_.Current().filename().string() + " — decode failed: " + errorMessage);
 			std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
 			return false;
 		}
+		std::vector<Image> decodedFrames;
+		decodedFrames.reserve(decoded.frames.size());
+		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded.frames) {
+			Image frame;
+			if (!frame.StoreBGRA(decodedFrame.bgra.data(), decodedFrame.width, decodedFrame.height)) {
+				SetTitle(fileList_.Current().filename().string() + " — image is too large");
+				std::cerr << fileList_.Current() << ": image is too large\n";
+				return false;
+			}
+			decodedFrames.push_back(std::move(frame));
+		}
+		animationFrames_ = std::move(decodedFrames);
+		animationFrameDelaysMs_.clear();
+		animationFrameDelaysMs_.reserve(decoded.frames.size());
+		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded.frames) {
+			animationFrameDelaysMs_.push_back(std::max(10, decodedFrame.delayMs));
+		}
+		animationFrameIndex_ = 0;
+		animationLoopCount_ = decoded.loopCount;
+		animationLoopsCompleted_ = 0;
+		image_ = animationFrames_.front();
 		correctionBase_ = image_;
 		correctionBaseValid_ = true;
 		if (autoContrastEnabled_ && !image_.AutoContrast()) {
@@ -1491,8 +1429,18 @@ private:
 		if (!UpdateTexture()) return false;
 
 		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
-		lastInteractionTick_ = SDL_GetTicks();
+		const Uint32 now = SDL_GetTicks();
+		lastInteractionTick_ = now;
 		imageModified_ = false;
+		animationPlaying_ = decoded.animation && animationFrames_.size() > 1 &&
+			playbackMode_ != PlaybackMode::Slideshow;
+		if (animationPlaying_) {
+			ScheduleAnimation(now);
+		} else if (playbackMode_ == PlaybackMode::Movie) {
+			nextPlaybackTick_ = now + MovieFrameInterval();
+		} else {
+			nextPlaybackTick_ = 0;
+		}
 		SetTitle();
 		return true;
 	}
@@ -2253,10 +2201,139 @@ private:
 	}
 
 	void StartSlideshow(double seconds) {
+		animationPlaying_ = false;
+		playbackMode_ = PlaybackMode::Slideshow;
 		slideshowSeconds_ = std::max(0.1, seconds);
 		lastSlideshowSeconds_ = slideshowSeconds_;
+		nextPlaybackTick_ = 0;
 		lastInteractionTick_ = SDL_GetTicks();
 		SetTitle();
+	}
+
+	void StartMovie(double framesPerSecond) {
+		playbackMode_ = PlaybackMode::Movie;
+		slideshowSeconds_ = 0.0;
+		movieFps_ = std::clamp(framesPerSecond, 1.0, 100.0);
+		lastInteractionTick_ = SDL_GetTicks();
+		if (animationFrames_.size() > 1 && IsCurrentAnimation()) {
+			animationPlaying_ = true;
+			ScheduleAnimation(lastInteractionTick_);
+		} else {
+			animationPlaying_ = false;
+			nextPlaybackTick_ = lastInteractionTick_ + MovieFrameInterval();
+		}
+		SetTitle();
+	}
+
+	void StopPlayback() {
+		playbackMode_ = PlaybackMode::None;
+		slideshowSeconds_ = 0.0;
+		animationPlaying_ = false;
+		nextPlaybackTick_ = 0;
+		lastInteractionTick_ = SDL_GetTicks();
+		SetTitle();
+	}
+
+	void ResumePlayback() {
+		const Uint32 now = SDL_GetTicks();
+		if (playbackMode_ == PlaybackMode::Slideshow) {
+			StartSlideshow(lastSlideshowSeconds_);
+			return;
+		}
+		if (animationFrames_.size() > 1 && IsCurrentAnimation()) {
+			if (animationFrameIndex_ >= animationFrames_.size() - 1) {
+				if (!SetAnimationFrame(0)) return;
+			}
+			animationPlaying_ = true;
+			lastInteractionTick_ = now;
+			ScheduleAnimation(now);
+			SetTitle();
+			return;
+		}
+		StartMovie(movieFps_);
+	}
+
+	bool IsCurrentAnimation() const {
+		return animationFrames_.size() > 1 &&
+			std::any_of(animationFrameDelaysMs_.begin(), animationFrameDelaysMs_.end(),
+				[](int delay) { return delay > 0; });
+	}
+
+	Uint32 MovieFrameInterval() const {
+		return static_cast<Uint32>(std::clamp(
+			static_cast<int>(std::lround(1000.0 / std::max(1.0, movieFps_))), 10, 1000));
+	}
+
+	void ScheduleAnimation(Uint32 now) {
+		int delay = 100;
+		if (movieFps_ > 0.0 && playbackMode_ == PlaybackMode::Movie) {
+			delay = static_cast<int>(MovieFrameInterval());
+		} else if (animationFrameIndex_ < animationFrameDelaysMs_.size()) {
+			delay = animationFrameDelaysMs_[animationFrameIndex_];
+		}
+		nextPlaybackTick_ = now + static_cast<Uint32>(std::clamp(delay, 10, 60000));
+	}
+
+	void TickPlayback() {
+		const Uint32 now = SDL_GetTicks();
+		if (animationPlaying_ && !animationFrames_.empty() && now >= nextPlaybackTick_) {
+			if (animationFrameIndex_ + 1 < animationFrames_.size()) {
+				++animationFrameIndex_;
+				if (!SetAnimationFrame(animationFrameIndex_)) {
+					animationPlaying_ = false;
+					return;
+				}
+				ScheduleAnimation(now);
+				return;
+			}
+
+			++animationLoopsCompleted_;
+			if (animationLoopCount_ > 0 && animationLoopsCompleted_ >= animationLoopCount_) {
+				animationPlaying_ = false;
+				if (playbackMode_ == PlaybackMode::Movie) {
+					nextPlaybackTick_ = now + MovieFrameInterval();
+					NextImage();
+				} else {
+					nextPlaybackTick_ = 0;
+				}
+				return;
+			}
+			animationFrameIndex_ = 0;
+			if (SetAnimationFrame(0)) ScheduleAnimation(now);
+			else animationPlaying_ = false;
+			return;
+		}
+
+		if (playbackMode_ == PlaybackMode::Movie && !animationPlaying_ &&
+			nextPlaybackTick_ != 0 && now >= nextPlaybackTick_) {
+			nextPlaybackTick_ = now + MovieFrameInterval();
+			NextImage();
+			return;
+		}
+
+		if (playbackMode_ == PlaybackMode::Slideshow && slideshowSeconds_ > 0.0 &&
+			static_cast<double>(now - lastInteractionTick_) >= slideshowSeconds_ * 1000.0) {
+			NextImage();
+		}
+	}
+
+	bool SetAnimationFrame(std::size_t index) {
+		if (index >= animationFrames_.size()) return false;
+		const bool wasFitToWindow = fitToWindow_;
+		const bool wasFillWithCrop = fillWithCrop_;
+		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
+		const double manualZoom = zoom_;
+		Image base = animationFrames_[index];
+		Image displayed = base;
+		if (autoContrastEnabled_ && !displayed.AutoContrast()) return false;
+		image_ = std::move(displayed);
+		correctionBase_ = std::move(base);
+		correctionBaseValid_ = true;
+		animationFrameIndex_ = index;
+		imageModified_ = false;
+		if (!UpdateTexture()) return false;
+		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		return true;
 	}
 
 	void ShowControls() {
@@ -2275,6 +2352,11 @@ private:
 
 		lines.push_back("Image width: " + std::to_string(image_.originalWidth));
 		lines.push_back("Image height: " + std::to_string(image_.originalHeight));
+		if (animationFrames_.size() > 1) {
+			lines.push_back("Frame: " + std::to_string(animationFrameIndex_ + 1) + "/" +
+				std::to_string(animationFrames_.size()));
+			lines.push_back(std::string("Playback: ") + (animationPlaying_ ? "playing" : "paused"));
+		}
 		if (image_.width != image_.originalWidth || image_.height != image_.originalHeight) {
 			lines.push_back("Displayed size: " + std::to_string(image_.width) + " x " + std::to_string(image_.height));
 		}
@@ -2542,12 +2624,10 @@ private:
 			SetTitle();
 			break;
 		case IDM_STOP_MOVIE:
-			slideshowSeconds_ = 0.0;
-			lastInteractionTick_ = SDL_GetTicks();
-			SetTitle();
+			StopPlayback();
 			break;
 		case IDM_SLIDESHOW_RESUME:
-			StartSlideshow(lastSlideshowSeconds_);
+			ResumePlayback();
 			break;
 		case IDM_SLIDESHOW_START:
 			StartSlideshow(3.0);
@@ -2614,7 +2694,7 @@ private:
 			OpenAbout();
 			break;
 		case IDM_MOVIE_START_FPS:
-			StartSlideshow(1.0 / 25.0);
+			StartMovie(25.0);
 			break;
 		case IDM_MOVIE_5_FPS:
 		case IDM_MOVIE_10_FPS:
@@ -2622,7 +2702,7 @@ private:
 		case IDM_MOVIE_30_FPS:
 		case IDM_MOVIE_50_FPS:
 		case IDM_MOVIE_100_FPS:
-			StartSlideshow(1.0 / static_cast<double>(command - IDM_MOVIE_START_FPS));
+			StartMovie(static_cast<double>(command - IDM_MOVIE_START_FPS));
 			break;
 		case IDM_EFFECT_NONE:
 		case IDM_EFFECT_BLEND:
@@ -2660,10 +2740,8 @@ private:
 			quitRequested_ = true;
 			break;
 		case IDM_DEFAULT_ESC:
-			if (slideshowSeconds_ > 0.0) {
-				slideshowSeconds_ = 0.0;
-				lastInteractionTick_ = SDL_GetTicks();
-				SetTitle();
+			if (playbackMode_ != PlaybackMode::None || animationPlaying_) {
+				StopPlayback();
 			} else {
 				quitRequested_ = true;
 			}
@@ -2684,9 +2762,10 @@ private:
 		const bool ctrl = (modifiers & 0x00C0u) != 0;
 		const bool shift = (modifiers & 0x0003u) != 0;
 		const bool alt = (modifiers & 0x0300u) != 0;
+		if (alt && !ctrl && !shift && key == SDLK_r) return IDM_SLIDESHOW_RESUME;
 		if (alt) return 0;
 
-		if (key == SDLK_ESCAPE) return slideshowSeconds_ > 0.0 ? IDM_DEFAULT_ESC : IDM_EXIT;
+		if (key == SDLK_ESCAPE) return (playbackMode_ != PlaybackMode::None || animationPlaying_) ? IDM_DEFAULT_ESC : IDM_EXIT;
 		if (!ctrl && !shift && key == SDLK_q) return IDM_EXIT; // Linux viewer convenience alias.
 		if (ctrl && !shift && key == SDLK_o) return IDM_OPEN;
 		if (ctrl && !shift && key == SDLK_F2) return IDM_SHOW_FILENAME;
@@ -2756,7 +2835,8 @@ private:
 			// resource.  Indented entries are the portable equivalent of its
 			// submenus. Unsupported Windows-only commands remain visible but
 			// disabled instead of silently doing nothing.
-			{"Stop slide show/movie", IDM_STOP_MOVIE, false, false, slideshowSeconds_ > 0.0, "Esc"},
+			{"Stop slide show/movie", IDM_STOP_MOVIE, false, false,
+				playbackMode_ != PlaybackMode::None || animationPlaying_, "Esc"},
 			{nullptr, 0, true},
 			{"Open image...", IDM_OPEN, false, false, true, "Ctrl+O"},
 			{"Open image with", 0},
@@ -2850,7 +2930,9 @@ private:
 			{"  Fill with crop", IDM_AUTO_ZOOM_FILL, false, fitToWindow_ && fillWithCrop_ && !autoZoomNoEnlarge_},
 			{nullptr, 0, true},
 			{"Play folder as slideshow/movie", 0},
-			{slideshowSeconds_ > 0.0 ? "  Stop slide show/movie" : "  Slideshow", slideshowSeconds_ > 0.0 ? IDM_STOP_MOVIE : IDM_SLIDESHOW_START},
+			{playbackMode_ == PlaybackMode::Slideshow ? "  Stop slideshow" : "  Slideshow",
+				playbackMode_ == PlaybackMode::Slideshow ? IDM_STOP_MOVIE : IDM_SLIDESHOW_START,
+				false, false, true, "1-9"},
 			{"  Waiting time 1 sec", IDM_SLIDESHOW_1, false, false, true, "1"},
 			{"  Waiting time 2 sec", IDM_SLIDESHOW_2, false, false, true, "2"},
 			{"  Waiting time 3 sec", IDM_SLIDESHOW_3, false, false, true, "3"},
@@ -2880,13 +2962,22 @@ private:
 			{"    Normal", IDM_EFFECTTIME_NORMAL, false, transitionDurationMs_ == 500, true},
 			{"    Slow", IDM_EFFECTTIME_SLOW, false, transitionDurationMs_ == 1000, true},
 			{"    Very slow", IDM_EFFECTTIME_VERY_SLOW, false, transitionDurationMs_ == 2000, true},
-			{"  Movie", IDM_MOVIE_START_FPS},
-			{"  Playback speed 5 fps", IDM_MOVIE_5_FPS, false, false, false},
-			{"  Playback speed 10 fps", IDM_MOVIE_10_FPS, false, false, false},
-			{"  Playback speed 25 fps", IDM_MOVIE_25_FPS, false, false, false},
-			{"  Playback speed 30 fps", IDM_MOVIE_30_FPS, false, false, false},
-			{"  Playback speed 50 fps", IDM_MOVIE_50_FPS, false, false, false},
-			{"  Playback speed 100 fps", IDM_MOVIE_100_FPS, false, false, false},
+			{"  Resume playback", IDM_SLIDESHOW_RESUME, false, false,
+				(!animationPlaying_ && (playbackMode_ != PlaybackMode::None || animationFrames_.size() > 1)), "Alt+R"},
+			{"  Movie", IDM_MOVIE_START_FPS, false, playbackMode_ == PlaybackMode::Movie &&
+				std::abs(movieFps_ - 25.0) < 0.01, true, "25 fps"},
+			{"  Playback speed 5 fps", IDM_MOVIE_5_FPS, false, playbackMode_ == PlaybackMode::Movie &&
+				std::abs(movieFps_ - 5.0) < 0.01, true, "5"},
+			{"  Playback speed 10 fps", IDM_MOVIE_10_FPS, false, playbackMode_ == PlaybackMode::Movie &&
+				std::abs(movieFps_ - 10.0) < 0.01, true, "10"},
+			{"  Playback speed 25 fps", IDM_MOVIE_25_FPS, false, playbackMode_ == PlaybackMode::Movie &&
+				std::abs(movieFps_ - 25.0) < 0.01, true, "25"},
+			{"  Playback speed 30 fps", IDM_MOVIE_30_FPS, false, playbackMode_ == PlaybackMode::Movie &&
+				std::abs(movieFps_ - 30.0) < 0.01, true, "30"},
+			{"  Playback speed 50 fps", IDM_MOVIE_50_FPS, false, playbackMode_ == PlaybackMode::Movie &&
+				std::abs(movieFps_ - 50.0) < 0.01, true, "50"},
+			{"  Playback speed 100 fps", IDM_MOVIE_100_FPS, false, playbackMode_ == PlaybackMode::Movie &&
+				std::abs(movieFps_ - 100.0) < 0.01, true, "100"},
 			{nullptr, 0, true},
 			{"Settings Admin", 0},
 			{"  Edit global settings...", IDM_EDIT_GLOBAL_CONFIG, false, false, false},
@@ -4546,6 +4637,15 @@ private:
 	jpegview_linux::FileList fileList_;
 	double slideshowSeconds_ = 0.0;
 	double lastSlideshowSeconds_ = 3.0;
+	double movieFps_ = 25.0;
+	PlaybackMode playbackMode_ = PlaybackMode::None;
+	Uint32 nextPlaybackTick_ = 0;
+	bool animationPlaying_ = false;
+	std::vector<Image> animationFrames_;
+	std::vector<int> animationFrameDelaysMs_;
+	std::size_t animationFrameIndex_ = 0;
+	int animationLoopCount_ = 0;
+	int animationLoopsCompleted_ = 0;
 	int transitionEffect_ = IDM_EFFECT_NONE;
 	Uint32 transitionDurationMs_ = 500;
 	Uint32 transitionStartTick_ = 0;
@@ -4704,13 +4804,20 @@ int main(int argc, char** argv) {
 
 	if (decodeCheck) {
 		for (const fs::path& file : fileList.Files()) {
-			Image image;
+			jpegview_linux::DecodedImage decoded;
 			std::string errorMessage;
-			if (!image.Load(file, errorMessage)) {
+			if (!jpegview_linux::DecodeImage(file, decoded, errorMessage) || decoded.frames.empty()) {
 				std::cerr << file << ": " << errorMessage << '\n';
 				return 1;
 			}
-			std::cout << file << ": " << image.width << 'x' << image.height << '\n';
+			const jpegview_linux::DecodedFrame& firstFrame = decoded.frames.front();
+			std::cout << file << ": " << firstFrame.width << 'x' << firstFrame.height;
+			if (decoded.frames.size() > 1) {
+				std::cout << " (" << decoded.frames.size() << " frames";
+				if (decoded.animation) std::cout << ", animation";
+				std::cout << ')';
+			}
+			std::cout << '\n';
 		}
 		return 0;
 	}
