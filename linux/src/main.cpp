@@ -748,6 +748,8 @@ private:
 				}
 			} else if (key == "maximized") {
 				maximized_ = value == "1" || value == "true";
+			} else if (key == "navigation_panel_enabled") {
+				navigationPanelEnabled_ = value == "1" || value == "true";
 			}
 		}
 
@@ -800,7 +802,8 @@ private:
 			output << "# JPEGView Linux display scaling\n"
 			       << "scale_mode=" << CurrentScaleMode() << '\n'
 			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n'
-			       << "maximized=" << (lastMaximized ? 1 : 0) << '\n';
+			       << "maximized=" << (lastMaximized ? 1 : 0) << '\n'
+			       << "navigation_panel_enabled=" << (navigationPanelEnabled_ ? 1 : 0) << '\n';
 			if (!output) {
 				output.close();
 				fs::remove(temporaryPath, error);
