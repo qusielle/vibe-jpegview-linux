@@ -11,7 +11,7 @@ the frontend uses the small SDL2 ABI declared in `src/sdl_abi.h`.
 On Ubuntu 20.04, install the compiler, make, and SDL2 runtime first:
 
 ```sh
-sudo apt install g++ make libsdl2-2.0-0
+sudo apt install g++ make libsdl2-2.0-0 libjpeg-dev libpng-dev
 ```
 
 ```sh
@@ -82,9 +82,11 @@ traverses sibling folders. The context menu exposes the same navigation and disp
 Previous-folder history is retained when recursive or sibling navigation enters another directory.
 
 The context menu and navigation panel also provide the first Windows-command parity for editing:
-rotate ±90 degrees and mirror horizontally or vertically. These transformations affect the
-displayed image in memory; saving processed images is not ported yet, so the source file remains
-unchanged.
+rotate ±90 degrees and mirror horizontally or vertically. `Ctrl+S` opens the native save dialog
+for a full-size processed image; `Ctrl+Shift+S` saves the displayed screen-size result. JPEG, PNG,
+BMP, TGA, and WebP output are supported, with the default filename following Windows JPEGView's
+`<name>_proc.jpg` convention. Existing files require a second Enter to confirm replacement.
+The source file itself remains unchanged.
 
 The Linux command dispatcher uses the original numeric `IDM_*` values from
 `src/JPEGView/resource.h`, and the supported keyboard bindings follow the corresponding entries

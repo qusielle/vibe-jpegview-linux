@@ -38,6 +38,8 @@ if command -v apt-get >/dev/null 2>&1 && [ "${SET_ENV_SKIP_APT:-0}" != "1" ]; th
 		g++ \
 		git \
 		imagemagick \
+		libjpeg-dev \
+		libpng-dev \
 		libsdl2-2.0-0 \
 		make \
 		patchelf \

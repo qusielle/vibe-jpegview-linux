@@ -1,5 +1,6 @@
 #include "sdl_abi.h"
 #include "file_list.h"
+#include "image_writer.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -301,6 +302,32 @@ struct Image {
 		bgra.swap(transformed);
 		return true;
 	}
+
+	bool Resize(int newWidth, int newHeight) {
+		if (width <= 0 || height <= 0 || newWidth <= 0 || newHeight <= 0) return false;
+		if (newWidth == width && newHeight == height) return true;
+		const std::size_t pixelCount = static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(newHeight);
+		if (pixelCount > std::numeric_limits<std::size_t>::max() / 4) return false;
+		std::vector<std::uint8_t> resized;
+		try {
+			resized.resize(pixelCount * 4);
+		} catch (const std::exception&) {
+			return false;
+		}
+		for (int y = 0; y < newHeight; ++y) {
+			const int sourceY = std::min(height - 1, static_cast<int>((static_cast<std::int64_t>(y) * height) / newHeight));
+			for (int x = 0; x < newWidth; ++x) {
+				const int sourceX = std::min(width - 1, static_cast<int>((static_cast<std::int64_t>(x) * width) / newWidth));
+				const std::size_t sourceOffset = (static_cast<std::size_t>(sourceY) * width + sourceX) * 4;
+				const std::size_t targetOffset = (static_cast<std::size_t>(y) * newWidth + x) * 4;
+				std::copy_n(bgra.data() + sourceOffset, 4, resized.data() + targetOffset);
+			}
+		}
+		width = newWidth;
+		height = newHeight;
+		bgra.swap(resized);
+		return true;
+	}
 };
 
 std::string FormatPercent(double zoom) {
@@ -495,8 +522,50 @@ private:
 			return;
 		}
 		dragging_ = false;
-		fileDialogOpen_ = false;
+		CloseFileDialog();
 		LoadCurrent();
+	}
+
+	void CloseFileDialog() {
+		if (fileDialogSave_) SDL_StopTextInput();
+		fileDialogOpen_ = false;
+		fileDialogSave_ = false;
+		fileDialogFilename_.clear();
+	}
+
+	void SaveImageFromDialog() {
+		if (!fileDialogSave_ || fileDialogFilename_.empty()) return;
+		fs::path filename(fileDialogFilename_);
+		if (filename.extension().empty()) filename += ".jpg";
+		const fs::path output = AbsoluteNormalized(fileDialogDirectory_ / filename);
+		std::error_code existsError;
+		if (fs::exists(output, existsError) && !existsError && !fileDialogOverwriteConfirmed_) {
+			fileDialogOverwriteConfirmed_ = true;
+			fileDialogMessage_ = "File exists; press ENTER to overwrite or ESC to cancel";
+			return;
+		}
+
+		Image outputImage = image_;
+		if (!fileDialogSaveFullSize_) {
+			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * zoom_)));
+			const int outputHeight = std::max(1, static_cast<int>(std::round(image_.height * zoom_)));
+			if (!outputImage.Resize(outputWidth, outputHeight)) {
+				fileDialogMessage_ = "Cannot resize image for screen-size output";
+				return;
+			}
+		}
+
+		jpegview_linux::ImageWriteOptions options;
+		std::string errorMessage;
+		if (!jpegview_linux::WriteImage(output, outputImage.bgra.data(), outputImage.width,
+			outputImage.height, options, errorMessage)) {
+			fileDialogMessage_ = "Save failed: " + errorMessage;
+			return;
+		}
+
+		const std::string savedName = output.filename().string();
+		CloseFileDialog();
+		SetTitle("Saved processed image: " + savedName);
 	}
 
 	void FitToWindow() {
@@ -671,6 +740,13 @@ private:
 		case IDM_OPEN:
 			OpenFileDialog();
 			break;
+		case IDM_SAVE:
+		case IDM_SAVE_ALLOW_NO_PROMPT:
+			OpenSaveFileDialog(true);
+			break;
+		case IDM_SAVE_SCREEN:
+			OpenSaveFileDialog(false);
+			break;
 		case IDM_RELOAD:
 			if (fileList_.Reload()) LoadCurrent();
 			break;
@@ -795,6 +871,8 @@ private:
 		if (key == SDLK_ESCAPE) return slideshowSeconds_ > 0.0 ? IDM_DEFAULT_ESC : IDM_EXIT;
 		if (!ctrl && !shift && key == SDLK_q) return IDM_EXIT; // Linux viewer convenience alias.
 		if (ctrl && !shift && key == SDLK_o) return IDM_OPEN;
+		if (ctrl && !shift && key == 's') return IDM_SAVE_ALLOW_NO_PROMPT;
+		if (ctrl && shift && key == 's') return IDM_SAVE_SCREEN;
 		if (ctrl && !shift && key == SDLK_r) return IDM_RELOAD;
 		if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;
 		if (!ctrl && !shift && key == 'c') return IDM_SORT_CREATION_DATE;
@@ -833,6 +911,8 @@ private:
 			// frontends enter the same ExecuteCommand path.
 			{"Open image...", IDM_OPEN},
 			{"Reload image", IDM_RELOAD},
+			{"Save processed image...", IDM_SAVE},
+			{"Save displayed image...", IDM_SAVE_SCREEN},
 			{nullptr, 0, true},
 			{"Next image", IDM_NEXT},
 			{"Previous image", IDM_PREV},
@@ -1006,11 +1086,12 @@ private:
 	}
 
 	int FileDialogListTop() const {
-		return FileDialogRect().y + 72;
+		return FileDialogRect().y + (fileDialogSave_ ? 112 : 72);
 	}
 
 	int FileDialogVisibleRows() const {
-		return std::max(1, (FileDialogRect().h - 128) / 26);
+		const int reservedHeight = fileDialogSave_ ? 168 : 128;
+		return std::max(1, (FileDialogRect().h - reservedHeight) / 26);
 	}
 
 	void RefreshFileDialog() {
@@ -1051,9 +1132,30 @@ private:
 		}
 		if (error || directory.empty()) directory = fs::path(".");
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
+		fileDialogSave_ = false;
+		fileDialogSaveFullSize_ = true;
+		fileDialogFilename_.clear();
+		fileDialogMessage_.clear();
 		fileDialogOpen_ = true;
 		contextMenuOpen_ = false;
 		RefreshFileDialog();
+	}
+
+	void OpenSaveFileDialog(bool fullSize) {
+		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		fs::path directory = fileList_.Current().parent_path();
+		if (directory.empty()) directory = fs::current_path();
+		fileDialogDirectory_ = AbsoluteNormalized(directory);
+		fileDialogSave_ = true;
+		fileDialogSaveFullSize_ = fullSize;
+		fileDialogFilename_ = fileList_.Current().stem().string() + "_proc.jpg";
+		fileDialogMessage_.clear();
+		fileDialogOverwriteConfirmed_ = false;
+		fileDialogOpen_ = true;
+		contextMenuOpen_ = false;
+		RefreshFileDialog();
+		fileDialogSelected_ = -1;
+		SDL_StartTextInput();
 	}
 
 	std::string FileDialogEntryLabel(const FileDialogEntry& entry) const {
@@ -1087,14 +1189,26 @@ private:
 	}
 
 	void ActivateFileDialogSelection() {
+		if (fileDialogSave_ && fileDialogSelected_ < 0) {
+			SaveImageFromDialog();
+			return;
+		}
 		if (fileDialogSelected_ < 0 || fileDialogSelected_ >= static_cast<int>(fileDialogEntries_.size())) return;
 		const FileDialogEntry entry = fileDialogEntries_[fileDialogSelected_];
 		if (entry.directory) {
 			fileDialogDirectory_ = entry.path;
 			RefreshFileDialog();
+			if (fileDialogSave_) fileDialogSelected_ = -1;
+			fileDialogOverwriteConfirmed_ = false;
 			return;
 		}
-		OpenDroppedFiles({entry.path.string()});
+		if (fileDialogSave_) {
+			fileDialogFilename_ = entry.path.filename().string();
+			fileDialogOverwriteConfirmed_ = false;
+			SaveImageFromDialog();
+		} else {
+			OpenDroppedFiles({entry.path.string()});
+		}
 	}
 
 	void HandleFileDialogEvents(const SDL_Event& event, bool& running) {
@@ -1105,7 +1219,7 @@ private:
 		case SDL_KEYDOWN:
 			if (event.key.repeat != 0) break;
 			if (event.key.keysym.sym == SDLK_ESCAPE) {
-				fileDialogOpen_ = false;
+				CloseFileDialog();
 			} else if (event.key.keysym.sym == SDLK_UP) {
 				MoveFileDialogSelection(-1);
 			} else if (event.key.keysym.sym == SDLK_DOWN) {
@@ -1113,11 +1227,27 @@ private:
 			} else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE) {
 				ActivateFileDialogSelection();
 			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
+				if (fileDialogSave_ && fileDialogSelected_ < 0 && !fileDialogFilename_.empty()) {
+					fileDialogFilename_.pop_back();
+					fileDialogMessage_.clear();
+					fileDialogOverwriteConfirmed_ = false;
+					break;
+				}
 				const fs::path parent = fileDialogDirectory_.parent_path();
 				if (!parent.empty() && parent != fileDialogDirectory_) {
 					fileDialogDirectory_ = parent;
 					RefreshFileDialog();
+					if (fileDialogSave_) fileDialogSelected_ = -1;
+					if (fileDialogSave_) fileDialogOverwriteConfirmed_ = false;
 				}
+			}
+			break;
+		case SDL_TEXTINPUT:
+			if (fileDialogSave_) {
+				fileDialogFilename_ += event.text.text;
+				fileDialogSelected_ = -1;
+				fileDialogMessage_.clear();
+				fileDialogOverwriteConfirmed_ = false;
 			}
 			break;
 		case SDL_MOUSEMOTION: {
@@ -1131,9 +1261,14 @@ private:
 		case SDL_MOUSEBUTTONDOWN:
 			if (event.button.button == SDL_BUTTON_RIGHT ||
 			(event.button.button == SDL_BUTTON_LEFT && FileDialogItemAt(event.button.x, event.button.y) < 0)) {
-				fileDialogOpen_ = false;
+				CloseFileDialog();
 			} else if (event.button.button == SDL_BUTTON_LEFT) {
 				fileDialogSelected_ = FileDialogItemAt(event.button.x, event.button.y);
+				if (fileDialogSave_ && fileDialogSelected_ >= 0 &&
+					fileDialogSelected_ < static_cast<int>(fileDialogEntries_.size()) &&
+					!fileDialogEntries_[fileDialogSelected_].directory) {
+					fileDialogFilename_ = fileDialogEntries_[fileDialogSelected_].path.filename().string();
+				}
 				if (event.button.clicks >= 2) ActivateFileDialogSelection();
 			}
 			break;
@@ -1148,8 +1283,16 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 255);
 		SDL_RenderFillRect(renderer_, &dialog);
 		DrawRect(dialog, 190, 190, 190);
-		DrawText("OPEN IMAGE", dialog.x + 18, dialog.y + 14, 2);
+		DrawText(fileDialogSave_ ? "SAVE PROCESSED IMAGE" : "OPEN IMAGE", dialog.x + 18, dialog.y + 14, 2);
 		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, 2, 170, 170, 170);
+		if (fileDialogSave_) {
+			DrawText("FILE NAME", dialog.x + 18, dialog.y + 68, 2, 190, 190, 190);
+			SDL_Rect inputRect{dialog.x + 12, dialog.y + 86, dialog.w - 24, 28};
+			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 255);
+			SDL_RenderFillRect(renderer_, &inputRect);
+			DrawRect(inputRect, 100, 130, 165);
+			DrawText(fileDialogFilename_, inputRect.x + 10, inputRect.y + 6, 2);
+		}
 
 		const int listTop = FileDialogListTop();
 		const int rows = FileDialogVisibleRows();
@@ -1170,7 +1313,11 @@ private:
 			DrawText(FileDialogEntryLabel(entry), listRect.x + 10, rowTop + 5, 2,
 				entry.directory ? 185 : 235, entry.directory ? 205 : 235, entry.directory ? 235 : 235);
 		}
-		DrawText("ENTER OPEN   BACKSPACE PARENT   ESC CANCEL", dialog.x + 18, dialog.y + dialog.h - 34, 2, 170, 170, 170);
+		if (!fileDialogMessage_.empty()) {
+			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, 2, 235, 150, 120);
+		}
+		DrawText(fileDialogSave_ ? "ENTER SAVE   BACKSPACE EDIT/PARENT   ESC CANCEL" :
+			"ENTER OPEN   BACKSPACE PARENT   ESC CANCEL", dialog.x + 18, dialog.y + dialog.h - 34, 2, 170, 170, 170);
 	}
 
 	void DrawText(const std::string& text, int x, int y, int scale, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
@@ -1509,7 +1656,12 @@ private:
 	bool imageModified_ = false;
 	bool quitRequested_ = false;
 	bool fileDialogOpen_ = false;
+	bool fileDialogSave_ = false;
+	bool fileDialogSaveFullSize_ = true;
+	bool fileDialogOverwriteConfirmed_ = false;
 	fs::path fileDialogDirectory_;
+	std::string fileDialogFilename_;
+	std::string fileDialogMessage_;
 	std::vector<FileDialogEntry> fileDialogEntries_;
 	int fileDialogSelected_ = 0;
 	int fileDialogScroll_ = 0;
@@ -1530,7 +1682,7 @@ void PrintUsage(const char* program) {
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, N/M/C/Z select display order,\n"
-		<< "          Ctrl+O opens, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
+		<< "          Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
 		<< "          right-click opens the context menu, Esc or Q quits.\n";
 }
 

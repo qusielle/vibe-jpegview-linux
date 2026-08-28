@@ -79,6 +79,13 @@ struct SDL_MouseButtonEvent {
 	Sint32 y;
 };
 
+struct SDL_TextInputEvent {
+	Uint32 type;
+	Uint32 timestamp;
+	Uint32 windowID;
+	char text[32];
+};
+
 // SDL 2.0.18 and later append precise coordinates to this event.  The viewer
 // only consumes the SDL 2.0.10-compatible prefix through direction.
 struct SDL_MouseWheelEvent {
@@ -105,6 +112,7 @@ union SDL_Event {
 	SDL_MouseMotionEvent motion;
 	SDL_MouseButtonEvent button;
 	SDL_MouseWheelEvent wheel;
+	SDL_TextInputEvent text;
 	SDL_DropEvent drop;
 	Uint8 padding[56];
 };
@@ -118,6 +126,7 @@ static_assert(sizeof(SDL_WindowEvent) == 24, "unexpected SDL_WindowEvent layout"
 static_assert(sizeof(SDL_MouseMotionEvent) == 36, "unexpected SDL_MouseMotionEvent layout");
 static_assert(sizeof(SDL_MouseButtonEvent) == 28, "unexpected SDL_MouseButtonEvent layout");
 static_assert(sizeof(SDL_MouseWheelEvent) == 28, "unexpected SDL_MouseWheelEvent layout");
+static_assert(sizeof(SDL_TextInputEvent) == 44, "unexpected SDL_TextInputEvent layout");
 static_assert(offsetof(SDL_DropEvent, file) == sizeof(Uint32) * 2, "unexpected SDL drop offset");
 static_assert(offsetof(SDL_KeyboardEvent, keysym) == 16, "unexpected SDL keyboard offset");
 static_assert(offsetof(SDL_MouseMotionEvent, x) == 20, "unexpected SDL motion offset");
@@ -144,6 +153,7 @@ enum : Uint32 {
 	SDL_MOUSEBUTTONDOWN = 0x401u,
 	SDL_MOUSEBUTTONUP = 0x402u,
 	SDL_MOUSEWHEEL = 0x403u,
+	SDL_TEXTINPUT = 0x303u,
 	SDL_DROPFILE = 0x1000u,
 	SDL_DROPTEXT = 0x1001u,
 	SDL_DROPBEGIN = 0x1002u,
@@ -195,6 +205,8 @@ void SDL_DestroyWindow(SDL_Window* window);
 int SDL_SetWindowFullscreen(SDL_Window* window, Uint32 flags);
 void SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
 void SDL_SetWindowTitle(SDL_Window* window, const char* title);
+void SDL_StartTextInput();
+void SDL_StopTextInput();
 void SDL_free(void* memory);
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, int index, Uint32 flags);
 void SDL_DestroyRenderer(SDL_Renderer* renderer);
