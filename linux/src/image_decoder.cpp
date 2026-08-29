@@ -1226,7 +1226,8 @@ bool DecodeAvif(const std::filesystem::path& filename, DecodedImage& image,
 		avifRGBImageSetDefaults(&rgb, decoder->image);
 		rgb.depth = 8;
 		rgb.format = AVIF_RGB_FORMAT_BGRA;
-		if (avifRGBImageAllocatePixels(&rgb) != AVIF_RESULT_OK ||
+		avifRGBImageAllocatePixels(&rgb);
+		if (rgb.pixels == nullptr ||
 			avifImageYUVToRGB(decoder->image, &rgb) != AVIF_RESULT_OK) {
 			errorMessage = "AVIF color conversion failed";
 			avifRGBImageFreePixels(&rgb);

@@ -589,7 +589,15 @@ bool WriteTiff(const std::filesystem::path& filename, const std::uint8_t* bgra,
 #if JPEGVIEW_HAVE_HEIF
 bool WriteHeif(const std::filesystem::path& filename, const std::uint8_t* bgra,
 	int width, int height, int quality, bool avif, std::string& errorMessage) {
+	#if defined(LIBHEIF_HAVE_VERSION) && LIBHEIF_HAVE_VERSION(1, 8, 0)
 	const heif_compression_format format = avif ? heif_compression_AV1 : heif_compression_HEVC;
+	#else
+	if (avif) {
+		errorMessage = "AVIF encoder is not available in this libheif version";
+		return false;
+	}
+	const heif_compression_format format = heif_compression_HEVC;
+	#endif
 	if (!heif_have_encoder_for_format(format)) {
 		errorMessage = avif ? "AVIF encoder is not available" : "HEIF encoder is not available";
 		return false;
@@ -663,8 +671,17 @@ bool WriteAvif(const std::filesystem::path& filename, const std::uint8_t* bgra,
 	rgb.rowBytes = static_cast<uint32_t>(width) * 4;
 	avifResult result = avifImageRGBToYUV(image, &rgb);
 	if (result == AVIF_RESULT_OK) {
-		encoder->quality = std::clamp(quality, 0, 100);
-		encoder->qualityAlpha = std::clamp(quality, 0, 100);
+		const int clampedQuality = std::clamp(quality, 0, 100);
+		#if AVIF_VERSION >= 1000000
+		encoder->quality = clampedQuality;
+		encoder->qualityAlpha = clampedQuality;
+		#else
+		const int quantizer = (AVIF_QUANTIZER_WORST_QUALITY * (100 - clampedQuality) + 50) / 100;
+		encoder->minQuantizer = quantizer;
+		encoder->maxQuantizer = quantizer;
+		encoder->minQuantizerAlpha = quantizer;
+		encoder->maxQuantizerAlpha = quantizer;
+		#endif
 	}
 	avifRWData output = AVIF_DATA_EMPTY;
 	if (result == AVIF_RESULT_OK) result = avifEncoderWrite(encoder, image, &output);
