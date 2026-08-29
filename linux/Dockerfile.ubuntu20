@@ -7,11 +7,12 @@ ARG APPIMAGETOOL_SHA256=
 ARG HIGHWAY_VERSION=1.0.7
 ARG LIBJXL_VERSION=0.7.0
 ARG LIBJXL_SKCMS_VERSION=64374756e03700d649f897dbd98c95e78c30c7da
+ARG AOM_VERSION=3.2.0
 ARG LIBAVIF_VERSION=0.9.3
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    g++ make cmake ninja-build pkg-config curl ca-certificates file patchelf \
+    g++ make cmake ninja-build pkg-config curl ca-certificates file patchelf nasm \
     libsdl2-2.0-0 libjpeg-dev libpng-dev libjpeg-turbo-progs \
     libgif-dev libtiff-dev libwebp-dev libwebp6 libheif-dev libraw-dev libjxr-dev \
     libaom-dev libde265-dev libx265-dev libbrotli-dev liblcms2-dev \
@@ -55,11 +56,25 @@ RUN curl --fail --location --retry 3 "https://github.com/libjxl/libjxl/archive/r
  && cmake --build /tmp/jpegview-codecs/libjxl-build --parallel \
  && cmake --install /tmp/jpegview-codecs/libjxl-build
 
+RUN mkdir -p "/tmp/jpegview-codecs/aom-${AOM_VERSION}" \
+ && curl --fail --location --retry 3 \
+    "https://aomedia.googlesource.com/aom/+archive/v${AOM_VERSION}.tar.gz" \
+    --output /tmp/jpegview-codecs/aom.tar.gz \
+ && tar -xzf /tmp/jpegview-codecs/aom.tar.gz \
+    -C "/tmp/jpegview-codecs/aom-${AOM_VERSION}" \
+ && cmake -S "/tmp/jpegview-codecs/aom-${AOM_VERSION}" -B /tmp/jpegview-codecs/aom-build -GNinja \
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+    -DENABLE_TESTS=OFF -DENABLE_TOOLS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_DOCS=OFF \
+ && cmake --build /tmp/jpegview-codecs/aom-build --parallel \
+ && cmake --install /tmp/jpegview-codecs/aom-build \
+ && ldconfig
+
 RUN curl --fail --location --retry 3 "https://github.com/AOMediaCodec/libavif/archive/refs/tags/v${LIBAVIF_VERSION}.tar.gz" \
     --output /tmp/jpegview-codecs/libavif.tar.gz \
  && tar -xzf /tmp/jpegview-codecs/libavif.tar.gz -C /tmp/jpegview-codecs \
  && cmake -S "/tmp/jpegview-codecs/libavif-${LIBAVIF_VERSION}" -B /tmp/jpegview-codecs/libavif-build -GNinja \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DAVIF_CODEC_AOM=SYSTEM \
+    -DAOM_INCLUDE_DIR=/usr/local/include -DAOM_LIBRARY=/usr/local/lib/libaom.so \
     -DAVIF_BUILD_APPS=OFF -DAVIF_BUILD_TESTS=OFF \
  && cmake --build /tmp/jpegview-codecs/libavif-build --parallel \
  && cmake --install /tmp/jpegview-codecs/libavif-build \
