@@ -88,20 +88,21 @@ intended Docker environment.
 Right/Left or PageUp/PageDown navigate; Up/Down rotate 90 degrees; mouse wheel zooms around the
 cursor; left-drag pans; dropped files open in the viewer. Space toggles fit/actual, Return fits,
 and F11 toggles fullscreen (`0`, `F`, and `Q` remain convenience aliases; `1`–`9` start a
-slideshow at that interval). F2 toggles the top-left picture information panel; N or Ctrl+F2
-toggles the filename overlay. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N
+slideshow at that interval). F2 toggles the top-left picture information panel; Shift+N or Ctrl+F2
+toggles the filename overlay, while N selects filename sorting. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N
 toggles the panel. Ctrl+C copies the image at original size, Ctrl+Shift+C
 copies its path, Ctrl+V pastes a PNG image, Ctrl+P sends the processed image to `lp`, and Delete
 opens the move-to-trash confirmation. Ctrl+Shift+M/E set the modification date to now/EXIF date;
 R/T perform lossless JPEG rotations when bundled `jpegtran` is available; F5 toggles the ported
-automatic histogram contrast correction, and Ctrl+Shift+R opens the image resize dialog. Shift+N selects
-filename sorting. Move the pointer to
+automatic histogram contrast correction, and Ctrl+Shift+R opens the image resize dialog. Move the pointer to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, fit/actual, and fullscreen). The checked panel
 remains visible until Ctrl+N disables it; it is temporarily suppressed while a modal menu or
 file browser is open. Right-click
-opens the core JPEGView context menu; it also supports keyboard selection with the arrow keys and
-Return. Hovering over a lower navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
+opens the compact core JPEGView context menu; Show Advanced Options temporarily restores the
+Open image with, Print, batch rename/copy, date, and wallpaper commands without saving that
+choice. The menu also supports keyboard selection with the arrow keys and Return. Hovering over
+a lower navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
 next or previous image and is saved between application runs, as is the last maximized or
 normal window mode, the lower navigation panel's show/hide selection, and the F2/Ctrl+F2 overlay
 visibility choices. These settings are stored in

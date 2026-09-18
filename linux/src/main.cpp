@@ -49,6 +49,7 @@ constexpr double kMaxZoom = 32.0;
 constexpr int kUiTextScale = 1;
 constexpr int kContextMenuItemHeight = 18;
 constexpr int kContextMenuSeparatorHeight = 7;
+constexpr int kContextMenuShowAdvanced = -1;
 constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kOverlayLineHeight = 18;
@@ -81,6 +82,7 @@ struct MenuItem {
 	bool checked = false;
 	bool enabled = true;
 	const char* shortcut = nullptr;
+	bool advanced = false;
 };
 
 struct OpenWithApplication {
@@ -2834,7 +2836,7 @@ private:
 		return 0;
 	}
 
-	std::vector<MenuItem> ContextMenuItems() {
+	std::vector<MenuItem> ContextMenuItems(bool advancedOptions) {
 		const std::string extension = fileList_.Empty() ? std::string() : Lower(fileList_.Current().extension().string());
 		const bool losslessJpegAvailable = !clipboardMode_ && HasExecutable("jpegtran") &&
 			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
@@ -2849,28 +2851,28 @@ private:
 				playbackMode_ != PlaybackMode::None || animationPlaying_, "Esc"},
 			{nullptr, 0, true},
 			{"Open image...", IDM_OPEN, false, false, true, "Ctrl+O"},
-			{"Open image with", 0},
-			{"  (no configured applications)", 0, false, false, false},
+			{"Open image with", 0, false, false, true, nullptr, true},
+			{"  (no configured applications)", 0, false, false, false, nullptr, true},
 			{"Save processed image...", IDM_SAVE, false, false, true, "Ctrl+S"},
 			{"Save displayed image...", IDM_SAVE_SCREEN, false, false, true, "Ctrl+Shift+S"},
 			{"Reload image", IDM_RELOAD, false, false, true, "Ctrl+R"},
 			{"Open containing folder", IDM_EXPLORE, false, false, true, "W"},
-			{"Print image...", IDM_PRINT, false, false, true, "Ctrl+P"},
-			{"Batch rename/copy...", IDM_BATCH_COPY, false, false, true},
-			{"Set modification date", 0},
-			{"  To current date", IDM_TOUCH_IMAGE, false, false, true, "Ctrl+Shift+M"},
-			{"  To EXIF date", IDM_TOUCH_IMAGE_EXIF, false, false, true, "Ctrl+Shift+E"},
-			{"  To EXIF date all files in folder", IDM_TOUCH_IMAGE_EXIF_FOLDER},
-			{"Set as desktop wallpaper", 0},
-			{"  Use original image", IDM_SET_WALLPAPER_ORIG},
-			{"  Use processed image as displayed", IDM_SET_WALLPAPER_DISPLAY},
+			{"Print image...", IDM_PRINT, false, false, true, "Ctrl+P", true},
+			{"Batch rename/copy...", IDM_BATCH_COPY, false, false, true, nullptr, true},
+			{"Set modification date", 0, false, false, true, nullptr, true},
+			{"  To current date", IDM_TOUCH_IMAGE, false, false, true, "Ctrl+Shift+M", true},
+			{"  To EXIF date", IDM_TOUCH_IMAGE_EXIF, false, false, true, "Ctrl+Shift+E", true},
+			{"  To EXIF date all files in folder", IDM_TOUCH_IMAGE_EXIF_FOLDER, false, false, true, nullptr, true},
+			{"Set as desktop wallpaper", 0, false, false, true, nullptr, true},
+			{"  Use original image", IDM_SET_WALLPAPER_ORIG, false, false, true, nullptr, true},
+			{"  Use processed image as displayed", IDM_SET_WALLPAPER_DISPLAY, false, false, true, nullptr, true},
 			{nullptr, 0, true},
 			{"Copy original size image", IDM_COPY_FULL, false, false, true, "Ctrl+C"},
 			{"Copy file path", IDM_COPY_PATH, false, false, true, "Ctrl+Shift+C"},
 			{"Paste from clipboard", IDM_PASTE, false, false, true, "Ctrl+V"},
 			{nullptr, 0, true},
 			{"Show picture info (EXIF)", IDM_SHOW_FILEINFO, false, infoVisible_, true, "F2"},
-			{"Show filename", IDM_SHOW_FILENAME, false, showFileName_, true, "N / Ctrl+F2"},
+			{"Show filename", IDM_SHOW_FILENAME, false, showFileName_, true, "Shift+N / Ctrl+F2"},
 			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_, true, "Ctrl+N"},
 			{nullptr, 0, true},
 			{"Next image", IDM_NEXT, false, false, true, "Right/PgDn"},
@@ -2891,7 +2893,7 @@ private:
 			{"  Creation date", IDM_SORT_CREATION_DATE, false,
 				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::CreationTime, true, "C"},
 			{"  File name", IDM_SORT_NAME, false,
-				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName, true, "Shift+N"},
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName, true, "N"},
 			{"  File size", IDM_SORT_SIZE, false,
 				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileSize},
 			{"  Random", IDM_SORT_RANDOM, false,
@@ -3016,9 +3018,26 @@ private:
 					openWithLabels_.emplace_back("  " + openWithApplications_[index].name);
 					items.insert(items.begin() + static_cast<std::ptrdiff_t>(headerIndex + 1 + index),
 						MenuItem{openWithLabels_.back().c_str(),
-							static_cast<int>(IDM_FIRST_OPENWITH_CMD + index), false, false, true});
+							static_cast<int>(IDM_FIRST_OPENWITH_CMD + index), false, false, true, nullptr, true});
 				}
 			}
+		}
+		if (!advancedOptions) {
+			std::vector<MenuItem> compactItems;
+			compactItems.reserve(items.size());
+			bool advancedOptionAdded = false;
+			for (const MenuItem& item : items) {
+				if (item.advanced) {
+					if (!advancedOptionAdded) {
+						compactItems.push_back({"Show Advanced Options", kContextMenuShowAdvanced,
+							false, false, true, nullptr});
+						advancedOptionAdded = true;
+					}
+					continue;
+				}
+				compactItems.push_back(item);
+			}
+			items = std::move(compactItems);
 		}
 		return items;
 	}
@@ -3061,10 +3080,12 @@ private:
 		}
 		int x = contextMenuX_;
 		int y = contextMenuY_;
-		if (x + width > windowWidth) x = windowWidth - width - 4;
-		if (y + height > windowHeight) y = windowHeight - height - 4;
-		x = std::max(4, x);
-		y = std::max(4, y);
+		if (!contextMenuPositionLocked_) {
+			if (x + width > windowWidth) x = windowWidth - width - 4;
+			if (y + height > windowHeight) y = windowHeight - height - 4;
+			x = std::max(4, x);
+			y = std::max(4, y);
+		}
 		return SDL_Rect{x, y, width, height};
 	}
 
@@ -3095,9 +3116,15 @@ private:
 		// event. Read the current pointer state so the menu does not fall back
 		// to the initial (0, 0) position.
 		SDL_GetMouseState(&x, &y);
-		contextMenuItems_ = ContextMenuItems();
+		contextMenuAdvancedOptions_ = false;
+		contextMenuItems_ = ContextMenuItems(contextMenuAdvancedOptions_);
 		contextMenuX_ = x;
 		contextMenuY_ = y;
+		contextMenuPositionLocked_ = false;
+		const SDL_Rect initialMenu = ContextMenuRect();
+		contextMenuX_ = initialMenu.x;
+		contextMenuY_ = initialMenu.y;
+		contextMenuPositionLocked_ = true;
 		contextMenuScroll_ = 0;
 		contextMenuOpen_ = true;
 		menuSelected_ = -1;
@@ -3106,6 +3133,8 @@ private:
 	void CloseContextMenu() {
 		if (!contextMenuOpen_) return;
 		contextMenuOpen_ = false;
+		contextMenuAdvancedOptions_ = false;
+		contextMenuPositionLocked_ = false;
 		contextMenuScroll_ = 0;
 		menuSelected_ = -1;
 		contextMenuItems_.clear();
@@ -3150,6 +3179,13 @@ private:
 			return;
 		}
 		const int command = contextMenuItems_[menuSelected_].command;
+		if (command == kContextMenuShowAdvanced) {
+			contextMenuAdvancedOptions_ = true;
+			contextMenuItems_ = ContextMenuItems(contextMenuAdvancedOptions_);
+			contextMenuScroll_ = 0;
+			menuSelected_ = -1;
+			return;
+		}
 		CloseContextMenu();
 		ExecuteCommand(command);
 		if (command == IDM_EXIT) running = false;
@@ -4748,6 +4784,8 @@ private:
 	jpegview_linux::ExifInfo metadata_;
 	std::string jpegComment_;
 	bool contextMenuOpen_ = false;
+	bool contextMenuAdvancedOptions_ = false;
+	bool contextMenuPositionLocked_ = false;
 	bool contextMenuNeedsCleanFrame_ = false;
 	int contextMenuX_ = 0;
 	int contextMenuY_ = 0;
