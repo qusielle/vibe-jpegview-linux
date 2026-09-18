@@ -3082,6 +3082,10 @@ private:
 	}
 
 	void OpenContextMenu(int x, int y) {
+		// A first right-click can arrive before SDL has delivered any motion
+		// event. Read the current pointer state so the menu does not fall back
+		// to the initial (0, 0) position.
+		SDL_GetMouseState(&x, &y);
 		contextMenuItems_ = ContextMenuItems();
 		contextMenuX_ = x;
 		contextMenuY_ = y;
