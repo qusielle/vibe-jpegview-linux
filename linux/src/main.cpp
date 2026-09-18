@@ -4807,10 +4807,16 @@ private:
 				lastMouseY_ = event.motion.y;
 				break;
 			case SDL_MOUSEWHEEL:
-				if (event.wheel.y > 0) {
-					ZoomAt(1.2, lastMouseX_, lastMouseY_);
+				if ((SDL_GetModState() & 0x00C0u) != 0) {
+					if (event.wheel.y > 0) {
+						ZoomAt(1.2, lastMouseX_, lastMouseY_);
+					} else if (event.wheel.y < 0) {
+						ZoomAt(1.0 / 1.2, lastMouseX_, lastMouseY_);
+					}
+				} else if (event.wheel.y > 0) {
+					PreviousImage();
 				} else if (event.wheel.y < 0) {
-					ZoomAt(1.0 / 1.2, lastMouseX_, lastMouseY_);
+					NextImage();
 				}
 				break;
 			case SDL_DROPBEGIN:
@@ -4985,7 +4991,7 @@ void PrintUsage(const char* program) {
 		<< "  --slideshow N      Advance every N seconds\n"
 		<< "  --decode-check     Decode inputs and exit (useful for CI)\n"
 		<< "  --help             Show this help\n\n"
-		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel zooms, left-drag pans, drop files to open,\n"
+		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel up/down navigates previous/next, Ctrl+mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, N/M/C/Z select display order,\n"
 		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"

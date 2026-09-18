@@ -225,6 +225,7 @@ void SDL_SetWindowSize(SDL_Window* window, int w, int h);
 void SDL_SetWindowTitle(SDL_Window* window, const char* title);
 void SDL_SetWindowBordered(SDL_Window* window, int bordered);
 Uint32 SDL_GetMouseState(int* x, int* y);
+int SDL_GetModState();
 int SDL_SetClipboardText(const char* text);
 void SDL_StartTextInput();
 void SDL_StopTextInput();

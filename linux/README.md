@@ -85,7 +85,8 @@ intended Docker environment.
 
 ## Controls
 
-Right/Left or PageUp/PageDown navigate; Up/Down rotate 90 degrees; mouse wheel zooms around the
+Right/Left or PageUp/PageDown navigate; Up/Down rotate 90 degrees; mouse wheel up/down navigates
+previous/next; Ctrl+mouse wheel zooms around the
 cursor; left-drag pans; dropped files open in the viewer. Space toggles fit/actual, Return fits,
 and F11 toggles fullscreen (`0`, `F`, and `Q` remain convenience aliases; `1`–`9` start a
 slideshow at that interval). F2 toggles the top-left picture information panel; Shift+N or Ctrl+F2
