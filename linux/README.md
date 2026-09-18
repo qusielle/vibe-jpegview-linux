@@ -32,13 +32,14 @@ a host `out/` directory:
 
 ```sh
 mkdir -p out
-docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build .
+DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build .
 docker run --rm -v "$PWD/out:/out" jpegview-linux-build appimage
 ```
 
 This creates `out/JPEGView-Linux-1.3.46-linux.1-x86_64.AppImage`. To export only the binary,
 use `jpegview-linux-build binary`; to select another release label, pass it as the second
-argument. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded AppImage tool.
+argument. The Dockerfile builds the Highway/JPEG XL and AOM/AVIF dependency chains in parallel
+with BuildKit. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded AppImage tool.
 
 If SDL2 is installed in a non-standard location, override the linker settings:
 
