@@ -50,6 +50,7 @@ constexpr int kUiTextScale = 1;
 constexpr int kContextMenuItemHeight = 18;
 constexpr int kContextMenuSeparatorHeight = 7;
 constexpr int kContextMenuShowAdvanced = -1;
+constexpr int kNavigationSortMode = -2;
 constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kOverlayLineHeight = 18;
@@ -2425,8 +2426,8 @@ private:
 		const int gap = 5;
 		const int margin = 8;
 		const int separator = 12;
-		const int buttonCount = 8;
-		const int panelWidth = margin * 2 + buttonSize * buttonCount + gap * (buttonCount - 2) + separator * 2;
+		const int buttonCount = 9;
+		const int panelWidth = margin * 2 + buttonSize * buttonCount + gap * (buttonCount - 1) + separator * 2;
 		return SDL_Rect{
 			(windowWidth - panelWidth) / 2,
 			windowHeight - buttonSize - margin * 2,
@@ -2443,7 +2444,7 @@ private:
 		const int separator = 12;
 		const int commands[] = {
 			IDM_FIRST, IDM_PREV, IDM_NEXT,
-			IDM_LAST, IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, IDM_FULL_SCREEN_MODE,
+			IDM_LAST, kNavigationSortMode, IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, IDM_FULL_SCREEN_MODE,
 			IDM_ROTATE_90, IDM_ROTATE_270
 		};
 		buttons.clear();
@@ -2451,7 +2452,7 @@ private:
 		for (std::size_t i = 0; i < std::size(commands); ++i) {
 			buttons.push_back(ControlButton{SDL_Rect{x, panel.y + margin, buttonSize, buttonSize}, commands[i]});
 			x += buttonSize + gap;
-			if (i == 3 || i == 5) x += separator;
+			if (i == 3 || i == 6) x += separator;
 		}
 	}
 
@@ -2604,6 +2605,14 @@ private:
 			break;
 		case IDM_SORT_MOD_DATE:
 			fileList_.SetSorting(jpegview_linux::FileList::SortMode::LastModificationTime,
+				fileList_.IsSortedAscending());
+			SetTitle();
+			break;
+		case kNavigationSortMode:
+			fileList_.SetSorting(
+				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName ?
+					jpegview_linux::FileList::SortMode::LastModificationTime :
+					jpegview_linux::FileList::SortMode::FileName,
 				fileList_.IsSortedAscending());
 			SetTitle();
 			break;
@@ -2840,6 +2849,8 @@ private:
 		const std::string extension = fileList_.Empty() ? std::string() : Lower(fileList_.Current().extension().string());
 		const bool losslessJpegAvailable = !clipboardMode_ && HasExecutable("jpegtran") &&
 			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
+		contextMenuSortingLabel_ = "Current order: " + std::string(SortModeShortLabel()) +
+			" (" + SortModeDescription() + ")";
 		openWithApplications_ = DiscoverOpenWithApplications(extension);
 		openWithLabels_.clear();
 		std::vector<MenuItem> items = {
@@ -2888,6 +2899,7 @@ private:
 			{"  Loop siblings", IDM_LOOP_SIBLINGS, false,
 				fileList_.GetNavigationMode() == jpegview_linux::FileList::NavigationMode::LoopSameDirectoryLevel, true, "F9"},
 			{"Display order", 0},
+			{contextMenuSortingLabel_.c_str(), 0},
 			{"  Modification date", IDM_SORT_MOD_DATE, false,
 				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::LastModificationTime, true, "M"},
 			{"  Creation date", IDM_SORT_CREATION_DATE, false,
@@ -4256,9 +4268,44 @@ private:
 			DrawLine(left + 9, top + 7, left + 5, top + 3);
 			DrawLine(left + 9, top + 7, left + 5, top + 11);
 			break;
+		case kNavigationSortMode: {
+			const std::string label = SortModeShortLabel();
+			DrawText(label, r.x + (r.w - TextWidth(label, kUiTextScale)) / 2,
+				r.y + (r.h - 7 * kUiTextScale) / 2, kUiTextScale);
+			break;
+		}
 		default:
 			break;
 		}
+	}
+
+	const char* SortModeShortLabel() const {
+		switch (fileList_.GetSorting()) {
+		case jpegview_linux::FileList::SortMode::LastModificationTime: return "D";
+		case jpegview_linux::FileList::SortMode::CreationTime: return "C";
+		case jpegview_linux::FileList::SortMode::FileName: return "N";
+		case jpegview_linux::FileList::SortMode::Random: return "R";
+		case jpegview_linux::FileList::SortMode::FileSize: return "S";
+		}
+		return "?";
+	}
+
+	const char* SortModeDescription() const {
+		switch (fileList_.GetSorting()) {
+		case jpegview_linux::FileList::SortMode::LastModificationTime: return "modification date";
+		case jpegview_linux::FileList::SortMode::CreationTime: return "creation date";
+		case jpegview_linux::FileList::SortMode::FileName: return "file name";
+		case jpegview_linux::FileList::SortMode::Random: return "random";
+		case jpegview_linux::FileList::SortMode::FileSize: return "file size";
+		}
+		return "unknown";
+	}
+
+	std::string SortModeTooltip() const {
+		const std::string nextMode = fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName ?
+			"modification date" : "file name";
+		return "Current order: " + std::string(SortModeDescription()) +
+			"; click for " + nextMode + " order";
 	}
 
 	std::string ControlTooltip(int command) const {
@@ -4279,6 +4326,8 @@ private:
 			return "Rotate image 90 deg clockwise (Down)";
 		case IDM_ROTATE_270:
 			return "Rotate image 90 deg counter-clockwise (Up)";
+		case kNavigationSortMode:
+			return SortModeTooltip();
 		default:
 			return {};
 		}
@@ -4792,6 +4841,7 @@ private:
 	std::size_t contextMenuScroll_ = 0;
 	int menuSelected_ = -1;
 	std::vector<MenuItem> contextMenuItems_;
+	std::string contextMenuSortingLabel_;
 	std::vector<OpenWithApplication> openWithApplications_;
 	std::deque<std::string> openWithLabels_;
 	bool imageModified_ = false;

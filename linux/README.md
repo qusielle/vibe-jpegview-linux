@@ -96,9 +96,10 @@ opens the move-to-trash confirmation. Ctrl+Shift+M/E set the modification date t
 R/T perform lossless JPEG rotations when bundled `jpegtran` is available; F5 toggles the ported
 automatic histogram contrast correction, and Ctrl+Shift+R opens the image resize dialog. Move the pointer to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
-navigation panel (first/previous/next/last, fit/actual, and fullscreen). The checked panel
-remains visible until Ctrl+N disables it; it is temporarily suppressed while a modal menu or
-file browser is open. Right-click
+navigation panel (first/previous/next/last, ordering mode, fit/actual, and fullscreen). The
+ordering button shows `N` for file-name order and `D` for modification-date order; clicking it
+switches between those two modes. The checked panel remains visible until Ctrl+N disables it;
+it is temporarily suppressed while a modal menu or file browser is open. Right-click
 opens the compact core JPEGView context menu; Show Advanced Options temporarily restores the
 Open image with, Print, batch rename/copy, date, and wallpaper commands without saving that
 choice. The menu also supports keyboard selection with the arrow keys and Return. Hovering over
@@ -110,9 +111,10 @@ visibility choices. These settings are stored in
 matching the Windows default escape command, and otherwise quits.
 
 The port follows the Windows `CFileList` navigation model: the default display order is ascending
-last-modification time; `N`, `M`, `C`, and `Z` select filename, modification date, creation date,
-and random order. `F7` loops the current folder, `F8` traverses non-empty subfolders, and `F9`
-traverses sibling folders. The context menu exposes the same navigation and display-order commands.
+file modification time from the filesystem; `N`, `M`, `C`, and `Z` select filename, modification
+date, creation date, and random order. `F7` loops the current folder, `F8` traverses non-empty
+subfolders, and `F9` traverses sibling folders. The navigation panel and context menu show the
+current display-order mode, and the context menu exposes the same navigation and sorting commands.
 Previous-folder history is retained when recursive or sibling navigation enters another directory.
 
 The context menu is a native rendering of the Windows `PopupMenu` resource, including its navigation,
