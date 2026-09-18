@@ -4131,8 +4131,20 @@ private:
 	}
 
 	void DrawRect(const SDL_Rect& rect, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
+		if (rect.w <= 0 || rect.h <= 0) return;
 		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
-		SDL_RenderDrawRect(renderer_, &rect);
+		const SDL_Rect top{rect.x, rect.y, rect.w, 1};
+		SDL_RenderFillRect(renderer_, &top);
+		if (rect.h > 1) {
+			const SDL_Rect bottom{rect.x, rect.y + rect.h - 1, rect.w, 1};
+			SDL_RenderFillRect(renderer_, &bottom);
+		}
+		if (rect.h > 2 && rect.w > 1) {
+			const SDL_Rect left{rect.x, rect.y + 1, 1, rect.h - 2};
+			const SDL_Rect right{rect.x + rect.w - 1, rect.y + 1, 1, rect.h - 2};
+			SDL_RenderFillRect(renderer_, &left);
+			SDL_RenderFillRect(renderer_, &right);
+		}
 	}
 
 	void DrawNavigationIcon(const ControlButton& button, bool hovered) {
