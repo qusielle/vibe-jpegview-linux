@@ -4248,8 +4248,10 @@ private:
 		text << '[' << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
 			<< InfoText(fileList_.Current().filename().string());
 		std::string label = text.str();
-		const int panelWidth = std::min(std::max(260, windowWidth - 16), 900);
-		const int textWidth = panelWidth - 20;
+		const int maximumPanelWidth = std::max(1, windowWidth - 16);
+		const int panelWidth = std::min(maximumPanelWidth,
+			std::max(260, TextWidth(label, kUiTextScale) + 20));
+		const int textWidth = std::max(1, panelWidth - 20);
 		if (TextWidth(label, kUiTextScale) > textWidth) {
 			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
 				textWidth / (6 * kUiTextScale)));
