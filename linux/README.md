@@ -90,7 +90,7 @@ cursor; left-drag pans; dropped files open in the viewer. Space toggles fit/actu
 and F11 toggles fullscreen (`0`, `F`, and `Q` remain convenience aliases; `1`–`9` start a
 slideshow at that interval). F2 toggles the top-left picture information panel; Ctrl+F2 toggles
 the filename overlay. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N
-toggles the panel. Ctrl+C copies the displayed image, Ctrl+X copies it at original size, Ctrl+Shift+C
+toggles the panel. Ctrl+C copies the image at original size, Ctrl+Shift+C
 copies its path, Ctrl+V pastes a PNG image, Ctrl+P sends the processed image to `lp`, and Delete
 opens the move-to-trash confirmation. Ctrl+Shift+M/E set the modification date to now/EXIF date;
 R/T perform lossless JPEG rotations when bundled `jpegtran` is available; F5 toggles the ported

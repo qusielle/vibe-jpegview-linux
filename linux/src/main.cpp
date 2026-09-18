@@ -2527,9 +2527,6 @@ private:
 		case IDM_BATCH_COPY:
 			OpenBatchCopyDialog();
 			break;
-		case IDM_COPY:
-			CopyCurrentImage(false);
-			break;
 		case IDM_COPY_FULL:
 			CopyCurrentImage(true);
 			break;
@@ -2774,9 +2771,8 @@ private:
 		if (!ctrl && !shift && key == SDLK_q) return IDM_EXIT; // Linux viewer convenience alias.
 		if (ctrl && !shift && key == SDLK_o) return IDM_OPEN;
 		if (ctrl && !shift && key == SDLK_F2) return IDM_SHOW_FILENAME;
-		if (ctrl && !shift && key == 'c') return IDM_COPY;
+		if (ctrl && !shift && key == 'c') return IDM_COPY_FULL;
 		if (ctrl && shift && key == 'c') return IDM_COPY_PATH;
-		if (ctrl && !shift && key == 'x') return IDM_COPY_FULL;
 		if (ctrl && !shift && key == 'v') return IDM_PASTE;
 		if (ctrl && !shift && key == 'p') return IDM_PRINT;
 		if (ctrl && !shift && key == 's') return IDM_SAVE_ALLOW_NO_PROMPT;
@@ -2860,8 +2856,7 @@ private:
 			{"  Use original image", IDM_SET_WALLPAPER_ORIG},
 			{"  Use processed image as displayed", IDM_SET_WALLPAPER_DISPLAY},
 			{nullptr, 0, true},
-			{"Copy to clipboard", IDM_COPY, false, false, true, "Ctrl+C"},
-			{"Copy original size image", IDM_COPY_FULL, false, false, true, "Ctrl+X"},
+			{"Copy original size image", IDM_COPY_FULL, false, false, true, "Ctrl+C"},
 			{"Copy file path", IDM_COPY_PATH, false, false, true, "Ctrl+Shift+C"},
 			{"Paste from clipboard", IDM_PASTE, false, false, true, "Ctrl+V"},
 			{nullptr, 0, true},
