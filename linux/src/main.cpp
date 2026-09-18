@@ -4253,7 +4253,7 @@ private:
 		std::string label = text.str();
 		const int maximumPanelWidth = std::max(1, windowWidth - 2 * kOverlayInset);
 		const int panelWidth = std::min(maximumPanelWidth,
-			std::max(260, TextWidth(label, kUiTextScale) + 2 * kOverlayTextPadding));
+			TextWidth(label, kUiTextScale) + 2 * kOverlayTextPadding);
 		const int textWidth = std::max(1, panelWidth - 2 * kOverlayTextPadding);
 		if (TextWidth(label, kUiTextScale) > textWidth) {
 			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
