@@ -49,6 +49,10 @@ constexpr double kMaxZoom = 32.0;
 constexpr int kUiTextScale = 1;
 constexpr int kContextMenuItemHeight = 18;
 constexpr int kContextMenuSeparatorHeight = 7;
+constexpr int kOverlayInset = 4;
+constexpr int kOverlayTextPadding = 6;
+constexpr int kOverlayLineHeight = 18;
+constexpr int kFilenameOverlayHeight = 20;
 constexpr int kBatchSelectAll = 0;
 constexpr int kBatchSelectNone = 1;
 constexpr int kBatchPreview = 2;
@@ -4248,21 +4252,22 @@ private:
 		text << '[' << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
 			<< InfoText(fileList_.Current().filename().string());
 		std::string label = text.str();
-		const int maximumPanelWidth = std::max(1, windowWidth - 16);
+		const int maximumPanelWidth = std::max(1, windowWidth - 2 * kOverlayInset);
 		const int panelWidth = std::min(maximumPanelWidth,
-			std::max(260, TextWidth(label, kUiTextScale) + 20));
-		const int textWidth = std::max(1, panelWidth - 20);
+			std::max(260, TextWidth(label, kUiTextScale) + 2 * kOverlayTextPadding));
+		const int textWidth = std::max(1, panelWidth - 2 * kOverlayTextPadding);
 		if (TextWidth(label, kUiTextScale) > textWidth) {
 			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
 				textWidth / (6 * kUiTextScale)));
 			label.resize(maximumCharacters - 3);
 			label += "...";
 		}
-		const SDL_Rect panel{8, 8, panelWidth, 28};
+		const SDL_Rect panel{kOverlayInset, kOverlayInset, panelWidth, kFilenameOverlayHeight};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
-		DrawText(label, panel.x + 10, panel.y + 6, kUiTextScale, 255, 255, 255);
+		DrawText(label, panel.x + kOverlayTextPadding,
+			panel.y + (kFilenameOverlayHeight - 7) / 2, kUiTextScale, 255, 255, 255);
 	}
 
 	void RenderImageInfo() {
@@ -4273,8 +4278,9 @@ private:
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const int panelWidth = std::min(std::max(260, windowWidth - 16), 620);
-		const int textWidth = panelWidth - 20;
+		const int maximumPanelWidth = std::max(1, windowWidth - 2 * kOverlayInset);
+		const int panelWidth = std::min(620, maximumPanelWidth);
+		const int textWidth = std::max(1, panelWidth - 2 * kOverlayTextPadding);
 		for (std::string& line : lines) {
 			line = InfoText(line);
 			if (TextWidth(line, kUiTextScale) <= textWidth) continue;
@@ -4284,16 +4290,18 @@ private:
 			line += "...";
 		}
 
-		const int lineHeight = 18;
-		const int panelHeight = std::min(windowHeight - 16, 20 + static_cast<int>(lines.size()) * lineHeight);
-		const int panelTop = showFileName_ ? 42 : 8;
-		SDL_Rect panel{8, panelTop, panelWidth, panelHeight};
+		const int panelHeight = std::min(std::max(1, windowHeight - 2 * kOverlayInset),
+			2 * kOverlayTextPadding + static_cast<int>(lines.size()) * kOverlayLineHeight);
+		const int panelTop = showFileName_ ?
+			kOverlayInset + kFilenameOverlayHeight + kOverlayInset : kOverlayInset;
+		SDL_Rect panel{kOverlayInset, panelTop, panelWidth, panelHeight};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
-		const int visibleLines = std::max(0, (panelHeight - 12) / lineHeight);
+		const int visibleLines = std::max(0, (panelHeight - 2 * kOverlayTextPadding) / kOverlayLineHeight);
 		for (int index = 0; index < visibleLines && index < static_cast<int>(lines.size()); ++index) {
-			DrawText(lines[static_cast<std::size_t>(index)], panel.x + 10, panel.y + 10 + index * lineHeight,
+			DrawText(lines[static_cast<std::size_t>(index)], panel.x + kOverlayTextPadding,
+				panel.y + kOverlayTextPadding + index * kOverlayLineHeight,
 				kUiTextScale,
 				index == 0 ? 255 : 243, index == 0 ? 255 : 242, index == 0 ? 255 : 231);
 		}
