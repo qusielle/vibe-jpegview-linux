@@ -108,7 +108,8 @@ choice. The menu also supports keyboard selection with the arrow keys and Return
 a lower navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
 next or previous image and is saved between application runs, as is the last maximized or
 normal window mode, the lower navigation panel's show/hide selection, and the F2/Ctrl+F2 overlay
-visibility choices. The navigation panel hover preference is also saved. These settings are stored in
+visibility choices. The navigation panel hover preference and current file-order mode/direction are
+also saved. These settings are stored in
 `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. Esc stops an active slideshow first,
 matching the Windows default escape command, and otherwise quits.
 
