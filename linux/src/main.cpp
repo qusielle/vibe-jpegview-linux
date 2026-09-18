@@ -3100,6 +3100,18 @@ private:
 		menuSelected_ = -1;
 	}
 
+	void CloseContextMenu() {
+		if (!contextMenuOpen_) return;
+		contextMenuOpen_ = false;
+		contextMenuScroll_ = 0;
+		menuSelected_ = -1;
+		contextMenuItems_.clear();
+		// Some SDL2 backends can leave a single stale pixel from the last
+		// presented menu frame. Render one additional clean frame after closing
+		// so the image underneath is fully restored before continuing.
+		contextMenuNeedsCleanFrame_ = true;
+	}
+
 	void EnsureContextMenuSelectionVisible() {
 		const std::size_t visibleCount = static_cast<std::size_t>(ContextMenuVisibleCount());
 		if (menuSelected_ >= 0) {
@@ -3135,7 +3147,7 @@ private:
 			return;
 		}
 		const int command = contextMenuItems_[menuSelected_].command;
-		contextMenuOpen_ = false;
+		CloseContextMenu();
 		ExecuteCommand(command);
 		if (command == IDM_EXIT) running = false;
 	}
@@ -4493,7 +4505,7 @@ private:
 				case SDL_KEYDOWN:
 					if (event.key.repeat != 0) break;
 					if (event.key.keysym.sym == SDLK_ESCAPE) {
-						contextMenuOpen_ = false;
+						CloseContextMenu();
 					} else if (event.key.keysym.sym == SDLK_UP) {
 						MoveContextMenuSelection(-1);
 					} else if (event.key.keysym.sym == SDLK_DOWN) {
@@ -4519,10 +4531,10 @@ private:
 							menuSelected_ = item;
 							ActivateContextMenuSelection(running);
 						} else {
-							contextMenuOpen_ = false;
+							CloseContextMenu();
 						}
 					} else {
-						contextMenuOpen_ = false;
+						CloseContextMenu();
 					}
 					break;
 				default:
@@ -4623,7 +4635,7 @@ private:
 		}
 	}
 
-	void Render() {
+	void RenderFrame() {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
@@ -4654,6 +4666,13 @@ private:
 		RenderAbout();
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_RenderPresent(renderer_);
+	}
+
+	void Render() {
+		const bool needsCleanContextMenuFrame = contextMenuNeedsCleanFrame_;
+		contextMenuNeedsCleanFrame_ = false;
+		RenderFrame();
+		if (needsCleanContextMenuFrame) RenderFrame();
 	}
 
 	jpegview_linux::FileList fileList_;
@@ -4707,6 +4726,7 @@ private:
 	jpegview_linux::ExifInfo metadata_;
 	std::string jpegComment_;
 	bool contextMenuOpen_ = false;
+	bool contextMenuNeedsCleanFrame_ = false;
 	int contextMenuX_ = 0;
 	int contextMenuY_ = 0;
 	std::size_t contextMenuScroll_ = 0;
