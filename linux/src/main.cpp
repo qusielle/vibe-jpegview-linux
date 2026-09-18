@@ -4296,10 +4296,17 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		const int maximumPanelWidth = std::max(1, windowWidth - 2 * kOverlayInset);
-		const int panelWidth = std::min(620, maximumPanelWidth);
-		const int textWidth = std::max(1, panelWidth - 2 * kOverlayTextPadding);
 		for (std::string& line : lines) {
 			line = InfoText(line);
+		}
+		int contentWidth = 0;
+		for (const std::string& line : lines) {
+			contentWidth = std::max(contentWidth, TextWidth(line, kUiTextScale));
+		}
+		const int panelWidth = std::min(maximumPanelWidth,
+			contentWidth + 2 * kOverlayTextPadding);
+		const int textWidth = std::max(1, panelWidth - 2 * kOverlayTextPadding);
+		for (std::string& line : lines) {
 			if (TextWidth(line, kUiTextScale) <= textWidth) continue;
 			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
 				textWidth / (6 * kUiTextScale)));
