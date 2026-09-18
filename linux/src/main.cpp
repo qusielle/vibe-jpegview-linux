@@ -2145,18 +2145,34 @@ private:
 		SetTitle();
 	}
 
-	void NextImage() {
+	void NextImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
 		const bool animate = slideshowSeconds_ > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage = animate ? image_ : Image{};
-		if (fileList_.Next() && LoadCurrent() && animate) StartTransition(previousImage);
+		if (!fileList_.Next()) return;
+		SetTitle();
+		if (showPendingNavigation) {
+			navigationLoading_ = true;
+			Render();
+		}
+		const bool loaded = LoadCurrent();
+		navigationLoading_ = false;
+		if (loaded && animate) StartTransition(previousImage);
 	}
 
-	void PreviousImage() {
+	void PreviousImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
 		const bool animate = slideshowSeconds_ > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage = animate ? image_ : Image{};
-		if (fileList_.Previous() && LoadCurrent() && animate) StartTransition(previousImage);
+		if (!fileList_.Previous()) return;
+		SetTitle();
+		if (showPendingNavigation) {
+			navigationLoading_ = true;
+			Render();
+		}
+		const bool loaded = LoadCurrent();
+		navigationLoading_ = false;
+		if (loaded && animate) StartTransition(previousImage);
 	}
 
 	void FirstImage() {
@@ -4681,8 +4697,14 @@ private:
 					break;
 				}
 				const int command = CommandForKey(event.key);
-				if (command != 0) ExecuteCommand(command);
+				if (plainNavigationKey && event.key.repeat != 0) {
+					if (command == IDM_NEXT) NextImage(true);
+					else if (command == IDM_PREV) PreviousImage(true);
+				} else if (command != 0) {
+					ExecuteCommand(command);
+				}
 				if (quitRequested_) running = false;
+				if (plainNavigationKey) return;
 				break;
 			}
 			case SDL_MOUSEBUTTONDOWN:
@@ -4763,7 +4785,7 @@ private:
 		RenderImageTransition(destination, windowWidth, windowHeight, renderTexture);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderFileName();
-		RenderImageInfo();
+		if (!navigationLoading_) RenderImageInfo();
 		RenderControls();
 		RenderContextMenu();
 		RenderFileDialog();
@@ -4826,6 +4848,7 @@ private:
 	bool navigationPanelEnabled_ = true;
 	bool infoVisible_ = false;
 	bool showFileName_ = false;
+	bool navigationLoading_ = false;
 	bool confirmationOpen_ = false;
 	int confirmationCommand_ = 0;
 	std::string confirmationMessage_;
