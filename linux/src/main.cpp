@@ -1310,6 +1310,10 @@ private:
 				maximized_ = value == "1" || value == "true";
 			} else if (key == "navigation_panel_enabled") {
 				navigationPanelEnabled_ = value == "1" || value == "true";
+			} else if (key == "info_visible") {
+				infoVisible_ = value == "1" || value == "true";
+			} else if (key == "show_filename") {
+				showFileName_ = value == "1" || value == "true";
 			} else if (key == "auto_contrast") {
 				autoContrastEnabled_ = value == "1" || value == "true";
 			}
@@ -1367,6 +1371,8 @@ private:
 			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n'
 			       << "maximized=" << (lastMaximized ? 1 : 0) << '\n'
 			       << "navigation_panel_enabled=" << (navigationPanelEnabled_ ? 1 : 0) << '\n'
+			       << "info_visible=" << (infoVisible_ ? 1 : 0) << '\n'
+			       << "show_filename=" << (showFileName_ ? 1 : 0) << '\n'
 			       << "auto_contrast=" << (autoContrastEnabled_ ? 1 : 0) << '\n'
 			       << "copy_rename_pattern=" << copyRenamePattern_ << '\n';
 			if (!output) {
