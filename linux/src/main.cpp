@@ -51,6 +51,8 @@ constexpr int kContextMenuItemHeight = 18;
 constexpr int kContextMenuSeparatorHeight = 7;
 constexpr int kContextMenuShowAdvanced = -1;
 constexpr int kNavigationSortMode = -2;
+constexpr int kToggleNavigationPanelAutoReveal = -3;
+constexpr int kNavigationPanelHoverHeight = 64;
 constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kOverlayLineHeight = 18;
@@ -1217,8 +1219,11 @@ public:
 			Cleanup();
 			return 1;
 		}
-		ShowControls();
 		SDL_ShowWindow(window_);
+		int mouseX = 0;
+		int mouseY = 0;
+		SDL_GetMouseState(&mouseX, &mouseY);
+		UpdateNavigationPanelVisibility(mouseX, mouseY);
 
 		bool running = true;
 		while (running) {
@@ -1313,6 +1318,8 @@ private:
 				maximized_ = value == "1" || value == "true";
 			} else if (key == "navigation_panel_enabled") {
 				navigationPanelEnabled_ = value == "1" || value == "true";
+			} else if (key == "navigation_panel_auto_reveal") {
+				navigationPanelAutoReveal_ = value == "1" || value == "true";
 			} else if (key == "info_visible") {
 				infoVisible_ = value == "1" || value == "true";
 			} else if (key == "show_filename") {
@@ -1374,6 +1381,7 @@ private:
 			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n'
 			       << "maximized=" << (lastMaximized ? 1 : 0) << '\n'
 			       << "navigation_panel_enabled=" << (navigationPanelEnabled_ ? 1 : 0) << '\n'
+			       << "navigation_panel_auto_reveal=" << (navigationPanelAutoReveal_ ? 1 : 0) << '\n'
 			       << "info_visible=" << (infoVisible_ ? 1 : 0) << '\n'
 			       << "show_filename=" << (showFileName_ ? 1 : 0) << '\n'
 			       << "auto_contrast=" << (autoContrastEnabled_ ? 1 : 0) << '\n'
@@ -2366,9 +2374,20 @@ private:
 		return true;
 	}
 
-	void ShowControls() {
-		if (!navigationPanelEnabled_) return;
-		controlsVisible_ = true;
+	void UpdateNavigationPanelVisibility(int, int mouseY) {
+		if (!navigationPanelEnabled_) {
+			controlsVisible_ = false;
+			return;
+		}
+		if (!navigationPanelAutoReveal_) {
+			controlsVisible_ = true;
+			return;
+		}
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		(void)windowWidth;
+		controlsVisible_ = mouseY >= std::max(0, windowHeight - kNavigationPanelHoverHeight);
 	}
 
 	std::vector<std::string> ImageInfoLines() const {
@@ -2483,7 +2502,7 @@ private:
 		for (const ControlButton& button : buttons) {
 			if (!PointInRect(x, y, button.rect)) continue;
 			ExecuteCommand(button.command);
-			ShowControls();
+			UpdateNavigationPanelVisibility(x, y);
 			return true;
 		}
 		return PointInRect(x, y, ControlPanelRect());
@@ -2605,7 +2624,13 @@ private:
 			break;
 		case IDM_SHOW_NAVPANEL:
 			navigationPanelEnabled_ = !navigationPanelEnabled_;
-			if (navigationPanelEnabled_) ShowControls(); else controlsVisible_ = false;
+			UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
+			SaveSettings();
+			break;
+		case kToggleNavigationPanelAutoReveal:
+			navigationPanelAutoReveal_ = !navigationPanelAutoReveal_;
+			UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
+			SaveSettings();
 			break;
 		case IDM_LOOP_FOLDER:
 			fileList_.SetNavigationMode(jpegview_linux::FileList::NavigationMode::LoopDirectory);
@@ -2901,6 +2926,8 @@ private:
 			{"Show picture info (EXIF)", IDM_SHOW_FILEINFO, false, infoVisible_, true, "F2"},
 			{"Show filename", IDM_SHOW_FILENAME, false, showFileName_, true, "Shift+N / Ctrl+F2"},
 			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_, true, "Ctrl+N"},
+			{"Show navigation panel on bottom hover", kToggleNavigationPanelAutoReveal, false,
+				navigationPanelAutoReveal_, true},
 			{nullptr, 0, true},
 			{"Next image", IDM_NEXT, false, false, true, "Right/PgDn"},
 			{"Previous image", IDM_PREV, false, false, true, "Left/PgUp"},
@@ -3166,6 +3193,8 @@ private:
 		contextMenuScroll_ = 0;
 		menuSelected_ = -1;
 		contextMenuItems_.clear();
+		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+		UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
 		// Some SDL2 backends can leave a single stale pixel from the last
 		// presented menu frame. Render one additional clean frame after closing
 		// so the image underneath is fully restored before continuing.
@@ -4728,7 +4757,7 @@ private:
 			case SDL_MOUSEMOTION:
 				imageCenterX_ = event.motion.x;
 				imageCenterY_ = event.motion.y;
-				ShowControls();
+				UpdateNavigationPanelVisibility(event.motion.x, event.motion.y);
 				if (dragging_) {
 					offsetX_ += event.motion.xrel;
 					offsetY_ += event.motion.yrel;
@@ -4846,6 +4875,7 @@ private:
 	bool dragging_ = false;
 	bool controlsVisible_ = true;
 	bool navigationPanelEnabled_ = true;
+	bool navigationPanelAutoReveal_ = true;
 	bool infoVisible_ = false;
 	bool showFileName_ = false;
 	bool navigationLoading_ = false;
