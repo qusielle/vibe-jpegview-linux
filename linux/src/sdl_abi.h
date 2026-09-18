@@ -137,6 +137,7 @@ enum : Uint32 {
 	SDL_BLENDMODE_NONE = 0u,
 	SDL_INIT_VIDEO = 0x00000020u,
 	SDL_WINDOW_SHOWN = 0x00000004u,
+	SDL_WINDOW_HIDDEN = 0x00000008u,
 	SDL_WINDOW_RESIZABLE = 0x00000020u,
 	SDL_WINDOW_MAXIMIZED = 0x00000040u,
 	SDL_WINDOW_ALLOW_HIGHDPI = 0x00002000u,
@@ -215,6 +216,7 @@ void SDL_Quit();
 const char* SDL_GetError();
 SDL_Window* SDL_CreateWindow(const char* title, int x, int y, int w, int h, Uint32 flags);
 void SDL_DestroyWindow(SDL_Window* window);
+void SDL_ShowWindow(SDL_Window* window);
 int SDL_SetWindowFullscreen(SDL_Window* window, Uint32 flags);
 void SDL_MaximizeWindow(SDL_Window* window);
 void SDL_RestoreWindow(SDL_Window* window);

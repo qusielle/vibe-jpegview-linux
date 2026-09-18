@@ -1171,7 +1171,10 @@ public:
 			return 1;
 		}
 
-		Uint32 windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+		// Keep the window hidden while SDL and the window manager apply the
+		// initial state.  Showing it first makes a restored maximized window
+		// visibly appear in its normal size before it is maximized.
+		Uint32 windowFlags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 		if (maximized_ && !startFullscreen_) windowFlags |= SDL_WINDOW_MAXIMIZED;
 		window_ = SDL_CreateWindow("JPEGView Linux", 0x2FFF0000, 0x2FFF0000,
 			kDefaultWidth, kDefaultHeight, windowFlags);
@@ -1197,6 +1200,10 @@ public:
 		if (startFullscreen_) {
 			fullscreen_ = true;
 			SDL_SetWindowFullscreen(window_, SDL_WINDOW_FULLSCREEN_DESKTOP);
+		} else if (maximized_) {
+			// The creation flag handles backends that can apply the state before
+			// mapping; this call covers backends that require an explicit request.
+			SDL_MaximizeWindow(window_);
 		}
 
 		if (!LoadCurrent()) {
@@ -1204,17 +1211,11 @@ public:
 			return 1;
 		}
 		ShowControls();
-		bool restoreMaximizedPending = maximized_ && !startFullscreen_;
-		const Uint32 restoreMaximizedAt = SDL_GetTicks() + 250;
+		SDL_ShowWindow(window_);
 
 		bool running = true;
 		while (running) {
 			HandleEvents(running);
-			if (restoreMaximizedPending && SDL_GetTicks() >= restoreMaximizedAt) {
-				SDL_RestoreWindow(window_);
-				SDL_MaximizeWindow(window_);
-				restoreMaximizedPending = false;
-			}
 			if (quitRequested_) running = false;
 			TickPlayback();
 			Render();
