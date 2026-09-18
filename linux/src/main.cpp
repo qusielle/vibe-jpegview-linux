@@ -2578,9 +2578,11 @@ private:
 			break;
 		case IDM_SHOW_FILEINFO:
 			infoVisible_ = !infoVisible_;
+			SaveSettings();
 			break;
 		case IDM_SHOW_FILENAME:
 			showFileName_ = !showFileName_;
+			SaveSettings();
 			break;
 		case IDM_SHOW_NAVPANEL:
 			navigationPanelEnabled_ = !navigationPanelEnabled_;
