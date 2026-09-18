@@ -2792,14 +2792,14 @@ private:
 		if (ctrl && shift && key == 'm') return IDM_TOUCH_IMAGE;
 		if (ctrl && shift && key == 'e') return IDM_TOUCH_IMAGE_EXIF;
 		if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;
-		if (!ctrl && !shift && key == 'n') return IDM_SHOW_FILENAME;
+		if (!ctrl && shift && key == 'n') return IDM_SHOW_FILENAME;
 		if (!ctrl && !shift && key == SDLK_F2) return IDM_SHOW_FILEINFO;
 		if (!ctrl && !shift && key == SDLK_F3) return IDM_TOGGLE_RESAMPLING_QUALITY;
 		if (!ctrl && !shift && key == SDLK_F4) return IDM_KEEP_PARAMETERS;
 		if (!ctrl && !shift && key == SDLK_F5) return IDM_AUTO_CORRECTION;
 		if (!ctrl && !shift && key == SDLK_F6) return IDM_LDC;
 		if (!ctrl && !shift && key == 'c') return IDM_SORT_CREATION_DATE;
-		if (!ctrl && shift && key == 'n') return IDM_SORT_NAME;
+		if (!ctrl && !shift && key == 'n') return IDM_SORT_NAME;
 		if (!ctrl && !shift && key == 'm') return IDM_SORT_MOD_DATE;
 		if (!ctrl && !shift && key == 'z') return IDM_SORT_RANDOM;
 		if (!ctrl && !shift && key == SDLK_F7) return IDM_LOOP_FOLDER;
@@ -4845,8 +4845,8 @@ void PrintUsage(const char* program) {
 		<< "  --help             Show this help\n\n"
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
-		<< "          F7/F8/F9 select folder/recursive/sibling navigation, M/C/Z select display order, Shift+N selects filename order,\n"
-		<< "          F2 toggles picture information, N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
+		<< "          F7/F8/F9 select folder/recursive/sibling navigation, N/M/C/Z select display order,\n"
+		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
 		<< "          right-click opens the context menu, Esc or Q quits.\n";
 }
 
