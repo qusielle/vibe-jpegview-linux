@@ -4531,8 +4531,14 @@ private:
 				break;
 			case SDL_KEYDOWN:
 			{
-				if (event.key.repeat != 0) break;
 				const Uint16 modifiers = event.key.keysym.mod;
+				const bool plainNavigationKey =
+					(modifiers & 0x03C3u) == 0 &&
+					(event.key.keysym.sym == SDLK_LEFT || event.key.keysym.sym == SDLK_RIGHT);
+				// SDL marks OS key-repeat events instead of generating a fresh
+				// physical key press. Keep repeating navigation, while retaining
+				// one-shot behavior for commands such as delete, save, and rotate.
+				if (event.key.repeat != 0 && !plainNavigationKey) break;
 				const bool plainKey = (modifiers & 0x03C3u) == 0;
 				if (plainKey && event.key.keysym.sym >= '1' && event.key.keysym.sym <= '9') {
 					// CMainDlg::OnKeyDown reserves the number row for quick
