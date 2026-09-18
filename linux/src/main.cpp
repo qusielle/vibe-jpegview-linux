@@ -1319,7 +1319,7 @@ private:
 		if (scaleMode == "fit") {
 			fitToWindow_ = true;
 			fillWithCrop_ = false;
-			autoZoomNoEnlarge_ = false;
+			autoZoomNoEnlarge_ = true;
 		} else if (scaleMode == "fill") {
 			fitToWindow_ = true;
 			fillWithCrop_ = true;
@@ -2090,7 +2090,7 @@ private:
 		SetTitle();
 	}
 
-	void FitToWindow(bool fillCrop = false, bool noEnlarge = false) {
+	void FitToWindow(bool fillCrop = false, bool noEnlarge = true) {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
@@ -2690,7 +2690,7 @@ private:
 			FitToWindow(true, true);
 			break;
 		case IDM_AUTO_ZOOM_FIT:
-			FitToWindow(false, false);
+			FitToWindow(false, true);
 			break;
 		case IDM_AUTO_ZOOM_FILL:
 			FitToWindow(true, false);
@@ -2916,7 +2916,7 @@ private:
 			{"Clear parameters from DB", IDM_CLEAR_PARAM_DB, false, false, false},
 			{nullptr, 0, true},
 			{"Scale / zoom", 0},
-			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_ && !fillWithCrop_ && !autoZoomNoEnlarge_, true, "Return/0"},
+			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_ && !fillWithCrop_, true, "Return/0"},
 			{"  Fill with crop", IDM_FILL_WITH_CROP, false, fitToWindow_ && fillWithCrop_ && !autoZoomNoEnlarge_, true, "Ctrl+Return"},
 			{"  Span all screens", IDM_SPAN_SCREENS, false, fullscreen_, true, "F12"},
 			{"  400 %", IDM_ZOOM_400},
@@ -4685,7 +4685,7 @@ private:
 	double offsetY_ = 0.0;
 	bool fitToWindow_ = true;
 	bool fillWithCrop_ = false;
-	bool autoZoomNoEnlarge_ = false;
+	bool autoZoomNoEnlarge_ = true;
 	bool fullscreen_ = false;
 	bool maximized_ = false;
 	bool borderless_ = false;

@@ -60,6 +60,9 @@ Catmull-Rom bicubic interpolation. The resulting display-size bitmap is cached u
 target size changes, so SDL does not have to scale the original texture with nearest-neighbor
 sampling on every frame.
 
+Fit-to-screen mode does not enlarge images that are smaller than the available window; those images
+remain at their native size and are centered. Larger images are reduced to fit as usual.
+
 The native navigation panel, menus, tooltips, information overlays, and modal dialogs use
 semi-transparent backgrounds so the image remains partially visible underneath them.
 
