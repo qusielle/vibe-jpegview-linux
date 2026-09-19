@@ -4,6 +4,7 @@
 #include "clipboard.h"
 #include "image_writer.h"
 #include "image_decoder.h"
+#include "settings.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -44,8 +45,6 @@ namespace {
 
 constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
-constexpr double kMinZoom = 0.01;
-constexpr double kMaxZoom = 32.0;
 constexpr int kUiTextScale = 1;
 constexpr int kContextMenuItemHeight = 18;
 constexpr int kContextMenuSeparatorHeight = 7;
@@ -1273,101 +1272,48 @@ private:
 		const fs::path settingsPath = ScaleSettingsPath();
 		if (settingsPath.empty()) return;
 
-		std::ifstream input(settingsPath);
-		if (!input) return;
-
-		std::string scaleMode;
-		std::string sortMode;
-		std::string copyRenamePattern;
-		double manualZoom = zoom_;
-		bool hasManualZoom = false;
-		bool sortAscending = true;
-		std::string line;
-		while (std::getline(input, line)) {
-			if (line.empty() || line[0] == '#') continue;
-			const std::size_t separator = line.find('=');
-			if (separator == std::string::npos) continue;
-			std::string key = line.substr(0, separator);
-			std::string value = line.substr(separator + 1);
-			const auto trim = [](std::string text) {
-				const auto first = std::find_if_not(text.begin(), text.end(), [](unsigned char character) {
-					return std::isspace(character) != 0;
-				});
-				const auto last = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char character) {
-					return std::isspace(character) != 0;
-				}).base();
-				if (first >= last) return std::string{};
-				return std::string(first, last);
-			};
-			key = trim(std::move(key));
-			value = trim(std::move(value));
-			if (key == "scale_mode") {
-				scaleMode = value;
-			} else if (key == "sort_mode") {
-				sortMode = value;
-			} else if (key == "sort_ascending") {
-				sortAscending = value == "1" || value == "true";
-			} else if (key == "copy_rename_pattern") {
-				copyRenamePattern = value;
-			} else if (key == "manual_zoom") {
-				try {
-					std::size_t parsedCharacters = 0;
-					const double parsedZoom = std::stod(value, &parsedCharacters);
-					if (parsedCharacters == value.size() && std::isfinite(parsedZoom)) {
-						manualZoom = std::clamp(parsedZoom, kMinZoom, kMaxZoom);
-						hasManualZoom = true;
-					}
-				} catch (const std::exception&) {
-					// Ignore malformed settings and retain the built-in default.
-				}
-			} else if (key == "maximized") {
-				maximized_ = value == "1" || value == "true";
-			} else if (key == "navigation_panel_enabled") {
-				navigationPanelEnabled_ = value == "1" || value == "true";
-			} else if (key == "navigation_panel_auto_reveal") {
-				navigationPanelAutoReveal_ = value == "1" || value == "true";
-			} else if (key == "info_visible") {
-				infoVisible_ = value == "1" || value == "true";
-			} else if (key == "show_filename") {
-				showFileName_ = value == "1" || value == "true";
-			} else if (key == "auto_contrast") {
-				autoContrastEnabled_ = value == "1" || value == "true";
-			}
-		}
-		copyRenamePattern_ = copyRenamePattern;
-		if (sortMode == "modification_date") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::LastModificationTime, sortAscending);
-		} else if (sortMode == "creation_date") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::CreationTime, sortAscending);
-		} else if (sortMode == "file_name") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileName, sortAscending);
-		} else if (sortMode == "random") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::Random, sortAscending);
-		} else if (sortMode == "file_size") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileSize, sortAscending);
+		jpegview_linux::ViewerSettings settings;
+		if (!jpegview_linux::LoadViewerSettings(settingsPath, settings)) return;
+		copyRenamePattern_ = settings.copyRenamePattern;
+		if (settings.sortMode == "modification_date") {
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::LastModificationTime, settings.sortAscending);
+		} else if (settings.sortMode == "creation_date") {
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::CreationTime, settings.sortAscending);
+		} else if (settings.sortMode == "file_name") {
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileName, settings.sortAscending);
+		} else if (settings.sortMode == "random") {
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::Random, settings.sortAscending);
+		} else if (settings.sortMode == "file_size") {
+			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileSize, settings.sortAscending);
 		}
 
-		if (scaleMode == "fit") {
+		maximized_ = settings.maximized;
+		navigationPanelEnabled_ = settings.navigationPanelEnabled;
+		navigationPanelAutoReveal_ = settings.navigationPanelAutoReveal;
+		infoVisible_ = settings.infoVisible;
+		showFileName_ = settings.showFilename;
+		autoContrastEnabled_ = settings.autoContrast;
+		if (settings.scaleMode == "fit") {
 			fitToWindow_ = true;
 			fillWithCrop_ = false;
 			autoZoomNoEnlarge_ = true;
-		} else if (scaleMode == "fill") {
+		} else if (settings.scaleMode == "fill") {
 			fitToWindow_ = true;
 			fillWithCrop_ = true;
 			autoZoomNoEnlarge_ = false;
-		} else if (scaleMode == "fit_no_enlarge") {
+		} else if (settings.scaleMode == "fit_no_enlarge") {
 			fitToWindow_ = true;
 			fillWithCrop_ = false;
 			autoZoomNoEnlarge_ = true;
-		} else if (scaleMode == "fill_no_enlarge") {
+		} else if (settings.scaleMode == "fill_no_enlarge") {
 			fitToWindow_ = true;
 			fillWithCrop_ = true;
 			autoZoomNoEnlarge_ = true;
-		} else if (scaleMode == "manual") {
+		} else if (settings.scaleMode == "manual") {
 			fitToWindow_ = false;
 			fillWithCrop_ = false;
 			autoZoomNoEnlarge_ = false;
-			if (hasManualZoom) zoom_ = manualZoom;
+			if (settings.manualZoomSet) zoom_ = settings.manualZoom;
 		}
 	}
 
@@ -1383,38 +1329,19 @@ private:
 		const fs::path settingsPath = ScaleSettingsPath();
 		if (settingsPath.empty()) return;
 
-		std::error_code error;
-		fs::create_directories(settingsPath.parent_path(), error);
-		if (error) return;
-
-		fs::path temporaryPath = settingsPath;
-		temporaryPath += ".tmp";
-		bool lastMaximized = maximized_;
-		const char* sortMode = CurrentSortModeSetting();
-		{
-			std::ofstream output(temporaryPath, std::ios::trunc);
-			if (!output) return;
-			output << "# JPEGView Linux display and batch-operation settings\n"
-			       << "scale_mode=" << CurrentScaleMode() << '\n'
-			       << "sort_mode=" << sortMode << '\n'
-			       << "sort_ascending=" << (fileList_.IsSortedAscending() ? 1 : 0) << '\n'
-			       << std::setprecision(17) << "manual_zoom=" << zoom_ << '\n'
-			       << "maximized=" << (lastMaximized ? 1 : 0) << '\n'
-			       << "navigation_panel_enabled=" << (navigationPanelEnabled_ ? 1 : 0) << '\n'
-			       << "navigation_panel_auto_reveal=" << (navigationPanelAutoReveal_ ? 1 : 0) << '\n'
-			       << "info_visible=" << (infoVisible_ ? 1 : 0) << '\n'
-			       << "show_filename=" << (showFileName_ ? 1 : 0) << '\n'
-			       << "auto_contrast=" << (autoContrastEnabled_ ? 1 : 0) << '\n'
-			       << "copy_rename_pattern=" << copyRenamePattern_ << '\n';
-			if (!output) {
-				output.close();
-				fs::remove(temporaryPath, error);
-				return;
-			}
-		}
-
-		fs::rename(temporaryPath, settingsPath, error);
-		if (error) fs::remove(temporaryPath, error);
+		jpegview_linux::ViewerSettings settings;
+		settings.scaleMode = CurrentScaleMode();
+		settings.sortMode = CurrentSortModeSetting();
+		settings.sortAscending = fileList_.IsSortedAscending();
+		settings.manualZoom = zoom_;
+		settings.maximized = maximized_;
+		settings.navigationPanelEnabled = navigationPanelEnabled_;
+		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
+		settings.infoVisible = infoVisible_;
+		settings.showFilename = showFileName_;
+		settings.autoContrast = autoContrastEnabled_;
+		settings.copyRenamePattern = copyRenamePattern_;
+		jpegview_linux::SaveViewerSettings(settingsPath, settings);
 	}
 
 	bool LoadCurrent() {
@@ -2118,7 +2045,7 @@ private:
 			FitToWindow(fillCrop, noEnlarge);
 			return;
 		}
-		zoom_ = std::clamp(manualZoom, kMinZoom, kMaxZoom);
+		zoom_ = std::clamp(manualZoom, jpegview_linux::kMinimumZoom, jpegview_linux::kMaximumZoom);
 		fitToWindow_ = false;
 		fillWithCrop_ = false;
 		autoZoomNoEnlarge_ = false;
@@ -2134,7 +2061,8 @@ private:
 		const double widthScale = static_cast<double>(std::max(1, windowWidth - 16)) / image_.width;
 		const double heightScale = static_cast<double>(std::max(1, windowHeight - 16)) / image_.height;
 		const double windowScale = fillCrop ? std::max(widthScale, heightScale) : std::min(widthScale, heightScale);
-		zoom_ = std::clamp(noEnlarge ? std::min(1.0, windowScale) : windowScale, kMinZoom, kMaxZoom);
+		zoom_ = std::clamp(noEnlarge ? std::min(1.0, windowScale) : windowScale,
+			jpegview_linux::kMinimumZoom, jpegview_linux::kMaximumZoom);
 		fitToWindow_ = true;
 		fillWithCrop_ = fillCrop;
 		autoZoomNoEnlarge_ = noEnlarge;
@@ -2163,7 +2091,7 @@ private:
 		const double oldZoom = zoom_;
 		const double imageX = (mouseX - (windowWidth - image_.width * oldZoom) / 2.0 - offsetX_) / oldZoom;
 		const double imageY = (mouseY - (windowHeight - image_.height * oldZoom) / 2.0 - offsetY_) / oldZoom;
-		zoom_ = std::clamp(oldZoom * factor, kMinZoom, kMaxZoom);
+		zoom_ = std::clamp(oldZoom * factor, jpegview_linux::kMinimumZoom, jpegview_linux::kMaximumZoom);
 		offsetX_ = mouseX - (windowWidth - image_.width * zoom_) / 2.0 - imageX * zoom_;
 		offsetY_ = mouseY - (windowHeight - image_.height * zoom_) / 2.0 - imageY * zoom_;
 		fitToWindow_ = false;

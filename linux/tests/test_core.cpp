@@ -2,6 +2,7 @@
 #include "file_list.h"
 #include "image_decoder.h"
 #include "image_writer.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <chrono>
@@ -355,6 +356,52 @@ void TestDecoderFailures() {
 	Expect(error == "cannot open file" || !error.empty(), "missing image did not produce an error message");
 }
 
+void TestSettingsRoundTripAndMalformedValues() {
+	TemporaryDirectory temporary;
+	const fs::path settingsPath = temporary.path() / "config" / "settings.conf";
+	jpegview_linux::ViewerSettings expected;
+	expected.scaleMode = "manual";
+	expected.sortMode = "file_name";
+	expected.sortAscending = false;
+	expected.manualZoom = 2.375;
+	expected.maximized = true;
+	expected.navigationPanelEnabled = false;
+	expected.navigationPanelAutoReveal = false;
+	expected.infoVisible = true;
+	expected.showFilename = true;
+	expected.autoContrast = true;
+	expected.copyRenamePattern = "%F=%n";
+	Expect(jpegview_linux::SaveViewerSettings(settingsPath, expected), "settings could not be saved");
+	Expect(fs::exists(settingsPath), "settings file was not created");
+	Expect(!fs::exists(settingsPath.string() + ".tmp"), "temporary settings file was left behind");
+
+	jpegview_linux::ViewerSettings loaded;
+	Expect(jpegview_linux::LoadViewerSettings(settingsPath, loaded), "settings could not be loaded");
+	Expect(loaded.scaleMode == expected.scaleMode && loaded.sortMode == expected.sortMode,
+		"settings string values did not round-trip");
+	Expect(loaded.sortAscending == expected.sortAscending && loaded.maximized == expected.maximized,
+		"settings boolean values did not round-trip");
+	Expect(loaded.navigationPanelEnabled == expected.navigationPanelEnabled &&
+		loaded.navigationPanelAutoReveal == expected.navigationPanelAutoReveal,
+		"navigation panel settings did not round-trip");
+	Expect(loaded.infoVisible == expected.infoVisible && loaded.showFilename == expected.showFilename &&
+		loaded.autoContrast == expected.autoContrast,
+		"overlay/correction settings did not round-trip");
+	Expect(loaded.copyRenamePattern == expected.copyRenamePattern, "batch pattern did not round-trip");
+	Expect(loaded.manualZoomSet, "saved manual zoom was not marked present");
+	ExpectNear(loaded.manualZoom, expected.manualZoom, 0.0000001, "manual zoom did not round-trip");
+
+	const fs::path malformed = temporary.path() / "malformed.conf";
+	std::ofstream malformedOutput(malformed);
+	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\nunknown_key=value\n";
+	malformedOutput.close();
+	loaded = {};
+	Expect(jpegview_linux::LoadViewerSettings(malformed, loaded), "malformed settings file was rejected entirely");
+	Expect(loaded.scaleMode == "manual", "whitespace around a setting was not trimmed");
+	Expect(!loaded.manualZoomSet && loaded.manualZoom == 1.0,
+		"malformed manual zoom did not retain its default");
+}
+
 class ExifFixture {
 public:
 	ExifFixture() : bytes_({'E', 'x', 'i', 'f', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) {
@@ -561,6 +608,7 @@ int main() {
 	RunTest("file-list-multiple-inputs", TestFileListMultipleInputs, failures);
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
+	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
