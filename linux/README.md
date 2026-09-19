@@ -107,8 +107,10 @@ persisted settings:
 make -C linux test-ui
 ```
 
-The UI suite uses `Xvfb`, `openbox`, and `xdotool`; it reports `SKIP` when those tools are not
-installed. `make -C linux check` runs both suites. The Ubuntu Docker build runs the core suite.
+The UI suite uses `Xvfb`, `openbox`, `wmctrl`, and `xdotool`; it reports `SKIP` when those tools are
+not installed. When ImageMagick's `import` and `compare` are available it also checks the context
+menu repaint pixel-for-pixel. `make -C linux check` runs both suites. The Ubuntu Docker build runs
+the core suite.
 
 ## Controls
 

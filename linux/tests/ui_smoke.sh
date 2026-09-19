@@ -7,10 +7,17 @@ if [ ! -x "$BINARY" ]; then
 	exit 2
 fi
 
-for command in Xvfb xdotool openbox; do
+for command in Xvfb xdotool openbox wmctrl; do
 	if ! command -v "$command" >/dev/null 2>&1; then
 		echo "UI smoke test: SKIP (missing $command)"
 		exit 0
+	fi
+done
+
+visual_assertions=1
+for command in import compare xprop; do
+	if ! command -v "$command" >/dev/null 2>&1; then
+		visual_assertions=0
 	fi
 done
 
@@ -46,7 +53,10 @@ write_ppm() {
 write_ppm "$temporary/images/01-red.ppm" 255 0 0
 write_ppm "$temporary/images/02-green.ppm" 0 255 0
 write_ppm "$temporary/images/03-blue.ppm" 0 0 255
-touch -t 202001010000.00 "$temporary/images/01-red.ppm" "$temporary/images/02-green.ppm" "$temporary/images/03-blue.ppm"
+write_ppm "$temporary/images/04-yellow.ppm" 255 255 0
+write_ppm "$temporary/images/05-cyan.ppm" 0 255 255
+touch -t 202001010000.00 "$temporary/images/01-red.ppm" "$temporary/images/02-green.ppm" \
+	"$temporary/images/03-blue.ppm" "$temporary/images/04-yellow.ppm" "$temporary/images/05-cyan.ppm"
 
 help_text=$($BINARY --help)
 case "$help_text" in
@@ -107,19 +117,55 @@ if [ "$title_before" = "$title_after_wheel" ]; then
 	exit 1
 fi
 
+title_before_hold=$title_after_wheel
+DISPLAY=":$display_number" xdotool keydown Right
+sleep 0.7
+DISPLAY=":$display_number" xdotool keyup Right
+sleep 0.2
+title_after_hold=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+if [ "$title_before_hold" = "$title_after_hold" ]; then
+	echo "UI smoke test: held Right key did not repeat navigation" >&2
+	exit 1
+fi
+
 DISPLAY=":$display_number" xdotool keydown ctrl
 DISPLAY=":$display_number" xdotool click 5
 DISPLAY=":$display_number" xdotool keyup ctrl
 sleep 0.3
 title_after_ctrl_wheel=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
-if [ "$title_after_wheel" != "$title_after_ctrl_wheel" ]; then
+if [ "$title_after_hold" != "$title_after_ctrl_wheel" ]; then
 	echo "UI smoke test: Ctrl+wheel navigated instead of zooming" >&2
 	exit 1
+fi
+
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" xdotool mousemove 640 400
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-before.png"
+	DISPLAY=":$display_number" xdotool click 3
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-open.png"
+	DISPLAY=":$display_number" xdotool key Escape
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-after.png"
+	context_difference=$(compare -metric AE "$temporary/context-before.png" "$temporary/context-after.png" null: 2>&1 || true)
+	if [ "$context_difference" != "0" ]; then
+		echo "UI smoke test: context-menu close left a repaint difference ($context_difference)" >&2
+		exit 1
+	fi
 fi
 
 DISPLAY=":$display_number" xdotool key n
 DISPLAY=":$display_number" xdotool key shift+n
 DISPLAY=":$display_number" xdotool key F2
+DISPLAY=":$display_number" wmctrl -i -r "$window_id" -b add,maximized_vert,maximized_horz
+sleep 0.5
+if [ "$visual_assertions" -eq 1 ]; then
+	window_state=$(DISPLAY=":$display_number" xprop -id "$window_id" _NET_WM_STATE 2>/dev/null || true)
+	case "$window_state" in
+		*MAXIMIZED_VERT*MAXIMIZED_HORZ*) ;;
+		*) echo "UI smoke test: test window could not be maximized" >&2; exit 1 ;;
+	esac
+fi
 sleep 0.2
 stop_viewer
 
@@ -128,8 +174,16 @@ grep -q '^sort_mode=file_name$' "$settings"
 grep -q '^sort_ascending=1$' "$settings"
 grep -q '^show_filename=1$' "$settings"
 grep -q '^info_visible=1$' "$settings"
+grep -q '^maximized=1$' "$settings"
 
 launch_viewer
+if [ "$visual_assertions" -eq 1 ]; then
+	window_state=$(DISPLAY=":$display_number" xprop -id "$window_id" _NET_WM_STATE 2>/dev/null || true)
+	case "$window_state" in
+		*MAXIMIZED_VERT*MAXIMIZED_HORZ*) ;;
+		*) echo "UI smoke test: maximized window state was not restored at launch" >&2; exit 1 ;;
+	esac
+fi
 DISPLAY=":$display_number" xdotool key Home
 sleep 0.3
 title_after_reload=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
