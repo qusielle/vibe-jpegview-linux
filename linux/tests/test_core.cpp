@@ -1703,6 +1703,19 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 	Expect(jpegview_linux::ThumbnailPreloadOrder(4, 0, 8) ==
 		std::vector<std::size_t>({0, 1, 2, 3}),
 		"thumbnail preload order failed at the first file");
+	Expect(jpegview_linux::ThumbnailCacheCapacity(164, 112, 1,
+		16u * 1024u * 1024u, 64) == 64,
+		"thumbnail cache did not honor its entry limit");
+	Expect(jpegview_linux::ThumbnailCacheCapacity(800, 536, 1,
+		16u * 1024u * 1024u, 64) == 39,
+		"thumbnail cache did not scale down for wide thumbnails");
+	Expect(jpegview_linux::ThumbnailCacheCapacity(100, 103, 1, 1, 64) == 1,
+		"thumbnail cache did not retain one entry below its pixel budget");
+	Expect(jpegview_linux::ThumbnailCacheCapacity(0, 100, 1, 10000, 64) == 0 &&
+		jpegview_linux::ThumbnailCacheCapacity(100, 2, 1, 10000, 64) == 0 &&
+		jpegview_linux::ThumbnailCacheCapacity(100, 100, 1, 0, 64) == 0 &&
+		jpegview_linux::ThumbnailCacheCapacity(100, 100, 1, 10000, 0) == 0,
+		"thumbnail cache accepted invalid dimensions or limits");
 
 	jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(400, 200, 100, 80);
 	Expect(size.width == 100 && size.height == 50,

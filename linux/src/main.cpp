@@ -616,25 +616,19 @@ private:
 		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
 		const SDL_Rect panel = ThumbnailPanelRect();
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
-		const std::size_t cacheLimit = ThumbnailCacheLimit(panel.w, rowHeight);
+		const std::size_t cacheLimit = jpegview_linux::ThumbnailCacheCapacity(panel.w, rowHeight,
+			kThumbnailVerticalMargin, kThumbnailCachePixelBudget, kThumbnailCacheLimit);
 		const std::vector<std::size_t> order = jpegview_linux::ThumbnailPreloadOrder(
 			fileList_.Size(), fileList_.CurrentIndex(), cacheLimit);
 		thumbnailLoadQueue_.insert(thumbnailLoadQueue_.end(), order.begin(), order.end());
 		nextThumbnailLoadTick_ = 0;
 	}
 
-	std::size_t ThumbnailCacheLimit(int panelWidth, int rowHeight) const {
-		const int imageHeight = std::max(1, rowHeight - kThumbnailVerticalMargin * 2 - 1);
-		const std::size_t pixelsPerThumbnail = static_cast<std::size_t>(std::max(1, panelWidth)) *
-			static_cast<std::size_t>(imageHeight);
-		return std::clamp(kThumbnailCachePixelBudget / pixelsPerThumbnail,
-			static_cast<std::size_t>(1), kThumbnailCacheLimit);
-	}
-
 	std::size_t CurrentThumbnailCacheLimit() const {
 		const SDL_Rect panel = ThumbnailPanelRect();
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
-		return ThumbnailCacheLimit(panel.w, rowHeight);
+		return jpegview_linux::ThumbnailCacheCapacity(panel.w, rowHeight,
+			kThumbnailVerticalMargin, kThumbnailCachePixelBudget, kThumbnailCacheLimit);
 	}
 
 	void TrimThumbnailCache() {

@@ -49,6 +49,12 @@ std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
 std::vector<std::size_t> ThumbnailPreloadOrder(std::size_t fileCount,
 	std::size_t currentIndex, std::size_t maximumCount);
 
+// Calculates the number of full-panel thumbnail surfaces that fit within a
+// pixel budget. A non-empty cache keeps at least one entry and never exceeds
+// maximumEntries.
+std::size_t ThumbnailCacheCapacity(int panelWidth, int rowHeight,
+	int verticalMargin, std::size_t pixelBudget, std::size_t maximumEntries);
+
 // Aspect-fit dimensions for a thumbnail. Images are never enlarged.
 ThumbnailSize FitThumbnailSize(int sourceWidth, int sourceHeight,
 	int maximumWidth, int maximumHeight);

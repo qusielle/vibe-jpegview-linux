@@ -51,6 +51,18 @@ std::vector<std::size_t> ThumbnailPreloadOrder(std::size_t fileCount,
 	return order;
 }
 
+std::size_t ThumbnailCacheCapacity(int panelWidth, int rowHeight,
+	int verticalMargin, std::size_t pixelBudget, std::size_t maximumEntries) {
+	if (panelWidth <= 0 || rowHeight <= 0 || pixelBudget == 0 || maximumEntries == 0) return 0;
+	const int margin = std::max(0, verticalMargin);
+	const int imageHeight = rowHeight - margin * 2 - 1;
+	if (imageHeight <= 0) return 0;
+	const std::size_t pixelsPerThumbnail = static_cast<std::size_t>(panelWidth) *
+		static_cast<std::size_t>(imageHeight);
+	return std::clamp(pixelBudget / pixelsPerThumbnail,
+		static_cast<std::size_t>(1), maximumEntries);
+}
+
 ThumbnailSize FitThumbnailSize(int sourceWidth, int sourceHeight,
 	int maximumWidth, int maximumHeight) {
 	if (sourceWidth <= 0 || sourceHeight <= 0 || maximumWidth <= 0 || maximumHeight <= 0) return {};
