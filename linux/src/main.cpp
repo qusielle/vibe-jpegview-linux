@@ -16,6 +16,7 @@
 #include "resize_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
+#include "viewer_chrome.h"
 #include "playback_scheduler.h"
 #include "thumbnail_panel_model.h"
 #include "thumbnail_resampler.h"
@@ -30,7 +31,6 @@
 #include "../../src/JPEGView/resource.h"
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <cctype>
 #include <cmath>
@@ -70,7 +70,6 @@ constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr int kUiTextScale = 1;
 constexpr int kContextMenuSeparatorHeight = 7;
-constexpr int kNavigationSortMode = -2;
 constexpr int kNavigationPanelHoverHeight = 64;
 constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
@@ -91,11 +90,6 @@ constexpr int kResizeHeight = 2;
 constexpr int kResizeFilter = 3;
 constexpr int kResizeApply = 0;
 constexpr int kResizeCancel = 1;
-
-struct ControlButton {
-	SDL_Rect rect{};
-	int command = IDM_NEXT;
-};
 
 jpegview_linux::SystemFont& UiFont() {
 	static jpegview_linux::SystemFont font;
@@ -1460,42 +1454,14 @@ private:
 		return lines;
 	}
 
-	SDL_Rect ControlPanelRect() const {
+	jpegview_linux::NavigationPanelPaint CurrentNavigationPanelPaint() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const int buttonSize = 40;
-		const int gap = 5;
-		const int margin = 8;
-		const int separator = 12;
-		const int buttonCount = 9;
-		const int panelWidth = margin * 2 + buttonSize * buttonCount + gap * (buttonCount - 1) + separator * 2;
-		return SDL_Rect{
-			(windowWidth - panelWidth) / 2,
-			windowHeight - buttonSize - margin * 2,
-			panelWidth,
-			buttonSize + margin * 2
-		};
-	}
-
-	void LayoutControls(std::vector<ControlButton>& buttons) const {
-		const SDL_Rect panel = ControlPanelRect();
-		const int buttonSize = 40;
-		const int gap = 5;
-		const int margin = 8;
-		const int separator = 12;
-		const int commands[] = {
-			IDM_FIRST, IDM_PREV, IDM_NEXT,
-			IDM_LAST, kNavigationSortMode, IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, IDM_FULL_SCREEN_MODE,
-			IDM_ROTATE_90, IDM_ROTATE_270
-		};
-		buttons.clear();
-		int x = panel.x + margin;
-		for (std::size_t i = 0; i < std::size(commands); ++i) {
-			buttons.push_back(ControlButton{SDL_Rect{x, panel.y + margin, buttonSize, buttonSize}, commands[i]});
-			x += buttonSize + gap;
-			if (i == 3 || i == 6) x += separator;
-		}
+		const std::string sortLabel = jpegview_linux::SortModeShortLabel(fileList_.GetSorting());
+		return jpegview_linux::BuildNavigationPanelPaint(windowWidth, windowHeight,
+			lastMouseX_, lastMouseY_, viewport_.IsFitToWindow(), fileList_.GetSorting(),
+			TextWidth(sortLabel, kUiTextScale), TextLineHeight(kUiTextScale));
 	}
 
 	static bool PointInRect(int x, int y, const SDL_Rect& rect) {
@@ -1504,15 +1470,14 @@ private:
 
 	bool HandleControlClick(int x, int y) {
 		if (!navigationPanelEnabled_ || !controlsVisible_) return false;
-		std::vector<ControlButton> buttons;
-		LayoutControls(buttons);
-		for (const ControlButton& button : buttons) {
-			if (!PointInRect(x, y, button.rect)) continue;
+		const jpegview_linux::NavigationPanelPaint panel = CurrentNavigationPanelPaint();
+		for (const jpegview_linux::NavigationButtonPaint& button : panel.buttons) {
+			if (!jpegview_linux::Contains(button.rect, x, y)) continue;
 			ExecuteCommand(button.command);
 			UpdateNavigationPanelVisibility(x, y);
 			return true;
 		}
-		return PointInRect(x, y, ControlPanelRect());
+		return jpegview_linux::Contains(panel.panel, x, y);
 	}
 
 	void ExecuteCommand(int command) {
@@ -1667,7 +1632,7 @@ private:
 			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
-		case kNavigationSortMode:
+		case jpegview_linux::kNavigationSortModeCommand:
 			fileList_.SetSorting(
 				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName ?
 					jpegview_linux::FileList::SortMode::LastModificationTime :
@@ -2981,142 +2946,40 @@ private:
 		}
 	}
 
-	void DrawNavigationIcon(const ControlButton& button, bool hovered) {
-		const SDL_Rect r = button.rect;
-		if (hovered) {
+	static SDL_Rect SdlRect(const jpegview_linux::UiRect& rect) {
+		return SDL_Rect{rect.x, rect.y, rect.width, rect.height};
+	}
+
+	void RenderOverlayPaint(const jpegview_linux::OverlayPaintPlan& plan) {
+		const SDL_Rect panel = SdlRect(plan.panel);
+		SDL_SetRenderDrawColor(renderer_, plan.background.red, plan.background.green,
+			plan.background.blue, plan.background.alpha);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, plan.border.red, plan.border.green, plan.border.blue);
+		for (const jpegview_linux::UiText& text : plan.text) {
+			DrawText(text.text, text.x, text.y, kUiTextScale,
+				text.color.red, text.color.green, text.color.blue);
+		}
+	}
+
+	void RenderNavigationButton(const jpegview_linux::NavigationButtonPaint& button) {
+		const SDL_Rect rect = SdlRect(button.rect);
+		if (button.hovered) {
 			SDL_SetRenderDrawColor(renderer_, 65, 65, 65, 165);
-			SDL_RenderFillRect(renderer_, &r);
+			SDL_RenderFillRect(renderer_, &rect);
 		}
-		DrawRect(r, 150, 150, 150);
-		const int left = r.x + 8;
-		const int right = r.x + r.w - 8;
-		const int top = r.y + 8;
-		const int bottom = r.y + r.h - 8;
-		const int middle = r.y + r.h / 2;
-		switch (button.command) {
-		case IDM_FIRST:
-			DrawLine(left, top, left, bottom);
-			DrawLine(left + 8, top, left + 8, bottom);
-			DrawLine(right, top, right - 10, middle);
-			DrawLine(right - 10, middle, right, bottom);
-			break;
-		case IDM_PREV:
-			DrawLine(left + 5, top, left + 5, bottom);
-			DrawLine(right - 1, top, right - 12, middle);
-			DrawLine(right - 12, middle, right - 1, bottom);
-			break;
-		case IDM_NEXT:
-			DrawLine(left + 1, top, left + 12, middle);
-			DrawLine(left + 12, middle, left + 1, bottom);
-			DrawLine(right - 5, top, right - 5, bottom);
-			break;
-		case IDM_LAST:
-			DrawLine(left, top, left + 10, middle);
-			DrawLine(left + 10, middle, left, bottom);
-			DrawLine(right - 8, top, right - 8, bottom);
-			DrawLine(right, top, right, bottom);
-			break;
-		case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
-			if (viewport_.IsFitToWindow()) {
-				DrawLine(left + 5, top + 4, left + 14, top + 4);
-				DrawLine(left + 5, top + 4, left + 5, top + 13);
-				DrawLine(right - 5, top + 4, right - 14, top + 4);
-				DrawLine(right - 5, top + 4, right - 5, top + 13);
-				DrawLine(left + 5, bottom - 4, left + 14, bottom - 4);
-				DrawLine(left + 5, bottom - 4, left + 5, bottom - 13);
-				DrawLine(right - 5, bottom - 4, right - 14, bottom - 4);
-				DrawLine(right - 5, bottom - 4, right - 5, bottom - 13);
-			} else {
-				DrawLine(left + 7, top + 3, left + 7, bottom - 3);
-				DrawLine(left + 7, top + 3, left + 16, top + 3);
-				DrawLine(left + 7, bottom - 3, left + 16, bottom - 3);
-				DrawLine(right - 7, top + 3, right - 7, bottom - 3);
-				DrawLine(right - 7, top + 3, right - 16, top + 3);
-				DrawLine(right - 7, bottom - 3, right - 16, bottom - 3);
-			}
-			break;
-		case IDM_FULL_SCREEN_MODE:
-			DrawRect(SDL_Rect{left, top, right - left, bottom - top});
-			DrawLine(left, top + 7, right, top + 7);
-			break;
-		case IDM_ROTATE_90:
-			DrawLine(left + 4, bottom - 2, right - 2, bottom - 2);
-			DrawLine(right - 2, bottom - 2, right - 2, top + 7);
-			DrawLine(right - 2, top + 7, right - 9, top + 7);
-			DrawLine(right - 9, top + 7, right - 5, top + 3);
-			DrawLine(right - 9, top + 7, right - 5, top + 11);
-			break;
-		case IDM_ROTATE_270:
-			DrawLine(left + 2, top + 7, left + 2, bottom - 2);
-			DrawLine(left + 2, bottom - 2, right - 4, bottom - 2);
-			DrawLine(left + 2, top + 7, left + 9, top + 7);
-			DrawLine(left + 9, top + 7, left + 5, top + 3);
-			DrawLine(left + 9, top + 7, left + 5, top + 11);
-			break;
-		case kNavigationSortMode: {
-			const std::string label = jpegview_linux::SortModeShortLabel(fileList_.GetSorting());
-			DrawText(label, r.x + (r.w - TextWidth(label, kUiTextScale)) / 2,
-				r.y + (r.h - TextLineHeight(kUiTextScale)) / 2, kUiTextScale);
-			break;
+		DrawRect(rect, 150, 150, 150);
+		for (const jpegview_linux::UiRect& outline : button.outlines) {
+			DrawRect(SdlRect(outline));
 		}
-		default:
-			break;
+		for (const jpegview_linux::UiLine& line : button.lines) {
+			DrawLine(line.x1, line.y1, line.x2, line.y2,
+				line.color.red, line.color.green, line.color.blue);
 		}
-	}
-
-	std::string SortModeTooltip() const {
-		const std::string nextMode = fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName ?
-			"modification date" : "file name";
-		return "Current order: " + std::string(jpegview_linux::SortModeDescription(fileList_.GetSorting())) +
-			"; click for " + nextMode + " order";
-	}
-
-	std::string ControlTooltip(int command) const {
-		switch (command) {
-		case IDM_FIRST:
-			return "Show first image in folder (Home)";
-		case IDM_PREV:
-			return "Show previous image (Left)";
-		case IDM_NEXT:
-			return "Show next image (Right)";
-		case IDM_LAST:
-			return "Show last image in folder (End)";
-		case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
-			return viewport_.IsFitToWindow() ? "Actual size of image (Space)" : "Fit image to screen (Space)";
-		case IDM_FULL_SCREEN_MODE:
-			return fullscreen_ ? "Window mode (F11)" : "Full screen mode (F11)";
-		case IDM_ROTATE_90:
-			return "Rotate image 90 deg clockwise (Down)";
-		case IDM_ROTATE_270:
-			return "Rotate image 90 deg counter-clockwise (Up)";
-		case kNavigationSortMode:
-			return SortModeTooltip();
-		default:
-			return {};
+		for (const jpegview_linux::UiText& text : button.text) {
+			DrawText(text.text, text.x, text.y, kUiTextScale,
+				text.color.red, text.color.green, text.color.blue);
 		}
-	}
-
-	void RenderControlTooltip(const SDL_Rect& anchor, const std::string& text) {
-		if (text.empty()) return;
-		int windowWidth = 0;
-		int windowHeight = 0;
-		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const int maximumWidth = std::max(1, windowWidth - 8);
-		const int availableTextWidth = std::max(1, maximumWidth - 16);
-		const std::string label = ClipText(text, availableTextWidth);
-		const int tooltipWidth = std::min(maximumWidth, TextWidth(label, kUiTextScale) + 16);
-		const int tooltipHeight = std::max(22, TextLineHeight() + 8);
-		int x = anchor.x + (anchor.w - tooltipWidth) / 2;
-		x = std::clamp(x, 4, std::max(4, windowWidth - tooltipWidth - 4));
-		int y = anchor.y - tooltipHeight - 6;
-		if (y < 4) y = anchor.y + anchor.h + 6;
-		if (y + tooltipHeight > windowHeight) y = std::max(4, windowHeight - tooltipHeight - 4);
-		const SDL_Rect tooltip{x, y, tooltipWidth, tooltipHeight};
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 215);
-		SDL_RenderFillRect(renderer_, &tooltip);
-		DrawRect(tooltip, 190, 190, 190);
-		DrawText(label, tooltip.x + 8, tooltip.y + (tooltip.h - TextLineHeight()) / 2,
-			kUiTextScale, 255, 255, 255);
 	}
 
 	void RenderFileName() {
@@ -3132,13 +2995,8 @@ private:
 			TextWidth(label, kUiTextScale), windowWidth, kOverlayInset,
 			kOverlayTextPadding, FilenameOverlayHeight());
 		label = ClipText(label, layout.textWidth);
-		const SDL_Rect panel{layout.x, layout.y, layout.width, layout.height};
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
-		SDL_RenderFillRect(renderer_, &panel);
-		DrawRect(panel, 105, 105, 105);
-		DrawText(label, panel.x + kOverlayTextPadding,
-			panel.y + (FilenameOverlayHeight() - TextLineHeight()) / 2,
-			kUiTextScale, 255, 255, 255);
+		RenderOverlayPaint(jpegview_linux::FilenameOverlayPaint(layout, std::move(label),
+			TextLineHeight(), kOverlayTextPadding));
 	}
 
 	void RenderImageInfo() {
@@ -3165,16 +3023,8 @@ private:
 			line = ClipText(line, layout.textWidth);
 		}
 
-		SDL_Rect panel{layout.x, layout.y, layout.width, layout.height};
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
-		SDL_RenderFillRect(renderer_, &panel);
-		DrawRect(panel, 105, 105, 105);
-		for (int index = 0; index < layout.visibleLines && index < static_cast<int>(lines.size()); ++index) {
-			DrawText(lines[static_cast<std::size_t>(index)], panel.x + kOverlayTextPadding,
-				panel.y + kOverlayTextPadding + index * OverlayLineHeight(),
-				kUiTextScale,
-				index == 0 ? 255 : 243, index == 0 ? 255 : 242, index == 0 ? 255 : 231);
-		}
+		RenderOverlayPaint(jpegview_linux::InformationOverlayPaint(layout, lines,
+			OverlayLineHeight(), kOverlayTextPadding));
 	}
 
 	jpegview_linux::ThumbnailPanelLayout CurrentThumbnailPanelLayout() const {
@@ -3316,25 +3166,33 @@ private:
 	void RenderControls() {
 		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
-		std::vector<ControlButton> buttons;
-		LayoutControls(buttons);
-		const SDL_Rect panel = ControlPanelRect();
-		const ControlButton* hoveredButton = nullptr;
+		const jpegview_linux::NavigationPanelPaint paint = CurrentNavigationPanelPaint();
+		const SDL_Rect panel = SdlRect(paint.panel);
+		const jpegview_linux::NavigationButtonPaint* hoveredButton = nullptr;
 
 		// Some accelerated SDL/X11 renderers rasterize a line endpoint one pixel
 		// beyond its logical bounds. Keep every navigation-panel primitive inside
 		// the panel so reopening it after a context menu cannot damage the image.
 		SDL_RenderSetClipRect(renderer_, &panel);
-		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
+		SDL_SetRenderDrawColor(renderer_, paint.background.red, paint.background.green,
+			paint.background.blue, paint.background.alpha);
 		SDL_RenderFillRect(renderer_, &panel);
-		DrawRect(panel, 105, 105, 105);
-		for (const ControlButton& button : buttons) {
-			const bool hovered = PointInRect(lastMouseX_, lastMouseY_, button.rect);
-			if (hovered) hoveredButton = &button;
-			DrawNavigationIcon(button, hovered);
+		DrawRect(panel, paint.border.red, paint.border.green, paint.border.blue);
+		for (const jpegview_linux::NavigationButtonPaint& button : paint.buttons) {
+			if (button.hovered) hoveredButton = &button;
+			RenderNavigationButton(button);
 		}
 		SDL_RenderSetClipRect(renderer_, nullptr);
-		if (hoveredButton != nullptr) RenderControlTooltip(hoveredButton->rect, ControlTooltip(hoveredButton->command));
+		if (hoveredButton == nullptr) return;
+		const std::string text = jpegview_linux::NavigationTooltip(hoveredButton->command,
+			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting());
+		if (text.empty()) return;
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const std::string label = ClipText(text, std::max(1, windowWidth - 24));
+		RenderOverlayPaint(jpegview_linux::NavigationTooltipPaint(hoveredButton->rect,
+			label, TextWidth(label, kUiTextScale), TextLineHeight(), windowWidth, windowHeight));
 	}
 
 	void RenderConfirmation() {

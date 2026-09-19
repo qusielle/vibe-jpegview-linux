@@ -14,6 +14,7 @@
 #include "resize_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
+#include "viewer_chrome.h"
 #include "thumbnail_panel_model.h"
 #include "thumbnail_resampler.h"
 #include "app_icon.h"
@@ -1906,6 +1907,67 @@ void TestOverlayLayoutUsesContentWidthAndComfortableMargins() {
 		"overlay layout did not remain valid for an extremely narrow window");
 }
 
+void TestViewerChromePaintPlans() {
+	const jpegview_linux::OverlayLayout filenameLayout{4, 4, 112, 20, 100, 1};
+	jpegview_linux::OverlayPaintPlan overlay = jpegview_linux::FilenameOverlayPaint(
+		filenameLayout, "[1/2] image.jpg", 11, 6);
+	Expect(overlay.panel.x == 4 && overlay.panel.y == 4 && overlay.panel.width == 112 &&
+		overlay.panel.height == 20 && overlay.background.alpha == 205 &&
+		overlay.text.size() == 1 && overlay.text[0].x == 10 && overlay.text[0].y == 8 &&
+		overlay.text[0].color.red == 255,
+		"filename overlay paint plan changed panel style or text alignment");
+	const jpegview_linux::OverlayLayout infoLayout{4, 28, 160, 48, 148, 2};
+	overlay = jpegview_linux::InformationOverlayPaint(infoLayout,
+		{"heading", "details", "hidden"}, 18, 6);
+	Expect(overlay.text.size() == 2 && overlay.text[0].y == 34 && overlay.text[1].y == 52 &&
+		overlay.text[0].color.red == 255 && overlay.text[1].color.red == 243 &&
+		overlay.text[1].color.green == 242 && overlay.text[1].color.blue == 231,
+		"information overlay paint plan ignored visible lines or emphasis colors");
+
+	jpegview_linux::NavigationPanelPaint navigation = jpegview_linux::BuildNavigationPanelPaint(
+		800, 600, 385, 560, true, FileList::SortMode::LastModificationTime, 7, 11);
+	Expect(navigation.panel.x == 180 && navigation.panel.y == 544 &&
+		navigation.panel.width == 440 && navigation.panel.height == 56 &&
+		navigation.buttons.size() == 9,
+		"navigation paint plan changed panel geometry or button count");
+	Expect(navigation.buttons[0].rect.x == 188 && navigation.buttons[3].rect.x == 323 &&
+		navigation.buttons[4].rect.x == 380 && navigation.buttons[7].rect.x == 527,
+		"navigation paint plan lost section spacing");
+	Expect(navigation.buttons[0].command == IDM_FIRST && navigation.buttons[0].lines.size() == 4 &&
+		navigation.buttons[0].lines[0].x1 == 196 && navigation.buttons[0].lines[0].y1 == 560,
+		"first-image navigation icon geometry is incorrect");
+	Expect(navigation.buttons[4].command == jpegview_linux::kNavigationSortModeCommand &&
+		navigation.buttons[4].hovered && navigation.buttons[4].text.size() == 1 &&
+		navigation.buttons[4].text[0].text == "D",
+		"navigation sort button did not expose state and hover in its paint plan");
+	Expect(navigation.buttons[5].lines.size() == 8,
+		"fit-mode navigation icon did not use outward-corner geometry");
+	navigation = jpegview_linux::BuildNavigationPanelPaint(
+		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 11);
+	Expect(navigation.buttons[5].lines.size() == 6 && navigation.buttons[4].text[0].text == "N",
+		"actual-size navigation icon or name-order label is incorrect");
+
+	Expect(jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, false,
+		FileList::SortMode::FileName) == "Full screen mode (F11)" &&
+		jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, true,
+			FileList::SortMode::FileName) == "Window mode (F11)" &&
+		jpegview_linux::NavigationTooltip(jpegview_linux::kNavigationSortModeCommand, true, false,
+			FileList::SortMode::LastModificationTime).find("click for file name") != std::string::npos,
+		"navigation tooltip did not reflect fullscreen or sort state");
+	const jpegview_linux::UiRect anchor{2, 5, 40, 40};
+	overlay = jpegview_linux::NavigationTooltipPaint(anchor, "tip", 21, 11, 100, 60);
+	Expect(overlay.panel.x == 4 && overlay.panel.y == 34 && overlay.panel.width == 37 &&
+		overlay.panel.height == 22 && overlay.background.alpha == 215 &&
+		overlay.text[0].x == 12,
+		"navigation tooltip paint plan did not clamp or flip around its anchor");
+	Expect(jpegview_linux::Contains(navigation.buttons[0].rect,
+		navigation.buttons[0].rect.x, navigation.buttons[0].rect.y) &&
+		!jpegview_linux::Contains(navigation.buttons[0].rect,
+			navigation.buttons[0].rect.x + navigation.buttons[0].rect.width,
+			navigation.buttons[0].rect.y),
+		"viewer chrome hit testing did not use half-open rectangle bounds");
+}
+
 void TestThumbnailPanelLayoutPreloadAndSizing() {
 	Expect(jpegview_linux::ThumbnailRowHeight(164, 1) == 112,
 		"default thumbnail row height changed");
@@ -2479,6 +2541,7 @@ int main() {
 	RunTest("context-menu-catalog-and-state", TestContextMenuCatalogAndState, failures);
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
+	RunTest("viewer-chrome-paint-plans", TestViewerChromePaintPlans, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("thumbnail-cache-scheduling-and-eviction", TestThumbnailCacheSchedulingAndEviction, failures);
 	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);

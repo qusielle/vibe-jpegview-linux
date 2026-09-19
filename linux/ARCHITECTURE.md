@@ -18,6 +18,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_dialog_model`: filtering, name/date sorting, UTF-8 editing, selection, paging, scrolling,
   focus restoration, and cancellable background directory summaries.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
+- `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
+  primitives, hit regions, dynamic labels, and tooltip placement.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry, nearest-first cache scheduling,
   cancellation/LRU policy, memory sizing, and antialiased source-area reduction.
 - `image_info_model`: stable dimensions/date/file-size presentation.
@@ -33,16 +35,15 @@ should normally be added to one of these focused modules and covered by `tests/t
 and invoking desktop integrations. It should translate SDL events into operations on the modules
 above rather than duplicate their state.
 
-## Refactoring backlog
+## Refactoring status
 
-The remaining Viewer work is ordered by expected testability and reduction in coupling:
-
-1. Separate overlay/navigation drawing from Viewer. Rendering remains last because pixel-level X11
-   smoke tests are its best safety net.
+The planned Viewer decomposition is complete. Future extractions should be driven by a concrete
+feature or maintenance problem rather than moving SDL calls for its own sake.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
-The image, viewport, playback, file-dialog, resize, context-menu rule, thumbnail-layout/resampling, font,
-image-information, and overlay-layout extractions are complete. They establish the intended
+The image, viewport, playback, file-dialog, dialog-controller, context-menu, thumbnail cache,
+external-command, font, image-information, and viewer-chrome extractions establish the intended
 pattern: a small pure C++ object, thin SDL adapter methods in Viewer, focused core tests, then UI
 smoke tests for integration. Worker threads belong behind model APIs (as with directory summaries),
-while SDL windows, textures, cursors, and event translation remain owned by Viewer.
+while SDL windows, textures, cursors, process execution, and event translation remain owned by
+platform adapters.
