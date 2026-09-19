@@ -3,6 +3,114 @@
 This directory contains the first native Linux deliverable for upstream JPEGView v1.3.46.
 The original Windows/ATL/WTL project remains unchanged under `src/`.
 
+## Linux branch changes, in order of importance
+
+This is the complete grouped summary of features and changes made since the native Linux branch
+split from the Windows frontend. Later fixes, tests, and refactorings are grouped with the feature
+they support.
+
+1. **Native Linux viewer and distributable AppImage.** A native SDL2 frontend now opens individual
+   images, multiple command-line inputs, and directories without modifying the original Windows
+   application. It includes a resizable/maximizable/fullscreen window, drag-and-drop, a desktop
+   entry, the upstream JPEGView application icon, an Ubuntu 20.04 build container, and AppImage
+   packaging with bundled SDL and codec runtimes.
+
+2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
+   PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, and LibRaw camera formats. Embedded
+   color profiles are transformed through LCMS2. The save dialog writes JPEG, PNG, BMP, TGA, WebP,
+   GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images. Codec detection and fixtures
+   were made portable across Ubuntu 20.04 and newer distributions, including giflib installations
+   without pkg-config metadata and HEIF encoders with different supported profiles.
+
+3. **High-quality viewing, fitting, zooming, and panning.** JPEGView's high-quality downsampling and
+   sharpening path was ported, with bicubic enlargement and a display-size texture cache. Fit mode
+   uses the full client area without artificial top/bottom gaps and does not enlarge small images.
+   Fit, fill, actual-size, and manual modes survive navigation appropriately, while temporary zoom
+   on one image is reset to the selected fit/actual mode for the next image. Ctrl+wheel zooms around
+   the pointer, mouse dragging pans, and repeatable Shift+Arrow commands pan an actual-size image in
+   the original 48-pixel steps.
+
+4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
+   previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
+   sibling folders; reload; and previous-folder history. Ordering supports logical filename,
+   filesystem modification date, creation date, file size, and random modes in either direction.
+   The active filename/date ordering is visible and switchable from both the navigation panel and
+   context menu, and the selected mode is preserved between runs.
+
+5. **Responsive keyboard and mouse navigation.** Left/Right navigation and context-menu Up/Down
+   selection repeat while held. Repeated image navigation presents progress immediately instead of
+   freezing until key release. The plain mouse wheel selects the previous/next file, while holding
+   Ctrl retains wheel zoom. Home/End, PageUp/PageDown, the keyboard Context Menu key, and the original
+   Windows numeric command IDs and corresponding supported default bindings are retained.
+
+6. **Neighboring-image thumbnail panel.** Ctrl+T or the context menu opens a vertical strip on the
+   left in active file order. The current image stays centered and fully bright; neighboring images
+   are darkened and clickable. The panel reserves image space instead of covering the picture,
+   preloads nearest files first, and uses a bounded in-memory cache. Its divider is mouse-resizable,
+   its width and visibility persist, and thumbnail row height follows panel width so a narrow panel
+   fits more images without large fixed gaps. Thumbnails have no forced horizontal inset and only a
+   one-pixel vertical margin plus separator.
+
+7. **Native navigation panel with automatic reveal.** The lower panel provides first/previous/next/
+   last, ordering, fit/actual, rotate, and fullscreen controls with action tooltips. By default it
+   appears when the pointer reaches the lower edge, with options to keep it shown or disable it.
+   Rendering is clipped to its bounds, and its visibility and hover preference persist.
+
+8. **Complete adaptive context menu.** The Linux-rendered menu uses the Windows `PopupMenu` command
+   vocabulary and shows shortcuts and checked states. Its compact view keeps common actions visible;
+   one-off **Show Advanced Options** reveals navigation, ordering, transforms, correction, extended
+   zoom/window/auto-zoom, slideshow, Open With, print, batch, date, wallpaper, settings, and disabled
+   Windows-only administration entries without persisting the expanded state. Long menus split into
+   columns, support Left/Right column movement and repeating Up/Down movement, remain inside the
+   window when expanded, open at the current pointer, and can be opened from the keyboard menu key.
+
+9. **Portable file and desktop operations.** The branch adds a native open/save browser, processed
+   full-size and screen-size saving with overwrite confirmation, move-to-trash confirmation,
+   original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`, modification-date
+   updates from now or EXIF, wallpaper integration, folder exploration, and lossless JPEG rotation
+   through `jpegtran`. The **Open image with** submenu discovers freedesktop `.desktop` applications
+   and expands their file/URI placeholders.
+
+10. **Batch rename/copy and image resizing.** The batch dialog supports image selection, previews,
+    saved Windows-compatible naming patterns, safe same-folder renames, and copying into newly
+    created directories without overwrites. The resize dialog preserves aspect ratio across percent,
+    width, and height fields and provides point, Lanczos/Bicubic, sharpen-low, and sharpen-medium
+    filters. Both areas were separated into independently tested planning/model modules.
+
+11. **Image processing and animation.** The Windows histogram-derived automatic contrast correction
+    and core rotate/mirror transforms are available non-destructively before save. Animated GIF,
+    APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
+    rates and folder advancement, slideshow transitions are rendered natively, Alt+R resumes, and
+    Escape stops active playback before quitting.
+
+12. **Information overlays and window feedback.** F2 picture information and Shift+N/Ctrl+F2 filename
+    overlays use compact translucent surfaces sized to their content with small comfortable margins.
+    Filename, EXIF, and counter text remain responsive during navigation. The information popup uses
+    a compact `WxH, Size` line and `Mod.date:` label. Overlay visibility persists immediately. The
+    window title shows filename, dimensions, and size, and menus, dialogs, tooltips, and panels share
+    the compact bitmap font and translucent visual treatment.
+
+13. **Reliable startup and saved session state.** Scale mode, ordering mode/direction, maximized or
+    normal state, navigation-panel choices, filename/EXIF visibility, automatic correction, batch
+    pattern, and thumbnail visibility/width are stored under XDG configuration paths. A previously
+    maximized window is created maximized before it is shown, avoiding the visible delayed maximize.
+    Compatibility handling keeps always-on-top optional on older SDL runtimes.
+
+14. **Rendering and metadata correctness fixes.** Context-menu close no longer leaves a white pixel
+    over the image or revealed navigation panel; borders avoid endpoint rasterization artifacts;
+    overlays no longer retain unnecessary minimum widths; large images fit edge-to-edge; and signed
+    EXIF rational values are parsed correctly. Context menus and modal panels trigger clean redraws
+    and no longer damage underlying image pixels.
+
+15. **Regression tests, modularization, and faster builds.** A dependency-light core suite and X11
+    UI smoke suite now cover codecs, file ordering, settings, keyboard mappings, viewport geometry,
+    overlays, context-menu columns and repainting, thumbnail layout/persistence, resize and batch
+    models, application discovery, metadata, startup maximization, and held-key behavior. Viewer
+    logic was extracted into focused modules for settings, sorting, input commands, viewport,
+    overlays, thumbnail layout, image information, context menus, resize, batch operations, and
+    desktop applications. Docker builds compile independent codec stages and the viewer/tests in
+    parallel.
+
 ## Build
 
 The only runtime framework dependency is SDL2. SDL2 development headers are not required because

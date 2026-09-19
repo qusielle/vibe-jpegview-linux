@@ -15,7 +15,8 @@ make -C linux
 linux/build/jpegview-linux /path/to/image-or-folder
 ```
 
-See [`linux/README.md`](linux/README.md) for controls and AppImage packaging instructions.
+See [`linux/README.md`](linux/README.md) for the prioritized Linux change inventory, controls,
+supported formats, tests, and AppImage packaging instructions.
 
 This is the official re-release of JPEGView.
 
