@@ -2318,8 +2318,9 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 		"bitmap-font coverage did not distinguish printable ASCII from Unicode");
 	const jpegview_linux::BitmapFontGlyph& uppercase = jpegview_linux::Terminus12Glyph('A');
 	const jpegview_linux::BitmapFontGlyph& lowercase = jpegview_linux::Terminus12Glyph('a');
-	Expect(jpegview_linux::Terminus12LineHeight() == 17 && uppercase.advance == 8,
-		"12-point bitmap font metrics did not match the 96-DPI screen scale");
+	Expect(jpegview_linux::Terminus12LineHeight() == 17 && uppercase.advance == 8 &&
+		uppercase.width == 8 && uppercase.height == 16,
+		"12-point font did not use the embedded 16-pixel monochrome bitmap strike");
 	Expect(uppercase.pixelOffset != lowercase.pixelOffset,
 		"12-point bitmap font mapped lowercase letters to uppercase glyphs");
 	const std::uint8_t expectedAdvance = uppercase.advance;
