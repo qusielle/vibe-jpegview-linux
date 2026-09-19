@@ -1,6 +1,7 @@
 #include "exif_reader.h"
 #include "file_list.h"
 #include "image_decoder.h"
+#include "image.h"
 #include "image_writer.h"
 #include "settings.h"
 #include "sort_mode.h"
@@ -754,6 +755,132 @@ void TestDecoderFailures() {
 	Expect(!jpegview_linux::DecodeImage(temporary.path() / "missing.jpg", decoded, error),
 		"missing image was accepted");
 	Expect(error == "cannot open file" || !error.empty(), "missing image did not produce an error message");
+}
+
+jpegview_linux::Image MakeIndexedImage(int width, int height) {
+	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+	for (int index = 0; index < width * height; ++index) {
+		const std::size_t offset = static_cast<std::size_t>(index) * 4;
+		const std::uint8_t value = static_cast<std::uint8_t>(index + 1);
+		pixels[offset] = value;
+		pixels[offset + 1] = static_cast<std::uint8_t>(value + 20);
+		pixels[offset + 2] = static_cast<std::uint8_t>(value + 40);
+		pixels[offset + 3] = static_cast<std::uint8_t>(value + 80);
+	}
+	jpegview_linux::Image image;
+	Expect(image.StoreBGRA(pixels.data(), width, height), "could not create indexed image fixture");
+	return image;
+}
+
+std::vector<std::uint8_t> ImageBlueChannel(const jpegview_linux::Image& image) {
+	std::vector<std::uint8_t> values;
+	for (std::size_t offset = 0; offset < image.bgra.size(); offset += 4) {
+		values.push_back(image.bgra[offset]);
+	}
+	return values;
+}
+
+void TestImageStorageTransformsAndValidation() {
+	jpegview_linux::Image empty;
+	Expect(!empty.StoreBGRA(nullptr, 1, 1) && !empty.StoreBGRA(nullptr, 0, 0),
+		"image storage accepted null or empty pixel input");
+	const std::uint8_t onePixel[4] = {1, 2, 3, 4};
+	Expect(!empty.StoreBGRA(onePixel, 65535, 65535),
+		"image storage accepted dimensions above the pixel safety limit");
+
+	const jpegview_linux::Image source = MakeIndexedImage(2, 3);
+	jpegview_linux::Image transformed = source;
+	Expect(transformed.Rotate(true) && transformed.width == 3 && transformed.height == 2 &&
+		ImageBlueChannel(transformed) == std::vector<std::uint8_t>({5, 3, 1, 6, 4, 2}),
+		"clockwise image rotation changed pixel orientation");
+	Expect(transformed.originalWidth == 2 && transformed.originalHeight == 3,
+		"image rotation changed source dimensions");
+
+	transformed = source;
+	Expect(transformed.Rotate(false) &&
+		ImageBlueChannel(transformed) == std::vector<std::uint8_t>({2, 4, 6, 1, 3, 5}),
+		"counter-clockwise image rotation changed pixel orientation");
+	transformed = source;
+	Expect(transformed.Mirror(true) &&
+		ImageBlueChannel(transformed) == std::vector<std::uint8_t>({2, 1, 4, 3, 6, 5}),
+		"horizontal image mirror changed pixel orientation");
+	transformed = source;
+	Expect(transformed.Mirror(false) &&
+		ImageBlueChannel(transformed) == std::vector<std::uint8_t>({5, 6, 3, 4, 1, 2}),
+		"vertical image mirror changed pixel orientation");
+
+	jpegview_linux::Image malformed;
+	malformed.width = 2;
+	malformed.height = 2;
+	malformed.bgra = {1, 2, 3, 4};
+	Expect(!malformed.Rotate(true) && !malformed.Mirror(true) &&
+		!malformed.Resize(1, 1) && !malformed.AutoContrast(),
+		"image operations accepted a truncated pixel buffer");
+}
+
+void TestImageResizeFiltersAndLimits() {
+	jpegview_linux::Image source = MakeIndexedImage(4, 1);
+	jpegview_linux::Image point = source;
+	Expect(point.Resize(2, 1, 0) && ImageBlueChannel(point) == std::vector<std::uint8_t>({1, 3}),
+		"point downsampling did not map destination pixels to expected source pixels");
+	jpegview_linux::Image enlarged = MakeIndexedImage(2, 1);
+	Expect(enlarged.Resize(3, 1, 0) &&
+		ImageBlueChannel(enlarged) == std::vector<std::uint8_t>({1, 1, 2}),
+		"point enlargement did not preserve source endpoints");
+	jpegview_linux::Image clampedFilter = source;
+	Expect(clampedFilter.Resize(2, 1, -50) && clampedFilter.bgra == point.bgra,
+		"resize did not clamp a low filter index to point sampling");
+
+	std::vector<std::uint8_t> constantPixels(8u * 8u * 4u);
+	for (std::size_t offset = 0; offset < constantPixels.size(); offset += 4) {
+		constantPixels[offset] = 25;
+		constantPixels[offset + 1] = 75;
+		constantPixels[offset + 2] = 125;
+		constantPixels[offset + 3] = 175;
+	}
+	jpegview_linux::Image constant;
+	Expect(constant.StoreBGRA(constantPixels.data(), 8, 8), "could not create constant resize fixture");
+	for (int filter = 1; filter < 4; ++filter) {
+		jpegview_linux::Image resized = constant;
+		Expect(resized.Resize(3, 3, filter) && resized.width == 3 && resized.height == 3,
+			"filtered resize rejected valid dimensions");
+		for (std::size_t offset = 0; offset < resized.bgra.size(); offset += 4) {
+			Expect(resized.bgra[offset] == 25 && resized.bgra[offset + 1] == 75 &&
+				resized.bgra[offset + 2] == 125 && resized.bgra[offset + 3] == 175,
+				"normalized resize kernel changed a constant color or alpha value");
+		}
+	}
+
+	jpegview_linux::Image multipass = MakeIndexedImage(30, 2);
+	Expect(multipass.Resize(3, 1, 3) && multipass.width == 3 && multipass.height == 1 &&
+		multipass.originalWidth == 30 && multipass.originalHeight == 2,
+		"large reduction did not complete through the multi-pass resize path");
+	const jpegview_linux::Image beforeFailure = multipass;
+	Expect(!multipass.Resize(0, 1) && !multipass.Resize(65535, 65535) &&
+		multipass.width == beforeFailure.width && multipass.height == beforeFailure.height &&
+		multipass.bgra == beforeFailure.bgra,
+		"invalid resize dimensions modified the image");
+}
+
+void TestImageAutoContrastInvariants() {
+	const std::vector<std::uint8_t> pixels = {
+		20, 40, 60, 17, 80, 100, 120, 18,
+		140, 160, 180, 19, 200, 220, 240, 20,
+	};
+	jpegview_linux::Image image;
+	Expect(image.StoreBGRA(pixels.data(), 2, 2), "could not create auto-contrast fixture");
+	Expect(image.AutoContrast(), "auto contrast rejected a valid image");
+	Expect(image.width == 2 && image.height == 2 && image.originalWidth == 2 && image.originalHeight == 2,
+		"auto contrast changed image dimensions");
+	bool colorChanged = false;
+	for (std::size_t offset = 0; offset < image.bgra.size(); offset += 4) {
+		colorChanged = colorChanged || !std::equal(image.bgra.begin() + static_cast<std::ptrdiff_t>(offset),
+			image.bgra.begin() + static_cast<std::ptrdiff_t>(offset + 3),
+			pixels.begin() + static_cast<std::ptrdiff_t>(offset));
+		Expect(image.bgra[offset + 3] == pixels[offset + 3],
+			"auto contrast modified straight-alpha values");
+	}
+	Expect(colorChanged, "auto contrast left a non-uniform low-range fixture unchanged");
 }
 
 void TestSettingsRoundTripAndMalformedValues() {
@@ -1778,6 +1905,9 @@ int main() {
 	RunTest("pnm-variants", TestPnmVariants, failures);
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
+	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);
+	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
+	RunTest("image-auto-contrast-invariants", TestImageAutoContrastInvariants, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
 	RunTest("settings-path-selection", TestSettingsPathSelection, failures);
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);
