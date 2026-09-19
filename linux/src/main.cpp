@@ -5,6 +5,7 @@
 #include "image_writer.h"
 #include "image_decoder.h"
 #include "settings.h"
+#include "sort_mode.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -1275,16 +1276,9 @@ private:
 		jpegview_linux::ViewerSettings settings;
 		if (!jpegview_linux::LoadViewerSettings(settingsPath, settings)) return;
 		copyRenamePattern_ = settings.copyRenamePattern;
-		if (settings.sortMode == "modification_date") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::LastModificationTime, settings.sortAscending);
-		} else if (settings.sortMode == "creation_date") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::CreationTime, settings.sortAscending);
-		} else if (settings.sortMode == "file_name") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileName, settings.sortAscending);
-		} else if (settings.sortMode == "random") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::Random, settings.sortAscending);
-		} else if (settings.sortMode == "file_size") {
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileSize, settings.sortAscending);
+		jpegview_linux::FileList::SortMode sortMode;
+		if (jpegview_linux::ParseSortMode(settings.sortMode, sortMode)) {
+			fileList_.SetSorting(sortMode, settings.sortAscending);
 		}
 
 		maximized_ = settings.maximized;
@@ -1331,7 +1325,7 @@ private:
 
 		jpegview_linux::ViewerSettings settings;
 		settings.scaleMode = CurrentScaleMode();
-		settings.sortMode = CurrentSortModeSetting();
+		settings.sortMode = jpegview_linux::SortModeSettingName(fileList_.GetSorting());
 		settings.sortAscending = fileList_.IsSortedAscending();
 		settings.manualZoom = zoom_;
 		settings.maximized = maximized_;
@@ -2846,8 +2840,9 @@ private:
 		const std::string extension = fileList_.Empty() ? std::string() : Lower(fileList_.Current().extension().string());
 		const bool losslessJpegAvailable = !clipboardMode_ && HasExecutable("jpegtran") &&
 			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
-		contextMenuSortingLabel_ = "Current order: " + std::string(SortModeShortLabel()) +
-			" (" + SortModeDescription() + ")";
+		contextMenuSortingLabel_ = "Current order: " +
+			std::string(jpegview_linux::SortModeShortLabel(fileList_.GetSorting())) +
+			" (" + jpegview_linux::SortModeDescription(fileList_.GetSorting()) + ")";
 		openWithApplications_ = DiscoverOpenWithApplications(extension);
 		openWithLabels_.clear();
 		std::vector<MenuItem> items = {
@@ -4270,7 +4265,7 @@ private:
 			DrawLine(left + 9, top + 7, left + 5, top + 11);
 			break;
 		case kNavigationSortMode: {
-			const std::string label = SortModeShortLabel();
+			const std::string label = jpegview_linux::SortModeShortLabel(fileList_.GetSorting());
 			DrawText(label, r.x + (r.w - TextWidth(label, kUiTextScale)) / 2,
 				r.y + (r.h - 7 * kUiTextScale) / 2, kUiTextScale);
 			break;
@@ -4280,43 +4275,10 @@ private:
 		}
 	}
 
-	const char* SortModeShortLabel() const {
-		switch (fileList_.GetSorting()) {
-		case jpegview_linux::FileList::SortMode::LastModificationTime: return "D";
-		case jpegview_linux::FileList::SortMode::CreationTime: return "C";
-		case jpegview_linux::FileList::SortMode::FileName: return "N";
-		case jpegview_linux::FileList::SortMode::Random: return "R";
-		case jpegview_linux::FileList::SortMode::FileSize: return "S";
-		}
-		return "?";
-	}
-
-	const char* SortModeDescription() const {
-		switch (fileList_.GetSorting()) {
-		case jpegview_linux::FileList::SortMode::LastModificationTime: return "modification date";
-		case jpegview_linux::FileList::SortMode::CreationTime: return "creation date";
-		case jpegview_linux::FileList::SortMode::FileName: return "file name";
-		case jpegview_linux::FileList::SortMode::Random: return "random";
-		case jpegview_linux::FileList::SortMode::FileSize: return "file size";
-		}
-		return "unknown";
-	}
-
-	const char* CurrentSortModeSetting() const {
-		switch (fileList_.GetSorting()) {
-		case jpegview_linux::FileList::SortMode::LastModificationTime: return "modification_date";
-		case jpegview_linux::FileList::SortMode::CreationTime: return "creation_date";
-		case jpegview_linux::FileList::SortMode::FileName: return "file_name";
-		case jpegview_linux::FileList::SortMode::Random: return "random";
-		case jpegview_linux::FileList::SortMode::FileSize: return "file_size";
-		}
-		return "modification_date";
-	}
-
 	std::string SortModeTooltip() const {
 		const std::string nextMode = fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName ?
 			"modification date" : "file name";
-		return "Current order: " + std::string(SortModeDescription()) +
+		return "Current order: " + std::string(jpegview_linux::SortModeDescription(fileList_.GetSorting())) +
 			"; click for " + nextMode + " order";
 	}
 

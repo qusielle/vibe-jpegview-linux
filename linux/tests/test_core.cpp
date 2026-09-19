@@ -3,6 +3,7 @@
 #include "image_decoder.h"
 #include "image_writer.h"
 #include "settings.h"
+#include "sort_mode.h"
 
 #include <algorithm>
 #include <chrono>
@@ -402,6 +403,36 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"malformed manual zoom did not retain its default");
 }
 
+void TestSortModeMappings() {
+	struct SortCase {
+		FileList::SortMode mode;
+		const char* setting;
+		const char* label;
+		const char* description;
+	};
+	const std::vector<SortCase> cases = {
+		{FileList::SortMode::LastModificationTime, "modification_date", "D", "modification date"},
+		{FileList::SortMode::CreationTime, "creation_date", "C", "creation date"},
+		{FileList::SortMode::FileName, "file_name", "N", "file name"},
+		{FileList::SortMode::Random, "random", "R", "random"},
+		{FileList::SortMode::FileSize, "file_size", "S", "file size"},
+	};
+	for (const SortCase& testCase : cases) {
+		Expect(std::string(jpegview_linux::SortModeSettingName(testCase.mode)) == testCase.setting,
+			"sort mode setting mapping is incorrect");
+		Expect(std::string(jpegview_linux::SortModeShortLabel(testCase.mode)) == testCase.label,
+			"sort mode short label mapping is incorrect");
+		Expect(std::string(jpegview_linux::SortModeDescription(testCase.mode)) == testCase.description,
+			"sort mode description mapping is incorrect");
+		FileList::SortMode parsed = FileList::SortMode::FileSize;
+		Expect(jpegview_linux::ParseSortMode(testCase.setting, parsed), "known sort mode was not parsed");
+		Expect(parsed == testCase.mode, "sort mode parser returned the wrong mode");
+	}
+	FileList::SortMode unchanged = FileList::SortMode::FileName;
+	Expect(!jpegview_linux::ParseSortMode("not-a-sort-mode", unchanged), "unknown sort mode was accepted");
+	Expect(unchanged == FileList::SortMode::FileName, "unknown sort mode changed the output value");
+}
+
 class ExifFixture {
 public:
 	ExifFixture() : bytes_({'E', 'x', 'i', 'f', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) {
@@ -609,6 +640,7 @@ int main() {
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
+	RunTest("sort-mode-mappings", TestSortModeMappings, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
