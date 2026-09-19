@@ -1812,6 +1812,86 @@ void TestFileDialogSorting() {
 		"open-dialog modification-date ties did not fall back to deterministic name order");
 }
 
+void TestFileDialogModelStateAndNavigation() {
+	using Entry = jpegview_linux::FileDialogEntry;
+	using FileTime = fs::file_time_type;
+	using namespace std::chrono_literals;
+	const FileTime epoch{};
+	const std::vector<Entry> entries = {
+		{fs::path("/pictures"), true, true, epoch + 100s},
+		{fs::path("/pictures/b-folder"), true, false, epoch + 50s},
+		{fs::path("/pictures/a-folder"), true, false, epoch + 10s},
+		{fs::path("/pictures/03-last.jpg"), false, false, epoch + 40s},
+		{fs::path(u8"/pictures/02-写真.jpg"), false, false, epoch + 30s},
+		{fs::path("/pictures/01-first.jpg"), false, false, epoch + 20s},
+	};
+
+	jpegview_linux::FileDialogModel model;
+	model.Begin(false);
+	model.SetEntries(entries);
+	Expect(model.Entries().size() == entries.size() && model.Entries()[0].parent &&
+		model.Entries()[1].path.filename() == "a-folder" && model.SelectedIndex() == 1,
+		"open-dialog model did not sort by name or select the first child");
+
+	model.MoveSelectionByPage(1, 2);
+	Expect(model.SelectedIndex() == 3 && model.Scroll() == 2,
+		"open-dialog page movement did not update selection and scroll together");
+	model.SelectLast(2);
+	Expect(model.SelectedIndex() == 5 && model.Scroll() == 4,
+		"open-dialog End selection did not reveal the last row");
+	model.SelectFirst(2);
+	Expect(model.SelectedIndex() == 0 && model.Scroll() == 0,
+		"open-dialog Home selection did not reveal the first row");
+	model.MoveSelection(-1, 2);
+	Expect(model.SelectedIndex() == 0, "open-dialog selection moved before its first row");
+	Expect(model.Focus(fs::path("/pictures/03-last.jpg"), 2) &&
+		model.SelectedEntry() != nullptr && model.SelectedEntry()->path.filename() == "03-last.jpg",
+		"open-dialog could not focus an entry by path");
+	Expect(!model.Focus(fs::path("/pictures/missing.jpg"), 2),
+		"open-dialog reported focusing a missing path");
+
+	model.AppendFilter(u8"写真");
+	Expect(model.Filter() == u8"写真" && model.Entries().size() == 2 &&
+		model.Entries()[0].parent && model.Entries()[1].path.filename() == u8"02-写真.jpg" &&
+		model.SelectedIndex() == 1,
+		"open-dialog Unicode filtering did not retain the parent and matching image");
+	Expect(model.BackspaceFilter() && model.Filter() == u8"写",
+		"open-dialog Backspace removed a byte instead of one UTF-8 character");
+	Expect(model.BackspaceFilter() && model.Filter().empty(),
+		"open-dialog could not clear the final filter character");
+	model.AppendFilter("missing");
+	Expect(model.Entries().size() == 1 && model.Entries()[0].parent && model.SelectedIndex() == -1,
+		"unmatched open-dialog filter left the parent row selected");
+	model.ClearFilter();
+
+	Expect(model.Focus(fs::path("/pictures/a-folder"), 10),
+		"could not prepare sort-selection preservation test");
+	model.ToggleSortMode(10);
+	Expect(model.SortMode() == jpegview_linux::FileDialogSortMode::ModificationDate &&
+		model.Entries()[1].path.filename() == "b-folder" &&
+		model.SelectedEntry() != nullptr && model.SelectedEntry()->path.filename() == "a-folder",
+		"open-dialog date sorting did not reorder entries while preserving selection");
+
+	model.Begin(true);
+	model.SetEntries(entries);
+	Expect(model.SaveDialog() && model.Entries()[1].path.filename() == "a-folder" &&
+		model.SelectedIndex() == 0,
+		"save dialog did not retain fixed name sorting and first-row selection");
+	model.AppendFilter("first");
+	Expect(model.Filter().empty() && model.Entries().size() == entries.size(),
+		"save dialog unexpectedly applied an open-dialog filter");
+	model.ClearSelection();
+	model.MoveSelection(1, 3);
+	Expect(model.SelectedIndex() == 0, "save dialog did not move from an empty selection to the first row");
+	model.Clear();
+	Expect(model.Entries().empty() && model.AllEntries().empty() && model.SelectedEntry() == nullptr,
+		"clearing the file-dialog model retained stale state");
+
+	std::string malformed = std::string("ok") + static_cast<char>(0x80);
+	Expect(jpegview_linux::EraseLastUtf8CodePoint(malformed) && malformed == "ok",
+		"UTF-8 erasure damaged valid text before a malformed trailing byte");
+}
+
 void TestFileDialogDirectorySummaries() {
 	TemporaryDirectory temporary;
 	const fs::path album = temporary.path() / "album";
@@ -1927,6 +2007,7 @@ int main() {
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
 	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
+	RunTest("file-dialog-model-state-and-navigation", TestFileDialogModelStateAndNavigation, failures);
 	RunTest("file-dialog-directory-summaries", TestFileDialogDirectorySummaries, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {

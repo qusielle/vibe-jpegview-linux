@@ -57,6 +57,25 @@ void SortFileDialogEntries(std::vector<FileDialogEntry>& entries, FileDialogSort
 	});
 }
 
+bool EraseLastUtf8CodePoint(std::string& text) {
+	if (text.empty()) return false;
+	const std::size_t last = text.size() - 1;
+	std::size_t position = last;
+	while (position > 0 &&
+		(static_cast<unsigned char>(text[position]) & 0xc0u) == 0x80u) --position;
+	const unsigned char lead = static_cast<unsigned char>(text[position]);
+	const std::size_t expectedBytes = (lead & 0x80u) == 0 ? 1 :
+		(lead & 0xe0u) == 0xc0u ? 2 : (lead & 0xf0u) == 0xe0u ? 3 :
+		(lead & 0xf8u) == 0xf0u ? 4 : 0;
+	if (expectedBytes == text.size() - position) {
+		text.erase(position);
+	} else {
+		// Keep preceding valid text intact if the input ends in a malformed sequence.
+		text.erase(last);
+	}
+	return true;
+}
+
 std::vector<FileDialogEntry> FilterFileDialogEntries(
 	const std::vector<FileDialogEntry>& entries, std::string_view filter) {
 	if (filter.empty()) return entries;
@@ -80,6 +99,122 @@ std::string FormatDirectorySummary(const DirectorySummary& summary) {
 	text << summary.imageCount << (summary.imageCount == 1 ? " image, " : " images, ")
 		<< summary.subdirectoryCount << (summary.subdirectoryCount == 1 ? " dir" : " dirs");
 	return text.str();
+}
+
+void FileDialogModel::Begin(bool saveDialog) {
+	saveDialog_ = saveDialog;
+	filter_.clear();
+	allEntries_.clear();
+	entries_.clear();
+	selected_ = -1;
+	scroll_ = 0;
+}
+
+void FileDialogModel::Clear() {
+	Begin(false);
+}
+
+void FileDialogModel::SetEntries(std::vector<FileDialogEntry> entries) {
+	allEntries_ = std::move(entries);
+	SortFileDialogEntries(allEntries_, saveDialog_ ? FileDialogSortMode::Name : sortMode_);
+	ApplyFilter();
+}
+
+void FileDialogModel::AppendFilter(std::string_view text) {
+	if (saveDialog_ || text.empty()) return;
+	filter_.append(text.data(), text.size());
+	ApplyFilter();
+}
+
+bool FileDialogModel::BackspaceFilter() {
+	if (saveDialog_ || !EraseLastUtf8CodePoint(filter_)) return false;
+	ApplyFilter();
+	return true;
+}
+
+void FileDialogModel::ClearFilter() {
+	if (filter_.empty()) return;
+	filter_.clear();
+	ApplyFilter();
+}
+
+void FileDialogModel::ToggleSortMode(int visibleRows) {
+	if (saveDialog_) return;
+	std::filesystem::path selectedPath;
+	if (const FileDialogEntry* selected = SelectedEntry()) selectedPath = selected->path;
+	sortMode_ = sortMode_ == FileDialogSortMode::Name ?
+		FileDialogSortMode::ModificationDate : FileDialogSortMode::Name;
+	SortFileDialogEntries(allEntries_, sortMode_);
+	ApplyFilter();
+	if (!selectedPath.empty()) Focus(selectedPath, visibleRows);
+}
+
+void FileDialogModel::MoveSelection(int direction, int visibleRows) {
+	if (entries_.empty()) return;
+	selected_ = std::clamp(selected_ + direction, 0, static_cast<int>(entries_.size()) - 1);
+	EnsureSelectionVisible(visibleRows);
+}
+
+void FileDialogModel::MoveSelectionByPage(int direction, int visibleRows) {
+	MoveSelection(direction * std::max(1, visibleRows), visibleRows);
+}
+
+void FileDialogModel::SelectFirst(int visibleRows) {
+	Select(0, visibleRows);
+}
+
+void FileDialogModel::SelectLast(int visibleRows) {
+	Select(static_cast<int>(entries_.size()) - 1, visibleRows);
+}
+
+void FileDialogModel::Select(int index, int visibleRows) {
+	if (index < 0 || index >= static_cast<int>(entries_.size())) return;
+	selected_ = index;
+	EnsureSelectionVisible(visibleRows);
+}
+
+bool FileDialogModel::Focus(const std::filesystem::path& path, int visibleRows) {
+	const auto entry = std::find_if(entries_.begin(), entries_.end(), [&path](const FileDialogEntry& candidate) {
+		return candidate.path == path;
+	});
+	if (entry == entries_.end()) return false;
+	Select(static_cast<int>(std::distance(entries_.begin(), entry)), visibleRows);
+	return true;
+}
+
+void FileDialogModel::ClearSelection() {
+	selected_ = -1;
+}
+
+const FileDialogEntry* FileDialogModel::SelectedEntry() const {
+	return selected_ >= 0 && selected_ < static_cast<int>(entries_.size()) ? &entries_[selected_] : nullptr;
+}
+
+void FileDialogModel::ApplyFilter() {
+	entries_ = FilterFileDialogEntries(allEntries_, saveDialog_ ? std::string_view{} : std::string_view(filter_));
+	scroll_ = 0;
+	if (entries_.empty()) {
+		selected_ = -1;
+		return;
+	}
+	selected_ = 0;
+	if (saveDialog_) return;
+	const auto firstChild = std::find_if(entries_.begin(), entries_.end(), [](const FileDialogEntry& entry) {
+		return !entry.parent;
+	});
+	if (firstChild != entries_.end()) {
+		selected_ = static_cast<int>(std::distance(entries_.begin(), firstChild));
+	} else if (!filter_.empty()) {
+		selected_ = -1;
+	}
+}
+
+void FileDialogModel::EnsureSelectionVisible(int visibleRows) {
+	visibleRows = std::max(1, visibleRows);
+	if (selected_ < scroll_) scroll_ = selected_;
+	if (selected_ >= scroll_ + visibleRows) scroll_ = selected_ - visibleRows + 1;
+	const int maximumScroll = std::max(0, static_cast<int>(entries_.size()) - visibleRows);
+	scroll_ = std::clamp(scroll_, 0, maximumScroll);
 }
 
 struct DirectorySummaryLoader::Impl {

@@ -27,6 +27,10 @@ enum class FileDialogSortMode {
 // with names providing deterministic ordering for equal timestamps.
 void SortFileDialogEntries(std::vector<FileDialogEntry>& entries, FileDialogSortMode mode);
 
+// Removes one complete UTF-8 code point from the end. Invalid trailing byte
+// sequences are still removed without touching preceding valid text.
+bool EraseLastUtf8CodePoint(std::string& text);
+
 // Applies a case-insensitive filename substring filter. The parent-directory
 // entry is always retained so filtering never traps the user in a directory.
 std::vector<FileDialogEntry> FilterFileDialogEntries(
@@ -41,6 +45,47 @@ struct DirectorySummary {
 // visited, matching what the open dialog will show after entering the folder.
 DirectorySummary CountImmediateDirectoryContents(const std::filesystem::path& directory);
 std::string FormatDirectorySummary(const DirectorySummary& summary);
+
+class FileDialogModel {
+public:
+	void Begin(bool saveDialog);
+	void Clear();
+	void SetEntries(std::vector<FileDialogEntry> entries);
+
+	void AppendFilter(std::string_view text);
+	bool BackspaceFilter();
+	void ClearFilter();
+	void ToggleSortMode(int visibleRows);
+
+	void MoveSelection(int direction, int visibleRows);
+	void MoveSelectionByPage(int direction, int visibleRows);
+	void SelectFirst(int visibleRows);
+	void SelectLast(int visibleRows);
+	void Select(int index, int visibleRows);
+	bool Focus(const std::filesystem::path& path, int visibleRows);
+	void ClearSelection();
+
+	const std::vector<FileDialogEntry>& AllEntries() const { return allEntries_; }
+	const std::vector<FileDialogEntry>& Entries() const { return entries_; }
+	const FileDialogEntry* SelectedEntry() const;
+	const std::string& Filter() const { return filter_; }
+	FileDialogSortMode SortMode() const { return sortMode_; }
+	int SelectedIndex() const { return selected_; }
+	int Scroll() const { return scroll_; }
+	bool SaveDialog() const { return saveDialog_; }
+
+private:
+	void ApplyFilter();
+	void EnsureSelectionVisible(int visibleRows);
+
+	std::vector<FileDialogEntry> allEntries_;
+	std::vector<FileDialogEntry> entries_;
+	std::string filter_;
+	FileDialogSortMode sortMode_ = FileDialogSortMode::Name;
+	int selected_ = -1;
+	int scroll_ = 0;
+	bool saveDialog_ = false;
+};
 
 struct DirectorySummaryResult {
 	std::filesystem::path directory;
