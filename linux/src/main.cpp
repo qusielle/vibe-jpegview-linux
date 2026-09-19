@@ -13,6 +13,7 @@
 #include "viewport.h"
 #include "resize_model.h"
 #include "context_menu_model.h"
+#include "overlay_layout.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -3671,17 +3672,16 @@ private:
 		text << '[' << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
 			<< InfoText(fileList_.Current().filename().string());
 		std::string label = text.str();
-		const int maximumPanelWidth = std::max(1, windowWidth - 2 * kOverlayInset);
-		const int panelWidth = std::min(maximumPanelWidth,
-			TextWidth(label, kUiTextScale) + 2 * kOverlayTextPadding);
-		const int textWidth = std::max(1, panelWidth - 2 * kOverlayTextPadding);
-		if (TextWidth(label, kUiTextScale) > textWidth) {
+		const jpegview_linux::OverlayLayout layout = jpegview_linux::FilenameOverlayLayout(
+			TextWidth(label, kUiTextScale), windowWidth, kOverlayInset,
+			kOverlayTextPadding, kFilenameOverlayHeight);
+		if (TextWidth(label, kUiTextScale) > layout.textWidth) {
 			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
-				textWidth / (6 * kUiTextScale)));
+				layout.textWidth / (6 * kUiTextScale)));
 			label.resize(maximumCharacters - 3);
 			label += "...";
 		}
-		const SDL_Rect panel{kOverlayInset, kOverlayInset, panelWidth, kFilenameOverlayHeight};
+		const SDL_Rect panel{layout.x, layout.y, layout.width, layout.height};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
@@ -3697,7 +3697,6 @@ private:
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const int maximumPanelWidth = std::max(1, windowWidth - 2 * kOverlayInset);
 		for (std::string& line : lines) {
 			line = InfoText(line);
 		}
@@ -3705,27 +3704,22 @@ private:
 		for (const std::string& line : lines) {
 			contentWidth = std::max(contentWidth, TextWidth(line, kUiTextScale));
 		}
-		const int panelWidth = std::min(maximumPanelWidth,
-			contentWidth + 2 * kOverlayTextPadding);
-		const int textWidth = std::max(1, panelWidth - 2 * kOverlayTextPadding);
+		const jpegview_linux::OverlayLayout layout = jpegview_linux::InformationOverlayLayout(
+			contentWidth, lines.size(), windowWidth, windowHeight, showFileName_,
+			kOverlayInset, kOverlayTextPadding, kOverlayLineHeight, kFilenameOverlayHeight);
 		for (std::string& line : lines) {
-			if (TextWidth(line, kUiTextScale) <= textWidth) continue;
+			if (TextWidth(line, kUiTextScale) <= layout.textWidth) continue;
 			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
-				textWidth / (6 * kUiTextScale)));
+				layout.textWidth / (6 * kUiTextScale)));
 			line.resize(maximumCharacters - 3);
 			line += "...";
 		}
 
-		const int panelHeight = std::min(std::max(1, windowHeight - 2 * kOverlayInset),
-			2 * kOverlayTextPadding + static_cast<int>(lines.size()) * kOverlayLineHeight);
-		const int panelTop = showFileName_ ?
-			kOverlayInset + kFilenameOverlayHeight + kOverlayInset : kOverlayInset;
-		SDL_Rect panel{kOverlayInset, panelTop, panelWidth, panelHeight};
+		SDL_Rect panel{layout.x, layout.y, layout.width, layout.height};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
-		const int visibleLines = std::max(0, (panelHeight - 2 * kOverlayTextPadding) / kOverlayLineHeight);
-		for (int index = 0; index < visibleLines && index < static_cast<int>(lines.size()); ++index) {
+		for (int index = 0; index < layout.visibleLines && index < static_cast<int>(lines.size()); ++index) {
 			DrawText(lines[static_cast<std::size_t>(index)], panel.x + kOverlayTextPadding,
 				panel.y + kOverlayTextPadding + index * kOverlayLineHeight,
 				kUiTextScale,

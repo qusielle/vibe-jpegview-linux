@@ -11,6 +11,7 @@
 #include "viewport.h"
 #include "resize_model.h"
 #include "context_menu_model.h"
+#include "overlay_layout.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -1261,6 +1262,33 @@ void TestContextMenuCompactionAndSelection() {
 		-1, 1) == -1, "menu with no actionable items returned a selection");
 }
 
+void TestOverlayLayoutUsesContentWidthAndComfortableMargins() {
+	jpegview_linux::OverlayLayout filename = jpegview_linux::FilenameOverlayLayout(60, 800);
+	Expect(filename.x == 4 && filename.y == 4 && filename.width == 72 && filename.height == 20,
+		"short filename overlay was not content-sized with six-pixel margins");
+	Expect(filename.textWidth == 60, "filename overlay text area did not match content width");
+
+	filename = jpegview_linux::FilenameOverlayLayout(900, 800);
+	Expect(filename.width == 792 && filename.textWidth == 780,
+		"long filename overlay did not clamp to the window insets");
+
+	jpegview_linux::OverlayLayout info =
+		jpegview_linux::InformationOverlayLayout(100, 3, 500, 300, false);
+	Expect(info.x == 4 && info.y == 4 && info.width == 112 && info.height == 66,
+		"EXIF overlay was not content-sized");
+	Expect(info.textWidth == 100 && info.visibleLines == 3,
+		"EXIF overlay margins or visible line count are incorrect");
+
+	info = jpegview_linux::InformationOverlayLayout(100, 20, 500, 40, true);
+	Expect(info.y == 28, "EXIF overlay did not move below visible filename overlay");
+	Expect(info.height == 32 && info.visibleLines == 1,
+		"EXIF overlay did not clamp vertically to a small window");
+
+	filename = jpegview_linux::FilenameOverlayLayout(20, 4);
+	Expect(filename.width == 1 && filename.textWidth == 1,
+		"overlay layout did not remain valid for an extremely narrow window");
+}
+
 void RunTest(const char* name, void (*test)(), int& failures) {
 	try {
 		test();
@@ -1296,6 +1324,7 @@ int main() {
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
+	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
 		return 1;
