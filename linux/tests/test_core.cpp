@@ -759,6 +759,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.navigationPanelEnabled = false;
 	expected.navigationPanelAutoReveal = false;
 	expected.thumbnailPanelVisible = true;
+	expected.thumbnailPanelWidth = 287;
 	expected.infoVisible = true;
 	expected.showFilename = true;
 	expected.autoContrast = true;
@@ -778,6 +779,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"navigation panel settings did not round-trip");
 	Expect(loaded.thumbnailPanelVisible == expected.thumbnailPanelVisible,
 		"thumbnail panel visibility did not round-trip");
+	Expect(loaded.thumbnailPanelWidth == expected.thumbnailPanelWidth,
+		"thumbnail panel width did not round-trip");
 	Expect(loaded.infoVisible == expected.infoVisible && loaded.showFilename == expected.showFilename &&
 		loaded.autoContrast == expected.autoContrast,
 		"overlay/correction settings did not round-trip");
@@ -787,7 +790,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 
 	const fs::path malformed = temporary.path() / "malformed.conf";
 	std::ofstream malformedOutput(malformed);
-	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\nunknown_key=value\n";
+	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\n"
+		"thumbnail_panel_width=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
 	loaded = {};
 	Expect(jpegview_linux::LoadViewerSettings(malformed, loaded), "malformed settings file was rejected entirely");
@@ -796,6 +800,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"malformed manual zoom did not retain its default");
 	Expect(!loaded.thumbnailPanelVisible,
 		"settings without thumbnail visibility did not retain the hidden default");
+	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
+		"malformed thumbnail width did not retain its default");
 }
 
 void TestSettingsPathSelection() {
@@ -1515,6 +1521,12 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 		"small thumbnail was enlarged");
 	Expect(jpegview_linux::FitThumbnailSize(0, 20, 100, 80).width == 0,
 		"invalid image dimensions produced a thumbnail size");
+
+	const jpegview_linux::ThumbnailRect thumbnail =
+		jpegview_linux::ThumbnailImageRect(164, 109, 164, 200, 112, 1);
+	Expect(thumbnail.x == 0 && thumbnail.y == 201 &&
+		thumbnail.width == 164 && thumbnail.height == 109,
+		"thumbnail row added horizontal margins or incorrect vertical margins");
 }
 
 void TestEmbeddedApplicationIcon() {

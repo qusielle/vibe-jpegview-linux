@@ -17,6 +17,7 @@ struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Texture;
 struct SDL_Surface;
+struct SDL_Cursor;
 
 struct SDL_Rect {
 	int x;
@@ -170,8 +171,15 @@ enum : Uint8 {
 	SDL_WINDOWEVENT_SIZE_CHANGED = 0x06u,
 	SDL_WINDOWEVENT_MAXIMIZED = 0x08u,
 	SDL_WINDOWEVENT_RESTORED = 0x09u,
+	SDL_WINDOWEVENT_FOCUS_LOST = 0x0Du,
 	SDL_BUTTON_LEFT = 1u,
 	SDL_BUTTON_RIGHT = 3u,
+};
+
+enum : int {
+	SDL_FALSE = 0,
+	SDL_TRUE = 1,
+	SDL_SYSTEM_CURSOR_SIZEWE = 7,
 };
 
 enum : Sint32 {
@@ -229,6 +237,11 @@ void SDL_SetWindowIcon(SDL_Window* window, SDL_Surface* icon);
 void SDL_SetWindowBordered(SDL_Window* window, int bordered);
 Uint32 SDL_GetMouseState(int* x, int* y);
 int SDL_GetModState();
+SDL_Cursor* SDL_CreateSystemCursor(int id);
+SDL_Cursor* SDL_GetDefaultCursor();
+void SDL_SetCursor(SDL_Cursor* cursor);
+void SDL_FreeCursor(SDL_Cursor* cursor);
+int SDL_CaptureMouse(int enabled);
 int SDL_SetClipboardText(const char* text);
 void SDL_StartTextInput();
 void SDL_StopTextInput();

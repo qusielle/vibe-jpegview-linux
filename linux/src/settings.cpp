@@ -80,6 +80,17 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			loaded.navigationPanelAutoReveal = ParseBool(value);
 		} else if (key == "thumbnail_panel_visible") {
 			loaded.thumbnailPanelVisible = ParseBool(value);
+		} else if (key == "thumbnail_panel_width") {
+			try {
+				std::size_t parsedCharacters = 0;
+				const int parsedWidth = std::stoi(value, &parsedCharacters);
+				if (parsedCharacters == value.size()) {
+					loaded.thumbnailPanelWidth = std::clamp(parsedWidth,
+						kMinimumThumbnailPanelWidth, kMaximumThumbnailPanelWidth);
+				}
+			} catch (const std::exception&) {
+				// Ignore malformed settings and retain the built-in default.
+			}
 		} else if (key == "info_visible") {
 			loaded.infoVisible = ParseBool(value);
 		} else if (key == "show_filename") {
@@ -116,6 +127,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "navigation_panel_enabled=" << (settings.navigationPanelEnabled ? 1 : 0) << '\n'
 		       << "navigation_panel_auto_reveal=" << (settings.navigationPanelAutoReveal ? 1 : 0) << '\n'
 		       << "thumbnail_panel_visible=" << (settings.thumbnailPanelVisible ? 1 : 0) << '\n'
+		       << "thumbnail_panel_width=" << settings.thumbnailPanelWidth << '\n'
 		       << "info_visible=" << (settings.infoVisible ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'
 		       << "auto_contrast=" << (settings.autoContrast ? 1 : 0) << '\n'

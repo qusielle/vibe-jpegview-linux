@@ -178,6 +178,11 @@ if [ "$visual_assertions" -eq 1 ]; then
 		fi
 	fi
 fi
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 164 300
+DISPLAY=":$display_number" xdotool mousedown 1
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 240 300
+DISPLAY=":$display_number" xdotool mouseup 1
+sleep 0.3
 title_before_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 DISPLAY=":$display_number" xdotool mousemove 80 500
 DISPLAY=":$display_number" xdotool click 1
@@ -261,6 +266,7 @@ grep -q '^sort_ascending=1$' "$settings"
 grep -q '^show_filename=1$' "$settings"
 grep -q '^info_visible=1$' "$settings"
 grep -q '^thumbnail_panel_visible=1$' "$settings"
+grep -q '^thumbnail_panel_width=240$' "$settings"
 grep -q '^maximized=1$' "$settings"
 
 launch_viewer
@@ -278,7 +284,7 @@ case "$title_after_reload" in
 	01-red.ppm\ *) ;;
 	*) echo "UI smoke test: persisted filename ordering was not restored" >&2; exit 1 ;;
 esac
-DISPLAY=":$display_number" xdotool mousemove 80 500
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 200 500
 DISPLAY=":$display_number" xdotool click 1
 sleep 0.3
 title_after_restored_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")

@@ -69,9 +69,9 @@ constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kOverlayLineHeight = 18;
 constexpr int kFilenameOverlayHeight = 20;
-constexpr int kThumbnailPanelWidth = 164;
 constexpr int kThumbnailRowHeight = 112;
-constexpr int kThumbnailInset = 8;
+constexpr int kThumbnailVerticalMargin = 1;
+constexpr int kThumbnailResizeHandleHalfWidth = 3;
 constexpr std::size_t kThumbnailCacheLimit = 64;
 constexpr int kBatchSelectAll = 0;
 constexpr int kBatchSelectNone = 1;
@@ -758,7 +758,6 @@ public:
 			std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
 			return 1;
 		}
-
 		// Keep the window hidden while SDL and the window manager apply the
 		// initial state.  Showing it first makes a restored maximized window
 		// visibly appear in its normal size before it is maximized.
@@ -795,6 +794,7 @@ public:
 				return 1;
 			}
 		}
+		thumbnailResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
 
 		if (startFullscreen_) {
 			fullscreen_ = true;
@@ -873,6 +873,11 @@ private:
 			SDL_DestroyWindow(window_);
 			window_ = nullptr;
 		}
+		if (thumbnailResizeCursor_ != nullptr) {
+			SDL_SetCursor(SDL_GetDefaultCursor());
+			SDL_FreeCursor(thumbnailResizeCursor_);
+			thumbnailResizeCursor_ = nullptr;
+		}
 		SDL_Quit();
 	}
 
@@ -892,6 +897,7 @@ private:
 		navigationPanelEnabled_ = settings.navigationPanelEnabled;
 		navigationPanelAutoReveal_ = settings.navigationPanelAutoReveal;
 		thumbnailPanelVisible_ = settings.thumbnailPanelVisible;
+		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
 		infoVisible_ = settings.infoVisible;
 		showFileName_ = settings.showFilename;
 		autoContrastEnabled_ = settings.autoContrast;
@@ -911,6 +917,7 @@ private:
 		settings.navigationPanelEnabled = navigationPanelEnabled_;
 		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
 		settings.thumbnailPanelVisible = thumbnailPanelVisible_;
+		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.infoVisible = infoVisible_;
 		settings.showFilename = showFileName_;
 		settings.autoContrast = autoContrastEnabled_;
@@ -1108,8 +1115,8 @@ private:
 			if (jpegview_linux::DecodeImage(path, decoded, errorMessage) && !decoded.frames.empty()) {
 				const jpegview_linux::DecodedFrame& frame = decoded.frames.front();
 				const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
-					frame.width, frame.height, kThumbnailPanelWidth - kThumbnailInset * 2,
-					kThumbnailRowHeight - kThumbnailInset * 2);
+					frame.width, frame.height, jpegview_linux::kMaximumThumbnailPanelWidth,
+					kThumbnailRowHeight - kThumbnailVerticalMargin * 2 - 1);
 				Image thumbnail;
 				if (size.width > 0 && size.height > 0 &&
 					thumbnail.StoreBGRA(frame.bgra.data(), frame.width, frame.height) &&
@@ -1766,7 +1773,7 @@ private:
 
 	void FitWindowToImage() {
 		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
-		const int panelWidth = thumbnailPanelVisible_ ? kThumbnailPanelWidth : 0;
+		const int panelWidth = thumbnailPanelVisible_ ? thumbnailPanelWidth_ : 0;
 		const int width = std::clamp(image_.width + panelWidth + 16, 160, 4096);
 		const int height = std::clamp(image_.height + 16, 120, 4096);
 		SDL_SetWindowSize(window_, width, height);
@@ -2185,6 +2192,7 @@ private:
 		case jpegview_linux::kCommandToggleThumbnailPanel:
 			thumbnailPanelVisible_ = !thumbnailPanelVisible_;
 			PrepareThumbnailPreload();
+			UpdateThumbnailPanelCursor(lastMouseX_, lastMouseY_);
 			if (viewport_.IsFitToWindow()) {
 				FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
 			}
@@ -3896,7 +3904,7 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		return jpegview_linux::CalculateThumbnailPanelLayout(windowWidth, windowHeight,
-			thumbnailPanelVisible_, kThumbnailPanelWidth);
+			thumbnailPanelVisible_, thumbnailPanelWidth_);
 	}
 
 	SDL_Rect ThumbnailPanelRect() const {
@@ -3907,6 +3915,53 @@ private:
 	SDL_Rect ImageAreaRect() const {
 		const jpegview_linux::ThumbnailPanelLayout layout = CurrentThumbnailPanelLayout();
 		return SDL_Rect{layout.imageX, 0, layout.imageWidth, layout.imageHeight};
+	}
+
+	bool IsThumbnailPanelResizeHandle(int x, int y) const {
+		if (!thumbnailPanelVisible_) return false;
+		const SDL_Rect panel = ThumbnailPanelRect();
+		return panel.w > 0 && y >= panel.y && y < panel.y + panel.h &&
+			x >= panel.x + panel.w - kThumbnailResizeHandleHalfWidth &&
+			x <= panel.x + panel.w + kThumbnailResizeHandleHalfWidth;
+	}
+
+	void UpdateThumbnailPanelCursor(int x, int y) const {
+		if (thumbnailResizeCursor_ == nullptr) return;
+		SDL_SetCursor(thumbnailPanelResizing_ || IsThumbnailPanelResizeHandle(x, y) ?
+			thumbnailResizeCursor_ : SDL_GetDefaultCursor());
+	}
+
+	bool BeginThumbnailPanelResize(int x, int y) {
+		if (!IsThumbnailPanelResizeHandle(x, y)) return false;
+		thumbnailPanelResizing_ = true;
+		thumbnailResizeOffset_ = ThumbnailPanelRect().w - x;
+		SDL_CaptureMouse(SDL_TRUE);
+		UpdateThumbnailPanelCursor(x, y);
+		return true;
+	}
+
+	void ResizeThumbnailPanel(int mouseX) {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		(void)windowHeight;
+		const int maximumWidth = std::max(1, std::min(
+			jpegview_linux::kMaximumThumbnailPanelWidth, windowWidth - 1));
+		const int minimumWidth = std::min(jpegview_linux::kMinimumThumbnailPanelWidth, maximumWidth);
+		const int width = std::clamp(mouseX + thumbnailResizeOffset_, minimumWidth, maximumWidth);
+		if (width == thumbnailPanelWidth_) return;
+		thumbnailPanelWidth_ = width;
+		if (viewport_.IsFitToWindow()) {
+			FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+		}
+	}
+
+	void EndThumbnailPanelResize(int mouseX, int mouseY) {
+		if (!thumbnailPanelResizing_) return;
+		thumbnailPanelResizing_ = false;
+		SDL_CaptureMouse(SDL_FALSE);
+		UpdateThumbnailPanelCursor(mouseX, mouseY);
+		SaveSettings();
 	}
 
 	void RenderThumbnailPanel() {
@@ -3927,15 +3982,14 @@ private:
 			auto cached = thumbnailCache_.find(key);
 			if (cached != thumbnailCache_.end() && cached->second.texture != nullptr) {
 				cached->second.lastUsed = ++thumbnailUseCounter_;
-				const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
+				const jpegview_linux::ThumbnailRect thumbnail = jpegview_linux::ThumbnailImageRect(
 					cached->second.width, cached->second.height,
-					std::max(1, panel.w - kThumbnailInset * 2),
-					kThumbnailRowHeight - kThumbnailInset * 2);
+					panel.w, row.y, row.h, kThumbnailVerticalMargin);
 				SDL_Rect imageRect{
-					panel.x + (panel.w - size.width) / 2,
-					row.y + (row.h - size.height) / 2,
-					size.width,
-					size.height
+					panel.x + thumbnail.x,
+					thumbnail.y,
+					thumbnail.width,
+					thumbnail.height
 				};
 				SDL_RenderCopy(renderer_, cached->second.texture, nullptr, &imageRect);
 				if (!slot.current) {
@@ -3950,7 +4004,7 @@ private:
 					row.y + (row.h - 7) / 2, kUiTextScale,
 					slot.current ? 215 : 95, slot.current ? 215 : 95, slot.current ? 215 : 95);
 			}
-			DrawLine(panel.x + 8, row.y + row.h - 1, panel.x + panel.w - 9,
+			DrawLine(panel.x, row.y + row.h - 1, std::max(panel.x, panel.x + panel.w - 2),
 				row.y + row.h - 1, 48, 48, 48);
 		}
 		DrawLine(panel.x + panel.w - 1, panel.y, panel.x + panel.w - 1,
@@ -4212,6 +4266,8 @@ private:
 					maximized_ = true;
 				} else if (event.window.event == SDL_WINDOWEVENT_RESTORED) {
 					maximized_ = false;
+				} else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+					EndThumbnailPanelResize(lastMouseX_, lastMouseY_);
 				} else if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
 					event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
 					if (viewport_.IsFitToWindow()) {
@@ -4254,6 +4310,10 @@ private:
 			}
 			case SDL_MOUSEBUTTONDOWN:
 				if (event.button.button == SDL_BUTTON_LEFT) {
+					if (BeginThumbnailPanelResize(event.button.x, event.button.y)) {
+						dragging_ = false;
+						break;
+					}
 					if (HandleThumbnailPanelClick(event.button.x, event.button.y)) {
 						dragging_ = false;
 						break;
@@ -4272,9 +4332,19 @@ private:
 				}
 				break;
 			case SDL_MOUSEBUTTONUP:
-				if (event.button.button == SDL_BUTTON_LEFT) dragging_ = false;
+				if (event.button.button == SDL_BUTTON_LEFT) {
+					EndThumbnailPanelResize(event.button.x, event.button.y);
+					dragging_ = false;
+				}
 				break;
 			case SDL_MOUSEMOTION:
+				UpdateThumbnailPanelCursor(event.motion.x, event.motion.y);
+				if (thumbnailPanelResizing_) {
+					ResizeThumbnailPanel(event.motion.x);
+					lastMouseX_ = event.motion.x;
+					lastMouseY_ = event.motion.y;
+					break;
+				}
 				imageCenterX_ = event.motion.x;
 				imageCenterY_ = event.motion.y;
 				UpdateNavigationPanelVisibility(event.motion.x, event.motion.y);
@@ -4395,6 +4465,10 @@ private:
 	bool navigationPanelEnabled_ = true;
 	bool navigationPanelAutoReveal_ = true;
 	bool thumbnailPanelVisible_ = false;
+	int thumbnailPanelWidth_ = jpegview_linux::kDefaultThumbnailPanelWidth;
+	bool thumbnailPanelResizing_ = false;
+	int thumbnailResizeOffset_ = 0;
+	SDL_Cursor* thumbnailResizeCursor_ = nullptr;
 	bool infoVisible_ = false;
 	bool showFileName_ = false;
 	bool navigationLoading_ = false;

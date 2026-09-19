@@ -162,8 +162,8 @@ The thumbnail panel is hidden by default and can be enabled from the context men
 It follows the active file ordering in a vertical strip: the current image remains centered and at
 normal brightness, while surrounding images are darkened. Clicking a thumbnail opens that file.
 Thumbnails are loaded incrementally in nearest-to-current order and kept in a bounded in-memory
-cache. The panel reserves its own space on the left instead of covering the image. Its visibility
-is preserved between runs.
+cache. The panel reserves its own space on the left instead of covering the image. Drag its right
+separator to adjust its width. The width and visibility are preserved between runs.
 
 The port follows the Windows `CFileList` navigation model: the default display order is ascending
 file modification time from the filesystem; `N`, `M`, `C`, and `Z` select filename, modification

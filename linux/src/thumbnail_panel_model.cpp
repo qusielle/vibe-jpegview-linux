@@ -55,4 +55,19 @@ ThumbnailSize FitThumbnailSize(int sourceWidth, int sourceHeight,
 	};
 }
 
+ThumbnailRect ThumbnailImageRect(int sourceWidth, int sourceHeight,
+	int panelWidth, int rowY, int rowHeight, int verticalMargin) {
+	const int margin = std::max(0, verticalMargin);
+	const int availableHeight = rowHeight - margin * 2 - 1;
+	const ThumbnailSize size = FitThumbnailSize(sourceWidth, sourceHeight,
+		panelWidth, availableHeight);
+	if (size.width <= 0 || size.height <= 0) return {};
+	return {
+		(panelWidth - size.width) / 2,
+		rowY + margin + (availableHeight - size.height) / 2,
+		size.width,
+		size.height
+	};
+}
+
 } // namespace jpegview_linux

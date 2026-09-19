@@ -16,6 +16,13 @@ struct ThumbnailSize {
 	int height = 0;
 };
 
+struct ThumbnailRect {
+	int x = 0;
+	int y = 0;
+	int width = 0;
+	int height = 0;
+};
+
 struct ThumbnailPanelLayout {
 	int panelWidth = 0;
 	int imageX = 0;
@@ -41,5 +48,10 @@ std::vector<std::size_t> ThumbnailPreloadOrder(std::size_t fileCount,
 // Aspect-fit dimensions for a thumbnail. Images are never enlarged.
 ThumbnailSize FitThumbnailSize(int sourceWidth, int sourceHeight,
 	int maximumWidth, int maximumHeight);
+
+// Fits a thumbnail into a row with no forced horizontal inset. The bottom
+// pixel is reserved for the row separator in addition to the vertical margin.
+ThumbnailRect ThumbnailImageRect(int sourceWidth, int sourceHeight,
+	int panelWidth, int rowY, int rowHeight, int verticalMargin);
 
 } // namespace jpegview_linux

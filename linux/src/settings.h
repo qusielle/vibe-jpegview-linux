@@ -7,6 +7,9 @@ namespace jpegview_linux {
 
 inline constexpr double kMinimumZoom = 0.01;
 inline constexpr double kMaximumZoom = 32.0;
+inline constexpr int kDefaultThumbnailPanelWidth = 164;
+inline constexpr int kMinimumThumbnailPanelWidth = 48;
+inline constexpr int kMaximumThumbnailPanelWidth = 1024;
 
 std::filesystem::path ViewerSettingsPath();
 
@@ -20,6 +23,7 @@ struct ViewerSettings {
 	bool navigationPanelEnabled = true;
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
+	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	bool infoVisible = false;
 	bool showFilename = false;
 	bool autoContrast = false;
