@@ -3638,6 +3638,9 @@ private:
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
 		SDL_RenderClear(renderer_);
+		// Explicitly repaint the image viewport so newly exposed pillarbox and
+		// letterbox margins are overwritten when navigation changes image size.
+		SDL_RenderFillRect(renderer_, &imageArea);
 		SDL_RenderSetClipRect(renderer_, &imageArea);
 		RenderImageTransition(destination, imageArea, renderTexture);
 		SDL_RenderSetClipRect(renderer_, nullptr);

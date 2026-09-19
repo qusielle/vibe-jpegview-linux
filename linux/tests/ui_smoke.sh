@@ -467,4 +467,60 @@ if [ "$title_after_reload" = "$title_after_restored_thumbnail_click" ]; then
 fi
 stop_viewer
 
+if [ "$visual_assertions" -eq 1 ]; then
+	# A narrower portrait image must repaint the side margins after a wide image
+	# has occupied them.  Check the left pillarbox after a landscape/portrait
+	# round trip, including the exact portrait -> landscape -> portrait sequence.
+	mkdir -p "$temporary/aspect-images" "$temporary/aspect-config"
+	convert -size 1600x900 xc:red "$temporary/aspect-images/01-landscape.png"
+	convert -size 400x600 xc:blue "$temporary/aspect-images/02-portrait.png"
+	DISPLAY=":$display_number" HOME="$temporary/home" \
+		XDG_CONFIG_HOME="$temporary/aspect-config" "$BINARY" "$temporary/aspect-images" \
+		>"$temporary/aspect-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: aspect-ratio repaint viewer did not appear" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	sleep 0.3
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/aspect-landscape.png"
+	window_height=$(identify -format '%h' "$temporary/aspect-landscape.png")
+	pillarbox_y=$((window_height / 2))
+	landscape_pixel=$(convert "$temporary/aspect-landscape.png" \
+		-format "%[pixel:p{100,$pillarbox_y}]" info:)
+	if [ "$landscape_pixel" != "srgb(255,0,0)" ]; then
+		echo "UI smoke test: aspect-ratio fixture did not cover the portrait side margin ($landscape_pixel)" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key Right
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Left
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Right
+	sleep 0.2
+	portrait_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	case "$portrait_title" in
+		02-portrait.png\ *) ;;
+		*) echo "UI smoke test: aspect-ratio navigation did not return to the portrait image" >&2; exit 1 ;;
+	esac
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/aspect-portrait.png"
+	window_height=$(identify -format '%h' "$temporary/aspect-portrait.png")
+	pillarbox_y=$((window_height / 2))
+	pillarbox_color=$(convert "$temporary/aspect-portrait.png" \
+		-format "%[pixel:p{100,$pillarbox_y}]" info:)
+	if [ "$pillarbox_color" != "srgb(18,18,18)" ]; then
+		echo "UI smoke test: portrait navigation left stale landscape pixels in its side margin ($pillarbox_color)" >&2
+		exit 1
+	fi
+	stop_viewer
+fi
+
 echo "UI smoke tests passed"
