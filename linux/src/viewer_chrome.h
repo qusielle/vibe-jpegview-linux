@@ -2,6 +2,7 @@
 
 #include "file_list.h"
 #include "overlay_layout.h"
+#include "spectrum_model.h"
 
 #include <cstdint>
 #include <string>
@@ -47,10 +48,19 @@ struct OverlayPaintPlan {
 	std::vector<UiText> text;
 };
 
+struct InformationOverlayPaintPlan {
+	OverlayPaintPlan overlay;
+	UiRect spectrumButton;
+	std::vector<UiLine> spectrumLines;
+};
+
 OverlayPaintPlan FilenameOverlayPaint(const OverlayLayout& layout,
 	std::string label, int textLineHeight, int textPadding = 6);
-OverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
-	const std::vector<std::string>& lines, int lineHeight, int textPadding = 6);
+InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
+	const std::vector<std::string>& lines, int lineHeight, int textPadding = 6,
+	bool spectrumVisible = false, const GrayscaleSpectrum* spectrum = nullptr,
+	bool buttonHovered = false);
+UiRect InformationOverlaySpectrumButton(const OverlayLayout& layout, int textPadding = 6);
 
 struct NavigationButtonPaint {
 	UiRect rect;

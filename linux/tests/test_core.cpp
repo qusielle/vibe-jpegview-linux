@@ -19,6 +19,7 @@
 #include "thumbnail_resampler.h"
 #include "app_icon.h"
 #include "image_info_model.h"
+#include "spectrum_model.h"
 #include "file_dialog_model.h"
 #include "system_font.h"
 #include "bitmap_font.h"
@@ -37,6 +38,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -925,6 +927,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.thumbnailPanelVisible = true;
 	expected.thumbnailPanelWidth = 287;
 	expected.infoVisible = true;
+	expected.showHistogram = true;
 	expected.showFilename = true;
 	expected.autoContrast = true;
 	expected.copyRenamePattern = "%F=%n";
@@ -945,7 +948,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"thumbnail panel visibility did not round-trip");
 	Expect(loaded.thumbnailPanelWidth == expected.thumbnailPanelWidth,
 		"thumbnail panel width did not round-trip");
-	Expect(loaded.infoVisible == expected.infoVisible && loaded.showFilename == expected.showFilename &&
+	Expect(loaded.infoVisible == expected.infoVisible && loaded.showHistogram == expected.showHistogram &&
+		loaded.showFilename == expected.showFilename &&
 		loaded.autoContrast == expected.autoContrast,
 		"overlay/correction settings did not round-trip");
 	Expect(loaded.copyRenamePattern == expected.copyRenamePattern, "batch pattern did not round-trip");
@@ -964,6 +968,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"malformed manual zoom did not retain its default");
 	Expect(!loaded.thumbnailPanelVisible,
 		"settings without thumbnail visibility did not retain the hidden default");
+	Expect(!loaded.showHistogram,
+		"settings without a histogram choice did not retain the hidden default");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
 		"malformed thumbnail width did not retain its default");
 
@@ -1892,10 +1898,15 @@ void TestOverlayLayoutUsesContentWidthAndComfortableMargins() {
 
 	jpegview_linux::OverlayLayout info =
 		jpegview_linux::InformationOverlayLayout(100, 3, 500, 300, false);
-	Expect(info.x == 4 && info.y == 4 && info.width == 112 && info.height == 66,
+	Expect(info.x == 4 && info.y == 4 && info.width == 136 && info.height == 66,
 		"EXIF overlay was not content-sized");
-	Expect(info.textWidth == 100 && info.visibleLines == 3,
-		"EXIF overlay margins or visible line count are incorrect");
+	Expect(info.textWidth == 100 && info.visibleLines == 3 && info.contentHeight == 66,
+		"EXIF overlay margins, toggle room, or visible line count are incorrect");
+	info = jpegview_linux::InformationOverlayLayout(100, 3, 500, 300, false,
+		4, 6, 18, 20, true);
+	Expect(info.width == 268 && info.height == 126 && info.textWidth == 100 &&
+		info.visibleLines == 3 && info.contentHeight == 66,
+		"expanded EXIF overlay did not reserve the Windows-sized histogram area");
 
 	info = jpegview_linux::InformationOverlayLayout(100, 20, 500, 40, true);
 	Expect(info.y == 28, "EXIF overlay did not move below visible filename overlay");
@@ -1916,13 +1927,39 @@ void TestViewerChromePaintPlans() {
 		overlay.text.size() == 1 && overlay.text[0].x == 10 && overlay.text[0].y == 8 &&
 		overlay.text[0].color.red == 255,
 		"filename overlay paint plan changed panel style or text alignment");
-	const jpegview_linux::OverlayLayout infoLayout{4, 28, 160, 48, 148, 2};
-	overlay = jpegview_linux::InformationOverlayPaint(infoLayout,
+	const jpegview_linux::OverlayLayout infoLayout{4, 28, 160, 48, 100, 2, 48};
+	jpegview_linux::InformationOverlayPaintPlan infoPaint = jpegview_linux::InformationOverlayPaint(infoLayout,
 		{"heading", "details", "hidden"}, 18, 6);
-	Expect(overlay.text.size() == 2 && overlay.text[0].y == 34 && overlay.text[1].y == 52 &&
-		overlay.text[0].color.red == 255 && overlay.text[1].color.red == 243 &&
-		overlay.text[1].color.green == 242 && overlay.text[1].color.blue == 231,
+	Expect(infoPaint.overlay.text.size() == 2 && infoPaint.overlay.text[0].y == 34 &&
+		infoPaint.overlay.text[1].y == 52 && infoPaint.overlay.text[0].color.red == 255 &&
+		infoPaint.overlay.text[1].color.red == 243 && infoPaint.overlay.text[1].color.green == 242 &&
+		infoPaint.overlay.text[1].color.blue == 231 && infoPaint.spectrumButton.width == 18 &&
+		infoPaint.spectrumLines.size() == 2 &&
+		infoPaint.spectrumLines[0].y1 < infoPaint.spectrumLines[0].y2 &&
+		jpegview_linux::Contains(infoPaint.spectrumButton, infoPaint.spectrumButton.x,
+			infoPaint.spectrumButton.y) &&
+		!jpegview_linux::Contains(infoPaint.spectrumButton,
+			infoPaint.spectrumButton.x + infoPaint.spectrumButton.width,
+			infoPaint.spectrumButton.y),
 		"information overlay paint plan ignored visible lines or emphasis colors");
+	jpegview_linux::GrayscaleSpectrum spectrum{};
+	spectrum[64] = 16;
+	spectrum[192] = 4;
+	const jpegview_linux::OverlayLayout spectrumLayout = jpegview_linux::InformationOverlayLayout(
+		100, 3, 500, 300, false, 4, 6, 18, 20, true);
+	infoPaint = jpegview_linux::InformationOverlayPaint(spectrumLayout,
+		{"heading", "details", "hidden"}, 18, 6, true, &spectrum, true);
+	Expect(infoPaint.spectrumLines.size() == 5 && infoPaint.spectrumButton.x == 248 &&
+		infoPaint.spectrumButton.y == 46 && infoPaint.spectrumLines[2].x1 == 10 &&
+		infoPaint.spectrumLines[2].y1 == 120 && infoPaint.spectrumLines[2].x2 == 266 &&
+		infoPaint.spectrumLines[2].color.red == 255 &&
+		infoPaint.spectrumLines[3].x1 == 74 && infoPaint.spectrumLines[3].y1 == 70 &&
+		infoPaint.spectrumLines[3].y2 == 120 &&
+		infoPaint.spectrumLines[4].x1 == 202 && infoPaint.spectrumLines[4].y1 == 95 &&
+		infoPaint.spectrumLines[4].y2 == 120 &&
+		infoPaint.spectrumLines[0].y1 > infoPaint.spectrumLines[0].y2 &&
+		infoPaint.spectrumLines[0].color.red == 255,
+		"expanded EXIF spectrum or collapse button was laid out incorrectly");
 
 	jpegview_linux::NavigationPanelPaint navigation = jpegview_linux::BuildNavigationPanelPaint(
 		800, 600, 385, 585, true, FileList::SortMode::LastModificationTime, 7, 11);
@@ -2152,6 +2189,45 @@ void TestThumbnailDownsamplingAntialiasing() {
 		"thumbnail downsampler accepted a truncated source buffer");
 	Expect(!jpegview_linux::DownsampleThumbnailBgra({}, 0, 0, 0, 0, filtered),
 		"thumbnail downsampler accepted empty dimensions");
+}
+
+void TestGrayscaleSpectrumCalculationAndScaling() {
+	const std::vector<std::uint8_t> pixels = {
+		0, 0, 0, 255,
+		255, 255, 255, 255,
+		0, 0, 255, 255,
+		0, 255, 0, 255,
+		255, 0, 0, 255,
+	};
+	const jpegview_linux::GrayscaleSpectrum spectrum =
+		jpegview_linux::BuildGrayscaleSpectrum(pixels, 5, 1);
+	Expect(spectrum[0] == 1 && spectrum[31] == 1 && spectrum[63] == 1 &&
+		spectrum[159] == 1 && spectrum[255] == 1,
+		"weighted grayscale histogram did not match Windows JPEGView channel weights");
+	Expect(jpegview_linux::BuildGrayscaleSpectrum({1, 2, 3}, 1, 1) ==
+		jpegview_linux::GrayscaleSpectrum{} &&
+		jpegview_linux::BuildGrayscaleSpectrum(pixels, 0, 1) ==
+		jpegview_linux::GrayscaleSpectrum{},
+		"grayscale histogram accepted invalid image storage or dimensions");
+
+	std::vector<std::uint8_t> largeImage(1000 * 1000 * 4, 127);
+	for (std::size_t offset = 3; offset < largeImage.size(); offset += 4) {
+		largeImage[offset] = 255;
+	}
+	const jpegview_linux::GrayscaleSpectrum sampled =
+		jpegview_linux::BuildGrayscaleSpectrum(largeImage, 1000, 1000);
+	Expect(sampled[127] == 40000 &&
+		std::accumulate(sampled.begin(), sampled.end(), std::uint64_t{0}) == 40000,
+		"large-image histogram did not use Windows JPEGView's bounded grid sampling");
+
+	jpegview_linux::GrayscaleSpectrum distribution{};
+	distribution[80] = 16;
+	distribution[200] = 4;
+	const auto heights = jpegview_linux::GrayscaleSpectrumBarHeights(distribution, 50);
+	Expect(heights[80] == 50 && heights[200] == 25 && heights[0] == 0 &&
+		jpegview_linux::GrayscaleSpectrumBarHeights(distribution, 0) ==
+		std::array<int, jpegview_linux::kSpectrumBinCount>{},
+		"grayscale spectrum bars did not use square-root scaling or handle empty height");
 }
 
 void TestImageInfoFormatting() {
@@ -2553,6 +2629,7 @@ int main() {
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("thumbnail-cache-scheduling-and-eviction", TestThumbnailCacheSchedulingAndEviction, failures);
 	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);
+	RunTest("grayscale-spectrum-calculation-and-scaling", TestGrayscaleSpectrumCalculationAndScaling, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
 	RunTest("playback-scheduler-timing-and-modes", TestPlaybackSchedulerTimingAndModes, failures);

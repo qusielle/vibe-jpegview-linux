@@ -93,6 +93,8 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			}
 		} else if (key == "info_visible") {
 			loaded.infoVisible = ParseBool(value);
+		} else if (key == "show_histogram") {
+			loaded.showHistogram = ParseBool(value);
 		} else if (key == "show_filename") {
 			loaded.showFilename = ParseBool(value);
 		} else if (key == "auto_contrast") {
@@ -129,6 +131,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "thumbnail_panel_visible=" << (settings.thumbnailPanelVisible ? 1 : 0) << '\n'
 		       << "thumbnail_panel_width=" << settings.thumbnailPanelWidth << '\n'
 		       << "info_visible=" << (settings.infoVisible ? 1 : 0) << '\n'
+		       << "show_histogram=" << (settings.showHistogram ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'
 		       << "auto_contrast=" << (settings.autoContrast ? 1 : 0) << '\n'
 		       << "copy_rename_pattern=" << settings.copyRenamePattern << '\n';

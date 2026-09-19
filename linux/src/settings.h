@@ -25,6 +25,7 @@ struct ViewerSettings {
 	bool thumbnailPanelVisible = false;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	bool infoVisible = false;
+	bool showHistogram = false;
 	bool showFilename = false;
 	bool autoContrast = false;
 	std::string copyRenamePattern;

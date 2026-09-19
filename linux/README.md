@@ -92,7 +92,8 @@ they support.
 12. **Information overlays and window feedback.** F2 picture information and Shift+N/Ctrl+F2 filename
     overlays use compact translucent surfaces sized to their content with small comfortable margins.
     Filename, EXIF, and counter text remain responsive during navigation. The information popup uses
-    a readable `W X H, Size` line and an unlabeled modification date. Overlay visibility persists
+    a readable `W X H, Size` line and an unlabeled modification date. The EXIF popup includes a
+    toggleable grayscale histogram, hidden by default. Overlay visibility persists
     immediately. The window title shows filename, dimensions, and size. Menus, dialogs, tooltips,
     and panels use the hinted 12-point Terminus bitmap when the complete string is printable ASCII,
     preserving lowercase letters as drawn and using crisp one-bit pixels without antialiased edges. Strings
@@ -101,8 +102,8 @@ they support.
     treatment.
 
 13. **Reliable startup and saved session state.** Scale mode, ordering mode/direction, maximized or
-    normal state, navigation-panel choices, filename/EXIF visibility, automatic correction, batch
-    pattern, and thumbnail visibility/width are stored under XDG configuration paths. A previously
+    normal state, navigation-panel choices, filename/EXIF/histogram visibility, automatic correction,
+    batch pattern, and thumbnail visibility/width are stored under XDG configuration paths. A previously
     maximized window is created maximized before it is shown, avoiding the visible delayed maximize.
     Compatibility handling keeps always-on-top optional on older SDL runtimes.
 

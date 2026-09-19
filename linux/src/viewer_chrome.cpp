@@ -140,9 +140,17 @@ OverlayPaintPlan FilenameOverlayPaint(const OverlayLayout& layout,
 	return plan;
 }
 
-OverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
-	const std::vector<std::string>& lines, int lineHeight, int textPadding) {
-	OverlayPaintPlan plan;
+UiRect InformationOverlaySpectrumButton(const OverlayLayout& layout, int textPadding) {
+	return {layout.x + layout.width - textPadding - kSpectrumButtonSize,
+		layout.y + std::max(0, layout.contentHeight - textPadding - kSpectrumButtonSize),
+		kSpectrumButtonSize, kSpectrumButtonSize};
+}
+
+InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
+	const std::vector<std::string>& lines, int lineHeight, int textPadding,
+	bool spectrumVisible, const GrayscaleSpectrum* spectrum, bool buttonHovered) {
+	InformationOverlayPaintPlan result;
+	OverlayPaintPlan& plan = result.overlay;
 	plan.panel = AsRect(layout);
 	const int count = std::min(layout.visibleLines, static_cast<int>(lines.size()));
 	for (int index = 0; index < count; ++index) {
@@ -150,7 +158,36 @@ OverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 			layout.y + textPadding + index * lineHeight,
 			index == 0 ? UiColor{255, 255, 255, 255} : UiColor{243, 242, 231, 255}});
 	}
-	return plan;
+
+	const int contentHeight = layout.contentHeight;
+	result.spectrumButton = InformationOverlaySpectrumButton(layout, textPadding);
+	const UiColor buttonColor = buttonHovered ? UiColor{255, 255, 255, 255} : kGuiColor;
+	const int centerX = result.spectrumButton.x + result.spectrumButton.width / 2;
+	const int centerY = result.spectrumButton.y + result.spectrumButton.height / 2;
+	if (spectrumVisible) {
+		result.spectrumLines.push_back({centerX - 5, centerY + 3, centerX, centerY - 2, buttonColor});
+		result.spectrumLines.push_back({centerX, centerY - 2, centerX + 5, centerY + 3, buttonColor});
+	} else {
+		result.spectrumLines.push_back({centerX - 5, centerY - 3, centerX, centerY + 2, buttonColor});
+		result.spectrumLines.push_back({centerX, centerY + 2, centerX + 5, centerY - 3, buttonColor});
+	}
+
+	if (spectrumVisible) {
+		const int graphX = layout.x + (layout.width - kSpectrumGraphWidth) / 2;
+		const int graphY = layout.y + contentHeight;
+		const int baselineY = graphY + kSpectrumGraphHeight;
+		const auto heights = spectrum == nullptr ? std::array<int, kSpectrumBinCount>{} :
+			GrayscaleSpectrumBarHeights(*spectrum, kSpectrumGraphHeight);
+		result.spectrumLines.push_back({graphX, baselineY, graphX + kSpectrumGraphWidth,
+			baselineY, {255, 255, 255, 255}});
+		for (int index = 0; index < kSpectrumBinCount; ++index) {
+			const int height = heights[static_cast<std::size_t>(index)];
+			if (height == 0) continue;
+			result.spectrumLines.push_back({graphX + index, baselineY - height,
+				graphX + index, baselineY, {190, 190, 170, 255}});
+		}
+	}
+	return result;
 }
 
 NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight,

@@ -24,6 +24,7 @@
 #include "image_info_model.h"
 #include "file_dialog_model.h"
 #include "system_font.h"
+#include "spectrum_model.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -434,6 +435,7 @@ private:
 		thumbnailPanelVisible_ = settings.thumbnailPanelVisible;
 		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
 		infoVisible_ = settings.infoVisible;
+		showHistogram_ = settings.showHistogram;
 		showFileName_ = settings.showFilename;
 		autoContrastEnabled_ = settings.autoContrast;
 		viewport_.LoadScaleMode(settings.scaleMode, settings.manualZoomSet, settings.manualZoom);
@@ -454,6 +456,7 @@ private:
 		settings.thumbnailPanelVisible = thumbnailPanelVisible_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.infoVisible = infoVisible_;
+		settings.showHistogram = showHistogram_;
 		settings.showFilename = showFileName_;
 		settings.autoContrast = autoContrastEnabled_;
 		settings.copyRenamePattern = copyRenamePattern_;
@@ -1452,6 +1455,40 @@ private:
 			lines.push_back("Altitude (m): " + value.str());
 		}
 		return lines;
+	}
+
+	jpegview_linux::InformationOverlayPaintPlan BuildImageInfoPaintPlan() const {
+		std::vector<std::string> lines = ImageInfoLines();
+		if (lines.empty()) return {};
+		int contentWidth = 0;
+		for (std::string& line : lines) {
+			line = InfoText(line);
+			contentWidth = std::max(contentWidth, TextWidth(line, kUiTextScale));
+		}
+
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const jpegview_linux::OverlayLayout layout = jpegview_linux::InformationOverlayLayout(
+			contentWidth, lines.size(), windowWidth, windowHeight, showFileName_,
+			kOverlayInset, kOverlayTextPadding, OverlayLineHeight(), FilenameOverlayHeight(),
+			showHistogram_);
+		for (std::string& line : lines) {
+			if (TextWidth(line, kUiTextScale) <= layout.textWidth) continue;
+			line = ClipText(line, layout.textWidth);
+		}
+
+		jpegview_linux::GrayscaleSpectrum spectrum{};
+		const jpegview_linux::GrayscaleSpectrum* spectrumPointer = nullptr;
+		if (showHistogram_) {
+			spectrum = jpegview_linux::BuildGrayscaleSpectrum(image_.bgra, image_.width, image_.height);
+			spectrumPointer = &spectrum;
+		}
+		const jpegview_linux::UiRect button = jpegview_linux::InformationOverlaySpectrumButton(
+			layout, kOverlayTextPadding);
+		const bool buttonHovered = jpegview_linux::Contains(button, lastMouseX_, lastMouseY_);
+		return jpegview_linux::InformationOverlayPaint(layout, lines, OverlayLineHeight(),
+			kOverlayTextPadding, showHistogram_, spectrumPointer, buttonHovered);
 	}
 
 	jpegview_linux::NavigationPanelPaint CurrentNavigationPanelPaint() const {
@@ -3016,29 +3053,25 @@ private:
 	void RenderImageInfo() {
 		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
-		std::vector<std::string> lines = ImageInfoLines();
-		if (lines.empty()) return;
+		const jpegview_linux::InformationOverlayPaintPlan paint = BuildImageInfoPaintPlan();
+		if (paint.overlay.panel.width <= 0 || paint.overlay.panel.height <= 0) return;
+		RenderOverlayPaint(paint.overlay);
+		const SDL_Rect panel = SdlRect(paint.overlay.panel);
+		SDL_RenderSetClipRect(renderer_, &panel);
+		for (const jpegview_linux::UiLine& line : paint.spectrumLines) {
+			DrawLine(line.x1, line.y1, line.x2, line.y2,
+				line.color.red, line.color.green, line.color.blue, line.color.alpha);
+		}
+		SDL_RenderSetClipRect(renderer_, nullptr);
 
-		int windowWidth = 0;
-		int windowHeight = 0;
-		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		for (std::string& line : lines) {
-			line = InfoText(line);
+		if (jpegview_linux::Contains(paint.spectrumButton, lastMouseX_, lastMouseY_)) {
+			const std::string label = showHistogram_ ? "Hide histogram" : "Show histogram";
+			int windowWidth = 0;
+			int windowHeight = 0;
+			SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+			RenderOverlayPaint(jpegview_linux::NavigationTooltipPaint(paint.spectrumButton,
+				label, TextWidth(label, kUiTextScale), TextLineHeight(), windowWidth, windowHeight));
 		}
-		int contentWidth = 0;
-		for (const std::string& line : lines) {
-			contentWidth = std::max(contentWidth, TextWidth(line, kUiTextScale));
-		}
-		const jpegview_linux::OverlayLayout layout = jpegview_linux::InformationOverlayLayout(
-			contentWidth, lines.size(), windowWidth, windowHeight, showFileName_,
-			kOverlayInset, kOverlayTextPadding, OverlayLineHeight(), FilenameOverlayHeight());
-		for (std::string& line : lines) {
-			if (TextWidth(line, kUiTextScale) <= layout.textWidth) continue;
-			line = ClipText(line, layout.textWidth);
-		}
-
-		RenderOverlayPaint(jpegview_linux::InformationOverlayPaint(layout, lines,
-			OverlayLineHeight(), kOverlayTextPadding));
 	}
 
 	jpegview_linux::ThumbnailPanelLayout CurrentThumbnailPanelLayout() const {
@@ -3174,6 +3207,16 @@ private:
 			if (fileList_.Select(slot.fileIndex)) LoadCurrent();
 			break;
 		}
+		return true;
+	}
+
+	bool HandleImageInfoClick(int x, int y) {
+		if (!infoVisible_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return false;
+		const jpegview_linux::InformationOverlayPaintPlan paint = BuildImageInfoPaintPlan();
+		if (!jpegview_linux::Contains(paint.spectrumButton, x, y)) return false;
+		showHistogram_ = !showHistogram_;
+		SaveSettings();
 		return true;
 	}
 
@@ -3467,6 +3510,10 @@ private:
 			}
 			case SDL_MOUSEBUTTONDOWN:
 				if (event.button.button == SDL_BUTTON_LEFT) {
+					if (HandleImageInfoClick(event.button.x, event.button.y)) {
+						dragging_ = false;
+						break;
+					}
 					if (BeginThumbnailPanelResize(event.button.x, event.button.y)) {
 						dragging_ = false;
 						break;
@@ -3619,6 +3666,7 @@ private:
 	int thumbnailResizeOffset_ = 0;
 	SDL_Cursor* thumbnailResizeCursor_ = nullptr;
 	bool infoVisible_ = false;
+	bool showHistogram_ = false;
 	bool showFileName_ = false;
 	bool navigationLoading_ = false;
 	bool confirmationOpen_ = false;
