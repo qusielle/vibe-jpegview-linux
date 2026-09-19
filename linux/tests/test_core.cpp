@@ -1457,6 +1457,20 @@ void TestOverlayLayoutUsesContentWidthAndComfortableMargins() {
 }
 
 void TestThumbnailPanelLayoutPreloadAndSizing() {
+	jpegview_linux::ThumbnailPanelLayout layout =
+		jpegview_linux::CalculateThumbnailPanelLayout(800, 600, true, 164);
+	Expect(layout.panelWidth == 164 && layout.imageX == 164 &&
+		layout.imageWidth == 636 && layout.imageHeight == 600,
+		"visible thumbnail panel did not reserve image viewport space");
+	layout = jpegview_linux::CalculateThumbnailPanelLayout(800, 600, false, 164);
+	Expect(layout.panelWidth == 0 && layout.imageX == 0 &&
+		layout.imageWidth == 800 && layout.imageHeight == 600,
+		"hidden thumbnail panel reduced the image viewport");
+	layout = jpegview_linux::CalculateThumbnailPanelLayout(80, 40, true, 164);
+	Expect(layout.panelWidth == 79 && layout.imageX == 79 &&
+		layout.imageWidth == 1 && layout.imageHeight == 40,
+		"thumbnail panel consumed the entire narrow image viewport");
+
 	const std::vector<jpegview_linux::ThumbnailSlot> slots =
 		jpegview_linux::ThumbnailPanelSlots(10, 5, 500, 100);
 	Expect(slots.size() == 5, "thumbnail panel did not create one row per visible neighbor");

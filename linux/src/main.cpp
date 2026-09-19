@@ -1681,18 +1681,14 @@ private:
 	}
 
 	void RestoreScaleMode(const jpegview_linux::ViewportSnapshot& snapshot) {
-		int windowWidth = 0;
-		int windowHeight = 0;
-		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		viewport_.Restore(snapshot, image_.width, image_.height, windowWidth, windowHeight);
+		const SDL_Rect imageArea = ImageAreaRect();
+		viewport_.Restore(snapshot, image_.width, image_.height, imageArea.w, imageArea.h);
 		SetTitle();
 	}
 
 	void FitToWindow(bool fillCrop = false, bool noEnlarge = true) {
-		int windowWidth = 0;
-		int windowHeight = 0;
-		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		viewport_.Fit(image_.width, image_.height, windowWidth, windowHeight, fillCrop, noEnlarge);
+		const SDL_Rect imageArea = ImageAreaRect();
+		viewport_.Fit(image_.width, image_.height, imageArea.w, imageArea.h, fillCrop, noEnlarge);
 		SetTitle();
 	}
 
@@ -1705,10 +1701,11 @@ private:
 		if (image_.width == 0 || image_.height == 0) {
 			return;
 		}
-		int windowWidth = 0;
-		int windowHeight = 0;
-		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		viewport_.ZoomAt(factor, mouseX, mouseY, image_.width, image_.height, windowWidth, windowHeight);
+		const SDL_Rect imageArea = ImageAreaRect();
+		const int localMouseX = std::clamp(mouseX - imageArea.x, 0, imageArea.w);
+		const int localMouseY = std::clamp(mouseY - imageArea.y, 0, imageArea.h);
+		viewport_.ZoomAt(factor, localMouseX, localMouseY, image_.width, image_.height,
+			imageArea.w, imageArea.h);
 		lastInteractionTick_ = SDL_GetTicks();
 		SetTitle();
 	}
@@ -1769,7 +1766,8 @@ private:
 
 	void FitWindowToImage() {
 		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
-		const int width = std::clamp(image_.width + 16, 160, 4096);
+		const int panelWidth = thumbnailPanelVisible_ ? kThumbnailPanelWidth : 0;
+		const int width = std::clamp(image_.width + panelWidth + 16, 160, 4096);
 		const int height = std::clamp(image_.height + 16, 120, 4096);
 		SDL_SetWindowSize(window_, width, height);
 		FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
@@ -2187,6 +2185,9 @@ private:
 		case jpegview_linux::kCommandToggleThumbnailPanel:
 			thumbnailPanelVisible_ = !thumbnailPanelVisible_;
 			PrepareThumbnailPreload();
+			if (viewport_.IsFitToWindow()) {
+				FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+			}
 			SaveSettings();
 			break;
 		case kToggleNavigationPanelAutoReveal:
@@ -3890,11 +3891,22 @@ private:
 		}
 	}
 
-	SDL_Rect ThumbnailPanelRect() const {
+	jpegview_linux::ThumbnailPanelLayout CurrentThumbnailPanelLayout() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		return SDL_Rect{0, 0, std::min(kThumbnailPanelWidth, windowWidth), windowHeight};
+		return jpegview_linux::CalculateThumbnailPanelLayout(windowWidth, windowHeight,
+			thumbnailPanelVisible_, kThumbnailPanelWidth);
+	}
+
+	SDL_Rect ThumbnailPanelRect() const {
+		const jpegview_linux::ThumbnailPanelLayout layout = CurrentThumbnailPanelLayout();
+		return SDL_Rect{0, 0, layout.panelWidth, layout.imageHeight};
+	}
+
+	SDL_Rect ImageAreaRect() const {
+		const jpegview_linux::ThumbnailPanelLayout layout = CurrentThumbnailPanelLayout();
+		return SDL_Rect{layout.imageX, 0, layout.imageWidth, layout.imageHeight};
 	}
 
 	void RenderThumbnailPanel() {
@@ -4024,7 +4036,7 @@ private:
 		DrawText("PRESS ESC TO CLOSE", panel.x + 18, panel.y + 156, kUiTextScale, 180, 180, 180);
 	}
 
-	void RenderImageTransition(const SDL_Rect& destination, int windowWidth, int windowHeight, SDL_Texture* currentTexture) {
+	void RenderImageTransition(const SDL_Rect& destination, const SDL_Rect& imageArea, SDL_Texture* currentTexture) {
 		if (transitionTexture_ == nullptr || transitionStartTick_ == 0) {
 			SDL_RenderCopy(renderer_, currentTexture, nullptr, &destination);
 			return;
@@ -4039,11 +4051,12 @@ private:
 		}
 
 		const jpegview_linux::ViewportRect oldRect = viewport_.Destination(
-			transitionImage_.width, transitionImage_.height, windowWidth, windowHeight);
-		SDL_Rect oldDestination{oldRect.x, oldRect.y, oldRect.width, oldRect.height};
+			transitionImage_.width, transitionImage_.height, imageArea.w, imageArea.h);
+		SDL_Rect oldDestination{oldRect.x + imageArea.x, oldRect.y + imageArea.y,
+			oldRect.width, oldRect.height};
 		SDL_Rect enteringDestination = destination;
-		const int horizontalDistance = std::max(windowWidth, destination.w);
-		const int verticalDistance = std::max(windowHeight, destination.h);
+		const int horizontalDistance = std::max(imageArea.w, destination.w);
+		const int verticalDistance = std::max(imageArea.h, destination.h);
 		const int effect = transitionEffect_;
 		const bool fromRight = effect == IDM_EFFECT_SLIDE_RL || effect == IDM_EFFECT_ROLL_RL || effect == IDM_EFFECT_SCROLL_RL;
 		const bool fromLeft = effect == IDM_EFFECT_SLIDE_LR || effect == IDM_EFFECT_ROLL_LR || effect == IDM_EFFECT_SCROLL_LR;
@@ -4305,21 +4318,22 @@ private:
 	}
 
 	void RenderFrame() {
-		int windowWidth = 0;
-		int windowHeight = 0;
-		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		imageCenterX_ = windowWidth / 2;
-		imageCenterY_ = windowHeight / 2;
+		const SDL_Rect imageArea = ImageAreaRect();
+		imageCenterX_ = imageArea.x + imageArea.w / 2;
+		imageCenterY_ = imageArea.y + imageArea.h / 2;
 		const jpegview_linux::ViewportRect viewportRect = viewport_.Destination(
-			image_.width, image_.height, windowWidth, windowHeight);
+			image_.width, image_.height, imageArea.w, imageArea.h);
 		const int renderWidth = viewportRect.width;
 		const int renderHeight = viewportRect.height;
-		SDL_Rect destination{viewportRect.x, viewportRect.y, viewportRect.width, viewportRect.height};
+		SDL_Rect destination{viewportRect.x + imageArea.x, viewportRect.y + imageArea.y,
+			viewportRect.width, viewportRect.height};
 		SDL_Texture* renderTexture = DisplayTextureFor(renderWidth, renderHeight);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
 		SDL_RenderClear(renderer_);
-		RenderImageTransition(destination, windowWidth, windowHeight, renderTexture);
+		SDL_RenderSetClipRect(renderer_, &imageArea);
+		RenderImageTransition(destination, imageArea, renderTexture);
+		SDL_RenderSetClipRect(renderer_, nullptr);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderThumbnailPanel();
 		RenderFileName();

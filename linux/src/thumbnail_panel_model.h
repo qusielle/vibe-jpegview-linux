@@ -16,6 +16,18 @@ struct ThumbnailSize {
 	int height = 0;
 };
 
+struct ThumbnailPanelLayout {
+	int panelWidth = 0;
+	int imageX = 0;
+	int imageWidth = 0;
+	int imageHeight = 0;
+};
+
+// Splits the client area into a left thumbnail strip and the image viewport.
+// At least one pixel remains available to the image in very narrow windows.
+ThumbnailPanelLayout CalculateThumbnailPanelLayout(int windowWidth, int windowHeight,
+	bool panelVisible, int preferredPanelWidth);
+
 // Returns visible rows in file-list order. The current file's row is centered
 // vertically; rows outside the window are omitted rather than wrapping.
 std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,

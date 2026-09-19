@@ -15,7 +15,7 @@ for command in Xvfb xdotool openbox wmctrl; do
 done
 
 visual_assertions=1
-for command in import compare xprop; do
+for command in import compare convert identify xprop; do
 	if ! command -v "$command" >/dev/null 2>&1; then
 		visual_assertions=0
 	fi
@@ -159,6 +159,23 @@ if [ "$visual_assertions" -eq 1 ]; then
 	if [ "$thumbnail_difference" = "0" ]; then
 		echo "UI smoke test: Ctrl+T did not show the thumbnail panel" >&2
 		exit 1
+	fi
+	thumbnail_capture_width=$(identify -format '%w' "$temporary/thumbnails-open.png")
+	thumbnail_capture_height=$(identify -format '%h' "$temporary/thumbnails-open.png")
+	thumbnail_content_width=$((thumbnail_capture_width - 180))
+	if [ "$thumbnail_content_width" -gt 0 ]; then
+		convert "$temporary/thumbnails-before.png" \
+			-crop "${thumbnail_content_width}x${thumbnail_capture_height}+180+0" +repage \
+			"$temporary/thumbnails-content-before.png"
+		convert "$temporary/thumbnails-open.png" \
+			-crop "${thumbnail_content_width}x${thumbnail_capture_height}+180+0" +repage \
+			"$temporary/thumbnails-content-open.png"
+		thumbnail_content_difference=$(compare -metric AE "$temporary/thumbnails-content-before.png" \
+			"$temporary/thumbnails-content-open.png" null: 2>&1 || true)
+		if [ "$thumbnail_content_difference" = "0" ]; then
+			echo "UI smoke test: thumbnail panel overlaid the image instead of reserving space" >&2
+			exit 1
+		fi
 	fi
 fi
 title_before_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")

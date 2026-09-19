@@ -5,6 +5,15 @@
 
 namespace jpegview_linux {
 
+ThumbnailPanelLayout CalculateThumbnailPanelLayout(int windowWidth, int windowHeight,
+	bool panelVisible, int preferredPanelWidth) {
+	const int width = std::max(0, windowWidth);
+	const int height = std::max(0, windowHeight);
+	const int panelWidth = panelVisible && width > 1 && preferredPanelWidth > 0 ?
+		std::min(preferredPanelWidth, width - 1) : 0;
+	return {panelWidth, panelWidth, width - panelWidth, height};
+}
+
 std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
 	std::size_t currentIndex, int windowHeight, int rowHeight) {
 	std::vector<ThumbnailSlot> slots;
