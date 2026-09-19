@@ -2,6 +2,7 @@
 #include "file_list.h"
 #include "image_decoder.h"
 #include "image_cache.h"
+#include "display_image_cache.h"
 #include "image.h"
 #include "image_writer.h"
 #include "settings.h"
@@ -877,6 +878,98 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	Expect(speculativeDecodes == 1 && fullCache.CachedImages() == 1 &&
 		fullCache.Find(files[2]) != nullptr,
 		"speculative decoding evicted an image retained from foreground viewing");
+}
+
+std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height) {
+	auto image = std::make_shared<DecodedImage>();
+	jpegview_linux::DecodedFrame frame;
+	frame.width = width;
+	frame.height = height;
+	frame.bgra.resize(static_cast<std::size_t>(width) * height * 4);
+	for (std::size_t offset = 0; offset < frame.bgra.size(); offset += 4) {
+		frame.bgra[offset] = static_cast<std::uint8_t>(offset / 4);
+		frame.bgra[offset + 1] = 70;
+		frame.bgra[offset + 2] = 180;
+		frame.bgra[offset + 3] = 255;
+	}
+	image->frames.push_back(std::move(frame));
+	return image;
+}
+
+void TestDisplayImageCacheBackgroundPreparation() {
+	TemporaryDirectory temporary;
+	const fs::path firstFile = temporary.path() / "first.jpg";
+	const fs::path secondFile = temporary.path() / "second.jpg";
+	const fs::path thirdFile = temporary.path() / "third.jpg";
+	WriteText(firstFile, "first");
+	WriteText(secondFile, "second");
+	WriteText(thirdFile, "third");
+	const std::shared_ptr<DecodedImage> decoded = DisplayCacheTestImage(4, 4);
+
+	const jpegview_linux::DisplayImageRequest invalid =
+		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 1, 2, 2, false);
+	Expect(!invalid.Valid(), "display cache accepted an invalid decoded frame");
+	const jpegview_linux::DisplayImageRequest scaled =
+		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false);
+	Expect(scaled.Valid(), "display cache rejected a valid preparation request");
+
+	jpegview_linux::DisplayImageCache realProcessor(64, 1);
+	realProcessor.Request(scaled);
+	Expect(realProcessor.WaitUntilIdle(std::chrono::seconds(2)),
+		"display image preparation did not finish");
+	const jpegview_linux::DisplayImageCache::ImagePtr prepared = realProcessor.Find(scaled);
+	Expect(prepared && prepared->width == 2 && prepared->height == 2 &&
+		prepared->bgra.size() == 16,
+		"display image worker did not produce exact target-size pixels");
+	Expect(realProcessor.TakeCompleted(1).size() == 1 && realProcessor.TakeCompleted(1).empty(),
+		"display image completion queue did not drain exactly once");
+
+	std::mutex orderMutex;
+	std::vector<int> preparationOrder;
+	const std::thread::id callingThread = std::this_thread::get_id();
+	std::atomic<bool> usedBackgroundThread{false};
+	jpegview_linux::DisplayImageCache ordered(32, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			usedBackgroundThread = std::this_thread::get_id() != callingThread;
+			{
+				std::lock_guard<std::mutex> lock(orderMutex);
+				preparationOrder.push_back(request.targetWidth);
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = request.targetWidth;
+			result->height = 1;
+			result->bgra.assign(16, static_cast<std::uint8_t>(request.targetWidth));
+			return result;
+		});
+	const std::vector<jpegview_linux::DisplayImageRequest> requests = {
+		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 11, 1, false),
+		jpegview_linux::MakeDisplayImageRequest(secondFile, decoded, 0, 22, 1, false),
+		jpegview_linux::MakeDisplayImageRequest(thirdFile, decoded, 0, 33, 1, false),
+	};
+	ordered.Prefetch(requests);
+	Expect(ordered.WaitUntilIdle(std::chrono::seconds(2)),
+		"display image prefetch did not finish");
+	{
+		std::lock_guard<std::mutex> lock(orderMutex);
+		Expect(preparationOrder == std::vector<int>({11, 22, 33}),
+			"display image workers did not preserve nearest-first queue order");
+	}
+	Expect(usedBackgroundThread, "display image processing ran on the calling thread");
+	Expect(ordered.CachedImages() == 2 && ordered.CachedBytes() == 32,
+		"display image cache did not enforce its pixel-memory budget");
+	ordered.Request(requests[2]);
+	Expect(ordered.WaitUntilIdle(std::chrono::seconds(2)) && ordered.Find(requests[2]) != nullptr &&
+		ordered.CachedImages() == 2 && ordered.CachedBytes() == 32,
+		"foreground display preparation did not evict the least-recently-used entry");
+
+	WriteText(thirdFile, "third-file-was-modified");
+	Expect(ordered.Find(requests[2]) == nullptr,
+		"display cache served prepared pixels after the source file changed");
+	ordered.Clear();
+	Expect(ordered.CachedImages() == 0 && ordered.CachedBytes() == 0 &&
+		ordered.TakeCompleted(10).empty(),
+		"display cache clear retained pixels or completion notifications");
 }
 
 jpegview_linux::Image MakeIndexedImage(int width, int height) {
@@ -2756,6 +2849,7 @@ int main() {
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
 	RunTest("decoded-image-cache-and-background-prefetch", TestDecodedImageCacheAndBackgroundPrefetch, failures);
+	RunTest("display-image-cache-background-preparation", TestDisplayImageCacheBackgroundPreparation, failures);
 	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);
 	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
 	RunTest("image-auto-contrast-invariants", TestImageAutoContrastInvariants, failures);
