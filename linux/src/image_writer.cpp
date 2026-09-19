@@ -611,7 +611,7 @@ bool WriteHeif(const std::filesystem::path& filename, const std::uint8_t* bgra,
 	heif_image* image = nullptr;
 	heif_image_handle* handle = nullptr;
 	const auto fail = [&](const heif_error& error, const char* fallback) {
-		errorMessage = error.message == nullptr ? fallback : error.message;
+		errorMessage = error.message == nullptr || error.message[0] == '\0' ? fallback : error.message;
 	};
 	heif_error error = heif_context_get_encoder_for_format(context, format, &encoder);
 	if (error.code == heif_error_Ok) error = heif_encoder_set_lossy_quality(encoder, std::clamp(quality, 0, 100));

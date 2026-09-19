@@ -556,36 +556,54 @@ void TestImageWriterDecoderRoundTrips() {
 		"uppercase extension was not accepted by the writer: " + error);
 	ExpectDecoded(uppercase, pixels, true, true);
 
-	const std::vector<std::pair<const char*, bool>> optionalFormats = {
+	struct OptionalFormatCase {
+		const char* extension;
+		int dimension;
+	};
+	const std::vector<OptionalFormatCase> optionalFormats = {
 #if JPEGVIEW_HAVE_GIF
-		{".gif", false},
+		{".gif", 2},
 #endif
 #if JPEGVIEW_HAVE_TIFF
-		{".tiff", true},
+		{".tiff", 2},
 #endif
 #if JPEGVIEW_HAVE_WEBP
-		{".webp", false},
+		{".webp", 2},
 #endif
 #if JPEGVIEW_HAVE_HEIF
-		{".heic", false},
+		// Ubuntu 20.04's libheif/x265 encoder cannot encode a 2x2 image.
+		// Exercise the codec with a realistic size while keeping the other
+		// optional format tests sensitive to tiny-image regressions.
+		{".heic", 64},
 #endif
 #if JPEGVIEW_HAVE_AVIF
-		{".avif", false},
+		{".avif", 2},
 #endif
 #if JPEGVIEW_HAVE_JXL
-		{".jxl", false},
+		{".jxl", 2},
 #endif
 	};
-	for (const auto& format : optionalFormats) {
-		const fs::path filename = temporary.path() / ("optional" + std::string(format.first));
+	for (const OptionalFormatCase& format : optionalFormats) {
+		const fs::path filename = temporary.path() / ("optional" + std::string(format.extension));
+		std::vector<std::uint8_t> optionalPixels(
+			static_cast<std::size_t>(format.dimension) * format.dimension * 4);
+		for (int y = 0; y < format.dimension; ++y) {
+			for (int x = 0; x < format.dimension; ++x) {
+				const std::size_t target = (static_cast<std::size_t>(y) * format.dimension + x) * 4;
+				const std::size_t source = (static_cast<std::size_t>(y % 2) * 2 + x % 2) * 4;
+				std::copy_n(pixels.data() + source, 4, optionalPixels.data() + target);
+			}
+		}
 		error.clear();
-		Expect(jpegview_linux::WriteImage(filename, pixels.data(), 2, 2, options, error),
+		Expect(jpegview_linux::WriteImage(filename, optionalPixels.data(), format.dimension,
+			format.dimension, options, error),
 			"cannot write optional " + filename.extension().string() + ": " + error);
 		DecodedImage decoded;
 		error.clear();
 		Expect(jpegview_linux::DecodeImage(filename, decoded, error),
 			"cannot decode optional " + filename.extension().string() + ": " + error);
-		Expect(decoded.frames.size() == 1 && decoded.frames.front().width == 2 && decoded.frames.front().height == 2,
+		Expect(decoded.frames.size() == 1 && decoded.frames.front().width == format.dimension &&
+			decoded.frames.front().height == format.dimension,
 			"optional format returned incorrect decoded dimensions");
 	}
 
