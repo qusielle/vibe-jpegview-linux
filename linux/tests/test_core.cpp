@@ -830,6 +830,30 @@ void TestImageResizeFiltersAndLimits() {
 	jpegview_linux::Image clampedFilter = source;
 	Expect(clampedFilter.Resize(2, 1, -50) && clampedFilter.bgra == point.bgra,
 		"resize did not clamp a low filter index to point sampling");
+	jpegview_linux::Image filteredEnlargement = MakeIndexedImage(2, 2);
+	const jpegview_linux::Image enlargementSource = filteredEnlargement;
+	Expect(filteredEnlargement.Resize(5, 4, 1) &&
+		std::equal(filteredEnlargement.bgra.begin(), filteredEnlargement.bgra.begin() + 4,
+			enlargementSource.bgra.begin()) &&
+		std::equal(filteredEnlargement.bgra.end() - 4, filteredEnlargement.bgra.end(),
+			enlargementSource.bgra.end() - 4),
+		"bicubic enlargement did not preserve the first and last source pixels");
+	jpegview_linux::Image singlePixel = MakeIndexedImage(1, 1);
+	const std::vector<std::uint8_t> singleColor = singlePixel.bgra;
+	Expect(singlePixel.Resize(4, 3, 3), "filtered enlargement rejected a one-pixel source");
+	for (std::size_t offset = 0; offset < singlePixel.bgra.size(); offset += 4) {
+		Expect(std::equal(singlePixel.bgra.begin() + static_cast<std::ptrdiff_t>(offset),
+			singlePixel.bgra.begin() + static_cast<std::ptrdiff_t>(offset + 4), singleColor.begin()),
+			"one-pixel enlargement did not retain its constant BGRA value");
+	}
+	jpegview_linux::Image unchanged = source;
+	Expect(unchanged.Resize(4, 1, 3) && unchanged.bgra == source.bgra,
+		"same-size resize modified source pixels");
+	jpegview_linux::Image highFilter = source;
+	jpegview_linux::Image defaultFilter = source;
+	Expect(highFilter.Resize(3, 1, 999) && defaultFilter.Resize(3, 1, 3) &&
+		highFilter.bgra == defaultFilter.bgra,
+		"resize did not clamp a high filter index to sharpen-medium");
 
 	std::vector<std::uint8_t> constantPixels(8u * 8u * 4u);
 	for (std::size_t offset = 0; offset < constantPixels.size(); offset += 4) {
@@ -938,6 +962,20 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"settings without thumbnail visibility did not retain the hidden default");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
 		"malformed thumbnail width did not retain its default");
+
+	const fs::path clamped = temporary.path() / "clamped.conf";
+	WriteText(clamped, "manual_zoom=1000\nthumbnail_panel_width=2\n");
+	loaded = {};
+	Expect(jpegview_linux::LoadViewerSettings(clamped, loaded) && loaded.manualZoomSet &&
+		loaded.manualZoom == jpegview_linux::kMaximumZoom &&
+		loaded.thumbnailPanelWidth == jpegview_linux::kMinimumThumbnailPanelWidth,
+		"out-of-range settings were not clamped to their public limits");
+
+	jpegview_linux::ViewerSettings unchanged;
+	unchanged.scaleMode = "sentinel";
+	Expect(!jpegview_linux::LoadViewerSettings(temporary.path() / "missing.conf", unchanged) &&
+		unchanged.scaleMode == "sentinel",
+		"missing settings file modified the caller's existing settings");
 }
 
 void TestSettingsPathSelection() {
@@ -951,6 +989,9 @@ void TestSettingsPathSelection() {
 	xdg.Clear();
 	Expect(jpegview_linux::ViewerSettingsPath() == home / ".config" / "jpegview-linux" / "settings.conf",
 		"HOME settings path fallback is incorrect");
+	homeEnvironment.Clear();
+	Expect(jpegview_linux::ViewerSettingsPath().empty(),
+		"settings path was invented when neither XDG_CONFIG_HOME nor HOME was available");
 }
 
 void TestSortModeMappings() {
@@ -1367,6 +1408,8 @@ void TestViewportNavigationResetsTransientZoom() {
 	const jpegview_linux::ViewportSnapshot fitNavigation = viewport.NavigationSnapshot();
 	Expect(fitNavigation.fitToWindow && !fitNavigation.fillWithCrop && fitNavigation.noEnlarge,
 		"transient zoom replaced the fit navigation mode");
+	Expect(std::string(viewport.NavigationScaleMode()) == "fit_no_enlarge",
+		"navigation scale-mode serialization followed transient zoom state");
 	viewport.Restore(fitNavigation, 2000, 1000, 500, 300);
 	ExpectNear(viewport.Zoom(), 0.25, 0.0001, "next image retained transient zoom instead of fitting");
 
@@ -1551,6 +1594,8 @@ void TestContextMenuColumnLayoutAndNavigation() {
 		"Down did not wrap within its column");
 	Expect(jpegview_linux::NextMenuSelectionInColumn(items, columns[2], 5, -1) == 7,
 		"Up did not wrap backward within its column");
+	Expect(jpegview_linux::NextMenuSelectionInColumn(items, columns[2], -1, -1) == 7,
+		"Up with no current item did not enter at the bottom of its column");
 	Expect(jpegview_linux::NextMenuSelectionInColumn(items, columns[1], 3, 1) == 3,
 		"vertical navigation did not remain on the only enabled item in a column");
 	Expect(jpegview_linux::NextMenuSelectionInColumn(items, {4, 5, 18}, 4, 1) == -1,
@@ -1712,6 +1757,10 @@ void TestThumbnailDownsamplingAntialiasing() {
 		filtered == transparentEdge, "same-size thumbnails were modified");
 	Expect(!jpegview_linux::DownsampleThumbnailBgra(transparentEdge, 2, 1, 3, 1, filtered),
 		"thumbnail-only downsampler accepted enlargement");
+	Expect(!jpegview_linux::DownsampleThumbnailBgra({1, 2, 3, 4}, 2, 2, 1, 1, filtered),
+		"thumbnail downsampler accepted a truncated source buffer");
+	Expect(!jpegview_linux::DownsampleThumbnailBgra({}, 0, 0, 0, 0, filtered),
+		"thumbnail downsampler accepted empty dimensions");
 }
 
 void TestImageInfoFormatting() {
@@ -1725,6 +1774,10 @@ void TestImageInfoFormatting() {
 		"modification date label was not shortened");
 	Expect(jpegview_linux::FormatFileSize(1536) == "1.5 KB",
 		"file-size formatting changed while moving it into the information model");
+	Expect(jpegview_linux::FormatFileSize(1023) == "1023 B" &&
+		jpegview_linux::FormatFileSize(10 * 1024) == "10 KB" &&
+		jpegview_linux::FormatFileSize(3ull * 1024 * 1024 * 1024) == "3.0 GB",
+		"file-size formatting changed at a unit or precision boundary");
 }
 
 void TestSystemFontResolutionAndUnicodeRendering() {
@@ -1749,6 +1802,23 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 	WriteText(home / ".gtkrc-2.0", "gtk-font-name = \"Legacy Choice 9\"\n");
 	Expect(jpegview_linux::ResolveDesktopFontDescription(home, config) == "Legacy Choice 9",
 		"GTK 2 system font was not parsed");
+	fs::remove(home / ".gtkrc-2.0");
+	fs::create_directories(config / "xsettingsd");
+	WriteText(config / "xsettingsd/xsettingsd.conf", "Gtk/FontName 'Xsettings Choice 10'\n");
+	Expect(jpegview_linux::ResolveDesktopFontDescription(home, config) == "Xsettings Choice 10",
+		"xsettingsd system font was not parsed");
+	fs::remove(config / "xsettingsd/xsettingsd.conf");
+	WriteText(config / "kdeglobals", "[General]\nfont=KDE Choice,11,-1,5,50,0,0,0,0,0\n");
+	Expect(jpegview_linux::ResolveDesktopFontDescription(home, config) == "KDE Choice 11",
+		"KDE system font family and size were not parsed");
+	fs::remove(config / "kdeglobals");
+	Expect(jpegview_linux::ResolveDesktopFontDescription(home, config) == "Sans 10",
+		"missing desktop font settings did not use the documented fallback");
+	{
+		ScopedEnvironment explicitOverride("JPEGVIEW_FONT", "  Override Choice 13  ");
+		Expect(jpegview_linux::ResolveDesktopFontDescription(home, config) == "Override Choice 13",
+			"JPEGVIEW_FONT did not override desktop settings or was not trimmed");
+	}
 
 	jpegview_linux::SystemFont font("Sans 10");
 	Expect(font.LineHeight() > 7 && font.TextWidth("iiii") < font.TextWidth("WWWW"),
@@ -1759,6 +1829,9 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 	Expect(std::any_of(raster.argb.begin(), raster.argb.end(), [](std::uint32_t pixel) {
 		return (pixel >> 24) != 0;
 	}), "non-Latin system-font text rasterized as an empty image");
+	const std::string invalidUtf8 = std::string("valid") + static_cast<char>(0xff);
+	Expect(font.TextWidth(invalidUtf8) > 0 && !font.Rasterize(invalidUtf8).argb.empty(),
+		"system font did not replace malformed UTF-8 safely");
 }
 
 void TestFileDialogFiltering() {
@@ -1828,6 +1901,9 @@ void TestFileDialogModelStateAndNavigation() {
 
 	jpegview_linux::FileDialogModel model;
 	model.Begin(false);
+	model.SetEntries({});
+	Expect(model.Entries().empty() && model.SelectedIndex() == -1,
+		"empty open-dialog listing retained a selection");
 	model.SetEntries(entries);
 	Expect(model.Entries().size() == entries.size() && model.Entries()[0].parent &&
 		model.Entries()[1].path.filename() == "a-folder" && model.SelectedIndex() == 1,
