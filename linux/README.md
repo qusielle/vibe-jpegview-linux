@@ -16,7 +16,7 @@ sudo apt install g++ make libsdl2-2.0-0 libjpeg-dev libpng-dev libjpeg-turbo-pro
 ```
 
 ```sh
-make -C linux
+make -C linux -j"$(nproc)"
 linux/build/jpegview-linux image.jpg
 linux/build/jpegview-linux /path/to/photos
 ```
@@ -98,9 +98,11 @@ The dependency-light core suite builds and runs with:
 make -C linux test
 ```
 
-It covers file-list ordering/navigation, the complete supported keyboard-command mapping, decoder
-and writer round trips across static and animated formats, all PNM variants, malformed input,
-batch-copy planning, and JPEG metadata. The optional X11 smoke suite covers startup controls,
+It covers file-list ordering/navigation, sort and settings persistence mappings, the complete
+supported keyboard-command mapping, viewport fit/fill/zoom/pan geometry, resize-dialog validation,
+decoder and writer round trips across static and animated formats, all PNM variants, malformed
+input, batch-copy planning, desktop-application command expansion, and JPEG metadata. The optional
+X11 smoke suite covers startup controls,
 mouse-wheel navigation versus Ctrl+wheel zoom, held-key repeat, maximize restoration, and
 persisted settings:
 
@@ -127,7 +129,7 @@ the panel. Ctrl+C copies the image at original size, Ctrl+Shift+C copies its pat
 PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.
 Ctrl+Shift+M/E set the modification date to now/EXIF date; R/T perform lossless JPEG rotations when
 bundled `jpegtran` is available; F5 toggles the ported automatic histogram contrast correction, and
-Ctrl+Shift+R opens the image resize dialog. Move the pointer to
+Ctrl+Shift+R opens the image resize dialog. Move the pointer to the lower edge of the window to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, ordering mode, fit/actual, and fullscreen). The
 ordering button shows `N` for file-name order and `D` for modification-date order; clicking it
@@ -199,3 +201,10 @@ in `src/JPEGView/Config/KeyMap.txt.default`. This keeps the portable SDL input l
 into the same command vocabulary as the Windows `CMainDlg::ExecuteCommand` path. The context menu
 is currently a native Linux rendering of the complete Windows `PopupMenu` resource; unsupported
 Windows-only commands are shown disabled rather than being silently ignored.
+
+## Architecture and future refactoring
+
+Platform-independent behavior is split into small modules under `src/` and exercised by the core
+suite; `main.cpp` is the SDL window, rendering, and event-dispatch composition layer. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for module ownership, the completed Viewer extractions, and the
+ordered refactoring backlog.
