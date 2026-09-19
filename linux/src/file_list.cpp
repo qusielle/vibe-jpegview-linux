@@ -391,6 +391,12 @@ bool FileList::Previous() {
 	return false;
 }
 
+bool FileList::Select(std::size_t index) {
+	if (index >= entries_.size()) return false;
+	currentIndex_ = index;
+	return true;
+}
+
 void FileList::First() {
 	if (!entries_.empty()) currentIndex_ = 0;
 }

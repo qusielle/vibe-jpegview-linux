@@ -40,6 +40,7 @@ public:
 
 	bool Next();
 	bool Previous();
+	bool Select(std::size_t index);
 	void First();
 	void Last();
 	bool Reload();

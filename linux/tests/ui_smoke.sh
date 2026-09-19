@@ -145,6 +145,34 @@ if [ "$title_after_hold" != "$title_after_ctrl_wheel" ]; then
 	exit 1
 fi
 
+DISPLAY=":$display_number" xdotool key Home
+sleep 0.2
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/thumbnails-before.png"
+fi
+DISPLAY=":$display_number" xdotool key ctrl+t
+sleep 0.5
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/thumbnails-open.png"
+	thumbnail_difference=$(compare -metric AE "$temporary/thumbnails-before.png" \
+		"$temporary/thumbnails-open.png" null: 2>&1 || true)
+	if [ "$thumbnail_difference" = "0" ]; then
+		echo "UI smoke test: Ctrl+T did not show the thumbnail panel" >&2
+		exit 1
+	fi
+fi
+title_before_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+DISPLAY=":$display_number" xdotool mousemove 80 500
+DISPLAY=":$display_number" xdotool click 1
+sleep 0.3
+title_after_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+if [ "$title_before_thumbnail_click" = "$title_after_thumbnail_click" ]; then
+	echo "UI smoke test: clicking a neighboring thumbnail did not navigate" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool key ctrl+t
+sleep 0.2
+
 if [ "$visual_assertions" -eq 1 ]; then
 	DISPLAY=":$display_number" xdotool mousemove 640 400
 	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-before.png"

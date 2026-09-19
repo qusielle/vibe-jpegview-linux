@@ -12,6 +12,7 @@
 #include "resize_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
+#include "thumbnail_panel_model.h"
 #include "app_icon.h"
 
 #include "../../src/JPEGView/resource.h"
@@ -278,6 +279,10 @@ void TestFileListFilteringAndLogicalSorting() {
 	Expect(files.Previous(), "previous image should advance backwards");
 	Expect(files.Current().filename() == "photo1.png", "previous image selected the wrong file");
 	Expect(!files.Previous(), "non-wrapping file list should stop before the first image");
+	Expect(files.Select(2) && files.Current().filename() == "photo10.png",
+		"direct file selection for the thumbnail panel selected the wrong image");
+	Expect(!files.Select(3) && files.Current().filename() == "photo10.png",
+		"out-of-range direct file selection changed the current image");
 
 	FileList descending({directory.string()}, FileList::SortMode::FileName, false, false);
 	Expect(FileNames(descending) == std::vector<std::string>({"photo10.png", "photo2.png", "photo1.png"}),
@@ -318,6 +323,7 @@ void TestKeyboardCommandMappings() {
 		{'m', 0x00C3u, IDM_TOUCH_IMAGE},
 		{'e', 0x00C3u, IDM_TOUCH_IMAGE_EXIF},
 		{'n', 0x00C0u, IDM_SHOW_NAVPANEL},
+		{'t', 0x00C0u, jpegview_linux::kCommandToggleThumbnailPanel},
 		{'n', 0x0003u, IDM_SHOW_FILENAME},
 		{SDLK_F2, 0, IDM_SHOW_FILEINFO},
 		{SDLK_F3, 0, IDM_TOGGLE_RESAMPLING_QUALITY},
@@ -1445,6 +1451,53 @@ void TestOverlayLayoutUsesContentWidthAndComfortableMargins() {
 		"overlay layout did not remain valid for an extremely narrow window");
 }
 
+void TestThumbnailPanelLayoutPreloadAndSizing() {
+	const std::vector<jpegview_linux::ThumbnailSlot> slots =
+		jpegview_linux::ThumbnailPanelSlots(10, 5, 500, 100);
+	Expect(slots.size() == 5, "thumbnail panel did not create one row per visible neighbor");
+	for (std::size_t index = 0; index < slots.size(); ++index) {
+		Expect(slots[index].fileIndex == index + 3 && slots[index].y == static_cast<int>(index) * 100,
+			"thumbnail rows do not follow the active file-list order");
+	}
+	Expect(slots[2].current && slots[2].fileIndex == 5 && slots[2].y == 200,
+		"current thumbnail was not centered in the panel");
+	Expect(std::count_if(slots.begin(), slots.end(), [](const jpegview_linux::ThumbnailSlot& slot) {
+		return slot.current;
+	}) == 1, "thumbnail panel marked more than one current image");
+
+	const std::vector<jpegview_linux::ThumbnailSlot> firstSlots =
+		jpegview_linux::ThumbnailPanelSlots(4, 0, 300, 100);
+	Expect(firstSlots.size() == 2 && firstSlots[0].fileIndex == 0 && firstSlots[0].y == 100 &&
+		firstSlots[0].current && firstSlots[1].fileIndex == 1 && firstSlots[1].y == 200,
+		"thumbnail panel did not keep the first image centered without wrapping");
+	Expect(jpegview_linux::ThumbnailPanelSlots(0, 0, 300, 100).empty(),
+		"empty file list produced thumbnail rows");
+	Expect(jpegview_linux::ThumbnailPanelSlots(4, 4, 300, 100).empty(),
+		"invalid current index produced thumbnail rows");
+
+	const std::vector<std::size_t> preload = jpegview_linux::ThumbnailPreloadOrder(7, 3, 7);
+	Expect(preload == std::vector<std::size_t>({3, 2, 4, 1, 5, 0, 6}),
+		"thumbnail preload order is not nearest-current-first");
+	const std::vector<std::size_t> limited = jpegview_linux::ThumbnailPreloadOrder(20, 10, 4);
+	Expect(limited == std::vector<std::size_t>({10, 9, 11, 8}),
+		"thumbnail preload order did not honor the memory-cache limit");
+	Expect(jpegview_linux::ThumbnailPreloadOrder(4, 0, 8) ==
+		std::vector<std::size_t>({0, 1, 2, 3}),
+		"thumbnail preload order failed at the first file");
+
+	jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(400, 200, 100, 80);
+	Expect(size.width == 100 && size.height == 50,
+		"wide thumbnail did not preserve its aspect ratio");
+	size = jpegview_linux::FitThumbnailSize(100, 400, 80, 100);
+	Expect(size.width == 25 && size.height == 100,
+		"tall thumbnail did not preserve its aspect ratio");
+	size = jpegview_linux::FitThumbnailSize(40, 20, 100, 80);
+	Expect(size.width == 40 && size.height == 20,
+		"small thumbnail was enlarged");
+	Expect(jpegview_linux::FitThumbnailSize(0, 20, 100, 80).width == 0,
+		"invalid image dimensions produced a thumbnail size");
+}
+
 void TestEmbeddedApplicationIcon() {
 	jpegview_linux::ApplicationIcon icon;
 	std::string error;
@@ -1505,6 +1558,7 @@ int main() {
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
+	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";

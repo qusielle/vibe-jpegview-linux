@@ -14,6 +14,7 @@
 #include "resize_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
+#include "thumbnail_panel_model.h"
 #include "app_icon.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
@@ -45,6 +46,7 @@
 #include <string>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <unordered_map>
 #include <unistd.h>
 #include <vector>
 
@@ -67,6 +69,10 @@ constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kOverlayLineHeight = 18;
 constexpr int kFilenameOverlayHeight = 20;
+constexpr int kThumbnailPanelWidth = 164;
+constexpr int kThumbnailRowHeight = 112;
+constexpr int kThumbnailInset = 8;
+constexpr std::size_t kThumbnailCacheLimit = 64;
 constexpr int kBatchSelectAll = 0;
 constexpr int kBatchSelectNone = 1;
 constexpr int kBatchPreview = 2;
@@ -814,6 +820,7 @@ public:
 			HandleEvents(running);
 			if (quitRequested_) running = false;
 			TickPlayback();
+			TickThumbnailPreload();
 			Render();
 			SDL_Delay(4);
 		}
@@ -837,6 +844,13 @@ private:
 		int height = 0;
 	};
 
+	struct ThumbnailCacheEntry {
+		SDL_Texture* texture = nullptr;
+		int width = 0;
+		int height = 0;
+		std::uint64_t lastUsed = 0;
+	};
+
 	void Cleanup() {
 		SaveSettings();
 		if (clipboardMode_) {
@@ -850,6 +864,7 @@ private:
 		}
 		ClearDisplayTexture();
 		ClearTransition();
+		ClearThumbnailCache();
 		if (renderer_ != nullptr) {
 			SDL_DestroyRenderer(renderer_);
 			renderer_ = nullptr;
@@ -965,6 +980,7 @@ private:
 			nextPlaybackTick_ = 0;
 		}
 		SetTitle();
+		PrepareThumbnailPreload();
 		return true;
 	}
 
@@ -1032,6 +1048,80 @@ private:
 		}
 		transitionImage_ = {};
 		transitionStartTick_ = 0;
+	}
+
+	void ClearThumbnailCache() {
+		for (auto& cached : thumbnailCache_) {
+			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
+		}
+		thumbnailCache_.clear();
+		thumbnailLoadQueue_.clear();
+	}
+
+	void PrepareThumbnailPreload() {
+		thumbnailLoadQueue_.clear();
+		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
+		const std::vector<std::size_t> order = jpegview_linux::ThumbnailPreloadOrder(
+			fileList_.Size(), fileList_.CurrentIndex(), kThumbnailCacheLimit);
+		thumbnailLoadQueue_.insert(thumbnailLoadQueue_.end(), order.begin(), order.end());
+		nextThumbnailLoadTick_ = 0;
+	}
+
+	void TrimThumbnailCache() {
+		const std::string currentKey = fileList_.Empty() ? std::string() : fileList_.Current().string();
+		while (thumbnailCache_.size() > kThumbnailCacheLimit) {
+			auto oldest = thumbnailCache_.end();
+			for (auto candidate = thumbnailCache_.begin(); candidate != thumbnailCache_.end(); ++candidate) {
+				if (candidate->first == currentKey) continue;
+				if (oldest == thumbnailCache_.end() || candidate->second.lastUsed < oldest->second.lastUsed) {
+					oldest = candidate;
+				}
+			}
+			if (oldest == thumbnailCache_.end()) break;
+			if (oldest->second.texture != nullptr) SDL_DestroyTexture(oldest->second.texture);
+			thumbnailCache_.erase(oldest);
+		}
+	}
+
+	void TickThumbnailPreload() {
+		if (!thumbnailPanelVisible_ || thumbnailLoadQueue_.empty()) return;
+		const Uint32 now = SDL_GetTicks();
+		if (nextThumbnailLoadTick_ != 0 && now < nextThumbnailLoadTick_) return;
+		while (!thumbnailLoadQueue_.empty()) {
+			const std::size_t index = thumbnailLoadQueue_.front();
+			thumbnailLoadQueue_.pop_front();
+			if (index >= fileList_.Files().size()) continue;
+			const fs::path& path = fileList_.Files()[index];
+			const std::string key = path.string();
+			auto existing = thumbnailCache_.find(key);
+			if (existing != thumbnailCache_.end()) {
+				existing->second.lastUsed = ++thumbnailUseCounter_;
+				continue;
+			}
+
+			ThumbnailCacheEntry cached;
+			cached.lastUsed = ++thumbnailUseCounter_;
+			jpegview_linux::DecodedImage decoded;
+			std::string errorMessage;
+			if (jpegview_linux::DecodeImage(path, decoded, errorMessage) && !decoded.frames.empty()) {
+				const jpegview_linux::DecodedFrame& frame = decoded.frames.front();
+				const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
+					frame.width, frame.height, kThumbnailPanelWidth - kThumbnailInset * 2,
+					kThumbnailRowHeight - kThumbnailInset * 2);
+				Image thumbnail;
+				if (size.width > 0 && size.height > 0 &&
+					thumbnail.StoreBGRA(frame.bgra.data(), frame.width, frame.height) &&
+					thumbnail.Resize(size.width, size.height, 1)) {
+					cached.texture = CreateTexture(thumbnail);
+					cached.width = size.width;
+					cached.height = size.height;
+				}
+			}
+			thumbnailCache_.emplace(key, std::move(cached));
+			TrimThumbnailCache();
+			nextThumbnailLoadTick_ = now + 25;
+			break;
+		}
 	}
 
 	void StartTransition(const Image& previousImage) {
@@ -2092,6 +2182,10 @@ private:
 			UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
 			SaveSettings();
 			break;
+		case jpegview_linux::kCommandToggleThumbnailPanel:
+			thumbnailPanelVisible_ = !thumbnailPanelVisible_;
+			PrepareThumbnailPreload();
+			break;
 		case kToggleNavigationPanelAutoReveal:
 			navigationPanelAutoReveal_ = !navigationPanelAutoReveal_;
 			UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
@@ -2113,6 +2207,7 @@ private:
 			fileList_.SetSorting(jpegview_linux::FileList::SortMode::LastModificationTime,
 				fileList_.IsSortedAscending());
 			SetTitle();
+			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
 		case kNavigationSortMode:
@@ -2122,40 +2217,47 @@ private:
 					jpegview_linux::FileList::SortMode::FileName,
 				fileList_.IsSortedAscending());
 			SetTitle();
+			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
 		case IDM_SORT_CREATION_DATE:
 			fileList_.SetSorting(jpegview_linux::FileList::SortMode::CreationTime,
 				fileList_.IsSortedAscending());
 			SetTitle();
+			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
 		case IDM_SORT_NAME:
 			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileName,
 				fileList_.IsSortedAscending());
 			SetTitle();
+			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
 		case IDM_SORT_RANDOM:
 			fileList_.SetSorting(jpegview_linux::FileList::SortMode::Random,
 				fileList_.IsSortedAscending());
 			SetTitle();
+			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
 		case IDM_SORT_SIZE:
 			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileSize,
 				fileList_.IsSortedAscending());
 			SetTitle();
+			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
 		case IDM_SORT_ASCENDING:
 			fileList_.SetSorting(fileList_.GetSorting(), true);
 			SetTitle();
+			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
 		case IDM_SORT_DESCENDING:
 			fileList_.SetSorting(fileList_.GetSorting(), false);
 			SetTitle();
+			PrepareThumbnailPreload();
 			SaveSettings();
 			break;
 		case IDM_STOP_MOVIE:
@@ -2331,6 +2433,8 @@ private:
 			{"Show navigation panel", IDM_SHOW_NAVPANEL, false, navigationPanelEnabled_, true, "Ctrl+N"},
 			{"Show navigation panel on bottom hover", kToggleNavigationPanelAutoReveal, false,
 				navigationPanelAutoReveal_, true},
+			{"Show thumbnail panel", jpegview_linux::kCommandToggleThumbnailPanel,
+				false, thumbnailPanelVisible_, true, "Ctrl+T"},
 			{nullptr, 0, true},
 			{"Next image", IDM_NEXT, false, false, true, "Right/PgDn"},
 			{"Previous image", IDM_PREV, false, false, true, "Left/PgUp"},
@@ -3783,6 +3887,76 @@ private:
 		}
 	}
 
+	SDL_Rect ThumbnailPanelRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		return SDL_Rect{0, 0, std::min(kThumbnailPanelWidth, windowWidth), windowHeight};
+	}
+
+	void RenderThumbnailPanel() {
+		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
+		const SDL_Rect panel = ThumbnailPanelRect();
+		if (panel.w <= 0 || panel.h <= 0) return;
+		SDL_SetRenderDrawColor(renderer_, 7, 7, 7, 238);
+		SDL_RenderFillRect(renderer_, &panel);
+		const std::vector<jpegview_linux::ThumbnailSlot> slots = jpegview_linux::ThumbnailPanelSlots(
+			fileList_.Size(), fileList_.CurrentIndex(), panel.h, kThumbnailRowHeight);
+		for (const jpegview_linux::ThumbnailSlot& slot : slots) {
+			const SDL_Rect row{panel.x, slot.y, panel.w, kThumbnailRowHeight};
+			if (slot.current) {
+				SDL_SetRenderDrawColor(renderer_, 32, 58, 82, 255);
+				SDL_RenderFillRect(renderer_, &row);
+			}
+			const std::string key = fileList_.Files()[slot.fileIndex].string();
+			auto cached = thumbnailCache_.find(key);
+			if (cached != thumbnailCache_.end() && cached->second.texture != nullptr) {
+				cached->second.lastUsed = ++thumbnailUseCounter_;
+				const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
+					cached->second.width, cached->second.height,
+					std::max(1, panel.w - kThumbnailInset * 2),
+					kThumbnailRowHeight - kThumbnailInset * 2);
+				SDL_Rect imageRect{
+					panel.x + (panel.w - size.width) / 2,
+					row.y + (row.h - size.height) / 2,
+					size.width,
+					size.height
+				};
+				SDL_RenderCopy(renderer_, cached->second.texture, nullptr, &imageRect);
+				if (!slot.current) {
+					SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 125);
+					SDL_RenderFillRect(renderer_, &imageRect);
+				} else {
+					DrawRect(imageRect, 225, 225, 225);
+				}
+			} else {
+				const std::string position = std::to_string(slot.fileIndex + 1);
+				DrawText(position, panel.x + (panel.w - TextWidth(position, kUiTextScale)) / 2,
+					row.y + (row.h - 7) / 2, kUiTextScale,
+					slot.current ? 215 : 95, slot.current ? 215 : 95, slot.current ? 215 : 95);
+			}
+			DrawLine(panel.x + 8, row.y + row.h - 1, panel.x + panel.w - 9,
+				row.y + row.h - 1, 48, 48, 48);
+		}
+		DrawLine(panel.x + panel.w - 1, panel.y, panel.x + panel.w - 1,
+			panel.y + panel.h - 1, 100, 100, 100);
+	}
+
+	bool HandleThumbnailPanelClick(int x, int y) {
+		if (!thumbnailPanelVisible_ || fileList_.Empty()) return false;
+		const SDL_Rect panel = ThumbnailPanelRect();
+		if (!PointInRect(x, y, panel)) return false;
+		const std::vector<jpegview_linux::ThumbnailSlot> slots = jpegview_linux::ThumbnailPanelSlots(
+			fileList_.Size(), fileList_.CurrentIndex(), panel.h, kThumbnailRowHeight);
+		for (const jpegview_linux::ThumbnailSlot& slot : slots) {
+			const SDL_Rect row{panel.x, slot.y, panel.w, kThumbnailRowHeight};
+			if (!PointInRect(x, y, row) || slot.current) continue;
+			if (fileList_.Select(slot.fileIndex)) LoadCurrent();
+			break;
+		}
+		return true;
+	}
+
 	void RenderControls() {
 		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_ || resizeDialogOpen_) return;
 		std::vector<ControlButton> buttons;
@@ -4064,6 +4238,10 @@ private:
 			}
 			case SDL_MOUSEBUTTONDOWN:
 				if (event.button.button == SDL_BUTTON_LEFT) {
+					if (HandleThumbnailPanelClick(event.button.x, event.button.y)) {
+						dragging_ = false;
+						break;
+					}
 					if (HandleControlClick(event.button.x, event.button.y)) {
 						dragging_ = false;
 						break;
@@ -4140,6 +4318,7 @@ private:
 		SDL_RenderClear(renderer_);
 		RenderImageTransition(destination, windowWidth, windowHeight, renderTexture);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+		RenderThumbnailPanel();
 		RenderFileName();
 		if (!navigationLoading_) RenderImageInfo();
 		RenderControls();
@@ -4198,6 +4377,7 @@ private:
 	bool controlsVisible_ = true;
 	bool navigationPanelEnabled_ = true;
 	bool navigationPanelAutoReveal_ = true;
+	bool thumbnailPanelVisible_ = false;
 	bool infoVisible_ = false;
 	bool showFileName_ = false;
 	bool navigationLoading_ = false;
@@ -4216,6 +4396,10 @@ private:
 	int menuSelected_ = -1;
 	std::vector<MenuItem> contextMenuItems_;
 	std::string contextMenuSortingLabel_;
+	std::unordered_map<std::string, ThumbnailCacheEntry> thumbnailCache_;
+	std::deque<std::size_t> thumbnailLoadQueue_;
+	std::uint64_t thumbnailUseCounter_ = 0;
+	Uint32 nextThumbnailLoadTick_ = 0;
 	std::vector<jpegview_linux::OpenWithApplication> openWithApplications_;
 	std::deque<std::string> openWithLabels_;
 	bool imageModified_ = false;
@@ -4266,7 +4450,7 @@ void PrintUsage(const char* program) {
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel up/down navigates previous/next, Ctrl+mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, N/M/C/Z select display order,\n"
-		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
+		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails,\n"
 		<< "          right-click or the Context Menu key opens the context menu, Esc or Q quits.\n";
 }
 

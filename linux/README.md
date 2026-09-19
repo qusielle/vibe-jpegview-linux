@@ -130,7 +130,8 @@ image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`â€
 slideshow at that interval. F2 toggles the top-left picture information panel; Shift+N or Ctrl+F2
 toggles the filename overlay, while N/M/C/Z select filename, modification-date, creation-date,
 or random sorting. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N toggles
-the panel. Ctrl+C copies the image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
+the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the image at
+original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
 PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.
 Ctrl+Shift+M/E set the modification date to now/EXIF date; R/T perform lossless JPEG rotations when
 bundled `jpegtran` is available; F5 toggles the ported automatic histogram contrast correction, and
@@ -156,6 +157,12 @@ visibility choices. The navigation panel hover preference and current file-order
 also saved. These settings are stored in
 `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. Esc stops an active slideshow first,
 matching the Windows default escape command, and otherwise quits.
+
+The thumbnail panel is hidden by default and can be enabled from the context menu or with Ctrl+T.
+It follows the active file ordering in a vertical strip: the current image remains centered and at
+normal brightness, while surrounding images are darkened. Clicking a thumbnail opens that file.
+Thumbnails are loaded incrementally in nearest-to-current order and kept in a bounded in-memory
+cache; the panel visibility itself is intentionally not saved between runs.
 
 The port follows the Windows `CFileList` navigation model: the default display order is ascending
 file modification time from the filesystem; `N`, `M`, `C`, and `Z` select filename, modification
