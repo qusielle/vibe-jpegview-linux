@@ -10,7 +10,13 @@ IMAGE_LIBS ?= -lpng -ljpeg -lz
 # WIC wrappers.  Linux uses the corresponding native codec libraries.  Every
 # codec is discovered independently so a lean local build can still use the
 # stb_image fallback when optional development packages are not installed.
-GIF_LIBS ?= $(shell pkg-config --libs libgif 2>/dev/null)
+# Ubuntu 20.04's libgif-dev ships headers and libgif.so but no pkg-config
+# metadata. Ask the compiler for the library as a fallback so animated GIF
+# support does not silently disappear in the compatibility build.
+GIF_LIBS ?= $(shell pkg-config --libs libgif 2>/dev/null || { \
+	gif_library="$$($(CXX) -print-file-name=libgif.so)"; \
+	test "$$gif_library" = libgif.so || echo -lgif; \
+})
 TIFF_CFLAGS ?= $(shell pkg-config --cflags libtiff-4 2>/dev/null)
 TIFF_LIBS ?= $(shell pkg-config --libs libtiff-4 2>/dev/null)
 WEBP_CFLAGS ?= $(shell pkg-config --cflags libwebpdemux 2>/dev/null)
