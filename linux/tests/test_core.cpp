@@ -1922,6 +1922,57 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 		"thumbnail row added horizontal margins or incorrect vertical margins");
 }
 
+void TestThumbnailCacheSchedulingAndEviction() {
+	jpegview_linux::ThumbnailCacheScheduler scheduler;
+	const std::vector<std::string> keys = {"a", "b", "c", "d", "e"};
+	Expect(scheduler.Prepare(keys, 2, 3).empty() && scheduler.PendingCount() == 3,
+		"thumbnail scheduler did not prepare a capacity-limited queue");
+	auto request = scheduler.Next(100);
+	Expect(request.has_value() && request->fileIndex == 2 && request->key == "c",
+		"thumbnail scheduler did not start with the current image");
+	Expect(scheduler.Complete(*request, 100).empty() && scheduler.IsCached("c"),
+		"thumbnail scheduler did not record completed work");
+	Expect(!scheduler.Next(124).has_value(), "thumbnail scheduler ignored its decode pacing deadline");
+	request = scheduler.Next(125);
+	Expect(request.has_value() && request->key == "b",
+		"thumbnail scheduler did not prefer the preceding equidistant image");
+	scheduler.Complete(*request, 125);
+	request = scheduler.Next(150);
+	Expect(request.has_value() && request->key == "d",
+		"thumbnail scheduler did not continue in nearest-first order");
+	scheduler.Complete(*request, 150);
+	Expect(scheduler.CacheSize() == 3 && scheduler.PendingCount() == 0,
+		"thumbnail scheduler cache/work accounting is incorrect");
+
+	const std::vector<std::string> evicted = scheduler.Prepare(keys, 2, 2);
+	Expect(evicted == std::vector<std::string>({"b"}) && scheduler.IsCached("c") &&
+		scheduler.IsCached("d") && !scheduler.IsCached("b"),
+		"thumbnail scheduler did not evict the least-recently-used non-current image");
+	request = scheduler.Next(151);
+	Expect(request.has_value() && request->key == "b",
+		"thumbnail scheduler did not skip retained cache entries and reload an evicted neighbor");
+	const jpegview_linux::ThumbnailLoadRequest stale = *request;
+	scheduler.Prepare(keys, 4, 2);
+	Expect(scheduler.Complete(stale, 151).empty() && !scheduler.IsCached("b"),
+		"thumbnail scheduler accepted work from a cancelled generation");
+
+	scheduler.Clear();
+	Expect(scheduler.CacheSize() == 0 && scheduler.PendingCount() == 0,
+		"thumbnail scheduler clear retained cache or work state");
+	scheduler.Prepare({"wrap-a", "wrap-b"}, 0, 2);
+	request = scheduler.Next(0xfffffffau);
+	Expect(request.has_value() && request->key == "wrap-a", "wraparound pacing fixture did not start");
+	scheduler.Complete(*request, 0xfffffffau, 10);
+	Expect(!scheduler.Next(3).has_value(), "thumbnail pacing deadline fired early across tick wraparound");
+	request = scheduler.Next(4);
+	Expect(request.has_value() && request->key == "wrap-b",
+		"thumbnail pacing deadline did not fire at tick wraparound");
+	scheduler.Complete(*request, 4);
+	const std::vector<std::string> zeroCapacityEvictions = scheduler.Prepare({"wrap-a"}, 0, 0);
+	Expect(zeroCapacityEvictions.size() == 2 && scheduler.CacheSize() == 0,
+		"zero-capacity thumbnail cache retained its protected entry");
+}
+
 void TestThumbnailDownsamplingAntialiasing() {
 	std::vector<std::uint8_t> checkerboard(8u * 8u * 4u, 255);
 	for (int y = 0; y < 8; ++y) {
@@ -2357,6 +2408,7 @@ int main() {
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
+	RunTest("thumbnail-cache-scheduling-and-eviction", TestThumbnailCacheSchedulingAndEviction, failures);
 	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);

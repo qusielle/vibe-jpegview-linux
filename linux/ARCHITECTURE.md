@@ -18,8 +18,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_dialog_model`: filtering, name/date sorting, UTF-8 editing, selection, paging, scrolling,
   focus restoration, and cancellable background directory summaries.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
-- `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry, preload ordering, memory sizing,
-  and antialiased source-area reduction.
+- `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry, nearest-first cache scheduling,
+  cancellation/LRU policy, memory sizing, and antialiased source-area reduction.
 - `image_info_model`: stable dimensions/date/file-size presentation.
 - `system_font`: desktop-font discovery, UTF-8 shaping, measurement, and rasterization.
 - `app_icon`: extraction of the application icon embedded from the upstream ICO resource.
@@ -35,11 +35,9 @@ above rather than duplicate their state.
 
 The remaining Viewer work is ordered by expected testability and reduction in coupling:
 
-1. Extract thumbnail decoding/cache scheduling from Viewer so cache limits, cancellation, and
-   nearest-first work can be tested without creating SDL textures.
-2. Separate external-command planning (print, wallpaper, clipboard helpers, and lossless JPEG
+1. Separate external-command planning (print, wallpaper, clipboard helpers, and lossless JPEG
    transforms) from process execution and Viewer status reporting.
-3. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
+2. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
 The image, viewport, playback, file-dialog, resize, context-menu rule, thumbnail-layout/resampling, font,

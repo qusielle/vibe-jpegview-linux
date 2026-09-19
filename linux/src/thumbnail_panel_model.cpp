@@ -89,4 +89,82 @@ ThumbnailRect ThumbnailImageRect(int sourceWidth, int sourceHeight,
 	};
 }
 
+std::vector<std::string> ThumbnailCacheScheduler::Prepare(
+	const std::vector<std::string>& fileKeys, std::size_t currentIndex,
+	std::size_t capacity) {
+	++generation_;
+	queue_.clear();
+	queuePosition_ = 0;
+	capacity_ = capacity;
+	protectedKey_ = currentIndex < fileKeys.size() ? fileKeys[currentIndex] : std::string();
+	const std::vector<std::size_t> order = ThumbnailPreloadOrder(
+		fileKeys.size(), currentIndex, capacity);
+	queue_.reserve(order.size());
+	for (const std::size_t index : order) {
+		queue_.push_back({index, fileKeys[index], generation_});
+	}
+	nextLoadTick_ = 0;
+	return Trim();
+}
+
+std::optional<ThumbnailLoadRequest> ThumbnailCacheScheduler::Next(std::uint32_t now) {
+	if (nextLoadTick_ != 0 && static_cast<std::int32_t>(now - nextLoadTick_) < 0) return std::nullopt;
+	while (queuePosition_ < queue_.size()) {
+		const ThumbnailLoadRequest request = queue_[queuePosition_++];
+		if (IsCached(request.key)) {
+			Touch(request.key);
+			continue;
+		}
+		return request;
+	}
+	return std::nullopt;
+}
+
+std::vector<std::string> ThumbnailCacheScheduler::Complete(
+	const ThumbnailLoadRequest& request, std::uint32_t now, std::uint32_t delayMs) {
+	if (request.generation != generation_) return {};
+	cache_[request.key].lastUsed = ++useCounter_;
+	nextLoadTick_ = now + delayMs;
+	return Trim();
+}
+
+void ThumbnailCacheScheduler::Touch(const std::string& key) {
+	const auto found = cache_.find(key);
+	if (found != cache_.end()) found->second.lastUsed = ++useCounter_;
+}
+
+void ThumbnailCacheScheduler::Clear() {
+	++generation_;
+	queue_.clear();
+	queuePosition_ = 0;
+	cache_.clear();
+	protectedKey_.clear();
+	capacity_ = 0;
+	nextLoadTick_ = 0;
+}
+
+bool ThumbnailCacheScheduler::IsCached(const std::string& key) const {
+	return cache_.find(key) != cache_.end();
+}
+
+std::vector<std::string> ThumbnailCacheScheduler::Trim() {
+	std::vector<std::string> evicted;
+	while (cache_.size() > capacity_) {
+		auto oldest = cache_.end();
+		for (auto candidate = cache_.begin(); candidate != cache_.end(); ++candidate) {
+			if (candidate->first == protectedKey_) continue;
+			if (oldest == cache_.end() || candidate->second.lastUsed < oldest->second.lastUsed) {
+				oldest = candidate;
+			}
+		}
+		if (oldest == cache_.end()) {
+			if (capacity_ != 0 || cache_.empty()) break;
+			oldest = cache_.begin();
+		}
+		evicted.push_back(oldest->first);
+		cache_.erase(oldest);
+	}
+	return evicted;
+}
+
 } // namespace jpegview_linux

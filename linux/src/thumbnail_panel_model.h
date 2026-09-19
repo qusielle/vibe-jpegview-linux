@@ -1,6 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace jpegview_linux {
@@ -63,5 +67,44 @@ ThumbnailSize FitThumbnailSize(int sourceWidth, int sourceHeight,
 // pixel is reserved for the row separator in addition to the vertical margin.
 ThumbnailRect ThumbnailImageRect(int sourceWidth, int sourceHeight,
 	int panelWidth, int rowY, int rowHeight, int verticalMargin);
+
+struct ThumbnailLoadRequest {
+	std::size_t fileIndex = 0;
+	std::string key;
+	std::uint64_t generation = 0;
+};
+
+// Owns nearest-first work, cancellation generations, LRU usage, and cache
+// capacity. Pixel decoding and renderer textures stay in the SDL adapter.
+class ThumbnailCacheScheduler {
+public:
+	std::vector<std::string> Prepare(const std::vector<std::string>& fileKeys,
+		std::size_t currentIndex, std::size_t capacity);
+	std::optional<ThumbnailLoadRequest> Next(std::uint32_t now);
+	std::vector<std::string> Complete(const ThumbnailLoadRequest& request,
+		std::uint32_t now, std::uint32_t delayMs = 25);
+	void Touch(const std::string& key);
+	void Clear();
+
+	bool IsCached(const std::string& key) const;
+	std::size_t CacheSize() const { return cache_.size(); }
+	std::size_t PendingCount() const { return queue_.size() - queuePosition_; }
+	std::uint64_t Generation() const { return generation_; }
+
+private:
+	std::vector<std::string> Trim();
+
+	struct CacheRecord {
+		std::uint64_t lastUsed = 0;
+	};
+	std::vector<ThumbnailLoadRequest> queue_;
+	std::size_t queuePosition_ = 0;
+	std::unordered_map<std::string, CacheRecord> cache_;
+	std::string protectedKey_;
+	std::size_t capacity_ = 0;
+	std::uint64_t useCounter_ = 0;
+	std::uint64_t generation_ = 0;
+	std::uint32_t nextLoadTick_ = 0;
+};
 
 } // namespace jpegview_linux

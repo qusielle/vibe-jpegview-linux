@@ -37,7 +37,6 @@
 #include <cstdio>
 #include <cstdint>
 #include <ctime>
-#include <deque>
 #include <dlfcn.h>
 #include <exception>
 #include <filesystem>
@@ -378,7 +377,6 @@ private:
 		SDL_Texture* texture = nullptr;
 		int width = 0;
 		int height = 0;
-		std::uint64_t lastUsed = 0;
 	};
 
 	struct TextTextureCacheEntry {
@@ -593,89 +591,65 @@ private:
 			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
 		}
 		thumbnailCache_.clear();
-		thumbnailLoadQueue_.clear();
+		thumbnailScheduler_.Clear();
+	}
+
+	void EvictThumbnails(const std::vector<std::string>& keys) {
+		for (const std::string& key : keys) {
+			const auto cached = thumbnailCache_.find(key);
+			if (cached == thumbnailCache_.end()) continue;
+			if (cached->second.texture != nullptr) SDL_DestroyTexture(cached->second.texture);
+			thumbnailCache_.erase(cached);
+		}
 	}
 
 	void PrepareThumbnailPreload() {
-		thumbnailLoadQueue_.clear();
-		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
+		if (!thumbnailPanelVisible_ || fileList_.Empty()) {
+			EvictThumbnails(thumbnailScheduler_.Prepare({}, 0, thumbnailCache_.size()));
+			return;
+		}
 		const SDL_Rect panel = ThumbnailPanelRect();
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
 		const std::size_t cacheLimit = jpegview_linux::ThumbnailCacheCapacity(panel.w, rowHeight,
 			kThumbnailVerticalMargin, kThumbnailCachePixelBudget, kThumbnailCacheLimit);
-		const std::vector<std::size_t> order = jpegview_linux::ThumbnailPreloadOrder(
-			fileList_.Size(), fileList_.CurrentIndex(), cacheLimit);
-		thumbnailLoadQueue_.insert(thumbnailLoadQueue_.end(), order.begin(), order.end());
-		nextThumbnailLoadTick_ = 0;
-	}
-
-	std::size_t CurrentThumbnailCacheLimit() const {
-		const SDL_Rect panel = ThumbnailPanelRect();
-		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
-		return jpegview_linux::ThumbnailCacheCapacity(panel.w, rowHeight,
-			kThumbnailVerticalMargin, kThumbnailCachePixelBudget, kThumbnailCacheLimit);
-	}
-
-	void TrimThumbnailCache() {
-		const std::string currentKey = fileList_.Empty() ? std::string() : fileList_.Current().string();
-		const std::size_t cacheLimit = CurrentThumbnailCacheLimit();
-		while (thumbnailCache_.size() > cacheLimit) {
-			auto oldest = thumbnailCache_.end();
-			for (auto candidate = thumbnailCache_.begin(); candidate != thumbnailCache_.end(); ++candidate) {
-				if (candidate->first == currentKey) continue;
-				if (oldest == thumbnailCache_.end() || candidate->second.lastUsed < oldest->second.lastUsed) {
-					oldest = candidate;
-				}
-			}
-			if (oldest == thumbnailCache_.end()) break;
-			if (oldest->second.texture != nullptr) SDL_DestroyTexture(oldest->second.texture);
-			thumbnailCache_.erase(oldest);
+		std::vector<std::string> keys;
+		keys.reserve(fileList_.Files().size());
+		for (const fs::path& path : fileList_.Files()) {
+			keys.push_back(path.string());
 		}
+		EvictThumbnails(thumbnailScheduler_.Prepare(keys, fileList_.CurrentIndex(), cacheLimit));
 	}
 
 	void TickThumbnailPreload() {
-		if (!thumbnailPanelVisible_ || thumbnailLoadQueue_.empty()) return;
+		if (!thumbnailPanelVisible_) return;
 		const Uint32 now = SDL_GetTicks();
-		if (nextThumbnailLoadTick_ != 0 && now < nextThumbnailLoadTick_) return;
-		while (!thumbnailLoadQueue_.empty()) {
-			const std::size_t index = thumbnailLoadQueue_.front();
-			thumbnailLoadQueue_.pop_front();
-			if (index >= fileList_.Files().size()) continue;
-			const fs::path& path = fileList_.Files()[index];
-			const std::string key = path.string();
-			auto existing = thumbnailCache_.find(key);
-			if (existing != thumbnailCache_.end()) {
-				existing->second.lastUsed = ++thumbnailUseCounter_;
-				continue;
+		const std::optional<jpegview_linux::ThumbnailLoadRequest> request = thumbnailScheduler_.Next(now);
+		if (!request.has_value() || request->fileIndex >= fileList_.Files().size() ||
+			fileList_.Files()[request->fileIndex].string() != request->key) return;
+		const fs::path& path = fileList_.Files()[request->fileIndex];
+		ThumbnailCacheEntry cached;
+		jpegview_linux::DecodedImage decoded;
+		std::string errorMessage;
+		if (jpegview_linux::DecodeImage(path, decoded, errorMessage) && !decoded.frames.empty()) {
+			const jpegview_linux::DecodedFrame& frame = decoded.frames.front();
+			const SDL_Rect panel = ThumbnailPanelRect();
+			const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
+			const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
+				frame.width, frame.height, panel.w,
+				rowHeight - kThumbnailVerticalMargin * 2 - 1);
+			Image thumbnail;
+			std::vector<std::uint8_t> thumbnailPixels;
+			if (size.width > 0 && size.height > 0 &&
+				jpegview_linux::DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
+					size.width, size.height, thumbnailPixels) &&
+				thumbnail.StoreBGRA(thumbnailPixels.data(), size.width, size.height)) {
+				cached.texture = CreateTexture(thumbnail);
+				cached.width = size.width;
+				cached.height = size.height;
 			}
-
-			ThumbnailCacheEntry cached;
-			cached.lastUsed = ++thumbnailUseCounter_;
-			jpegview_linux::DecodedImage decoded;
-			std::string errorMessage;
-			if (jpegview_linux::DecodeImage(path, decoded, errorMessage) && !decoded.frames.empty()) {
-				const jpegview_linux::DecodedFrame& frame = decoded.frames.front();
-				const SDL_Rect panel = ThumbnailPanelRect();
-				const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
-				const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
-					frame.width, frame.height, panel.w,
-					rowHeight - kThumbnailVerticalMargin * 2 - 1);
-				Image thumbnail;
-				std::vector<std::uint8_t> thumbnailPixels;
-				if (size.width > 0 && size.height > 0 &&
-					jpegview_linux::DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
-						size.width, size.height, thumbnailPixels) &&
-					thumbnail.StoreBGRA(thumbnailPixels.data(), size.width, size.height)) {
-					cached.texture = CreateTexture(thumbnail);
-					cached.width = size.width;
-					cached.height = size.height;
-				}
-			}
-			thumbnailCache_.emplace(key, std::move(cached));
-			TrimThumbnailCache();
-			nextThumbnailLoadTick_ = now + 25;
-			break;
 		}
+		thumbnailCache_.emplace(request->key, std::move(cached));
+		EvictThumbnails(thumbnailScheduler_.Complete(*request, now));
 	}
 
 	void StartTransition(const Image& previousImage) {
@@ -3296,7 +3270,7 @@ private:
 			const std::string key = fileList_.Files()[slot.fileIndex].string();
 			auto cached = thumbnailCache_.find(key);
 			if (cached != thumbnailCache_.end() && cached->second.texture != nullptr) {
-				cached->second.lastUsed = ++thumbnailUseCounter_;
+				thumbnailScheduler_.Touch(key);
 				const jpegview_linux::ThumbnailRect thumbnail = jpegview_linux::ThumbnailImageRect(
 					cached->second.width, cached->second.height,
 					panel.w, row.y, row.h, kThumbnailVerticalMargin);
@@ -3797,11 +3771,9 @@ private:
 	int menuSelected_ = -1;
 	std::vector<MenuItem> contextMenuItems_;
 	std::unordered_map<std::string, ThumbnailCacheEntry> thumbnailCache_;
-	std::deque<std::size_t> thumbnailLoadQueue_;
-	std::uint64_t thumbnailUseCounter_ = 0;
+	jpegview_linux::ThumbnailCacheScheduler thumbnailScheduler_;
 	std::unordered_map<std::string, TextTextureCacheEntry> textTextureCache_;
 	std::uint64_t textTextureUseCounter_ = 0;
-	Uint32 nextThumbnailLoadTick_ = 0;
 	std::vector<jpegview_linux::OpenWithApplication> openWithApplications_;
 	bool imageModified_ = false;
 	bool autoContrastEnabled_ = false;
