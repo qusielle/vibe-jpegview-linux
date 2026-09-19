@@ -2161,8 +2161,8 @@ void TestImageInfoFormatting() {
 	Expect(jpegview_linux::FormatImageDimensionsAndSize(640, 480, {}) == "640 X 480",
 		"missing file size left punctuation in the dimensions line");
 	Expect(jpegview_linux::FormatModificationDateLine("2026-09-19 12:34:56") ==
-		"Mod.date: 2026-09-19 12:34:56",
-		"modification date label was not shortened");
+		"2026-09-19 12:34:56",
+		"modification date popup text still includes a label");
 	Expect(jpegview_linux::FormatFileSize(1536) == "1.5 KB",
 		"file-size formatting changed while moving it into the information model");
 	Expect(jpegview_linux::FormatFileSize(1023) == "1023 B" &&

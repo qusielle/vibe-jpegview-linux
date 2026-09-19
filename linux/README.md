@@ -92,11 +92,13 @@ they support.
 12. **Information overlays and window feedback.** F2 picture information and Shift+N/Ctrl+F2 filename
     overlays use compact translucent surfaces sized to their content with small comfortable margins.
     Filename, EXIF, and counter text remain responsive during navigation. The information popup uses
-    a readable `W X H, Size` line and `Mod.date:` label. Overlay visibility persists immediately. The
-    window title shows filename, dimensions, and size. Menus, dialogs, tooltips, and panels use the
-    desktop's configured UI font through Pango, including Unicode shaping and automatic fallback to
-    installed fonts for characters outside the selected font; translucent surfaces provide a
-    consistent visual treatment.
+    a readable `W X H, Size` line and an unlabeled modification date. Overlay visibility persists
+    immediately. The window title shows filename, dimensions, and size. Menus, dialogs, tooltips,
+    and panels use the hinted 12-point Terminus bitmap when the complete string is printable ASCII,
+    preserving lowercase letters as drawn and using crisp one-bit pixels without antialiased edges. Strings
+    containing other characters use the desktop's configured UI font through Pango, retaining Unicode
+    shaping and automatic installed-font fallback; translucent surfaces provide a consistent visual
+    treatment.
 
 13. **Reliable startup and saved session state.** Scale mode, ordering mode/direction, maximized or
     normal state, navigation-panel choices, filename/EXIF visibility, automatic correction, batch
@@ -124,9 +126,10 @@ they support.
 
 The runtime framework dependencies are SDL2 and Pango/FreeType. SDL2 development headers are not
 required because the frontend uses the small ABI declared in `src/sdl_abi.h`; Pango development
-headers and codec development packages are needed at compile time. The font stack is loaded on
-first text use, so image-only startup does not pay its initialization cost. The AppImage bundles
-these libraries while continuing to discover the user's system fonts through Fontconfig.
+headers and codec development packages are needed at compile time. The font stack is loaded only
+when text outside the embedded printable-ASCII bitmap is used, so normal startup and ASCII UI do not
+pay its initialization cost. The AppImage bundles these libraries while continuing to discover the
+user's system fonts through Fontconfig.
 
 On Ubuntu 20.04, install the compiler, make, and SDL2 runtime first:
 
@@ -185,9 +188,10 @@ Fit-to-screen mode does not enlarge images that are smaller than the available w
 remain at their native size and are centered. Larger images are reduced to fit as usual.
 
 The native navigation panel, menus, tooltips, information overlays, and modal dialogs use
-semi-transparent backgrounds so the image remains partially visible underneath them.
-They use the desktop font discovered from XFCE, GTK, xsettingsd, or KDE configuration. Set
-`JPEGVIEW_FONT` to a Pango font description such as `Sans 11` to override desktop discovery.
+semi-transparent backgrounds so the image remains partially visible underneath them. Printable
+ASCII text uses the crisp embedded Tahoma bitmap; text requiring Unicode uses the desktop font
+discovered from XFCE, GTK, xsettingsd, or KDE configuration. Set `JPEGVIEW_FONT` to a Pango font
+description such as `Sans 11` to override desktop discovery for that Unicode fallback.
 
 The default window title follows the Windows-style image title format:
 `filename (widthxheight, file size) - JPEGView`.

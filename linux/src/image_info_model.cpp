@@ -35,7 +35,7 @@ std::string FormatImageDimensionsAndSize(int width, int height,
 }
 
 std::string FormatModificationDateLine(std::string_view date) {
-	return "Mod.date: " + std::string(date);
+	return std::string(date);
 }
 
 } // namespace jpegview_linux
