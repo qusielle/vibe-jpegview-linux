@@ -1318,6 +1318,84 @@ void TestContextMenuCompactionAndSelection() {
 		-1, 1) == -1, "menu with no actionable items returned a selection");
 }
 
+void TestContextMenuColumnLayoutAndNavigation() {
+	using jpegview_linux::MenuColumn;
+	using jpegview_linux::MenuItem;
+	const std::vector<MenuItem> items = {
+		{"Top", 10},
+		{nullptr, 0, true},
+		{"Heading", 0},
+		{"Alpha", 20},
+		{"Disabled", 30, false, false, false},
+		{"Beta", 40},
+		{nullptr, 0, true},
+		{"Gamma", 50},
+		{"Delta", 60},
+		{"Last", 70},
+	};
+	const std::vector<MenuColumn> columns =
+		jpegview_linux::LayoutMenuColumns(items, 43, 18, 7);
+	Expect(columns.size() == 4, "long menu did not split into height-limited columns");
+	const std::vector<MenuColumn> expected = {
+		{0, 3, 43}, {3, 5, 36}, {5, 8, 43}, {8, 10, 36},
+	};
+	std::size_t nextItem = 0;
+	for (std::size_t index = 0; index < columns.size(); ++index) {
+		Expect(columns[index].begin == expected[index].begin &&
+			columns[index].end == expected[index].end &&
+			columns[index].height == expected[index].height,
+			"column layout did not preserve sequential item ranges and separator heights");
+		Expect(columns[index].begin == nextItem && columns[index].height <= 43,
+			"column layout left a gap/overlap or exceeded the available content height");
+		nextItem = columns[index].end;
+	}
+	Expect(nextItem == items.size(), "column layout omitted trailing menu items");
+
+	const std::vector<MenuItem> shortMenu = {{"One", 1}, {nullptr, 0, true}, {"Two", 2}};
+	const std::vector<MenuColumn> exactFit =
+		jpegview_linux::LayoutMenuColumns(shortMenu, 43, 18, 7);
+	Expect(exactFit.size() == 1 && exactFit[0].height == 43,
+		"menu that exactly fits the available height was unnecessarily split");
+	Expect(jpegview_linux::LayoutMenuColumns(shortMenu, 42, 18, 7).size() == 2,
+		"menu overflowing by one pixel did not continue in a second column");
+	const std::vector<MenuColumn> emptyLayout =
+		jpegview_linux::LayoutMenuColumns({}, 1, 18, 7);
+	Expect(emptyLayout.size() == 1 && emptyLayout[0].begin == 0 &&
+		emptyLayout[0].end == 0 && emptyLayout[0].height == 0,
+		"empty menu did not return a valid empty column");
+
+	Expect(jpegview_linux::NextMenuSelectionInColumn(items, columns[2], 5, 1) == 7,
+		"Down did not skip a separator within its column");
+	Expect(jpegview_linux::NextMenuSelectionInColumn(items, columns[2], 7, 1) == 5,
+		"Down did not wrap within its column");
+	Expect(jpegview_linux::NextMenuSelectionInColumn(items, columns[2], 5, -1) == 7,
+		"Up did not wrap backward within its column");
+	Expect(jpegview_linux::NextMenuSelectionInColumn(items, columns[1], 3, 1) == 3,
+		"vertical navigation did not remain on the only enabled item in a column");
+	Expect(jpegview_linux::NextMenuSelectionInColumn(items, {4, 5, 18}, 4, 1) == -1,
+		"column containing only a disabled item returned a selection");
+
+	Expect(jpegview_linux::AdjacentMenuSelection(items, columns, 3, 1, 18, 7) == 5,
+		"Right did not enter the adjacent column at the closest row");
+	Expect(jpegview_linux::AdjacentMenuSelection(items, columns, 7, -1, 18, 7) == 3,
+		"Left did not choose the nearest actionable item in the previous column");
+	Expect(jpegview_linux::AdjacentMenuSelection(items, columns, 0, -1, 18, 7) == -1,
+		"Left wrapped past the first column");
+	Expect(jpegview_linux::AdjacentMenuSelection(items, columns, 9, 1, 18, 7) == -1,
+		"Right wrapped past the last column");
+	Expect(jpegview_linux::AdjacentMenuSelection(items, columns, -1, 1, 18, 7) == 0,
+		"Right with no selection did not start at the first column");
+	Expect(jpegview_linux::AdjacentMenuSelection(items, columns, -1, -1, 18, 7) == 8,
+		"Left with no selection did not start at the last column");
+
+	const std::vector<MenuItem> withEmptyColumn = {
+		{"Enabled before", 1}, {"Disabled only", 2, false, false, false}, {"Enabled after", 3},
+	};
+	const std::vector<MenuColumn> sparseColumns = {{0, 1, 18}, {1, 2, 18}, {2, 3, 18}};
+	Expect(jpegview_linux::AdjacentMenuSelection(withEmptyColumn, sparseColumns, 0, 1, 18, 7) == 2,
+		"horizontal navigation did not skip a column with no actionable items");
+}
+
 void TestOverlayLayoutUsesContentWidthAndComfortableMargins() {
 	jpegview_linux::OverlayLayout filename = jpegview_linux::FilenameOverlayLayout(60, 800);
 	Expect(filename.x == 4 && filename.y == 4 && filename.width == 72 && filename.height == 20,
@@ -1403,6 +1481,7 @@ int main() {
 	RunTest("viewport-navigation-resets-transient-zoom", TestViewportNavigationResetsTransientZoom, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
+	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {

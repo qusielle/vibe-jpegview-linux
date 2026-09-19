@@ -2506,25 +2506,14 @@ private:
 	}
 
 	std::vector<ContextMenuColumn> ContextMenuColumns() const {
-		int windowWidth = 0;
 		int windowHeight = 0;
-		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		(void)windowWidth;
-		const int maximumContentHeight = std::max(kContextMenuItemHeight, windowHeight - 24);
+		SDL_GetWindowSize(window_, nullptr, &windowHeight);
+		const std::vector<jpegview_linux::MenuColumn> layout = jpegview_linux::LayoutMenuColumns(
+			contextMenuItems_, windowHeight - 24, kContextMenuItemHeight, kContextMenuSeparatorHeight);
 		std::vector<ContextMenuColumn> columns;
-		std::size_t columnBegin = 0;
-		int columnHeight = 0;
-		for (std::size_t index = 0; index < contextMenuItems_.size(); ++index) {
-			const int itemHeight = ContextMenuItemHeight(index);
-			if (columnHeight > 0 && columnHeight + itemHeight > maximumContentHeight) {
-				columns.push_back({columnBegin, index, 0, 260, columnHeight});
-				columnBegin = index;
-				columnHeight = 0;
-			}
-			columnHeight += itemHeight;
-		}
-		if (columnBegin < contextMenuItems_.size() || columns.empty()) {
-			columns.push_back({columnBegin, contextMenuItems_.size(), 0, 260, columnHeight});
+		columns.reserve(layout.size());
+		for (const jpegview_linux::MenuColumn& source : layout) {
+			columns.push_back({source.begin, source.end, 0, 260, source.height});
 		}
 
 		int columnX = 0;
@@ -2634,66 +2623,22 @@ private:
 		for (const ContextMenuColumn& column : columns) {
 			if (static_cast<std::size_t>(menuSelected_) < column.begin ||
 				static_cast<std::size_t>(menuSelected_) >= column.end) continue;
-			int candidate = menuSelected_;
-			for (std::size_t tries = column.begin; tries < column.end; ++tries) {
-				candidate += direction < 0 ? -1 : 1;
-				if (candidate < static_cast<int>(column.begin)) candidate = static_cast<int>(column.end) - 1;
-				if (candidate >= static_cast<int>(column.end)) candidate = static_cast<int>(column.begin);
-				if (IsContextMenuItemSelectable(static_cast<std::size_t>(candidate))) {
-					menuSelected_ = candidate;
-					return;
-				}
-			}
+			menuSelected_ = jpegview_linux::NextMenuSelectionInColumn(contextMenuItems_,
+				{column.begin, column.end, column.height}, menuSelected_, direction);
 			return;
 		}
 	}
 
 	void MoveContextMenuSelectionAcrossColumns(int direction) {
 		const std::vector<ContextMenuColumn> columns = ContextMenuColumns();
-		if (columns.empty()) return;
-		int currentColumn = -1;
-		int currentCenter = 6;
-		if (menuSelected_ >= 0) {
-			for (std::size_t columnIndex = 0; columnIndex < columns.size(); ++columnIndex) {
-				const ContextMenuColumn& column = columns[columnIndex];
-				if (static_cast<std::size_t>(menuSelected_) < column.begin ||
-					static_cast<std::size_t>(menuSelected_) >= column.end) continue;
-				currentColumn = static_cast<int>(columnIndex);
-				int itemTop = 6;
-				for (std::size_t index = column.begin; index < static_cast<std::size_t>(menuSelected_); ++index) {
-					itemTop += ContextMenuItemHeight(index);
-				}
-				currentCenter = itemTop + ContextMenuItemHeight(static_cast<std::size_t>(menuSelected_)) / 2;
-				break;
-			}
+		std::vector<jpegview_linux::MenuColumn> layout;
+		layout.reserve(columns.size());
+		for (const ContextMenuColumn& column : columns) {
+			layout.push_back({column.begin, column.end, column.height});
 		}
-
-		int candidateColumn = currentColumn < 0
-			? (direction > 0 ? 0 : static_cast<int>(columns.size()) - 1)
-			: currentColumn + (direction > 0 ? 1 : -1);
-		while (candidateColumn >= 0 && candidateColumn < static_cast<int>(columns.size())) {
-			const ContextMenuColumn& column = columns[static_cast<std::size_t>(candidateColumn)];
-			int itemTop = 6;
-			int nearestIndex = -1;
-			int nearestDistance = std::numeric_limits<int>::max();
-			for (std::size_t index = column.begin; index < column.end; ++index) {
-				const int itemHeight = ContextMenuItemHeight(index);
-				if (IsContextMenuItemSelectable(index)) {
-					const int itemCenter = itemTop + itemHeight / 2;
-					const int distance = menuSelected_ < 0 ? 0 : std::abs(itemCenter - currentCenter);
-					if (distance < nearestDistance) {
-						nearestDistance = distance;
-						nearestIndex = static_cast<int>(index);
-					}
-				}
-				itemTop += itemHeight;
-			}
-			if (nearestIndex >= 0) {
-				menuSelected_ = nearestIndex;
-				return;
-			}
-			candidateColumn += direction > 0 ? 1 : -1;
-		}
+		const int selection = jpegview_linux::AdjacentMenuSelection(contextMenuItems_, layout,
+			menuSelected_, direction, kContextMenuItemHeight, kContextMenuSeparatorHeight);
+		if (selection >= 0) menuSelected_ = selection;
 	}
 
 	void ActivateContextMenuSelection(bool& running) {
