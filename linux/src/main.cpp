@@ -2560,6 +2560,14 @@ private:
 		return SDL_Rect{x, y, width, height};
 	}
 
+	void RepositionContextMenuToFit() {
+		contextMenuPositionLocked_ = false;
+		const SDL_Rect fittedMenu = ContextMenuRect();
+		contextMenuX_ = fittedMenu.x;
+		contextMenuY_ = fittedMenu.y;
+		contextMenuPositionLocked_ = true;
+	}
+
 	int ContextMenuItemAt(int x, int y) const {
 		const SDL_Rect menu = ContextMenuRect();
 		if (!PointInRect(x, y, menu)) return -1;
@@ -2595,11 +2603,7 @@ private:
 		contextMenuItems_ = ContextMenuItems(contextMenuAdvancedOptions_);
 		contextMenuX_ = x;
 		contextMenuY_ = y;
-		contextMenuPositionLocked_ = false;
-		const SDL_Rect initialMenu = ContextMenuRect();
-		contextMenuX_ = initialMenu.x;
-		contextMenuY_ = initialMenu.y;
-		contextMenuPositionLocked_ = true;
+		RepositionContextMenuToFit();
 		contextMenuOpen_ = true;
 		menuSelected_ = -1;
 	}
@@ -2656,6 +2660,7 @@ private:
 		if (command == kContextMenuShowAdvanced) {
 			contextMenuAdvancedOptions_ = true;
 			contextMenuItems_ = ContextMenuItems(contextMenuAdvancedOptions_);
+			RepositionContextMenuToFit();
 			menuSelected_ = -1;
 			return;
 		}
