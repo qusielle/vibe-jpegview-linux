@@ -253,6 +253,29 @@ case "$paged_dialog_title" in
 	*) echo "UI smoke test: PageUp/PageDown did not page through the Ctrl+O dialog" >&2; exit 1 ;;
 esac
 
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool type --delay 20 '.ppm'
+DISPLAY=":$display_number" xdotool key End
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+end_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$end_dialog_title" in
+	05-cyan.ppm*) ;;
+	*) echo "UI smoke test: End did not select the last row in the Ctrl+O dialog" >&2; exit 1 ;;
+esac
+
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool type --delay 20 '.ppm'
+DISPLAY=":$display_number" xdotool key Home
+DISPLAY=":$display_number" xdotool key Down
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+home_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$home_dialog_title" in
+	01-red.ppm*) ;;
+	*) echo "UI smoke test: Home did not select the first row in the Ctrl+O dialog" >&2; exit 1 ;;
+esac
+
 title_before=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 DISPLAY=":$display_number" xdotool mousemove 640 400
 DISPLAY=":$display_number" xdotool click 4

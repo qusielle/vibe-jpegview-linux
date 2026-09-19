@@ -251,7 +251,8 @@ opens a selected folder immediately at its first compatible image without enteri
 the dialog. The sorting control switches the listing between case-insensitive filename order and
 newest-first modification-date order. Backspace edits the filter and navigates to the parent folder
 once the filter is empty. Up/Down move one row
-and PageUp/PageDown move one visible page; all four keys repeat while held. Entering a folder
+and PageUp/PageDown move one visible page; Home/End select the first/last row. All six keys repeat
+while held. Entering a folder
 selects its first child rather than the `[..]` parent row; returning to the parent selects the
 folder that was just exited. Folder rows show
 right-aligned counts of compatible images and subdirectories at their immediate level; these are

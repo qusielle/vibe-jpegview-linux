@@ -3665,7 +3665,8 @@ private:
 		case SDL_KEYDOWN: {
 			const bool repeatableSelectionKey = event.key.keysym.sym == SDLK_UP ||
 				event.key.keysym.sym == SDLK_DOWN || event.key.keysym.sym == SDLK_PAGEUP ||
-				event.key.keysym.sym == SDLK_PAGEDOWN;
+				event.key.keysym.sym == SDLK_PAGEDOWN || event.key.keysym.sym == SDLK_HOME ||
+				event.key.keysym.sym == SDLK_END;
 			if (event.key.repeat != 0 && !repeatableSelectionKey) break;
 			if (event.key.keysym.sym == SDLK_ESCAPE) {
 				CloseFileDialog();
@@ -3677,6 +3678,16 @@ private:
 				MoveFileDialogSelectionByPage(-1);
 			} else if (event.key.keysym.sym == SDLK_PAGEDOWN) {
 				MoveFileDialogSelectionByPage(1);
+			} else if (event.key.keysym.sym == SDLK_HOME) {
+				if (!fileDialogEntries_.empty()) {
+					fileDialogSelected_ = 0;
+					EnsureFileDialogSelectionVisible();
+				}
+			} else if (event.key.keysym.sym == SDLK_END) {
+				if (!fileDialogEntries_.empty()) {
+					fileDialogSelected_ = static_cast<int>(fileDialogEntries_.size()) - 1;
+					EnsureFileDialogSelectionVisible();
+				}
 			} else if (event.key.keysym.sym == SDLK_RETURN) {
 				const bool ctrl = (event.key.keysym.mod & 0x00C0u) != 0;
 				ActivateFileDialogSelection(ctrl);
@@ -3811,7 +3822,7 @@ private:
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
 		DrawText(fileDialogSave_ ? "Enter: Save   Backspace: Edit/parent   Esc: Cancel" :
-			"Type to filter   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel",
+			"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel",
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 	}
 
