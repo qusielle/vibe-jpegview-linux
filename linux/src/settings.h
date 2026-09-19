@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cache_budget.h"
+
 #include <filesystem>
 #include <string>
 
@@ -28,6 +30,7 @@ struct ViewerSettings {
 	bool showHistogram = false;
 	bool showFilename = false;
 	bool autoContrast = false;
+	std::size_t cacheSizeMiB = kDefaultCacheSizeMiB;
 	std::string copyRenamePattern;
 };
 

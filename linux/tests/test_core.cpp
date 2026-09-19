@@ -3,6 +3,7 @@
 #include "image_decoder.h"
 #include "image_cache.h"
 #include "display_image_cache.h"
+#include "cache_budget.h"
 #include "image.h"
 #include "image_writer.h"
 #include "settings.h"
@@ -991,6 +992,30 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		"display cache clear retained pixels or completion notifications");
 }
 
+void TestSharedCacheBudgetAccounting() {
+	jpegview_linux::SharedCacheBudget budget(32);
+	Expect(budget.Capacity() == 32 && budget.Used() == 0 && budget.Available() == 32,
+		"shared cache budget did not expose its initial capacity");
+	Expect(budget.TryReserve(20) && budget.Used() == 20 && budget.Available() == 12,
+		"shared cache budget did not account for a reservation");
+	Expect(!budget.TryReserve(13) && budget.Used() == 20,
+		"shared cache budget exceeded its total capacity");
+	Expect(budget.TryReserve(12) && budget.Used() == 32 && budget.Available() == 0,
+		"shared cache budget rejected its exact remaining capacity");
+	budget.Release(7);
+	Expect(budget.Used() == 25 && budget.Available() == 7,
+		"shared cache budget did not release retained bytes");
+	budget.SetCapacity(16);
+	Expect(budget.Capacity() == 16 && budget.Used() == 25 && budget.Available() == 0 &&
+		!budget.TryReserve(1),
+		"lowered shared cache capacity incorrectly discarded or admitted reservations");
+	budget.Release(100);
+	Expect(budget.Used() == 0 && budget.Available() == 16,
+		"shared cache budget underflowed while releasing bytes");
+	Expect(jpegview_linux::CacheBytesFromMiB(2) == 2u * 1024u * 1024u,
+		"cache MiB conversion returned the wrong byte count");
+}
+
 jpegview_linux::Image MakeIndexedImage(int width, int height) {
 	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
 	for (int index = 0; index < width * height; ++index) {
@@ -1158,6 +1183,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.showHistogram = true;
 	expected.showFilename = true;
 	expected.autoContrast = true;
+	expected.cacheSizeMiB = 1536;
 	expected.copyRenamePattern = "%F=%n";
 	Expect(jpegview_linux::SaveViewerSettings(settingsPath, expected), "settings could not be saved");
 	Expect(fs::exists(settingsPath), "settings file was not created");
@@ -1181,13 +1207,14 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.autoContrast == expected.autoContrast,
 		"overlay/correction settings did not round-trip");
 	Expect(loaded.copyRenamePattern == expected.copyRenamePattern, "batch pattern did not round-trip");
+	Expect(loaded.cacheSizeMiB == expected.cacheSizeMiB, "cache size did not round-trip");
 	Expect(loaded.manualZoomSet, "saved manual zoom was not marked present");
 	ExpectNear(loaded.manualZoom, expected.manualZoom, 0.0000001, "manual zoom did not round-trip");
 
 	const fs::path malformed = temporary.path() / "malformed.conf";
 	std::ofstream malformedOutput(malformed);
 	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\n"
-		"thumbnail_panel_width=not-a-number\nunknown_key=value\n";
+		"thumbnail_panel_width=not-a-number\ncache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
 	loaded = {};
 	Expect(jpegview_linux::LoadViewerSettings(malformed, loaded), "malformed settings file was rejected entirely");
@@ -1200,13 +1227,16 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"settings without a histogram choice did not retain the hidden default");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
 		"malformed thumbnail width did not retain its default");
+	Expect(loaded.cacheSizeMiB == jpegview_linux::kDefaultCacheSizeMiB,
+		"malformed cache size did not retain its default");
 
 	const fs::path clamped = temporary.path() / "clamped.conf";
-	WriteText(clamped, "manual_zoom=1000\nthumbnail_panel_width=2\n");
+	WriteText(clamped, "manual_zoom=1000\nthumbnail_panel_width=2\ncache_size_mb=999999999\n");
 	loaded = {};
 	Expect(jpegview_linux::LoadViewerSettings(clamped, loaded) && loaded.manualZoomSet &&
 		loaded.manualZoom == jpegview_linux::kMaximumZoom &&
-		loaded.thumbnailPanelWidth == jpegview_linux::kMinimumThumbnailPanelWidth,
+		loaded.thumbnailPanelWidth == jpegview_linux::kMinimumThumbnailPanelWidth &&
+		loaded.cacheSizeMiB == jpegview_linux::kMaximumCacheSizeMiB,
 		"out-of-range settings were not clamped to their public limits");
 
 	jpegview_linux::ViewerSettings unchanged;
@@ -2869,6 +2899,7 @@ int main() {
 	RunTest("decoder-failures", TestDecoderFailures, failures);
 	RunTest("decoded-image-cache-and-background-prefetch", TestDecodedImageCacheAndBackgroundPrefetch, failures);
 	RunTest("display-image-cache-background-preparation", TestDisplayImageCacheBackgroundPreparation, failures);
+	RunTest("shared-cache-budget-accounting", TestSharedCacheBudgetAccounting, failures);
 	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);
 	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
 	RunTest("image-auto-contrast-invariants", TestImageAutoContrastInvariants, failures);

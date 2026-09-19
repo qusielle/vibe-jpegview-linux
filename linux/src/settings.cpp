@@ -99,6 +99,17 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			loaded.showFilename = ParseBool(value);
 		} else if (key == "auto_contrast") {
 			loaded.autoContrast = ParseBool(value);
+		} else if (key == "cache_size_mb") {
+			try {
+				std::size_t parsedCharacters = 0;
+				const unsigned long long parsedSize = std::stoull(value, &parsedCharacters);
+				if (parsedCharacters == value.size()) {
+					loaded.cacheSizeMiB = static_cast<std::size_t>(std::min<unsigned long long>(
+						parsedSize, kMaximumCacheSizeMiB));
+				}
+			} catch (const std::exception&) {
+				// Ignore malformed settings and retain the built-in default.
+			}
 		}
 	}
 	if (!input.eof() && input.fail()) return false;
@@ -134,6 +145,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "show_histogram=" << (settings.showHistogram ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'
 		       << "auto_contrast=" << (settings.autoContrast ? 1 : 0) << '\n'
+		       << "cache_size_mb=" << std::min(settings.cacheSizeMiB, kMaximumCacheSizeMiB) << '\n'
 		       << "copy_rename_pattern=" << settings.copyRenamePattern << '\n';
 		if (!output) {
 			output.close();
