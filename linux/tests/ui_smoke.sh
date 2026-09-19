@@ -74,7 +74,7 @@ esac
 Xvfb -displayfd 1 -screen 0 1280x800x24 >"$temporary/display" 2>"$temporary/xvfb.log" &
 xvfb_pid=$!
 display_number=''
-for attempt in $(seq 1 50); do
+for _ in $(seq 1 50); do
 	if [ -s "$temporary/display" ]; then
 		display_number=$(sed -n '1p' "$temporary/display")
 		break
@@ -94,7 +94,7 @@ launch_viewer() {
 		"$BINARY" "$temporary/images" >"$temporary/viewer.log" 2>&1 &
 	viewer_pid=$!
 	window_id=''
-	for attempt in $(seq 1 50); do
+	for _ in $(seq 1 50); do
 		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible --class jpegview-linux 2>/dev/null | head -1 || true)
 		if [ -n "$window_id" ]; then break; fi
 		sleep 0.1
@@ -140,7 +140,7 @@ DISPLAY=":$display_number" xdotool key ctrl+o
 sleep 0.3
 if [ "$visual_assertions" -eq 1 ]; then
 	summary_rendered=0
-	for attempt in $(seq 1 20); do
+	for _ in $(seq 1 20); do
 		DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-empty.png"
 		open_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
 		open_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')

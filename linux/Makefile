@@ -56,6 +56,8 @@ CODEC_LIBS := $(GIF_LIBS) $(TIFF_LIBS) $(WEBP_LIBS) $(HEIF_LIBS) \
 STATIC_RUNTIME ?= -static-libstdc++ -static-libgcc
 
 BUILD_DIR ?= build
+SANITIZER_BUILD_DIR ?= build-sanitize
+SANITIZER_CXXFLAGS ?= -O1 -g -std=c++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -fsanitize=address,undefined
 TARGET := $(BUILD_DIR)/jpegview-linux
 TEST_TARGET := $(BUILD_DIR)/jpegview-tests
 SOURCES := src/main.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/image.cpp src/image.h src/clipboard.cpp src/clipboard.h src/settings.cpp src/settings.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h src/overlay_layout.cpp src/overlay_layout.h src/thumbnail_panel_model.cpp src/thumbnail_panel_model.h src/thumbnail_resampler.cpp src/thumbnail_resampler.h src/image_info_model.cpp src/image_info_model.h src/file_dialog_model.cpp src/file_dialog_model.h src/system_font.cpp src/system_font.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
@@ -65,7 +67,7 @@ GENERATED_ICON_HEADER := $(BUILD_DIR)/jpegview_icon_data.h
 SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
 TEST_SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
 
-.PHONY: all clean run test test-ui check appimage
+.PHONY: all clean run test test-ui test-shell test-sanitize check appimage
 
 all: $(TARGET)
 
@@ -90,7 +92,20 @@ test: $(TEST_TARGET)
 test-ui: $(TARGET)
 	./tests/ui_smoke.sh $(TARGET)
 
-check: test test-ui
+test-shell:
+	sh -n tests/ui_smoke.sh package-appimage.sh embed-icon.sh docker-build.sh
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck tests/ui_smoke.sh package-appimage.sh embed-icon.sh docker-build.sh; \
+	else \
+		echo "ShellCheck: SKIP (shellcheck not installed)"; \
+	fi
+
+test-sanitize:
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+		$(MAKE) BUILD_DIR=$(SANITIZER_BUILD_DIR) STATIC_RUNTIME= \
+		CXXFLAGS='$(SANITIZER_CXXFLAGS)' test
+
+check: test test-ui test-shell
 
 appimage: $(TARGET)
 	./package-appimage.sh $(VERSION)
