@@ -8,8 +8,6 @@
 namespace jpegview_linux {
 namespace {
 
-constexpr int kWindowInset = 16;
-
 double ClampedZoom(double zoom) {
 	return std::clamp(zoom, kMinimumZoom, kMaximumZoom);
 }
@@ -54,8 +52,11 @@ void Viewport::Restore(const ViewportSnapshot& snapshot, int imageWidth, int ima
 void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowHeight,
 	bool fillWithCrop, bool noEnlarge) {
 	if (imageWidth <= 0 || imageHeight <= 0) return;
-	const double widthScale = static_cast<double>(std::max(1, windowWidth - kWindowInset)) / imageWidth;
-	const double heightScale = static_cast<double>(std::max(1, windowHeight - kWindowInset)) / imageHeight;
+	// Fit against the complete client area. The old calculation reserved an
+	// eight-pixel border on every side, leaving visible bands even when the
+	// image and window had matching aspect ratios.
+	const double widthScale = static_cast<double>(std::max(1, windowWidth)) / imageWidth;
+	const double heightScale = static_cast<double>(std::max(1, windowHeight)) / imageHeight;
 	const double windowScale = fillWithCrop ? std::max(widthScale, heightScale) :
 		std::min(widthScale, heightScale);
 	zoom_ = ClampedZoom(noEnlarge ? std::min(1.0, windowScale) : windowScale);

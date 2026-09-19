@@ -1139,15 +1139,19 @@ void TestViewportModesAndGeometry() {
 		"small image was not centered at original size");
 
 	viewport.Fit(1000, 500, 500, 300);
-	ExpectNear(viewport.Zoom(), 0.484, 0.0001, "large image fit used the wrong scale");
-	ExpectRect(viewport.Destination(1000, 500, 500, 300), 8, 29, 484, 242,
+	ExpectNear(viewport.Zoom(), 0.5, 0.0001, "large image fit used the wrong scale");
+	ExpectRect(viewport.Destination(1000, 500, 500, 300), 0, 25, 500, 250,
 		"fitted image geometry is incorrect");
 
 	viewport.Fit(1000, 500, 500, 300, true, false);
 	Expect(std::string(viewport.ScaleMode()) == "fill", "fill mode was not recorded");
-	ExpectNear(viewport.Zoom(), 0.568, 0.0001, "fill mode used the wrong scale");
-	ExpectRect(viewport.Destination(1000, 500, 500, 300), -34, 8, 568, 284,
+	ExpectNear(viewport.Zoom(), 0.6, 0.0001, "fill mode used the wrong scale");
+	ExpectRect(viewport.Destination(1000, 500, 500, 300), -50, 0, 600, 300,
 		"fill-and-crop geometry is incorrect");
+
+	viewport.Fit(1000, 600, 500, 300);
+	ExpectRect(viewport.Destination(1000, 600, 500, 300), 0, 0, 500, 300,
+		"matching-aspect oversized image retained an artificial border");
 
 	viewport.LoadScaleMode("fit", false, 1.0);
 	Expect(viewport.IsFitToWindow() && !viewport.NoEnlarge(), "fit mode incorrectly prevents enlargement");
@@ -1186,7 +1190,7 @@ void TestViewportManualZoomPanAndRestore() {
 	const jpegview_linux::ViewportSnapshot fitted = viewport.Snapshot();
 	viewport.ActualSize();
 	viewport.Restore(fitted, 1000, 500, 500, 300);
-	ExpectNear(viewport.Zoom(), 0.484, 0.0001, "fit snapshot did not recompute for new geometry");
+	ExpectNear(viewport.Zoom(), 0.5, 0.0001, "fit snapshot did not recompute for new geometry");
 	Expect(viewport.IsFitToWindow() && viewport.NoEnlarge(), "fit snapshot flags were not restored");
 
 	const double zoomBeforeInvalidInput = viewport.Zoom();
