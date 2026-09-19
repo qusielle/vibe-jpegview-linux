@@ -17,6 +17,7 @@
 #include "thumbnail_panel_model.h"
 #include "app_icon.h"
 #include "image_info_model.h"
+#include "file_dialog_model.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -53,6 +54,7 @@
 
 namespace fs = std::filesystem;
 using jpegview_linux::BatchCopyItem;
+using jpegview_linux::FileDialogEntry;
 using jpegview_linux::MenuItem;
 
 namespace {
@@ -94,12 +96,6 @@ constexpr int kMaxImageDimension = 65535;
 struct ControlButton {
 	SDL_Rect rect{};
 	int command = IDM_NEXT;
-};
-
-struct FileDialogEntry {
-	fs::path path;
-	bool directory = false;
-	bool parent = false;
 };
 
 struct FontGlyph {
@@ -181,6 +177,15 @@ std::string ClipText(const std::string& value, int maximumWidth, int scale = kUi
 		maximumWidth / (6 * scale)));
 	if (maximumCharacters <= 3) return value.substr(0, 1) + "...";
 	return value.substr(0, maximumCharacters - 3) + "...";
+}
+
+std::string ClipInputText(const std::string& value, int maximumWidth, int scale = kUiTextScale) {
+	if (maximumWidth <= 0) return {};
+	if (TextWidth(value, scale) <= maximumWidth) return value;
+	const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
+		maximumWidth / (6 * scale)));
+	if (maximumCharacters <= 3) return "...";
+	return "..." + value.substr(value.size() - (maximumCharacters - 3));
 }
 
 std::string Lower(std::string value) {
@@ -1310,10 +1315,13 @@ private:
 	}
 
 	void CloseFileDialog() {
-		if (fileDialogSave_) SDL_StopTextInput();
+		if (fileDialogOpen_) SDL_StopTextInput();
 		fileDialogOpen_ = false;
 		fileDialogSave_ = false;
 		fileDialogFilename_.clear();
+		fileDialogFilter_.clear();
+		fileDialogAllEntries_.clear();
+		fileDialogEntries_.clear();
 	}
 
 	void SaveImageFromDialog() {
@@ -3441,20 +3449,41 @@ private:
 	}
 
 	int FileDialogListTop() const {
-		return FileDialogRect().y + (fileDialogSave_ ? 112 : 72);
+		return FileDialogRect().y + 112;
 	}
 
 	int FileDialogVisibleRows() const {
-		const int reservedHeight = fileDialogSave_ ? 168 : 128;
-		return std::max(1, (FileDialogRect().h - reservedHeight) / 26);
+		return std::max(1, (FileDialogRect().h - 168) / 26);
+	}
+
+	SDL_Rect FileDialogInputRect() const {
+		const SDL_Rect dialog = FileDialogRect();
+		return SDL_Rect{dialog.x + 12, dialog.y + 86, dialog.w - 24, 28};
+	}
+
+	void ApplyFileDialogFilter() {
+		fileDialogEntries_ = jpegview_linux::FilterFileDialogEntries(
+			fileDialogAllEntries_, fileDialogSave_ ? std::string_view{} : std::string_view(fileDialogFilter_));
+		fileDialogScroll_ = 0;
+		if (fileDialogEntries_.empty()) {
+			fileDialogSelected_ = -1;
+			return;
+		}
+		fileDialogSelected_ = 0;
+		if (!fileDialogSave_ && !fileDialogFilter_.empty()) {
+			const auto firstMatch = std::find_if(fileDialogEntries_.begin(), fileDialogEntries_.end(),
+				[](const FileDialogEntry& entry) { return !entry.parent; });
+			fileDialogSelected_ = firstMatch == fileDialogEntries_.end() ? -1 :
+				static_cast<int>(std::distance(fileDialogEntries_.begin(), firstMatch));
+		}
 	}
 
 	void RefreshFileDialog() {
-		fileDialogEntries_.clear();
+		fileDialogAllEntries_.clear();
 		std::error_code error;
 		const fs::path parent = fileDialogDirectory_.parent_path();
 		if (!parent.empty() && parent != fileDialogDirectory_) {
-			fileDialogEntries_.push_back(FileDialogEntry{parent, true, true});
+			fileDialogAllEntries_.push_back(FileDialogEntry{parent, true, true});
 		}
 
 		for (const fs::directory_entry& entry : fs::directory_iterator(fileDialogDirectory_, error)) {
@@ -3465,18 +3494,17 @@ private:
 				!jpegview_linux::IsSupportedImagePath(entry.path())))) {
 				continue;
 			}
-			fileDialogEntries_.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory, false});
+			fileDialogAllEntries_.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory, false});
 		}
 
-		std::sort(fileDialogEntries_.begin(), fileDialogEntries_.end(), [](const FileDialogEntry& left, const FileDialogEntry& right) {
+		std::sort(fileDialogAllEntries_.begin(), fileDialogAllEntries_.end(), [](const FileDialogEntry& left, const FileDialogEntry& right) {
 			if (left.parent != right.parent) return left.parent;
 			if (left.directory != right.directory) return left.directory;
 			const std::string leftName = Lower(left.path.filename().string());
 			const std::string rightName = Lower(right.path.filename().string());
 			return leftName == rightName ? left.path.string() < right.path.string() : leftName < rightName;
 		});
-		fileDialogSelected_ = 0;
-		fileDialogScroll_ = 0;
+		ApplyFileDialogFilter();
 	}
 
 	void OpenFileDialog() {
@@ -3491,10 +3519,12 @@ private:
 		fileDialogSave_ = false;
 		fileDialogSaveFullSize_ = true;
 		fileDialogFilename_.clear();
+		fileDialogFilter_.clear();
 		fileDialogMessage_.clear();
 		fileDialogOpen_ = true;
 		contextMenuOpen_ = false;
 		RefreshFileDialog();
+		SDL_StartTextInput();
 	}
 
 	void OpenSaveFileDialog(bool fullSize) {
@@ -3505,6 +3535,7 @@ private:
 		fileDialogSave_ = true;
 		fileDialogSaveFullSize_ = fullSize;
 		fileDialogFilename_ = fileList_.Current().stem().string() + "_proc.jpg";
+		fileDialogFilter_.clear();
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
 		fileDialogOpen_ = true;
@@ -3553,6 +3584,7 @@ private:
 		const FileDialogEntry entry = fileDialogEntries_[fileDialogSelected_];
 		if (entry.directory) {
 			fileDialogDirectory_ = entry.path;
+			if (!fileDialogSave_) fileDialogFilter_.clear();
 			RefreshFileDialog();
 			if (fileDialogSave_) fileDialogSelected_ = -1;
 			fileDialogOverwriteConfirmed_ = false;
@@ -3580,13 +3612,18 @@ private:
 				MoveFileDialogSelection(-1);
 			} else if (event.key.keysym.sym == SDLK_DOWN) {
 				MoveFileDialogSelection(1);
-			} else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE) {
+			} else if (event.key.keysym.sym == SDLK_RETURN) {
 				ActivateFileDialogSelection();
 			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
 				if (fileDialogSave_ && fileDialogSelected_ < 0 && !fileDialogFilename_.empty()) {
 					fileDialogFilename_.pop_back();
 					fileDialogMessage_.clear();
 					fileDialogOverwriteConfirmed_ = false;
+					break;
+				}
+				if (!fileDialogSave_ && !fileDialogFilter_.empty()) {
+					fileDialogFilter_.pop_back();
+					ApplyFileDialogFilter();
 					break;
 				}
 				const fs::path parent = fileDialogDirectory_.parent_path();
@@ -3604,6 +3641,9 @@ private:
 				fileDialogSelected_ = -1;
 				fileDialogMessage_.clear();
 				fileDialogOverwriteConfirmed_ = false;
+			} else {
+				fileDialogFilter_ += event.text.text;
+				ApplyFileDialogFilter();
 			}
 			break;
 		case SDL_MOUSEMOTION: {
@@ -3614,12 +3654,16 @@ private:
 			}
 			break;
 		}
-		case SDL_MOUSEBUTTONDOWN:
+		case SDL_MOUSEBUTTONDOWN: {
+			const int item = FileDialogItemAt(event.button.x, event.button.y);
+			const bool inputClicked = PointInRect(event.button.x, event.button.y, FileDialogInputRect());
 			if (event.button.button == SDL_BUTTON_RIGHT ||
-			(event.button.button == SDL_BUTTON_LEFT && FileDialogItemAt(event.button.x, event.button.y) < 0)) {
+				(event.button.button == SDL_BUTTON_LEFT && item < 0 && !inputClicked)) {
 				CloseFileDialog();
+			} else if (event.button.button == SDL_BUTTON_LEFT && inputClicked) {
+				if (fileDialogSave_) fileDialogSelected_ = -1;
 			} else if (event.button.button == SDL_BUTTON_LEFT) {
-				fileDialogSelected_ = FileDialogItemAt(event.button.x, event.button.y);
+				fileDialogSelected_ = item;
 				if (fileDialogSave_ && fileDialogSelected_ >= 0 &&
 					fileDialogSelected_ < static_cast<int>(fileDialogEntries_.size()) &&
 					!fileDialogEntries_[fileDialogSelected_].directory) {
@@ -3628,6 +3672,7 @@ private:
 				if (event.button.clicks >= 2) ActivateFileDialogSelection();
 			}
 			break;
+		}
 		default:
 			break;
 		}
@@ -3641,14 +3686,14 @@ private:
 		DrawRect(dialog, 190, 190, 190);
 		DrawText(fileDialogSave_ ? "SAVE PROCESSED IMAGE" : "OPEN IMAGE", dialog.x + 18, dialog.y + 14, kUiTextScale);
 		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
-		if (fileDialogSave_) {
-			DrawText("FILE NAME", dialog.x + 18, dialog.y + 68, kUiTextScale, 190, 190, 190);
-			SDL_Rect inputRect{dialog.x + 12, dialog.y + 86, dialog.w - 24, 28};
-			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
-			SDL_RenderFillRect(renderer_, &inputRect);
-			DrawRect(inputRect, 100, 130, 165);
-			DrawText(fileDialogFilename_, inputRect.x + 10, inputRect.y + 6, kUiTextScale);
-		}
+		DrawText(fileDialogSave_ ? "FILE NAME" : "FILTER", dialog.x + 18, dialog.y + 68,
+			kUiTextScale, 190, 190, 190);
+		SDL_Rect inputRect = FileDialogInputRect();
+		SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
+		SDL_RenderFillRect(renderer_, &inputRect);
+		DrawRect(inputRect, 100, 130, 165);
+		const std::string& inputText = fileDialogSave_ ? fileDialogFilename_ : fileDialogFilter_;
+		DrawText(ClipInputText(inputText, inputRect.w - 20), inputRect.x + 10, inputRect.y + 6, kUiTextScale);
 
 		const int listTop = FileDialogListTop();
 		const int rows = FileDialogVisibleRows();
@@ -3673,7 +3718,8 @@ private:
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
 		DrawText(fileDialogSave_ ? "ENTER SAVE   BACKSPACE EDIT/PARENT   ESC CANCEL" :
-			"ENTER OPEN   BACKSPACE PARENT   ESC CANCEL", dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
+			"TYPE TO FILTER   ENTER OPEN   BACKSPACE EDIT/PARENT   ESC CANCEL",
+			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 	}
 
 	void DrawText(const std::string& text, int x, int y, int scale, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
@@ -4537,7 +4583,9 @@ private:
 	bool fileDialogOverwriteConfirmed_ = false;
 	fs::path fileDialogDirectory_;
 	std::string fileDialogFilename_;
+	std::string fileDialogFilter_;
 	std::string fileDialogMessage_;
+	std::vector<FileDialogEntry> fileDialogAllEntries_;
 	std::vector<FileDialogEntry> fileDialogEntries_;
 	int fileDialogSelected_ = 0;
 	int fileDialogScroll_ = 0;

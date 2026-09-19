@@ -114,6 +114,31 @@ if [ "$visual_assertions" -eq 1 ]; then
 		*) echo "UI smoke test: native window did not publish the embedded 64x64 icon" >&2; exit 1 ;;
 	esac
 fi
+
+DISPLAY=":$display_number" xdotool key ctrl+o
+sleep 0.3
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-empty.png"
+fi
+DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
+sleep 0.3
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-filtered.png"
+	open_dialog_difference=$(compare -metric AE "$temporary/open-dialog-empty.png" \
+		"$temporary/open-dialog-filtered.png" null: 2>&1 || true)
+	if [ "$open_dialog_difference" = "0" ]; then
+		echo "UI smoke test: Ctrl+O did not show the typed filename filter" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.4
+filtered_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$filtered_title" in
+	03-blue.ppm*) ;;
+	*) echo "UI smoke test: Ctrl+O filename filter did not open the matching image" >&2; exit 1 ;;
+esac
+
 title_before=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 DISPLAY=":$display_number" xdotool mousemove 640 400
 DISPLAY=":$display_number" xdotool click 4

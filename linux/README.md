@@ -65,7 +65,8 @@ they support.
    window when expanded, open at the current pointer, and can be opened from the keyboard menu key.
 
 9. **Portable file and desktop operations.** The branch adds a native open/save browser, processed
-   full-size and screen-size saving with overwrite confirmation, move-to-trash confirmation,
+   full-size and screen-size saving with overwrite confirmation, live case-insensitive filename
+   filtering in the open browser, move-to-trash confirmation,
    original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`, modification-date
    updates from now or EXIF, wallpaper integration, folder exploration, and lossless JPEG rotation
    through `jpegtran`. The **Open image with** submenu discovers freedesktop `.desktop` applications
@@ -238,9 +239,11 @@ image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`â€
 slideshow at that interval. At actual size, Shift+Arrow pans the image in 48-pixel steps. F2
 toggles the top-left picture information panel; Shift+N or Ctrl+F2
 toggles the filename overlay, while N/M/C/Z select filename, modification-date, creation-date,
-or random sorting. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N toggles
-the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the image at
-original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
+or random sorting. Ctrl+O opens the native in-app file browser; type any part of a name to filter
+its files and folders case-insensitively, then press Enter to open the selected match. Backspace
+edits the filter and navigates to the parent folder once the filter is empty. Ctrl+R reloads, and
+Ctrl+N toggles the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the
+image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
 PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.
 Ctrl+Shift+M/E set the modification date to now/EXIF date; R/T perform lossless JPEG rotations when
 bundled `jpegtran` is available; F5 toggles the ported automatic histogram contrast correction, and

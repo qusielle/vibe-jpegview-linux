@@ -15,6 +15,7 @@
 #include "thumbnail_panel_model.h"
 #include "app_icon.h"
 #include "image_info_model.h"
+#include "file_dialog_model.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -1560,6 +1561,26 @@ void TestImageInfoFormatting() {
 		"file-size formatting changed while moving it into the information model");
 }
 
+void TestFileDialogFiltering() {
+	const std::vector<jpegview_linux::FileDialogEntry> entries = {
+		{fs::path("/pictures"), true, true},
+		{fs::path("/pictures/Photos"), true, false},
+		{fs::path("/pictures/Alpha.JPG"), false, false},
+		{fs::path("/pictures/holiday.png"), false, false},
+	};
+	Expect(jpegview_linux::FilterFileDialogEntries(entries, {}).size() == entries.size(),
+		"empty open-dialog filter removed entries");
+	const std::vector<jpegview_linux::FileDialogEntry> filtered =
+		jpegview_linux::FilterFileDialogEntries(entries, "PH");
+	Expect(filtered.size() == 3 && filtered[0].parent &&
+		filtered[1].path.filename() == "Photos" && filtered[2].path.filename() == "Alpha.JPG",
+		"open-dialog filter was not a case-insensitive filename substring match");
+	const std::vector<jpegview_linux::FileDialogEntry> unmatched =
+		jpegview_linux::FilterFileDialogEntries(entries, "missing");
+	Expect(unmatched.size() == 1 && unmatched[0].parent,
+		"open-dialog filter did not retain only the parent entry when nothing matched");
+}
+
 void TestEmbeddedApplicationIcon() {
 	jpegview_linux::ApplicationIcon icon;
 	std::string error;
@@ -1622,6 +1643,7 @@ int main() {
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
+	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
