@@ -26,7 +26,7 @@ std::string FormatFileSize(std::uintmax_t size) {
 
 std::string FormatImageDimensionsAndSize(int width, int height,
 	std::string_view formattedFileSize) {
-	std::string line = std::to_string(width) + "x" + std::to_string(height);
+	std::string line = std::to_string(width) + " X " + std::to_string(height);
 	if (!formattedFileSize.empty()) {
 		line += ", ";
 		line += formattedFileSize;

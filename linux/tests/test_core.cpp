@@ -1551,9 +1551,9 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 
 void TestImageInfoFormatting() {
 	Expect(jpegview_linux::FormatImageDimensionsAndSize(1920, 1080, "2.5 MB") ==
-		"1920x1080, 2.5 MB",
+		"1920 X 1080, 2.5 MB",
 		"image dimensions and file size were not compacted into one line");
-	Expect(jpegview_linux::FormatImageDimensionsAndSize(640, 480, {}) == "640x480",
+	Expect(jpegview_linux::FormatImageDimensionsAndSize(640, 480, {}) == "640 X 480",
 		"missing file size left punctuation in the dimensions line");
 	Expect(jpegview_linux::FormatModificationDateLine("2026-09-19 12:34:56") ==
 		"Mod.date: 2026-09-19 12:34:56",

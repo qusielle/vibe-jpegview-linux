@@ -89,7 +89,7 @@ they support.
 12. **Information overlays and window feedback.** F2 picture information and Shift+N/Ctrl+F2 filename
     overlays use compact translucent surfaces sized to their content with small comfortable margins.
     Filename, EXIF, and counter text remain responsive during navigation. The information popup uses
-    a compact `WxH, Size` line and `Mod.date:` label. Overlay visibility persists immediately. The
+    a readable `W X H, Size` line and `Mod.date:` label. Overlay visibility persists immediately. The
     window title shows filename, dimensions, and size, and menus, dialogs, tooltips, and panels share
     the compact bitmap font and translucent visual treatment.
 
