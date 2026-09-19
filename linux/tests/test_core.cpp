@@ -4,6 +4,7 @@
 #include "image_writer.h"
 #include "settings.h"
 #include "sort_mode.h"
+#include "desktop_applications.h"
 
 #include <algorithm>
 #include <chrono>
@@ -72,6 +73,13 @@ void WriteBytes(const fs::path& filename, const std::vector<std::uint8_t>& bytes
 	std::ofstream output(filename, std::ios::binary);
 	if (!output) throw TestFailure("cannot create " + filename.string());
 	output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+	if (!output) throw TestFailure("cannot write " + filename.string());
+}
+
+void WriteText(const fs::path& filename, const std::string& text) {
+	std::ofstream output(filename);
+	if (!output) throw TestFailure("cannot create " + filename.string());
+	output << text;
 	if (!output) throw TestFailure("cannot write " + filename.string());
 }
 
@@ -433,6 +441,62 @@ void TestSortModeMappings() {
 	Expect(unchanged == FileList::SortMode::FileName, "unknown sort mode changed the output value");
 }
 
+void TestDesktopApplicationParsingAndExecExpansion() {
+	TemporaryDirectory temporary;
+	const fs::path desktopFile = temporary.path() / "viewer.desktop";
+	WriteText(desktopFile,
+		"[Desktop Entry]\n"
+		"Type=Application\n"
+		"Name=Test\\sViewer\n"
+		"Exec=test-viewer --title \"hello world\" %f\n"
+		"MimeType=image/jpeg;image/png;\n"
+		"Terminal=true\n"
+		"\n"
+		"[Desktop Action Open]\n"
+		"Name=Ignored\n");
+
+	jpegview_linux::OpenWithApplication application;
+	Expect(jpegview_linux::ReadDesktopApplication(desktopFile, "image/jpeg", application),
+		"valid desktop entry was rejected");
+	Expect(application.name == "Test Viewer" && application.terminal,
+		"desktop entry name or terminal flag was parsed incorrectly");
+	Expect(application.exec.find("hello world") != std::string::npos, "desktop Exec quoting was lost");
+
+	Expect(!jpegview_linux::ReadDesktopApplication(desktopFile, "image/gif", application),
+		"desktop entry with an incompatible MIME type was accepted");
+	WriteText(temporary.path() / "hidden.desktop",
+		"[Desktop Entry]\nType=Application\nName=Hidden\nExec=viewer %f\nMimeType=image/jpeg;\nHidden=true\n");
+	Expect(!jpegview_linux::ReadDesktopApplication(temporary.path() / "hidden.desktop", "image/jpeg", application),
+		"hidden desktop entry was accepted");
+
+	Expect(jpegview_linux::UnescapeDesktopValue("a\\sb\\n\\t\\\\") == "a b\n\t\\",
+		"desktop value escaping was parsed incorrectly");
+	Expect(jpegview_linux::MimeTypeMatches("image/*", "image/png"), "MIME wildcard did not match");
+	Expect(jpegview_linux::MimeTypeMatches("image/x-ms-bmp", "image/bmp"), "MIME alias did not match");
+	Expect(jpegview_linux::MimeTypeMatches("*/*", "image/png"), "universal MIME wildcard did not match");
+	Expect(!jpegview_linux::MimeTypeMatches("image/jpeg", "image/png"), "incompatible MIME type matched");
+	Expect(jpegview_linux::MimeTypeForExtension(".jpg") == "image/jpeg", "JPEG MIME mapping is incorrect");
+
+	const fs::path image = temporary.path() / "photos" / "a file.jpg";
+	application.name = "Test Viewer";
+	application.desktopFile = desktopFile;
+	application.exec = "viewer --name \"%n\" %u %% %d";
+	const std::vector<std::string> tokens = jpegview_linux::TokenizeDesktopExec(
+		"viewer --label \"hello world\" 'single quoted' escaped\\ space");
+	Expect(tokens == std::vector<std::string>({"viewer", "--label", "hello world", "single quoted", "escaped space"}),
+		"desktop Exec tokenization is incorrect");
+	const std::vector<std::string> arguments = jpegview_linux::DesktopExecArguments(application, image);
+	Expect(arguments.size() == 6 && arguments[0] == "viewer" && arguments[1] == "--name" &&
+		arguments[2] == "a file.jpg" && arguments[3].find("file:///tmp") == 0 &&
+		arguments[4] == "%" && arguments[5] == fs::absolute(image.parent_path()).lexically_normal().string(),
+		"desktop Exec field expansion is incorrect");
+
+	application.exec = "viewer --flag";
+	const std::vector<std::string> implicitFile = jpegview_linux::DesktopExecArguments(application, image);
+	Expect(implicitFile.size() == 3 && implicitFile[2] == fs::absolute(image).lexically_normal().string(),
+		"desktop Exec did not append an image when no field code was present");
+}
+
 class ExifFixture {
 public:
 	ExifFixture() : bytes_({'E', 'x', 'i', 'f', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) {
@@ -641,6 +705,7 @@ int main() {
 	RunTest("decoder-failures", TestDecoderFailures, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);
+	RunTest("desktop-application-parsing-and-expansion", TestDesktopApplicationParsingAndExecExpansion, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
