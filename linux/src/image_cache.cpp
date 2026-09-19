@@ -108,6 +108,7 @@ struct DecodedImageCache::Impl {
 		std::string key;
 		FileIdentity identity;
 		std::uint64_t generation = 0;
+		Completion completion;
 	};
 
 	explicit Impl(std::size_t budget, Decoder decode)
@@ -173,16 +174,27 @@ struct DecodedImageCache::Impl {
 			const bool decoded = decoder(work.filename, *image, errorMessage) && !image->frames.empty();
 			const FileIdentity currentIdentity = decoded ? Identify(work.filename) : FileIdentity{};
 
+			ImagePtr completedImage;
+			Completion completion;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
-				decoding = false;
 				if (!stopping && decoded && work.generation == generation &&
 					currentIdentity == work.identity) {
 					// Speculative work must never evict an image the user has
 					// already viewed. Stop this generation once the free budget
 					// cannot hold its next nearest neighbor.
-					if (!Insert(work.key, work.identity, image, false)) queue.clear();
+					if (!Insert(work.key, work.identity, image, false)) {
+						queue.clear();
+					} else {
+						completedImage = image;
+						completion = std::move(work.completion);
+					}
 				}
+			}
+			if (completion && completedImage) completion(work.filename, completedImage);
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				decoding = false;
 				idle.notify_all();
 			}
 		}
@@ -231,14 +243,17 @@ void DecodedImageCache::Store(const fs::path& filename,
 }
 
 void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
-	std::size_t currentIndex, int preferredDirection, std::size_t maximumCount) {
+	std::size_t currentIndex, int preferredDirection, std::size_t maximumCount,
+	Completion completion) {
 	std::vector<Impl::Work> prepared;
+	std::vector<std::pair<fs::path, ImagePtr>> alreadyCached;
 	for (const std::size_t index : ImagePrefetchOrder(files.size(), currentIndex,
 		preferredDirection, maximumCount)) {
 		Impl::Work work;
 		work.filename = files[index];
 		work.key = CacheKey(work.filename);
 		work.identity = Identify(work.filename);
+		work.completion = completion;
 		if (work.identity.valid) prepared.push_back(std::move(work));
 	}
 	{
@@ -247,13 +262,19 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 		impl_->queue.clear();
 		for (Impl::Work& work : prepared) {
 			const auto cached = impl_->entries.find(work.key);
-			if (cached != impl_->entries.end() && cached->second.identity == work.identity) continue;
+			if (cached != impl_->entries.end() && cached->second.identity == work.identity) {
+				if (completion) alreadyCached.emplace_back(work.filename, cached->second.image);
+				continue;
+			}
 			work.generation = impl_->generation;
 			impl_->queue.push_back(std::move(work));
 		}
 		impl_->idle.notify_all();
 	}
 	impl_->workAvailable.notify_one();
+	if (completion) {
+		for (const auto& cached : alreadyCached) completion(cached.first, cached.second);
+	}
 }
 
 void DecodedImageCache::Clear() {

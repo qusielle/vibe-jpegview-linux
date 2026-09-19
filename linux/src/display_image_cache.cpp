@@ -207,10 +207,12 @@ struct DisplayImageCache::Impl {
 				std::lock_guard<std::mutex> lock(mutex);
 				inFlightKeys.erase(work.request.key);
 				--activeWorkers;
+				const bool foreground = work.foreground ||
+					foregroundKeys.erase(work.request.key) != 0;
 				if (!stopping && work.epoch == epoch && image && image->key == currentKey &&
-					(work.foreground || desiredPrefetchKeys.find(work.request.key) !=
+					(foreground || desiredPrefetchKeys.find(work.request.key) !=
 						desiredPrefetchKeys.end()) &&
-					Insert(image, work.foreground)) {
+					Insert(image, foreground)) {
 					completed.push_back(image);
 				}
 				idle.notify_all();
@@ -230,6 +232,7 @@ struct DisplayImageCache::Impl {
 	std::unordered_set<std::string> queuedKeys;
 	std::unordered_set<std::string> inFlightKeys;
 	std::unordered_set<std::string> desiredPrefetchKeys;
+	std::unordered_set<std::string> foregroundKeys;
 	std::size_t cachedBytes = 0;
 	std::size_t activeWorkers = 0;
 	std::uint64_t useCounter = 0;
@@ -260,9 +263,23 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	if (!request.Valid()) return;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		if (impl_->entries.find(request.key) != impl_->entries.end() ||
-			impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end() ||
-			impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) return;
+		if (impl_->entries.find(request.key) != impl_->entries.end()) return;
+		if (impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) {
+			impl_->foregroundKeys.insert(request.key);
+			return;
+		}
+		if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end()) {
+			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
+				[&request](const Impl::Work& work) { return work.request.key == request.key; });
+			if (queued != impl_->queue.end()) {
+				Impl::Work promoted = std::move(*queued);
+				impl_->queue.erase(queued);
+				promoted.foreground = true;
+				promoted.epoch = impl_->epoch;
+				impl_->queue.push_front(std::move(promoted));
+			}
+			return;
+		}
 		impl_->queue.push_front(Impl::Work{request, 0, impl_->epoch, true});
 		impl_->queuedKeys.insert(request.key);
 	}
@@ -304,6 +321,12 @@ std::vector<DisplayImageCache::ImagePtr> DisplayImageCache::TakeCompleted(std::s
 	return result;
 }
 
+void DisplayImageCache::Release(const std::string& key) {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	const auto found = impl_->entries.find(key);
+	if (found != impl_->entries.end()) impl_->Erase(found);
+}
+
 void DisplayImageCache::Clear() {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	++impl_->generation;
@@ -312,6 +335,7 @@ void DisplayImageCache::Clear() {
 	impl_->completed.clear();
 	impl_->queuedKeys.clear();
 	impl_->desiredPrefetchKeys.clear();
+	impl_->foregroundKeys.clear();
 	impl_->entries.clear();
 	impl_->cachedBytes = 0;
 	impl_->idle.notify_all();

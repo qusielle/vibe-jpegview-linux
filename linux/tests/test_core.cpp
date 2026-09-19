@@ -843,6 +843,8 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 
 	std::mutex decodedOrderMutex;
 	std::vector<std::string> decodedOrder;
+	std::vector<std::string> completedOrder;
+	std::atomic<bool> missingCompletionPixels{false};
 	jpegview_linux::DecodedImageCache background(64,
 		[&](const fs::path& filename, DecodedImage& image, std::string&) {
 			{
@@ -852,7 +854,12 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 			image = *CachedTestImage(4);
 			return true;
 		});
-	background.Prefetch(files, 2, 1, 4);
+	background.Prefetch(files, 2, 1, 4,
+		[&](const fs::path& filename, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			if (!image) missingCompletionPixels = true;
+			std::lock_guard<std::mutex> lock(decodedOrderMutex);
+			completedOrder.push_back(filename.filename().string());
+		});
 	Expect(background.WaitUntilIdle(std::chrono::seconds(2)),
 		"background image prefetch did not finish");
 	{
@@ -860,7 +867,10 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 		Expect(decodedOrder == std::vector<std::string>({
 			"image-3", "image-1", "image-4", "image-0"}),
 			"background decoder did not follow nearest-first prefetch order");
+		Expect(completedOrder == decodedOrder,
+			"decoded prefetch completion did not preserve nearest-first order");
 	}
+	Expect(!missingCompletionPixels, "decoded prefetch callback received no pixels");
 	Expect(background.CachedImages() == 4 && background.CachedBytes() == 16,
 		"background decoder did not retain completed images in the shared cache");
 
@@ -923,6 +933,9 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		"display image worker did not produce exact target-size pixels");
 	Expect(realProcessor.TakeCompleted(1).size() == 1 && realProcessor.TakeCompleted(1).empty(),
 		"display image completion queue did not drain exactly once");
+	realProcessor.Release(scaled.key);
+	Expect(realProcessor.CachedImages() == 0 && realProcessor.CachedBytes() == 0,
+		"display image release retained uploaded staging pixels");
 
 	std::mutex orderMutex;
 	std::vector<int> preparationOrder;

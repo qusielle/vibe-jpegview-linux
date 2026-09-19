@@ -23,7 +23,10 @@ they support.
    without pkg-config metadata and HEIF encoders with different supported profiles.
 
 3. **High-quality viewing, fitting, zooming, and panning.** JPEGView's high-quality downsampling and
-   sharpening path was ported, with bicubic enlargement and a display-size texture cache. Fit mode
+   sharpening path was ported, with bicubic enlargement and a 1 GiB display-size texture cache.
+   Nearby decoded images are corrected and scaled on low-priority worker threads, then uploaded
+   incrementally and retained as renderer-ready textures; navigation therefore avoids CPU resizing
+   and normally avoids texture upload as well. Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
    Fit, fill, actual-size, and manual modes survive navigation appropriately, while temporary zoom
    on one image is reset to the selected fit/actual mode for the next image. Ctrl+wheel zooms around
@@ -90,8 +93,10 @@ they support.
     rates and folder advancement, slideshow transitions are rendered natively, Alt+R resumes, and
     Escape stops active playback before quitting. Full decoded images use a 1 GiB memory-bounded LRU
     cache, while a low-contention background worker predecodes nearby files in the current navigation
-    direction. Previously viewed and prefetched images therefore avoid repeated synchronous decoding;
-    source identity checks prevent stale pixels from being reused after a file changes.
+    direction. Decode completions feed a separate display-preparation worker pool, and both decoded
+    and display caches reject stale source identities. Previously viewed and prefetched images
+    therefore avoid repeated synchronous decoding, correction, high-quality scaling, and texture
+    creation during navigation.
 
 12. **Information overlays and window feedback.** F2 picture information and Shift+N/Ctrl+F2 filename
     overlays use compact translucent surfaces sized to their content with small comfortable margins.
@@ -185,9 +190,12 @@ single-header library, while the additional formats use their native codec libra
 
 Display resizing follows JPEGView's high-quality path: downsampling uses its integrated
 best-quality filter with the default sharpening value, and enlargement uses endpoint-preserving
-Catmull-Rom bicubic interpolation. The resulting display-size bitmap is cached until the image or
-target size changes, so SDL does not have to scale the original texture with nearest-neighbor
-sampling on every frame.
+Catmull-Rom bicubic interpolation. Decoded neighbors are converted to exact display-size bitmaps on
+low-priority background workers. The SDL thread uploads completed frames incrementally—SDL renderer
+objects are thread-confined—and retains the resulting textures in a separate 1 GiB LRU keyed by
+source identity, animation frame, correction mode, and target size. If preparation misses, SDL can
+temporarily scale the source texture while the high-quality result is produced; the expensive CPU
+resize never runs in the render loop.
 
 Fit-to-screen mode does not enlarge images that are smaller than the available window; those images
 remain at their native size and are centered. Larger images are reduced to fit as usual.

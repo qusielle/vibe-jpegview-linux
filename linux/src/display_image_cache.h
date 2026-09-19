@@ -60,6 +60,7 @@ public:
 	void Request(const DisplayImageRequest& request);
 	void Prefetch(const std::vector<DisplayImageRequest>& requests);
 	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount);
+	void Release(const std::string& key);
 	void Clear();
 
 	std::size_t CachedBytes() const;

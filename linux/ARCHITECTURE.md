@@ -7,6 +7,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `image`: validated mutable BGRA storage, rotate/mirror transforms, high-quality resizing, and
   histogram-derived automatic correction.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
+- `image_cache` and `display_image_cache`: source-aware decoded-image retention, nearest-first
+  decode completion, and threaded correction/scaling of renderer-ready frames.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `settings` and `sort_mode`: persisted configuration and stable setting values.
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
@@ -46,4 +48,5 @@ external-command, font, image-information, and viewer-chrome extractions establi
 pattern: a small pure C++ object, thin SDL adapter methods in Viewer, focused core tests, then UI
 smoke tests for integration. Worker threads belong behind model APIs (as with directory summaries),
 while SDL windows, textures, cursors, process execution, and event translation remain owned by
-platform adapters.
+platform adapters. In particular, display pixels may be prepared on workers, but SDL texture upload
+and destruction stay on the renderer thread because SDL renderer objects are not thread-safe.
