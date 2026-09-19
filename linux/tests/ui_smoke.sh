@@ -170,6 +170,24 @@ esac
 
 DISPLAY=":$display_number" xdotool key ctrl+o
 DISPLAY=":$display_number" xdotool type --delay 20 '00-ENTRY-TEST'
+DISPLAY=":$display_number" xdotool key ctrl+Return
+sleep 0.3
+immediate_directory_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$immediate_directory_title" in
+	inside-first.ppm*) ;;
+	*) echo "UI smoke test: Ctrl+Return did not open the first image in the selected directory" >&2; exit 1 ;;
+esac
+
+# Return to a root-level image so the ordinary directory-entry behavior below
+# starts from the same directory as the initial open-dialog checks.
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key BackSpace
+DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool type --delay 20 '00-ENTRY-TEST'
 DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3

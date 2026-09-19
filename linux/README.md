@@ -246,8 +246,10 @@ slideshow at that interval. At actual size, Shift+Arrow pans the image in 48-pix
 toggles the top-left picture information panel; Shift+N or Ctrl+F2
 toggles the filename overlay, while N/M/C/Z select filename, modification-date, creation-date,
 or random sorting. Ctrl+O opens the native in-app file browser; type any part of a name to filter
-its files and folders case-insensitively, then press Enter to open the selected match. Backspace
-edits the filter and navigates to the parent folder once the filter is empty. Up/Down move one row
+its files and folders case-insensitively, then press Enter to open the selected match. Ctrl+Return
+opens a selected folder immediately at its first compatible image without entering the folder in
+the dialog. Backspace edits the filter and navigates to the parent folder once the filter is empty.
+Up/Down move one row
 and PageUp/PageDown move one visible page; all four keys repeat while held. Entering a folder
 selects its first child rather than the `[..]` parent row; returning to the parent selects the
 folder that was just exited. Folder rows show

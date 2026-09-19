@@ -3618,7 +3618,7 @@ private:
 		fileDialogOverwriteConfirmed_ = false;
 	}
 
-	void ActivateFileDialogSelection() {
+	void ActivateFileDialogSelection(bool openDirectoryImmediately = false) {
 		if (fileDialogSave_ && fileDialogSelected_ < 0) {
 			SaveImageFromDialog();
 			return;
@@ -3626,7 +3626,11 @@ private:
 		if (fileDialogSelected_ < 0 || fileDialogSelected_ >= static_cast<int>(fileDialogEntries_.size())) return;
 		const FileDialogEntry entry = fileDialogEntries_[fileDialogSelected_];
 		if (entry.directory) {
-			NavigateFileDialogDirectory(entry.path, entry.parent);
+			if (openDirectoryImmediately && !fileDialogSave_) {
+				OpenDroppedFiles({entry.path.string()});
+			} else {
+				NavigateFileDialogDirectory(entry.path, entry.parent);
+			}
 			return;
 		}
 		if (fileDialogSave_) {
@@ -3659,7 +3663,8 @@ private:
 			} else if (event.key.keysym.sym == SDLK_PAGEDOWN) {
 				MoveFileDialogSelectionByPage(1);
 			} else if (event.key.keysym.sym == SDLK_RETURN) {
-				ActivateFileDialogSelection();
+				const bool ctrl = (event.key.keysym.mod & 0x00C0u) != 0;
+				ActivateFileDialogSelection(ctrl);
 			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
 				if (fileDialogSave_ && fileDialogSelected_ < 0 && !fileDialogFilename_.empty()) {
 					fileDialogFilename_.pop_back();
@@ -3777,7 +3782,7 @@ private:
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
 		DrawText(fileDialogSave_ ? "Enter: Save   Backspace: Edit/parent   Esc: Cancel" :
-			"Type to filter   PgUp/PgDn: Page   Enter: Open   Backspace: Edit/parent   Esc: Cancel",
+			"Type to filter   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel",
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 	}
 
