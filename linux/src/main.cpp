@@ -2548,10 +2548,12 @@ private:
 		menuSelected_ = ContextMenuItemAt(x, y);
 	}
 
-	void OpenContextMenu(int x, int y) {
+	void OpenContextMenu() {
 		// A first right-click can arrive before SDL has delivered any motion
-		// event. Read the current pointer state so the menu does not fall back
-		// to the initial (0, 0) position.
+		// event. Read the current pointer state so both mouse and keyboard
+		// invocation place the menu at the actual pointer position.
+		int x = 0;
+		int y = 0;
 		SDL_GetMouseState(&x, &y);
 		contextMenuAdvancedOptions_ = false;
 		contextMenuItems_ = ContextMenuItems(contextMenuAdvancedOptions_);
@@ -3981,6 +3983,10 @@ private:
 				// physical key press. Keep repeating navigation, while retaining
 				// one-shot behavior for commands such as delete, save, and rotate.
 				if (event.key.repeat != 0 && !plainNavigationKey) break;
+				if (event.key.keysym.sym == SDLK_MENU) {
+					OpenContextMenu();
+					break;
+				}
 				const bool plainKey = (modifiers & 0x03C3u) == 0;
 				if (plainKey && event.key.keysym.sym >= '1' && event.key.keysym.sym <= '9') {
 					// CMainDlg::OnKeyDown reserves the number row for quick
@@ -4012,7 +4018,7 @@ private:
 					imageCenterX_ = event.button.x;
 					imageCenterY_ = event.button.y;
 				} else if (event.button.button == SDL_BUTTON_RIGHT) {
-					OpenContextMenu(event.button.x, event.button.y);
+					OpenContextMenu();
 				}
 				break;
 			case SDL_MOUSEBUTTONUP:
@@ -4206,7 +4212,7 @@ void PrintUsage(const char* program) {
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, N/M/C/Z select display order,\n"
 		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles the navigation panel,\n"
-		<< "          right-click opens the context menu, Esc or Q quits.\n";
+		<< "          right-click or the Context Menu key opens the context menu, Esc or Q quits.\n";
 }
 
 } // namespace

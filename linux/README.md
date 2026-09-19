@@ -141,8 +141,8 @@ ordering button shows `N` for file-name order and `D` for modification-date orde
 switches between those two modes. By default the panel is hidden until the pointer enters the
 lower edge of the window; the context menu can disable this automatic reveal mode. Ctrl+N
 disables the panel entirely, and the panel is temporarily suppressed while a modal menu or file
-browser is open. Right-click
-opens the compact core JPEGView context menu; Show Advanced Options temporarily restores the
+browser is open. Right-click or the keyboard Context Menu key opens the compact core JPEGView
+context menu; Show Advanced Options temporarily restores the
 Open image with, Print, batch rename/copy, date, and wallpaper commands without saving that
 choice. The menu also supports keyboard selection with the arrow keys and Return. Hovering over
 a lower navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
