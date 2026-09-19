@@ -8,6 +8,7 @@
 #include "batch_copy.h"
 #include "image_formats.h"
 #include "input_commands.h"
+#include "viewport.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -52,6 +53,16 @@ void ExpectNear(double actual, double expected, double tolerance, const std::str
 	if (std::abs(actual - expected) > tolerance) {
 		std::ostringstream details;
 		details << message << " (actual=" << actual << ", expected=" << expected << ')';
+		throw TestFailure(details.str());
+	}
+}
+
+void ExpectRect(const jpegview_linux::ViewportRect& actual, int x, int y, int width, int height,
+	const std::string& message) {
+	if (actual.x != x || actual.y != y || actual.width != width || actual.height != height) {
+		std::ostringstream details;
+		details << message << " (actual=" << actual.x << ',' << actual.y << ' ' << actual.width << 'x'
+			<< actual.height << ", expected=" << x << ',' << y << ' ' << width << 'x' << height << ')';
 		throw TestFailure(details.str());
 	}
 }
@@ -1097,6 +1108,72 @@ void TestExifAndJpegCommentParsing() {
 	Expect(!info.hasExif, "malformed metadata was incorrectly accepted as EXIF");
 }
 
+void TestViewportModesAndGeometry() {
+	jpegview_linux::Viewport viewport;
+	Expect(std::string(viewport.ScaleMode()) == "fit_no_enlarge", "viewport default scale mode changed");
+
+	viewport.Fit(100, 50, 500, 300);
+	ExpectNear(viewport.Zoom(), 1.0, 0.0001, "fit-no-enlarge scaled a small image up");
+	ExpectRect(viewport.Destination(100, 50, 500, 300), 200, 125, 100, 50,
+		"small image was not centered at original size");
+
+	viewport.Fit(1000, 500, 500, 300);
+	ExpectNear(viewport.Zoom(), 0.484, 0.0001, "large image fit used the wrong scale");
+	ExpectRect(viewport.Destination(1000, 500, 500, 300), 8, 29, 484, 242,
+		"fitted image geometry is incorrect");
+
+	viewport.Fit(1000, 500, 500, 300, true, false);
+	Expect(std::string(viewport.ScaleMode()) == "fill", "fill mode was not recorded");
+	ExpectNear(viewport.Zoom(), 0.568, 0.0001, "fill mode used the wrong scale");
+	ExpectRect(viewport.Destination(1000, 500, 500, 300), -34, 8, 568, 284,
+		"fill-and-crop geometry is incorrect");
+
+	viewport.LoadScaleMode("fit", false, 1.0);
+	Expect(viewport.IsFitToWindow() && !viewport.NoEnlarge(), "fit mode incorrectly prevents enlargement");
+	Expect(std::string(viewport.ScaleMode()) == "fit", "fit mode did not round-trip");
+	viewport.LoadScaleMode("fill_no_enlarge", false, 1.0);
+	Expect(viewport.FillWithCrop() && viewport.NoEnlarge(), "fill-no-enlarge mode did not load");
+	viewport.LoadScaleMode("unknown", false, 1.0);
+	Expect(std::string(viewport.ScaleMode()) == "fit_no_enlarge", "unknown scale mode did not use safe default");
+}
+
+void TestViewportManualZoomPanAndRestore() {
+	jpegview_linux::Viewport viewport;
+	viewport.LoadScaleMode("manual", true, 100.0);
+	ExpectNear(viewport.Zoom(), jpegview_linux::kMaximumZoom, 0.0001, "manual zoom was not clamped high");
+	viewport.LoadScaleMode("manual", true, 0.0001);
+	ExpectNear(viewport.Zoom(), jpegview_linux::kMinimumZoom, 0.0001, "manual zoom was not clamped low");
+
+	viewport.ActualSize();
+	viewport.ZoomAt(2.0, 150, 75, 200, 100, 400, 200);
+	ExpectNear(viewport.Zoom(), 2.0, 0.0001, "anchored zoom did not update scale");
+	ExpectRect(viewport.Destination(200, 100, 400, 200), 50, 25, 400, 200,
+		"anchored zoom did not preserve the point beneath the pointer");
+	viewport.Pan(10.0, -5.0);
+	ExpectRect(viewport.Destination(200, 100, 400, 200), 60, 20, 400, 200,
+		"viewport pan did not update the destination");
+	Expect(std::string(viewport.ScaleMode()) == "manual", "zoomed or panned viewport was not manual");
+
+	const jpegview_linux::ViewportSnapshot manual = viewport.Snapshot();
+	viewport.Fit(800, 600, 400, 300);
+	viewport.Restore(manual, 320, 200, 640, 480);
+	ExpectNear(viewport.Zoom(), 2.0, 0.0001, "manual snapshot did not restore zoom");
+	ExpectNear(viewport.OffsetX(), 0.0, 0.0001, "manual restore did not reset horizontal pan");
+	ExpectNear(viewport.OffsetY(), 0.0, 0.0001, "manual restore did not reset vertical pan");
+
+	viewport.Fit(800, 600, 400, 300, false, true);
+	const jpegview_linux::ViewportSnapshot fitted = viewport.Snapshot();
+	viewport.ActualSize();
+	viewport.Restore(fitted, 1000, 500, 500, 300);
+	ExpectNear(viewport.Zoom(), 0.484, 0.0001, "fit snapshot did not recompute for new geometry");
+	Expect(viewport.IsFitToWindow() && viewport.NoEnlarge(), "fit snapshot flags were not restored");
+
+	const double zoomBeforeInvalidInput = viewport.Zoom();
+	viewport.ZoomAt(2.0, 0, 0, 0, 100, 500, 300);
+	viewport.ZoomAt(-1.0, 0, 0, 100, 100, 500, 300);
+	ExpectNear(viewport.Zoom(), zoomBeforeInvalidInput, 0.0001, "invalid zoom input changed viewport state");
+}
+
 void RunTest(const char* name, void (*test)(), int& failures) {
 	try {
 		test();
@@ -1128,6 +1205,8 @@ int main() {
 	RunTest("batch-copy-pattern-expansion-and-preview", TestBatchCopyPatternExpansionAndPreview, failures);
 	RunTest("desktop-application-parsing-and-expansion", TestDesktopApplicationParsingAndExecExpansion, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
+	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
+	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
 		return 1;

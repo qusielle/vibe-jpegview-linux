@@ -10,6 +10,7 @@
 #include "batch_copy.h"
 #include "image_formats.h"
 #include "input_commands.h"
+#include "viewport.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -864,36 +865,11 @@ private:
 		infoVisible_ = settings.infoVisible;
 		showFileName_ = settings.showFilename;
 		autoContrastEnabled_ = settings.autoContrast;
-		if (settings.scaleMode == "fit") {
-			fitToWindow_ = true;
-			fillWithCrop_ = false;
-			autoZoomNoEnlarge_ = true;
-		} else if (settings.scaleMode == "fill") {
-			fitToWindow_ = true;
-			fillWithCrop_ = true;
-			autoZoomNoEnlarge_ = false;
-		} else if (settings.scaleMode == "fit_no_enlarge") {
-			fitToWindow_ = true;
-			fillWithCrop_ = false;
-			autoZoomNoEnlarge_ = true;
-		} else if (settings.scaleMode == "fill_no_enlarge") {
-			fitToWindow_ = true;
-			fillWithCrop_ = true;
-			autoZoomNoEnlarge_ = true;
-		} else if (settings.scaleMode == "manual") {
-			fitToWindow_ = false;
-			fillWithCrop_ = false;
-			autoZoomNoEnlarge_ = false;
-			if (settings.manualZoomSet) zoom_ = settings.manualZoom;
-		}
+		viewport_.LoadScaleMode(settings.scaleMode, settings.manualZoomSet, settings.manualZoom);
 	}
 
 	const char* CurrentScaleMode() const {
-		if (!fitToWindow_) return "manual";
-		if (fillWithCrop_ && autoZoomNoEnlarge_) return "fill_no_enlarge";
-		if (fillWithCrop_) return "fill";
-		if (autoZoomNoEnlarge_) return "fit_no_enlarge";
-		return "fit";
+		return viewport_.ScaleMode();
 	}
 
 	void SaveSettings() const {
@@ -904,7 +880,7 @@ private:
 		settings.scaleMode = CurrentScaleMode();
 		settings.sortMode = jpegview_linux::SortModeSettingName(fileList_.GetSorting());
 		settings.sortAscending = fileList_.IsSortedAscending();
-		settings.manualZoom = zoom_;
+		settings.manualZoom = viewport_.Zoom();
 		settings.maximized = maximized_;
 		settings.navigationPanelEnabled = navigationPanelEnabled_;
 		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
@@ -919,10 +895,7 @@ private:
 		if (fileList_.Empty()) {
 			return false;
 		}
-		const bool wasFitToWindow = fitToWindow_;
-		const bool wasFillWithCrop = fillWithCrop_;
-		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
-		const double manualZoom = zoom_;
+		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		metadata_ = {};
 		jpegComment_.clear();
 		ClearTransition();
@@ -968,7 +941,7 @@ private:
 		texture_ = nullptr;
 		if (!UpdateTexture()) return false;
 
-		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		RestoreScaleMode(viewportSnapshot);
 		const Uint32 now = SDL_GetTicks();
 		lastInteractionTick_ = now;
 		imageModified_ = false;
@@ -1076,21 +1049,17 @@ private:
 	}
 
 	void ApplyTransform(int command) {
-		const bool wasFitToWindow = fitToWindow_;
-		const bool wasFillWithCrop = fillWithCrop_;
-		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
-		const double manualZoom = zoom_;
+		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		if (!TransformImage(image_, command) ||
 			(correctionBaseValid_ && !TransformImage(correctionBase_, command)) || !UpdateTexture()) {
 			SetTitle("Image transform failed");
 			return;
 		}
 		imageModified_ = true;
-		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		RestoreScaleMode(viewportSnapshot);
 	}
 
-	void RebuildAutoContrastImage(bool wasFitToWindow, bool wasFillWithCrop,
-		bool wasAutoZoomNoEnlarge, double manualZoom) {
+	void RebuildAutoContrastImage(const jpegview_linux::ViewportSnapshot& viewportSnapshot) {
 		if (!correctionBaseValid_) return;
 		image_ = correctionBase_;
 		if (autoContrastEnabled_) image_.AutoContrast();
@@ -1098,18 +1067,15 @@ private:
 			SetTitle("Automatic correction failed: could not update the display texture");
 			return;
 		}
-		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		RestoreScaleMode(viewportSnapshot);
 		SetTitle();
 	}
 
 	void ToggleAutoContrast() {
 		if (!correctionBaseValid_) return;
-		const bool wasFitToWindow = fitToWindow_;
-		const bool wasFillWithCrop = fillWithCrop_;
-		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
-		const double manualZoom = zoom_;
+		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		autoContrastEnabled_ = !autoContrastEnabled_;
-		RebuildAutoContrastImage(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		RebuildAutoContrastImage(viewportSnapshot);
 		SaveSettings();
 	}
 
@@ -1250,8 +1216,8 @@ private:
 
 		Image outputImage = image_;
 		if (!fileDialogSaveFullSize_) {
-			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * zoom_)));
-			const int outputHeight = std::max(1, static_cast<int>(std::round(image_.height * zoom_)));
+			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * viewport_.Zoom())));
+			const int outputHeight = std::max(1, static_cast<int>(std::round(image_.height * viewport_.Zoom())));
 			if (!outputImage.Resize(outputWidth, outputHeight)) {
 				fileDialogMessage_ = "Cannot resize image for screen-size output";
 				return;
@@ -1275,8 +1241,8 @@ private:
 		if (image_.width <= 0 || image_.height <= 0) return;
 		Image copied = image_;
 		if (!fullSize) {
-			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * zoom_)));
-			const int outputHeight = std::max(1, static_cast<int>(std::round(image_.height * zoom_)));
+			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * viewport_.Zoom())));
+			const int outputHeight = std::max(1, static_cast<int>(std::round(image_.height * viewport_.Zoom())));
 			if (!copied.Resize(outputWidth, outputHeight)) {
 				SetTitle("Copy failed: image is too large");
 				return;
@@ -1612,17 +1578,11 @@ private:
 		SetTitle("Clipboard image — press next/previous to return to the file list");
 	}
 
-	void RestoreScaleMode(bool wasFitToWindow, bool fillCrop, bool noEnlarge, double manualZoom) {
-		if (wasFitToWindow) {
-			FitToWindow(fillCrop, noEnlarge);
-			return;
-		}
-		zoom_ = std::clamp(manualZoom, jpegview_linux::kMinimumZoom, jpegview_linux::kMaximumZoom);
-		fitToWindow_ = false;
-		fillWithCrop_ = false;
-		autoZoomNoEnlarge_ = false;
-		offsetX_ = 0.0;
-		offsetY_ = 0.0;
+	void RestoreScaleMode(const jpegview_linux::ViewportSnapshot& snapshot) {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		viewport_.Restore(snapshot, image_.width, image_.height, windowWidth, windowHeight);
 		SetTitle();
 	}
 
@@ -1630,26 +1590,12 @@ private:
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const double widthScale = static_cast<double>(std::max(1, windowWidth - 16)) / image_.width;
-		const double heightScale = static_cast<double>(std::max(1, windowHeight - 16)) / image_.height;
-		const double windowScale = fillCrop ? std::max(widthScale, heightScale) : std::min(widthScale, heightScale);
-		zoom_ = std::clamp(noEnlarge ? std::min(1.0, windowScale) : windowScale,
-			jpegview_linux::kMinimumZoom, jpegview_linux::kMaximumZoom);
-		fitToWindow_ = true;
-		fillWithCrop_ = fillCrop;
-		autoZoomNoEnlarge_ = noEnlarge;
-		offsetX_ = 0.0;
-		offsetY_ = 0.0;
+		viewport_.Fit(image_.width, image_.height, windowWidth, windowHeight, fillCrop, noEnlarge);
 		SetTitle();
 	}
 
 	void ActualSize() {
-		zoom_ = 1.0;
-		fitToWindow_ = false;
-		fillWithCrop_ = false;
-		autoZoomNoEnlarge_ = false;
-		offsetX_ = 0.0;
-		offsetY_ = 0.0;
+		viewport_.ActualSize();
 		SetTitle();
 	}
 
@@ -1660,15 +1606,7 @@ private:
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const double oldZoom = zoom_;
-		const double imageX = (mouseX - (windowWidth - image_.width * oldZoom) / 2.0 - offsetX_) / oldZoom;
-		const double imageY = (mouseY - (windowHeight - image_.height * oldZoom) / 2.0 - offsetY_) / oldZoom;
-		zoom_ = std::clamp(oldZoom * factor, jpegview_linux::kMinimumZoom, jpegview_linux::kMaximumZoom);
-		offsetX_ = mouseX - (windowWidth - image_.width * zoom_) / 2.0 - imageX * zoom_;
-		offsetY_ = mouseY - (windowHeight - image_.height * zoom_) / 2.0 - imageY * zoom_;
-		fitToWindow_ = false;
-		fillWithCrop_ = false;
-		autoZoomNoEnlarge_ = false;
+		viewport_.ZoomAt(factor, mouseX, mouseY, image_.width, image_.height, windowWidth, windowHeight);
 		lastInteractionTick_ = SDL_GetTicks();
 		SetTitle();
 	}
@@ -1720,8 +1658,8 @@ private:
 	void ToggleFullscreen() {
 		fullscreen_ = !fullscreen_;
 		SDL_SetWindowFullscreen(window_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : static_cast<Uint32>(0));
-		if (fitToWindow_) {
-			FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
+		if (viewport_.IsFitToWindow()) {
+			FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
 		} else {
 			SetTitle();
 		}
@@ -1732,7 +1670,7 @@ private:
 		const int width = std::clamp(image_.width + 16, 160, 4096);
 		const int height = std::clamp(image_.height + 16, 120, 4096);
 		SDL_SetWindowSize(window_, width, height);
-		FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
+		FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
 	}
 
 	void ToggleTitleBar() {
@@ -1877,10 +1815,7 @@ private:
 
 	bool SetAnimationFrame(std::size_t index) {
 		if (index >= animationFrames_.size()) return false;
-		const bool wasFitToWindow = fitToWindow_;
-		const bool wasFillWithCrop = fillWithCrop_;
-		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
-		const double manualZoom = zoom_;
+		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		Image base = animationFrames_[index];
 		Image displayed = base;
 		if (autoContrastEnabled_ && !displayed.AutoContrast()) return false;
@@ -1890,7 +1825,7 @@ private:
 		animationFrameIndex_ = index;
 		imageModified_ = false;
 		if (!UpdateTexture()) return false;
-		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		RestoreScaleMode(viewportSnapshot);
 		return true;
 	}
 
@@ -2047,7 +1982,7 @@ private:
 			LastImage();
 			break;
 		case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
-			if (fitToWindow_) ActualSize(); else FitToWindow();
+			if (viewport_.IsFitToWindow()) ActualSize(); else FitToWindow();
 			break;
 		case IDM_FIT_TO_SCREEN:
 			FitToWindow();
@@ -2233,16 +2168,16 @@ private:
 			StartSlideshow(static_cast<double>(command - IDM_SLIDESHOW_START));
 			break;
 		case IDM_ZOOM_400:
-			ZoomAt(4.0 / zoom_, imageCenterX_, imageCenterY_);
+			ZoomAt(4.0 / viewport_.Zoom(), imageCenterX_, imageCenterY_);
 			break;
 		case IDM_ZOOM_200:
-			ZoomAt(2.0 / zoom_, imageCenterX_, imageCenterY_);
+			ZoomAt(2.0 / viewport_.Zoom(), imageCenterX_, imageCenterY_);
 			break;
 		case IDM_ZOOM_50:
-			ZoomAt(0.5 / zoom_, imageCenterX_, imageCenterY_);
+			ZoomAt(0.5 / viewport_.Zoom(), imageCenterX_, imageCenterY_);
 			break;
 		case IDM_ZOOM_25:
-			ZoomAt(0.25 / zoom_, imageCenterX_, imageCenterY_);
+			ZoomAt(0.25 / viewport_.Zoom(), imageCenterX_, imageCenterY_);
 			break;
 		case IDM_ZOOM_INC:
 			ZoomAt(1.2, imageCenterX_, imageCenterY_);
@@ -2435,12 +2370,12 @@ private:
 			{"Clear parameters from DB", IDM_CLEAR_PARAM_DB, false, false, false},
 			{nullptr, 0, true},
 			{"Scale / zoom", 0},
-			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, fitToWindow_ && !fillWithCrop_, true, "Return/0"},
-			{"  Fill with crop", IDM_FILL_WITH_CROP, false, fitToWindow_ && fillWithCrop_ && !autoZoomNoEnlarge_, true, "Ctrl+Return"},
+			{"  Fit to screen", IDM_FIT_TO_SCREEN, false, viewport_.IsFitToWindow() && !viewport_.FillWithCrop(), true, "Return/0"},
+			{"  Fill with crop", IDM_FILL_WITH_CROP, false, viewport_.IsFitToWindow() && viewport_.FillWithCrop() && !viewport_.NoEnlarge(), true, "Ctrl+Return"},
 			{"  Span all screens", IDM_SPAN_SCREENS, false, fullscreen_, true, "F12"},
 			{"  400 %", IDM_ZOOM_400},
 			{"  200 %", IDM_ZOOM_200},
-			{"  Actual size (100 %)", IDM_ZOOM_100, false, !fitToWindow_ && std::abs(zoom_ - 1.0) < 0.01, true, "Space"},
+			{"  Actual size (100 %)", IDM_ZOOM_100, false, !viewport_.IsFitToWindow() && std::abs(viewport_.Zoom() - 1.0) < 0.01, true, "Space"},
 			{"  50 %", IDM_ZOOM_50},
 			{"  25 %", IDM_ZOOM_25},
 			{"  Full screen mode", IDM_FULL_SCREEN_MODE, false, fullscreen_, true, "F11/F"},
@@ -2448,10 +2383,10 @@ private:
 			{"  Hide window title bar", IDM_HIDE_TITLE_BAR, false, borderless_, true, "Shift+F11"},
 			{"  Set window always on top", IDM_ALWAYS_ON_TOP, false, alwaysOnTop_, true, "Shift+F12"},
 			{"Auto zoom mode", 0},
-			{"  Fit to screen no zoom", IDM_AUTO_ZOOM_FIT_NO_ZOOM, false, fitToWindow_ && !fillWithCrop_ && autoZoomNoEnlarge_},
-			{"  Fill with crop no zoom", IDM_AUTO_ZOOM_FILL_NO_ZOOM, false, fitToWindow_ && fillWithCrop_ && autoZoomNoEnlarge_},
-			{"  Fit to screen", IDM_AUTO_ZOOM_FIT, false, fitToWindow_ && !fillWithCrop_ && !autoZoomNoEnlarge_},
-			{"  Fill with crop", IDM_AUTO_ZOOM_FILL, false, fitToWindow_ && fillWithCrop_ && !autoZoomNoEnlarge_},
+			{"  Fit to screen no zoom", IDM_AUTO_ZOOM_FIT_NO_ZOOM, false, viewport_.IsFitToWindow() && !viewport_.FillWithCrop() && viewport_.NoEnlarge()},
+			{"  Fill with crop no zoom", IDM_AUTO_ZOOM_FILL_NO_ZOOM, false, viewport_.IsFitToWindow() && viewport_.FillWithCrop() && viewport_.NoEnlarge()},
+			{"  Fit to screen", IDM_AUTO_ZOOM_FIT, false, viewport_.IsFitToWindow() && !viewport_.FillWithCrop() && !viewport_.NoEnlarge()},
+			{"  Fill with crop", IDM_AUTO_ZOOM_FILL, false, viewport_.IsFitToWindow() && viewport_.FillWithCrop() && !viewport_.NoEnlarge()},
 			{nullptr, 0, true},
 			{"Play folder as slideshow/movie", 0},
 			{playbackMode_ == PlaybackMode::Slideshow ? "  Stop slideshow" : "  Slideshow",
@@ -3235,10 +3170,7 @@ private:
 			CloseResizeDialog();
 			return;
 		}
-		const bool wasFitToWindow = fitToWindow_;
-		const bool wasFillWithCrop = fillWithCrop_;
-		const bool wasAutoZoomNoEnlarge = autoZoomNoEnlarge_;
-		const double manualZoom = zoom_;
+		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		Image resizedImage = correctionBaseValid_ ? correctionBase_ : image_;
 		if (!resizedImage.Resize(width, height, resizeFilter_)) {
 			resizeMessage_ = "Resizing failed: not enough memory or the image is too large";
@@ -3255,7 +3187,7 @@ private:
 			return;
 		}
 		imageModified_ = true;
-		RestoreScaleMode(wasFitToWindow, wasFillWithCrop, wasAutoZoomNoEnlarge, manualZoom);
+		RestoreScaleMode(viewportSnapshot);
 		SetTitle();
 		CloseResizeDialog();
 	}
@@ -3714,7 +3646,7 @@ private:
 			DrawLine(right, top, right, bottom);
 			break;
 		case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
-			if (fitToWindow_) {
+			if (viewport_.IsFitToWindow()) {
 				DrawLine(left + 5, top + 4, left + 14, top + 4);
 				DrawLine(left + 5, top + 4, left + 5, top + 13);
 				DrawLine(right - 5, top + 4, right - 14, top + 4);
@@ -3779,7 +3711,7 @@ private:
 		case IDM_LAST:
 			return "Show last image in folder (End)";
 		case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
-			return fitToWindow_ ? "Actual size of image (Space)" : "Fit image to screen (Space)";
+			return viewport_.IsFitToWindow() ? "Actual size of image (Space)" : "Fit image to screen (Space)";
 		case IDM_FULL_SCREEN_MODE:
 			return fullscreen_ ? "Window mode (F11)" : "Full screen mode (F11)";
 		case IDM_ROTATE_90:
@@ -3964,12 +3896,9 @@ private:
 			return;
 		}
 
-		SDL_Rect oldDestination{
-			static_cast<int>(std::round((windowWidth - transitionImage_.width * zoom_) / 2.0 + offsetX_)),
-			static_cast<int>(std::round((windowHeight - transitionImage_.height * zoom_) / 2.0 + offsetY_)),
-			std::max(1, static_cast<int>(std::round(transitionImage_.width * zoom_))),
-			std::max(1, static_cast<int>(std::round(transitionImage_.height * zoom_))),
-		};
+		const jpegview_linux::ViewportRect oldRect = viewport_.Destination(
+			transitionImage_.width, transitionImage_.height, windowWidth, windowHeight);
+		SDL_Rect oldDestination{oldRect.x, oldRect.y, oldRect.width, oldRect.height};
 		SDL_Rect enteringDestination = destination;
 		const int horizontalDistance = std::max(windowWidth, destination.w);
 		const int verticalDistance = std::max(windowHeight, destination.h);
@@ -4120,7 +4049,9 @@ private:
 					maximized_ = false;
 				} else if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
 					event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-					if (fitToWindow_) FitToWindow(fillWithCrop_, autoZoomNoEnlarge_);
+					if (viewport_.IsFitToWindow()) {
+						FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+					}
 				}
 				break;
 			case SDL_KEYDOWN:
@@ -4175,9 +4106,7 @@ private:
 				imageCenterY_ = event.motion.y;
 				UpdateNavigationPanelVisibility(event.motion.x, event.motion.y);
 				if (dragging_) {
-					offsetX_ += event.motion.xrel;
-					offsetY_ += event.motion.yrel;
-					fitToWindow_ = false;
+					viewport_.Pan(event.motion.xrel, event.motion.yrel);
 					SetTitle();
 				}
 				lastMouseX_ = event.motion.x;
@@ -4221,14 +4150,11 @@ private:
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		imageCenterX_ = windowWidth / 2;
 		imageCenterY_ = windowHeight / 2;
-		const int renderWidth = std::max(1, static_cast<int>(std::round(image_.width * zoom_)));
-		const int renderHeight = std::max(1, static_cast<int>(std::round(image_.height * zoom_)));
-		SDL_Rect destination{
-			static_cast<int>(std::round((windowWidth - renderWidth) / 2.0 + offsetX_)),
-			static_cast<int>(std::round((windowHeight - renderHeight) / 2.0 + offsetY_)),
-			renderWidth,
-			renderHeight
-		};
+		const jpegview_linux::ViewportRect viewportRect = viewport_.Destination(
+			image_.width, image_.height, windowWidth, windowHeight);
+		const int renderWidth = viewportRect.width;
+		const int renderHeight = viewportRect.height;
+		SDL_Rect destination{viewportRect.x, viewportRect.y, viewportRect.width, viewportRect.height};
 		SDL_Texture* renderTexture = DisplayTextureFor(renderWidth, renderHeight);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
@@ -4284,12 +4210,7 @@ private:
 	int displayTextureHeight_ = 0;
 	Image transitionImage_;
 	SDL_Texture* transitionTexture_ = nullptr;
-	double zoom_ = 1.0;
-	double offsetX_ = 0.0;
-	double offsetY_ = 0.0;
-	bool fitToWindow_ = true;
-	bool fillWithCrop_ = false;
-	bool autoZoomNoEnlarge_ = true;
+	jpegview_linux::Viewport viewport_;
 	bool fullscreen_ = false;
 	bool maximized_ = false;
 	bool borderless_ = false;
