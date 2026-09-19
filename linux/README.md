@@ -154,7 +154,7 @@ navigation-panel button displays its Windows-style action hint. The selected fit
 next or previous image and is saved between application runs, as is the last maximized or
 normal window mode, the lower navigation panel's show/hide selection, and the F2/Ctrl+F2 overlay
 visibility choices. The navigation panel hover preference and current file-order mode/direction are
-also saved. These settings are stored in
+also saved, together with the thumbnail panel visibility. These settings are stored in
 `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. Esc stops an active slideshow first,
 matching the Windows default escape command, and otherwise quits.
 
@@ -162,7 +162,7 @@ The thumbnail panel is hidden by default and can be enabled from the context men
 It follows the active file ordering in a vertical strip: the current image remains centered and at
 normal brightness, while surrounding images are darkened. Clicking a thumbnail opens that file.
 Thumbnails are loaded incrementally in nearest-to-current order and kept in a bounded in-memory
-cache; the panel visibility itself is intentionally not saved between runs.
+cache. Its visibility is preserved between runs.
 
 The port follows the Windows `CFileList` navigation model: the default display order is ascending
 file modification time from the filesystem; `N`, `M`, `C`, and `Z` select filename, modification

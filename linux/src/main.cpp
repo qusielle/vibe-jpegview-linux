@@ -891,6 +891,7 @@ private:
 		maximized_ = settings.maximized;
 		navigationPanelEnabled_ = settings.navigationPanelEnabled;
 		navigationPanelAutoReveal_ = settings.navigationPanelAutoReveal;
+		thumbnailPanelVisible_ = settings.thumbnailPanelVisible;
 		infoVisible_ = settings.infoVisible;
 		showFileName_ = settings.showFilename;
 		autoContrastEnabled_ = settings.autoContrast;
@@ -909,6 +910,7 @@ private:
 		settings.maximized = maximized_;
 		settings.navigationPanelEnabled = navigationPanelEnabled_;
 		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
+		settings.thumbnailPanelVisible = thumbnailPanelVisible_;
 		settings.infoVisible = infoVisible_;
 		settings.showFilename = showFileName_;
 		settings.autoContrast = autoContrastEnabled_;
@@ -2185,6 +2187,7 @@ private:
 		case jpegview_linux::kCommandToggleThumbnailPanel:
 			thumbnailPanelVisible_ = !thumbnailPanelVisible_;
 			PrepareThumbnailPreload();
+			SaveSettings();
 			break;
 		case kToggleNavigationPanelAutoReveal:
 			navigationPanelAutoReveal_ = !navigationPanelAutoReveal_;

@@ -758,6 +758,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.maximized = true;
 	expected.navigationPanelEnabled = false;
 	expected.navigationPanelAutoReveal = false;
+	expected.thumbnailPanelVisible = true;
 	expected.infoVisible = true;
 	expected.showFilename = true;
 	expected.autoContrast = true;
@@ -775,6 +776,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	Expect(loaded.navigationPanelEnabled == expected.navigationPanelEnabled &&
 		loaded.navigationPanelAutoReveal == expected.navigationPanelAutoReveal,
 		"navigation panel settings did not round-trip");
+	Expect(loaded.thumbnailPanelVisible == expected.thumbnailPanelVisible,
+		"thumbnail panel visibility did not round-trip");
 	Expect(loaded.infoVisible == expected.infoVisible && loaded.showFilename == expected.showFilename &&
 		loaded.autoContrast == expected.autoContrast,
 		"overlay/correction settings did not round-trip");
@@ -791,6 +794,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	Expect(loaded.scaleMode == "manual", "whitespace around a setting was not trimmed");
 	Expect(!loaded.manualZoomSet && loaded.manualZoom == 1.0,
 		"malformed manual zoom did not retain its default");
+	Expect(!loaded.thumbnailPanelVisible,
+		"settings without thumbnail visibility did not retain the hidden default");
 }
 
 void TestSettingsPathSelection() {

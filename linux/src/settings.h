@@ -19,6 +19,7 @@ struct ViewerSettings {
 	bool maximized = false;
 	bool navigationPanelEnabled = true;
 	bool navigationPanelAutoReveal = true;
+	bool thumbnailPanelVisible = false;
 	bool infoVisible = false;
 	bool showFilename = false;
 	bool autoContrast = false;

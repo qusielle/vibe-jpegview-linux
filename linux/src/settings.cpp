@@ -78,6 +78,8 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			loaded.navigationPanelEnabled = ParseBool(value);
 		} else if (key == "navigation_panel_auto_reveal") {
 			loaded.navigationPanelAutoReveal = ParseBool(value);
+		} else if (key == "thumbnail_panel_visible") {
+			loaded.thumbnailPanelVisible = ParseBool(value);
 		} else if (key == "info_visible") {
 			loaded.infoVisible = ParseBool(value);
 		} else if (key == "show_filename") {
@@ -113,6 +115,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "maximized=" << (settings.maximized ? 1 : 0) << '\n'
 		       << "navigation_panel_enabled=" << (settings.navigationPanelEnabled ? 1 : 0) << '\n'
 		       << "navigation_panel_auto_reveal=" << (settings.navigationPanelAutoReveal ? 1 : 0) << '\n'
+		       << "thumbnail_panel_visible=" << (settings.thumbnailPanelVisible ? 1 : 0) << '\n'
 		       << "info_visible=" << (settings.infoVisible ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'
 		       << "auto_contrast=" << (settings.autoContrast ? 1 : 0) << '\n'

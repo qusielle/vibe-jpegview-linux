@@ -223,6 +223,7 @@ fi
 DISPLAY=":$display_number" xdotool key n
 DISPLAY=":$display_number" xdotool key shift+n
 DISPLAY=":$display_number" xdotool key F2
+DISPLAY=":$display_number" xdotool key ctrl+t
 DISPLAY=":$display_number" wmctrl -i -r "$window_id" -b add,maximized_vert,maximized_horz
 sleep 0.5
 if [ "$visual_assertions" -eq 1 ]; then
@@ -242,6 +243,7 @@ grep -q '^sort_mode=file_name$' "$settings"
 grep -q '^sort_ascending=1$' "$settings"
 grep -q '^show_filename=1$' "$settings"
 grep -q '^info_visible=1$' "$settings"
+grep -q '^thumbnail_panel_visible=1$' "$settings"
 grep -q '^maximized=1$' "$settings"
 
 launch_viewer
@@ -259,6 +261,14 @@ case "$title_after_reload" in
 	01-red.ppm\ *) ;;
 	*) echo "UI smoke test: persisted filename ordering was not restored" >&2; exit 1 ;;
 esac
+DISPLAY=":$display_number" xdotool mousemove 80 500
+DISPLAY=":$display_number" xdotool click 1
+sleep 0.3
+title_after_restored_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+if [ "$title_after_reload" = "$title_after_restored_thumbnail_click" ]; then
+	echo "UI smoke test: persisted thumbnail panel was not interactive after relaunch" >&2
+	exit 1
+fi
 stop_viewer
 
 echo "UI smoke tests passed"
