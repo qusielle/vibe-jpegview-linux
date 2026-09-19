@@ -22,102 +22,131 @@ void AddLine(NavigationButtonPaint& button, int x1, int y1, int x2, int y2) {
 	button.lines.push_back({x1, y1, x2, y2, button.foreground});
 }
 
+UiRect WindowsInflatedRect(const UiRect& rect, float amount) {
+	const int inset = static_cast<int>(amount * rect.width);
+	UiRect result{rect.x + inset, rect.y + inset,
+		rect.width - inset * 2, rect.height - inset * 2};
+	if ((result.height & 1) != 0) --result.height;
+	return result;
+}
+
 void AddNavigationIcon(NavigationButtonPaint& button, bool fitToWindow,
-	const std::string& sortLabel, int sortLabelWidth, int textLineHeight) {
+	const std::string& sortLabel, int sortLabelWidth, int oneToOneLabelWidth,
+	int textLineHeight) {
 	const UiRect& rect = button.rect;
-	const int left = rect.x + 8;
-	const int right = rect.x + rect.width - 8;
-	const int top = rect.y + 8;
-	const int bottom = rect.y + rect.height - 8;
-	const int middle = rect.y + rect.height / 2;
 	switch (button.command) {
-	case IDM_FIRST:
-		AddLine(button, left, top, left, bottom);
-		AddLine(button, left + 8, top, left + 8, bottom);
-		AddLine(button, right, top, right - 10, middle);
-		AddLine(button, right - 10, middle, right, bottom);
+	case IDM_FIRST: {
+		const UiRect icon = WindowsInflatedRect(rect, 0.3f);
+		const int right = icon.x + icon.width;
+		const int bottom = icon.y + icon.height;
+		const int secondBar = icon.x + static_cast<int>(icon.width * 0.4f);
+		const int halfHeight = icon.height / 2;
+		AddLine(button, icon.x, icon.y, icon.x, bottom);
+		AddLine(button, secondBar, icon.y, secondBar, bottom);
+		AddLine(button, right, icon.y + 1, right - halfHeight + 1, icon.y + halfHeight);
+		AddLine(button, right - halfHeight + 1, icon.y + halfHeight, right + 1, bottom);
 		break;
-	case IDM_PREV:
-		AddLine(button, left + 5, top, left + 5, bottom);
-		AddLine(button, right - 1, top, right - 12, middle);
-		AddLine(button, right - 12, middle, right - 1, bottom);
+	}
+	case IDM_PREV: {
+		const UiRect icon = WindowsInflatedRect(rect, 0.3f);
+		const int right = icon.x + icon.width;
+		const int bottom = icon.y + icon.height;
+		const int horizontalGap = static_cast<int>(icon.width * 0.2f);
+		const int bar = icon.x + horizontalGap;
+		const int arrow = right - horizontalGap;
+		const int halfHeight = icon.height / 2;
+		AddLine(button, bar, icon.y, bar, bottom);
+		AddLine(button, arrow, icon.y + 1, arrow - halfHeight + 1, icon.y + halfHeight);
+		AddLine(button, arrow - halfHeight + 1, icon.y + halfHeight, arrow + 1, bottom);
 		break;
-	case IDM_NEXT:
-		AddLine(button, left + 1, top, left + 12, middle);
-		AddLine(button, left + 12, middle, left + 1, bottom);
-		AddLine(button, right - 5, top, right - 5, bottom);
+	}
+	case IDM_NEXT: {
+		const UiRect icon = WindowsInflatedRect(rect, 0.3f);
+		const int right = icon.x + icon.width;
+		const int bottom = icon.y + icon.height;
+		const int horizontalGap = static_cast<int>(icon.width * 0.2f);
+		const int arrow = icon.x + horizontalGap - 1;
+		const int bar = right - horizontalGap;
+		const int halfHeight = icon.height / 2;
+		AddLine(button, arrow + 1, icon.y + 1, arrow + halfHeight, icon.y + halfHeight);
+		AddLine(button, arrow + halfHeight, icon.y + halfHeight, arrow, bottom);
+		AddLine(button, bar, icon.y, bar, bottom);
 		break;
-	case IDM_LAST:
-		AddLine(button, left, top, left + 10, middle);
-		AddLine(button, left + 10, middle, left, bottom);
-		AddLine(button, right - 8, top, right - 8, bottom);
-		AddLine(button, right, top, right, bottom);
+	}
+	case IDM_LAST: {
+		const UiRect icon = WindowsInflatedRect(rect, 0.3f);
+		const int right = icon.x + icon.width;
+		const int bottom = icon.y + icon.height;
+		const int halfHeight = icon.height / 2;
+		const int firstBar = right - static_cast<int>(icon.width * 0.4f);
+		AddLine(button, icon.x, icon.y + 1, icon.x + halfHeight - 1, icon.y + halfHeight);
+		AddLine(button, icon.x + halfHeight - 1, icon.y + halfHeight, icon.x - 1, bottom);
+		AddLine(button, firstBar, icon.y, firstBar, bottom);
+		AddLine(button, right, icon.y, right, bottom);
 		break;
+	}
 	case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
 		if (fitToWindow) {
-			const int inset = rect.width / 4;
-			const int leftEdge = rect.x + inset;
-			const int rightEdge = rect.x + rect.width - inset;
-			const int topEdge = rect.y + inset;
-			const int bottomEdge = rect.y + rect.height - inset;
-			const int corner = (rightEdge - leftEdge) / 3;
-			const int diagonal = (rightEdge - leftEdge) / 2 - 1;
+			button.text.push_back({"1:1",
+				rect.x + (rect.width - oneToOneLabelWidth) / 2,
+				rect.y + (rect.height - textLineHeight) / 2,
+				button.foreground});
+		} else {
+			const UiRect icon = WindowsInflatedRect(rect, 0.25f);
+			const int right = icon.x + icon.width;
+			const int bottom = icon.y + icon.height;
+			const int corner = icon.width / 3;
+			const int diagonal = icon.width / 2 - 1;
 			for (int index = 0; index < 4; ++index) {
 				const bool onLeft = index < 2;
-				const bool onTop = (index & 1) == 0;
-				const int x = onLeft ? leftEdge : rightEdge;
-				const int y = onTop ? topEdge : bottomEdge;
+				const bool onBottom = (index & 1) != 0;
+				const int x = onLeft ? icon.x : right;
+				const int y = onBottom ? bottom : icon.y;
 				const int cornerX = onLeft ? corner : -corner;
 				const int diagonalX = onLeft ? diagonal : -diagonal;
-				const int diagonalY = onTop ? diagonal : -diagonal;
-				const int cornerY = onTop ? corner : -corner;
+				const int diagonalY = onBottom ? -diagonal : diagonal;
+				const int cornerY = onBottom ? -corner : corner;
 				const int adjacentX = onLeft ? 1 : -1;
 				AddLine(button, x, y + cornerY, x, y);
 				AddLine(button, x, y, x + cornerX + adjacentX, y);
 				AddLine(button, x, y, x + diagonalX, y + diagonalY);
 			}
-		} else {
-			const int inset = rect.width / 3;
-			const int leftEdge = rect.x + inset;
-			const int rightEdge = rect.x + rect.width - inset;
-			const int topEdge = rect.y + inset;
-			const int bottomEdge = rect.y + rect.height - inset;
-			const int middle = (leftEdge + rightEdge) / 2;
-			AddLine(button, leftEdge, topEdge, leftEdge, bottomEdge);
-			AddLine(button, leftEdge, topEdge, middle, topEdge);
-			AddLine(button, leftEdge, bottomEdge, middle, bottomEdge);
-			AddLine(button, rightEdge, topEdge, rightEdge, bottomEdge);
-			AddLine(button, rightEdge, topEdge, middle, topEdge);
-			AddLine(button, rightEdge, bottomEdge, middle, bottomEdge);
 		}
 		break;
-	case IDM_FULL_SCREEN_MODE:
-		{
-			const int inset = rect.width / 4;
-			const int leftEdge = rect.x + inset;
-			const int rightEdge = rect.x + rect.width - inset;
-			const int topEdge = rect.y + inset;
-			const int bottomEdge = rect.y + rect.height - inset;
-			button.outlines.push_back({leftEdge, topEdge,
-				rightEdge - leftEdge, bottomEdge - topEdge});
-			AddLine(button, leftEdge, topEdge + (bottomEdge - topEdge) / 4, rightEdge,
-				topEdge + (bottomEdge - topEdge) / 4);
-		}
+	case IDM_FULL_SCREEN_MODE: {
+		const UiRect icon = WindowsInflatedRect(rect, 0.25f);
+		button.outlines.push_back(icon);
+		AddLine(button, icon.x + 1, icon.y + icon.height / 4,
+			icon.x + icon.width, icon.y + icon.height / 4);
 		break;
-	case IDM_ROTATE_90:
-		AddLine(button, left + 4, bottom - 2, right - 2, bottom - 2);
-		AddLine(button, right - 2, bottom - 2, right - 2, top + 7);
-		AddLine(button, right - 2, top + 7, right - 9, top + 7);
-		AddLine(button, right - 9, top + 7, right - 5, top + 3);
-		AddLine(button, right - 9, top + 7, right - 5, top + 11);
+	}
+	case IDM_ROTATE_90: {
+		const UiRect icon = WindowsInflatedRect(rect, 0.3f);
+		const int right = icon.x + icon.width;
+		const int bottom = icon.y + icon.height;
+		const int x = icon.x + static_cast<int>(icon.width * 0.65f);
+		AddLine(button, icon.x - 2, bottom, x, bottom);
+		AddLine(button, x, bottom, x, bottom - static_cast<int>(icon.height * 0.4f));
+		AddLine(button, x, bottom - static_cast<int>(icon.height * 0.4f), icon.x - 2, bottom);
+		AddLine(button, x + 2, bottom, right + 2, bottom);
+		AddLine(button, right + 2, bottom, x + 2, icon.y);
+		AddLine(button, x + 2, icon.y, x + 2, bottom);
 		break;
-	case IDM_ROTATE_270:
-		AddLine(button, left + 2, top + 7, left + 2, bottom - 2);
-		AddLine(button, left + 2, bottom - 2, right - 4, bottom - 2);
-		AddLine(button, left + 2, top + 7, left + 9, top + 7);
-		AddLine(button, left + 9, top + 7, left + 5, top + 3);
-		AddLine(button, left + 9, top + 7, left + 5, top + 11);
+	}
+	case IDM_ROTATE_270: {
+		const UiRect icon = WindowsInflatedRect(rect, 0.3f);
+		const int right = icon.x + icon.width;
+		const int bottom = icon.y + icon.height;
+		const int x = icon.x + static_cast<int>(icon.width * 0.33f);
+		AddLine(button, icon.x - 2, bottom, x, bottom);
+		AddLine(button, x, bottom, x, icon.y);
+		AddLine(button, x, icon.y, icon.x - 2, bottom);
+		AddLine(button, x + 2, bottom, right + 2, bottom);
+		AddLine(button, right + 2, bottom, x + 2,
+			bottom - static_cast<int>(icon.height * 0.4f));
+		AddLine(button, x + 2, bottom - static_cast<int>(icon.height * 0.4f), x + 2, bottom);
 		break;
+	}
 	case kNavigationSortModeCommand:
 		button.text.push_back({sortLabel,
 			rect.x + (rect.width - sortLabelWidth) / 2,
@@ -192,7 +221,7 @@ InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 
 NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight,
 	int mouseX, int mouseY, bool fitToWindow, FileList::SortMode sortMode,
-	int sortLabelWidth, int textLineHeight) {
+	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight) {
 	constexpr int buttonSize = 26;
 	constexpr int panelHeight = 32;
 	constexpr int gap = 5;
@@ -218,7 +247,8 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 		button.hovered = Contains(button.rect, mouseX, mouseY);
 		button.foreground = button.hovered ? kHighlightColor : kGuiColor;
 		button.foreground.alpha = plan.opacity;
-		AddNavigationIcon(button, fitToWindow, sortLabel, sortLabelWidth, textLineHeight);
+		AddNavigationIcon(button, fitToWindow, sortLabel, sortLabelWidth,
+			oneToOneLabelWidth, textLineHeight);
 		plan.buttons.push_back(std::move(button));
 		x += buttonSize + gap;
 		if (index == 4 || index == 6) x += separator;

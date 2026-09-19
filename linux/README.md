@@ -56,8 +56,9 @@ they support.
    last, ordering, fit/actual, rotate, and fullscreen controls with action tooltips. By default it
    appears when the pointer reaches the lower edge, with options to keep it shown or disable it.
    Its compact 32-pixel height, 26-pixel outlined buttons, off-white icons, and yellow hover feedback
-   follow the original Windows panel style. Rendering is clipped to its bounds, and its visibility
-   and hover preference persist.
+   follow the original Windows panel style. Navigation, fit/actual-size, window, and rotation glyphs
+   use the original Windows geometry and show the action that clicking will perform. Rendering is
+   clipped to the panel bounds, and its visibility and hover preference persist.
 
 8. **Complete adaptive context menu.** The Linux-rendered menu uses the Windows `PopupMenu` command
    vocabulary and shows shortcuts and checked states. Its compact view keeps common actions visible;

@@ -1545,7 +1545,8 @@ private:
 		const std::string sortLabel = jpegview_linux::SortModeShortLabel(fileList_.GetSorting());
 		return jpegview_linux::BuildNavigationPanelPaint(windowWidth, windowHeight,
 			lastMouseX_, lastMouseY_, viewport_.IsFitToWindow(), fileList_.GetSorting(),
-			TextWidth(sortLabel, kUiTextScale), TextLineHeight(kUiTextScale));
+			TextWidth(sortLabel, kUiTextScale), TextWidth("1:1", kUiTextScale),
+			TextLineHeight(kUiTextScale));
 	}
 
 	static bool PointInRect(int x, int y, const SDL_Rect& rect) {

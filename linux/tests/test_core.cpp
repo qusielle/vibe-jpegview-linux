@@ -2078,7 +2078,7 @@ void TestViewerChromePaintPlans() {
 		"expanded EXIF spectrum or collapse button was laid out incorrectly");
 
 	jpegview_linux::NavigationPanelPaint navigation = jpegview_linux::BuildNavigationPanelPaint(
-		800, 600, 385, 585, true, FileList::SortMode::LastModificationTime, 7, 11);
+		800, 600, 385, 585, true, FileList::SortMode::LastModificationTime, 7, 18, 11);
 	Expect(navigation.panel.x == 249 && navigation.panel.y == 568 &&
 		navigation.panel.width == 302 && navigation.panel.height == 32 &&
 		navigation.opacity == 255 && navigation.buttons.size() == 9,
@@ -2088,7 +2088,10 @@ void TestViewerChromePaintPlans() {
 		navigation.buttons[7].rect.x == 488,
 		"navigation paint plan lost section spacing");
 	Expect(navigation.buttons[0].command == IDM_FIRST && navigation.buttons[0].lines.size() == 4 &&
-		navigation.buttons[0].lines[0].x1 == 263 && navigation.buttons[0].lines[0].y1 == 579 &&
+		navigation.buttons[0].lines[0].x1 == 262 && navigation.buttons[0].lines[0].y1 == 578 &&
+		navigation.buttons[0].lines[0].y2 == 590 &&
+		navigation.buttons[0].lines[2].x1 == 274 &&
+		navigation.buttons[0].lines[2].x2 == 269 &&
 		navigation.buttons[0].foreground.red == 243 &&
 		navigation.buttons[0].foreground.green == 242 &&
 		navigation.buttons[0].foreground.blue == 231,
@@ -2100,13 +2103,21 @@ void TestViewerChromePaintPlans() {
 		navigation.buttons[4].foreground.green == 205 &&
 		navigation.buttons[4].foreground.blue == 0,
 		"navigation sort button did not expose state and hover in its paint plan");
-	Expect(navigation.buttons[5].lines.size() == 12,
-		"fit-mode navigation icon did not use compact outward-corner geometry");
+	Expect(navigation.buttons[5].lines.empty() && navigation.buttons[5].text.size() == 1 &&
+		navigation.buttons[5].text[0].text == "1:1" &&
+		navigation.buttons[6].outlines.size() == 1 &&
+		navigation.buttons[6].outlines[0].width == 14 &&
+		navigation.buttons[7].lines.size() == 6 &&
+		navigation.buttons[7].lines[0].x1 == 493 &&
+		navigation.buttons[7].lines[0].x2 == 502 &&
+		navigation.buttons[8].lines.size() == 6,
+		"fit or rotation controls did not use the original Windows action glyphs");
 	navigation = jpegview_linux::BuildNavigationPanelPaint(
-		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 11);
+		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 18, 11);
 	Expect(navigation.opacity == 128 && navigation.buttons[0].foreground.alpha == 128 &&
-		navigation.buttons[5].lines.size() == 6 && navigation.buttons[4].text[0].text == "N",
-		"actual-size navigation icon or name-order label is incorrect");
+		navigation.buttons[5].lines.size() == 12 && navigation.buttons[5].text.empty() &&
+		navigation.buttons[4].text[0].text == "N",
+		"fit-action navigation icon or name-order label is incorrect");
 
 	Expect(jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, false,
 		FileList::SortMode::FileName) == "Full screen mode (F11)" &&
