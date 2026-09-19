@@ -2288,19 +2288,33 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 	}
 
 	jpegview_linux::SystemFont font("Sans 10");
-	Expect(font.LineHeight() == jpegview_linux::Tahoma12LineHeight() &&
-		font.TextWidth("iiii") < font.TextWidth("WWWW") &&
-		font.TextWidth("Tahoma 12") == jpegview_linux::Tahoma12TextWidth("Tahoma 12"),
-		"printable ASCII did not use the proportional 12-point bitmap metrics");
-	Expect(jpegview_linux::Tahoma12CanRender("Mixed Case 123") &&
-		!jpegview_linux::Tahoma12CanRender(u8"café"),
+	Expect(font.LineHeight() == jpegview_linux::Terminus12LineHeight() &&
+		font.TextWidth("iiii") == font.TextWidth("WWWW") &&
+		font.TextWidth("Terminus 12") == jpegview_linux::Terminus12TextWidth("Terminus 12"),
+		"printable ASCII did not use the fixed-width 12-point bitmap metrics");
+	Expect(jpegview_linux::Terminus12CanRender("Mixed Case 123") &&
+		!jpegview_linux::Terminus12CanRender(u8"café"),
 		"bitmap-font coverage did not distinguish printable ASCII from Unicode");
-	const jpegview_linux::BitmapFontGlyph& uppercase = jpegview_linux::Tahoma12Glyph('A');
-	const jpegview_linux::BitmapFontGlyph& lowercase = jpegview_linux::Tahoma12Glyph('a');
+	const jpegview_linux::BitmapFontGlyph& uppercase = jpegview_linux::Terminus12Glyph('A');
+	const jpegview_linux::BitmapFontGlyph& lowercase = jpegview_linux::Terminus12Glyph('a');
+	Expect(jpegview_linux::Terminus12LineHeight() == 17 && uppercase.advance == 8,
+		"12-point bitmap font metrics did not match the 96-DPI screen scale");
 	Expect(uppercase.pixelOffset != lowercase.pixelOffset,
 		"12-point bitmap font mapped lowercase letters to uppercase glyphs");
+	const std::uint8_t expectedAdvance = uppercase.advance;
+	for (unsigned int character = 32; character <= 126; ++character) {
+		const jpegview_linux::BitmapFontGlyph& glyph = jpegview_linux::Terminus12Glyph(
+			static_cast<unsigned char>(character));
+		Expect(glyph.advance == expectedAdvance,
+			"12-point Terminus bitmap glyphs do not use a fixed-width advance");
+		const std::uint8_t* pixels = jpegview_linux::Terminus12GlyphPixels(glyph);
+		const std::size_t pixelCount = static_cast<std::size_t>(glyph.width) * glyph.height;
+		Expect(std::all_of(pixels, pixels + pixelCount, [](std::uint8_t value) {
+			return value == 0 || value == 255;
+		}), "embedded Terminus glyph contains antialiased pixel values");
+	}
 	const jpegview_linux::RasterizedText asciiRaster = font.Rasterize("Mixed Case");
-	Expect(asciiRaster.width > 0 && asciiRaster.height == jpegview_linux::Tahoma12LineHeight() &&
+	Expect(asciiRaster.width > 0 && asciiRaster.height == jpegview_linux::Terminus12LineHeight() &&
 		!asciiRaster.argb.empty() &&
 		std::any_of(asciiRaster.argb.begin(), asciiRaster.argb.end(), [](std::uint32_t pixel) {
 			return (pixel >> 24) > 0 && (pixel >> 24) < 255;

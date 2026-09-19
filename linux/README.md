@@ -190,7 +190,9 @@ remain at their native size and are centered. Larger images are reduced to fit a
 
 The native navigation panel, menus, tooltips, information overlays, and modal dialogs use
 semi-transparent backgrounds so the image remains partially visible underneath them. Printable
-ASCII text uses the crisp embedded Tahoma bitmap; text requiring Unicode uses the desktop font
+ASCII text uses the crisp embedded 12-point Terminus bitmap. The atlas is generated from
+`TerminusTTF-4.47.0.ttf` with FreeType monochrome rendering at 96 dpi, matching the system-font
+renderer. The TTF itself is not bundled. Text requiring Unicode uses the desktop font
 discovered from XFCE, GTK, xsettingsd, or KDE configuration. Set `JPEGVIEW_FONT` to a Pango font
 description such as `Sans 11` to override desktop discovery for that Unicode fallback.
 
