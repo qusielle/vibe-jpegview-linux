@@ -12,19 +12,32 @@ double ClampedZoom(double zoom) {
 	return std::clamp(zoom, kMinimumZoom, kMaximumZoom);
 }
 
-} // namespace
-
-const char* Viewport::ScaleMode() const {
-	if (!fitToWindow_) return "manual";
-	if (fillWithCrop_ && noEnlarge_) return "fill_no_enlarge";
-	if (fillWithCrop_) return "fill";
-	if (noEnlarge_) return "fit_no_enlarge";
+const char* ScaleModeName(const ViewportSnapshot& state) {
+	if (!state.fitToWindow) return "manual";
+	if (state.fillWithCrop && state.noEnlarge) return "fill_no_enlarge";
+	if (state.fillWithCrop) return "fill";
+	if (state.noEnlarge) return "fit_no_enlarge";
 	return "fit";
 }
 
+} // namespace
+
+const char* Viewport::ScaleMode() const {
+	return ScaleModeName(Snapshot());
+}
+
+const char* Viewport::NavigationScaleMode() const {
+	return ScaleModeName(navigationState_);
+}
+
 void Viewport::LoadScaleMode(std::string_view mode, bool manualZoomSet, double manualZoom) {
+	(void)manualZoomSet;
+	(void)manualZoom;
 	if (mode == "manual") {
-		SetManualZoom(manualZoomSet ? manualZoom : zoom_);
+		// Manual zoom is transient. The persisted non-fit mode represents Actual
+		// Size so an old ad-hoc zoom cannot leak into a newly opened file.
+		SetManualZoom(1.0);
+		navigationState_ = Snapshot();
 		return;
 	}
 
@@ -33,6 +46,7 @@ void Viewport::LoadScaleMode(std::string_view mode, bool manualZoomSet, double m
 	noEnlarge_ = mode != "fit" && mode != "fill";
 	offsetX_ = 0.0;
 	offsetY_ = 0.0;
+	navigationState_ = Snapshot();
 }
 
 ViewportSnapshot Viewport::Snapshot() const {
@@ -41,12 +55,14 @@ ViewportSnapshot Viewport::Snapshot() const {
 
 void Viewport::Restore(const ViewportSnapshot& snapshot, int imageWidth, int imageHeight,
 	int windowWidth, int windowHeight) {
+	const ViewportSnapshot navigationState = navigationState_;
 	if (snapshot.fitToWindow) {
 		Fit(imageWidth, imageHeight, windowWidth, windowHeight,
 			snapshot.fillWithCrop, snapshot.noEnlarge);
 	} else {
 		SetManualZoom(snapshot.zoom);
 	}
+	navigationState_ = navigationState;
 }
 
 void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowHeight,
@@ -65,10 +81,12 @@ void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowH
 	noEnlarge_ = noEnlarge;
 	offsetX_ = 0.0;
 	offsetY_ = 0.0;
+	navigationState_ = Snapshot();
 }
 
 void Viewport::ActualSize() {
 	SetManualZoom(1.0);
+	navigationState_ = Snapshot();
 }
 
 void Viewport::ZoomAt(double factor, int mouseX, int mouseY, int imageWidth, int imageHeight,

@@ -1165,9 +1165,9 @@ void TestViewportModesAndGeometry() {
 void TestViewportManualZoomPanAndRestore() {
 	jpegview_linux::Viewport viewport;
 	viewport.LoadScaleMode("manual", true, 100.0);
-	ExpectNear(viewport.Zoom(), jpegview_linux::kMaximumZoom, 0.0001, "manual zoom was not clamped high");
+	ExpectNear(viewport.Zoom(), 1.0, 0.0001, "persisted transient zoom was restored instead of actual size");
 	viewport.LoadScaleMode("manual", true, 0.0001);
-	ExpectNear(viewport.Zoom(), jpegview_linux::kMinimumZoom, 0.0001, "manual zoom was not clamped low");
+	ExpectNear(viewport.Zoom(), 1.0, 0.0001, "persisted transient zoom replaced actual size");
 
 	viewport.ActualSize();
 	viewport.ZoomAt(2.0, 150, 75, 200, 100, 400, 200);
@@ -1197,6 +1197,39 @@ void TestViewportManualZoomPanAndRestore() {
 	viewport.ZoomAt(2.0, 0, 0, 0, 100, 500, 300);
 	viewport.ZoomAt(-1.0, 0, 0, 100, 100, 500, 300);
 	ExpectNear(viewport.Zoom(), zoomBeforeInvalidInput, 0.0001, "invalid zoom input changed viewport state");
+}
+
+void TestViewportNavigationResetsTransientZoom() {
+	jpegview_linux::Viewport viewport;
+	viewport.Fit(1000, 600, 500, 300, false, true);
+	viewport.ZoomAt(2.0, 250, 150, 1000, 600, 500, 300);
+	Expect(std::string(viewport.ScaleMode()) == "manual", "zoom did not affect the current image");
+	const jpegview_linux::ViewportSnapshot fitNavigation = viewport.NavigationSnapshot();
+	Expect(fitNavigation.fitToWindow && !fitNavigation.fillWithCrop && fitNavigation.noEnlarge,
+		"transient zoom replaced the fit navigation mode");
+	viewport.Restore(fitNavigation, 2000, 1000, 500, 300);
+	ExpectNear(viewport.Zoom(), 0.25, 0.0001, "next image retained transient zoom instead of fitting");
+
+	viewport.Fit(1000, 500, 500, 300, true, false);
+	viewport.Pan(30.0, 20.0);
+	const jpegview_linux::ViewportSnapshot fillNavigation = viewport.NavigationSnapshot();
+	Expect(fillNavigation.fitToWindow && fillNavigation.fillWithCrop && !fillNavigation.noEnlarge,
+		"transient pan replaced the fill navigation mode");
+
+	viewport.ActualSize();
+	viewport.ZoomAt(3.0, 250, 150, 200, 100, 500, 300);
+	const jpegview_linux::ViewportSnapshot actualSizeNavigation = viewport.NavigationSnapshot();
+	Expect(!actualSizeNavigation.fitToWindow,
+		"actual-size navigation was incorrectly converted to a fit mode");
+	ExpectNear(actualSizeNavigation.zoom, 1.0, 0.0001,
+		"zooming replaced actual size as the navigation zoom");
+	viewport.Restore(actualSizeNavigation, 400, 200, 500, 300);
+	ExpectNear(viewport.Zoom(), 1.0, 0.0001, "next image retained zoom instead of actual size");
+
+	viewport.LoadScaleMode("manual", true, 2.5);
+	ExpectNear(viewport.Zoom(), 1.0, 0.0001, "legacy manual setting was restored instead of actual size");
+	ExpectNear(viewport.NavigationZoom(), 1.0, 0.0001,
+		"legacy manual setting was allowed to propagate to subsequent images");
 }
 
 void TestResizeModelAspectRatioValidationAndFilters() {
@@ -1344,6 +1377,7 @@ int main() {
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
+	RunTest("viewport-navigation-resets-transient-zoom", TestViewportNavigationResetsTransientZoom, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);

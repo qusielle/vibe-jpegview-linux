@@ -201,6 +201,8 @@ sleep 0.2
 stop_viewer
 
 settings="$temporary/config/jpegview-linux/settings.conf"
+grep -q '^scale_mode=fit_no_enlarge$' "$settings"
+grep -q '^manual_zoom=1$' "$settings"
 grep -q '^sort_mode=file_name$' "$settings"
 grep -q '^sort_ascending=1$' "$settings"
 grep -q '^show_filename=1$' "$settings"

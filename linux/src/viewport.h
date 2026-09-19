@@ -30,8 +30,11 @@ public:
 	bool NoEnlarge() const { return noEnlarge_; }
 
 	const char* ScaleMode() const;
+	const char* NavigationScaleMode() const;
+	double NavigationZoom() const { return navigationState_.zoom; }
 	void LoadScaleMode(std::string_view mode, bool manualZoomSet, double manualZoom);
 	ViewportSnapshot Snapshot() const;
+	ViewportSnapshot NavigationSnapshot() const { return navigationState_; }
 
 	void Restore(const ViewportSnapshot& snapshot, int imageWidth, int imageHeight,
 		int windowWidth, int windowHeight);
@@ -54,6 +57,7 @@ private:
 	bool fitToWindow_ = true;
 	bool fillWithCrop_ = false;
 	bool noEnlarge_ = true;
+	ViewportSnapshot navigationState_;
 };
 
 } // namespace jpegview_linux

@@ -862,19 +862,15 @@ private:
 		viewport_.LoadScaleMode(settings.scaleMode, settings.manualZoomSet, settings.manualZoom);
 	}
 
-	const char* CurrentScaleMode() const {
-		return viewport_.ScaleMode();
-	}
-
 	void SaveSettings() const {
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
 		if (settingsPath.empty()) return;
 
 		jpegview_linux::ViewerSettings settings;
-		settings.scaleMode = CurrentScaleMode();
+		settings.scaleMode = viewport_.NavigationScaleMode();
 		settings.sortMode = jpegview_linux::SortModeSettingName(fileList_.GetSorting());
 		settings.sortAscending = fileList_.IsSortedAscending();
-		settings.manualZoom = viewport_.Zoom();
+		settings.manualZoom = viewport_.NavigationZoom();
 		settings.maximized = maximized_;
 		settings.navigationPanelEnabled = navigationPanelEnabled_;
 		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
@@ -889,7 +885,7 @@ private:
 		if (fileList_.Empty()) {
 			return false;
 		}
-		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
+		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.NavigationSnapshot();
 		metadata_ = {};
 		jpegComment_.clear();
 		ClearTransition();
