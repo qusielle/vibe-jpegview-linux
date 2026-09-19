@@ -3607,6 +3607,27 @@ private:
 		MoveFileDialogSelection(direction * FileDialogVisibleRows());
 	}
 
+	void FocusFileDialogEntry(const fs::path& path) {
+		const auto entry = std::find_if(fileDialogEntries_.begin(), fileDialogEntries_.end(),
+			[&path](const FileDialogEntry& candidate) { return candidate.path == path; });
+		if (entry == fileDialogEntries_.end()) return;
+		fileDialogSelected_ = static_cast<int>(std::distance(fileDialogEntries_.begin(), entry));
+		EnsureFileDialogSelectionVisible();
+	}
+
+	void NavigateFileDialogDirectory(const fs::path& directory, bool returningToParent) {
+		const fs::path previousDirectory = fileDialogDirectory_;
+		fileDialogDirectory_ = directory;
+		if (!fileDialogSave_) fileDialogFilter_.clear();
+		RefreshFileDialog();
+		if (fileDialogSave_) {
+			fileDialogSelected_ = -1;
+		} else if (returningToParent) {
+			FocusFileDialogEntry(previousDirectory);
+		}
+		fileDialogOverwriteConfirmed_ = false;
+	}
+
 	void ActivateFileDialogSelection() {
 		if (fileDialogSave_ && fileDialogSelected_ < 0) {
 			SaveImageFromDialog();
@@ -3615,11 +3636,7 @@ private:
 		if (fileDialogSelected_ < 0 || fileDialogSelected_ >= static_cast<int>(fileDialogEntries_.size())) return;
 		const FileDialogEntry entry = fileDialogEntries_[fileDialogSelected_];
 		if (entry.directory) {
-			fileDialogDirectory_ = entry.path;
-			if (!fileDialogSave_) fileDialogFilter_.clear();
-			RefreshFileDialog();
-			if (fileDialogSave_) fileDialogSelected_ = -1;
-			fileDialogOverwriteConfirmed_ = false;
+			NavigateFileDialogDirectory(entry.path, entry.parent);
 			return;
 		}
 		if (fileDialogSave_) {
@@ -3667,10 +3684,7 @@ private:
 				}
 				const fs::path parent = fileDialogDirectory_.parent_path();
 				if (!parent.empty() && parent != fileDialogDirectory_) {
-					fileDialogDirectory_ = parent;
-					RefreshFileDialog();
-					if (fileDialogSave_) fileDialogSelected_ = -1;
-					if (fileDialogSave_) fileDialogOverwriteConfirmed_ = false;
+					NavigateFileDialogDirectory(parent, true);
 				}
 			}
 			break;

@@ -245,7 +245,8 @@ or random sorting. Ctrl+O opens the native in-app file browser; type any part of
 its files and folders case-insensitively, then press Enter to open the selected match. Backspace
 edits the filter and navigates to the parent folder once the filter is empty. Up/Down move one row
 and PageUp/PageDown move one visible page; all four keys repeat while held. Entering a folder
-selects its first child rather than the `[..]` parent row. Folder rows show
+selects its first child rather than the `[..]` parent row; returning to the parent selects the
+folder that was just exited. Folder rows show
 right-aligned counts of compatible images and subdirectories at their immediate level; these are
 calculated in the background. Ctrl+R reloads, and
 Ctrl+N toggles the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the

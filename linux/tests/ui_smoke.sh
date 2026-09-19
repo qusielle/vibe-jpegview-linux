@@ -181,6 +181,17 @@ esac
 
 DISPLAY=":$display_number" xdotool key ctrl+o
 DISPLAY=":$display_number" xdotool key BackSpace
+DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+restored_directory_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$restored_directory_title" in
+	inside-first.ppm*) ;;
+	*) echo "UI smoke test: returning to the parent did not focus the directory just exited" >&2; exit 1 ;;
+esac
+
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool type --delay 20 '.ppm'
 DISPLAY=":$display_number" xdotool keydown Down
 sleep 0.9
