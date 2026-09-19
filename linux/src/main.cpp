@@ -7,6 +7,7 @@
 #include "settings.h"
 #include "sort_mode.h"
 #include "desktop_applications.h"
+#include "batch_copy.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -42,6 +43,7 @@
 #include <vector>
 
 namespace fs = std::filesystem;
+using jpegview_linux::BatchCopyItem;
 
 namespace {
 
@@ -93,15 +95,6 @@ struct FileDialogEntry {
 	fs::path path;
 	bool directory = false;
 	bool parent = false;
-};
-
-struct BatchCopyItem {
-	fs::path source;
-	std::time_t modificationTime = 0;
-	bool selected = false;
-	bool copy = false;
-	fs::path destination;
-	std::string destinationText;
 };
 
 struct FontGlyph {
@@ -669,92 +662,6 @@ std::time_t FileModificationTime(const fs::path& filename) {
 	struct stat status{};
 	if (stat(filename.c_str(), &status) != 0) return 0;
 	return status.st_mtime;
-}
-
-std::string FormatBatchDate(std::time_t timestamp) {
-	if (timestamp == 0) return {};
-	std::tm localTime{};
-	if (localtime_r(&timestamp, &localTime) == nullptr) return {};
-	char formatted[32]{};
-	if (std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S", &localTime) == 0) return {};
-	return formatted;
-}
-
-void ReplaceAll(std::string& value, const std::string& from, const std::string& to) {
-	if (from.empty()) return;
-	std::size_t position = 0;
-	while ((position = value.find(from, position)) != std::string::npos) {
-		value.replace(position, from.size(), to);
-		position += to.size();
-	}
-}
-
-std::string FirstNumber(const std::string& filename) {
-	std::size_t start = std::string::npos;
-	for (std::size_t index = 0; index < filename.size(); ++index) {
-		if (std::isdigit(static_cast<unsigned char>(filename[index]))) {
-			if (start == std::string::npos) start = index;
-		} else if (start != std::string::npos) {
-			return filename.substr(start, index - start);
-		}
-	}
-	return start == std::string::npos ? std::string() : filename.substr(start);
-}
-
-fs::path PicturesDirectory() {
-	if (const char* pictures = std::getenv("XDG_PICTURES_DIR"); pictures != nullptr && *pictures != '\0') {
-		return AbsoluteNormalized(fs::path(pictures));
-	}
-	if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-		return AbsoluteNormalized(fs::path(home) / "Pictures");
-	}
-	return {};
-}
-
-std::string ExpandBatchPattern(const std::string& pattern, std::size_t selectedIndex,
-	const fs::path& source, std::time_t modificationTime) {
-	std::string result = pattern;
-	const std::string title = source.filename().string();
-	const std::string stem = source.stem().string();
-	const std::string extension = source.extension().string();
-	const std::string number = FirstNumber(title);
-	ReplaceAll(result, "%x", std::to_string(selectedIndex + 1));
-	ReplaceAll(result, "%n", number);
-	for (int digits = 2; digits <= 9; ++digits) {
-		std::ostringstream formatted;
-		formatted << std::setw(digits) << std::setfill('0') << selectedIndex + 1;
-		ReplaceAll(result, "%" + std::to_string(digits) + "x", formatted.str());
-	}
-	ReplaceAll(result, "%f", title);
-	ReplaceAll(result, "%F", stem);
-	ReplaceAll(result, "%e", extension.empty() ? std::string() : extension.substr(1));
-
-	std::tm localTime{};
-	if (modificationTime != 0) localtime_r(&modificationTime, &localTime);
-	char datePart[32]{};
-	if (modificationTime != 0) {
-		std::strftime(datePart, sizeof(datePart), "%H", &localTime);
-		ReplaceAll(result, "%h", datePart);
-		std::strftime(datePart, sizeof(datePart), "%M", &localTime);
-		ReplaceAll(result, "%min", datePart);
-		std::strftime(datePart, sizeof(datePart), "%d", &localTime);
-		ReplaceAll(result, "%d", datePart);
-		std::strftime(datePart, sizeof(datePart), "%m", &localTime);
-		ReplaceAll(result, "%m", datePart);
-		std::strftime(datePart, sizeof(datePart), "%Y", &localTime);
-		ReplaceAll(result, "%y", datePart);
-		std::strftime(datePart, sizeof(datePart), "%y", &localTime);
-		ReplaceAll(result, "%2y", datePart);
-		std::strftime(datePart, sizeof(datePart), "%B", &localTime);
-		ReplaceAll(result, "%3M", std::string(datePart).substr(0, 3));
-		ReplaceAll(result, "%M", datePart);
-	}
-	const fs::path pictures = PicturesDirectory();
-	if (!pictures.empty()) ReplaceAll(result, "%pictures%", pictures.string());
-	// Windows JPEGView patterns use backslashes for subdirectories. Accept
-	// those templates on Linux while still allowing the native '/' separator.
-	std::replace(result.begin(), result.end(), '\\', '/');
-	return result;
 }
 
 std::string FormatFileSize(std::uintmax_t size) {
@@ -2986,30 +2893,8 @@ private:
 		EnsureBatchCopySelectionVisible();
 	}
 
-	fs::path BatchCopyDestination(const BatchCopyItem& item, std::size_t selectedIndex) const {
-		if (batchCopyPattern_.empty()) return {};
-		const std::string expanded = ExpandBatchPattern(batchCopyPattern_, selectedIndex,
-			item.source, item.modificationTime);
-		if (expanded.empty()) return {};
-		const fs::path target(expanded);
-		return AbsoluteNormalized(target.is_absolute() ? target : item.source.parent_path() / target);
-	}
-
 	void UpdateBatchCopyPreview() {
-		std::size_t selectedIndex = 0;
-		for (BatchCopyItem& item : batchCopyEntries_) {
-			item.destination = fs::path{};
-			item.destinationText.clear();
-			item.copy = false;
-			if (!item.selected) continue;
-			item.destinationText = ExpandBatchPattern(batchCopyPattern_, selectedIndex,
-				item.source, item.modificationTime);
-			if (!item.destinationText.empty()) {
-				item.destination = BatchCopyDestination(item, selectedIndex);
-				item.copy = item.destination.parent_path() != item.source.parent_path();
-			}
-			++selectedIndex;
-		}
+		jpegview_linux::UpdateBatchCopyPreview(batchCopyPattern_, batchCopyEntries_);
 	}
 
 	void PreviewBatchCopy() {
@@ -3276,7 +3161,7 @@ private:
 				item.selected ? 255 : 150, item.selected ? 255 : 150, item.selected ? 255 : 150);
 			DrawText(ClipText(InfoText(item.source.filename().string()), 190), list.x + 42, rowTop + 6,
 				kUiTextScale, 235, 235, 235);
-			DrawText(ClipText(FormatBatchDate(item.modificationTime), 125), list.x + 245, rowTop + 6,
+		DrawText(ClipText(jpegview_linux::FormatBatchDate(item.modificationTime), 125), list.x + 245, rowTop + 6,
 				kUiTextScale, 210, 210, 210);
 			const std::string destination = item.destinationText.empty() ? "-" :
 				std::string(item.copy ? ">> " : "") + InfoText(item.destinationText);

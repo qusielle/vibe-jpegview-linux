@@ -5,11 +5,13 @@
 #include "settings.h"
 #include "sort_mode.h"
 #include "desktop_applications.h"
+#include "batch_copy.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -441,6 +443,64 @@ void TestSortModeMappings() {
 	Expect(unchanged == FileList::SortMode::FileName, "unknown sort mode changed the output value");
 }
 
+std::string FormatLocalTime(std::time_t timestamp, const char* format) {
+	std::tm localTime{};
+	Expect(localtime_r(&timestamp, &localTime) != nullptr, "cannot convert test timestamp to local time");
+	char output[64]{};
+	Expect(std::strftime(output, sizeof(output), format, &localTime) != 0,
+		"cannot format test timestamp");
+	return output;
+}
+
+void TestBatchCopyPatternExpansionAndPreview() {
+	const fs::path source = fs::path("/tmp/photos/holiday12.JPG");
+	const std::time_t timestamp = 1706933106; // 2024-02-03 04:05:06 UTC.
+	const fs::path pictures = fs::path("/tmp/Pictures");
+	const std::string pattern = R"(folder\%x-%n-%2x-%3x-%9x-%f-%F-%e-%h-%min-%d-%m-%y-%2y-%3M-%M-%pictures%)";
+	const std::string expanded = jpegview_linux::ExpandBatchPattern(pattern, 4, source, timestamp, pictures);
+	const std::string expected = "folder/5-12-05-005-000000005-holiday12.JPG-holiday12-JPG-" +
+		FormatLocalTime(timestamp, "%H") + "-" + FormatLocalTime(timestamp, "%M") + "-" +
+		FormatLocalTime(timestamp, "%d") + "-" + FormatLocalTime(timestamp, "%m") + "-" +
+		FormatLocalTime(timestamp, "%Y") + "-" + FormatLocalTime(timestamp, "%y") + "-" +
+		FormatLocalTime(timestamp, "%b") + "-" + FormatLocalTime(timestamp, "%B") + "-/tmp/Pictures";
+	Expect(expanded == expected, "batch copy pattern expansion is incorrect: " + expanded);
+	Expect(jpegview_linux::ExpandBatchPattern("%f", 0, fs::path("no-extension"), 0) == "no-extension",
+		"batch copy expansion mishandled a filename without an extension");
+
+	jpegview_linux::BatchCopyItem first;
+	first.source = fs::path("/tmp/photos/a12.jpg");
+	first.modificationTime = timestamp;
+	first.selected = true;
+	jpegview_linux::BatchCopyItem skipped;
+	skipped.source = fs::path("/tmp/photos/b13.jpg");
+	jpegview_linux::BatchCopyItem renamed;
+	renamed.source = fs::path("/tmp/photos/c14.jpg");
+	renamed.selected = true;
+	std::vector<jpegview_linux::BatchCopyItem> items{first, skipped, renamed};
+	jpegview_linux::UpdateBatchCopyPreview("out/%2x-%f", items);
+	Expect(items[0].destinationText == "out/01-a12.jpg", "batch copy preview text is incorrect");
+	Expect(items[0].destination == fs::path("/tmp/photos/out/01-a12.jpg"),
+		"batch copy relative destination was not resolved against the source directory");
+	Expect(items[0].copy, "batch copy preview did not classify a different directory as a copy");
+	Expect(items[1].destination.empty() && items[1].destinationText.empty() && !items[1].copy,
+		"unselected batch copy item was included in the preview");
+	Expect(items[2].destinationText == "out/02-c14.jpg" && items[2].copy,
+		"batch copy selected index did not ignore unselected items");
+	Expect(jpegview_linux::BatchCopyDestination("renamed-%f", items[2], 0) ==
+		fs::path("/tmp/photos/renamed-c14.jpg"), "same-directory rename target is incorrect");
+	items[0].selected = false;
+	items[2].selected = false;
+	items[0].destination = fs::path("stale");
+	items[0].destinationText = "stale";
+	items[0].copy = true;
+	jpegview_linux::UpdateBatchCopyPreview("", items);
+	Expect(items[0].destination.empty() && items[0].destinationText.empty() && !items[0].copy,
+		"empty batch pattern did not clear stale preview state");
+	Expect(jpegview_linux::FormatBatchDate(0).empty(), "zero batch timestamp should format as empty");
+	Expect(jpegview_linux::FormatBatchDate(timestamp) ==
+		FormatLocalTime(timestamp, "%Y-%m-%d %H:%M:%S"), "batch date formatting is incorrect");
+}
+
 void TestDesktopApplicationParsingAndExecExpansion() {
 	TemporaryDirectory temporary;
 	const fs::path desktopFile = temporary.path() / "viewer.desktop";
@@ -705,6 +765,7 @@ int main() {
 	RunTest("decoder-failures", TestDecoderFailures, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);
+	RunTest("batch-copy-pattern-expansion-and-preview", TestBatchCopyPatternExpansionAndPreview, failures);
 	RunTest("desktop-application-parsing-and-expansion", TestDesktopApplicationParsingAndExecExpansion, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	if (failures != 0) {
