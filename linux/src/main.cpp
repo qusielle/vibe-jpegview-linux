@@ -12,6 +12,7 @@
 #include "input_commands.h"
 #include "viewport.h"
 #include "resize_model.h"
+#include "context_menu_model.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -47,6 +48,7 @@
 
 namespace fs = std::filesystem;
 using jpegview_linux::BatchCopyItem;
+using jpegview_linux::MenuItem;
 
 namespace {
 
@@ -82,16 +84,6 @@ constexpr int kMaxImageDimension = 65535;
 struct ControlButton {
 	SDL_Rect rect{};
 	int command = IDM_NEXT;
-};
-
-struct MenuItem {
-	const char* label = nullptr;
-	int command = IDM_NEXT;
-	bool separator = false;
-	bool checked = false;
-	bool enabled = true;
-	const char* shortcut = nullptr;
-	bool advanced = false;
 };
 
 struct FileDialogEntry {
@@ -2472,21 +2464,8 @@ private:
 			}
 		}
 		if (!advancedOptions) {
-			std::vector<MenuItem> compactItems;
-			compactItems.reserve(items.size());
-			bool advancedOptionAdded = false;
-			for (const MenuItem& item : items) {
-				if (item.advanced) {
-					if (!advancedOptionAdded) {
-						compactItems.push_back({"Show Advanced Options", kContextMenuShowAdvanced,
-							false, false, true, nullptr});
-						advancedOptionAdded = true;
-					}
-					continue;
-				}
-				compactItems.push_back(item);
-			}
-			items = std::move(compactItems);
+			items = jpegview_linux::CompactMenuItems(items, kContextMenuShowAdvanced,
+				"Show Advanced Options");
 		}
 		return items;
 	}
@@ -2608,19 +2587,10 @@ private:
 	}
 
 	void MoveContextMenuSelection(int direction) {
-		if (contextMenuItems_.empty()) return;
-		int candidate = menuSelected_;
-		for (std::size_t tries = 0; tries < contextMenuItems_.size(); ++tries) {
-			candidate += direction;
-			if (candidate < 0) candidate = static_cast<int>(contextMenuItems_.size()) - 1;
-			if (candidate >= static_cast<int>(contextMenuItems_.size())) candidate = 0;
-			if (!contextMenuItems_[candidate].separator && contextMenuItems_[candidate].command != 0 &&
-				contextMenuItems_[candidate].enabled) {
-				menuSelected_ = candidate;
-				EnsureContextMenuSelectionVisible();
-				return;
-			}
-		}
+		const int selection = jpegview_linux::NextMenuSelection(contextMenuItems_, menuSelected_, direction);
+		if (selection < 0) return;
+		menuSelected_ = selection;
+		EnsureContextMenuSelectionVisible();
 	}
 
 	void ActivateContextMenuSelection(bool& running) {

@@ -50,8 +50,8 @@ STATIC_RUNTIME ?= -static-libstdc++ -static-libgcc
 BUILD_DIR ?= build
 TARGET := $(BUILD_DIR)/jpegview-linux
 TEST_TARGET := $(BUILD_DIR)/jpegview-tests
-SOURCES := src/main.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/clipboard.cpp src/clipboard.h src/settings.cpp src/settings.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
-TEST_SOURCES := tests/test_core.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/settings.cpp src/settings.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h third_party/stb_image.h ../src/JPEGView/resource.h
+SOURCES := src/main.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/clipboard.cpp src/clipboard.h src/settings.cpp src/settings.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
+TEST_SOURCES := tests/test_core.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/settings.cpp src/settings.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h third_party/stb_image.h ../src/JPEGView/resource.h
 
 .PHONY: all clean run test test-ui check appimage
 
@@ -59,14 +59,14 @@ all: $(TARGET)
 
 $(TARGET): $(SOURCES)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(CODEC_DEFINES) $(SDL2_CFLAGS) $(CODEC_CFLAGS) -Isrc -Ithird_party src/main.cpp src/file_list.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/clipboard.cpp src/settings.cpp src/sort_mode.cpp src/desktop_applications.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp -o $@ $(LDFLAGS) $(STATIC_RUNTIME) $(SDL2_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+	$(CXX) $(CXXFLAGS) $(CODEC_DEFINES) $(SDL2_CFLAGS) $(CODEC_CFLAGS) -Isrc -Ithird_party src/main.cpp src/file_list.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/clipboard.cpp src/settings.cpp src/sort_mode.cpp src/desktop_applications.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp -o $@ $(LDFLAGS) $(STATIC_RUNTIME) $(SDL2_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
 
 run: $(TARGET)
 	$(TARGET) $(ARGS)
 
 $(TEST_TARGET): $(TEST_SOURCES)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(CODEC_DEFINES) $(CODEC_CFLAGS) -Isrc -Ithird_party tests/test_core.cpp src/file_list.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/settings.cpp src/sort_mode.cpp src/desktop_applications.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp -o $@ $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+	$(CXX) $(CXXFLAGS) $(CODEC_DEFINES) $(CODEC_CFLAGS) -Isrc -Ithird_party tests/test_core.cpp src/file_list.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/settings.cpp src/sort_mode.cpp src/desktop_applications.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp -o $@ $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
 
 test: $(TEST_TARGET)
 	$(TEST_TARGET)

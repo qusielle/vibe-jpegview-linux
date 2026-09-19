@@ -10,6 +10,7 @@
 #include "input_commands.h"
 #include "viewport.h"
 #include "resize_model.h"
+#include "context_menu_model.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -1225,6 +1226,41 @@ void TestResizeModelAspectRatioValidationAndFilters() {
 	Expect(model.Filter() == 3, "resize filter did not wrap backward");
 }
 
+void TestContextMenuCompactionAndSelection() {
+	const std::vector<jpegview_linux::MenuItem> complete = {
+		{"Open", 10},
+		{nullptr, 0, true},
+		{"Advanced heading", 0, false, false, true, nullptr, true},
+		{"Advanced command", 20, false, false, true, "Ctrl+A", true},
+		{"Disabled", 30, false, false, false},
+		{"Close", 40},
+	};
+	const std::vector<jpegview_linux::MenuItem> compact =
+		jpegview_linux::CompactMenuItems(complete, -1, "Show Advanced Options");
+	Expect(compact.size() == 5, "compact menu retained advanced entries or lost core entries");
+	Expect(std::string(compact[2].label) == "Show Advanced Options" && compact[2].command == -1,
+		"compact menu did not insert the one-off advanced command at the first advanced item");
+	Expect(std::count_if(compact.begin(), compact.end(), [](const jpegview_linux::MenuItem& item) {
+		return item.command == -1;
+	}) == 1, "compact menu inserted the advanced command more than once");
+	Expect(std::none_of(compact.begin(), compact.end(), [](const jpegview_linux::MenuItem& item) {
+		return item.advanced;
+	}), "compact menu retained an advanced item");
+
+	Expect(jpegview_linux::NextMenuSelection(compact, -1, 1) == 0,
+		"menu selection did not start at first command");
+	Expect(jpegview_linux::NextMenuSelection(compact, 0, 1) == 2,
+		"menu selection did not skip separator");
+	Expect(jpegview_linux::NextMenuSelection(compact, 2, 1) == 4,
+		"menu selection did not skip disabled item");
+	Expect(jpegview_linux::NextMenuSelection(compact, 4, 1) == 0,
+		"menu selection did not wrap forward");
+	Expect(jpegview_linux::NextMenuSelection(compact, 0, -1) == 4,
+		"menu selection did not wrap backward");
+	Expect(jpegview_linux::NextMenuSelection({{nullptr, 0, true}, {"Disabled", 1, false, false, false}},
+		-1, 1) == -1, "menu with no actionable items returned a selection");
+}
+
 void RunTest(const char* name, void (*test)(), int& failures) {
 	try {
 		test();
@@ -1259,6 +1295,7 @@ int main() {
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
+	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
 		return 1;
