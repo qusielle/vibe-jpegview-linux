@@ -9,6 +9,7 @@
 #include "image_formats.h"
 #include "input_commands.h"
 #include "viewport.h"
+#include "resize_model.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -1174,6 +1175,56 @@ void TestViewportManualZoomPanAndRestore() {
 	ExpectNear(viewport.Zoom(), zoomBeforeInvalidInput, 0.0001, "invalid zoom input changed viewport state");
 }
 
+void TestResizeModelAspectRatioValidationAndFilters() {
+	jpegview_linux::ResizeModel model;
+	model.Reset(400, 200);
+	Expect(model.OriginalWidth() == 400 && model.OriginalHeight() == 200,
+		"resize model did not retain original dimensions");
+	Expect(model.FieldText(jpegview_linux::ResizeModel::kPercentField) == "100",
+		"resize model did not initialize percentage");
+	Expect(model.Filter() == 2 && std::string(model.FilterName()) == "SHARPEN LOW",
+		"resize model default filter changed");
+
+	model.FieldText(jpegview_linux::ResizeModel::kPercentField) = "50";
+	Expect(model.UpdateFrom(jpegview_linux::ResizeModel::kPercentField), "valid resize percentage was rejected");
+	Expect(model.FieldText(jpegview_linux::ResizeModel::kWidthField) == "200" &&
+		model.FieldText(jpegview_linux::ResizeModel::kHeightField) == "100",
+		"percentage did not update proportional dimensions");
+
+	model.FieldText(jpegview_linux::ResizeModel::kWidthField) = "100";
+	Expect(model.UpdateFrom(jpegview_linux::ResizeModel::kWidthField), "valid resize width was rejected");
+	Expect(model.FieldText(jpegview_linux::ResizeModel::kPercentField) == "25" &&
+		model.FieldText(jpegview_linux::ResizeModel::kHeightField) == "50",
+		"width did not update percentage and proportional height");
+
+	model.FieldText(jpegview_linux::ResizeModel::kHeightField) = "100";
+	Expect(model.UpdateFrom(jpegview_linux::ResizeModel::kHeightField), "valid resize height was rejected");
+	int width = 0;
+	int height = 0;
+	Expect(model.Target(width, height) && width == 200 && height == 100,
+		"resize target did not reflect edited height");
+
+	model.FieldText(jpegview_linux::ResizeModel::kWidthField) = "65535";
+	Expect(!model.UpdateFrom(jpegview_linux::ResizeModel::kWidthField), "oversized pixel count was accepted");
+	Expect(!model.ValidationMessage().empty(), "oversized resize did not provide validation feedback");
+	model.FieldText(jpegview_linux::ResizeModel::kWidthField) = "12px";
+	Expect(!model.Target(width, height), "partially numeric resize target was accepted");
+
+	model.Reset(1, 1);
+	model.FieldText(jpegview_linux::ResizeModel::kPercentField) = "0.1";
+	Expect(!model.UpdateFrom(jpegview_linux::ResizeModel::kPercentField),
+		"percentage producing a zero-sized image was accepted");
+	model.FieldText(jpegview_linux::ResizeModel::kPercentField) = "nan";
+	Expect(!model.UpdateFrom(jpegview_linux::ResizeModel::kPercentField), "non-finite percentage was accepted");
+
+	model.CycleFilter(1);
+	Expect(model.Filter() == 3, "resize filter did not advance");
+	model.CycleFilter(1);
+	Expect(model.Filter() == 0, "resize filter did not wrap forward");
+	model.CycleFilter(-1);
+	Expect(model.Filter() == 3, "resize filter did not wrap backward");
+}
+
 void RunTest(const char* name, void (*test)(), int& failures) {
 	try {
 		test();
@@ -1207,6 +1258,7 @@ int main() {
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
+	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
 		return 1;

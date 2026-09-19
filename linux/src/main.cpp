@@ -11,6 +11,7 @@
 #include "image_formats.h"
 #include "input_commands.h"
 #include "viewport.h"
+#include "resize_model.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -3062,86 +3063,25 @@ private:
 	}
 
 	const char* ResizeFilterName() const {
-		static constexpr const char* names[kResizeFilterCount] = {
-			"BOX / POINT", "LANCZOS / BICUBIC", "SHARPEN LOW", "SHARPEN MEDIUM"
-		};
-		return names[std::clamp(resizeFilter_, 0, kResizeFilterCount - 1)];
+		return resizeModel_.FilterName();
 	}
 
 	std::string& ResizeFieldText(int field) {
-		if (field == kResizeWidth) return resizeWidthText_;
-		if (field == kResizeHeight) return resizeHeightText_;
-		return resizePercentText_;
-	}
-
-	bool ParseResizePercent(double& percent) const {
-		try {
-			std::size_t parsedCharacters = 0;
-			percent = std::stod(resizePercentText_, &parsedCharacters);
-			return parsedCharacters == resizePercentText_.size() && std::isfinite(percent) && percent > 0.0;
-		} catch (const std::exception&) {
-			return false;
-		}
-	}
-
-	bool ParseResizeInteger(const std::string& text, int& value) const {
-		try {
-			std::size_t parsedCharacters = 0;
-			const long long parsed = std::stoll(text, &parsedCharacters);
-			if (parsedCharacters != text.size() || parsed <= 0 || parsed > kMaxImageDimension) return false;
-			value = static_cast<int>(parsed);
-			return true;
-		} catch (const std::exception&) {
-			return false;
-		}
-	}
-
-	bool ValidResizeSize(int width, int height) const {
-		return width > 0 && height > 0 && width <= kMaxImageDimension && height <= kMaxImageDimension &&
-			static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) <= kMaxImagePixels;
+		return resizeModel_.FieldText(field);
 	}
 
 	void UpdateResizeFieldsFrom(int changedField) {
-		if (resizeOriginalWidth_ <= 0 || resizeOriginalHeight_ <= 0) return;
-		int width = 0;
-		int height = 0;
-		double percent = 0.0;
-		if (changedField == kResizePercent) {
-			if (!ParseResizePercent(percent)) return;
-			width = static_cast<int>(std::llround(resizeOriginalWidth_ * percent / 100.0));
-			height = static_cast<int>(std::llround(resizeOriginalHeight_ * percent / 100.0));
-		} else if (changedField == kResizeWidth) {
-			if (!ParseResizeInteger(resizeWidthText_, width)) return;
-			percent = 100.0 * width / resizeOriginalWidth_;
-			height = static_cast<int>(std::llround(resizeOriginalHeight_ * percent / 100.0));
-		} else if (changedField == kResizeHeight) {
-			if (!ParseResizeInteger(resizeHeightText_, height)) return;
-			percent = 100.0 * height / resizeOriginalHeight_;
-			width = static_cast<int>(std::llround(resizeOriginalWidth_ * percent / 100.0));
-		}
-		if (!ValidResizeSize(width, height)) {
-			resizeMessage_ = "Size must be positive and no larger than 65535 x 65535 / 100 MP";
-			return;
-		}
-		resizePercentText_ = std::to_string(std::max(1, static_cast<int>(std::llround(percent))));
-		resizeWidthText_ = std::to_string(width);
-		resizeHeightText_ = std::to_string(height);
-		resizeMessage_.clear();
+		if (resizeModel_.UpdateFrom(changedField)) resizeMessage_.clear();
+		else if (!resizeModel_.ValidationMessage().empty()) resizeMessage_ = resizeModel_.ValidationMessage();
 	}
 
 	bool ResizeTarget(int& width, int& height) const {
-		return ParseResizeInteger(resizeWidthText_, width) && ParseResizeInteger(resizeHeightText_, height) &&
-			ValidResizeSize(width, height);
+		return resizeModel_.Target(width, height);
 	}
 
 	void OpenResizeDialog() {
 		if (image_.width <= 0 || image_.height <= 0) return;
-		resizeOriginalWidth_ = image_.width;
-		resizeOriginalHeight_ = image_.height;
-		resizePercentText_ = "100";
-		resizeWidthText_ = std::to_string(image_.width);
-		resizeHeightText_ = std::to_string(image_.height);
-		resizeFilter_ = 2; // CResizeDlg remembers Sharpen low by default.
+		resizeModel_.Reset(image_.width, image_.height);
 		resizeField_ = kResizePercent;
 		resizeInputPrimed_ = true;
 		resizeMessage_.clear();
@@ -3172,7 +3112,7 @@ private:
 		}
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		Image resizedImage = correctionBaseValid_ ? correctionBase_ : image_;
-		if (!resizedImage.Resize(width, height, resizeFilter_)) {
+		if (!resizedImage.Resize(width, height, resizeModel_.Filter())) {
 			resizeMessage_ = "Resizing failed: not enough memory or the image is too large";
 			return;
 		}
@@ -3199,7 +3139,7 @@ private:
 	}
 
 	void CycleResizeFilter(int direction) {
-		resizeFilter_ = (resizeFilter_ + direction + kResizeFilterCount) % kResizeFilterCount;
+		resizeModel_.CycleFilter(direction);
 		resizeField_ = kResizeFilter;
 	}
 
@@ -3299,7 +3239,7 @@ private:
 		DrawRect(dialog, 190, 190, 190);
 		DrawText("RESIZE IMAGE", dialog.x + 20, dialog.y + 16, kUiTextScale, 255, 255, 255);
 		DrawText("ORIGINAL SIZE", dialog.x + 20, dialog.y + 43, kUiTextScale, 180, 195, 215);
-		DrawText(std::to_string(resizeOriginalWidth_) + "X" + std::to_string(resizeOriginalHeight_),
+		DrawText(std::to_string(resizeModel_.OriginalWidth()) + "X" + std::to_string(resizeModel_.OriginalHeight()),
 			dialog.x + 190, dialog.y + 43, kUiTextScale, 220, 220, 220);
 
 		const char* labels[] = {"NEW SIZE", "NEW WIDTH", "NEW HEIGHT", "FILTER"};
@@ -3310,7 +3250,7 @@ private:
 			SDL_RenderFillRect(renderer_, &rect);
 			DrawRect(rect, focused ? 100 : 75, focused ? 130 : 75, focused ? 165 : 75);
 			DrawText(labels[field], dialog.x + 20, rect.y + 9, kUiTextScale, 205, 215, 230);
-			const std::string value = field == kResizeFilter ? ResizeFilterName() : ResizeFieldText(field);
+			const std::string value = field == kResizeFilter ? ResizeFilterName() : resizeModel_.FieldText(field);
 			DrawText(ClipText(value, rect.w - 16), rect.x + 8, rect.y + 9, kUiTextScale, 255, 255, 255);
 			if (field == kResizePercent) DrawText("%", rect.x + rect.w + 10, rect.y + 9, kUiTextScale, 185, 185, 185);
 			if (field == kResizeWidth || field == kResizeHeight) {
@@ -4264,12 +4204,7 @@ private:
 	bool resizeDialogOpen_ = false;
 	int resizeField_ = kResizePercent;
 	bool resizeInputPrimed_ = false;
-	int resizeOriginalWidth_ = 0;
-	int resizeOriginalHeight_ = 0;
-	int resizeFilter_ = 2;
-	std::string resizePercentText_;
-	std::string resizeWidthText_;
-	std::string resizeHeightText_;
+	jpegview_linux::ResizeModel resizeModel_;
 	std::string resizeMessage_;
 	std::vector<std::string> pendingDroppedFiles_;
 	std::unique_ptr<jpegview_linux::FileList> fileListBeforeClipboard_;
