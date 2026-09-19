@@ -58,6 +58,8 @@ write_ppm "$temporary/images/05-cyan.ppm" 0 255 255
 mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
 write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
+mkdir -p "$temporary/images/00-entry-test"
+write_ppm "$temporary/images/00-entry-test/inside-first.ppm" 64 128 32
 touch -t 202001010000.00 "$temporary/images/01-red.ppm" "$temporary/images/02-green.ppm" \
 	"$temporary/images/03-blue.ppm" "$temporary/images/04-yellow.ppm" "$temporary/images/05-cyan.ppm"
 
@@ -167,6 +169,18 @@ case "$filtered_title" in
 esac
 
 DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool type --delay 20 '00-ENTRY-TEST'
+DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+entered_directory_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$entered_directory_title" in
+	inside-first.ppm*) ;;
+	*) echo "UI smoke test: entering a directory focused [..] instead of its first child" >&2; exit 1 ;;
+esac
+
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool type --delay 20 '.ppm'
 DISPLAY=":$display_number" xdotool keydown Down
 sleep 0.9

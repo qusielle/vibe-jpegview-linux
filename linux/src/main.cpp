@@ -3474,11 +3474,14 @@ private:
 			return;
 		}
 		fileDialogSelected_ = 0;
-		if (!fileDialogSave_ && !fileDialogFilter_.empty()) {
-			const auto firstMatch = std::find_if(fileDialogEntries_.begin(), fileDialogEntries_.end(),
+		if (!fileDialogSave_) {
+			const auto firstChild = std::find_if(fileDialogEntries_.begin(), fileDialogEntries_.end(),
 				[](const FileDialogEntry& entry) { return !entry.parent; });
-			fileDialogSelected_ = firstMatch == fileDialogEntries_.end() ? -1 :
-				static_cast<int>(std::distance(fileDialogEntries_.begin(), firstMatch));
+			if (firstChild != fileDialogEntries_.end()) {
+				fileDialogSelected_ = static_cast<int>(std::distance(fileDialogEntries_.begin(), firstChild));
+			} else if (!fileDialogFilter_.empty()) {
+				fileDialogSelected_ = -1;
+			}
 		}
 	}
 
