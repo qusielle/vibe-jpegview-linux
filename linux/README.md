@@ -142,9 +142,12 @@ switches between those two modes. By default the panel is hidden until the point
 lower edge of the window; the context menu can disable this automatic reveal mode. Ctrl+N
 disables the panel entirely, and the panel is temporarily suppressed while a modal menu or file
 browser is open. Right-click or the keyboard Context Menu key opens the compact core JPEGView
-context menu; Show Advanced Options temporarily restores the
-Open image with, Print, batch rename/copy, date, and wallpaper commands without saving that
-choice. The menu also supports keyboard selection with Up/Down and Return; if it spans multiple
+context menu; Show Advanced Options temporarily restores Open image with, Print, batch rename/copy,
+date and wallpaper commands, extended navigation and sorting, image transforms and correction,
+extra zoom and window controls, slideshow controls, and settings administration (including
+disabled Windows-only commands) without saving that choice. The compact menu keeps common
+navigation, fit/actual-size, fullscreen, and fit-window-to-image commands available. The menu also
+supports keyboard selection with Up/Down and Return; if it spans multiple
 columns to fit the window height, Left/Right moves between columns. Hovering over a lower
 navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
 next or previous image and is saved between application runs, as is the last maximized or

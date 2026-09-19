@@ -1284,6 +1284,7 @@ void TestResizeModelAspectRatioValidationAndFilters() {
 }
 
 void TestContextMenuCompactionAndSelection() {
+	using jpegview_linux::MenuItem;
 	const std::vector<jpegview_linux::MenuItem> complete = {
 		{"Open", 10},
 		{nullptr, 0, true},
@@ -1316,6 +1317,27 @@ void TestContextMenuCompactionAndSelection() {
 		"menu selection did not wrap backward");
 	Expect(jpegview_linux::NextMenuSelection({{nullptr, 0, true}, {"Disabled", 1, false, false, false}},
 		-1, 1) == -1, "menu with no actionable items returned a selection");
+
+	const std::vector<MenuItem> separatedSections = {
+		{nullptr, 0, true},
+		{"Next", 50},
+		{nullptr, 0, true},
+		{"Navigation", 0, false, false, true, nullptr, true},
+		{"Loop recursively", 51, false, false, true, nullptr, true},
+		{nullptr, 0, true},
+		{"Transform image", 0, false, false, true, nullptr, true},
+		{"Unsupported transform", 52, false, false, false, nullptr, true},
+		{nullptr, 0, true},
+		{"Actual size", 53},
+		{nullptr, 0, true},
+		{nullptr, 0, true},
+	};
+	const std::vector<MenuItem> compactSections = jpegview_linux::CompactMenuItems(
+		separatedSections, -1, "Show Advanced Options");
+	Expect(compactSections.size() == 5 && compactSections[0].command == 50 &&
+		compactSections[1].separator && compactSections[2].command == -1 &&
+		compactSections[3].separator && compactSections[4].command == 53,
+		"compacting advanced sections left empty, repeated, or trailing separators");
 }
 
 void TestContextMenuColumnLayoutAndNavigation() {

@@ -31,8 +31,10 @@ std::vector<MenuItem> CompactMenuItems(const std::vector<MenuItem>& items,
 			}
 			continue;
 		}
+		if (item.separator && (compactItems.empty() || compactItems.back().separator)) continue;
 		compactItems.push_back(item);
 	}
+	if (!compactItems.empty() && compactItems.back().separator) compactItems.pop_back();
 	return compactItems;
 }
 
