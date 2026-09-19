@@ -4,8 +4,8 @@ LDFLAGS ?= -Wl,-rpath,'$$ORIGIN/../lib'
 
 SDL2_CFLAGS ?= $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL2_LIBS ?= $(shell pkg-config --libs sdl2 2>/dev/null || echo -l:libSDL2-2.0.so.0)
-PANGO_CFLAGS ?= $(shell pkg-config --cflags pangocairo)
-PANGO_LIBS ?= $(shell pkg-config --libs pangocairo)
+PANGO_CFLAGS ?= $(shell pkg-config --cflags pangoft2)
+PANGO_LIBS ?=
 IMAGE_LIBS ?= -lpng -ljpeg -lz
 
 # The original Windows build routes the less common formats through dedicated

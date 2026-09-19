@@ -59,6 +59,21 @@ if [ -z "$SDL2_LIBRARY" ] || [ ! -f "$SDL2_LIBRARY" ]; then
 fi
 copy_runtime_dependencies "$BUILD_DIR/jpegview-linux"
 
+# The system-font renderer is loaded on first use so processes that never draw
+# UI text do not pay Fontconfig/Pango startup cost. Its dependency is therefore
+# intentionally absent from the executable's ldd output and must be seeded into
+# the AppImage dependency walk explicitly.
+PANGOFT2_LIBRARY=${PANGOFT2_LIBRARY:-}
+if [ -z "$PANGOFT2_LIBRARY" ]; then
+	PANGOFT2_LIBRARY=$(ldconfig -p 2>/dev/null | awk '/libpangoft2-1\.0\.so\.0/ {print $NF; exit}')
+fi
+if [ -z "$PANGOFT2_LIBRARY" ] || [ ! -f "$PANGOFT2_LIBRARY" ]; then
+	echo "Could not locate libpangoft2-1.0.so.0. Set PANGOFT2_LIBRARY=/path/to/libpangoft2-1.0.so.0" >&2
+	exit 1
+fi
+cp -L "$PANGOFT2_LIBRARY" "$APPDIR/usr/lib/$(basename "$PANGOFT2_LIBRARY")"
+copy_runtime_dependencies "$PANGOFT2_LIBRARY"
+
 # Ubuntu releases with modular libheif packages keep the HEVC/AV1 codec
 # plugins outside libheif.so. Copy them beside the bundled libraries and let
 # AppRun point libheif at this private directory.

@@ -1,10 +1,12 @@
 #include "system_font.h"
 
-#include <pango/pangocairo.h>
+#include <pango/pangoft2.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <fstream>
 #include <sstream>
 #include <utility>
@@ -139,24 +141,100 @@ std::string EnvironmentFont() {
 	return font == nullptr ? std::string() : Trim(font);
 }
 
-std::string ValidUtf8(std::string_view text) {
+struct FontApi {
+	FontApi() {
+		handle = dlopen("libpangoft2-1.0.so.0", RTLD_LAZY | RTLD_LOCAL);
+		if (handle == nullptr) return;
+#define LOAD_FONT_SYMBOL(member, symbol) available = Load(member, #symbol) && available
+		available = true;
+		LOAD_FONT_SYMBOL(fontDescriptionCopy, pango_font_description_copy);
+		LOAD_FONT_SYMBOL(fontDescriptionGetSize, pango_font_description_get_size);
+		LOAD_FONT_SYMBOL(fontDescriptionGetSizeIsAbsolute, pango_font_description_get_size_is_absolute);
+		LOAD_FONT_SYMBOL(fontDescriptionSetAbsoluteSize, pango_font_description_set_absolute_size);
+		LOAD_FONT_SYMBOL(fontDescriptionSetSize, pango_font_description_set_size);
+		LOAD_FONT_SYMBOL(fontDescriptionFromString, pango_font_description_from_string);
+		LOAD_FONT_SYMBOL(fontDescriptionFree, pango_font_description_free);
+		LOAD_FONT_SYMBOL(ft2FontMapNew, pango_ft2_font_map_new);
+		LOAD_FONT_SYMBOL(ft2FontMapSetResolution, pango_ft2_font_map_set_resolution);
+		LOAD_FONT_SYMBOL(fontMapCreateContext, pango_font_map_create_context);
+		LOAD_FONT_SYMBOL(layoutNew, pango_layout_new);
+		LOAD_FONT_SYMBOL(layoutSetFontDescription, pango_layout_set_font_description);
+		LOAD_FONT_SYMBOL(layoutSetText, pango_layout_set_text);
+		LOAD_FONT_SYMBOL(layoutSetSingleParagraphMode, pango_layout_set_single_paragraph_mode);
+		LOAD_FONT_SYMBOL(layoutGetPixelSize, pango_layout_get_pixel_size);
+		LOAD_FONT_SYMBOL(layoutGetPixelExtents, pango_layout_get_pixel_extents);
+		LOAD_FONT_SYMBOL(ft2RenderLayout, pango_ft2_render_layout);
+		LOAD_FONT_SYMBOL(utf8Validate, g_utf8_validate);
+		LOAD_FONT_SYMBOL(utf8MakeValid, g_utf8_make_valid);
+		LOAD_FONT_SYMBOL(freeMemory, g_free);
+		LOAD_FONT_SYMBOL(objectUnref, g_object_unref);
+#undef LOAD_FONT_SYMBOL
+		if (!available) {
+			dlclose(handle);
+			handle = nullptr;
+		}
+	}
+
+	FontApi(const FontApi&) = delete;
+	FontApi& operator=(const FontApi&) = delete;
+
+	static FontApi& Instance() {
+		static FontApi api;
+		return api;
+	}
+
+	template<typename Function>
+	bool Load(Function& function, const char* name) {
+		void* symbol = dlsym(handle, name);
+		static_assert(sizeof(function) == sizeof(symbol));
+		std::memcpy(&function, &symbol, sizeof(symbol));
+		return function != nullptr;
+	}
+
+	void* handle = nullptr;
+	bool available = false;
+	decltype(&pango_font_description_copy) fontDescriptionCopy = nullptr;
+	decltype(&pango_font_description_get_size) fontDescriptionGetSize = nullptr;
+	decltype(&pango_font_description_get_size_is_absolute) fontDescriptionGetSizeIsAbsolute = nullptr;
+	decltype(&pango_font_description_set_absolute_size) fontDescriptionSetAbsoluteSize = nullptr;
+	decltype(&pango_font_description_set_size) fontDescriptionSetSize = nullptr;
+	decltype(&pango_font_description_from_string) fontDescriptionFromString = nullptr;
+	decltype(&pango_font_description_free) fontDescriptionFree = nullptr;
+	decltype(&pango_ft2_font_map_new) ft2FontMapNew = nullptr;
+	decltype(&pango_ft2_font_map_set_resolution) ft2FontMapSetResolution = nullptr;
+	decltype(&pango_font_map_create_context) fontMapCreateContext = nullptr;
+	decltype(&pango_layout_new) layoutNew = nullptr;
+	decltype(&pango_layout_set_font_description) layoutSetFontDescription = nullptr;
+	decltype(&pango_layout_set_text) layoutSetText = nullptr;
+	decltype(&pango_layout_set_single_paragraph_mode) layoutSetSingleParagraphMode = nullptr;
+	decltype(&pango_layout_get_pixel_size) layoutGetPixelSize = nullptr;
+	decltype(&pango_layout_get_pixel_extents) layoutGetPixelExtents = nullptr;
+	decltype(&pango_ft2_render_layout) ft2RenderLayout = nullptr;
+	decltype(&g_utf8_validate) utf8Validate = nullptr;
+	decltype(&g_utf8_make_valid) utf8MakeValid = nullptr;
+	decltype(&g_free) freeMemory = nullptr;
+	decltype(&g_object_unref) objectUnref = nullptr;
+};
+
+std::string ValidUtf8(std::string_view text, const FontApi& api) {
 	const std::string copy(text);
-	if (g_utf8_validate(copy.c_str(), static_cast<gssize>(copy.size()), nullptr)) return copy;
-	char* valid = g_utf8_make_valid(copy.c_str(), static_cast<gssize>(copy.size()));
+	if (api.utf8Validate(copy.c_str(), static_cast<gssize>(copy.size()), nullptr)) return copy;
+	char* valid = api.utf8MakeValid(copy.c_str(), static_cast<gssize>(copy.size()));
 	if (valid == nullptr) return {};
 	std::string result(valid);
-	g_free(valid);
+	api.freeMemory(valid);
 	return result;
 }
 
-PangoFontDescription* ScaledDescription(const PangoFontDescription* source, int scale) {
-	PangoFontDescription* result = pango_font_description_copy(source);
-	const int currentSize = pango_font_description_get_size(result);
+PangoFontDescription* ScaledDescription(const FontApi& api,
+	const PangoFontDescription* source, int scale) {
+	PangoFontDescription* result = api.fontDescriptionCopy(source);
+	const int currentSize = api.fontDescriptionGetSize(result);
 	const int baseSize = currentSize > 0 ? currentSize : 10 * PANGO_SCALE;
-	if (pango_font_description_get_size_is_absolute(result)) {
-		pango_font_description_set_absolute_size(result, static_cast<double>(baseSize) * scale);
+	if (api.fontDescriptionGetSizeIsAbsolute(result)) {
+		api.fontDescriptionSetAbsoluteSize(result, static_cast<double>(baseSize) * scale);
 	} else {
-		pango_font_description_set_size(result, baseSize * scale);
+		api.fontDescriptionSetSize(result, baseSize * scale);
 	}
 	return result;
 }
@@ -196,34 +274,48 @@ struct SystemFont::Impl {
 			requestedDescription = ResolveDesktopFontDescription(home, config);
 		}
 		description = requestedDescription.empty() ? kFallbackFont : std::move(requestedDescription);
-		font = pango_font_description_from_string(description.c_str());
+		api = &FontApi::Instance();
+		if (!api->available) return;
+		font = api->fontDescriptionFromString(description.c_str());
 		if (font == nullptr) {
 			description = kFallbackFont;
-			font = pango_font_description_from_string(description.c_str());
+			font = api->fontDescriptionFromString(description.c_str());
 		}
-		PangoFontMap* map = pango_cairo_font_map_get_default();
-		context = pango_font_map_create_context(map);
+		map = api->ft2FontMapNew();
+		api->ft2FontMapSetResolution(reinterpret_cast<PangoFT2FontMap*>(map), 96.0, 96.0);
+		context = api->fontMapCreateContext(map);
+		layout = api->layoutNew(context);
 	}
 
 	~Impl() {
-		if (font != nullptr) pango_font_description_free(font);
-		if (context != nullptr) g_object_unref(context);
+		if (api == nullptr || !api->available) return;
+		if (layout != nullptr) api->objectUnref(layout);
+		if (context != nullptr) api->objectUnref(context);
+		if (map != nullptr) api->objectUnref(map);
+		if (font != nullptr) api->fontDescriptionFree(font);
 	}
 
 	PangoLayout* Layout(std::string_view text, int scale) const {
-		PangoLayout* layout = pango_layout_new(context);
-		PangoFontDescription* scaled = ScaledDescription(font, std::max(1, scale));
-		pango_layout_set_font_description(layout, scaled);
-		pango_font_description_free(scaled);
-		const std::string valid = ValidUtf8(text);
-		pango_layout_set_text(layout, valid.c_str(), static_cast<int>(valid.size()));
-		pango_layout_set_single_paragraph_mode(layout, TRUE);
+		if (layout == nullptr || font == nullptr) return nullptr;
+		if (scale == 1) {
+			api->layoutSetFontDescription(layout, font);
+		} else {
+			PangoFontDescription* scaled = ScaledDescription(*api, font, std::max(1, scale));
+			api->layoutSetFontDescription(layout, scaled);
+			api->fontDescriptionFree(scaled);
+		}
+		const std::string valid = ValidUtf8(text, *api);
+		api->layoutSetText(layout, valid.c_str(), static_cast<int>(valid.size()));
+		api->layoutSetSingleParagraphMode(layout, TRUE);
 		return layout;
 	}
 
+	FontApi* api = nullptr;
 	std::string description;
 	PangoFontDescription* font = nullptr;
+	PangoFontMap* map = nullptr;
 	PangoContext* context = nullptr;
+	PangoLayout* layout = nullptr;
 };
 
 SystemFont::SystemFont(std::string description) : impl_(std::make_unique<Impl>(std::move(description))) {}
@@ -234,18 +326,18 @@ SystemFont& SystemFont::operator=(SystemFont&&) noexcept = default;
 int SystemFont::TextWidth(std::string_view text, int scale) const {
 	if (text.empty() || scale <= 0) return 0;
 	PangoLayout* layout = impl_->Layout(text, scale);
+	if (layout == nullptr) return 0;
 	int width = 0;
-	pango_layout_get_pixel_size(layout, &width, nullptr);
-	g_object_unref(layout);
+	impl_->api->layoutGetPixelSize(layout, &width, nullptr);
 	return width;
 }
 
 int SystemFont::LineHeight(int scale) const {
 	if (scale <= 0) return 0;
 	PangoLayout* layout = impl_->Layout("Mg", scale);
+	if (layout == nullptr) return 0;
 	int height = 0;
-	pango_layout_get_pixel_size(layout, nullptr, &height);
-	g_object_unref(layout);
+	impl_->api->layoutGetPixelSize(layout, nullptr, &height);
 	return height;
 }
 
@@ -253,9 +345,10 @@ RasterizedText SystemFont::Rasterize(std::string_view text, int scale) const {
 	RasterizedText result;
 	if (text.empty() || scale <= 0) return result;
 	PangoLayout* layout = impl_->Layout(text, scale);
+	if (layout == nullptr) return result;
 	PangoRectangle ink{};
 	PangoRectangle logical{};
-	pango_layout_get_pixel_extents(layout, &ink, &logical);
+	impl_->api->layoutGetPixelExtents(layout, &ink, &logical);
 	const int left = std::min(0, ink.x);
 	const int top = std::min(0, ink.y);
 	const int right = std::max(logical.width, ink.x + ink.width);
@@ -264,42 +357,26 @@ RasterizedText SystemFont::Rasterize(std::string_view text, int scale) const {
 	result.height = std::max(0, bottom - top);
 	result.offsetX = left;
 	result.offsetY = top;
-	if (result.width == 0 || result.height == 0) {
-		g_object_unref(layout);
-		return result;
-	}
+	if (result.width == 0 || result.height == 0) return result;
 
-	cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_A8, result.width, result.height);
-	if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-		cairo_surface_destroy(surface);
-		g_object_unref(layout);
-		return {};
-	}
-	cairo_t* cairo = cairo_create(surface);
-	if (cairo_status(cairo) != CAIRO_STATUS_SUCCESS) {
-		cairo_destroy(cairo);
-		cairo_surface_destroy(surface);
-		g_object_unref(layout);
-		return {};
-	}
-	cairo_set_source_rgba(cairo, 1.0, 1.0, 1.0, 1.0);
-	cairo_move_to(cairo, -left, -top);
-	pango_cairo_show_layout(cairo, layout);
-	cairo_destroy(cairo);
-	cairo_surface_flush(surface);
+	std::vector<unsigned char> alpha(static_cast<std::size_t>(result.width) * result.height);
+	FT_Bitmap bitmap{};
+	bitmap.rows = static_cast<unsigned int>(result.height);
+	bitmap.width = static_cast<unsigned int>(result.width);
+	bitmap.pitch = result.width;
+	bitmap.buffer = alpha.data();
+	bitmap.num_grays = 256;
+	bitmap.pixel_mode = FT_PIXEL_MODE_GRAY;
+	impl_->api->ft2RenderLayout(&bitmap, layout, -left, -top);
 
-	const unsigned char* data = cairo_image_surface_get_data(surface);
-	const int stride = cairo_image_surface_get_stride(surface);
 	result.argb.resize(static_cast<std::size_t>(result.width) * result.height);
 	for (int y = 0; y < result.height; ++y) {
 		for (int x = 0; x < result.width; ++x) {
-			const std::uint32_t alpha = data[y * stride + x];
+			const std::uint32_t coverage = alpha[static_cast<std::size_t>(y) * result.width + x];
 			result.argb[static_cast<std::size_t>(y) * result.width + x] =
-				(alpha << 24) | 0x00ffffffu;
+				(coverage << 24) | 0x00ffffffu;
 		}
 	}
-	cairo_surface_destroy(surface);
-	g_object_unref(layout);
 	return result;
 }
 

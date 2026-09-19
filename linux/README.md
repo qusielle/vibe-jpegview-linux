@@ -120,15 +120,16 @@ they support.
 
 ## Build
 
-The runtime framework dependencies are SDL2 and Pango/Cairo. SDL2 development headers are not
+The runtime framework dependencies are SDL2 and Pango/FreeType. SDL2 development headers are not
 required because the frontend uses the small ABI declared in `src/sdl_abi.h`; Pango development
-headers and codec development packages are needed at compile time. The AppImage bundles these
-libraries while continuing to discover the user's system fonts through Fontconfig.
+headers and codec development packages are needed at compile time. The font stack is loaded on
+first text use, so image-only startup does not pay its initialization cost. The AppImage bundles
+these libraries while continuing to discover the user's system fonts through Fontconfig.
 
 On Ubuntu 20.04, install the compiler, make, and SDL2 runtime first:
 
 ```sh
-sudo apt install g++ make libsdl2-2.0-0 libpango1.0-dev libcairo2-dev libfontconfig1-dev \
+sudo apt install g++ make libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev \
   libjpeg-dev libpng-dev libjpeg-turbo-progs xclip wl-clipboard
 ```
 
