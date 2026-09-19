@@ -239,8 +239,12 @@ private:
 		std::size_t length = 0;
 		if (!ValueLocation(entry, location, length) || index > (length - 8) / 8) return false;
 		location += index * 8;
-		const std::int64_t number = entry->type == 10 ? static_cast<std::int32_t>(Read32(location)) : Read32(location);
-		const std::int64_t divisor = entry->type == 10 ? static_cast<std::int32_t>(Read32(location + 4)) : Read32(location + 4);
+		const std::int64_t number = entry->type == 10 ?
+			static_cast<std::int64_t>(static_cast<std::int32_t>(Read32(location))) :
+			static_cast<std::int64_t>(Read32(location));
+		const std::int64_t divisor = entry->type == 10 ?
+			static_cast<std::int64_t>(static_cast<std::int32_t>(Read32(location + 4))) :
+			static_cast<std::int64_t>(Read32(location + 4));
 		if (divisor == 0) return false;
 		value = static_cast<double>(number) / static_cast<double>(divisor);
 		if (numerator != nullptr) *numerator = number;
