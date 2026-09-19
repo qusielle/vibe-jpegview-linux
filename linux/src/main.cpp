@@ -3565,7 +3565,7 @@ private:
 
 	std::string FileDialogEntryLabel(const FileDialogEntry& entry) const {
 		if (entry.parent) return "[..]";
-		return entry.directory ? std::string("[DIR] ") + entry.path.filename().string() : entry.path.filename().string();
+		return entry.directory ? std::string("[Dir] ") + entry.path.filename().string() : entry.path.filename().string();
 	}
 
 	int FileDialogItemAt(int x, int y) const {
@@ -3728,9 +3728,10 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
 		SDL_RenderFillRect(renderer_, &dialog);
 		DrawRect(dialog, 190, 190, 190);
-		DrawText(fileDialogSave_ ? "SAVE PROCESSED IMAGE" : "OPEN IMAGE", dialog.x + 18, dialog.y + 14, kUiTextScale);
+		DrawText(fileDialogSave_ ? "Save processed image" : "Open image",
+			dialog.x + 18, dialog.y + 14, kUiTextScale);
 		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
-		DrawText(fileDialogSave_ ? "FILE NAME" : "FILTER", dialog.x + 18, dialog.y + 68,
+		DrawText(fileDialogSave_ ? "File name" : "Filter", dialog.x + 18, dialog.y + 68,
 			kUiTextScale, 190, 190, 190);
 		SDL_Rect inputRect = FileDialogInputRect();
 		SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
@@ -3775,8 +3776,8 @@ private:
 		if (!fileDialogMessage_.empty()) {
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
-		DrawText(fileDialogSave_ ? "ENTER SAVE   BACKSPACE EDIT/PARENT   ESC CANCEL" :
-			"TYPE TO FILTER   PGUP/PGDN PAGE   ENTER OPEN   BACKSPACE EDIT/PARENT   ESC CANCEL",
+		DrawText(fileDialogSave_ ? "Enter: Save   Backspace: Edit/parent   Esc: Cancel" :
+			"Type to filter   PgUp/PgDn: Page   Enter: Open   Backspace: Edit/parent   Esc: Cancel",
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 	}
 
