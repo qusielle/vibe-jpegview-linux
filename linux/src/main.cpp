@@ -3918,14 +3918,14 @@ private:
 					running = false;
 					break;
 				case SDL_KEYDOWN:
-					if (event.key.repeat != 0) break;
-					if (event.key.keysym.sym == SDLK_ESCAPE) {
-						CloseContextMenu();
-					} else if (event.key.keysym.sym == SDLK_UP) {
+					if (event.key.keysym.sym == SDLK_UP) {
 						MoveContextMenuSelection(-1);
 					} else if (event.key.keysym.sym == SDLK_DOWN) {
 						MoveContextMenuSelection(1);
-					} else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE) {
+					} else if (event.key.repeat == 0 && event.key.keysym.sym == SDLK_ESCAPE) {
+						CloseContextMenu();
+					} else if (event.key.repeat == 0 &&
+						(event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE)) {
 						ActivateContextMenuSelection(running);
 					}
 					break;
