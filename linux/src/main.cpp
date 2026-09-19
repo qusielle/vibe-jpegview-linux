@@ -3600,6 +3600,10 @@ private:
 		EnsureFileDialogSelectionVisible();
 	}
 
+	void MoveFileDialogSelectionByPage(int direction) {
+		MoveFileDialogSelection(direction * FileDialogVisibleRows());
+	}
+
 	void ActivateFileDialogSelection() {
 		if (fileDialogSave_ && fileDialogSelected_ < 0) {
 			SaveImageFromDialog();
@@ -3631,7 +3635,8 @@ private:
 			break;
 		case SDL_KEYDOWN: {
 			const bool repeatableSelectionKey = event.key.keysym.sym == SDLK_UP ||
-				event.key.keysym.sym == SDLK_DOWN;
+				event.key.keysym.sym == SDLK_DOWN || event.key.keysym.sym == SDLK_PAGEUP ||
+				event.key.keysym.sym == SDLK_PAGEDOWN;
 			if (event.key.repeat != 0 && !repeatableSelectionKey) break;
 			if (event.key.keysym.sym == SDLK_ESCAPE) {
 				CloseFileDialog();
@@ -3639,6 +3644,10 @@ private:
 				MoveFileDialogSelection(-1);
 			} else if (event.key.keysym.sym == SDLK_DOWN) {
 				MoveFileDialogSelection(1);
+			} else if (event.key.keysym.sym == SDLK_PAGEUP) {
+				MoveFileDialogSelectionByPage(-1);
+			} else if (event.key.keysym.sym == SDLK_PAGEDOWN) {
+				MoveFileDialogSelectionByPage(1);
 			} else if (event.key.keysym.sym == SDLK_RETURN) {
 				ActivateFileDialogSelection();
 			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
@@ -3760,7 +3769,7 @@ private:
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
 		DrawText(fileDialogSave_ ? "ENTER SAVE   BACKSPACE EDIT/PARENT   ESC CANCEL" :
-			"TYPE TO FILTER   ENTER OPEN   BACKSPACE EDIT/PARENT   ESC CANCEL",
+			"TYPE TO FILTER   PGUP/PGDN PAGE   ENTER OPEN   BACKSPACE EDIT/PARENT   ESC CANCEL",
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 	}
 
