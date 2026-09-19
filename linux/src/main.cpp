@@ -90,7 +90,6 @@ constexpr int kResizeHeight = 2;
 constexpr int kResizeFilter = 3;
 constexpr int kResizeApply = 0;
 constexpr int kResizeCancel = 1;
-constexpr int kResizeFilterCount = 4;
 
 struct ControlButton {
 	SDL_Rect rect{};
@@ -2148,8 +2147,8 @@ private:
 		if (!PointInRect(x, y, list)) return -1;
 		const int row = (y - list.y - 22) / 24;
 		if (row < 0) return -1;
-		const int item = static_cast<int>(batchCopyScroll_) + row;
-		return item >= 0 && item < static_cast<int>(batchCopyEntries_.size()) ? item : -1;
+		const int item = static_cast<int>(batchCopyDialog_.Scroll()) + row;
+		return item >= 0 && item < static_cast<int>(batchCopyDialog_.Items().size()) ? item : -1;
 	}
 
 	int BatchCopyButtonAt(int x, int y) const {
@@ -2164,79 +2163,44 @@ private:
 		return std::max(1, (list.h - 22) / 24);
 	}
 
-	void EnsureBatchCopySelectionVisible() {
-		const int rows = BatchCopyVisibleRows();
-		if (batchCopyCursor_ < static_cast<int>(batchCopyScroll_)) batchCopyScroll_ = batchCopyCursor_;
-		if (batchCopyCursor_ >= static_cast<int>(batchCopyScroll_) + rows) {
-			batchCopyScroll_ = static_cast<std::size_t>(batchCopyCursor_ - rows + 1);
-		}
-		const int maximumScroll = std::max(0, static_cast<int>(batchCopyEntries_.size()) - rows);
-		batchCopyScroll_ = std::min(batchCopyScroll_, static_cast<std::size_t>(maximumScroll));
-	}
-
-	void PopulateBatchCopyEntries() {
-		batchCopyEntries_.clear();
+	std::vector<BatchCopyItem> CollectBatchCopyEntries() const {
+		std::vector<BatchCopyItem> entries;
 		for (const fs::path& filename : fileList_.Files()) {
 			BatchCopyItem item;
 			item.source = filename;
 			item.modificationTime = FileModificationTime(filename);
-			batchCopyEntries_.push_back(std::move(item));
+			entries.push_back(std::move(item));
 		}
-		if (batchCopyEntries_.empty()) {
-			batchCopyCursor_ = 0;
-			batchCopyScroll_ = 0;
-			return;
-		}
-		batchCopyCursor_ = std::min(fileList_.CurrentIndex(), batchCopyEntries_.size() - 1);
-		batchCopyScroll_ = 0;
-		EnsureBatchCopySelectionVisible();
-	}
-
-	void UpdateBatchCopyPreview() {
-		jpegview_linux::UpdateBatchCopyPreview(batchCopyPattern_, batchCopyEntries_);
+		return entries;
 	}
 
 	void PreviewBatchCopy() {
-		UpdateBatchCopyPreview();
-		if (batchCopyPattern_.empty()) {
-			batchCopyMessage_ = "Enter a target pattern first";
-			return;
-		}
-		int selected = 0;
-		int copies = 0;
-		for (const BatchCopyItem& item : batchCopyEntries_) {
-			if (!item.selected) continue;
-			++selected;
-			if (item.copy) ++copies;
-		}
-		batchCopyMessage_ = selected == 0 ? "Select one or more files" :
-			"Preview: " + std::to_string(selected) + " selected, " + std::to_string(copies) + " copied, " +
-			std::to_string(selected - copies) + " renamed";
+		batchCopyDialog_.Preview();
 	}
 
 	void SaveBatchCopyPattern() {
-		if (batchCopyPattern_.empty()) {
-			batchCopyMessage_ = "Enter a target pattern first";
+		if (batchCopyDialog_.Pattern().empty()) {
+			batchCopyDialog_.Preview();
 			return;
 		}
-		copyRenamePattern_ = batchCopyPattern_;
+		copyRenamePattern_ = batchCopyDialog_.Pattern();
 		SaveSettings();
-		batchCopyMessage_ = "Saved batch pattern";
+		batchCopyDialog_.SetMessage("Saved batch pattern");
 	}
 
 	void PerformBatchCopy() {
-		if (batchCopyPattern_.empty()) {
-			batchCopyMessage_ = "Enter a target pattern first";
+		if (batchCopyDialog_.Pattern().empty()) {
+			batchCopyDialog_.Preview();
 			return;
 		}
-		UpdateBatchCopyPreview();
+		batchCopyDialog_.Preview();
 		fs::path preferredCurrentPath = fileList_.Current();
 		int renamed = 0;
 		int copied = 0;
 		int createdDirectories = 0;
 		int failed = 0;
 		std::string firstFailure;
-		for (BatchCopyItem& item : batchCopyEntries_) {
+		for (BatchCopyItem& item : batchCopyDialog_.Items()) {
 			if (!item.selected) continue;
 			if (item.destination.empty() || item.destination == item.source) {
 				++failed;
@@ -2281,22 +2245,19 @@ private:
 		if (renamed > 0 || copied > 0) {
 			if (fileList_.Reload(preferredCurrentPath)) LoadCurrent();
 		}
-		PopulateBatchCopyEntries();
-		for (BatchCopyItem& item : batchCopyEntries_) item.selected = false;
-		UpdateBatchCopyPreview();
-		batchCopyMessage_ = "Completed: " + std::to_string(renamed) + " renamed, " +
+		batchCopyDialog_.ReplaceItems(CollectBatchCopyEntries(), fileList_.CurrentIndex(), BatchCopyVisibleRows());
+		batchCopyDialog_.Preview();
+		std::string message = "Completed: " + std::to_string(renamed) + " renamed, " +
 			std::to_string(copied) + " copied, " + std::to_string(createdDirectories) + " folder(s) created";
-		if (failed > 0) batchCopyMessage_ += "; " + std::to_string(failed) + " failed" +
+		if (failed > 0) message += "; " + std::to_string(failed) + " failed" +
 			(firstFailure.empty() ? std::string() : ": " + firstFailure);
+		batchCopyDialog_.SetMessage(std::move(message));
 	}
 
 	void OpenBatchCopyDialog() {
 		if (fileList_.Empty() || clipboardMode_) return;
-		PopulateBatchCopyEntries();
-		batchCopyPattern_ = copyRenamePattern_;
-		batchCopyMessage_.clear();
-		batchCopyOpen_ = true;
-		batchCopyPatternFocused_ = true;
+		batchCopyDialog_.Open(CollectBatchCopyEntries(), fileList_.CurrentIndex(),
+			copyRenamePattern_, BatchCopyVisibleRows());
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
 		SDL_StartTextInput();
@@ -2304,19 +2265,16 @@ private:
 
 	void CloseBatchCopyDialog() {
 		SDL_StopTextInput();
-		batchCopyOpen_ = false;
-		batchCopyPatternFocused_ = false;
+		batchCopyDialog_.Close();
 	}
 
 	void HandleBatchCopyButton(int button) {
 		switch (button) {
 		case kBatchSelectAll:
-			for (BatchCopyItem& item : batchCopyEntries_) item.selected = true;
-			PreviewBatchCopy();
+			batchCopyDialog_.SelectAll(true);
 			break;
 		case kBatchSelectNone:
-			for (BatchCopyItem& item : batchCopyEntries_) item.selected = false;
-			PreviewBatchCopy();
+			batchCopyDialog_.SelectAll(false);
 			break;
 		case kBatchPreview:
 			PreviewBatchCopy();
@@ -2347,47 +2305,32 @@ private:
 			if (event.key.keysym.sym == SDLK_ESCAPE) {
 				CloseBatchCopyDialog();
 			} else if (ctrl && event.key.keysym.sym == 'a') {
-				for (BatchCopyItem& item : batchCopyEntries_) item.selected = true;
-				PreviewBatchCopy();
+				batchCopyDialog_.SelectAll(true);
 			} else if (event.key.keysym.sym == SDLK_TAB) {
-				batchCopyPatternFocused_ = !batchCopyPatternFocused_;
-			} else if (batchCopyPatternFocused_ && event.key.keysym.sym == SDLK_BACKSPACE) {
-				if (!batchCopyPattern_.empty()) batchCopyPattern_.pop_back();
-				PreviewBatchCopy();
-			} else if (!batchCopyPatternFocused_ && event.key.keysym.sym == SDLK_UP) {
-				batchCopyCursor_ = std::max(0, batchCopyCursor_ - 1);
-				EnsureBatchCopySelectionVisible();
-			} else if (!batchCopyPatternFocused_ && event.key.keysym.sym == SDLK_DOWN) {
-				if (!batchCopyEntries_.empty()) batchCopyCursor_ = std::min(
-					static_cast<int>(batchCopyEntries_.size()) - 1, batchCopyCursor_ + 1);
-				EnsureBatchCopySelectionVisible();
-			} else if (!batchCopyPatternFocused_ && event.key.keysym.sym == SDLK_SPACE) {
-				if (batchCopyCursor_ >= 0 && batchCopyCursor_ < static_cast<int>(batchCopyEntries_.size())) {
-					BatchCopyItem& item = batchCopyEntries_[static_cast<std::size_t>(batchCopyCursor_)];
-					item.selected = !item.selected;
-					PreviewBatchCopy();
-				}
+				batchCopyDialog_.TogglePatternFocus();
+			} else if (batchCopyDialog_.PatternFocused() && event.key.keysym.sym == SDLK_BACKSPACE) {
+				batchCopyDialog_.BackspacePattern();
+			} else if (!batchCopyDialog_.PatternFocused() && event.key.keysym.sym == SDLK_UP) {
+				batchCopyDialog_.MoveCursor(-1, BatchCopyVisibleRows());
+			} else if (!batchCopyDialog_.PatternFocused() && event.key.keysym.sym == SDLK_DOWN) {
+				batchCopyDialog_.MoveCursor(1, BatchCopyVisibleRows());
+			} else if (!batchCopyDialog_.PatternFocused() && event.key.keysym.sym == SDLK_SPACE) {
+				batchCopyDialog_.ToggleItem(batchCopyDialog_.Cursor());
 			} else if (event.key.keysym.sym == SDLK_RETURN) {
 				PreviewBatchCopy();
 			}
 			break;
 		}
 		case SDL_TEXTINPUT:
-			if (batchCopyPatternFocused_) {
-				batchCopyPattern_ += event.text.text;
-				PreviewBatchCopy();
-			}
+			batchCopyDialog_.AppendPattern(event.text.text);
 			break;
 		case SDL_MOUSEWHEEL: {
-			const int rows = BatchCopyVisibleRows();
-			const int maximumScroll = std::max(0, static_cast<int>(batchCopyEntries_.size()) - rows);
-			batchCopyScroll_ = static_cast<std::size_t>(std::clamp(
-				static_cast<int>(batchCopyScroll_) - event.wheel.y, 0, maximumScroll));
+			batchCopyDialog_.ScrollBy(-event.wheel.y, BatchCopyVisibleRows());
 			break;
 		}
 		case SDL_MOUSEMOTION: {
 			const int item = BatchCopyEntryAt(event.motion.x, event.motion.y);
-			if (item >= 0) batchCopyCursor_ = item;
+			batchCopyDialog_.FocusItem(item);
 			break;
 		}
 		case SDL_MOUSEBUTTONDOWN:
@@ -2397,15 +2340,11 @@ private:
 				break;
 			}
 			if (PointInRect(event.button.x, event.button.y, BatchCopyPatternRect())) {
-				batchCopyPatternFocused_ = true;
+				batchCopyDialog_.SetPatternFocused(true);
 				break;
 			}
 			if (const int item = BatchCopyEntryAt(event.button.x, event.button.y); item >= 0) {
-				batchCopyCursor_ = item;
-				batchCopyPatternFocused_ = false;
-				batchCopyEntries_[static_cast<std::size_t>(item)].selected =
-					!batchCopyEntries_[static_cast<std::size_t>(item)].selected;
-				PreviewBatchCopy();
+				batchCopyDialog_.ToggleItem(item);
 			}
 			break;
 		default:
@@ -2424,7 +2363,7 @@ private:
 	}
 
 	void RenderBatchCopy() {
-		if (!batchCopyOpen_) return;
+		if (!batchCopyDialog_.IsOpen()) return;
 		const SDL_Rect dialog = BatchCopyRect();
 		const SDL_Rect list = BatchCopyListRect();
 		const int rightX = BatchCopyRightX();
@@ -2447,11 +2386,11 @@ private:
 
 		const int rows = BatchCopyVisibleRows();
 		for (int row = 0; row < rows; ++row) {
-			const int itemIndex = static_cast<int>(batchCopyScroll_) + row;
-			if (itemIndex >= static_cast<int>(batchCopyEntries_.size())) break;
-			const BatchCopyItem& item = batchCopyEntries_[static_cast<std::size_t>(itemIndex)];
+			const int itemIndex = static_cast<int>(batchCopyDialog_.Scroll()) + row;
+			if (itemIndex >= static_cast<int>(batchCopyDialog_.Items().size())) break;
+			const BatchCopyItem& item = batchCopyDialog_.Items()[static_cast<std::size_t>(itemIndex)];
 			const int rowTop = list.y + 22 + row * 24;
-			if (itemIndex == batchCopyCursor_) {
+			if (itemIndex == batchCopyDialog_.Cursor()) {
 				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
 				SDL_Rect selection{list.x + 2, rowTop, list.w - 4, 22};
 				SDL_RenderFillRect(renderer_, &selection);
@@ -2479,12 +2418,12 @@ private:
 		const SDL_Rect patternRect = BatchCopyPatternRect();
 		SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
 		SDL_RenderFillRect(renderer_, &patternRect);
-		DrawRect(patternRect, batchCopyPatternFocused_ ? 100 : 75, batchCopyPatternFocused_ ? 130 : 75,
-			batchCopyPatternFocused_ ? 165 : 75);
-		DrawText(ClipText(batchCopyPattern_, patternRect.w - 16), patternRect.x + 8, patternRect.y + 10,
+		DrawRect(patternRect, batchCopyDialog_.PatternFocused() ? 100 : 75,
+			batchCopyDialog_.PatternFocused() ? 130 : 75, batchCopyDialog_.PatternFocused() ? 165 : 75);
+		DrawText(ClipText(batchCopyDialog_.Pattern(), patternRect.w - 16), patternRect.x + 8, patternRect.y + 10,
 			kUiTextScale);
-		if (!batchCopyMessage_.empty()) {
-			DrawText(ClipText(batchCopyMessage_, rightWidth), rightX, dialog.y + dialog.h - 88, kUiTextScale,
+		if (!batchCopyDialog_.Message().empty()) {
+			DrawText(ClipText(batchCopyDialog_.Message(), rightWidth), rightX, dialog.y + dialog.h - 88, kUiTextScale,
 				235, 180, 130);
 		}
 		RenderBatchButton(kBatchSelectAll, "SELECT ALL");
@@ -2518,47 +2457,32 @@ private:
 	}
 
 	const char* ResizeFilterName() const {
-		return resizeModel_.FilterName();
-	}
-
-	std::string& ResizeFieldText(int field) {
-		return resizeModel_.FieldText(field);
-	}
-
-	void UpdateResizeFieldsFrom(int changedField) {
-		if (resizeModel_.UpdateFrom(changedField)) resizeMessage_.clear();
-		else if (!resizeModel_.ValidationMessage().empty()) resizeMessage_ = resizeModel_.ValidationMessage();
+		return resizeDialog_.Model().FilterName();
 	}
 
 	bool ResizeTarget(int& width, int& height) const {
-		return resizeModel_.Target(width, height);
+		return resizeDialog_.Target(width, height);
 	}
 
 	void OpenResizeDialog() {
 		if (image_.width <= 0 || image_.height <= 0) return;
-		resizeModel_.Reset(image_.width, image_.height);
-		resizeField_ = kResizePercent;
-		resizeInputPrimed_ = true;
-		resizeMessage_.clear();
-		resizeDialogOpen_ = true;
+		resizeDialog_.Open(image_.width, image_.height);
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
-		batchCopyOpen_ = false;
+		batchCopyDialog_.Close();
 		SDL_StartTextInput();
 	}
 
 	void CloseResizeDialog() {
 		SDL_StopTextInput();
-		resizeDialogOpen_ = false;
-		resizeInputPrimed_ = false;
-		resizeMessage_.clear();
+		resizeDialog_.Close();
 	}
 
 	void ApplyResizeDialog() {
 		int width = 0;
 		int height = 0;
 		if (!ResizeTarget(width, height)) {
-			resizeMessage_ = "Enter a valid size (maximum 65535 x 65535 / 100 MP)";
+			resizeDialog_.SetMessage("Enter a valid size (maximum 65535 x 65535 / 100 MP)");
 			return;
 		}
 		if (width == image_.width && height == image_.height) {
@@ -2567,8 +2491,8 @@ private:
 		}
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		Image resizedImage = correctionBaseValid_ ? correctionBase_ : image_;
-		if (!resizedImage.Resize(width, height, resizeModel_.Filter())) {
-			resizeMessage_ = "Resizing failed: not enough memory or the image is too large";
+		if (!resizedImage.Resize(width, height, resizeDialog_.Model().Filter())) {
+			resizeDialog_.SetMessage("Resizing failed: not enough memory or the image is too large");
 			return;
 		}
 		resizedImage.originalWidth = width;
@@ -2578,24 +2502,13 @@ private:
 		image_ = correctionBase_;
 		if (autoContrastEnabled_) image_.AutoContrast();
 		if (!UpdateTexture()) {
-			resizeMessage_ = "Resizing failed: could not update the display texture";
+			resizeDialog_.SetMessage("Resizing failed: could not update the display texture");
 			return;
 		}
 		imageModified_ = true;
 		RestoreScaleMode(viewportSnapshot);
 		SetTitle();
 		CloseResizeDialog();
-	}
-
-	void PrepareResizeTextInput() {
-		if (!resizeInputPrimed_ || resizeField_ > kResizeHeight) return;
-		ResizeFieldText(resizeField_).clear();
-		resizeInputPrimed_ = false;
-	}
-
-	void CycleResizeFilter(int direction) {
-		resizeModel_.CycleFilter(direction);
-		resizeField_ = kResizeFilter;
 	}
 
 	void HandleResizeDialogEvents(const SDL_Event& event, bool& running) {
@@ -2613,42 +2526,24 @@ private:
 			} else if (event.key.keysym.sym == SDLK_RETURN) {
 				ApplyResizeDialog();
 			} else if (event.key.keysym.sym == SDLK_TAB) {
-				resizeField_ = (resizeField_ + (shift ? kResizeFilterCount - 1 : 1)) % kResizeFilterCount;
-				resizeInputPrimed_ = true;
+				resizeDialog_.MoveFocus(shift ? -1 : 1);
 			} else if (ctrl && event.key.keysym.sym == 'a') {
-				if (resizeField_ <= kResizeHeight) {
-					ResizeFieldText(resizeField_).clear();
-					resizeInputPrimed_ = false;
-				}
-			} else if (resizeField_ <= kResizeHeight && event.key.keysym.sym == SDLK_BACKSPACE) {
-				PrepareResizeTextInput();
-				std::string& text = ResizeFieldText(resizeField_);
-				if (!text.empty()) text.pop_back();
-				UpdateResizeFieldsFrom(resizeField_);
-			} else if (resizeField_ == kResizeFilter && event.key.keysym.sym == SDLK_LEFT) {
-				CycleResizeFilter(-1);
-			} else if (resizeField_ == kResizeFilter && event.key.keysym.sym == SDLK_RIGHT) {
-				CycleResizeFilter(1);
+				resizeDialog_.SelectAll();
+			} else if (resizeDialog_.FocusedField() <= kResizeHeight && event.key.keysym.sym == SDLK_BACKSPACE) {
+				resizeDialog_.Backspace();
+			} else if (resizeDialog_.FocusedField() == kResizeFilter && event.key.keysym.sym == SDLK_LEFT) {
+				resizeDialog_.CycleFilter(-1);
+			} else if (resizeDialog_.FocusedField() == kResizeFilter && event.key.keysym.sym == SDLK_RIGHT) {
+				resizeDialog_.CycleFilter(1);
 			} else if (event.key.keysym.sym == SDLK_UP || event.key.keysym.sym == SDLK_LEFT) {
-				resizeField_ = (resizeField_ + kResizeFilterCount - 1) % kResizeFilterCount;
-				resizeInputPrimed_ = true;
+				resizeDialog_.MoveFocus(-1);
 			} else if (event.key.keysym.sym == SDLK_DOWN || event.key.keysym.sym == SDLK_RIGHT) {
-				resizeField_ = (resizeField_ + 1) % kResizeFilterCount;
-				resizeInputPrimed_ = true;
+				resizeDialog_.MoveFocus(1);
 			}
 			break;
 		}
 		case SDL_TEXTINPUT:
-			if (resizeField_ <= kResizeHeight) {
-				PrepareResizeTextInput();
-				std::string& text = ResizeFieldText(resizeField_);
-				for (const unsigned char character : std::string(event.text.text)) {
-					if (std::isdigit(character) != 0 || (resizeField_ == kResizePercent && character == '.')) {
-						text.push_back(static_cast<char>(character));
-					}
-				}
-				UpdateResizeFieldsFrom(resizeField_);
-			}
+			resizeDialog_.AppendText(event.text.text);
 			break;
 		case SDL_MOUSEMOTION:
 			lastMouseX_ = event.motion.x;
@@ -2663,11 +2558,8 @@ private:
 			} else {
 				for (int field = kResizePercent; field <= kResizeFilter; ++field) {
 					if (!PointInRect(event.button.x, event.button.y, ResizeFieldRect(field))) continue;
-					if (field == kResizeFilter) CycleResizeFilter(1);
-					else {
-						resizeField_ = field;
-						resizeInputPrimed_ = true;
-					}
+					if (field == kResizeFilter) resizeDialog_.CycleFilter(1);
+					else resizeDialog_.SelectField(field);
 					break;
 				}
 			}
@@ -2687,33 +2579,34 @@ private:
 	}
 
 	void RenderResizeDialog() {
-		if (!resizeDialogOpen_) return;
+		if (!resizeDialog_.IsOpen()) return;
 		const SDL_Rect dialog = ResizeDialogRect();
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 232);
 		SDL_RenderFillRect(renderer_, &dialog);
 		DrawRect(dialog, 190, 190, 190);
 		DrawText("RESIZE IMAGE", dialog.x + 20, dialog.y + 16, kUiTextScale, 255, 255, 255);
 		DrawText("ORIGINAL SIZE", dialog.x + 20, dialog.y + 43, kUiTextScale, 180, 195, 215);
-		DrawText(std::to_string(resizeModel_.OriginalWidth()) + "X" + std::to_string(resizeModel_.OriginalHeight()),
+		DrawText(std::to_string(resizeDialog_.Model().OriginalWidth()) + "X" +
+			std::to_string(resizeDialog_.Model().OriginalHeight()),
 			dialog.x + 190, dialog.y + 43, kUiTextScale, 220, 220, 220);
 
 		const char* labels[] = {"NEW SIZE", "NEW WIDTH", "NEW HEIGHT", "FILTER"};
 		for (int field = kResizePercent; field <= kResizeFilter; ++field) {
 			const SDL_Rect rect = ResizeFieldRect(field);
-			const bool focused = resizeField_ == field;
+			const bool focused = resizeDialog_.FocusedField() == field;
 			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 225);
 			SDL_RenderFillRect(renderer_, &rect);
 			DrawRect(rect, focused ? 100 : 75, focused ? 130 : 75, focused ? 165 : 75);
 			DrawText(labels[field], dialog.x + 20, rect.y + 9, kUiTextScale, 205, 215, 230);
-			const std::string value = field == kResizeFilter ? ResizeFilterName() : resizeModel_.FieldText(field);
+			const std::string value = field == kResizeFilter ? ResizeFilterName() : resizeDialog_.Model().FieldText(field);
 			DrawText(ClipText(value, rect.w - 16), rect.x + 8, rect.y + 9, kUiTextScale, 255, 255, 255);
 			if (field == kResizePercent) DrawText("%", rect.x + rect.w + 10, rect.y + 9, kUiTextScale, 185, 185, 185);
 			if (field == kResizeWidth || field == kResizeHeight) {
 				DrawText("PIXELS", rect.x + rect.w + 10, rect.y + 9, kUiTextScale, 185, 185, 185);
 			}
 		}
-		if (!resizeMessage_.empty()) {
-			DrawText(ClipText(resizeMessage_, dialog.w - 40), dialog.x + 20, dialog.y + dialog.h - 82,
+		if (!resizeDialog_.Message().empty()) {
+			DrawText(ClipText(resizeDialog_.Message(), dialog.w - 40), dialog.x + 20, dialog.y + dialog.h - 82,
 				kUiTextScale, 235, 180, 130);
 		}
 		DrawText("TAB: NEXT FIELD   ARROWS: CHANGE FILTER/FIELD   ENTER: APPLY   ESC: CANCEL",
@@ -3256,7 +3149,8 @@ private:
 	}
 
 	void RenderFileName() {
-		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_ || resizeDialogOpen_) return;
+		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
 		int windowWidth = 0;
 		SDL_GetWindowSize(window_, &windowWidth, nullptr);
 		std::ostringstream text;
@@ -3277,7 +3171,8 @@ private:
 	}
 
 	void RenderImageInfo() {
-		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_ || resizeDialogOpen_) return;
+		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
 		std::vector<std::string> lines = ImageInfoLines();
 		if (lines.empty()) return;
 
@@ -3448,7 +3343,8 @@ private:
 	}
 
 	void RenderControls() {
-		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ || batchCopyOpen_ || resizeDialogOpen_) return;
+		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
 		std::vector<ControlButton> buttons;
 		LayoutControls(buttons);
 		const SDL_Rect panel = ControlPanelRect();
@@ -3618,11 +3514,11 @@ private:
 				HandleFileDialogEvents(event, running);
 				continue;
 			}
-			if (batchCopyOpen_) {
+			if (batchCopyDialog_.IsOpen()) {
 				HandleBatchCopyEvents(event, running);
 				continue;
 			}
-			if (resizeDialogOpen_) {
+			if (resizeDialog_.IsOpen()) {
 				HandleResizeDialogEvents(event, running);
 				continue;
 			}
@@ -3921,19 +3817,9 @@ private:
 	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;
 	std::unordered_map<std::string, jpegview_linux::DirectorySummary> fileDialogDirectorySummaries_;
 	std::uint64_t fileDialogSummaryGeneration_ = 0;
-	bool batchCopyOpen_ = false;
-	bool batchCopyPatternFocused_ = false;
 	std::string copyRenamePattern_;
-	std::string batchCopyPattern_;
-	std::string batchCopyMessage_;
-	std::vector<BatchCopyItem> batchCopyEntries_;
-	std::size_t batchCopyScroll_ = 0;
-	int batchCopyCursor_ = 0;
-	bool resizeDialogOpen_ = false;
-	int resizeField_ = kResizePercent;
-	bool resizeInputPrimed_ = false;
-	jpegview_linux::ResizeModel resizeModel_;
-	std::string resizeMessage_;
+	jpegview_linux::BatchCopyDialogController batchCopyDialog_;
+	jpegview_linux::ResizeDialogController resizeDialog_;
 	std::vector<std::string> pendingDroppedFiles_;
 	std::unique_ptr<jpegview_linux::FileList> fileListBeforeClipboard_;
 	fs::path clipboardTempFile_;

@@ -134,4 +134,99 @@ void UpdateBatchCopyPreview(const std::string& pattern, std::vector<BatchCopyIte
 	}
 }
 
+void BatchCopyDialogController::Open(std::vector<BatchCopyItem> items,
+	std::size_t currentIndex, std::string pattern, int visibleRows) {
+	open_ = true;
+	patternFocused_ = true;
+	pattern_ = std::move(pattern);
+	message_.clear();
+	ReplaceItems(std::move(items), currentIndex, visibleRows);
+}
+
+void BatchCopyDialogController::Close() {
+	open_ = false;
+	patternFocused_ = false;
+}
+
+void BatchCopyDialogController::ReplaceItems(std::vector<BatchCopyItem> items,
+	std::size_t currentIndex, int visibleRows) {
+	items_ = std::move(items);
+	scroll_ = 0;
+	cursor_ = items_.empty() ? 0 : static_cast<int>(std::min(currentIndex, items_.size() - 1));
+	EnsureCursorVisible(visibleRows);
+}
+
+void BatchCopyDialogController::AppendPattern(const std::string& text) {
+	if (!patternFocused_ || text.empty()) return;
+	pattern_ += text;
+	Preview();
+}
+
+void BatchCopyDialogController::BackspacePattern() {
+	if (!patternFocused_ || pattern_.empty()) return;
+	std::size_t start = pattern_.size() - 1;
+	while (start > 0 && (static_cast<unsigned char>(pattern_[start]) & 0xC0u) == 0x80u) --start;
+	pattern_.erase(start);
+	Preview();
+}
+
+void BatchCopyDialogController::SelectAll(bool selected) {
+	for (BatchCopyItem& item : items_) item.selected = selected;
+	Preview();
+}
+
+void BatchCopyDialogController::ToggleItem(int index) {
+	if (index < 0 || index >= static_cast<int>(items_.size())) return;
+	cursor_ = index;
+	patternFocused_ = false;
+	BatchCopyItem& item = items_[static_cast<std::size_t>(index)];
+	item.selected = !item.selected;
+	Preview();
+}
+
+void BatchCopyDialogController::MoveCursor(int direction, int visibleRows) {
+	if (patternFocused_ || items_.empty() || direction == 0) return;
+	cursor_ = std::clamp(cursor_ + (direction < 0 ? -1 : 1), 0,
+		static_cast<int>(items_.size()) - 1);
+	EnsureCursorVisible(visibleRows);
+}
+
+void BatchCopyDialogController::FocusItem(int index) {
+	if (index >= 0 && index < static_cast<int>(items_.size())) cursor_ = index;
+}
+
+void BatchCopyDialogController::ScrollBy(int rows, int visibleRows) {
+	const int maximumScroll = std::max(0, static_cast<int>(items_.size()) - std::max(1, visibleRows));
+	scroll_ = static_cast<std::size_t>(std::clamp(
+		static_cast<int>(scroll_) + rows, 0, maximumScroll));
+}
+
+void BatchCopyDialogController::Preview() {
+	UpdateBatchCopyPreview(pattern_, items_);
+	if (pattern_.empty()) {
+		message_ = "Enter a target pattern first";
+		return;
+	}
+	int selected = 0;
+	int copies = 0;
+	for (const BatchCopyItem& item : items_) {
+		if (!item.selected) continue;
+		++selected;
+		if (item.copy) ++copies;
+	}
+	message_ = selected == 0 ? "Select one or more files" :
+		"Preview: " + std::to_string(selected) + " selected, " + std::to_string(copies) +
+		" copied, " + std::to_string(selected - copies) + " renamed";
+}
+
+void BatchCopyDialogController::EnsureCursorVisible(int visibleRows) {
+	const int rows = std::max(1, visibleRows);
+	if (cursor_ < static_cast<int>(scroll_)) scroll_ = static_cast<std::size_t>(std::max(0, cursor_));
+	if (cursor_ >= static_cast<int>(scroll_) + rows) {
+		scroll_ = static_cast<std::size_t>(cursor_ - rows + 1);
+	}
+	const int maximumScroll = std::max(0, static_cast<int>(items_.size()) - rows);
+	scroll_ = std::min(scroll_, static_cast<std::size_t>(maximumScroll));
+}
+
 } // namespace jpegview_linux

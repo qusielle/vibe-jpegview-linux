@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cctype>
 #include <exception>
 
 namespace jpegview_linux {
@@ -108,6 +109,77 @@ bool ResizeModel::ParseInteger(const std::string& text, int& value) {
 bool ResizeModel::ValidSize(int width, int height) {
 	return width > 0 && height > 0 && width <= kMaxImageDimension && height <= kMaxImageDimension &&
 		static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) <= kMaxImagePixels;
+}
+
+void ResizeDialogController::Open(int originalWidth, int originalHeight) {
+	model_.Reset(originalWidth, originalHeight);
+	focusedField_ = ResizeModel::kPercentField;
+	inputPrimed_ = true;
+	message_.clear();
+	open_ = true;
+}
+
+void ResizeDialogController::Close() {
+	open_ = false;
+	inputPrimed_ = false;
+	message_.clear();
+}
+
+void ResizeDialogController::MoveFocus(int direction) {
+	if (direction == 0) return;
+	focusedField_ = (focusedField_ + (direction < 0 ? ResizeModel::kFilterCount - 1 : 1)) %
+		ResizeModel::kFilterCount;
+	inputPrimed_ = true;
+}
+
+void ResizeDialogController::SelectField(int field) {
+	if (field < ResizeModel::kPercentField || field > ResizeModel::kFilterField) return;
+	focusedField_ = field;
+	inputPrimed_ = true;
+}
+
+void ResizeDialogController::SelectAll() {
+	if (focusedField_ > ResizeModel::kHeightField) return;
+	model_.FieldText(focusedField_).clear();
+	inputPrimed_ = false;
+}
+
+void ResizeDialogController::Backspace() {
+	if (focusedField_ > ResizeModel::kHeightField) return;
+	PrimeField();
+	std::string& text = model_.FieldText(focusedField_);
+	if (!text.empty()) text.pop_back();
+	UpdateFromFocusedField();
+}
+
+void ResizeDialogController::AppendText(const std::string& text) {
+	if (focusedField_ > ResizeModel::kHeightField) return;
+	PrimeField();
+	std::string& field = model_.FieldText(focusedField_);
+	for (const unsigned char character : text) {
+		if (std::isdigit(character) != 0 ||
+			(focusedField_ == ResizeModel::kPercentField && character == '.')) {
+			field.push_back(static_cast<char>(character));
+		}
+	}
+	UpdateFromFocusedField();
+}
+
+void ResizeDialogController::CycleFilter(int direction) {
+	model_.CycleFilter(direction);
+	focusedField_ = ResizeModel::kFilterField;
+	inputPrimed_ = false;
+}
+
+void ResizeDialogController::PrimeField() {
+	if (!inputPrimed_ || focusedField_ > ResizeModel::kHeightField) return;
+	model_.FieldText(focusedField_).clear();
+	inputPrimed_ = false;
+}
+
+void ResizeDialogController::UpdateFromFocusedField() {
+	if (model_.UpdateFrom(focusedField_)) message_.clear();
+	else if (!model_.ValidationMessage().empty()) message_ = model_.ValidationMessage();
 }
 
 } // namespace jpegview_linux

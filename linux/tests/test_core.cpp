@@ -1084,6 +1084,53 @@ void TestBatchCopyPatternExpansionAndPreview() {
 		FormatLocalTime(timestamp, "%Y-%m-%d %H:%M:%S"), "batch date formatting is incorrect");
 }
 
+void TestBatchCopyDialogController() {
+	std::vector<jpegview_linux::BatchCopyItem> items;
+	for (int index = 0; index < 8; ++index) {
+		jpegview_linux::BatchCopyItem item;
+		item.source = fs::path("/tmp/photos/image" + std::to_string(index) + ".jpg");
+		items.push_back(std::move(item));
+	}
+	jpegview_linux::BatchCopyDialogController dialog;
+	dialog.Open(items, 5, "%F-copy.%e", 3);
+	Expect(dialog.IsOpen() && dialog.PatternFocused() && dialog.Cursor() == 5 && dialog.Scroll() == 3,
+		"batch dialog did not initialize focus, cursor, and visible scroll state");
+	dialog.MoveCursor(1, 3);
+	Expect(dialog.Cursor() == 5, "batch dialog moved the list cursor while its pattern had focus");
+	dialog.TogglePatternFocus();
+	dialog.MoveCursor(1, 3);
+	Expect(dialog.Cursor() == 6 && dialog.Scroll() == 4,
+		"batch dialog did not reveal a keyboard-moved cursor");
+	dialog.ToggleItem(6);
+	Expect(dialog.Items()[6].selected && dialog.Items()[6].destinationText == "image6-copy.jpg" &&
+		dialog.Message().find("1 selected") != std::string::npos,
+		"batch dialog did not update selection, preview, and summary together");
+	dialog.SelectAll(true);
+	Expect(std::all_of(dialog.Items().begin(), dialog.Items().end(),
+		[](const jpegview_linux::BatchCopyItem& item) { return item.selected; }) &&
+		dialog.Message().find("8 selected") != std::string::npos,
+		"batch dialog select-all did not refresh preview state");
+	dialog.ScrollBy(100, 3);
+	Expect(dialog.Scroll() == 5, "batch dialog scrolling exceeded its final full page");
+	dialog.ScrollBy(-100, 3);
+	Expect(dialog.Scroll() == 0, "batch dialog scrolling exceeded its first page");
+	dialog.FocusItem(2);
+	Expect(dialog.Cursor() == 2, "batch dialog hover focus did not select a valid row");
+	dialog.FocusItem(99);
+	Expect(dialog.Cursor() == 2, "batch dialog hover focus accepted an invalid row");
+
+	dialog.Open({}, 0, u8"copy-写真", 4);
+	dialog.BackspacePattern();
+	Expect(dialog.Pattern() == u8"copy-写", "batch dialog Backspace split a UTF-8 code point");
+	dialog.AppendPattern(u8"像");
+	Expect(dialog.Pattern() == u8"copy-写像", "batch dialog did not append Unicode pattern text");
+	dialog.TogglePatternFocus();
+	dialog.AppendPattern("ignored");
+	Expect(dialog.Pattern() == u8"copy-写像", "batch dialog edited the pattern without pattern focus");
+	dialog.Close();
+	Expect(!dialog.IsOpen() && !dialog.PatternFocused(), "batch dialog did not clear open/focus state");
+}
+
 void TestDesktopApplicationParsingAndExecExpansion() {
 	TemporaryDirectory temporary;
 	const fs::path desktopFile = temporary.path() / "viewer.desktop";
@@ -1485,6 +1532,47 @@ void TestResizeModelAspectRatioValidationAndFilters() {
 	Expect(model.Filter() == 0, "resize filter did not wrap forward");
 	model.CycleFilter(-1);
 	Expect(model.Filter() == 3, "resize filter did not wrap backward");
+}
+
+void TestResizeDialogController() {
+	jpegview_linux::ResizeDialogController dialog;
+	dialog.Open(400, 200);
+	Expect(dialog.IsOpen() && dialog.FocusedField() == jpegview_linux::ResizeModel::kPercentField,
+		"resize dialog did not open on its percentage field");
+	dialog.AppendText("50abc.5");
+	Expect(dialog.Model().FieldText(jpegview_linux::ResizeModel::kPercentField) == "51" &&
+		dialog.Model().FieldText(jpegview_linux::ResizeModel::kWidthField) == "202" &&
+		dialog.Model().FieldText(jpegview_linux::ResizeModel::kHeightField) == "101",
+		"resize dialog did not filter text or update coupled dimensions");
+	dialog.MoveFocus(1);
+	Expect(dialog.FocusedField() == jpegview_linux::ResizeModel::kWidthField,
+		"resize dialog did not move focus forward");
+	dialog.AppendText("100");
+	int width = 0;
+	int height = 0;
+	Expect(dialog.Target(width, height) && width == 100 && height == 50,
+		"resize dialog did not replace a primed field and expose its target");
+	dialog.SelectAll();
+	Expect(dialog.Model().FieldText(jpegview_linux::ResizeModel::kWidthField).empty(),
+		"resize dialog select-all did not clear the focused numeric field");
+	dialog.AppendText("80");
+	dialog.Backspace();
+	Expect(dialog.Target(width, height) && width == 8 && height == 4,
+		"resize dialog Backspace did not recalculate its target");
+	dialog.MoveFocus(-1);
+	Expect(dialog.FocusedField() == jpegview_linux::ResizeModel::kPercentField,
+		"resize dialog did not move focus backward");
+	dialog.SelectField(jpegview_linux::ResizeModel::kFilterField);
+	const int previousFilter = dialog.Model().Filter();
+	dialog.CycleFilter(1);
+	Expect(dialog.FocusedField() == jpegview_linux::ResizeModel::kFilterField &&
+		dialog.Model().Filter() == (previousFilter + 1) % jpegview_linux::ResizeModel::kFilterCount,
+		"resize dialog did not cycle its filter in place");
+	dialog.SetMessage("external failure");
+	Expect(dialog.Message() == "external failure", "resize dialog did not retain adapter failure feedback");
+	dialog.Close();
+	Expect(!dialog.IsOpen() && dialog.Message().empty(),
+		"resize dialog did not clear transient state when closed");
 }
 
 void TestContextMenuCompactionAndSelection() {
@@ -2256,12 +2344,14 @@ int main() {
 	RunTest("settings-path-selection", TestSettingsPathSelection, failures);
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);
 	RunTest("batch-copy-pattern-expansion-and-preview", TestBatchCopyPatternExpansionAndPreview, failures);
+	RunTest("batch-copy-dialog-controller", TestBatchCopyDialogController, failures);
 	RunTest("desktop-application-parsing-and-expansion", TestDesktopApplicationParsingAndExecExpansion, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
 	RunTest("viewport-navigation-resets-transient-zoom", TestViewportNavigationResetsTransientZoom, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
+	RunTest("resize-dialog-controller", TestResizeDialogController, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
 	RunTest("context-menu-catalog-and-state", TestContextMenuCatalogAndState, failures);
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);

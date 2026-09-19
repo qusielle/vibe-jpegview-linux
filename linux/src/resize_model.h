@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 
 namespace jpegview_linux {
 
@@ -37,6 +38,36 @@ private:
 	std::string heightText_;
 	int filter_ = 2;
 	std::string validationMessage_;
+};
+
+class ResizeDialogController {
+public:
+	void Open(int originalWidth, int originalHeight);
+	void Close();
+	void MoveFocus(int direction);
+	void SelectField(int field);
+	void SelectAll();
+	void Backspace();
+	void AppendText(const std::string& text);
+	void CycleFilter(int direction);
+
+	bool IsOpen() const { return open_; }
+	int FocusedField() const { return focusedField_; }
+	const ResizeModel& Model() const { return model_; }
+	ResizeModel& Model() { return model_; }
+	const std::string& Message() const { return message_; }
+	void SetMessage(std::string message) { message_ = std::move(message); }
+	bool Target(int& width, int& height) const { return model_.Target(width, height); }
+
+private:
+	void PrimeField();
+	void UpdateFromFocusedField();
+
+	bool open_ = false;
+	int focusedField_ = ResizeModel::kPercentField;
+	bool inputPrimed_ = false;
+	ResizeModel model_;
+	std::string message_;
 };
 
 } // namespace jpegview_linux
