@@ -7,6 +7,9 @@
 #include "desktop_applications.h"
 #include "batch_copy.h"
 #include "image_formats.h"
+#include "input_commands.h"
+
+#include "../../src/JPEGView/resource.h"
 
 #include <algorithm>
 #include <array>
@@ -277,6 +280,94 @@ void TestSupportedImageExtensionPolicy() {
 		Expect(!jpegview_linux::IsSupportedImagePath(filename),
 			std::string("unsupported image extension was accepted: ") + filename);
 	}
+}
+
+void TestKeyboardCommandMappings() {
+	struct KeyCase {
+		Sint32 key;
+		Uint16 modifiers;
+		int command;
+	};
+	const std::vector<KeyCase> cases = {
+		{SDLK_q, 0, IDM_EXIT},
+		{SDLK_o, 0x00C0u, IDM_OPEN},
+		{SDLK_F2, 0x00C0u, IDM_SHOW_FILENAME},
+		{'c', 0x00C0u, IDM_COPY_FULL},
+		{'c', 0x00C3u, IDM_COPY_PATH},
+		{'v', 0x00C0u, IDM_PASTE},
+		{'p', 0x00C0u, IDM_PRINT},
+		{'s', 0x00C0u, IDM_SAVE_ALLOW_NO_PROMPT},
+		{'s', 0x00C3u, IDM_SAVE_SCREEN},
+		{SDLK_r, 0x00C0u, IDM_RELOAD},
+		{SDLK_r, 0x00C3u, IDM_CHANGESIZE},
+		{'m', 0x00C3u, IDM_TOUCH_IMAGE},
+		{'e', 0x00C3u, IDM_TOUCH_IMAGE_EXIF},
+		{'n', 0x00C0u, IDM_SHOW_NAVPANEL},
+		{'n', 0x0003u, IDM_SHOW_FILENAME},
+		{SDLK_F2, 0, IDM_SHOW_FILEINFO},
+		{SDLK_F3, 0, IDM_TOGGLE_RESAMPLING_QUALITY},
+		{SDLK_F4, 0, IDM_KEEP_PARAMETERS},
+		{SDLK_F5, 0, IDM_AUTO_CORRECTION},
+		{SDLK_F6, 0, IDM_LDC},
+		{'c', 0, IDM_SORT_CREATION_DATE},
+		{'n', 0, IDM_SORT_NAME},
+		{'m', 0, IDM_SORT_MOD_DATE},
+		{'z', 0, IDM_SORT_RANDOM},
+		{SDLK_F7, 0, IDM_LOOP_FOLDER},
+		{SDLK_F8, 0, IDM_LOOP_RECURSIVELY},
+		{SDLK_F9, 0, IDM_LOOP_SIBLINGS},
+		{SDLK_DELETE, 0, IDM_MOVE_TO_RECYCLE_BIN_CONFIRM},
+		{'w', 0, IDM_EXPLORE},
+		{SDLK_RIGHT, 0, IDM_NEXT},
+		{SDLK_PAGEDOWN, 0, IDM_NEXT},
+		{SDLK_LEFT, 0, IDM_PREV},
+		{SDLK_PAGEUP, 0, IDM_PREV},
+		{SDLK_HOME, 0, IDM_FIRST},
+		{SDLK_END, 0, IDM_LAST},
+		{SDLK_SPACE, 0, IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS},
+		{SDLK_RETURN, 0, IDM_FIT_TO_SCREEN},
+		{SDLK_DOWN, 0, IDM_ROTATE_90},
+		{SDLK_UP, 0, IDM_ROTATE_270},
+		{SDLK_DOWN, 0x00C0u, IDM_ZOOM_DEC},
+		{SDLK_UP, 0x00C0u, IDM_ZOOM_INC},
+		{SDLK_F11, 0, IDM_FULL_SCREEN_MODE},
+		{SDLK_F11, 0x0003u, IDM_HIDE_TITLE_BAR},
+		{SDLK_F11, 0x00C0u, IDM_FIT_WINDOW_TO_IMAGE},
+		{SDLK_F12, 0, IDM_SPAN_SCREENS},
+		{SDLK_F12, 0x0003u, IDM_ALWAYS_ON_TOP},
+		{SDLK_RETURN, 0x00C0u, IDM_FILL_WITH_CROP},
+		{'r', 0, IDM_ROTATE_90_LOSSLESS_CONFIRM},
+		{'t', 0, IDM_ROTATE_270_LOSSLESS_CONFIRM},
+		{SDLK_0, 0, IDM_FIT_TO_SCREEN},
+		{'f', 0, IDM_FULL_SCREEN_MODE},
+		{SDLK_EQUALS, 0, IDM_ZOOM_INC},
+		{SDLK_KP_PLUS, 0x0003u, IDM_ZOOM_INC},
+		{SDLK_MINUS, 0, IDM_ZOOM_DEC},
+		{SDLK_KP_MINUS, 0x0003u, IDM_ZOOM_DEC},
+	};
+	for (const KeyCase& testCase : cases) {
+		SDL_KeyboardEvent event{};
+		event.keysym.sym = testCase.key;
+		event.keysym.mod = testCase.modifiers;
+		Expect(jpegview_linux::CommandForKey(event, false) == testCase.command,
+			"keyboard command mapping is incorrect");
+	}
+	SDL_KeyboardEvent escape{};
+	escape.keysym.sym = SDLK_ESCAPE;
+	Expect(jpegview_linux::CommandForKey(escape, false) == IDM_EXIT,
+		"Escape did not exit when playback was inactive");
+	Expect(jpegview_linux::CommandForKey(escape, true) == IDM_DEFAULT_ESC,
+		"Escape did not stop playback before exiting");
+	SDL_KeyboardEvent resume{};
+	resume.keysym.sym = SDLK_r;
+	resume.keysym.mod = 0x0300u;
+	Expect(jpegview_linux::CommandForKey(resume, false) == IDM_SLIDESHOW_RESUME,
+		"Alt+R did not resume playback");
+	resume.keysym.sym = 'x';
+	Expect(jpegview_linux::CommandForKey(resume, false) == 0, "unsupported Alt command was accepted");
+	SDL_KeyboardEvent unknown{};
+	unknown.keysym.sym = 'x';
+	Expect(jpegview_linux::CommandForKey(unknown, false) == 0, "unknown key was accepted");
 }
 
 void TestFileListDateSortingAndSelectionPreservation() {
@@ -1001,6 +1092,7 @@ int main() {
 	int failures = 0;
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
+	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);
 	RunTest("file-list-multiple-inputs", TestFileListMultipleInputs, failures);

@@ -98,9 +98,10 @@ The dependency-light core suite builds and runs with:
 make -C linux test
 ```
 
-It covers file-list ordering/navigation, decoder and writer round trips across static and animated
-formats, all PNM variants, malformed input, batch-copy planning, and JPEG metadata. The optional
-X11 smoke suite covers startup controls, mouse-wheel navigation versus Ctrl+wheel zoom, and
+It covers file-list ordering/navigation, the complete supported keyboard-command mapping, decoder
+and writer round trips across static and animated formats, all PNM variants, malformed input,
+batch-copy planning, and JPEG metadata. The optional X11 smoke suite covers startup controls,
+mouse-wheel navigation versus Ctrl+wheel zoom, held-key repeat, maximize restoration, and
 persisted settings:
 
 ```sh
