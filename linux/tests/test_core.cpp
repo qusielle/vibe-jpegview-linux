@@ -6,6 +6,7 @@
 #include "settings.h"
 #include "sort_mode.h"
 #include "desktop_applications.h"
+#include "external_commands.h"
 #include "batch_copy.h"
 #include "image_formats.h"
 #include "input_commands.h"
@@ -1185,6 +1186,76 @@ void TestDesktopApplicationParsingAndExecExpansion() {
 	const std::vector<std::string> implicitFile = jpegview_linux::DesktopExecArguments(application, image);
 	Expect(implicitFile.size() == 3 && implicitFile[2] == fs::absolute(image).lexically_normal().string(),
 		"desktop Exec did not append an image when no field code was present");
+}
+
+void TestExternalCommandPlanning() {
+	using jpegview_linux::ClipboardBackend;
+	using jpegview_linux::ExternalCommand;
+	using jpegview_linux::LosslessJpegOperation;
+	const fs::path source = fs::path("/tmp/source photo.jpg");
+	const fs::path output = fs::path("/tmp/output.jpg");
+	ExternalCommand command = jpegview_linux::LosslessJpegCommand(
+		LosslessJpegOperation::Rotate90, source, output);
+	Expect(command.executable == "jpegtran" && command.arguments ==
+		std::vector<std::string>({"-copy", "all", "-rotate", "90", "-outfile",
+			output.string(), source.string()}),
+		"lossless JPEG rotation plan has incorrect arguments");
+	command = jpegview_linux::LosslessJpegCommand(
+		LosslessJpegOperation::FlipVertical, source, output);
+	Expect(command.arguments[2] == "-flip" && command.arguments[3] == "vertical",
+		"lossless JPEG mirror plan has incorrect arguments");
+	Expect(jpegview_linux::PrintCommand(output).executable == "lp" &&
+		jpegview_linux::PrintCommand(output).arguments == std::vector<std::string>({output.string()}),
+		"print command plan is incorrect");
+
+	const auto openFolder = jpegview_linux::OpenContainingFolderCommands(fs::path("/tmp/my folder"));
+	Expect(openFolder.size() == 2 && openFolder[0].executable == "xdg-open" &&
+		openFolder[1].executable == "gio" && openFolder[1].arguments ==
+			std::vector<std::string>({"open", "/tmp/my folder"}),
+		"open-folder fallback plans are incorrect");
+	jpegview_linux::OpenWithApplication application;
+	application.name = "Editor";
+	application.exec = "photo-editor --new-window %f";
+	application.terminal = true;
+	auto openWith = jpegview_linux::OpenWithCommand(application, source, true);
+	Expect(openWith.has_value() && openWith->executable == "x-terminal-emulator" &&
+		openWith->arguments == std::vector<std::string>({"-e", "photo-editor", "--new-window", source.string()}),
+		"terminal Open with plan did not wrap the expanded desktop command");
+	openWith = jpegview_linux::OpenWithCommand(application, source, false);
+	Expect(openWith.has_value() && openWith->executable == "photo-editor" &&
+		openWith->arguments == std::vector<std::string>({"--new-window", source.string()}),
+		"direct Open with plan did not split executable and arguments");
+	application.exec.clear();
+	Expect(!jpegview_linux::OpenWithCommand(application, source, true).has_value(),
+		"invalid Open with command produced an execution plan");
+
+	const auto wallpaper = jpegview_linux::WallpaperCommandSequences(source);
+	Expect(wallpaper.size() == 3 && wallpaper[0].required.executable == "gsettings" &&
+		wallpaper[0].required.arguments[2] == "picture-uri" &&
+		wallpaper[0].required.arguments.back() == "file:///tmp/source%20photo.jpg" &&
+		wallpaper[0].afterSuccess.size() == 1 &&
+		wallpaper[0].afterSuccess[0].arguments[2] == "picture-uri-dark" &&
+		wallpaper[1].required.executable == "feh" &&
+		wallpaper[2].required.executable == "nitrogen",
+		"wallpaper backend plan order or GNOME follow-up is incorrect");
+	const auto trash = jpegview_linux::TrashCommands(source);
+	Expect(trash.size() == 2 && trash[0].arguments ==
+		std::vector<std::string>({"trash", source.string()}) &&
+		trash[1].executable == "trash-put",
+		"trash helper plans are incorrect");
+
+	Expect(jpegview_linux::SelectClipboardBackend(true, true, true) == ClipboardBackend::Wayland &&
+		jpegview_linux::SelectClipboardBackend(false, true, true) == ClipboardBackend::Xclip &&
+		jpegview_linux::SelectClipboardBackend(false, true, false) == ClipboardBackend::Wayland &&
+		jpegview_linux::SelectClipboardBackend(true, false, false) == ClipboardBackend::None,
+		"clipboard backend preference/fallback policy is incorrect");
+	const ExternalCommand waylandWrite = jpegview_linux::ClipboardWriteCommand(ClipboardBackend::Wayland);
+	const ExternalCommand xclipRead = jpegview_linux::ClipboardReadCommand(ClipboardBackend::Xclip);
+	Expect(waylandWrite.executable == "wl-copy" && waylandWrite.arguments ==
+		std::vector<std::string>({"--type", "image/png"}) &&
+		xclipRead.executable == "xclip" && xclipRead.arguments.back() == "-o" &&
+		!jpegview_linux::ClipboardReadCommand(ClipboardBackend::None).Valid(),
+		"clipboard helper arguments are incorrect");
 }
 
 class ExifFixture {
@@ -2397,6 +2468,7 @@ int main() {
 	RunTest("batch-copy-pattern-expansion-and-preview", TestBatchCopyPatternExpansionAndPreview, failures);
 	RunTest("batch-copy-dialog-controller", TestBatchCopyDialogController, failures);
 	RunTest("desktop-application-parsing-and-expansion", TestDesktopApplicationParsingAndExecExpansion, failures);
+	RunTest("external-command-planning", TestExternalCommandPlanning, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);

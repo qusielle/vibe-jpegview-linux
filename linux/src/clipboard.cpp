@@ -1,5 +1,6 @@
 #include "clipboard.h"
 
+#include "external_commands.h"
 #include "image_writer.h"
 #include "sdl_abi.h"
 
@@ -32,24 +33,32 @@ bool HasExecutable(const char* executable) {
 	return false;
 }
 
-const char* ClipboardWriter() {
-	const bool wayland = std::getenv("WAYLAND_DISPLAY") != nullptr ||
-		(std::getenv("XDG_SESSION_TYPE") != nullptr && std::string(std::getenv("XDG_SESSION_TYPE")) == "wayland");
-	if (wayland && HasExecutable("wl-copy")) return "wl-copy";
-	if (!wayland && HasExecutable("xclip")) return "xclip";
-	if (HasExecutable("wl-copy")) return "wl-copy";
-	if (HasExecutable("xclip")) return "xclip";
-	return nullptr;
+bool WaylandSession() {
+	return std::getenv("WAYLAND_DISPLAY") != nullptr ||
+		(std::getenv("XDG_SESSION_TYPE") != nullptr &&
+			std::string(std::getenv("XDG_SESSION_TYPE")) == "wayland");
 }
 
-const char* ClipboardReader() {
-	const bool wayland = std::getenv("WAYLAND_DISPLAY") != nullptr ||
-		(std::getenv("XDG_SESSION_TYPE") != nullptr && std::string(std::getenv("XDG_SESSION_TYPE")) == "wayland");
-	if (wayland && HasExecutable("wl-paste")) return "wl-paste";
-	if (!wayland && HasExecutable("xclip")) return "xclip";
-	if (HasExecutable("wl-paste")) return "wl-paste";
-	if (HasExecutable("xclip")) return "xclip";
-	return nullptr;
+ExternalCommand ClipboardWriter() {
+	return ClipboardWriteCommand(SelectClipboardBackend(WaylandSession(),
+		HasExecutable("wl-copy"), HasExecutable("xclip")));
+}
+
+ExternalCommand ClipboardReader() {
+	return ClipboardReadCommand(SelectClipboardBackend(WaylandSession(),
+		HasExecutable("wl-paste"), HasExecutable("xclip")));
+}
+
+[[noreturn]] void ExecCommand(const ExternalCommand& command) {
+	std::vector<char*> arguments;
+	arguments.reserve(command.arguments.size() + 2);
+	arguments.push_back(const_cast<char*>(command.executable.c_str()));
+	for (const std::string& argument : command.arguments) {
+		arguments.push_back(const_cast<char*>(argument.c_str()));
+	}
+	arguments.push_back(nullptr);
+	execvp(command.executable.c_str(), arguments.data());
+	_exit(127);
 }
 
 bool WriteAll(int descriptor, const std::uint8_t* data, std::size_t size) {
@@ -78,8 +87,8 @@ bool WriteClipboardPayload(int descriptor, const std::vector<std::uint8_t>& data
 }
 
 bool SendToClipboard(const std::vector<std::uint8_t>& data, std::string& errorMessage) {
-	const char* executable = ClipboardWriter();
-	if (executable == nullptr) {
+	const ExternalCommand command = ClipboardWriter();
+	if (!command.Valid()) {
 		errorMessage = "install xclip (X11) or wl-clipboard (Wayland) to copy images";
 		return false;
 	}
@@ -103,12 +112,7 @@ bool SendToClipboard(const std::vector<std::uint8_t>& data, std::string& errorMe
 			close(descriptors[1]);
 			if (dup2(descriptors[0], STDIN_FILENO) < 0) _exit(126);
 			close(descriptors[0]);
-			if (std::string(executable) == "wl-copy") {
-				execlp(executable, executable, "--type", "image/png", static_cast<char*>(nullptr));
-			} else {
-				execlp(executable, executable, "-selection", "clipboard", "-t", "image/png", "-i", static_cast<char*>(nullptr));
-			}
-			_exit(127);
+			ExecCommand(command);
 		}
 		close(descriptors[0]);
 		close(descriptors[1]);
@@ -126,7 +130,7 @@ bool SendToClipboard(const std::vector<std::uint8_t>& data, std::string& errorMe
 	return true;
 }
 
-bool CaptureFromClipboard(const char* executable, std::vector<std::uint8_t>& data) {
+bool CaptureFromClipboard(const ExternalCommand& command, std::vector<std::uint8_t>& data) {
 	int descriptors[2]{};
 	if (pipe(descriptors) != 0) return false;
 	const pid_t child = fork();
@@ -139,12 +143,7 @@ bool CaptureFromClipboard(const char* executable, std::vector<std::uint8_t>& dat
 		close(descriptors[0]);
 		if (dup2(descriptors[1], STDOUT_FILENO) < 0) _exit(126);
 		close(descriptors[1]);
-		if (std::string(executable) == "wl-paste") {
-			execlp(executable, executable, "--type", "image/png", "--no-newline", static_cast<char*>(nullptr));
-		} else {
-			execlp(executable, executable, "-selection", "clipboard", "-t", "image/png", "-o", static_cast<char*>(nullptr));
-		}
-		_exit(127);
+		ExecCommand(command);
 	}
 	close(descriptors[1]);
 	data.clear();
@@ -223,12 +222,12 @@ bool CopyImageToClipboard(const std::uint8_t* bgra, int width, int height, std::
 }
 
 bool PasteImageFromClipboard(std::vector<std::uint8_t>& encodedPng, std::string& errorMessage) {
-	const char* executable = ClipboardReader();
-	if (executable == nullptr) {
+	const ExternalCommand command = ClipboardReader();
+	if (!command.Valid()) {
 		errorMessage = "install xclip (X11) or wl-clipboard (Wayland) to paste images";
 		return false;
 	}
-	if (!CaptureFromClipboard(executable, encodedPng)) {
+	if (!CaptureFromClipboard(command, encodedPng)) {
 		errorMessage = "clipboard does not contain a PNG image";
 		return false;
 	}

@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "sort_mode.h"
 #include "desktop_applications.h"
+#include "external_commands.h"
 #include "batch_copy.h"
 #include "image_formats.h"
 #include "input_commands.h"
@@ -46,6 +47,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -219,46 +221,47 @@ bool HasExecutable(const std::string& executable) {
 	return false;
 }
 
-[[noreturn]] void ExecProcess(const std::string& executable, const std::vector<std::string>& arguments) {
+[[noreturn]] void ExecProcess(const jpegview_linux::ExternalCommand& command) {
 	std::vector<char*> argv;
-	argv.reserve(arguments.size() + 2);
-	argv.push_back(const_cast<char*>(executable.c_str()));
-	for (const std::string& argument : arguments) argv.push_back(const_cast<char*>(argument.c_str()));
+	argv.reserve(command.arguments.size() + 2);
+	argv.push_back(const_cast<char*>(command.executable.c_str()));
+	for (const std::string& argument : command.arguments) argv.push_back(const_cast<char*>(argument.c_str()));
 	argv.push_back(nullptr);
-	execvp(executable.c_str(), argv.data());
+	execvp(command.executable.c_str(), argv.data());
 	_exit(127);
 }
 
-bool RunProcess(const std::string& executable, const std::vector<std::string>& arguments,
-	std::string& errorMessage) {
-	if (!HasExecutable(executable)) {
-		errorMessage = executable + " is not installed";
+bool RunProcess(const jpegview_linux::ExternalCommand& command, std::string& errorMessage) {
+	if (!command.Valid() || !HasExecutable(command.executable)) {
+		errorMessage = command.executable.empty() ? "invalid external command" :
+			command.executable + " is not installed";
 		return false;
 	}
 	const pid_t child = fork();
 	if (child < 0) {
-		errorMessage = "cannot start " + executable;
+		errorMessage = "cannot start " + command.executable;
 		return false;
 	}
-	if (child == 0) ExecProcess(executable, arguments);
+	if (child == 0) ExecProcess(command);
 	int status = 0;
 	while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		errorMessage = executable + " failed";
+		errorMessage = command.executable + " failed";
 		return false;
 	}
 	return true;
 }
 
-bool StartDetachedProcess(const std::string& executable, const std::vector<std::string>& arguments,
+bool StartDetachedProcess(const jpegview_linux::ExternalCommand& command,
 	std::string& errorMessage) {
-	if (!HasExecutable(executable)) {
-		errorMessage = executable + " is not installed";
+	if (!command.Valid() || !HasExecutable(command.executable)) {
+		errorMessage = command.executable.empty() ? "invalid external command" :
+			command.executable + " is not installed";
 		return false;
 	}
 	const pid_t child = fork();
 	if (child < 0) {
-		errorMessage = "cannot start " + executable;
+		errorMessage = "cannot start " + command.executable;
 		return false;
 	}
 	if (child == 0) {
@@ -266,12 +269,12 @@ bool StartDetachedProcess(const std::string& executable, const std::vector<std::
 		if (detached < 0) _exit(127);
 		if (detached > 0) _exit(0);
 		setsid();
-		ExecProcess(executable, arguments);
+		ExecProcess(command);
 	}
 	int status = 0;
 	while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		errorMessage = executable + " failed to start";
+		errorMessage = command.executable + " failed to start";
 		return false;
 	}
 	return true;
@@ -714,25 +717,29 @@ private:
 			SetTitle("Lossless JPEG transformation requires a JPEG image");
 			return;
 		}
-		std::string operation;
+		std::optional<jpegview_linux::LosslessJpegOperation> operation;
 		switch (command) {
 		case IDM_ROTATE_90_LOSSLESS:
 		case IDM_ROTATE_90_LOSSLESS_CONFIRM:
-			operation = "90";
+			operation = jpegview_linux::LosslessJpegOperation::Rotate90;
 			break;
 		case IDM_ROTATE_270_LOSSLESS:
 		case IDM_ROTATE_270_LOSSLESS_CONFIRM:
-			operation = "270";
+			operation = jpegview_linux::LosslessJpegOperation::Rotate270;
 			break;
 		case IDM_ROTATE_180_LOSSLESS:
-			operation = "180";
+			operation = jpegview_linux::LosslessJpegOperation::Rotate180;
+			break;
+		case IDM_MIRROR_H_LOSSLESS:
+			operation = jpegview_linux::LosslessJpegOperation::FlipHorizontal;
+			break;
+		case IDM_MIRROR_V_LOSSLESS:
+			operation = jpegview_linux::LosslessJpegOperation::FlipVertical;
 			break;
 		default:
 			break;
 		}
-		const bool horizontalFlip = command == IDM_MIRROR_H_LOSSLESS;
-		const bool verticalFlip = command == IDM_MIRROR_V_LOSSLESS;
-		if (operation.empty() && !horizontalFlip && !verticalFlip) return;
+		if (!operation.has_value()) return;
 		if (!HasExecutable("jpegtran")) {
 			SetTitle("Lossless JPEG transformation requires jpegtran");
 			return;
@@ -745,19 +752,10 @@ private:
 		}
 		const fs::path temporaryDirectory(temporaryDirectoryName);
 		const fs::path temporaryFile = temporaryDirectory / "transformed.jpg";
-		std::vector<std::string> arguments{"-copy", "all"};
-		if (!operation.empty()) {
-			arguments.push_back("-rotate");
-			arguments.push_back(operation);
-		} else {
-			arguments.push_back("-flip");
-			arguments.push_back(horizontalFlip ? "horizontal" : "vertical");
-		}
-		arguments.push_back("-outfile");
-		arguments.push_back(temporaryFile.string());
-		arguments.push_back(fileList_.Current().string());
+		const jpegview_linux::ExternalCommand transform = jpegview_linux::LosslessJpegCommand(
+			*operation, fileList_.Current(), temporaryFile);
 		std::string errorMessage;
-		const bool transformed = RunProcess("jpegtran", arguments, errorMessage);
+		const bool transformed = RunProcess(transform, errorMessage);
 		if (!transformed) {
 			std::error_code removeError;
 			fs::remove_all(temporaryDirectory, removeError);
@@ -902,8 +900,15 @@ private:
 		if (fileList_.Empty() || clipboardMode_) return;
 		const fs::path directory = fileList_.Current().parent_path();
 		std::string errorMessage;
-		if (StartDetachedProcess("xdg-open", {directory.string()}, errorMessage) ||
-			StartDetachedProcess("gio", {"open", directory.string()}, errorMessage)) {
+		bool started = false;
+		for (const jpegview_linux::ExternalCommand& command :
+			jpegview_linux::OpenContainingFolderCommands(directory)) {
+			if (StartDetachedProcess(command, errorMessage)) {
+				started = true;
+				break;
+			}
+		}
+		if (started) {
 			SetTitle("Opened containing folder");
 		} else {
 			SetTitle("Cannot open containing folder: " + errorMessage);
@@ -913,23 +918,16 @@ private:
 	void OpenCurrentWith(std::size_t applicationIndex) {
 		if (fileList_.Empty() || clipboardMode_ || applicationIndex >= openWithApplications_.size()) return;
 		const jpegview_linux::OpenWithApplication& application = openWithApplications_[applicationIndex];
-		std::vector<std::string> command = jpegview_linux::DesktopExecArguments(application, fileList_.Current());
-		if (command.empty()) {
+		const std::optional<jpegview_linux::ExternalCommand> command =
+			jpegview_linux::OpenWithCommand(application, fileList_.Current(),
+				HasExecutable("x-terminal-emulator"));
+		if (!command.has_value()) {
 			SetTitle("Cannot open image with " + application.name + ": invalid desktop command");
 			return;
 		}
 
 		std::string errorMessage;
-		bool started = false;
-		if (application.terminal && HasExecutable("x-terminal-emulator")) {
-			std::vector<std::string> terminalArguments{"-e"};
-			terminalArguments.insert(terminalArguments.end(), command.begin(), command.end());
-			started = StartDetachedProcess("x-terminal-emulator", terminalArguments, errorMessage);
-		} else {
-			const std::string executable = command.front();
-			command.erase(command.begin());
-			started = StartDetachedProcess(executable, command, errorMessage);
-		}
+		const bool started = StartDetachedProcess(*command, errorMessage);
 		SetTitle(started ? "Opened image with " + application.name :
 			"Cannot open image with " + application.name + ": " + errorMessage);
 	}
@@ -953,7 +951,7 @@ private:
 			SetTitle("Print failed: " + errorMessage);
 			return;
 		}
-		const bool printed = RunProcess("lp", {temporaryFile.string()}, errorMessage);
+		const bool printed = RunProcess(jpegview_linux::PrintCommand(temporaryFile), errorMessage);
 		std::error_code removeError;
 		fs::remove_all(temporaryDirectory, removeError);
 		SetTitle(printed ? "Sent image to the default printer" : "Print failed: " + errorMessage);
@@ -1069,20 +1067,15 @@ private:
 
 		std::string errorMessage;
 		bool applied = false;
-		if (HasExecutable("gsettings")) {
-			applied = RunProcess("gsettings", {"set", "org.gnome.desktop.background", "picture-uri", jpegview_linux::FileUri(wallpaperFile)}, errorMessage);
-			if (applied) {
-				// GNOME 42+ also consults the dark-mode URI.  Older versions simply
-				// report an unknown key; the light-mode setting above is sufficient.
+		for (const jpegview_linux::ExternalCommandSequence& sequence :
+			jpegview_linux::WallpaperCommandSequences(wallpaperFile)) {
+			if (!RunProcess(sequence.required, errorMessage)) continue;
+			applied = true;
+			for (const jpegview_linux::ExternalCommand& command : sequence.afterSuccess) {
 				std::string ignoredError;
-				RunProcess("gsettings", {"set", "org.gnome.desktop.background", "picture-uri-dark", jpegview_linux::FileUri(wallpaperFile)}, ignoredError);
+				RunProcess(command, ignoredError);
 			}
-		}
-		if (!applied && HasExecutable("feh")) {
-			applied = RunProcess("feh", {"--bg-fill", wallpaperFile.string()}, errorMessage);
-		}
-		if (!applied && HasExecutable("nitrogen")) {
-			applied = RunProcess("nitrogen", {"--set-zoom-fill", wallpaperFile.string()}, errorMessage);
+			break;
 		}
 		SetTitle(applied ? "Set desktop wallpaper" : "Set wallpaper failed: install gsettings, feh, or nitrogen");
 	}
@@ -1100,12 +1093,16 @@ private:
 		const fs::path filename = fileList_.Current();
 		std::string errorMessage;
 		bool moved = false;
-		if (HasExecutable("gio")) {
-			moved = RunProcess("gio", {"trash", filename.string()}, errorMessage);
-		} else if (HasExecutable("trash-put")) {
-			moved = RunProcess("trash-put", {filename.string()}, errorMessage);
+		bool helperAvailable = false;
+		for (const jpegview_linux::ExternalCommand& command : jpegview_linux::TrashCommands(filename)) {
+			if (!HasExecutable(command.executable)) continue;
+			helperAvailable = true;
+			if (RunProcess(command, errorMessage)) {
+				moved = true;
+				break;
+			}
 		}
-		if (!moved && !HasExecutable("gio") && !HasExecutable("trash-put")) {
+		if (!moved && !helperAvailable) {
 			// The confirmation dialog has already made this an explicit user
 			// action.  This fallback keeps the key binding useful on minimal
 			// systems that do not ship a freedesktop trash helper.

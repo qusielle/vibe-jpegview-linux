@@ -25,6 +25,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `app_icon`: extraction of the application icon embedded from the upstream ICO resource.
 - `batch_copy`: pattern expansion, previews, and pure dialog focus/selection/scroll transitions.
 - `desktop_applications`: non-UI discovery and planning for Open with commands.
+- `external_commands`: pure argv plans and fallback order for printing, wallpaper, clipboard,
+  desktop opening, trash, and lossless JPEG helpers.
 - `exif_reader`: JPEG metadata parsing.
 
 `main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
@@ -35,9 +37,8 @@ above rather than duplicate their state.
 
 The remaining Viewer work is ordered by expected testability and reduction in coupling:
 
-1. Separate external-command planning (print, wallpaper, clipboard helpers, and lossless JPEG
-   transforms) from process execution and Viewer status reporting.
-2. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
+1. Separate overlay/navigation drawing from Viewer. Rendering remains last because pixel-level X11
+   smoke tests are its best safety net.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
 The image, viewport, playback, file-dialog, resize, context-menu rule, thumbnail-layout/resampling, font,
