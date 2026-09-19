@@ -8,6 +8,8 @@ namespace jpegview_linux {
 inline constexpr double kMinimumZoom = 0.01;
 inline constexpr double kMaximumZoom = 32.0;
 
+std::filesystem::path ViewerSettingsPath();
+
 struct ViewerSettings {
 	std::string scaleMode = "fit_no_enlarge";
 	std::string sortMode = "modification_date";

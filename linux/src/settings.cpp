@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <system_error>
@@ -29,6 +30,16 @@ bool ParseBool(const std::string& value) {
 }
 
 } // namespace
+
+fs::path ViewerSettingsPath() {
+	if (const char* configHome = std::getenv("XDG_CONFIG_HOME"); configHome != nullptr && *configHome != '\0') {
+		return fs::path(configHome) / "jpegview-linux" / "settings.conf";
+	}
+	if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+		return fs::path(home) / ".config" / "jpegview-linux" / "settings.conf";
+	}
+	return {};
+}
 
 bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 	std::ifstream input(filename);

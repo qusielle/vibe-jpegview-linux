@@ -743,16 +743,6 @@ bool StartDetachedProcess(const std::string& executable, const std::vector<std::
 	return true;
 }
 
-fs::path ScaleSettingsPath() {
-	if (const char* configHome = std::getenv("XDG_CONFIG_HOME"); configHome != nullptr && *configHome != '\0') {
-		return fs::path(configHome) / "jpegview-linux" / "settings.conf";
-	}
-	if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-		return fs::path(home) / ".config" / "jpegview-linux" / "settings.conf";
-	}
-	return {};
-}
-
 class Viewer {
 public:
 	Viewer(jpegview_linux::FileList fileList, double slideshowSeconds, bool startFullscreen)
@@ -856,7 +846,7 @@ private:
 	}
 
 	void LoadSettings() {
-		const fs::path settingsPath = ScaleSettingsPath();
+		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
 		if (settingsPath.empty()) return;
 
 		jpegview_linux::ViewerSettings settings;
@@ -906,7 +896,7 @@ private:
 	}
 
 	void SaveSettings() const {
-		const fs::path settingsPath = ScaleSettingsPath();
+		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
 		if (settingsPath.empty()) return;
 
 		jpegview_linux::ViewerSettings settings;

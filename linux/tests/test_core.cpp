@@ -13,11 +13,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -72,6 +74,28 @@ public:
 
 private:
 	fs::path path_;
+};
+
+class ScopedEnvironment {
+public:
+	ScopedEnvironment(const char* name, const std::string& value) : name_(name) {
+		const char* previous = std::getenv(name);
+		if (previous != nullptr) previous_ = previous;
+		if (setenv(name, value.c_str(), 1) != 0) throw TestFailure("cannot set test environment");
+	}
+
+	~ScopedEnvironment() {
+		if (previous_.has_value()) setenv(name_.c_str(), previous_->c_str(), 1);
+		else unsetenv(name_.c_str());
+	}
+
+	void Clear() {
+		if (unsetenv(name_.c_str()) != 0) throw TestFailure("cannot clear test environment");
+	}
+
+private:
+	std::string name_;
+	std::optional<std::string> previous_;
 };
 
 void WriteBytes(const fs::path& filename, const std::vector<std::uint8_t>& bytes) {
@@ -618,6 +642,19 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"malformed manual zoom did not retain its default");
 }
 
+void TestSettingsPathSelection() {
+	TemporaryDirectory temporary;
+	const fs::path xdgHome = temporary.path() / "xdg";
+	const fs::path home = temporary.path() / "home";
+	ScopedEnvironment xdg("XDG_CONFIG_HOME", xdgHome.string());
+	ScopedEnvironment homeEnvironment("HOME", home.string());
+	Expect(jpegview_linux::ViewerSettingsPath() == xdgHome / "jpegview-linux" / "settings.conf",
+		"XDG_CONFIG_HOME settings path is incorrect");
+	xdg.Clear();
+	Expect(jpegview_linux::ViewerSettingsPath() == home / ".config" / "jpegview-linux" / "settings.conf",
+		"HOME settings path fallback is incorrect");
+}
+
 void TestSortModeMappings() {
 	struct SortCase {
 		FileList::SortMode mode;
@@ -972,6 +1009,7 @@ int main() {
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
+	RunTest("settings-path-selection", TestSettingsPathSelection, failures);
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);
 	RunTest("batch-copy-pattern-expansion-and-preview", TestBatchCopyPatternExpansionAndPreview, failures);
 	RunTest("desktop-application-parsing-and-expansion", TestDesktopApplicationParsingAndExecExpansion, failures);
