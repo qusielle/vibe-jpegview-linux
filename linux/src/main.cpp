@@ -829,6 +829,14 @@ private:
 		Movie,
 	};
 
+	struct ContextMenuColumn {
+		std::size_t begin = 0;
+		std::size_t end = 0;
+		int x = 0;
+		int width = 260;
+		int height = 0;
+	};
+
 	void Cleanup() {
 		SaveSettings();
 		if (clipboardMode_) {
@@ -2488,33 +2496,65 @@ private:
 		return item.shortcut == nullptr ? std::string() : item.shortcut;
 	}
 
-	int ContextMenuVisibleCount() const {
+	int ContextMenuItemHeight(std::size_t index) const {
+		return contextMenuItems_[index].separator ? kContextMenuSeparatorHeight : kContextMenuItemHeight;
+	}
+
+	bool IsContextMenuItemSelectable(std::size_t index) const {
+		const MenuItem& item = contextMenuItems_[index];
+		return !item.separator && item.command != 0 && item.enabled;
+	}
+
+	std::vector<ContextMenuColumn> ContextMenuColumns() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		return std::max(1, std::min(36, (windowHeight - 24) / kContextMenuItemHeight));
+		(void)windowWidth;
+		const int maximumContentHeight = std::max(kContextMenuItemHeight, windowHeight - 24);
+		std::vector<ContextMenuColumn> columns;
+		std::size_t columnBegin = 0;
+		int columnHeight = 0;
+		for (std::size_t index = 0; index < contextMenuItems_.size(); ++index) {
+			const int itemHeight = ContextMenuItemHeight(index);
+			if (columnHeight > 0 && columnHeight + itemHeight > maximumContentHeight) {
+				columns.push_back({columnBegin, index, 0, 260, columnHeight});
+				columnBegin = index;
+				columnHeight = 0;
+			}
+			columnHeight += itemHeight;
+		}
+		if (columnBegin < contextMenuItems_.size() || columns.empty()) {
+			columns.push_back({columnBegin, contextMenuItems_.size(), 0, 260, columnHeight});
+		}
+
+		int columnX = 0;
+		for (ContextMenuColumn& column : columns) {
+			for (std::size_t index = column.begin; index < column.end; ++index) {
+				const MenuItem& item = contextMenuItems_[index];
+				if (item.separator) continue;
+				const int labelWidth = TextWidth(MenuLabel(item), kUiTextScale);
+				const int shortcutWidth = TextWidth(MenuShortcut(item), kUiTextScale);
+				column.width = std::max(column.width,
+					labelWidth + shortcutWidth + (shortcutWidth > 0 ? 40 : 24));
+			}
+			column.x = columnX;
+			columnX += column.width + 1;
+		}
+		return columns;
 	}
 
 	SDL_Rect ContextMenuRect() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		int width = 260;
-		int height = 12;
-		const int visibleCount = ContextMenuVisibleCount();
-		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
-			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
-		for (std::size_t index = contextMenuScroll_; index < visibleEnd; ++index) {
-			const MenuItem& item = contextMenuItems_[index];
-			if (item.separator) {
-				height += kContextMenuSeparatorHeight;
-				continue;
-			}
-			const int labelWidth = TextWidth(MenuLabel(item), kUiTextScale);
-			const int shortcutWidth = TextWidth(MenuShortcut(item), kUiTextScale);
-			width = std::max(width, labelWidth + shortcutWidth + (shortcutWidth > 0 ? 40 : 24));
-			height += kContextMenuItemHeight;
+		const std::vector<ContextMenuColumn> columns = ContextMenuColumns();
+		int width = 0;
+		int contentHeight = 0;
+		for (const ContextMenuColumn& column : columns) {
+			width = std::max(width, column.x + column.width);
+			contentHeight = std::max(contentHeight, column.height);
 		}
+		const int height = contentHeight + 12;
 		int x = contextMenuX_;
 		int y = contextMenuY_;
 		if (!contextMenuPositionLocked_) {
@@ -2529,17 +2569,19 @@ private:
 	int ContextMenuItemAt(int x, int y) const {
 		const SDL_Rect menu = ContextMenuRect();
 		if (!PointInRect(x, y, menu)) return -1;
-		int itemTop = menu.y + 6;
-		const int visibleCount = ContextMenuVisibleCount();
-		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
-			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
-		for (std::size_t i = contextMenuScroll_; i < visibleEnd; ++i) {
-			const MenuItem& item = contextMenuItems_[i];
-			const int itemHeight = item.separator ? kContextMenuSeparatorHeight : kContextMenuItemHeight;
-			if (y >= itemTop && y < itemTop + itemHeight) {
-				return item.separator || item.command == 0 || !item.enabled ? -1 : static_cast<int>(i);
+		const std::vector<ContextMenuColumn> columns = ContextMenuColumns();
+		for (const ContextMenuColumn& column : columns) {
+			const int columnLeft = menu.x + column.x;
+			if (x < columnLeft || x >= columnLeft + column.width) continue;
+			int itemTop = menu.y + 6;
+			for (std::size_t index = column.begin; index < column.end; ++index) {
+				const int itemHeight = ContextMenuItemHeight(index);
+				if (y >= itemTop && y < itemTop + itemHeight) {
+					return IsContextMenuItemSelectable(index) ? static_cast<int>(index) : -1;
+				}
+				itemTop += itemHeight;
 			}
-			itemTop += itemHeight;
+			return -1;
 		}
 		return -1;
 	}
@@ -2564,7 +2606,6 @@ private:
 		contextMenuX_ = initialMenu.x;
 		contextMenuY_ = initialMenu.y;
 		contextMenuPositionLocked_ = true;
-		contextMenuScroll_ = 0;
 		contextMenuOpen_ = true;
 		menuSelected_ = -1;
 	}
@@ -2574,7 +2615,6 @@ private:
 		contextMenuOpen_ = false;
 		contextMenuAdvancedOptions_ = false;
 		contextMenuPositionLocked_ = false;
-		contextMenuScroll_ = 0;
 		menuSelected_ = -1;
 		contextMenuItems_.clear();
 		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
@@ -2585,23 +2625,75 @@ private:
 		contextMenuNeedsCleanFrame_ = true;
 	}
 
-	void EnsureContextMenuSelectionVisible() {
-		const std::size_t visibleCount = static_cast<std::size_t>(ContextMenuVisibleCount());
-		if (menuSelected_ >= 0) {
-			const std::size_t selected = static_cast<std::size_t>(menuSelected_);
-			if (selected < contextMenuScroll_) contextMenuScroll_ = selected;
-			if (selected >= contextMenuScroll_ + visibleCount) contextMenuScroll_ = selected - visibleCount + 1;
+	void MoveContextMenuSelection(int direction) {
+		if (menuSelected_ < 0) {
+			menuSelected_ = jpegview_linux::NextMenuSelection(contextMenuItems_, menuSelected_, direction);
+			return;
 		}
-		const std::size_t maximumScroll = contextMenuItems_.size() > visibleCount ?
-			contextMenuItems_.size() - visibleCount : 0;
-		contextMenuScroll_ = std::min(contextMenuScroll_, maximumScroll);
+		const std::vector<ContextMenuColumn> columns = ContextMenuColumns();
+		for (const ContextMenuColumn& column : columns) {
+			if (static_cast<std::size_t>(menuSelected_) < column.begin ||
+				static_cast<std::size_t>(menuSelected_) >= column.end) continue;
+			int candidate = menuSelected_;
+			for (std::size_t tries = column.begin; tries < column.end; ++tries) {
+				candidate += direction < 0 ? -1 : 1;
+				if (candidate < static_cast<int>(column.begin)) candidate = static_cast<int>(column.end) - 1;
+				if (candidate >= static_cast<int>(column.end)) candidate = static_cast<int>(column.begin);
+				if (IsContextMenuItemSelectable(static_cast<std::size_t>(candidate))) {
+					menuSelected_ = candidate;
+					return;
+				}
+			}
+			return;
+		}
 	}
 
-	void MoveContextMenuSelection(int direction) {
-		const int selection = jpegview_linux::NextMenuSelection(contextMenuItems_, menuSelected_, direction);
-		if (selection < 0) return;
-		menuSelected_ = selection;
-		EnsureContextMenuSelectionVisible();
+	void MoveContextMenuSelectionAcrossColumns(int direction) {
+		const std::vector<ContextMenuColumn> columns = ContextMenuColumns();
+		if (columns.empty()) return;
+		int currentColumn = -1;
+		int currentCenter = 6;
+		if (menuSelected_ >= 0) {
+			for (std::size_t columnIndex = 0; columnIndex < columns.size(); ++columnIndex) {
+				const ContextMenuColumn& column = columns[columnIndex];
+				if (static_cast<std::size_t>(menuSelected_) < column.begin ||
+					static_cast<std::size_t>(menuSelected_) >= column.end) continue;
+				currentColumn = static_cast<int>(columnIndex);
+				int itemTop = 6;
+				for (std::size_t index = column.begin; index < static_cast<std::size_t>(menuSelected_); ++index) {
+					itemTop += ContextMenuItemHeight(index);
+				}
+				currentCenter = itemTop + ContextMenuItemHeight(static_cast<std::size_t>(menuSelected_)) / 2;
+				break;
+			}
+		}
+
+		int candidateColumn = currentColumn < 0
+			? (direction > 0 ? 0 : static_cast<int>(columns.size()) - 1)
+			: currentColumn + (direction > 0 ? 1 : -1);
+		while (candidateColumn >= 0 && candidateColumn < static_cast<int>(columns.size())) {
+			const ContextMenuColumn& column = columns[static_cast<std::size_t>(candidateColumn)];
+			int itemTop = 6;
+			int nearestIndex = -1;
+			int nearestDistance = std::numeric_limits<int>::max();
+			for (std::size_t index = column.begin; index < column.end; ++index) {
+				const int itemHeight = ContextMenuItemHeight(index);
+				if (IsContextMenuItemSelectable(index)) {
+					const int itemCenter = itemTop + itemHeight / 2;
+					const int distance = menuSelected_ < 0 ? 0 : std::abs(itemCenter - currentCenter);
+					if (distance < nearestDistance) {
+						nearestDistance = distance;
+						nearestIndex = static_cast<int>(index);
+					}
+				}
+				itemTop += itemHeight;
+			}
+			if (nearestIndex >= 0) {
+				menuSelected_ = nearestIndex;
+				return;
+			}
+			candidateColumn += direction > 0 ? 1 : -1;
+		}
 	}
 
 	void ActivateContextMenuSelection(bool& running) {
@@ -2614,7 +2706,6 @@ private:
 		if (command == kContextMenuShowAdvanced) {
 			contextMenuAdvancedOptions_ = true;
 			contextMenuItems_ = ContextMenuItems(contextMenuAdvancedOptions_);
-			contextMenuScroll_ = 0;
 			menuSelected_ = -1;
 			return;
 		}
@@ -3851,38 +3942,44 @@ private:
 	void RenderContextMenu() {
 		if (!contextMenuOpen_) return;
 		const SDL_Rect menu = ContextMenuRect();
+		const std::vector<ContextMenuColumn> columns = ContextMenuColumns();
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
 		SDL_RenderFillRect(renderer_, &menu);
 		DrawRect(menu, 185, 185, 185);
 
-		int itemTop = menu.y + 6;
-		const int visibleCount = ContextMenuVisibleCount();
-		const std::size_t visibleEnd = std::min(contextMenuItems_.size(),
-			contextMenuScroll_ + static_cast<std::size_t>(visibleCount));
-		for (std::size_t i = contextMenuScroll_; i < visibleEnd; ++i) {
-			const MenuItem& item = contextMenuItems_[i];
-			if (item.separator) {
-				DrawLine(menu.x + 10, itemTop + 4, menu.x + menu.w - 10, itemTop + 4, 75, 75, 75);
-				itemTop += kContextMenuSeparatorHeight;
-				continue;
+		for (const ContextMenuColumn& column : columns) {
+			const int columnX = menu.x + column.x;
+			int itemTop = menu.y + 6;
+			for (std::size_t i = column.begin; i < column.end; ++i) {
+				const MenuItem& item = contextMenuItems_[i];
+				if (item.separator) {
+					DrawLine(columnX + 10, itemTop + 4, columnX + column.width - 10, itemTop + 4,
+						75, 75, 75);
+					itemTop += kContextMenuSeparatorHeight;
+					continue;
+				}
+				if (static_cast<int>(i) == menuSelected_) {
+					SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
+					SDL_Rect selection{columnX + 3, itemTop, column.width - 6, kContextMenuItemHeight};
+					SDL_RenderFillRect(renderer_, &selection);
+				}
+				const Uint8 textColor = item.command == 0 ? 135 : (item.enabled ? 235 : 100);
+				const std::string label = MenuLabel(item);
+				const std::string shortcut = MenuShortcut(item);
+				DrawText(label, columnX + 12, itemTop + 4, kUiTextScale,
+					textColor, textColor, textColor);
+				if (!shortcut.empty()) {
+					const int shortcutWidth = TextWidth(shortcut, kUiTextScale);
+					const Uint8 shortcutColor = item.enabled ? 175 : 90;
+					DrawText(shortcut, columnX + column.width - 12 - shortcutWidth, itemTop + 4, kUiTextScale,
+						shortcutColor, shortcutColor, shortcutColor);
+				}
+				itemTop += kContextMenuItemHeight;
 			}
-			if (static_cast<int>(i) == menuSelected_) {
-				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
-				SDL_Rect selection{menu.x + 3, itemTop, menu.w - 6, kContextMenuItemHeight};
-				SDL_RenderFillRect(renderer_, &selection);
+			if (&column != &columns.back()) {
+				DrawLine(columnX + column.width, menu.y + 6, columnX + column.width,
+					menu.y + menu.h - 6, 75, 75, 75);
 			}
-			const Uint8 textColor = item.command == 0 ? 135 : (item.enabled ? 235 : 100);
-			const std::string label = MenuLabel(item);
-			const std::string shortcut = MenuShortcut(item);
-			DrawText(label, menu.x + 12, itemTop + 4, kUiTextScale,
-				textColor, textColor, textColor);
-			if (!shortcut.empty()) {
-				const int shortcutWidth = TextWidth(shortcut, kUiTextScale);
-				const Uint8 shortcutColor = item.enabled ? 175 : 90;
-				DrawText(shortcut, menu.x + menu.w - 12 - shortcutWidth, itemTop + 4, kUiTextScale,
-					shortcutColor, shortcutColor, shortcutColor);
-			}
-			itemTop += kContextMenuItemHeight;
 		}
 	}
 
@@ -3922,6 +4019,10 @@ private:
 						MoveContextMenuSelection(-1);
 					} else if (event.key.keysym.sym == SDLK_DOWN) {
 						MoveContextMenuSelection(1);
+					} else if (event.key.keysym.sym == SDLK_LEFT) {
+						MoveContextMenuSelectionAcrossColumns(-1);
+					} else if (event.key.keysym.sym == SDLK_RIGHT) {
+						MoveContextMenuSelectionAcrossColumns(1);
 					} else if (event.key.repeat == 0 && event.key.keysym.sym == SDLK_ESCAPE) {
 						CloseContextMenu();
 					} else if (event.key.repeat == 0 &&
@@ -3933,10 +4034,10 @@ private:
 					UpdateContextMenuSelection(event.motion.x, event.motion.y);
 					break;
 				case SDL_MOUSEWHEEL: {
-					const int maximumScroll = std::max(0, static_cast<int>(contextMenuItems_.size()) - ContextMenuVisibleCount());
-					contextMenuScroll_ = static_cast<std::size_t>(std::clamp(
-						static_cast<int>(contextMenuScroll_) - event.wheel.y, 0, maximumScroll));
-					menuSelected_ = -1;
+					const int wheelSteps = std::clamp(event.wheel.y, -10, 10);
+					for (int step = 0; step < std::abs(wheelSteps); ++step) {
+						MoveContextMenuSelection(wheelSteps > 0 ? -1 : 1);
+					}
 					break;
 				}
 				case SDL_MOUSEBUTTONDOWN:
@@ -4157,7 +4258,6 @@ private:
 	bool contextMenuNeedsCleanFrame_ = false;
 	int contextMenuX_ = 0;
 	int contextMenuY_ = 0;
-	std::size_t contextMenuScroll_ = 0;
 	int menuSelected_ = -1;
 	std::vector<MenuItem> contextMenuItems_;
 	std::string contextMenuSortingLabel_;

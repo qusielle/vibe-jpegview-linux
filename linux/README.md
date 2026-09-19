@@ -144,8 +144,9 @@ disables the panel entirely, and the panel is temporarily suppressed while a mod
 browser is open. Right-click or the keyboard Context Menu key opens the compact core JPEGView
 context menu; Show Advanced Options temporarily restores the
 Open image with, Print, batch rename/copy, date, and wallpaper commands without saving that
-choice. The menu also supports keyboard selection with the arrow keys and Return. Hovering over
-a lower navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
+choice. The menu also supports keyboard selection with Up/Down and Return; if it spans multiple
+columns to fit the window height, Left/Right moves between columns. Hovering over a lower
+navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
 next or previous image and is saved between application runs, as is the last maximized or
 normal window mode, the lower navigation panel's show/hide selection, and the F2/Ctrl+F2 overlay
 visibility choices. The navigation panel hover preference and current file-order mode/direction are
