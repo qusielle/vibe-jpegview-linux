@@ -3629,8 +3629,10 @@ private:
 		case SDL_QUIT:
 			running = false;
 			break;
-		case SDL_KEYDOWN:
-			if (event.key.repeat != 0) break;
+		case SDL_KEYDOWN: {
+			const bool repeatableSelectionKey = event.key.keysym.sym == SDLK_UP ||
+				event.key.keysym.sym == SDLK_DOWN;
+			if (event.key.repeat != 0 && !repeatableSelectionKey) break;
 			if (event.key.keysym.sym == SDLK_ESCAPE) {
 				CloseFileDialog();
 			} else if (event.key.keysym.sym == SDLK_UP) {
@@ -3660,6 +3662,7 @@ private:
 				}
 			}
 			break;
+		}
 		case SDL_TEXTINPUT:
 			if (fileDialogSave_) {
 				fileDialogFilename_ += event.text.text;

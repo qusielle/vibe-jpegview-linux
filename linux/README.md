@@ -37,11 +37,12 @@ they support.
    The active filename/date ordering is visible and switchable from both the navigation panel and
    context menu, and the selected mode is preserved between runs.
 
-5. **Responsive keyboard and mouse navigation.** Left/Right navigation and context-menu Up/Down
-   selection repeat while held. Repeated image navigation presents progress immediately instead of
-   freezing until key release. The plain mouse wheel selects the previous/next file, while holding
-   Ctrl retains wheel zoom. Home/End, PageUp/PageDown, the keyboard Context Menu key, and the original
-   Windows numeric command IDs and corresponding supported default bindings are retained.
+5. **Responsive keyboard and mouse navigation.** Left/Right navigation and Up/Down selection in
+   both the context menu and open browser repeat while held. Repeated image navigation presents
+   progress immediately instead of freezing until key release. The plain mouse wheel selects the
+   previous/next file, while holding Ctrl retains wheel zoom. Home/End, PageUp/PageDown, the keyboard
+   Context Menu key, and the original Windows numeric command IDs and corresponding supported
+   default bindings are retained.
 
 6. **Neighboring-image thumbnail panel.** Ctrl+T or the context menu opens a vertical strip on the
    left in active file order. The current image stays centered and fully bright; neighboring images
