@@ -26,6 +26,7 @@ public:
 	double OffsetX() const { return offsetX_; }
 	double OffsetY() const { return offsetY_; }
 	bool IsFitToWindow() const { return fitToWindow_; }
+	bool IsActualSize() const { return !fitToWindow_ && zoom_ == 1.0; }
 	bool FillWithCrop() const { return fillWithCrop_; }
 	bool NoEnlarge() const { return noEnlarge_; }
 

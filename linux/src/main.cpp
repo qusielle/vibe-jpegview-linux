@@ -74,6 +74,7 @@ constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
 constexpr std::size_t kThumbnailCacheLimit = 64;
 constexpr std::size_t kThumbnailCachePixelBudget = 16u * 1024u * 1024u;
+constexpr double kKeyboardPanStep = 48.0;
 constexpr int kBatchSelectAll = 0;
 constexpr int kBatchSelectNone = 1;
 constexpr int kBatchPreview = 2;
@@ -1708,6 +1709,17 @@ private:
 		SetTitle();
 	}
 
+	void PanActualSize(int command) {
+		if (!viewport_.IsActualSize()) return;
+		const double deltaX = command == IDM_PAN_LEFT ? kKeyboardPanStep :
+			command == IDM_PAN_RIGHT ? -kKeyboardPanStep : 0.0;
+		const double deltaY = command == IDM_PAN_UP ? kKeyboardPanStep :
+			command == IDM_PAN_DOWN ? -kKeyboardPanStep : 0.0;
+		viewport_.Pan(deltaX, deltaY);
+		lastInteractionTick_ = SDL_GetTicks();
+		SetTitle();
+	}
+
 	void ZoomAt(double factor, int mouseX, int mouseY) {
 		if (image_.width == 0 || image_.height == 0) {
 			return;
@@ -2311,6 +2323,12 @@ private:
 			break;
 		case IDM_ZOOM_DEC:
 			ZoomAt(1.0 / 1.2, imageCenterX_, imageCenterY_);
+			break;
+		case IDM_PAN_UP:
+		case IDM_PAN_DOWN:
+		case IDM_PAN_RIGHT:
+		case IDM_PAN_LEFT:
+			PanActualSize(command);
 			break;
 		case IDM_FILL_WITH_CROP:
 			FitToWindow(true, false);
@@ -4293,10 +4311,14 @@ private:
 				const bool plainNavigationKey =
 					(modifiers & 0x03C3u) == 0 &&
 					(event.key.keysym.sym == SDLK_LEFT || event.key.keysym.sym == SDLK_RIGHT);
+				const bool shiftPanKey = (modifiers & 0x03C0u) == 0 &&
+					(modifiers & 0x0003u) != 0 &&
+					(event.key.keysym.sym == SDLK_LEFT || event.key.keysym.sym == SDLK_RIGHT ||
+						event.key.keysym.sym == SDLK_UP || event.key.keysym.sym == SDLK_DOWN);
 				// SDL marks OS key-repeat events instead of generating a fresh
-				// physical key press. Keep repeating navigation, while retaining
-				// one-shot behavior for commands such as delete, save, and rotate.
-				if (event.key.repeat != 0 && !plainNavigationKey) break;
+				// physical key press. Keep repeating navigation and keyboard
+				// panning, while retaining one-shot behavior for other commands.
+				if (event.key.repeat != 0 && !plainNavigationKey && !shiftPanKey) break;
 				if (event.key.keysym.sym == SDLK_MENU) {
 					OpenContextMenu();
 					break;
@@ -4317,7 +4339,7 @@ private:
 					ExecuteCommand(command);
 				}
 				if (quitRequested_) running = false;
-				if (plainNavigationKey) return;
+				if (plainNavigationKey || shiftPanKey) return;
 				break;
 			}
 			case SDL_MOUSEBUTTONDOWN:

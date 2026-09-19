@@ -127,7 +127,8 @@ navigates previous/next, while Ctrl+mouse wheel and Ctrl+Up/Down zoom around the
 Up/Down rotate 90 degrees. Space toggles fit/actual, Return/0 fits, Ctrl+Return fills with crop,
 `+`/`-` zoom, and F11/F toggles fullscreen; F12 spans screens, Ctrl+F11 fits the window to the
 image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`–`9` start a
-slideshow at that interval. F2 toggles the top-left picture information panel; Shift+N or Ctrl+F2
+slideshow at that interval. At actual size, Shift+Arrow pans the image in 48-pixel steps. F2
+toggles the top-left picture information panel; Shift+N or Ctrl+F2
 toggles the filename overlay, while N/M/C/Z select filename, modification-date, creation-date,
 or random sorting. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N toggles
 the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the image at

@@ -350,6 +350,10 @@ void TestKeyboardCommandMappings() {
 		{SDLK_RETURN, 0, IDM_FIT_TO_SCREEN},
 		{SDLK_DOWN, 0, IDM_ROTATE_90},
 		{SDLK_UP, 0, IDM_ROTATE_270},
+		{SDLK_UP, 0x0003u, IDM_PAN_UP},
+		{SDLK_DOWN, 0x0003u, IDM_PAN_DOWN},
+		{SDLK_RIGHT, 0x0003u, IDM_PAN_RIGHT},
+		{SDLK_LEFT, 0x0003u, IDM_PAN_LEFT},
 		{SDLK_DOWN, 0x00C0u, IDM_ZOOM_DEC},
 		{SDLK_UP, 0x00C0u, IDM_ZOOM_INC},
 		{SDLK_F11, 0, IDM_FULL_SCREEN_MODE},
@@ -1189,7 +1193,9 @@ void TestViewportManualZoomPanAndRestore() {
 	ExpectNear(viewport.Zoom(), 1.0, 0.0001, "persisted transient zoom replaced actual size");
 
 	viewport.ActualSize();
+	Expect(viewport.IsActualSize(), "actual-size viewport was not identified as actual size");
 	viewport.ZoomAt(2.0, 150, 75, 200, 100, 400, 200);
+	Expect(!viewport.IsActualSize(), "zoomed viewport was incorrectly identified as actual size");
 	ExpectNear(viewport.Zoom(), 2.0, 0.0001, "anchored zoom did not update scale");
 	ExpectRect(viewport.Destination(200, 100, 400, 200), 50, 25, 400, 200,
 		"anchored zoom did not preserve the point beneath the pointer");
@@ -1197,8 +1203,12 @@ void TestViewportManualZoomPanAndRestore() {
 	ExpectRect(viewport.Destination(200, 100, 400, 200), 60, 20, 400, 200,
 		"viewport pan did not update the destination");
 	Expect(std::string(viewport.ScaleMode()) == "manual", "zoomed or panned viewport was not manual");
-
 	const jpegview_linux::ViewportSnapshot manual = viewport.Snapshot();
+	viewport.ActualSize();
+	viewport.Pan(48.0, -48.0);
+	Expect(viewport.IsActualSize() && viewport.OffsetX() == 48.0 && viewport.OffsetY() == -48.0,
+		"actual-size keyboard-style pan did not preserve scale or update offsets");
+
 	viewport.Fit(800, 600, 400, 300);
 	viewport.Restore(manual, 320, 200, 640, 480);
 	ExpectNear(viewport.Zoom(), 2.0, 0.0001, "manual snapshot did not restore zoom");

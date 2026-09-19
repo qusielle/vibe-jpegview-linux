@@ -53,6 +53,10 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	if (!ctrl && !shift && key == SDLK_RETURN) return IDM_FIT_TO_SCREEN;
 	if (!ctrl && !shift && key == SDLK_DOWN) return IDM_ROTATE_90;
 	if (!ctrl && !shift && key == SDLK_UP) return IDM_ROTATE_270;
+	if (!ctrl && shift && key == SDLK_UP) return IDM_PAN_UP;
+	if (!ctrl && shift && key == SDLK_DOWN) return IDM_PAN_DOWN;
+	if (!ctrl && shift && key == SDLK_RIGHT) return IDM_PAN_RIGHT;
+	if (!ctrl && shift && key == SDLK_LEFT) return IDM_PAN_LEFT;
 	if (ctrl && key == SDLK_DOWN) return IDM_ZOOM_DEC;
 	if (ctrl && key == SDLK_UP) return IDM_ZOOM_INC;
 	if (!ctrl && !shift && key == SDLK_F11) return IDM_FULL_SCREEN_MODE;
