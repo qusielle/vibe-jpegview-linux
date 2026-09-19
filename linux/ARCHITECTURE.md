@@ -4,13 +4,22 @@ The SDL frontend deliberately keeps platform-independent behavior outside `main.
 should normally be added to one of these focused modules and covered by `tests/test_core.cpp`:
 
 - `file_list`: discovery, ordering, navigation modes, and current-file preservation.
+- `image`: validated mutable BGRA storage, rotate/mirror transforms, high-quality resizing, and
+  histogram-derived automatic correction.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `settings` and `sort_mode`: persisted configuration and stable setting values.
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, and filter selection.
 - `context_menu_model`: compact/advanced filtering and actionable-item keyboard navigation.
+- `file_dialog_model`: filtering, name/date sorting, UTF-8 editing, selection, paging, scrolling,
+  focus restoration, and cancellable background directory summaries.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
+- `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry, preload ordering, memory sizing,
+  and antialiased source-area reduction.
+- `image_info_model`: stable dimensions/date/file-size presentation.
+- `system_font`: desktop-font discovery, UTF-8 shaping, measurement, and rasterization.
+- `app_icon`: extraction of the application icon embedded from the upstream ICO resource.
 - `batch_copy` and `desktop_applications`: non-UI planning for external operations.
 - `exif_reader`: JPEG metadata parsing.
 
@@ -22,17 +31,21 @@ above rather than duplicate their state.
 
 The remaining Viewer work is ordered by expected testability and reduction in coupling:
 
-1. Move the in-memory `Image` type and its rotate, mirror, resampling, and auto-contrast algorithms
-   out of `main.cpp`; add exact small-fixture tests for transforms and invariants for every filter.
+1. Extract animation/movie/slideshow timing into a scheduler that returns actions for Viewer to
+   execute. Test frame delays, finite loop counts, pause/resume, and tick wraparound.
 2. Move the full context-menu entry catalog and command enablement out of Viewer. Advanced-option
    filtering and keyboard selection are already independent and tested.
-3. Extract animation/movie/slideshow timing into a scheduler that returns actions for Viewer to
-   execute. Test frame delays, finite loop counts, pause/resume, and tick wraparound.
-4. Split file, batch-copy, and resize dialogs into controllers whose models do not manipulate SDL
-   text input directly.
-5. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
+3. Complete the batch-copy and resize dialog controllers. Their validation/planning models are
+   independent, but focus, selection, and SDL text-input transitions still live in Viewer.
+4. Extract thumbnail decoding/cache scheduling from Viewer so cache limits, cancellation, and
+   nearest-first work can be tested without creating SDL textures.
+5. Separate external-command planning (print, wallpaper, clipboard helpers, and lossless JPEG
+   transforms) from process execution and Viewer status reporting.
+6. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
-The viewport, resize-model, context-menu rule, and overlay-layout extractions are complete. They
-establish the intended pattern: a small pure C++ object, thin SDL adapter methods in Viewer,
-focused core tests, then UI smoke tests for the integration.
+The image, viewport, file-dialog, resize, context-menu rule, thumbnail-layout/resampling, font,
+image-information, and overlay-layout extractions are complete. They establish the intended
+pattern: a small pure C++ object, thin SDL adapter methods in Viewer, focused core tests, then UI
+smoke tests for integration. Worker threads belong behind model APIs (as with directory summaries),
+while SDL windows, textures, cursors, and event translation remain owned by Viewer.

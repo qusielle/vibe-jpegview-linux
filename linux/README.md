@@ -37,12 +37,12 @@ they support.
    The active filename/date ordering is visible and switchable from both the navigation panel and
    context menu, and the selected mode is preserved between runs.
 
-5. **Responsive keyboard and mouse navigation.** Left/Right navigation and Up/Down selection in
-   both the context menu and open browser repeat while held. Repeated image navigation presents
-   progress immediately instead of freezing until key release. The plain mouse wheel selects the
-   previous/next file, while holding Ctrl retains wheel zoom. Home/End, PageUp/PageDown, the keyboard
-   Context Menu key, and the original Windows numeric command IDs and corresponding supported
-   default bindings are retained.
+5. **Responsive keyboard and mouse navigation.** Left/Right image navigation and menu/browser
+   selection repeat while held. The open browser supports repeating Up/Down, PageUp/PageDown, and
+   Home/End movement. Repeated image navigation presents progress immediately instead of freezing
+   until key release. The plain mouse wheel selects the previous/next file, while holding Ctrl
+   retains wheel zoom. The keyboard Context Menu key and the original Windows numeric command IDs
+   and corresponding supported default bindings are retained.
 
 6. **Neighboring-image thumbnail panel.** Ctrl+T or the context menu opens a vertical strip on the
    left in active file order. The current image stays centered and fully bright; neighboring images
@@ -67,11 +67,12 @@ they support.
 
 9. **Portable file and desktop operations.** The branch adds a native open/save browser, processed
    full-size and screen-size saving with overwrite confirmation, live case-insensitive filename
-   filtering in the open browser, non-blocking direct image/subdirectory counts for folder rows,
-   move-to-trash confirmation,
-   original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`, modification-date
-   updates from now or EXIF, wallpaper integration, folder exploration, and lossless JPEG rotation
-   through `jpegtran`. The **Open image with** submenu discovers freedesktop `.desktop` applications
+   filtering, name/newest-modification-date listing order, Ctrl+Return direct folder opening, and
+   non-blocking direct image/subdirectory counts for folder rows. It also provides move-to-trash
+   confirmation, original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
+   modification-date updates from now or EXIF, wallpaper integration, folder exploration, and
+   lossless JPEG rotation through `jpegtran`. The **Open image with** submenu discovers freedesktop
+   `.desktop` applications
    and expands their file/URI placeholders.
 
 10. **Batch rename/copy and image resizing.** The batch dialog supports image selection, previews,
@@ -108,13 +109,14 @@ they support.
     and no longer damage underlying image pixels.
 
 15. **Regression tests, modularization, and faster builds.** A dependency-light core suite and X11
-    UI smoke suite now cover codecs, file ordering, settings, keyboard mappings, viewport geometry,
-    overlays, context-menu columns and repainting, thumbnail layout/persistence, resize and batch
-    models, application discovery, metadata, startup maximization, and held-key behavior. Viewer
-    logic was extracted into focused modules for settings, sorting, input commands, viewport,
-    overlays, thumbnail layout, image information, context menus, resize, batch operations, and
-    desktop applications. Docker builds compile independent codec stages and the viewer/tests in
-    parallel.
+    UI smoke suite now cover codecs, mutable image transforms/resampling, file ordering, browser
+    state, settings, keyboard mappings, viewport geometry, overlays, context-menu columns and
+    repainting, thumbnail layout/persistence, resize and batch models, application discovery,
+    metadata, startup maximization, and held-key behavior. Viewer logic was extracted into focused
+    modules for image pixels, settings, sorting, input commands, viewport, open-dialog state,
+    overlays, thumbnails, fonts, image information, context menus, resize, batch operations, and
+    desktop applications. Shell and sanitizer targets supplement the regular suites. Docker builds
+    compile independent codec stages and the viewer/tests in parallel.
 
 ## Build
 
@@ -181,6 +183,8 @@ remain at their native size and are centered. Larger images are reduced to fit a
 
 The native navigation panel, menus, tooltips, information overlays, and modal dialogs use
 semi-transparent backgrounds so the image remains partially visible underneath them.
+They use the desktop font discovered from XFCE, GTK, xsettingsd, or KDE configuration. Set
+`JPEGVIEW_FONT` to a Pango font description such as `Sans 11` to override desktop discovery.
 
 The default window title follows the Windows-style image title format:
 `filename (widthxheight, file size) - JPEGView`.
@@ -217,14 +221,17 @@ The dependency-light core suite builds and runs with:
 make -C linux test
 ```
 
-It covers file-list ordering/navigation, sort and settings persistence mappings, the complete
-supported keyboard-command mapping, viewport fit/fill/zoom/pan geometry, resize-dialog validation,
-content-sized overlay layout, compact/advanced menu filtering and keyboard selection,
-decoder and writer round trips across static and animated formats, all PNM variants, malformed
-input, batch-copy planning, desktop-application command expansion, and JPEG metadata. The optional
-X11 smoke suite covers startup controls,
-mouse-wheel navigation versus Ctrl+wheel zoom, held-key repeat, maximize restoration, and
-persisted settings:
+It covers file-list ordering/navigation, mutable image transforms, all resize filters and automatic
+correction invariants, sort and settings persistence mappings, the complete supported
+keyboard-command mapping, viewport fit/fill/zoom/pan geometry, open/save browser state,
+resize-dialog validation, content-sized overlay layout, compact/advanced menu filtering and
+keyboard selection, thumbnail layout/resampling, desktop-font resolution, decoder and writer round
+trips across static and animated formats, all PNM variants, malformed input, batch-copy planning,
+desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
+open browser's filtering, folder counts, sorting, direct-folder opening, focus restoration, paging,
+Home/End and held-key movement; thumbnail display/resizing/clicking/persistence; context-menu
+expansion and repainting; startup controls; mouse-wheel navigation versus Ctrl+wheel zoom; held
+image navigation; maximize restoration; and persisted settings:
 
 ```sh
 make -C linux test-ui
@@ -232,8 +239,11 @@ make -C linux test-ui
 
 The UI suite uses `Xvfb`, `openbox`, `wmctrl`, and `xdotool`; it reports `SKIP` when those tools are
 not installed. When ImageMagick's `import` and `compare` are available it also checks the context
-menu repaint pixel-for-pixel. `make -C linux check` runs both suites. The Ubuntu Docker build runs
-the core suite.
+menu repaint pixel-for-pixel. `make -C linux check` runs both suites plus shell syntax checks and
+ShellCheck when installed. `make -C linux test-sanitize` rebuilds the core suite with AddressSanitizer
+and UndefinedBehaviorSanitizer. Leak detection is disabled for that target because linked desktop
+font and optional codec libraries retain process-global caches. The Ubuntu Docker build runs the
+core suite.
 
 ## Controls
 
@@ -249,12 +259,11 @@ or random sorting. Ctrl+O opens the native in-app file browser; type any part of
 its files and folders case-insensitively, then press Enter to open the selected match. Ctrl+Return
 opens a selected folder immediately at its first compatible image without entering the folder in
 the dialog. The sorting control switches the listing between case-insensitive filename order and
-newest-first modification-date order. Backspace edits the filter and navigates to the parent folder
-once the filter is empty. Up/Down move one row
-and PageUp/PageDown move one visible page; Home/End select the first/last row. All six keys repeat
-while held. Entering a folder
-selects its first child rather than the `[..]` parent row; returning to the parent selects the
-folder that was just exited. Folder rows show
+newest-first modification-date order. Backspace removes one complete UTF-8 character from the
+filter and navigates to the parent folder once the filter is empty. Up/Down move one row,
+PageUp/PageDown move one visible page, and Home/End select the first/last row; all six keys repeat
+while held. Entering a folder selects its first child rather than the `[..]` parent row; returning
+to the parent selects the folder that was just exited. Folder rows show
 right-aligned counts of compatible images and subdirectories at their immediate level; these are
 calculated in the background. Ctrl+R reloads, and
 Ctrl+N toggles the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the
