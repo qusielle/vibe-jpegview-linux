@@ -150,8 +150,22 @@ if [ "$visual_assertions" -eq 1 ]; then
 	context_difference=$(compare -metric AE "$temporary/context-before.png" "$temporary/context-after.png" null: 2>&1 || true)
 	if [ "$context_difference" != "0" ]; then
 		echo "UI smoke test: context-menu close left a repaint difference ($context_difference)" >&2
+		 exit 1
+	fi
+	DISPLAY=":$display_number" xdotool click 3
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-compact.png"
+	DISPLAY=":$display_number" xdotool key Down
+	DISPLAY=":$display_number" xdotool key Down
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-advanced.png"
+	advanced_difference=$(compare -metric AE "$temporary/context-compact.png" "$temporary/context-advanced.png" null: 2>&1 || true)
+	if [ "$advanced_difference" = "0" ]; then
+		echo "UI smoke test: Advanced Options did not expand the context menu" >&2
 		exit 1
 	fi
+	DISPLAY=":$display_number" xdotool key Escape
 fi
 
 DISPLAY=":$display_number" xdotool key n
