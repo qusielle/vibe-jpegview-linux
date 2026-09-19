@@ -2341,7 +2341,9 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 			return (pixel >> 24) > 0 && (pixel >> 24) < 255;
 		}), "12-point ASCII bitmap did not retain its hinted antialiasing");
 	const jpegview_linux::RasterizedText raster = font.Rasterize(u8"Привет — 日本語");
-	Expect(raster.width > 0 && raster.height >= font.LineHeight() && !raster.argb.empty(),
+	// Unicode text uses the independently sized system font, not the embedded
+	// bitmap font whose fixed line height is returned by SystemFont::LineHeight.
+	Expect(raster.width > 0 && raster.height > 0 && !raster.argb.empty(),
 		"system font did not rasterize non-Latin UTF-8 text");
 	Expect(std::any_of(raster.argb.begin(), raster.argb.end(), [](std::uint32_t pixel) {
 		return (pixel >> 24) != 0;
