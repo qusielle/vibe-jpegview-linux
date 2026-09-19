@@ -34,6 +34,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1581,6 +1582,52 @@ void TestFileDialogFiltering() {
 		"open-dialog filter did not retain only the parent entry when nothing matched");
 }
 
+void TestFileDialogDirectorySummaries() {
+	TemporaryDirectory temporary;
+	const fs::path album = temporary.path() / "album";
+	fs::create_directories(album / "first-subdir");
+	fs::create_directories(album / "second-subdir");
+	WriteText(album / "photo.JPG", "image fixture");
+	WriteText(album / "scan.ppm", "image fixture");
+	WriteText(album / "notes.txt", "not an image");
+	WriteText(album / "first-subdir" / "recursive.png", "must not be counted");
+
+	const jpegview_linux::DirectorySummary summary =
+		jpegview_linux::CountImmediateDirectoryContents(album);
+	Expect(summary.imageCount == 2 && summary.subdirectoryCount == 2,
+		"directory summary did not count only immediate compatible images and subdirectories");
+	Expect(jpegview_linux::FormatDirectorySummary(summary) == "2 images, 2 dirs",
+		"directory summary plural formatting is incorrect");
+	Expect(jpegview_linux::FormatDirectorySummary({1, 1}) == "1 image, 1 dir",
+		"directory summary singular formatting is incorrect");
+
+	jpegview_linux::DirectorySummaryLoader loader;
+	loader.Request({album}, 17);
+	std::vector<jpegview_linux::DirectorySummaryResult> results;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		results = loader.TakeReady();
+	}
+	Expect(results.size() == 1 && results[0].generation == 17 &&
+		results[0].directory == album && results[0].summary.imageCount == 2 &&
+		results[0].summary.subdirectoryCount == 2,
+		"background directory summary loader did not publish the requested result");
+
+	const fs::path empty = temporary.path() / "empty";
+	fs::create_directory(empty);
+	loader.Request({album}, 18);
+	loader.Request({empty}, 19);
+	results.clear();
+	const auto replacementDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (results.empty() && std::chrono::steady_clock::now() < replacementDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		results = loader.TakeReady();
+	}
+	Expect(results.size() == 1 && results[0].generation == 19 && results[0].directory == empty,
+		"background directory summary loader published stale work after a replacement request");
+}
+
 void TestEmbeddedApplicationIcon() {
 	jpegview_linux::ApplicationIcon icon;
 	std::string error;
@@ -1644,6 +1691,7 @@ int main() {
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
+	RunTest("file-dialog-directory-summaries", TestFileDialogDirectorySummaries, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";

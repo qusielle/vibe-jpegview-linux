@@ -55,6 +55,9 @@ write_ppm "$temporary/images/02-green.ppm" 0 255 0
 write_ppm "$temporary/images/03-blue.ppm" 0 0 255
 write_ppm "$temporary/images/04-yellow.ppm" 255 255 0
 write_ppm "$temporary/images/05-cyan.ppm" 0 255 255
+mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
+write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
+write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
 touch -t 202001010000.00 "$temporary/images/01-red.ppm" "$temporary/images/02-green.ppm" \
 	"$temporary/images/03-blue.ppm" "$temporary/images/04-yellow.ppm" "$temporary/images/05-cyan.ppm"
 
@@ -118,7 +121,31 @@ fi
 DISPLAY=":$display_number" xdotool key ctrl+o
 sleep 0.3
 if [ "$visual_assertions" -eq 1 ]; then
-	DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-empty.png"
+	summary_rendered=0
+	for attempt in $(seq 1 20); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-empty.png"
+		open_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+		open_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+		dialog_width=$((open_width - 40))
+		if [ "$dialog_width" -gt 900 ]; then dialog_width=900; fi
+		if [ "$dialog_width" -lt 320 ]; then dialog_width=320; fi
+		dialog_height=$((open_height - 40))
+		if [ "$dialog_height" -gt 650 ]; then dialog_height=650; fi
+		if [ "$dialog_height" -lt 260 ]; then dialog_height=260; fi
+		summary_probe_x=$(((open_width - dialog_width) / 2 + dialog_width - 119))
+		summary_probe_y=$(((open_height - dialog_height) / 2 + 141))
+		convert "$temporary/open-dialog-empty.png" -crop "28x11+${summary_probe_x}+${summary_probe_y}" +repage \
+			-format %c histogram:info:- >"$temporary/summary-histogram.txt"
+		if grep -qi '#9BAFC3' "$temporary/summary-histogram.txt"; then
+			summary_rendered=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$summary_rendered" -ne 1 ]; then
+		echo "UI smoke test: Ctrl+O did not render the right-aligned directory image/subdirectory count" >&2
+		exit 1
+	fi
 fi
 DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
 sleep 0.3

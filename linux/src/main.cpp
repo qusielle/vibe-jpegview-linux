@@ -811,6 +811,7 @@ public:
 			if (quitRequested_) running = false;
 			TickPlayback();
 			TickThumbnailPreload();
+			TickFileDialogDirectorySummaries();
 			Render();
 			SDL_Delay(4);
 		}
@@ -1316,12 +1317,15 @@ private:
 
 	void CloseFileDialog() {
 		if (fileDialogOpen_) SDL_StopTextInput();
+		++fileDialogSummaryGeneration_;
+		fileDialogSummaryLoader_.Request({}, fileDialogSummaryGeneration_);
 		fileDialogOpen_ = false;
 		fileDialogSave_ = false;
 		fileDialogFilename_.clear();
 		fileDialogFilter_.clear();
 		fileDialogAllEntries_.clear();
 		fileDialogEntries_.clear();
+		fileDialogDirectorySummaries_.clear();
 	}
 
 	void SaveImageFromDialog() {
@@ -3478,6 +3482,26 @@ private:
 		}
 	}
 
+	void RequestFileDialogDirectorySummaries() {
+		++fileDialogSummaryGeneration_;
+		fileDialogDirectorySummaries_.clear();
+		std::vector<fs::path> directories;
+		if (!fileDialogSave_) {
+			for (const FileDialogEntry& entry : fileDialogAllEntries_) {
+				if (entry.directory && !entry.parent) directories.push_back(entry.path);
+			}
+		}
+		fileDialogSummaryLoader_.Request(directories, fileDialogSummaryGeneration_);
+	}
+
+	void TickFileDialogDirectorySummaries() {
+		for (jpegview_linux::DirectorySummaryResult& result : fileDialogSummaryLoader_.TakeReady()) {
+			if (!fileDialogOpen_ || fileDialogSave_ ||
+				result.generation != fileDialogSummaryGeneration_) continue;
+			fileDialogDirectorySummaries_[result.directory.string()] = result.summary;
+		}
+	}
+
 	void RefreshFileDialog() {
 		fileDialogAllEntries_.clear();
 		std::error_code error;
@@ -3505,6 +3529,7 @@ private:
 			return leftName == rightName ? left.path.string() < right.path.string() : leftName < rightName;
 		});
 		ApplyFileDialogFilter();
+		RequestFileDialogDirectorySummaries();
 	}
 
 	void OpenFileDialog() {
@@ -3711,8 +3736,22 @@ private:
 				SDL_Rect selection{listRect.x + 2, rowTop + 1, listRect.w - 4, 24};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
-			DrawText(FileDialogEntryLabel(entry), listRect.x + 10, rowTop + 5, kUiTextScale,
+			std::string summaryText;
+			if (!fileDialogSave_ && entry.directory && !entry.parent) {
+				const auto summary = fileDialogDirectorySummaries_.find(entry.path.string());
+				summaryText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
+					jpegview_linux::FormatDirectorySummary(summary->second);
+				summaryText = ClipText(summaryText, std::max(1, listRect.w / 2 - 20));
+			}
+			const int summaryWidth = TextWidth(summaryText, kUiTextScale);
+			const int summaryX = listRect.x + listRect.w - 10 - summaryWidth;
+			const int labelWidth = summaryText.empty() ? listRect.w - 20 :
+				std::max(1, summaryX - (listRect.x + 10) - 12);
+			DrawText(ClipText(FileDialogEntryLabel(entry), labelWidth), listRect.x + 10, rowTop + 5, kUiTextScale,
 				entry.directory ? 185 : 235, entry.directory ? 205 : 235, entry.directory ? 235 : 235);
+			if (!summaryText.empty()) {
+				DrawText(summaryText, summaryX, rowTop + 5, kUiTextScale, 155, 175, 195);
+			}
 		}
 		if (!fileDialogMessage_.empty()) {
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
@@ -4587,6 +4626,9 @@ private:
 	std::string fileDialogMessage_;
 	std::vector<FileDialogEntry> fileDialogAllEntries_;
 	std::vector<FileDialogEntry> fileDialogEntries_;
+	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;
+	std::unordered_map<std::string, jpegview_linux::DirectorySummary> fileDialogDirectorySummaries_;
+	std::uint64_t fileDialogSummaryGeneration_ = 0;
 	int fileDialogSelected_ = 0;
 	int fileDialogScroll_ = 0;
 	bool batchCopyOpen_ = false;
