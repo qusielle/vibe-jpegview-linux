@@ -12,6 +12,7 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, and filter selection.
 - `context_menu_model`: compact/advanced filtering and actionable-item keyboard navigation.
+- `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
 - `file_dialog_model`: filtering, name/date sorting, UTF-8 editing, selection, paging, scrolling,
   focus restoration, and cancellable background directory summaries.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
@@ -31,20 +32,18 @@ above rather than duplicate their state.
 
 The remaining Viewer work is ordered by expected testability and reduction in coupling:
 
-1. Extract animation/movie/slideshow timing into a scheduler that returns actions for Viewer to
-   execute. Test frame delays, finite loop counts, pause/resume, and tick wraparound.
-2. Move the full context-menu entry catalog and command enablement out of Viewer. Advanced-option
+1. Move the full context-menu entry catalog and command enablement out of Viewer. Advanced-option
    filtering and keyboard selection are already independent and tested.
-3. Complete the batch-copy and resize dialog controllers. Their validation/planning models are
+2. Complete the batch-copy and resize dialog controllers. Their validation/planning models are
    independent, but focus, selection, and SDL text-input transitions still live in Viewer.
-4. Extract thumbnail decoding/cache scheduling from Viewer so cache limits, cancellation, and
+3. Extract thumbnail decoding/cache scheduling from Viewer so cache limits, cancellation, and
    nearest-first work can be tested without creating SDL textures.
-5. Separate external-command planning (print, wallpaper, clipboard helpers, and lossless JPEG
+4. Separate external-command planning (print, wallpaper, clipboard helpers, and lossless JPEG
    transforms) from process execution and Viewer status reporting.
-6. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
+5. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
-The image, viewport, file-dialog, resize, context-menu rule, thumbnail-layout/resampling, font,
+The image, viewport, playback, file-dialog, resize, context-menu rule, thumbnail-layout/resampling, font,
 image-information, and overlay-layout extractions are complete. They establish the intended
 pattern: a small pure C++ object, thin SDL adapter methods in Viewer, focused core tests, then UI
 smoke tests for integration. Worker threads belong behind model APIs (as with directory summaries),

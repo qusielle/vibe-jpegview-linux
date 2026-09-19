@@ -15,6 +15,7 @@
 #include "resize_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
+#include "playback_scheduler.h"
 #include "thumbnail_panel_model.h"
 #include "thumbnail_resampler.h"
 #include "app_icon.h"
@@ -60,6 +61,7 @@ using jpegview_linux::BatchCopyItem;
 using jpegview_linux::FileDialogEntry;
 using jpegview_linux::Image;
 using jpegview_linux::MenuItem;
+using jpegview_linux::PlaybackMode;
 
 namespace {
 
@@ -282,8 +284,8 @@ bool StartDetachedProcess(const std::string& executable, const std::vector<std::
 class Viewer {
 public:
 	Viewer(jpegview_linux::FileList fileList, double slideshowSeconds, bool startFullscreen)
-		: fileList_(std::move(fileList)), slideshowSeconds_(slideshowSeconds),
-		  lastSlideshowSeconds_(slideshowSeconds > 0.0 ? slideshowSeconds : 3.0), startFullscreen_(startFullscreen) {}
+		: fileList_(std::move(fileList)), initialSlideshowSeconds_(slideshowSeconds),
+		  startFullscreen_(startFullscreen) {}
 
 	int Run() {
 		LoadSettings();
@@ -338,6 +340,9 @@ public:
 			SDL_MaximizeWindow(window_);
 		}
 
+		if (initialSlideshowSeconds_ > 0.0) {
+			playback_.StartSlideshow(initialSlideshowSeconds_, SDL_GetTicks());
+		}
 		if (!LoadCurrent()) {
 			Cleanup();
 			return 1;
@@ -364,12 +369,6 @@ public:
 	}
 
 private:
-	enum class PlaybackMode {
-		None,
-		Slideshow,
-		Movie,
-	};
-
 	struct ContextMenuColumn {
 		std::size_t begin = 0;
 		std::size_t end = 0;
@@ -496,14 +495,11 @@ private:
 			decodedFrames.push_back(std::move(frame));
 		}
 		animationFrames_ = std::move(decodedFrames);
-		animationFrameDelaysMs_.clear();
-		animationFrameDelaysMs_.reserve(decoded.frames.size());
+		std::vector<int> animationFrameDelaysMs;
+		animationFrameDelaysMs.reserve(decoded.frames.size());
 		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded.frames) {
-			animationFrameDelaysMs_.push_back(std::max(10, decodedFrame.delayMs));
+			animationFrameDelaysMs.push_back(std::max(10, decodedFrame.delayMs));
 		}
-		animationFrameIndex_ = 0;
-		animationLoopCount_ = decoded.loopCount;
-		animationLoopsCompleted_ = 0;
 		image_ = animationFrames_.front();
 		correctionBase_ = image_;
 		correctionBaseValid_ = true;
@@ -521,17 +517,9 @@ private:
 
 		RestoreScaleMode(viewportSnapshot);
 		const Uint32 now = SDL_GetTicks();
-		lastInteractionTick_ = now;
 		imageModified_ = false;
-		animationPlaying_ = decoded.animation && animationFrames_.size() > 1 &&
-			playbackMode_ != PlaybackMode::Slideshow;
-		if (animationPlaying_) {
-			ScheduleAnimation(now);
-		} else if (playbackMode_ == PlaybackMode::Movie) {
-			nextPlaybackTick_ = now + MovieFrameInterval();
-		} else {
-			nextPlaybackTick_ = 0;
-		}
+		playback_.ConfigureImage(std::move(animationFrameDelaysMs), decoded.loopCount,
+			decoded.animation, now);
 		SetTitle();
 		PrepareThumbnailPreload();
 		return true;
@@ -1275,7 +1263,7 @@ private:
 		const double deltaY = command == IDM_PAN_UP ? kKeyboardPanStep :
 			command == IDM_PAN_DOWN ? -kKeyboardPanStep : 0.0;
 		viewport_.Pan(deltaX, deltaY);
-		lastInteractionTick_ = SDL_GetTicks();
+		playback_.NotifyInteraction(SDL_GetTicks());
 		SetTitle();
 	}
 
@@ -1288,13 +1276,13 @@ private:
 		const int localMouseY = std::clamp(mouseY - imageArea.y, 0, imageArea.h);
 		viewport_.ZoomAt(factor, localMouseX, localMouseY, image_.width, image_.height,
 			imageArea.w, imageArea.h);
-		lastInteractionTick_ = SDL_GetTicks();
+		playback_.NotifyInteraction(SDL_GetTicks());
 		SetTitle();
 	}
 
 	void NextImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
-		const bool animate = slideshowSeconds_ > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
+		const bool animate = playback_.SlideshowSeconds() > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage = animate ? image_ : Image{};
 		if (!fileList_.Next()) return;
 		SetTitle();
@@ -1309,7 +1297,7 @@ private:
 
 	void PreviousImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
-		const bool animate = slideshowSeconds_ > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
+		const bool animate = playback_.SlideshowSeconds() > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage = animate ? image_ : Image{};
 		if (!fileList_.Previous()) return;
 		SetTitle();
@@ -1379,118 +1367,34 @@ private:
 	}
 
 	void StartSlideshow(double seconds) {
-		animationPlaying_ = false;
-		playbackMode_ = PlaybackMode::Slideshow;
-		slideshowSeconds_ = std::max(0.1, seconds);
-		lastSlideshowSeconds_ = slideshowSeconds_;
-		nextPlaybackTick_ = 0;
-		lastInteractionTick_ = SDL_GetTicks();
+		playback_.StartSlideshow(seconds, SDL_GetTicks());
 		SetTitle();
 	}
 
 	void StartMovie(double framesPerSecond) {
-		playbackMode_ = PlaybackMode::Movie;
-		slideshowSeconds_ = 0.0;
-		movieFps_ = std::clamp(framesPerSecond, 1.0, 100.0);
-		lastInteractionTick_ = SDL_GetTicks();
-		if (animationFrames_.size() > 1 && IsCurrentAnimation()) {
-			animationPlaying_ = true;
-			ScheduleAnimation(lastInteractionTick_);
-		} else {
-			animationPlaying_ = false;
-			nextPlaybackTick_ = lastInteractionTick_ + MovieFrameInterval();
-		}
+		playback_.StartMovie(framesPerSecond, SDL_GetTicks());
 		SetTitle();
 	}
 
 	void StopPlayback() {
-		playbackMode_ = PlaybackMode::None;
-		slideshowSeconds_ = 0.0;
-		animationPlaying_ = false;
-		nextPlaybackTick_ = 0;
-		lastInteractionTick_ = SDL_GetTicks();
+		playback_.Stop(SDL_GetTicks());
 		SetTitle();
 	}
 
 	void ResumePlayback() {
-		const Uint32 now = SDL_GetTicks();
-		if (playbackMode_ == PlaybackMode::Slideshow) {
-			StartSlideshow(lastSlideshowSeconds_);
-			return;
+		const jpegview_linux::PlaybackAction action = playback_.Resume(SDL_GetTicks());
+		if (action.type == jpegview_linux::PlaybackActionType::ShowFrame &&
+			!SetAnimationFrame(action.frameIndex)) {
+			playback_.FrameDisplayFailed();
 		}
-		if (animationFrames_.size() > 1 && IsCurrentAnimation()) {
-			if (animationFrameIndex_ >= animationFrames_.size() - 1) {
-				if (!SetAnimationFrame(0)) return;
-			}
-			animationPlaying_ = true;
-			lastInteractionTick_ = now;
-			ScheduleAnimation(now);
-			SetTitle();
-			return;
-		}
-		StartMovie(movieFps_);
-	}
-
-	bool IsCurrentAnimation() const {
-		return animationFrames_.size() > 1 &&
-			std::any_of(animationFrameDelaysMs_.begin(), animationFrameDelaysMs_.end(),
-				[](int delay) { return delay > 0; });
-	}
-
-	Uint32 MovieFrameInterval() const {
-		return static_cast<Uint32>(std::clamp(
-			static_cast<int>(std::lround(1000.0 / std::max(1.0, movieFps_))), 10, 1000));
-	}
-
-	void ScheduleAnimation(Uint32 now) {
-		int delay = 100;
-		if (movieFps_ > 0.0 && playbackMode_ == PlaybackMode::Movie) {
-			delay = static_cast<int>(MovieFrameInterval());
-		} else if (animationFrameIndex_ < animationFrameDelaysMs_.size()) {
-			delay = animationFrameDelaysMs_[animationFrameIndex_];
-		}
-		nextPlaybackTick_ = now + static_cast<Uint32>(std::clamp(delay, 10, 60000));
+		SetTitle();
 	}
 
 	void TickPlayback() {
-		const Uint32 now = SDL_GetTicks();
-		if (animationPlaying_ && !animationFrames_.empty() && now >= nextPlaybackTick_) {
-			if (animationFrameIndex_ + 1 < animationFrames_.size()) {
-				++animationFrameIndex_;
-				if (!SetAnimationFrame(animationFrameIndex_)) {
-					animationPlaying_ = false;
-					return;
-				}
-				ScheduleAnimation(now);
-				return;
-			}
-
-			++animationLoopsCompleted_;
-			if (animationLoopCount_ > 0 && animationLoopsCompleted_ >= animationLoopCount_) {
-				animationPlaying_ = false;
-				if (playbackMode_ == PlaybackMode::Movie) {
-					nextPlaybackTick_ = now + MovieFrameInterval();
-					NextImage();
-				} else {
-					nextPlaybackTick_ = 0;
-				}
-				return;
-			}
-			animationFrameIndex_ = 0;
-			if (SetAnimationFrame(0)) ScheduleAnimation(now);
-			else animationPlaying_ = false;
-			return;
-		}
-
-		if (playbackMode_ == PlaybackMode::Movie && !animationPlaying_ &&
-			nextPlaybackTick_ != 0 && now >= nextPlaybackTick_) {
-			nextPlaybackTick_ = now + MovieFrameInterval();
-			NextImage();
-			return;
-		}
-
-		if (playbackMode_ == PlaybackMode::Slideshow && slideshowSeconds_ > 0.0 &&
-			static_cast<double>(now - lastInteractionTick_) >= slideshowSeconds_ * 1000.0) {
+		const jpegview_linux::PlaybackAction action = playback_.Tick(SDL_GetTicks());
+		if (action.type == jpegview_linux::PlaybackActionType::ShowFrame) {
+			if (!SetAnimationFrame(action.frameIndex)) playback_.FrameDisplayFailed();
+		} else if (action.type == jpegview_linux::PlaybackActionType::NextImage) {
 			NextImage();
 		}
 	}
@@ -1504,7 +1408,6 @@ private:
 		image_ = std::move(displayed);
 		correctionBase_ = std::move(base);
 		correctionBaseValid_ = true;
-		animationFrameIndex_ = index;
 		imageModified_ = false;
 		if (!UpdateTexture()) return false;
 		RestoreScaleMode(viewportSnapshot);
@@ -1542,9 +1445,9 @@ private:
 			image_.originalWidth, image_.originalHeight,
 			fileError ? std::string() : jpegview_linux::FormatFileSize(fileSize)));
 		if (animationFrames_.size() > 1) {
-			lines.push_back("Frame: " + std::to_string(animationFrameIndex_ + 1) + "/" +
+			lines.push_back("Frame: " + std::to_string(playback_.FrameIndex() + 1) + "/" +
 				std::to_string(animationFrames_.size()));
-			lines.push_back(std::string("Playback: ") + (animationPlaying_ ? "playing" : "paused"));
+			lines.push_back(std::string("Playback: ") + (playback_.AnimationPlaying() ? "playing" : "paused"));
 		}
 		if (image_.width != image_.originalWidth || image_.height != image_.originalHeight) {
 			lines.push_back("Displayed size: " + std::to_string(image_.width) + " x " + std::to_string(image_.height));
@@ -1969,7 +1872,7 @@ private:
 			quitRequested_ = true;
 			break;
 		case IDM_DEFAULT_ESC:
-			if (playbackMode_ != PlaybackMode::None || animationPlaying_) {
+			if (playback_.Mode() != PlaybackMode::None || playback_.AnimationPlaying()) {
 				StopPlayback();
 			} else {
 				quitRequested_ = true;
@@ -1997,7 +1900,7 @@ private:
 			// submenus. Unsupported Windows-only commands remain visible but
 			// disabled instead of silently doing nothing.
 			{"Stop slide show/movie", IDM_STOP_MOVIE, false, false,
-				playbackMode_ != PlaybackMode::None || animationPlaying_, "Esc", true},
+				playback_.Mode() != PlaybackMode::None || playback_.AnimationPlaying(), "Esc", true},
 			{nullptr, 0, true},
 			{"Open image...", IDM_OPEN, false, false, true, "Ctrl+O"},
 			{"Open image with", 0, false, false, true, nullptr, true},
@@ -2100,8 +2003,8 @@ private:
 				false, viewport_.IsFitToWindow() && viewport_.FillWithCrop() && !viewport_.NoEnlarge(), true, nullptr, true},
 			{nullptr, 0, true},
 			{"Play folder as slideshow/movie", 0, false, false, true, nullptr, true},
-			{playbackMode_ == PlaybackMode::Slideshow ? "  Stop slideshow" : "  Slideshow",
-				playbackMode_ == PlaybackMode::Slideshow ? IDM_STOP_MOVIE : IDM_SLIDESHOW_START,
+			{playback_.Mode() == PlaybackMode::Slideshow ? "  Stop slideshow" : "  Slideshow",
+				playback_.Mode() == PlaybackMode::Slideshow ? IDM_STOP_MOVIE : IDM_SLIDESHOW_START,
 				false, false, true, "1-9", true},
 			{"  Waiting time 1 sec", IDM_SLIDESHOW_1, false, false, true, "1", true},
 			{"  Waiting time 2 sec", IDM_SLIDESHOW_2, false, false, true, "2", true},
@@ -2133,21 +2036,22 @@ private:
 			{"    Slow", IDM_EFFECTTIME_SLOW, false, transitionDurationMs_ == 1000, true, nullptr, true},
 			{"    Very slow", IDM_EFFECTTIME_VERY_SLOW, false, transitionDurationMs_ == 2000, true, nullptr, true},
 			{"  Resume playback", IDM_SLIDESHOW_RESUME, false, false,
-				(!animationPlaying_ && (playbackMode_ != PlaybackMode::None || animationFrames_.size() > 1)), "Alt+R", true},
-			{"  Movie", IDM_MOVIE_START_FPS, false, playbackMode_ == PlaybackMode::Movie &&
-				std::abs(movieFps_ - 25.0) < 0.01, true, "25 fps", true},
-			{"  Playback speed 5 fps", IDM_MOVIE_5_FPS, false, playbackMode_ == PlaybackMode::Movie &&
-				std::abs(movieFps_ - 5.0) < 0.01, true, "5", true},
-			{"  Playback speed 10 fps", IDM_MOVIE_10_FPS, false, playbackMode_ == PlaybackMode::Movie &&
-				std::abs(movieFps_ - 10.0) < 0.01, true, "10", true},
-			{"  Playback speed 25 fps", IDM_MOVIE_25_FPS, false, playbackMode_ == PlaybackMode::Movie &&
-				std::abs(movieFps_ - 25.0) < 0.01, true, "25", true},
-			{"  Playback speed 30 fps", IDM_MOVIE_30_FPS, false, playbackMode_ == PlaybackMode::Movie &&
-				std::abs(movieFps_ - 30.0) < 0.01, true, "30", true},
-			{"  Playback speed 50 fps", IDM_MOVIE_50_FPS, false, playbackMode_ == PlaybackMode::Movie &&
-				std::abs(movieFps_ - 50.0) < 0.01, true, "50", true},
-			{"  Playback speed 100 fps", IDM_MOVIE_100_FPS, false, playbackMode_ == PlaybackMode::Movie &&
-				std::abs(movieFps_ - 100.0) < 0.01, true, "100", true},
+				(!playback_.AnimationPlaying() &&
+					(playback_.Mode() != PlaybackMode::None || playback_.HasAnimation())), "Alt+R", true},
+			{"  Movie", IDM_MOVIE_START_FPS, false, playback_.Mode() == PlaybackMode::Movie &&
+				std::abs(playback_.MovieFramesPerSecond() - 25.0) < 0.01, true, "25 fps", true},
+			{"  Playback speed 5 fps", IDM_MOVIE_5_FPS, false, playback_.Mode() == PlaybackMode::Movie &&
+				std::abs(playback_.MovieFramesPerSecond() - 5.0) < 0.01, true, "5", true},
+			{"  Playback speed 10 fps", IDM_MOVIE_10_FPS, false, playback_.Mode() == PlaybackMode::Movie &&
+				std::abs(playback_.MovieFramesPerSecond() - 10.0) < 0.01, true, "10", true},
+			{"  Playback speed 25 fps", IDM_MOVIE_25_FPS, false, playback_.Mode() == PlaybackMode::Movie &&
+				std::abs(playback_.MovieFramesPerSecond() - 25.0) < 0.01, true, "25", true},
+			{"  Playback speed 30 fps", IDM_MOVIE_30_FPS, false, playback_.Mode() == PlaybackMode::Movie &&
+				std::abs(playback_.MovieFramesPerSecond() - 30.0) < 0.01, true, "30", true},
+			{"  Playback speed 50 fps", IDM_MOVIE_50_FPS, false, playback_.Mode() == PlaybackMode::Movie &&
+				std::abs(playback_.MovieFramesPerSecond() - 50.0) < 0.01, true, "50", true},
+			{"  Playback speed 100 fps", IDM_MOVIE_100_FPS, false, playback_.Mode() == PlaybackMode::Movie &&
+				std::abs(playback_.MovieFramesPerSecond() - 100.0) < 0.01, true, "100", true},
 			{nullptr, 0, true},
 			{"Settings Admin", 0, false, false, true, nullptr, true},
 			{"  Edit global settings...", IDM_EDIT_GLOBAL_CONFIG, false, false, false, nullptr, true},
@@ -3871,7 +3775,7 @@ private:
 	void HandleEvents(bool& running) {
 		SDL_Event event{};
 		while (SDL_PollEvent(&event) != 0) {
-			lastInteractionTick_ = SDL_GetTicks();
+			playback_.NotifyInteraction(SDL_GetTicks());
 			if (confirmationOpen_) {
 				if (event.type == SDL_QUIT) running = false;
 				else HandleConfirmationEvents(event);
@@ -3987,7 +3891,7 @@ private:
 					break;
 				}
 				const int command = jpegview_linux::CommandForKey(event.key,
-					playbackMode_ != PlaybackMode::None || animationPlaying_);
+					playback_.Mode() != PlaybackMode::None || playback_.AnimationPlaying());
 				if (plainNavigationKey && event.key.repeat != 0) {
 					if (command == IDM_NEXT) NextImage(true);
 					else if (command == IDM_PREV) PreviousImage(true);
@@ -4117,22 +4021,13 @@ private:
 	}
 
 	jpegview_linux::FileList fileList_;
-	double slideshowSeconds_ = 0.0;
-	double lastSlideshowSeconds_ = 3.0;
-	double movieFps_ = 25.0;
-	PlaybackMode playbackMode_ = PlaybackMode::None;
-	Uint32 nextPlaybackTick_ = 0;
-	bool animationPlaying_ = false;
+	double initialSlideshowSeconds_ = 0.0;
+	jpegview_linux::PlaybackScheduler playback_;
 	std::vector<Image> animationFrames_;
-	std::vector<int> animationFrameDelaysMs_;
-	std::size_t animationFrameIndex_ = 0;
-	int animationLoopCount_ = 0;
-	int animationLoopsCompleted_ = 0;
 	int transitionEffect_ = IDM_EFFECT_NONE;
 	Uint32 transitionDurationMs_ = 500;
 	Uint32 transitionStartTick_ = 0;
 	bool startFullscreen_ = false;
-	Uint32 lastInteractionTick_ = 0;
 	Image image_;
 	Image correctionBase_;
 	bool correctionBaseValid_ = false;

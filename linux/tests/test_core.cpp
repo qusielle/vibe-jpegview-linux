@@ -19,6 +19,8 @@
 #include "image_info_model.h"
 #include "file_dialog_model.h"
 #include "system_font.h"
+#include "bitmap_font.h"
+#include "playback_scheduler.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -1834,8 +1836,23 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 	}
 
 	jpegview_linux::SystemFont font("Sans 10");
-	Expect(font.LineHeight() > 7 && font.TextWidth("iiii") < font.TextWidth("WWWW"),
-		"system font metrics are missing or not proportional");
+	Expect(font.LineHeight() == jpegview_linux::Tahoma12LineHeight() &&
+		font.TextWidth("iiii") < font.TextWidth("WWWW") &&
+		font.TextWidth("Tahoma 12") == jpegview_linux::Tahoma12TextWidth("Tahoma 12"),
+		"printable ASCII did not use the proportional 12-point bitmap metrics");
+	Expect(jpegview_linux::Tahoma12CanRender("Mixed Case 123") &&
+		!jpegview_linux::Tahoma12CanRender(u8"café"),
+		"bitmap-font coverage did not distinguish printable ASCII from Unicode");
+	const jpegview_linux::BitmapFontGlyph& uppercase = jpegview_linux::Tahoma12Glyph('A');
+	const jpegview_linux::BitmapFontGlyph& lowercase = jpegview_linux::Tahoma12Glyph('a');
+	Expect(uppercase.pixelOffset != lowercase.pixelOffset,
+		"12-point bitmap font mapped lowercase letters to uppercase glyphs");
+	const jpegview_linux::RasterizedText asciiRaster = font.Rasterize("Mixed Case");
+	Expect(asciiRaster.width > 0 && asciiRaster.height == jpegview_linux::Tahoma12LineHeight() &&
+		!asciiRaster.argb.empty() &&
+		std::any_of(asciiRaster.argb.begin(), asciiRaster.argb.end(), [](std::uint32_t pixel) {
+			return (pixel >> 24) > 0 && (pixel >> 24) < 255;
+		}), "12-point ASCII bitmap did not retain its hinted antialiasing");
 	const jpegview_linux::RasterizedText raster = font.Rasterize(u8"Привет — 日本語");
 	Expect(raster.width > 0 && raster.height >= font.LineHeight() && !raster.argb.empty(),
 		"system font did not rasterize non-Latin UTF-8 text");
@@ -1845,6 +1862,68 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 	const std::string invalidUtf8 = std::string("valid") + static_cast<char>(0xff);
 	Expect(font.TextWidth(invalidUtf8) > 0 && !font.Rasterize(invalidUtf8).argb.empty(),
 		"system font did not replace malformed UTF-8 safely");
+}
+
+void TestPlaybackSchedulerTimingAndModes() {
+	using jpegview_linux::PlaybackActionType;
+	using jpegview_linux::PlaybackMode;
+	jpegview_linux::PlaybackScheduler scheduler;
+	scheduler.ConfigureImage({20, 30}, 2, true, 100);
+	Expect(scheduler.AnimationPlaying() && scheduler.NextTick() == 120,
+		"animated image did not schedule its first frame delay");
+	Expect(scheduler.Tick(119).type == PlaybackActionType::None,
+		"animation advanced before its frame deadline");
+	Expect(scheduler.Tick(120).type == PlaybackActionType::ShowFrame &&
+		scheduler.FrameIndex() == 1 && scheduler.NextTick() == 150,
+		"animation did not advance or schedule the second frame");
+	Expect(scheduler.Tick(150).type == PlaybackActionType::ShowFrame &&
+		scheduler.FrameIndex() == 0 && scheduler.CompletedLoops() == 1,
+		"animation did not wrap after its first loop");
+	scheduler.Tick(170);
+	Expect(scheduler.Tick(200).type == PlaybackActionType::None &&
+		!scheduler.AnimationPlaying() && scheduler.CompletedLoops() == 2,
+		"finite animation did not stop after its declared loop count");
+	const jpegview_linux::PlaybackAction resumed = scheduler.Resume(300);
+	Expect(resumed.type == PlaybackActionType::ShowFrame && resumed.frameIndex == 0 &&
+		scheduler.AnimationPlaying() && scheduler.NextTick() == 320,
+		"animation resume did not rewind a completed sequence");
+	scheduler.FrameDisplayFailed();
+	Expect(!scheduler.AnimationPlaying() && scheduler.NextTick() == 0,
+		"failed animation frame did not stop scheduling");
+
+	scheduler.ConfigureImage({}, 0, false, 400);
+	scheduler.StartMovie(25.0, 400);
+	Expect(scheduler.Mode() == PlaybackMode::Movie && scheduler.NextTick() == 440 &&
+		scheduler.Tick(439).type == PlaybackActionType::None &&
+		scheduler.Tick(440).type == PlaybackActionType::NextImage,
+		"movie mode did not advance a static image at its frame interval");
+	scheduler.StartMovie(1000.0, 500);
+	Expect(scheduler.MovieFramesPerSecond() == 100.0 && scheduler.NextTick() == 510,
+		"movie speed or minimum interval was not clamped");
+
+	scheduler.StartSlideshow(0.05, 1000);
+	Expect(scheduler.Mode() == PlaybackMode::Slideshow &&
+		scheduler.SlideshowSeconds() == 0.1 &&
+		scheduler.Tick(1099).type == PlaybackActionType::None &&
+		scheduler.Tick(1100).type == PlaybackActionType::NextImage,
+		"slideshow delay was not clamped or honored");
+	scheduler.NotifyInteraction(1200);
+	Expect(scheduler.Tick(1250).type == PlaybackActionType::None,
+		"interaction did not postpone slideshow advancement");
+	scheduler.Stop(1300);
+	Expect(scheduler.Mode() == PlaybackMode::None && scheduler.SlideshowSeconds() == 0.0,
+		"stopping playback did not clear active mode state");
+
+	jpegview_linux::PlaybackScheduler wrapping;
+	wrapping.ConfigureImage({20, 20}, 0, true, 0xfffffff5u);
+	Expect(wrapping.NextTick() == 9 &&
+		wrapping.Tick(8).type == PlaybackActionType::None &&
+		wrapping.Tick(9).type == PlaybackActionType::ShowFrame,
+		"animation deadline comparison failed across tick wraparound");
+	wrapping.StartSlideshow(0.1, 0xfffffff0u);
+	Expect(wrapping.Tick(83).type == PlaybackActionType::None &&
+		wrapping.Tick(84).type == PlaybackActionType::NextImage,
+		"slideshow elapsed time failed across tick wraparound");
 }
 
 void TestFileDialogFiltering() {
@@ -2094,6 +2173,7 @@ int main() {
 	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
+	RunTest("playback-scheduler-timing-and-modes", TestPlaybackSchedulerTimingAndModes, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
 	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
 	RunTest("file-dialog-model-state-and-navigation", TestFileDialogModelStateAndNavigation, failures);
