@@ -184,7 +184,9 @@ DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 240 300
 DISPLAY=":$display_number" xdotool mouseup 1
 sleep 0.3
 title_before_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
-DISPLAY=":$display_number" xdotool mousemove 80 500
+thumbnail_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+thumbnail_neighbor_y=$(((thumbnail_window_height + 163) / 2))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 80 "$thumbnail_neighbor_y"
 DISPLAY=":$display_number" xdotool click 1
 sleep 0.3
 title_after_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
@@ -284,7 +286,9 @@ case "$title_after_reload" in
 	01-red.ppm\ *) ;;
 	*) echo "UI smoke test: persisted filename ordering was not restored" >&2; exit 1 ;;
 esac
-DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 200 500
+thumbnail_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+thumbnail_neighbor_y=$(((thumbnail_window_height + 163) / 2))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 200 "$thumbnail_neighbor_y"
 DISPLAY=":$display_number" xdotool click 1
 sleep 0.3
 title_after_restored_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")

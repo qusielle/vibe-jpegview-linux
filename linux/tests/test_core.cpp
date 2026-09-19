@@ -1464,6 +1464,13 @@ void TestOverlayLayoutUsesContentWidthAndComfortableMargins() {
 }
 
 void TestThumbnailPanelLayoutPreloadAndSizing() {
+	Expect(jpegview_linux::ThumbnailRowHeight(164, 1) == 112,
+		"default thumbnail row height changed");
+	Expect(jpegview_linux::ThumbnailRowHeight(48, 1) == 35,
+		"narrow thumbnail panel did not create compact rows");
+	Expect(jpegview_linux::ThumbnailRowHeight(240, 1) == 163,
+		"wide thumbnail panel did not scale its rows with panel width");
+
 	jpegview_linux::ThumbnailPanelLayout layout =
 		jpegview_linux::CalculateThumbnailPanelLayout(800, 600, true, 164);
 	Expect(layout.panelWidth == 164 && layout.imageX == 164 &&

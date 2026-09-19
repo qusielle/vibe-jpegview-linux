@@ -163,7 +163,8 @@ It follows the active file ordering in a vertical strip: the current image remai
 normal brightness, while surrounding images are darkened. Clicking a thumbnail opens that file.
 Thumbnails are loaded incrementally in nearest-to-current order and kept in a bounded in-memory
 cache. The panel reserves its own space on the left instead of covering the image. Drag its right
-separator to adjust its width. The width and visibility are preserved between runs.
+separator to adjust its width; row height follows the width, so narrower panels display more
+thumbnails without large fixed vertical gaps. The width and visibility are preserved between runs.
 
 The port follows the Windows `CFileList` navigation model: the default display order is ascending
 file modification time from the filesystem; `N`, `M`, `C`, and `Z` select filename, modification

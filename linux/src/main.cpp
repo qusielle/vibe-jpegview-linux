@@ -70,10 +70,10 @@ constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kOverlayLineHeight = 18;
 constexpr int kFilenameOverlayHeight = 20;
-constexpr int kThumbnailRowHeight = 112;
 constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
 constexpr std::size_t kThumbnailCacheLimit = 64;
+constexpr std::size_t kThumbnailCachePixelBudget = 16u * 1024u * 1024u;
 constexpr int kBatchSelectAll = 0;
 constexpr int kBatchSelectNone = 1;
 constexpr int kBatchPreview = 2;
@@ -1054,15 +1054,33 @@ private:
 	void PrepareThumbnailPreload() {
 		thumbnailLoadQueue_.clear();
 		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
+		const SDL_Rect panel = ThumbnailPanelRect();
+		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
+		const std::size_t cacheLimit = ThumbnailCacheLimit(panel.w, rowHeight);
 		const std::vector<std::size_t> order = jpegview_linux::ThumbnailPreloadOrder(
-			fileList_.Size(), fileList_.CurrentIndex(), kThumbnailCacheLimit);
+			fileList_.Size(), fileList_.CurrentIndex(), cacheLimit);
 		thumbnailLoadQueue_.insert(thumbnailLoadQueue_.end(), order.begin(), order.end());
 		nextThumbnailLoadTick_ = 0;
 	}
 
+	std::size_t ThumbnailCacheLimit(int panelWidth, int rowHeight) const {
+		const int imageHeight = std::max(1, rowHeight - kThumbnailVerticalMargin * 2 - 1);
+		const std::size_t pixelsPerThumbnail = static_cast<std::size_t>(std::max(1, panelWidth)) *
+			static_cast<std::size_t>(imageHeight);
+		return std::clamp(kThumbnailCachePixelBudget / pixelsPerThumbnail,
+			static_cast<std::size_t>(1), kThumbnailCacheLimit);
+	}
+
+	std::size_t CurrentThumbnailCacheLimit() const {
+		const SDL_Rect panel = ThumbnailPanelRect();
+		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
+		return ThumbnailCacheLimit(panel.w, rowHeight);
+	}
+
 	void TrimThumbnailCache() {
 		const std::string currentKey = fileList_.Empty() ? std::string() : fileList_.Current().string();
-		while (thumbnailCache_.size() > kThumbnailCacheLimit) {
+		const std::size_t cacheLimit = CurrentThumbnailCacheLimit();
+		while (thumbnailCache_.size() > cacheLimit) {
 			auto oldest = thumbnailCache_.end();
 			for (auto candidate = thumbnailCache_.begin(); candidate != thumbnailCache_.end(); ++candidate) {
 				if (candidate->first == currentKey) continue;
@@ -1098,9 +1116,11 @@ private:
 			std::string errorMessage;
 			if (jpegview_linux::DecodeImage(path, decoded, errorMessage) && !decoded.frames.empty()) {
 				const jpegview_linux::DecodedFrame& frame = decoded.frames.front();
+				const SDL_Rect panel = ThumbnailPanelRect();
+				const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
 				const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
-					frame.width, frame.height, jpegview_linux::kMaximumThumbnailPanelWidth,
-					kThumbnailRowHeight - kThumbnailVerticalMargin * 2 - 1);
+					frame.width, frame.height, panel.w,
+					rowHeight - kThumbnailVerticalMargin * 2 - 1);
 				Image thumbnail;
 				if (size.width > 0 && size.height > 0 &&
 					thumbnail.StoreBGRA(frame.bgra.data(), frame.width, frame.height) &&
@@ -3917,6 +3937,7 @@ private:
 	bool BeginThumbnailPanelResize(int x, int y) {
 		if (!IsThumbnailPanelResizeHandle(x, y)) return false;
 		thumbnailPanelResizing_ = true;
+		thumbnailPanelResizeChanged_ = false;
 		thumbnailResizeOffset_ = ThumbnailPanelRect().w - x;
 		SDL_CaptureMouse(SDL_TRUE);
 		UpdateThumbnailPanelCursor(x, y);
@@ -3934,6 +3955,7 @@ private:
 		const int width = std::clamp(mouseX + thumbnailResizeOffset_, minimumWidth, maximumWidth);
 		if (width == thumbnailPanelWidth_) return;
 		thumbnailPanelWidth_ = width;
+		thumbnailPanelResizeChanged_ = true;
 		if (viewport_.IsFitToWindow()) {
 			FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
 		}
@@ -3943,6 +3965,11 @@ private:
 		if (!thumbnailPanelResizing_) return;
 		thumbnailPanelResizing_ = false;
 		SDL_CaptureMouse(SDL_FALSE);
+		if (thumbnailPanelResizeChanged_) {
+			ClearThumbnailCache();
+			PrepareThumbnailPreload();
+			thumbnailPanelResizeChanged_ = false;
+		}
 		UpdateThumbnailPanelCursor(mouseX, mouseY);
 		SaveSettings();
 	}
@@ -3953,10 +3980,11 @@ private:
 		if (panel.w <= 0 || panel.h <= 0) return;
 		SDL_SetRenderDrawColor(renderer_, 7, 7, 7, 238);
 		SDL_RenderFillRect(renderer_, &panel);
+		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
 		const std::vector<jpegview_linux::ThumbnailSlot> slots = jpegview_linux::ThumbnailPanelSlots(
-			fileList_.Size(), fileList_.CurrentIndex(), panel.h, kThumbnailRowHeight);
+			fileList_.Size(), fileList_.CurrentIndex(), panel.h, rowHeight);
 		for (const jpegview_linux::ThumbnailSlot& slot : slots) {
-			const SDL_Rect row{panel.x, slot.y, panel.w, kThumbnailRowHeight};
+			const SDL_Rect row{panel.x, slot.y, panel.w, rowHeight};
 			if (slot.current) {
 				SDL_SetRenderDrawColor(renderer_, 32, 58, 82, 255);
 				SDL_RenderFillRect(renderer_, &row);
@@ -3998,10 +4026,11 @@ private:
 		if (!thumbnailPanelVisible_ || fileList_.Empty()) return false;
 		const SDL_Rect panel = ThumbnailPanelRect();
 		if (!PointInRect(x, y, panel)) return false;
+		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
 		const std::vector<jpegview_linux::ThumbnailSlot> slots = jpegview_linux::ThumbnailPanelSlots(
-			fileList_.Size(), fileList_.CurrentIndex(), panel.h, kThumbnailRowHeight);
+			fileList_.Size(), fileList_.CurrentIndex(), panel.h, rowHeight);
 		for (const jpegview_linux::ThumbnailSlot& slot : slots) {
-			const SDL_Rect row{panel.x, slot.y, panel.w, kThumbnailRowHeight};
+			const SDL_Rect row{panel.x, slot.y, panel.w, rowHeight};
 			if (!PointInRect(x, y, row) || slot.current) continue;
 			if (fileList_.Select(slot.fileIndex)) LoadCurrent();
 			break;
@@ -4450,6 +4479,7 @@ private:
 	bool thumbnailPanelVisible_ = false;
 	int thumbnailPanelWidth_ = jpegview_linux::kDefaultThumbnailPanelWidth;
 	bool thumbnailPanelResizing_ = false;
+	bool thumbnailPanelResizeChanged_ = false;
 	int thumbnailResizeOffset_ = 0;
 	SDL_Cursor* thumbnailResizeCursor_ = nullptr;
 	bool infoVisible_ = false;

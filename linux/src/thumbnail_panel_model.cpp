@@ -14,6 +14,13 @@ ThumbnailPanelLayout CalculateThumbnailPanelLayout(int windowWidth, int windowHe
 	return {panelWidth, panelWidth, width - panelWidth, height};
 }
 
+int ThumbnailRowHeight(int panelWidth, int verticalMargin) {
+	if (panelWidth <= 0) return 0;
+	const int margin = std::max(0, verticalMargin);
+	const int imageHeight = std::max(1, static_cast<int>(std::round(panelWidth * 2.0 / 3.0)));
+	return imageHeight + margin * 2 + 1;
+}
+
 std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
 	std::size_t currentIndex, int windowHeight, int rowHeight) {
 	std::vector<ThumbnailSlot> slots;

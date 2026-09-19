@@ -35,6 +35,10 @@ struct ThumbnailPanelLayout {
 ThumbnailPanelLayout CalculateThumbnailPanelLayout(int windowWidth, int windowHeight,
 	bool panelVisible, int preferredPanelWidth);
 
+// Uses a 3:2 thumbnail cell so row height follows the adjustable panel width.
+// Vertical margins and the one-pixel separator are added around the image.
+int ThumbnailRowHeight(int panelWidth, int verticalMargin);
+
 // Returns visible rows in file-list order. The current file's row is centered
 // vertically; rows outside the window are omitted rather than wrapping.
 std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
