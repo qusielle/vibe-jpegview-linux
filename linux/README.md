@@ -231,6 +231,10 @@ The dependency-light core suite builds and runs with:
 make -C linux test
 ```
 
+The Unicode font-rendering test requires at least one installed system font. The Ubuntu Docker
+build installs `fonts-dejavu-core` for this purpose; this font is not bundled into the AppImage,
+which continues to use fonts installed on the user's system.
+
 It covers file-list ordering/navigation, mutable image transforms, all resize filters and automatic
 correction invariants, sort and settings persistence mappings, the complete supported
 keyboard-command mapping, viewport fit/fill/zoom/pan geometry, open/save browser state,

@@ -10,7 +10,7 @@ ARG APPIMAGETOOL_SHA256=
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     g++ make cmake ninja-build pkg-config curl ca-certificates file patchelf nasm \
-    libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev \
+    libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev fonts-dejavu-core \
     libjpeg-dev libpng-dev libjpeg-turbo-progs \
     libgif-dev libtiff-dev libwebp-dev libwebp6 libheif-dev libraw-dev libjxr-dev \
     libaom-dev libde265-dev libx265-dev libbrotli-dev liblcms2-dev \
