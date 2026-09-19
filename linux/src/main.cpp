@@ -1276,11 +1276,9 @@ private:
 		if (!fileList_.Next()) return;
 		SetTitle();
 		if (showPendingNavigation) {
-			navigationLoading_ = true;
 			Render();
 		}
 		const bool loaded = LoadCurrent(1);
-		navigationLoading_ = false;
 		if (loaded && animate) StartTransition(previousImage);
 	}
 
@@ -1291,11 +1289,9 @@ private:
 		if (!fileList_.Previous()) return;
 		SetTitle();
 		if (showPendingNavigation) {
-			navigationLoading_ = true;
 			Render();
 		}
 		const bool loaded = LoadCurrent(-1);
-		navigationLoading_ = false;
 		if (loaded && animate) StartTransition(previousImage);
 	}
 
@@ -3680,7 +3676,7 @@ private:
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderThumbnailPanel();
 		RenderFileName();
-		if (!navigationLoading_) RenderImageInfo();
+		RenderImageInfo();
 		RenderControls();
 		RenderContextMenu();
 		RenderFileDialog();
@@ -3738,7 +3734,6 @@ private:
 	bool infoVisible_ = false;
 	bool showHistogram_ = false;
 	bool showFileName_ = false;
-	bool navigationLoading_ = false;
 	jpegview_linux::HeldNavigationController heldNavigation_;
 	bool confirmationOpen_ = false;
 	int confirmationCommand_ = 0;

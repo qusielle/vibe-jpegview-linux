@@ -304,12 +304,44 @@ if [ "$title_after_hold" != "$title_after_release_settled" ]; then
 	exit 1
 fi
 
+if [ "$visual_assertions" -eq 1 ]; then
+	# Persistent overlays must remain painted on the intermediate frame shown
+	# before each held-navigation decode.  The EXIF panel starts at (4,4), where
+	# its opaque grey border is distinct from the dark image-area background.
+	DISPLAY=":$display_number" xdotool key F2
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/info-before-hold.png"
+	info_border=$(convert "$temporary/info-before-hold.png" -format '%[hex:p{4,4}]' info:)
+	case "$info_border" in
+		696969*) ;;
+		*) echo "UI smoke test: F2 did not show the EXIF overlay at its expected position" >&2; exit 1 ;;
+	esac
+
+	info_overlay_stable=1
+	DISPLAY=":$display_number" xdotool keydown Right
+	for sample in $(seq 1 24); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/info-held-$sample.png"
+		info_border=$(convert "$temporary/info-held-$sample.png" -format '%[hex:p{4,4}]' info:)
+		case "$info_border" in
+			696969*) ;;
+			*) info_overlay_stable=0 ;;
+		esac
+	done
+	DISPLAY=":$display_number" xdotool keyup Right
+	DISPLAY=":$display_number" xdotool key F2
+	if [ "$info_overlay_stable" -ne 1 ]; then
+		echo "UI smoke test: EXIF overlay disappeared during held navigation" >&2
+		exit 1
+	fi
+fi
+
+title_before_ctrl_wheel=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 DISPLAY=":$display_number" xdotool keydown ctrl
 DISPLAY=":$display_number" xdotool click 5
 DISPLAY=":$display_number" xdotool keyup ctrl
 sleep 0.3
 title_after_ctrl_wheel=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
-if [ "$title_after_hold" != "$title_after_ctrl_wheel" ]; then
+if [ "$title_before_ctrl_wheel" != "$title_after_ctrl_wheel" ]; then
 	echo "UI smoke test: Ctrl+wheel navigated instead of zooming" >&2
 	exit 1
 fi
