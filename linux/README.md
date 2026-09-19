@@ -100,6 +100,7 @@ make -C linux test
 
 It covers file-list ordering/navigation, sort and settings persistence mappings, the complete
 supported keyboard-command mapping, viewport fit/fill/zoom/pan geometry, resize-dialog validation,
+content-sized overlay layout, compact/advanced menu filtering and keyboard selection,
 decoder and writer round trips across static and animated formats, all PNM variants, malformed
 input, batch-copy planning, desktop-application command expansion, and JPEG metadata. The optional
 X11 smoke suite covers startup controls,
