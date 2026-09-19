@@ -16,6 +16,7 @@
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "file_dialog_model.h"
+#include "system_font.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -1562,6 +1563,40 @@ void TestImageInfoFormatting() {
 		"file-size formatting changed while moving it into the information model");
 }
 
+void TestSystemFontResolutionAndUnicodeRendering() {
+	TemporaryDirectory temporary;
+	const fs::path home = temporary.path() / "home";
+	const fs::path config = temporary.path() / "config";
+	fs::create_directories(config / "xfce4/xfconf/xfce-perchannel-xml");
+	fs::create_directories(config / "gtk-3.0");
+	WriteText(config / "gtk-3.0/settings.ini",
+		"[Settings]\ngtk-font-name=GTK Choice 11\n");
+	WriteText(config / "xfce4/xfconf/xfce-perchannel-xml/xsettings.xml",
+		"<channel><property value=\"Tahoma &amp; Friends 12\" type=\"string\" name=\"FontName\"/></channel>\n");
+	ScopedEnvironment overrideFont("JPEGVIEW_FONT", "");
+	Expect(jpegview_linux::ResolveDesktopFontDescription(home, config) == "Tahoma & Friends 12",
+		"XFCE system font was not preferred or its XML value was not decoded");
+
+	fs::remove(config / "xfce4/xfconf/xfce-perchannel-xml/xsettings.xml");
+	Expect(jpegview_linux::ResolveDesktopFontDescription(home, config) == "GTK Choice 11",
+		"GTK system font was not used when XFCE settings were absent");
+	fs::remove(config / "gtk-3.0/settings.ini");
+	fs::create_directories(home);
+	WriteText(home / ".gtkrc-2.0", "gtk-font-name = \"Legacy Choice 9\"\n");
+	Expect(jpegview_linux::ResolveDesktopFontDescription(home, config) == "Legacy Choice 9",
+		"GTK 2 system font was not parsed");
+
+	jpegview_linux::SystemFont font("Sans 10");
+	Expect(font.LineHeight() > 7 && font.TextWidth("iiii") < font.TextWidth("WWWW"),
+		"system font metrics are missing or not proportional");
+	const jpegview_linux::RasterizedText raster = font.Rasterize(u8"Привет — 日本語");
+	Expect(raster.width > 0 && raster.height >= font.LineHeight() && !raster.argb.empty(),
+		"system font did not rasterize non-Latin UTF-8 text");
+	Expect(std::any_of(raster.argb.begin(), raster.argb.end(), [](std::uint32_t pixel) {
+		return (pixel >> 24) != 0;
+	}), "non-Latin system-font text rasterized as an empty image");
+}
+
 void TestFileDialogFiltering() {
 	const std::vector<jpegview_linux::FileDialogEntry> entries = {
 		{fs::path("/pictures"), true, true},
@@ -1690,6 +1725,7 @@ int main() {
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
+	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
 	RunTest("file-dialog-directory-summaries", TestFileDialogDirectorySummaries, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);

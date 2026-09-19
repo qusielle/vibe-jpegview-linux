@@ -90,8 +90,10 @@ they support.
     overlays use compact translucent surfaces sized to their content with small comfortable margins.
     Filename, EXIF, and counter text remain responsive during navigation. The information popup uses
     a readable `W X H, Size` line and `Mod.date:` label. Overlay visibility persists immediately. The
-    window title shows filename, dimensions, and size, and menus, dialogs, tooltips, and panels share
-    the compact bitmap font and translucent visual treatment.
+    window title shows filename, dimensions, and size. Menus, dialogs, tooltips, and panels use the
+    desktop's configured UI font through Pango, including Unicode shaping and automatic fallback to
+    installed fonts for characters outside the selected font; translucent surfaces provide a
+    consistent visual treatment.
 
 13. **Reliable startup and saved session state.** Scale mode, ordering mode/direction, maximized or
     normal state, navigation-panel choices, filename/EXIF visibility, automatic correction, batch
@@ -116,14 +118,16 @@ they support.
 
 ## Build
 
-The only runtime framework dependency is SDL2. SDL2 development headers are not required because
-the frontend uses the small ABI declared in `src/sdl_abi.h`; codec development packages are still
-needed when compiling the optional format support.
+The runtime framework dependencies are SDL2 and Pango/Cairo. SDL2 development headers are not
+required because the frontend uses the small ABI declared in `src/sdl_abi.h`; Pango development
+headers and codec development packages are needed at compile time. The AppImage bundles these
+libraries while continuing to discover the user's system fonts through Fontconfig.
 
 On Ubuntu 20.04, install the compiler, make, and SDL2 runtime first:
 
 ```sh
-sudo apt install g++ make libsdl2-2.0-0 libjpeg-dev libpng-dev libjpeg-turbo-progs xclip wl-clipboard
+sudo apt install g++ make libsdl2-2.0-0 libpango1.0-dev libcairo2-dev libfontconfig1-dev \
+  libjpeg-dev libpng-dev libjpeg-turbo-progs xclip wl-clipboard
 ```
 
 ```sh

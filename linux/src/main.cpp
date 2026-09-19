@@ -18,6 +18,7 @@
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "file_dialog_model.h"
+#include "system_font.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -62,7 +63,6 @@ namespace {
 constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr int kUiTextScale = 1;
-constexpr int kContextMenuItemHeight = 18;
 constexpr int kContextMenuSeparatorHeight = 7;
 constexpr int kContextMenuShowAdvanced = -1;
 constexpr int kNavigationSortMode = -2;
@@ -70,8 +70,6 @@ constexpr int kToggleNavigationPanelAutoReveal = -3;
 constexpr int kNavigationPanelHoverHeight = 64;
 constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
-constexpr int kOverlayLineHeight = 18;
-constexpr int kFilenameOverlayHeight = 20;
 constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
 constexpr std::size_t kThumbnailCacheLimit = 64;
@@ -98,94 +96,73 @@ struct ControlButton {
 	int command = IDM_NEXT;
 };
 
-struct FontGlyph {
-	char character;
-	std::array<Uint8, 7> rows;
-};
-
-// A small built-in 5x7 font keeps the native SDL frontend independent of a
-// host font or an additional text-rendering shared library.  The Windows
-// popup menu is text based too; this is its portable drawing equivalent.
-const std::array<Uint8, 7>& GlyphRows(char character) {
-	static const std::array<Uint8, 7> empty{};
-	static const std::array<FontGlyph, 49> glyphs = {{
-		{'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
-		{'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
-		{'C', {0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F}},
-		{'D', {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E}},
-		{'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}},
-		{'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
-		{'G', {0x0F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0F}},
-		{'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
-		{'I', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F}},
-		{'J', {0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0E}},
-		{'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}},
-		{'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}},
-		{'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
-		{'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}},
-		{'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
-		{'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
-		{'Q', {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}},
-		{'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
-		{'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
-		{'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
-		{'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
-		{'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}},
-		{'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11}},
-		{'X', {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11}},
-		{'Y', {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04}},
-		{'Z', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F}},
-		{'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
-		{'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
-		{'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
-		{'3', {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E}},
-		{'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
-		{'5', {0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E}},
-		{'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
-		{'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
-		{'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
-		{'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
-		{'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06}},
-		{':', {0x00, 0x06, 0x06, 0x00, 0x06, 0x06, 0x00}},
-		{'?', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}},
-		{'!', {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04}},
-		{'%', {0x19, 0x19, 0x02, 0x04, 0x08, 0x13, 0x13}},
-		{'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
-		{'/', {0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10}},
-		{'[', {0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E}},
-		{']', {0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E}},
-		{'(', {0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02}},
-		{')', {0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08}},
-		{'+', {0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00}},
-		{'=', {0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00, 0x00}},
-	}};
-	const char upper = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
-	for (const FontGlyph& glyph : glyphs) {
-		if (glyph.character == upper) return glyph.rows;
-	}
-	return empty;
+jpegview_linux::SystemFont& UiFont() {
+	static jpegview_linux::SystemFont font;
+	return font;
 }
 
 int TextWidth(const std::string& text, int scale) {
-	return text.empty() ? 0 : static_cast<int>(text.size()) * (5 * scale + scale) - scale;
+	return UiFont().TextWidth(text, scale);
+}
+
+int TextLineHeight(int scale = kUiTextScale) {
+	return UiFont().LineHeight(scale);
+}
+
+int ContextMenuRowHeight() {
+	return std::max(18, TextLineHeight() + 8);
+}
+
+int OverlayLineHeight() {
+	return std::max(18, TextLineHeight() + 4);
+}
+
+int FilenameOverlayHeight() {
+	return std::max(20, TextLineHeight() + 6);
+}
+
+std::size_t NextUtf8Boundary(const std::string& value, std::size_t position) {
+	if (position >= value.size()) return value.size();
+	++position;
+	while (position < value.size() &&
+		(static_cast<unsigned char>(value[position]) & 0xc0u) == 0x80u) ++position;
+	return position;
+}
+
+std::size_t PreviousUtf8Boundary(const std::string& value, std::size_t position) {
+	if (position == 0) return 0;
+	--position;
+	while (position > 0 && (static_cast<unsigned char>(value[position]) & 0xc0u) == 0x80u) --position;
+	return position;
 }
 
 std::string ClipText(const std::string& value, int maximumWidth, int scale = kUiTextScale) {
 	if (maximumWidth <= 0) return {};
 	if (TextWidth(value, scale) <= maximumWidth) return value;
-	const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
-		maximumWidth / (6 * scale)));
-	if (maximumCharacters <= 3) return value.substr(0, 1) + "...";
-	return value.substr(0, maximumCharacters - 3) + "...";
+	const std::string ellipsis = "...";
+	if (TextWidth(ellipsis, scale) > maximumWidth) return {};
+	std::size_t end = 0;
+	for (std::size_t next = NextUtf8Boundary(value, end); next > end;
+		next = NextUtf8Boundary(value, end)) {
+		if (TextWidth(value.substr(0, next) + ellipsis, scale) > maximumWidth) break;
+		end = next;
+		if (end == value.size()) break;
+	}
+	return value.substr(0, end) + ellipsis;
 }
 
 std::string ClipInputText(const std::string& value, int maximumWidth, int scale = kUiTextScale) {
 	if (maximumWidth <= 0) return {};
 	if (TextWidth(value, scale) <= maximumWidth) return value;
-	const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
-		maximumWidth / (6 * scale)));
-	if (maximumCharacters <= 3) return "...";
-	return "..." + value.substr(value.size() - (maximumCharacters - 3));
+	const std::string ellipsis = "...";
+	if (TextWidth(ellipsis, scale) > maximumWidth) return {};
+	std::size_t start = value.size();
+	while (start > 0) {
+		const std::size_t previous = PreviousUtf8Boundary(value, start);
+		if (TextWidth(ellipsis + value.substr(previous), scale) > maximumWidth) break;
+		start = previous;
+	}
+	return ellipsis + value.substr(start);
 }
 
 std::string Lower(std::string value) {
@@ -640,7 +617,7 @@ std::string InfoText(const std::string& value) {
 	std::string result;
 	result.reserve(value.size());
 	for (const unsigned char character : value) {
-		result.push_back(character >= 32 && character < 127 ? static_cast<char>(character) : '?');
+		result.push_back(character >= 32 && character != 127 ? static_cast<char>(character) : '?');
 	}
 	return result;
 }
@@ -842,6 +819,15 @@ private:
 		std::uint64_t lastUsed = 0;
 	};
 
+	struct TextTextureCacheEntry {
+		SDL_Texture* texture = nullptr;
+		int width = 0;
+		int height = 0;
+		int offsetX = 0;
+		int offsetY = 0;
+		std::uint64_t lastUsed = 0;
+	};
+
 	void Cleanup() {
 		SaveSettings();
 		if (clipboardMode_) {
@@ -856,6 +842,7 @@ private:
 		ClearDisplayTexture();
 		ClearTransition();
 		ClearThumbnailCache();
+		ClearTextTextureCache();
 		if (renderer_ != nullptr) {
 			SDL_DestroyRenderer(renderer_);
 			renderer_ = nullptr;
@@ -2651,7 +2638,7 @@ private:
 	}
 
 	int ContextMenuItemHeight(std::size_t index) const {
-		return contextMenuItems_[index].separator ? kContextMenuSeparatorHeight : kContextMenuItemHeight;
+		return contextMenuItems_[index].separator ? kContextMenuSeparatorHeight : ContextMenuRowHeight();
 	}
 
 	bool IsContextMenuItemSelectable(std::size_t index) const {
@@ -2663,7 +2650,7 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, nullptr, &windowHeight);
 		const std::vector<jpegview_linux::MenuColumn> layout = jpegview_linux::LayoutMenuColumns(
-			contextMenuItems_, windowHeight - 24, kContextMenuItemHeight, kContextMenuSeparatorHeight);
+			contextMenuItems_, windowHeight - 24, ContextMenuRowHeight(), kContextMenuSeparatorHeight);
 		std::vector<ContextMenuColumn> columns;
 		columns.reserve(layout.size());
 		for (const jpegview_linux::MenuColumn& source : layout) {
@@ -2795,7 +2782,7 @@ private:
 			layout.push_back({column.begin, column.end, column.height});
 		}
 		const int selection = jpegview_linux::AdjacentMenuSelection(contextMenuItems_, layout,
-			menuSelected_, direction, kContextMenuItemHeight, kContextMenuSeparatorHeight);
+			menuSelected_, direction, ContextMenuRowHeight(), kContextMenuSeparatorHeight);
 		if (selection >= 0) menuSelected_ = selection;
 	}
 
@@ -3790,20 +3777,55 @@ private:
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 	}
 
-	void DrawText(const std::string& text, int x, int y, int scale, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
-		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
-		int cursorX = x;
-		for (const char character : text) {
-			const std::array<Uint8, 7>& rows = GlyphRows(character);
-			for (int row = 0; row < 7; ++row) {
-				for (int column = 0; column < 5; ++column) {
-					if ((rows[row] & (1u << (4 - column))) == 0) continue;
-					SDL_Rect pixel{cursorX + column * scale, y + row * scale, scale, scale};
-					SDL_RenderFillRect(renderer_, &pixel);
-				}
-			}
-			cursorX += 6 * scale;
+	void ClearTextTextureCache() {
+		for (auto& cached : textTextureCache_) {
+			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
 		}
+		textTextureCache_.clear();
+	}
+
+	TextTextureCacheEntry* TextTexture(const std::string& text, int scale) {
+		if (renderer_ == nullptr || text.empty() || scale <= 0) return nullptr;
+		const std::string key = std::to_string(scale) + '\n' + text;
+		auto found = textTextureCache_.find(key);
+		if (found != textTextureCache_.end()) {
+			found->second.lastUsed = ++textTextureUseCounter_;
+			return &found->second;
+		}
+
+		const jpegview_linux::RasterizedText raster = UiFont().Rasterize(text, scale);
+		if (raster.width <= 0 || raster.height <= 0 || raster.argb.empty()) return nullptr;
+		SDL_Texture* texture = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888,
+			SDL_TEXTUREACCESS_STATIC, raster.width, raster.height);
+		if (texture == nullptr) return nullptr;
+		if (SDL_UpdateTexture(texture, nullptr, raster.argb.data(), raster.width * 4) != 0) {
+			SDL_DestroyTexture(texture);
+			return nullptr;
+		}
+		SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+		TextTextureCacheEntry cached{texture, raster.width, raster.height,
+			raster.offsetX, raster.offsetY, ++textTextureUseCounter_};
+		auto inserted = textTextureCache_.emplace(key, cached).first;
+		if (textTextureCache_.size() > 512) {
+			auto oldest = textTextureCache_.begin();
+			for (auto candidate = textTextureCache_.begin(); candidate != textTextureCache_.end(); ++candidate) {
+				if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
+			}
+			if (oldest != inserted) {
+				SDL_DestroyTexture(oldest->second.texture);
+				textTextureCache_.erase(oldest);
+			}
+		}
+		return &inserted->second;
+	}
+
+	void DrawText(const std::string& text, int x, int y, int scale, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
+		TextTextureCacheEntry* cached = TextTexture(text, scale);
+		if (cached == nullptr) return;
+		SDL_SetTextureColorMod(cached->texture, r, g, b);
+		const SDL_Rect destination{x + cached->offsetX, y + cached->offsetY,
+			cached->width, cached->height};
+		SDL_RenderCopy(renderer_, cached->texture, nullptr, &destination);
 	}
 
 	void DrawLine(int x1, int y1, int x2, int y2, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
@@ -3903,7 +3925,7 @@ private:
 		case kNavigationSortMode: {
 			const std::string label = jpegview_linux::SortModeShortLabel(fileList_.GetSorting());
 			DrawText(label, r.x + (r.w - TextWidth(label, kUiTextScale)) / 2,
-				r.y + (r.h - 7 * kUiTextScale) / 2, kUiTextScale);
+				r.y + (r.h - TextLineHeight(kUiTextScale)) / 2, kUiTextScale);
 			break;
 		}
 		default:
@@ -3949,16 +3971,10 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		const int maximumWidth = std::max(1, windowWidth - 8);
-		std::string label = text;
 		const int availableTextWidth = std::max(1, maximumWidth - 16);
-		if (TextWidth(label, kUiTextScale) > availableTextWidth) {
-			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
-				availableTextWidth / (6 * kUiTextScale)));
-			label.resize(maximumCharacters - 3);
-			label += "...";
-		}
+		const std::string label = ClipText(text, availableTextWidth);
 		const int tooltipWidth = std::min(maximumWidth, TextWidth(label, kUiTextScale) + 16);
-		const int tooltipHeight = 22;
+		const int tooltipHeight = std::max(22, TextLineHeight() + 8);
 		int x = anchor.x + (anchor.w - tooltipWidth) / 2;
 		x = std::clamp(x, 4, std::max(4, windowWidth - tooltipWidth - 4));
 		int y = anchor.y - tooltipHeight - 6;
@@ -3968,7 +3984,8 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 215);
 		SDL_RenderFillRect(renderer_, &tooltip);
 		DrawRect(tooltip, 190, 190, 190);
-		DrawText(label, tooltip.x + 8, tooltip.y + 7, kUiTextScale, 255, 255, 255);
+		DrawText(label, tooltip.x + 8, tooltip.y + (tooltip.h - TextLineHeight()) / 2,
+			kUiTextScale, 255, 255, 255);
 	}
 
 	void RenderFileName() {
@@ -3981,19 +3998,15 @@ private:
 		std::string label = text.str();
 		const jpegview_linux::OverlayLayout layout = jpegview_linux::FilenameOverlayLayout(
 			TextWidth(label, kUiTextScale), windowWidth, kOverlayInset,
-			kOverlayTextPadding, kFilenameOverlayHeight);
-		if (TextWidth(label, kUiTextScale) > layout.textWidth) {
-			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
-				layout.textWidth / (6 * kUiTextScale)));
-			label.resize(maximumCharacters - 3);
-			label += "...";
-		}
+			kOverlayTextPadding, FilenameOverlayHeight());
+		label = ClipText(label, layout.textWidth);
 		const SDL_Rect panel{layout.x, layout.y, layout.width, layout.height};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
 		DrawText(label, panel.x + kOverlayTextPadding,
-			panel.y + (kFilenameOverlayHeight - 7) / 2, kUiTextScale, 255, 255, 255);
+			panel.y + (FilenameOverlayHeight() - TextLineHeight()) / 2,
+			kUiTextScale, 255, 255, 255);
 	}
 
 	void RenderImageInfo() {
@@ -4013,13 +4026,10 @@ private:
 		}
 		const jpegview_linux::OverlayLayout layout = jpegview_linux::InformationOverlayLayout(
 			contentWidth, lines.size(), windowWidth, windowHeight, showFileName_,
-			kOverlayInset, kOverlayTextPadding, kOverlayLineHeight, kFilenameOverlayHeight);
+			kOverlayInset, kOverlayTextPadding, OverlayLineHeight(), FilenameOverlayHeight());
 		for (std::string& line : lines) {
 			if (TextWidth(line, kUiTextScale) <= layout.textWidth) continue;
-			const std::size_t maximumCharacters = static_cast<std::size_t>(std::max(3,
-				layout.textWidth / (6 * kUiTextScale)));
-			line.resize(maximumCharacters - 3);
-			line += "...";
+			line = ClipText(line, layout.textWidth);
 		}
 
 		SDL_Rect panel{layout.x, layout.y, layout.width, layout.height};
@@ -4028,7 +4038,7 @@ private:
 		DrawRect(panel, 105, 105, 105);
 		for (int index = 0; index < layout.visibleLines && index < static_cast<int>(lines.size()); ++index) {
 			DrawText(lines[static_cast<std::size_t>(index)], panel.x + kOverlayTextPadding,
-				panel.y + kOverlayTextPadding + index * kOverlayLineHeight,
+				panel.y + kOverlayTextPadding + index * OverlayLineHeight(),
 				kUiTextScale,
 				index == 0 ? 255 : 243, index == 0 ? 255 : 242, index == 0 ? 255 : 231);
 		}
@@ -4144,7 +4154,7 @@ private:
 			} else {
 				const std::string position = std::to_string(slot.fileIndex + 1);
 				DrawText(position, panel.x + (panel.w - TextWidth(position, kUiTextScale)) / 2,
-					row.y + (row.h - 7) / 2, kUiTextScale,
+					row.y + (row.h - TextLineHeight()) / 2, kUiTextScale,
 					slot.current ? 215 : 95, slot.current ? 215 : 95, slot.current ? 215 : 95);
 			}
 			DrawLine(panel.x, row.y + row.h - 1, std::max(panel.x, panel.x + panel.w - 2),
@@ -4206,12 +4216,8 @@ private:
 		DrawRect(panel, 220, 170, 110);
 		DrawText("CONFIRM ACTION", panel.x + 18, panel.y + 14, kUiTextScale, 255, 220, 150);
 		DrawText(confirmationMessage_, panel.x + 18, panel.y + 42, kUiTextScale);
-		std::string filename = fileList_.Empty() ? std::string() : InfoText(fileList_.Current().filename().string());
-		const int maximumCharacters = std::max(3, (width - 36) / (6 * kUiTextScale));
-		if (static_cast<int>(filename.size()) > maximumCharacters) {
-			filename.resize(static_cast<std::size_t>(maximumCharacters - 3));
-			filename += "...";
-		}
+		const std::string filename = fileList_.Empty() ? std::string() :
+			ClipText(InfoText(fileList_.Current().filename().string()), width - 36);
 		DrawText(filename, panel.x + 18, panel.y + 68, kUiTextScale, 220, 220, 220);
 		DrawText("ENTER or SPACE: YES     ESC: CANCEL", panel.x + 18, panel.y + 104, kUiTextScale, 180, 180, 180);
 	}
@@ -4303,21 +4309,22 @@ private:
 				}
 				if (static_cast<int>(i) == menuSelected_) {
 					SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
-					SDL_Rect selection{columnX + 3, itemTop, column.width - 6, kContextMenuItemHeight};
+					SDL_Rect selection{columnX + 3, itemTop, column.width - 6, ContextMenuRowHeight()};
 					SDL_RenderFillRect(renderer_, &selection);
 				}
 				const Uint8 textColor = item.command == 0 ? 135 : (item.enabled ? 235 : 100);
 				const std::string label = MenuLabel(item);
 				const std::string shortcut = MenuShortcut(item);
-				DrawText(label, columnX + 12, itemTop + 4, kUiTextScale,
+				const int textY = itemTop + (ContextMenuRowHeight() - TextLineHeight()) / 2;
+				DrawText(label, columnX + 12, textY, kUiTextScale,
 					textColor, textColor, textColor);
 				if (!shortcut.empty()) {
 					const int shortcutWidth = TextWidth(shortcut, kUiTextScale);
 					const Uint8 shortcutColor = item.enabled ? 175 : 90;
-					DrawText(shortcut, columnX + column.width - 12 - shortcutWidth, itemTop + 4, kUiTextScale,
+					DrawText(shortcut, columnX + column.width - 12 - shortcutWidth, textY, kUiTextScale,
 						shortcutColor, shortcutColor, shortcutColor);
 				}
-				itemTop += kContextMenuItemHeight;
+				itemTop += ContextMenuRowHeight();
 			}
 			if (&column != &columns.back()) {
 				DrawLine(columnX + column.width, menu.y + 6, columnX + column.width,
@@ -4639,6 +4646,8 @@ private:
 	std::unordered_map<std::string, ThumbnailCacheEntry> thumbnailCache_;
 	std::deque<std::size_t> thumbnailLoadQueue_;
 	std::uint64_t thumbnailUseCounter_ = 0;
+	std::unordered_map<std::string, TextTextureCacheEntry> textTextureCache_;
+	std::uint64_t textTextureUseCounter_ = 0;
 	Uint32 nextThumbnailLoadTick_ = 0;
 	std::vector<jpegview_linux::OpenWithApplication> openWithApplications_;
 	std::deque<std::string> openWithLabels_;

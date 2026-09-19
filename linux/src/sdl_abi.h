@@ -147,6 +147,7 @@ enum : Uint32 {
 	SDL_RENDERER_ACCELERATED = 0x00000002u,
 	SDL_RENDERER_PRESENTVSYNC = 0x00000004u,
 	SDL_PIXELFORMAT_ARGB8888 = 372645892u,
+	SDL_TEXTUREACCESS_STATIC = 0u,
 	SDL_TEXTUREACCESS_STREAMING = 1u,
 	SDL_BLENDMODE_BLEND = 1u,
 };
@@ -257,6 +258,7 @@ void SDL_DestroyTexture(SDL_Texture* texture);
 int SDL_UpdateTexture(SDL_Texture* texture, const SDL_Rect* rect, const void* pixels, int pitch);
 int SDL_SetTextureBlendMode(SDL_Texture* texture, int blendMode);
 int SDL_SetTextureAlphaMod(SDL_Texture* texture, Uint8 alpha);
+int SDL_SetTextureColorMod(SDL_Texture* texture, Uint8 r, Uint8 g, Uint8 b);
 int SDL_RenderClear(SDL_Renderer* renderer);
 int SDL_RenderCopy(SDL_Renderer* renderer, SDL_Texture* texture, const SDL_Rect* src, const SDL_Rect* dst);
 int SDL_RenderDrawLine(SDL_Renderer* renderer, int x1, int y1, int x2, int y2);
