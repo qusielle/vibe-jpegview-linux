@@ -12,6 +12,7 @@
 #include "resize_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
+#include "app_icon.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -1344,6 +1345,28 @@ void TestOverlayLayoutUsesContentWidthAndComfortableMargins() {
 		"overlay layout did not remain valid for an extremely narrow window");
 }
 
+void TestEmbeddedApplicationIcon() {
+	jpegview_linux::ApplicationIcon icon;
+	std::string error;
+	Expect(jpegview_linux::DecodeApplicationIcon(icon, error),
+		"cannot decode embedded JPEGView.ico: " + error);
+	Expect(icon.width == 64 && icon.height == 64,
+		"embedded application icon did not select the largest ICO frame");
+	Expect(icon.bgra.size() == 64u * 64u * 4u,
+		"embedded application icon has an invalid pixel buffer");
+	bool hasDifferentPixels = false;
+	for (std::size_t offset = 4; offset < icon.bgra.size(); offset += 4) {
+		if (!std::equal(icon.bgra.begin(), icon.bgra.begin() + 4, icon.bgra.begin() + offset)) {
+			hasDifferentPixels = true;
+			break;
+		}
+	}
+	Expect(hasDifferentPixels, "embedded application icon decoded as a single color");
+	for (std::size_t offset = 3; offset < icon.bgra.size(); offset += 4) {
+		Expect(icon.bgra[offset] == 255, "opaque JPEGView.ico frame acquired unexpected transparency");
+	}
+}
+
 void RunTest(const char* name, void (*test)(), int& failures) {
 	try {
 		test();
@@ -1381,6 +1404,7 @@ int main() {
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
+	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
 		return 1;

@@ -14,6 +14,7 @@
 #include "resize_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
+#include "app_icon.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -763,6 +764,17 @@ public:
 			std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << '\n';
 			SDL_Quit();
 			return 1;
+		}
+		jpegview_linux::ApplicationIcon applicationIcon;
+		std::string iconError;
+		if (jpegview_linux::DecodeApplicationIcon(applicationIcon, iconError)) {
+			SDL_Surface* iconSurface = SDL_CreateRGBSurfaceFrom(applicationIcon.bgra.data(),
+				applicationIcon.width, applicationIcon.height, 32, applicationIcon.width * 4,
+				0x00ff0000u, 0x0000ff00u, 0x000000ffu, 0xff000000u);
+			if (iconSurface != nullptr) {
+				SDL_SetWindowIcon(window_, iconSurface);
+				SDL_FreeSurface(iconSurface);
+			}
 		}
 		SDL_SetHint("SDL_RENDER_SCALE_QUALITY", "2");
 		renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -4188,6 +4200,7 @@ void PrintUsage(const char* program) {
 		<< "  --fullscreen       Start fullscreen\n"
 		<< "  --slideshow N      Advance every N seconds\n"
 		<< "  --decode-check     Decode inputs and exit (useful for CI)\n"
+		<< "  --export-app-icon FILE  Export the embedded JPEGView icon as PNG\n"
 		<< "  --help             Show this help\n\n"
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel up/down navigates previous/next, Ctrl+mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
@@ -4202,6 +4215,7 @@ int main(int argc, char** argv) {
 	bool startFullscreen = false;
 	double slideshowSeconds = 0.0;
 	bool decodeCheck = false;
+	fs::path exportAppIcon;
 	std::vector<std::string> inputs;
 	for (int argument = 1; argument < argc; ++argument) {
 		const std::string value = argv[argument];
@@ -4236,12 +4250,36 @@ int main(int argc, char** argv) {
 			decodeCheck = true;
 			continue;
 		}
+		if (value == "--export-app-icon") {
+			if (argument + 1 >= argc) {
+				std::cerr << "--export-app-icon requires an output filename.\n";
+				return 2;
+			}
+			exportAppIcon = argv[++argument];
+			continue;
+		}
 		if (!value.empty() && value[0] == '-') {
 			std::cerr << "Unknown option: " << value << '\n';
 			PrintUsage(argv[0]);
 			return 2;
 		}
 		inputs.push_back(value);
+	}
+
+	if (!exportAppIcon.empty()) {
+		jpegview_linux::ApplicationIcon icon;
+		std::string errorMessage;
+		if (!jpegview_linux::DecodeApplicationIcon(icon, errorMessage)) {
+			std::cerr << "Cannot decode embedded application icon: " << errorMessage << '\n';
+			return 1;
+		}
+		jpegview_linux::ImageWriteOptions options;
+		if (!jpegview_linux::WriteImage(exportAppIcon, icon.bgra.data(), icon.width,
+			icon.height, options, errorMessage)) {
+			std::cerr << "Cannot export application icon: " << errorMessage << '\n';
+			return 1;
+		}
+		return 0;
 	}
 
 	jpegview_linux::FileList fileList(inputs);

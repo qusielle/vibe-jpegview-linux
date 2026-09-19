@@ -107,6 +107,13 @@ stop_viewer() {
 }
 
 launch_viewer
+if [ "$visual_assertions" -eq 1 ]; then
+	window_icon=$(DISPLAY=":$display_number" xprop -id "$window_id" _NET_WM_ICON 2>/dev/null || true)
+	case "$window_icon" in
+		*"Icon (64 x 64):"*) ;;
+		*) echo "UI smoke test: native window did not publish the embedded 64x64 icon" >&2; exit 1 ;;
+	esac
+fi
 title_before=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 DISPLAY=":$display_number" xdotool mousemove 640 400
 DISPLAY=":$display_number" xdotool click 4

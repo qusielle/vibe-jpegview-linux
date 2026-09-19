@@ -16,6 +16,7 @@ using Sint32 = std::int32_t;
 struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Texture;
+struct SDL_Surface;
 
 struct SDL_Rect {
 	int x;
@@ -223,6 +224,7 @@ void SDL_RestoreWindow(SDL_Window* window);
 void SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
 void SDL_SetWindowSize(SDL_Window* window, int w, int h);
 void SDL_SetWindowTitle(SDL_Window* window, const char* title);
+void SDL_SetWindowIcon(SDL_Window* window, SDL_Surface* icon);
 void SDL_SetWindowBordered(SDL_Window* window, int bordered);
 Uint32 SDL_GetMouseState(int* x, int* y);
 int SDL_GetModState();
@@ -230,6 +232,9 @@ int SDL_SetClipboardText(const char* text);
 void SDL_StartTextInput();
 void SDL_StopTextInput();
 void SDL_free(void* memory);
+SDL_Surface* SDL_CreateRGBSurfaceFrom(void* pixels, int width, int height, int depth,
+	int pitch, Uint32 redMask, Uint32 greenMask, Uint32 blueMask, Uint32 alphaMask);
+void SDL_FreeSurface(SDL_Surface* surface);
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, int index, Uint32 flags);
 int SDL_SetHint(const char* name, const char* value);
 void SDL_DestroyRenderer(SDL_Renderer* renderer);

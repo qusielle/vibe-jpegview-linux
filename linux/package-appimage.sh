@@ -11,13 +11,15 @@ OUTPUT=${OUTPUT:-$BUILD_DIR/JPEGView-Linux-${VERSION}-x86_64.AppImage}
 
 make -C "$SCRIPT_DIR" BUILD_DIR="$BUILD_DIR" all
 rm -rf "$APPDIR"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" \
+	"$APPDIR/usr/share/icons/hicolor/64x64/apps" "$APPDIR/usr/share/jpegview"
 cp "$BUILD_DIR/jpegview-linux" "$APPDIR/usr/bin/jpegview-linux"
 cp "$SCRIPT_DIR/AppRun" "$APPDIR/AppRun"
 cp "$SCRIPT_DIR/jpegview.desktop" "$APPDIR/usr/share/applications/jpegview-linux.desktop"
 cp "$SCRIPT_DIR/jpegview.desktop" "$APPDIR/jpegview-linux.desktop"
-cp "$SCRIPT_DIR/jpegview-linux.svg" "$APPDIR/jpegview-linux.svg"
-cp "$SCRIPT_DIR/jpegview-linux.svg" "$APPDIR/usr/share/icons/hicolor/256x256/apps/jpegview-linux.svg"
+"$BUILD_DIR/jpegview-linux" --export-app-icon "$APPDIR/jpegview-linux.png"
+cp "$APPDIR/jpegview-linux.png" "$APPDIR/usr/share/icons/hicolor/64x64/apps/jpegview-linux.png"
+cp "$SCRIPT_DIR/../src/JPEGView/res/JPEGView.ico" "$APPDIR/usr/share/jpegview/JPEGView.ico"
 chmod +x "$APPDIR/AppRun"
 
 copy_runtime_dependencies() {

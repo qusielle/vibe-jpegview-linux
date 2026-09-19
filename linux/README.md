@@ -90,6 +90,10 @@ working X11 or Wayland display server. Codec and SDL dependencies are carried wi
 Ubuntu 20.04 runtime compatibility still needs to be verified by running this image in the
 intended Docker environment.
 
+The native window and AppImage desktop entry both use the largest frame embedded from the upstream
+`src/JPEGView/res/JPEGView.ico`. Packaging exports that same frame as a Linux icon-theme PNG without
+requiring an external image-conversion tool.
+
 ## Tests
 
 The dependency-light core suite builds and runs with:
