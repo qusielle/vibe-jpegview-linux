@@ -6,8 +6,10 @@
 #include "sort_mode.h"
 #include "desktop_applications.h"
 #include "batch_copy.h"
+#include "image_formats.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -23,6 +25,7 @@
 #include <vector>
 
 #include <unistd.h>
+#include <zlib.h>
 
 namespace fs = std::filesystem;
 using jpegview_linux::DecodedImage;
@@ -76,6 +79,92 @@ void WriteBytes(const fs::path& filename, const std::vector<std::uint8_t>& bytes
 	if (!output) throw TestFailure("cannot create " + filename.string());
 	output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 	if (!output) throw TestFailure("cannot write " + filename.string());
+}
+
+std::uint32_t ReadBigEndian32(const std::vector<std::uint8_t>& bytes, std::size_t position) {
+	Expect(position + 4 <= bytes.size(), "truncated PNG integer in test fixture");
+	return (static_cast<std::uint32_t>(bytes[position]) << 24) |
+		(static_cast<std::uint32_t>(bytes[position + 1]) << 16) |
+		(static_cast<std::uint32_t>(bytes[position + 2]) << 8) | bytes[position + 3];
+}
+
+void AppendBigEndian16(std::vector<std::uint8_t>& bytes, std::uint16_t value) {
+	bytes.push_back(static_cast<std::uint8_t>(value >> 8));
+	bytes.push_back(static_cast<std::uint8_t>(value));
+}
+
+void AppendBigEndian32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+	bytes.push_back(static_cast<std::uint8_t>(value >> 24));
+	bytes.push_back(static_cast<std::uint8_t>(value >> 16));
+	bytes.push_back(static_cast<std::uint8_t>(value >> 8));
+	bytes.push_back(static_cast<std::uint8_t>(value));
+}
+
+void AppendPngChunk(std::vector<std::uint8_t>& output, const std::string& type,
+	const std::vector<std::uint8_t>& data) {
+	Expect(type.size() == 4, "test PNG chunk type is not four bytes");
+	AppendBigEndian32(output, static_cast<std::uint32_t>(data.size()));
+	output.insert(output.end(), type.begin(), type.end());
+	output.insert(output.end(), data.begin(), data.end());
+	uLong crc = crc32(0, reinterpret_cast<const Bytef*>(type.data()), type.size());
+	crc = crc32(crc, data.data(), data.size());
+	AppendBigEndian32(output, static_cast<std::uint32_t>(crc));
+}
+
+std::vector<std::vector<std::uint8_t>> PngChunks(const std::vector<std::uint8_t>& png,
+	const std::string& requestedType) {
+	static constexpr std::array<std::uint8_t, 8> signature = {
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+	Expect(png.size() >= signature.size() && std::equal(signature.begin(), signature.end(), png.begin()),
+		"test PNG has an invalid signature");
+	std::vector<std::vector<std::uint8_t>> result;
+	std::size_t position = signature.size();
+	while (position + 12 <= png.size()) {
+		const std::uint32_t length = ReadBigEndian32(png, position);
+		position += 4;
+		Expect(length <= png.size() - position - 8, "test PNG chunk is truncated");
+		const std::string type(reinterpret_cast<const char*>(png.data() + position), 4);
+		position += 4;
+		if (type == requestedType) {
+			result.emplace_back(png.begin() + static_cast<std::ptrdiff_t>(position),
+				png.begin() + static_cast<std::ptrdiff_t>(position + length));
+		}
+		position += length + 4;
+		if (type == "IEND") break;
+	}
+	return result;
+}
+
+std::vector<std::uint8_t> MakeApng(const std::vector<std::uint8_t>& firstPng,
+	const std::vector<std::uint8_t>& secondPng) {
+	const auto headers = PngChunks(firstPng, "IHDR");
+	const auto firstData = PngChunks(firstPng, "IDAT");
+	const auto secondData = PngChunks(secondPng, "IDAT");
+	Expect(headers.size() == 1 && firstData.size() == 1 && secondData.size() == 1,
+		"test PNG did not have the expected simple chunk layout");
+	std::vector<std::uint8_t> result = {
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+	AppendPngChunk(result, "IHDR", headers.front());
+	AppendPngChunk(result, "acTL", {0, 0, 0, 2, 0, 0, 0, 1});
+	std::vector<std::uint8_t> frameControl;
+	AppendBigEndian32(frameControl, 0);
+	AppendBigEndian32(frameControl, 2);
+	AppendBigEndian32(frameControl, 2);
+	AppendBigEndian32(frameControl, 0);
+	AppendBigEndian32(frameControl, 0);
+	AppendBigEndian16(frameControl, 7);
+	AppendBigEndian16(frameControl, 100);
+	frameControl.push_back(0);
+	frameControl.push_back(0);
+	AppendPngChunk(result, "fcTL", frameControl);
+	AppendPngChunk(result, "IDAT", firstData.front());
+	frameControl[3] = 1;
+	AppendPngChunk(result, "fcTL", frameControl);
+	std::vector<std::uint8_t> frameData{0, 0, 0, 2};
+	frameData.insert(frameData.end(), secondData.front().begin(), secondData.front().end());
+	AppendPngChunk(result, "fdAT", frameData);
+	AppendPngChunk(result, "IEND", {});
+	return result;
 }
 
 void WriteText(const fs::path& filename, const std::string& text) {
@@ -151,6 +240,19 @@ void TestFileListFilteringAndLogicalSorting() {
 	FileList descending({directory.string()}, FileList::SortMode::FileName, false, false);
 	Expect(FileNames(descending) == std::vector<std::string>({"photo10.png", "photo2.png", "photo1.png"}),
 		"descending logical filename ordering is incorrect");
+}
+
+void TestSupportedImageExtensionPolicy() {
+	const std::vector<std::string> supported = {
+		"photo.JPG", "photo.apng", "photo.PAM", "camera.CR3", "camera.rwl"};
+	for (const std::string& filename : supported) {
+		Expect(jpegview_linux::IsSupportedImagePath(filename),
+			"supported image extension was rejected: " + filename);
+	}
+	for (const char* filename : {"notes.txt", "photo", "image.jpeg.bak"}) {
+		Expect(!jpegview_linux::IsSupportedImagePath(filename),
+			std::string("unsupported image extension was accepted: ") + filename);
+	}
 }
 
 void TestFileListDateSortingAndSelectionPreservation() {
@@ -347,6 +449,109 @@ void TestImageWriterDecoderRoundTrips() {
 	Expect(!jpegview_linux::WriteImage(temporary.path() / "invalid.png", pixels.data(), 0, 2, options, error),
 		"invalid dimensions were accepted by the writer");
 	Expect(!error.empty(), "invalid dimensions did not produce an error message");
+}
+
+void ExpectStaticFrame(const fs::path& filename, int width, int height,
+	const std::vector<std::uint8_t>& expectedPixels) {
+	DecodedImage decoded;
+	std::string error;
+	Expect(jpegview_linux::DecodeImage(filename, decoded, error),
+		"cannot decode PNM fixture " + filename.filename().string() + ": " + error);
+	Expect(!decoded.animation && decoded.frames.size() == 1, "PNM fixture was not decoded as a static image");
+	Expect(decoded.frames.front().width == width && decoded.frames.front().height == height,
+		"PNM fixture dimensions are incorrect for " + filename.filename().string());
+	if (decoded.frames.front().bgra != expectedPixels) {
+		std::ostringstream actual;
+		for (std::uint8_t value : decoded.frames.front().bgra) actual << static_cast<int>(value) << ',';
+		throw TestFailure("PNM fixture pixels are incorrect for " + filename.filename().string() +
+			" (actual=" + actual.str() + ")");
+	}
+}
+
+void TestPnmVariants() {
+	TemporaryDirectory temporary;
+	WriteText(temporary.path() / "ascii.pgm", "P2\n# grayscale comment\n2 1\n255\n0 255\n");
+	ExpectStaticFrame(temporary.path() / "ascii.pgm", 2, 1,
+		{0, 0, 0, 255, 255, 255, 255, 255});
+	WriteText(temporary.path() / "ascii.pbm", "P1\n2 1\n0 1\n");
+	ExpectStaticFrame(temporary.path() / "ascii.pbm", 2, 1,
+		{255, 255, 255, 255, 0, 0, 0, 255});
+
+	WriteBytes(temporary.path() / "binary.pgm", {
+		'P', '5', '\n', '2', ' ', '1', '\n', '6', '5', '5', '3', '5', '\n',
+		0x00, 0x00, 0xff, 0xff});
+	ExpectStaticFrame(temporary.path() / "binary.pgm", 2, 1,
+		{0, 0, 0, 255, 255, 255, 255, 255});
+
+	WriteBytes(temporary.path() / "bitmap.pbm", {
+		'P', '4', '\n', '8', ' ', '1', '\n', 0xaa});
+	std::vector<std::uint8_t> pbmExpected;
+	for (int bit = 0; bit < 8; ++bit) {
+		const std::uint8_t value = (bit % 2 == 0) ? 0 : 255;
+		pbmExpected.insert(pbmExpected.end(), {value, value, value, 255});
+	}
+	ExpectStaticFrame(temporary.path() / "bitmap.pbm", 8, 1, pbmExpected);
+
+	WriteText(temporary.path() / "ascii.ppm", "P3\n2 1\n255\n255 0 0   0 255 0\n");
+	ExpectStaticFrame(temporary.path() / "ascii.ppm", 2, 1,
+		{0, 0, 255, 255, 0, 255, 0, 255});
+
+	WriteText(temporary.path() / "alpha.pam",
+		"P7\nWIDTH 2\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n");
+	std::ofstream alpha(temporary.path() / "alpha.pam", std::ios::binary | std::ios::app);
+	alpha.write("\xff\x00\x00\xff\x00\xff\x00\x80", 8);
+	alpha.close();
+	ExpectStaticFrame(temporary.path() / "alpha.pam", 2, 1,
+		{0, 0, 255, 255, 0, 255, 0, 128});
+}
+
+void TestAnimatedImageDecoders() {
+	TemporaryDirectory temporary;
+	ImageWriteOptions options;
+	const std::vector<std::uint8_t> red = {
+		0, 0, 255, 255, 0, 0, 255, 255,
+		0, 0, 255, 255, 0, 0, 255, 255};
+	const std::vector<std::uint8_t> blue = {
+		255, 0, 0, 255, 255, 0, 0, 255,
+		255, 0, 0, 255, 255, 0, 0, 255};
+	std::string error;
+	const fs::path firstPng = temporary.path() / "first.png";
+	const fs::path secondPng = temporary.path() / "second.png";
+	Expect(jpegview_linux::WriteImage(firstPng, red.data(), 2, 2, options, error), "cannot write APNG first frame");
+	Expect(jpegview_linux::WriteImage(secondPng, blue.data(), 2, 2, options, error), "cannot write APNG second frame");
+	const fs::path apng = temporary.path() / "animated.apng";
+	WriteBytes(apng, MakeApng(ReadBytes(firstPng), ReadBytes(secondPng)));
+	DecodedImage decoded;
+	Expect(jpegview_linux::DecodeImage(apng, decoded, error), "cannot decode APNG: " + error);
+	Expect(decoded.animation && decoded.frames.size() == 2 && decoded.loopCount == 1,
+		"APNG animation metadata is incorrect");
+	Expect(decoded.frames[0].delayMs == 70 && decoded.frames[1].delayMs == 70,
+		"APNG frame delay is incorrect");
+	Expect(decoded.frames[0].bgra != decoded.frames[1].bgra, "APNG frames were not composited independently");
+
+	const std::vector<std::uint8_t> gif = {
+		0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x02, 0x00, 0x02, 0x00, 0xf0, 0x00,
+		0x00, 0xff, 0x00, 0x00, 0xff, 0xff, 0xff, 0x21, 0xff, 0x0b, 0x4e, 0x45,
+		0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2e, 0x30, 0x03, 0x01, 0x01,
+		0x00, 0x00, 0x21, 0xf9, 0x04, 0x00, 0x07, 0x00, 0x00, 0x00, 0x21, 0xff,
+		0x0b, 0x49, 0x6d, 0x61, 0x67, 0x65, 0x4d, 0x61, 0x67, 0x69, 0x63, 0x6b,
+		0x0e, 0x67, 0x61, 0x6d, 0x6d, 0x61, 0x3d, 0x30, 0x2e, 0x34, 0x35, 0x34,
+		0x35, 0x34, 0x35, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02,
+		0x00, 0x00, 0x02, 0x02, 0x84, 0x51, 0x00, 0x21, 0xf9, 0x04, 0x00, 0x07,
+		0x00, 0x00, 0x00, 0x21, 0xff, 0x0b, 0x49, 0x6d, 0x61, 0x67, 0x65, 0x4d,
+		0x61, 0x67, 0x69, 0x63, 0x6b, 0x0e, 0x67, 0x61, 0x6d, 0x6d, 0x61, 0x3d,
+		0x30, 0x2e, 0x34, 0x35, 0x34, 0x35, 0x34, 0x35, 0x00, 0x2c, 0x00, 0x00,
+		0x00, 0x00, 0x02, 0x00, 0x02, 0x00, 0x80, 0x00, 0x00, 0xff, 0xff, 0xff,
+		0xff, 0x02, 0x02, 0x84, 0x51, 0x00, 0x3b};
+	const fs::path gifFile = temporary.path() / "animated.gif";
+	WriteBytes(gifFile, gif);
+	error.clear();
+	decoded = {};
+	Expect(jpegview_linux::DecodeImage(gifFile, decoded, error), "cannot decode GIF: " + error);
+	Expect(decoded.animation && decoded.frames.size() == 2 && decoded.loopCount == 1,
+		"GIF animation metadata is incorrect");
+	Expect(decoded.frames[0].delayMs == 100 && decoded.frames[1].delayMs == 100,
+		"GIF frame delay was not clamped to the viewer minimum");
 }
 
 void TestDecoderFailures() {
@@ -758,10 +963,13 @@ void RunTest(const char* name, void (*test)(), int& failures) {
 int main() {
 	int failures = 0;
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
+	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);
 	RunTest("file-list-multiple-inputs", TestFileListMultipleInputs, failures);
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
+	RunTest("pnm-variants", TestPnmVariants, failures);
+	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);

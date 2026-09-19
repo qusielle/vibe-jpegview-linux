@@ -8,6 +8,7 @@
 #include "sort_mode.h"
 #include "desktop_applications.h"
 #include "batch_copy.h"
+#include "image_formats.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -33,7 +34,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -182,19 +182,6 @@ std::string Lower(std::string value) {
 	std::transform(value.begin(), value.end(), value.begin(),
 		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	return value;
-}
-
-bool IsImagePath(const fs::path& path) {
-	static const std::set<std::string> extensions = {
-		".jpg", ".jpeg", ".jpe", ".png", ".gif", ".bmp", ".tga",
-		".psd", ".pnm", ".pbm", ".pgm", ".ppm", ".pam", ".pic", ".qoi", ".apng", ".webp",
-		".tif", ".tiff", ".heic", ".heif", ".hif", ".avif", ".avifs", ".jxl",
-		".jxr", ".wdp", ".hdp", ".mdp", ".pef", ".dng", ".crw", ".nef", ".cr2",
-		".mrw", ".rw2", ".orf", ".x3f", ".arw", ".kdc", ".nrw", ".dcr", ".sr2",
-		".raf", ".kc2", ".erf", ".3fr", ".raw", ".mef", ".mos", ".mdc", ".cr3",
-		".iiq", ".rwl"
-	};
-	return extensions.find(Lower(path.extension().string())) != extensions.end();
 }
 
 fs::path AbsoluteNormalized(const fs::path& path) {
@@ -1443,7 +1430,8 @@ private:
 		std::error_code iteratorError;
 		for (const fs::directory_entry& entry : fs::directory_iterator(directory, iteratorError)) {
 			if (iteratorError) break;
-			if (!entry.is_regular_file(iteratorError) || iteratorError || !IsImagePath(entry.path())) continue;
+			if (!entry.is_regular_file(iteratorError) || iteratorError ||
+				!jpegview_linux::IsSupportedImagePath(entry.path())) continue;
 			jpegview_linux::ExifInfo info;
 			std::string comment;
 			jpegview_linux::ReadJpegMetadata(entry.path(), info, comment);
@@ -3517,7 +3505,8 @@ private:
 			if (error) break;
 			std::error_code statusError;
 			const bool directory = entry.is_directory(statusError);
-			if (statusError || (!directory && (!entry.is_regular_file(statusError) || !IsImagePath(entry.path())))) {
+			if (statusError || (!directory && (!entry.is_regular_file(statusError) ||
+				!jpegview_linux::IsSupportedImagePath(entry.path())))) {
 				continue;
 			}
 			fileDialogEntries_.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory, false});

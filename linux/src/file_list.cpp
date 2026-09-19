@@ -1,4 +1,5 @@
 #include "file_list.h"
+#include "image_formats.h"
 
 #include <algorithm>
 #include <chrono>
@@ -72,20 +73,6 @@ fs::path FileList::Normalize(const fs::path& path) {
 	return (error ? path : absolute).lexically_normal();
 }
 
-bool FileList::IsImageFile(const fs::path& path) {
-	static const std::vector<std::string> extensions = {
-		".jpg", ".jpeg", ".jpe", ".png", ".gif", ".bmp", ".tga",
-		".psd", ".pnm", ".pbm", ".ppm", ".pgm", ".pam", ".pic", ".qoi", ".apng", ".webp",
-		".tif", ".tiff", ".heic", ".heif", ".hif", ".avif", ".avifs", ".jxl",
-		".jxr", ".wdp", ".hdp", ".mdp", ".pef", ".dng", ".crw", ".nef", ".cr2",
-		".mrw", ".rw2", ".orf", ".x3f", ".arw", ".kdc", ".nrw", ".dcr", ".sr2",
-		".raf", ".kc2", ".erf", ".3fr", ".raw", ".mef", ".mos", ".mdc", ".cr3",
-		".iiq", ".rwl"
-	};
-	const std::string extension = Lower(path.extension().string());
-	return std::find(extensions.begin(), extensions.end(), extension) != extensions.end();
-}
-
 FileList::Entry FileList::DescribeFile(const fs::path& path) {
 	Entry result;
 	result.path = Normalize(path);
@@ -126,7 +113,7 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory) 
 	while (iterator != end && !error) {
 		const fs::directory_entry entry = *iterator;
 		std::error_code statusError;
-		if (entry.is_regular_file(statusError) && !statusError && IsImageFile(entry.path())) {
+		if (entry.is_regular_file(statusError) && !statusError && IsSupportedImagePath(entry.path())) {
 			result.push_back(DescribeFile(entry.path()));
 		}
 		iterator.increment(error);
@@ -194,7 +181,7 @@ void FileList::Initialize(const std::vector<std::string>& inputs) {
 			RebuildPaths();
 			return;
 		}
-		if (fs::is_regular_file(input, error) && IsImageFile(input)) {
+		if (fs::is_regular_file(input, error) && IsSupportedImagePath(input)) {
 			rootDirectory_ = input.parent_path();
 			currentDirectory_ = input.parent_path();
 			entries_ = ScanDirectory(currentDirectory_);
@@ -216,7 +203,7 @@ void FileList::Initialize(const std::vector<std::string>& inputs) {
 		if (fs::is_directory(input, error)) {
 			const std::vector<Entry> directoryEntries = ScanDirectory(input);
 			entries_.insert(entries_.end(), directoryEntries.begin(), directoryEntries.end());
-		} else if (fs::is_regular_file(input, error) && IsImageFile(input)) {
+		} else if (fs::is_regular_file(input, error) && IsSupportedImagePath(input)) {
 			entries_.push_back(DescribeFile(input));
 		}
 	}

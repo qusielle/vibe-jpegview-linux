@@ -69,7 +69,6 @@ private:
 	};
 
 	static std::filesystem::path Normalize(const std::filesystem::path& path);
-	static bool IsImageFile(const std::filesystem::path& path);
 	static Entry DescribeFile(const std::filesystem::path& path);
 	static std::vector<Entry> ScanDirectory(const std::filesystem::path& directory);
 	static std::vector<std::filesystem::path> ChildDirectories(const std::filesystem::path& directory);

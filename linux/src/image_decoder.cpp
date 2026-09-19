@@ -801,6 +801,18 @@ bool ParsePositiveInteger(const std::string& text, int& value) {
 	}
 }
 
+bool ParseNonNegativeInteger(const std::string& text, int& value) {
+	try {
+		std::size_t parsed = 0;
+		const long long number = std::stoll(text, &parsed);
+		if (parsed != text.size() || number < 0 || number > std::numeric_limits<int>::max()) return false;
+		value = static_cast<int>(number);
+		return true;
+	} catch (const std::exception&) {
+		return false;
+	}
+}
+
 bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
 	std::vector<std::uint8_t> data;
@@ -808,14 +820,15 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 	std::size_t position = 0;
 	std::string magic;
 	if (!ReadPnmToken(data, position, magic) || magic.size() != 2 || magic[0] != 'P' ||
-		(magic[1] < '4' || magic[1] > '7')) {
+		(magic[1] < '1' || magic[1] > '7')) {
 		errorMessage = "invalid PNM header";
 		return false;
 	}
 	int width = 0;
 	int height = 0;
-	int depth = magic == "P7" ? 0 : (magic == "P4" ? 1 : (magic == "P5" ? 1 : 3));
-	int maxValue = magic == "P4" ? 1 : 0;
+	const bool ascii = magic == "P1" || magic == "P2" || magic == "P3";
+	int depth = magic == "P7" ? 0 : (magic == "P1" || magic == "P2" || magic == "P4" || magic == "P5" ? 1 : 3);
+	int maxValue = magic == "P1" || magic == "P4" ? 1 : 0;
 	if (magic == "P7") {
 		bool ended = false;
 		while (position < data.size()) {
@@ -848,7 +861,7 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 			errorMessage = "invalid PNM dimensions";
 			return false;
 		}
-		if (magic != "P4") {
+		if (magic != "P1" && magic != "P4") {
 			std::string maxValueText;
 			if (!ReadPnmToken(data, position, maxValueText) || !ParsePositiveInteger(maxValueText, maxValue) || maxValue > 65535) {
 				errorMessage = "invalid PNM maximum value";
@@ -865,7 +878,42 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 	const std::size_t sampleBytes = maxValue > 255 ? 2 : 1;
 	const std::size_t pixelCount = static_cast<std::size_t>(width) * height;
 	std::vector<std::uint8_t> bgra(pixelCount * 4, 255);
-	if (magic == "P4") {
+	if (ascii) {
+		const std::size_t requiredSamples = pixelCount * static_cast<std::size_t>(depth);
+		std::vector<int> samples;
+		try {
+			samples.reserve(requiredSamples);
+		} catch (const std::exception&) {
+			errorMessage = "out of memory";
+			return false;
+		}
+		for (std::size_t sampleIndex = 0; sampleIndex < requiredSamples; ++sampleIndex) {
+			std::string sampleText;
+			int value = 0;
+			if (!ReadPnmToken(data, position, sampleText) ||
+				!ParseNonNegativeInteger(sampleText, value) || value > maxValue) {
+				errorMessage = "invalid ASCII PNM sample";
+				return false;
+			}
+			samples.push_back(value);
+		}
+		const auto scale = [maxValue](int value) {
+			return static_cast<std::uint8_t>((value * 255 + maxValue / 2) / maxValue);
+		};
+		for (std::size_t pixelIndex = 0; pixelIndex < pixelCount; ++pixelIndex) {
+			std::uint8_t* pixel = bgra.data() + pixelIndex * 4;
+			if (magic == "P1") {
+				const std::uint8_t value = samples[pixelIndex] == 0 ? 255 : 0;
+				pixel[0] = pixel[1] = pixel[2] = value;
+			} else if (depth == 1) {
+				pixel[0] = pixel[1] = pixel[2] = scale(samples[pixelIndex]);
+			} else {
+				pixel[2] = scale(samples[pixelIndex * 3]);
+				pixel[1] = scale(samples[pixelIndex * 3 + 1]);
+				pixel[0] = scale(samples[pixelIndex * 3 + 2]);
+			}
+		}
+	} else if (magic == "P4") {
 		const std::size_t rowBytes = (static_cast<std::size_t>(width) + 7) / 8;
 		if (position > data.size() || (rowBytes > 0 && static_cast<std::size_t>(height) >
 			(data.size() - position) / rowBytes)) {
