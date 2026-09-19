@@ -87,7 +87,10 @@ they support.
     and core rotate/mirror transforms are available non-destructively before save. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
     rates and folder advancement, slideshow transitions are rendered natively, Alt+R resumes, and
-    Escape stops active playback before quitting.
+    Escape stops active playback before quitting. Full decoded images use a 1 GiB memory-bounded LRU
+    cache, while a low-contention background worker predecodes nearby files in the current navigation
+    direction. Previously viewed and prefetched images therefore avoid repeated synchronous decoding;
+    source identity checks prevent stale pixels from being reused after a file changes.
 
 12. **Information overlays and window feedback.** F2 picture information and Shift+N/Ctrl+F2 filename
     overlays use compact translucent surfaces sized to their content with small comfortable margins.

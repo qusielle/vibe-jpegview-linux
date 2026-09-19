@@ -4,6 +4,7 @@
 #include "clipboard.h"
 #include "image_writer.h"
 #include "image_decoder.h"
+#include "image_cache.h"
 #include "image.h"
 #include "settings.h"
 #include "sort_mode.h"
@@ -78,6 +79,8 @@ constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
 constexpr std::size_t kThumbnailCacheLimit = 64;
 constexpr std::size_t kThumbnailCachePixelBudget = 16u * 1024u * 1024u;
+constexpr std::size_t kDecodedImageCacheBudget = 1ull * 1024ull * 1024ull * 1024ull;
+constexpr std::size_t kDecodedImagePrefetchCount = 32;
 constexpr double kKeyboardPanStep = 48.0;
 constexpr int kBatchSelectAll = 0;
 constexpr int kBatchSelectNone = 1;
@@ -464,7 +467,7 @@ private:
 		jpegview_linux::SaveViewerSettings(settingsPath, settings);
 	}
 
-	bool LoadCurrent() {
+	bool LoadCurrent(int prefetchDirection = 0) {
 		if (fileList_.Empty()) {
 			return false;
 		}
@@ -473,15 +476,21 @@ private:
 		jpegComment_.clear();
 		ClearTransition();
 		std::string errorMessage;
-		jpegview_linux::DecodedImage decoded;
-		if (!jpegview_linux::DecodeImage(fileList_.Current(), decoded, errorMessage) || decoded.frames.empty()) {
-			SetTitle(fileList_.Current().filename().string() + " — decode failed: " + errorMessage);
-			std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
-			return false;
+		jpegview_linux::DecodedImageCache::ImagePtr decoded = imageCache_.Find(fileList_.Current());
+		if (!decoded) {
+			auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
+			if (!jpegview_linux::DecodeImage(fileList_.Current(), *loaded, errorMessage) ||
+				loaded->frames.empty()) {
+				SetTitle(fileList_.Current().filename().string() + " — decode failed: " + errorMessage);
+				std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
+				return false;
+			}
+			imageCache_.Store(fileList_.Current(), loaded);
+			decoded = std::move(loaded);
 		}
 		std::vector<Image> decodedFrames;
-		decodedFrames.reserve(decoded.frames.size());
-		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded.frames) {
+		decodedFrames.reserve(decoded->frames.size());
+		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded->frames) {
 			Image frame;
 			if (!frame.StoreBGRA(decodedFrame.bgra.data(), decodedFrame.width, decodedFrame.height)) {
 				SetTitle(fileList_.Current().filename().string() + " — image is too large");
@@ -492,8 +501,8 @@ private:
 		}
 		animationFrames_ = std::move(decodedFrames);
 		std::vector<int> animationFrameDelaysMs;
-		animationFrameDelaysMs.reserve(decoded.frames.size());
-		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded.frames) {
+		animationFrameDelaysMs.reserve(decoded->frames.size());
+		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded->frames) {
 			animationFrameDelaysMs.push_back(std::max(10, decodedFrame.delayMs));
 		}
 		image_ = animationFrames_.front();
@@ -514,11 +523,18 @@ private:
 		RestoreScaleMode(viewportSnapshot);
 		const Uint32 now = SDL_GetTicks();
 		imageModified_ = false;
-		playback_.ConfigureImage(std::move(animationFrameDelaysMs), decoded.loopCount,
-			decoded.animation, now);
+		playback_.ConfigureImage(std::move(animationFrameDelaysMs), decoded->loopCount,
+			decoded->animation, now);
 		SetTitle();
 		PrepareThumbnailPreload();
+		PrepareImagePrefetch(prefetchDirection);
 		return true;
+	}
+
+	void PrepareImagePrefetch(int preferredDirection = 0) {
+		if (fileList_.Empty() || clipboardMode_) return;
+		imageCache_.Prefetch(fileList_.Files(), fileList_.CurrentIndex(),
+			preferredDirection, kDecodedImagePrefetchCount);
 	}
 
 	bool UpdateTexture() {
@@ -629,10 +645,17 @@ private:
 			fileList_.Files()[request->fileIndex].string() != request->key) return;
 		const fs::path& path = fileList_.Files()[request->fileIndex];
 		ThumbnailCacheEntry cached;
-		jpegview_linux::DecodedImage decoded;
-		std::string errorMessage;
-		if (jpegview_linux::DecodeImage(path, decoded, errorMessage) && !decoded.frames.empty()) {
-			const jpegview_linux::DecodedFrame& frame = decoded.frames.front();
+		jpegview_linux::DecodedImageCache::ImagePtr decoded = imageCache_.Find(path);
+		if (!decoded) {
+			auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
+			std::string errorMessage;
+			if (jpegview_linux::DecodeImage(path, *loaded, errorMessage) && !loaded->frames.empty()) {
+				imageCache_.Store(path, loaded);
+				decoded = std::move(loaded);
+			}
+		}
+		if (decoded && !decoded->frames.empty()) {
+			const jpegview_linux::DecodedFrame& frame = decoded->frames.front();
 			const SDL_Rect panel = ThumbnailPanelRect();
 			const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
 			const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
@@ -1256,7 +1279,7 @@ private:
 			navigationLoading_ = true;
 			Render();
 		}
-		const bool loaded = LoadCurrent();
+		const bool loaded = LoadCurrent(1);
 		navigationLoading_ = false;
 		if (loaded && animate) StartTransition(previousImage);
 	}
@@ -1271,7 +1294,7 @@ private:
 			navigationLoading_ = true;
 			Render();
 		}
-		const bool loaded = LoadCurrent();
+		const bool loaded = LoadCurrent(-1);
 		navigationLoading_ = false;
 		if (loaded && animate) StartTransition(previousImage);
 	}
@@ -1280,14 +1303,14 @@ private:
 		if (clipboardMode_) RestoreClipboardImage();
 		if (fileList_.Empty() || fileList_.CurrentIndex() == 0) return;
 		fileList_.First();
-		LoadCurrent();
+		LoadCurrent(1);
 	}
 
 	void LastImage() {
 		if (clipboardMode_) RestoreClipboardImage();
 		if (fileList_.Empty() || fileList_.CurrentIndex() + 1 == fileList_.Size()) return;
 		fileList_.Last();
-		LoadCurrent();
+		LoadCurrent(-1);
 	}
 
 	void ToggleFullscreen() {
@@ -1691,6 +1714,7 @@ private:
 				fileList_.IsSortedAscending());
 			SetTitle();
 			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
 			SaveSettings();
 			break;
 		case jpegview_linux::kNavigationSortModeCommand:
@@ -1701,6 +1725,7 @@ private:
 				fileList_.IsSortedAscending());
 			SetTitle();
 			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
 			SaveSettings();
 			break;
 		case IDM_SORT_CREATION_DATE:
@@ -1708,6 +1733,7 @@ private:
 				fileList_.IsSortedAscending());
 			SetTitle();
 			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
 			SaveSettings();
 			break;
 		case IDM_SORT_NAME:
@@ -1715,6 +1741,7 @@ private:
 				fileList_.IsSortedAscending());
 			SetTitle();
 			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
 			SaveSettings();
 			break;
 		case IDM_SORT_RANDOM:
@@ -1722,6 +1749,7 @@ private:
 				fileList_.IsSortedAscending());
 			SetTitle();
 			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
 			SaveSettings();
 			break;
 		case IDM_SORT_SIZE:
@@ -1729,18 +1757,21 @@ private:
 				fileList_.IsSortedAscending());
 			SetTitle();
 			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
 			SaveSettings();
 			break;
 		case IDM_SORT_ASCENDING:
 			fileList_.SetSorting(fileList_.GetSorting(), true);
 			SetTitle();
 			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
 			SaveSettings();
 			break;
 		case IDM_SORT_DESCENDING:
 			fileList_.SetSorting(fileList_.GetSorting(), false);
 			SetTitle();
 			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
 			SaveSettings();
 			break;
 		case IDM_STOP_MOVIE:
@@ -3231,7 +3262,8 @@ private:
 		for (const jpegview_linux::ThumbnailSlot& slot : slots) {
 			const SDL_Rect row{panel.x, slot.y, panel.w, rowHeight};
 			if (!PointInRect(x, y, row) || slot.current) continue;
-			if (fileList_.Select(slot.fileIndex)) LoadCurrent();
+			const int direction = slot.fileIndex > fileList_.CurrentIndex() ? 1 : -1;
+			if (fileList_.Select(slot.fileIndex)) LoadCurrent(direction);
 			break;
 		}
 		return true;
@@ -3667,6 +3699,7 @@ private:
 	}
 
 	jpegview_linux::FileList fileList_;
+	jpegview_linux::DecodedImageCache imageCache_{kDecodedImageCacheBudget};
 	double initialSlideshowSeconds_ = 0.0;
 	jpegview_linux::PlaybackScheduler playback_;
 	std::vector<Image> animationFrames_;

@@ -1,6 +1,7 @@
 #include "exif_reader.h"
 #include "file_list.h"
 #include "image_decoder.h"
+#include "image_cache.h"
 #include "image.h"
 #include "image_writer.h"
 #include "settings.h"
@@ -29,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -38,6 +40,8 @@
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <sstream>
@@ -782,6 +786,97 @@ void TestDecoderFailures() {
 	Expect(!jpegview_linux::DecodeImage(temporary.path() / "missing.jpg", decoded, error),
 		"missing image was accepted");
 	Expect(error == "cannot open file" || !error.empty(), "missing image did not produce an error message");
+}
+
+std::shared_ptr<DecodedImage> CachedTestImage(std::size_t bytes) {
+	auto image = std::make_shared<DecodedImage>();
+	jpegview_linux::DecodedFrame frame;
+	frame.width = static_cast<int>(bytes / 4);
+	frame.height = 1;
+	frame.bgra.assign(bytes, 127);
+	image->frames.push_back(std::move(frame));
+	return image;
+}
+
+void TestDecodedImageCacheAndBackgroundPrefetch() {
+	Expect(jpegview_linux::ImagePrefetchOrder(5, 2, 1, 4) ==
+		std::vector<std::size_t>({3, 1, 4, 0}),
+		"forward prefetch did not alternate nearest neighbors in the preferred direction");
+	Expect(jpegview_linux::ImagePrefetchOrder(5, 2, -1, 4) ==
+		std::vector<std::size_t>({1, 3, 0, 4}),
+		"backward prefetch did not prioritize the previous image");
+	Expect(jpegview_linux::ImagePrefetchOrder(5, 0, 1, 4) ==
+		std::vector<std::size_t>({1, 4, 2, 3}),
+		"prefetch order did not include folder-loop wraparound");
+	Expect(jpegview_linux::ImagePrefetchOrder(0, 0, 1, 4).empty() &&
+		jpegview_linux::ImagePrefetchOrder(1, 0, 1, 4).empty(),
+		"prefetch order produced work without neighboring files");
+
+	TemporaryDirectory temporary;
+	std::vector<fs::path> files;
+	for (int index = 0; index < 5; ++index) {
+		const fs::path filename = temporary.path() / ("image-" + std::to_string(index));
+		WriteText(filename, "source-" + std::to_string(index));
+		files.push_back(filename);
+	}
+
+	jpegview_linux::DecodedImageCache lru(32);
+	lru.Store(files[0], CachedTestImage(16));
+	lru.Store(files[1], CachedTestImage(16));
+	Expect(lru.CachedBytes() == 32 && lru.CachedImages() == 2,
+		"decoded cache did not account for retained BGRA memory");
+	Expect(lru.Find(files[0]) != nullptr, "decoded cache missed a retained image");
+	lru.Store(files[2], CachedTestImage(16));
+	Expect(lru.Find(files[0]) != nullptr && lru.Find(files[1]) == nullptr &&
+		lru.Find(files[2]) != nullptr && lru.CachedBytes() == 32,
+		"decoded cache did not evict the least recently used image at its byte limit");
+	lru.Store(files[3], CachedTestImage(36));
+	Expect(lru.Find(files[3]) == nullptr && lru.CachedBytes() == 32,
+		"decoded cache retained an image larger than its complete byte budget");
+	WriteText(files[0], "changed-source-with-a-different-size");
+	Expect(lru.Find(files[0]) == nullptr && lru.CachedBytes() == 16,
+		"decoded cache served pixel data after the source file changed");
+	lru.Clear();
+	Expect(lru.CachedBytes() == 0 && lru.CachedImages() == 0,
+		"decoded cache clear retained entries or byte accounting");
+
+	std::mutex decodedOrderMutex;
+	std::vector<std::string> decodedOrder;
+	jpegview_linux::DecodedImageCache background(64,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			{
+				std::lock_guard<std::mutex> lock(decodedOrderMutex);
+				decodedOrder.push_back(filename.filename().string());
+			}
+			image = *CachedTestImage(4);
+			return true;
+		});
+	background.Prefetch(files, 2, 1, 4);
+	Expect(background.WaitUntilIdle(std::chrono::seconds(2)),
+		"background image prefetch did not finish");
+	{
+		std::lock_guard<std::mutex> lock(decodedOrderMutex);
+		Expect(decodedOrder == std::vector<std::string>({
+			"image-3", "image-1", "image-4", "image-0"}),
+			"background decoder did not follow nearest-first prefetch order");
+	}
+	Expect(background.CachedImages() == 4 && background.CachedBytes() == 16,
+		"background decoder did not retain completed images in the shared cache");
+
+	std::atomic<int> speculativeDecodes{0};
+	jpegview_linux::DecodedImageCache fullCache(16,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			++speculativeDecodes;
+			image = *CachedTestImage(4);
+			return true;
+		});
+	fullCache.Store(files[2], CachedTestImage(16));
+	fullCache.Prefetch(files, 2, 1, 4);
+	Expect(fullCache.WaitUntilIdle(std::chrono::seconds(2)),
+		"full background image cache did not become idle");
+	Expect(speculativeDecodes == 1 && fullCache.CachedImages() == 1 &&
+		fullCache.Find(files[2]) != nullptr,
+		"speculative decoding evicted an image retained from foreground viewing");
 }
 
 jpegview_linux::Image MakeIndexedImage(int width, int height) {
@@ -2649,6 +2744,7 @@ int main() {
 	RunTest("pnm-variants", TestPnmVariants, failures);
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
+	RunTest("decoded-image-cache-and-background-prefetch", TestDecodedImageCacheAndBackgroundPrefetch, failures);
 	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);
 	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
 	RunTest("image-auto-contrast-invariants", TestImageAutoContrastInvariants, failures);
