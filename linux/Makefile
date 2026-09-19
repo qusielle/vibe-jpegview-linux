@@ -49,9 +49,11 @@ STATIC_RUNTIME ?= -static-libstdc++ -static-libgcc
 
 BUILD_DIR ?= build
 TARGET := $(BUILD_DIR)/jpegview-linux
+TEST_TARGET := $(BUILD_DIR)/jpegview-tests
 SOURCES := src/main.cpp src/file_list.cpp src/file_list.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/clipboard.cpp src/clipboard.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
+TEST_SOURCES := tests/test_core.cpp src/file_list.cpp src/file_list.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h third_party/stb_image.h
 
-.PHONY: all clean run appimage
+.PHONY: all clean run test test-ui check appimage
 
 all: $(TARGET)
 
@@ -61,6 +63,18 @@ $(TARGET): $(SOURCES)
 
 run: $(TARGET)
 	$(TARGET) $(ARGS)
+
+$(TEST_TARGET): $(TEST_SOURCES)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(CODEC_DEFINES) $(CODEC_CFLAGS) -Isrc -Ithird_party tests/test_core.cpp src/file_list.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp -o $@ $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+
+test: $(TEST_TARGET)
+	$(TEST_TARGET)
+
+test-ui: $(TARGET)
+	./tests/ui_smoke.sh $(TARGET)
+
+check: test test-ui
 
 appimage: $(TARGET)
 	./package-appimage.sh $(VERSION)

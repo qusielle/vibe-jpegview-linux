@@ -99,6 +99,7 @@ COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
 RUN chmod 755 /usr/local/bin/jpegview-docker-build
 
 RUN make -C linux
+RUN make -C linux test
 
 VOLUME ["/out"]
 ENTRYPOINT ["/usr/local/bin/jpegview-docker-build"]

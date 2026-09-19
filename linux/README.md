@@ -5,8 +5,9 @@ The original Windows/ATL/WTL project remains unchanged under `src/`.
 
 ## Build
 
-The only runtime framework dependency is SDL2. Development headers are not required because
-the frontend uses the small SDL2 ABI declared in `src/sdl_abi.h`.
+The only runtime framework dependency is SDL2. SDL2 development headers are not required because
+the frontend uses the small ABI declared in `src/sdl_abi.h`; codec development packages are still
+needed when compiling the optional format support.
 
 On Ubuntu 20.04, install the compiler, make, and SDL2 runtime first:
 
@@ -49,9 +50,9 @@ make -C linux SDL2_LIBS='-L/path/to/lib -lSDL2'
 
 Supported input formats are JPEG, PNG/APNG (including animation), GIF (including animation), BMP, TGA, PSD, PNM-family files,
 QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
-formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. JPEG, PNG, BMP, TGA, WebP, GIF, TIFF, PSD,
-PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL can also be written from the save dialog; RAW and JPEG XR are
-decode-only. Common single-frame formats use the vendored public-domain/MIT `stb_image`
+formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. The save dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF,
+PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is view-only.
+Common single-frame formats use the vendored public-domain/MIT `stb_image`
 single-header library, while the additional formats use their native codec libraries.
 
 Display resizing follows JPEGView's high-quality path: downsampling uses its integrated
@@ -75,6 +76,12 @@ The packaging script creates an AppDir, bundles the SDL2 shared library, and inv
 `appimagetool` when it is available:
 
 ```sh
+mkdir -p out
+APPIMAGETOOL=/path/to/appimagetool \
+APPIMAGETOOL_ARGS=--appimage-extract-and-run \
+BUILD_DIR="$PWD/out/build" \
+APPDIR="$PWD/out/JPEGView-Linux.AppDir" \
+OUTPUT="$PWD/out/JPEGView-Linux-1.3.46-linux.1-x86_64.AppImage" \
 make -C linux appimage VERSION=1.3.46-linux.1
 ```
 
@@ -83,19 +90,40 @@ working X11 or Wayland display server. Codec and SDL dependencies are carried wi
 Ubuntu 20.04 runtime compatibility still needs to be verified by running this image in the
 intended Docker environment.
 
+## Tests
+
+The dependency-light core suite builds and runs with:
+
+```sh
+make -C linux test
+```
+
+It covers file-list ordering/navigation, decoder and writer round trips, malformed input, and JPEG
+metadata. The optional X11 smoke suite covers startup controls, mouse-wheel navigation versus
+Ctrl+wheel zoom, and persisted settings:
+
+```sh
+make -C linux test-ui
+```
+
+The UI suite uses `Xvfb`, `openbox`, and `xdotool`; it reports `SKIP` when those tools are not
+installed. `make -C linux check` runs both suites. The Ubuntu Docker build runs the core suite.
+
 ## Controls
 
-Right/Left or PageUp/PageDown navigate; Up/Down rotate 90 degrees; mouse wheel up/down navigates
-previous/next; Ctrl+mouse wheel zooms around the
-cursor; left-drag pans; dropped files open in the viewer. Space toggles fit/actual, Return fits,
-and F11 toggles fullscreen (`0`, `F`, and `Q` remain convenience aliases; `1`–`9` start a
-slideshow at that interval). F2 toggles the top-left picture information panel; Shift+N or Ctrl+F2
-toggles the filename overlay, while N selects filename sorting. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N
-toggles the panel. Ctrl+C copies the image at original size, Ctrl+Shift+C
-copies its path, Ctrl+V pastes a PNG image, Ctrl+P sends the processed image to `lp`, and Delete
-opens the move-to-trash confirmation. Ctrl+Shift+M/E set the modification date to now/EXIF date;
-R/T perform lossless JPEG rotations when bundled `jpegtran` is available; F5 toggles the ported
-automatic histogram contrast correction, and Ctrl+Shift+R opens the image resize dialog. Move the pointer to
+Right/Left or PageUp/PageDown navigate; Home/End select the first/last image; mouse wheel up/down
+navigates previous/next, while Ctrl+mouse wheel and Ctrl+Up/Down zoom around the pointer or center.
+Up/Down rotate 90 degrees. Space toggles fit/actual, Return/0 fits, Ctrl+Return fills with crop,
+`+`/`-` zoom, and F11/F toggles fullscreen; F12 spans screens, Ctrl+F11 fits the window to the
+image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`–`9` start a
+slideshow at that interval. F2 toggles the top-left picture information panel; Shift+N or Ctrl+F2
+toggles the filename overlay, while N/M/C/Z select filename, modification-date, creation-date,
+or random sorting. Ctrl+O opens the native in-app file browser, Ctrl+R reloads, and Ctrl+N toggles
+the panel. Ctrl+C copies the image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
+PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.
+Ctrl+Shift+M/E set the modification date to now/EXIF date; R/T perform lossless JPEG rotations when
+bundled `jpegtran` is available; F5 toggles the ported automatic histogram contrast correction, and
+Ctrl+Shift+R opens the image resize dialog. Move the pointer to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, ordering mode, fit/actual, and fullscreen). The
 ordering button shows `N` for file-name order and `D` for modification-date order; clicking it
