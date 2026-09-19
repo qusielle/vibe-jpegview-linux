@@ -398,6 +398,27 @@ void TestFileListDateSortingAndSelectionPreservation() {
 		"descending modification-date ordering is incorrect");
 }
 
+void TestFileListSizeAndRandomSorting() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "images";
+	fs::create_directories(directory);
+	WriteBytes(directory / "small.ppm", {'P', '6', '\n', '1', ' ', '1', '\n', '2', '5', '5', '\n', 0, 0, 0});
+	WriteBytes(directory / "large.ppm", {'P', '6', '\n', '2', ' ', '2', '\n', '2', '5', '5', '\n',
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+	FileList files({directory.string()}, FileList::SortMode::FileSize, true, false);
+	Expect(FileNames(files) == std::vector<std::string>({"small.ppm", "large.ppm"}),
+		"ascending file-size ordering is incorrect");
+	files.SetSorting(FileList::SortMode::FileSize, false);
+	Expect(FileNames(files) == std::vector<std::string>({"large.ppm", "small.ppm"}),
+		"descending file-size ordering is incorrect");
+	files.SetSorting(FileList::SortMode::Random, true);
+	const std::vector<std::string> randomOrder = FileNames(files);
+	Expect(randomOrder.size() == 2 && randomOrder[0] != randomOrder[1],
+		"random ordering did not retain all files");
+	files.SetSorting(FileList::SortMode::Random, true);
+	Expect(FileNames(files) == randomOrder, "random ordering was not deterministic for the same files");
+}
+
 void TestFileListNavigationModesAndReload() {
 	TemporaryDirectory temporary;
 	const fs::path root = temporary.path() / "root";
@@ -1094,6 +1115,7 @@ int main() {
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
+	RunTest("file-list-size-and-random-sorting", TestFileListSizeAndRandomSorting, failures);
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);
 	RunTest("file-list-multiple-inputs", TestFileListMultipleInputs, failures);
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
