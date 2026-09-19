@@ -98,8 +98,9 @@ COPY . /src
 COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
 RUN chmod 755 /usr/local/bin/jpegview-docker-build
 
-RUN make -C linux
-RUN make -C linux test
+# The viewer and core-test executable are independent link targets. Build
+# both concurrently, then run the tests as soon as their target is ready.
+RUN make -C linux -j"$(nproc)" all test
 
 VOLUME ["/out"]
 ENTRYPOINT ["/usr/local/bin/jpegview-docker-build"]
