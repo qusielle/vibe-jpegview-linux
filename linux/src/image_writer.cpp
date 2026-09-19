@@ -135,9 +135,11 @@ bool WriteJpeg(const std::filesystem::path& filename, const std::uint8_t* bgra,
 	jpeg_finish_compress(&compressor);
 	jpeg_destroy_compress(&compressor);
 	std::free(row);
-	const bool success = std::fclose(file) == 0;
-	if (!success) errorMessage = "error writing output file";
-	return success;
+	if (std::fclose(file) != 0) {
+		errorMessage = "error writing output file";
+		return false;
+	}
+	return true;
 }
 
 bool WritePng(const std::filesystem::path& filename, const std::uint8_t* bgra,
