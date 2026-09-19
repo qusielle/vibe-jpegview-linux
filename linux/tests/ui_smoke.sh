@@ -152,6 +152,23 @@ if [ "$visual_assertions" -eq 1 ]; then
 		echo "UI smoke test: context-menu close left a repaint difference ($context_difference)" >&2
 		 exit 1
 	fi
+	# Repeat the repaint check at the lower edge. Closing the menu restores the
+	# auto-revealed navigation panel, which exercises a different overlay path
+	# than the center-of-window check above.
+	DISPLAY=":$display_number" xdotool mousemove 640 790
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-panel-before.png"
+	DISPLAY=":$display_number" xdotool click 3
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Escape
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-panel-after.png"
+	context_panel_difference=$(compare -metric AE "$temporary/context-panel-before.png" \
+		"$temporary/context-panel-after.png" null: 2>&1 || true)
+	if [ "$context_panel_difference" != "0" ]; then
+		echo "UI smoke test: context-menu close damaged the revealed navigation panel ($context_panel_difference)" >&2
+		exit 1
+	fi
 	DISPLAY=":$display_number" xdotool click 3
 	sleep 0.2
 	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-compact.png"

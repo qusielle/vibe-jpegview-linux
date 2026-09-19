@@ -3734,6 +3734,10 @@ private:
 		const SDL_Rect panel = ControlPanelRect();
 		const ControlButton* hoveredButton = nullptr;
 
+		// Some accelerated SDL/X11 renderers rasterize a line endpoint one pixel
+		// beyond its logical bounds. Keep every navigation-panel primitive inside
+		// the panel so reopening it after a context menu cannot damage the image.
+		SDL_RenderSetClipRect(renderer_, &panel);
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 205);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 105, 105, 105);
@@ -3742,6 +3746,7 @@ private:
 			if (hovered) hoveredButton = &button;
 			DrawNavigationIcon(button, hovered);
 		}
+		SDL_RenderSetClipRect(renderer_, nullptr);
 		if (hoveredButton != nullptr) RenderControlTooltip(hoveredButton->rect, ControlTooltip(hoveredButton->command));
 	}
 

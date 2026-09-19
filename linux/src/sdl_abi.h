@@ -243,6 +243,7 @@ int SDL_RenderCopy(SDL_Renderer* renderer, SDL_Texture* texture, const SDL_Rect*
 int SDL_RenderDrawLine(SDL_Renderer* renderer, int x1, int y1, int x2, int y2);
 int SDL_RenderDrawRect(SDL_Renderer* renderer, const SDL_Rect* rect);
 int SDL_RenderFillRect(SDL_Renderer* renderer, const SDL_Rect* rect);
+int SDL_RenderSetClipRect(SDL_Renderer* renderer, const SDL_Rect* rect);
 int SDL_SetRenderDrawBlendMode(SDL_Renderer* renderer, int blendMode);
 void SDL_RenderPresent(SDL_Renderer* renderer);
 int SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
