@@ -13,6 +13,7 @@
 #include "context_menu_model.h"
 #include "overlay_layout.h"
 #include "thumbnail_panel_model.h"
+#include "thumbnail_resampler.h"
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "file_dialog_model.h"
@@ -1550,6 +1551,42 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 		"thumbnail row added horizontal margins or incorrect vertical margins");
 }
 
+void TestThumbnailDownsamplingAntialiasing() {
+	std::vector<std::uint8_t> checkerboard(8u * 8u * 4u, 255);
+	for (int y = 0; y < 8; ++y) {
+		for (int x = 0; x < 8; ++x) {
+			const std::uint8_t value = (x + y) % 2 == 0 ? 0 : 255;
+			const std::size_t offset = (static_cast<std::size_t>(y) * 8 + x) * 4;
+			checkerboard[offset] = value;
+			checkerboard[offset + 1] = value;
+			checkerboard[offset + 2] = value;
+		}
+	}
+	std::vector<std::uint8_t> filtered;
+	Expect(jpegview_linux::DownsampleThumbnailBgra(checkerboard, 8, 8, 2, 2, filtered),
+		"thumbnail antialiasing rejected valid downsampling dimensions");
+	Expect(filtered.size() == 16, "thumbnail antialiasing returned an incorrectly sized image");
+	for (std::size_t offset = 0; offset < filtered.size(); offset += 4) {
+		Expect(filtered[offset] == 128 && filtered[offset + 1] == 128 &&
+			filtered[offset + 2] == 128 && filtered[offset + 3] == 255,
+			"high-frequency thumbnail detail was sampled instead of area-filtered");
+	}
+
+	const std::vector<std::uint8_t> transparentEdge = {
+		0, 0, 255, 255,
+		255, 0, 0, 0,
+	};
+	Expect(jpegview_linux::DownsampleThumbnailBgra(transparentEdge, 2, 1, 1, 1, filtered),
+		"thumbnail antialiasing rejected a transparent edge");
+	Expect(filtered == std::vector<std::uint8_t>({0, 0, 255, 128}),
+		"thumbnail antialiasing introduced a color fringe at a transparent edge");
+
+	Expect(jpegview_linux::DownsampleThumbnailBgra(transparentEdge, 2, 1, 2, 1, filtered) &&
+		filtered == transparentEdge, "same-size thumbnails were modified");
+	Expect(!jpegview_linux::DownsampleThumbnailBgra(transparentEdge, 2, 1, 3, 1, filtered),
+		"thumbnail-only downsampler accepted enlargement");
+}
+
 void TestImageInfoFormatting() {
 	Expect(jpegview_linux::FormatImageDimensionsAndSize(1920, 1080, "2.5 MB") ==
 		"1920 X 1080, 2.5 MB",
@@ -1724,6 +1761,7 @@ int main() {
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
+	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);

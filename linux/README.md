@@ -50,7 +50,7 @@ they support.
    preloads nearest files first, and uses a bounded in-memory cache. Its divider is mouse-resizable,
    its width and visibility persist, and thumbnail row height follows panel width so a narrow panel
    fits more images without large fixed gaps. Thumbnails have no forced horizontal inset and only a
-   one-pixel vertical margin plus separator.
+   one-pixel vertical margin plus separator; source-area antialiasing keeps reduced images smooth.
 
 7. **Native navigation panel with automatic reveal.** The lower panel provides first/previous/next/
    last, ordering, fit/actual, rotate, and fullscreen controls with action tooltips. By default it

@@ -15,6 +15,7 @@
 #include "context_menu_model.h"
 #include "overlay_layout.h"
 #include "thumbnail_panel_model.h"
+#include "thumbnail_resampler.h"
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "file_dialog_model.h"
@@ -1116,9 +1117,11 @@ private:
 					frame.width, frame.height, panel.w,
 					rowHeight - kThumbnailVerticalMargin * 2 - 1);
 				Image thumbnail;
+				std::vector<std::uint8_t> thumbnailPixels;
 				if (size.width > 0 && size.height > 0 &&
-					thumbnail.StoreBGRA(frame.bgra.data(), frame.width, frame.height) &&
-					thumbnail.Resize(size.width, size.height, 1)) {
+					jpegview_linux::DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
+						size.width, size.height, thumbnailPixels) &&
+					thumbnail.StoreBGRA(thumbnailPixels.data(), size.width, size.height)) {
 					cached.texture = CreateTexture(thumbnail);
 					cached.width = size.width;
 					cached.height = size.height;
