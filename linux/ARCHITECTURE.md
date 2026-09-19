@@ -11,7 +11,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `settings` and `sort_mode`: persisted configuration and stable setting values.
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, and filter selection.
-- `context_menu_model`: compact/advanced filtering and actionable-item keyboard navigation.
+- `context_menu_model`: the complete menu catalog, state-derived enablement/checkmarks,
+  compact/advanced filtering, and actionable-item keyboard navigation.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
 - `file_dialog_model`: filtering, name/date sorting, UTF-8 editing, selection, paging, scrolling,
   focus restoration, and cancellable background directory summaries.
@@ -32,15 +33,13 @@ above rather than duplicate their state.
 
 The remaining Viewer work is ordered by expected testability and reduction in coupling:
 
-1. Move the full context-menu entry catalog and command enablement out of Viewer. Advanced-option
-   filtering and keyboard selection are already independent and tested.
-2. Complete the batch-copy and resize dialog controllers. Their validation/planning models are
+1. Complete the batch-copy and resize dialog controllers. Their validation/planning models are
    independent, but focus, selection, and SDL text-input transitions still live in Viewer.
-3. Extract thumbnail decoding/cache scheduling from Viewer so cache limits, cancellation, and
+2. Extract thumbnail decoding/cache scheduling from Viewer so cache limits, cancellation, and
    nearest-first work can be tested without creating SDL textures.
-4. Separate external-command planning (print, wallpaper, clipboard helpers, and lossless JPEG
+3. Separate external-command planning (print, wallpaper, clipboard helpers, and lossless JPEG
    transforms) from process execution and Viewer status reporting.
-5. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
+4. Separate overlay/navigation drawing from Viewer after the stateful behavior above is isolated.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
 The image, viewport, playback, file-dialog, resize, context-menu rule, thumbnail-layout/resampling, font,

@@ -1544,6 +1544,102 @@ void TestContextMenuCompactionAndSelection() {
 		"compacting advanced sections left empty, repeated, or trailing separators");
 }
 
+void TestContextMenuCatalogAndState() {
+	using jpegview_linux::ContextMenuState;
+	using jpegview_linux::MenuItem;
+	const auto findCommand = [](const std::vector<MenuItem>& items, int command) -> const MenuItem* {
+		const auto found = std::find_if(items.begin(), items.end(), [command](const MenuItem& item) {
+			return item.command == command;
+		});
+		return found == items.end() ? nullptr : &*found;
+	};
+	const auto findLabel = [](const std::vector<MenuItem>& items, const std::string& label) -> const MenuItem* {
+		const auto found = std::find_if(items.begin(), items.end(), [&label](const MenuItem& item) {
+			return item.label == label;
+		});
+		return found == items.end() ? nullptr : &*found;
+	};
+
+	ContextMenuState state;
+	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
+	Expect(findCommand(compact, jpegview_linux::kContextMenuShowAdvanced) != nullptr,
+		"compact context menu omitted the one-off advanced-options command");
+	Expect(findCommand(compact, IDM_PRINT) == nullptr && findCommand(compact, IDM_LOOP_FOLDER) == nullptr &&
+		findCommand(compact, IDM_ZOOM_400) == nullptr && findCommand(compact, IDM_SLIDESHOW_START) == nullptr,
+		"compact context menu exposed advanced catalog entries");
+	Expect(findCommand(compact, IDM_OPEN) != nullptr && findCommand(compact, IDM_NEXT) != nullptr &&
+		findCommand(compact, IDM_ZOOM_100) != nullptr && findCommand(compact, IDM_EXIT) != nullptr,
+		"compact context menu lost a primary command");
+
+	state.playbackMode = jpegview_linux::PlaybackMode::Movie;
+	state.animationAvailable = true;
+	state.movieFramesPerSecond = 50.0;
+	state.infoVisible = true;
+	state.filenameVisible = true;
+	state.navigationPanelEnabled = false;
+	state.navigationPanelAutoReveal = false;
+	state.thumbnailPanelVisible = true;
+	state.navigationMode = FileList::NavigationMode::LoopSubDirectories;
+	state.sortMode = FileList::SortMode::LastModificationTime;
+	state.sortAscending = false;
+	state.imageAvailable = true;
+	state.losslessJpegAvailable = true;
+	state.autoCorrectionEnabled = true;
+	state.fitToWindow = false;
+	state.zoom = 1.0;
+	state.fullscreen = true;
+	state.borderless = true;
+	state.alwaysOnTop = true;
+	state.transitionEffect = IDM_EFFECT_BLEND;
+	state.transitionDurationMs = 1000;
+	state.openWithApplicationNames = {"Photo Editor", u8"写真工具"};
+	const std::vector<MenuItem> advanced = jpegview_linux::BuildContextMenu(state, true);
+
+	Expect(findCommand(advanced, jpegview_linux::kContextMenuShowAdvanced) == nullptr,
+		"expanded context menu retained the advanced-options command");
+	Expect(findCommand(advanced, IDM_PRINT) != nullptr && findCommand(advanced, IDM_LOOP_FOLDER) != nullptr &&
+		findCommand(advanced, IDM_ZOOM_400) != nullptr && findCommand(advanced, IDM_SLIDESHOW_START) != nullptr,
+		"expanded context menu omitted an advanced catalog section");
+	Expect(findCommand(advanced, IDM_SHOW_FILEINFO)->checked &&
+		findCommand(advanced, IDM_SHOW_FILENAME)->checked &&
+		!findCommand(advanced, IDM_SHOW_NAVPANEL)->checked &&
+		findCommand(advanced, jpegview_linux::kCommandToggleThumbnailPanel)->checked,
+		"context menu did not reflect panel visibility state");
+	Expect(findCommand(advanced, IDM_LOOP_RECURSIVELY)->checked &&
+		findCommand(advanced, IDM_SORT_MOD_DATE)->checked &&
+		findCommand(advanced, IDM_SORT_DESCENDING)->checked &&
+		findLabel(advanced, "Current order: D (modification date)") != nullptr,
+		"context menu did not reflect navigation and ordering state");
+	Expect(findCommand(advanced, IDM_CHANGESIZE)->enabled &&
+		findCommand(advanced, IDM_ROTATE_90_LOSSLESS)->enabled &&
+		findCommand(advanced, IDM_AUTO_CORRECTION)->checked,
+		"context menu did not enable image-dependent commands");
+	Expect(findCommand(advanced, IDM_ZOOM_100)->checked &&
+		findCommand(advanced, IDM_FULL_SCREEN_MODE)->checked &&
+		findCommand(advanced, IDM_HIDE_TITLE_BAR)->checked &&
+		findCommand(advanced, IDM_ALWAYS_ON_TOP)->checked,
+		"context menu did not reflect viewport and window state");
+	Expect(findCommand(advanced, IDM_EFFECT_BLEND)->checked &&
+		findCommand(advanced, IDM_EFFECTTIME_SLOW)->checked &&
+		findCommand(advanced, IDM_MOVIE_50_FPS)->checked,
+		"context menu did not reflect playback settings");
+	Expect(findLabel(advanced, "  Photo Editor") != nullptr &&
+		findCommand(advanced, IDM_FIRST_OPENWITH_CMD)->label == "  Photo Editor" &&
+		findCommand(advanced, IDM_FIRST_OPENWITH_CMD + 1)->label == u8"  写真工具",
+		"context menu did not own or number dynamic Open with labels");
+	Expect(!findCommand(advanced, IDM_EDIT_GLOBAL_CONFIG)->enabled,
+		"unsupported settings command unexpectedly became actionable");
+
+	ContextMenuState unavailable;
+	const std::vector<MenuItem> disabled = jpegview_linux::BuildContextMenu(unavailable, true);
+	Expect(!findCommand(disabled, IDM_CHANGESIZE)->enabled &&
+		!findCommand(disabled, IDM_ROTATE_90_LOSSLESS)->enabled &&
+		!findCommand(disabled, IDM_AUTO_CORRECTION)->enabled,
+		"image-dependent commands were enabled without an image");
+	Expect(findLabel(disabled, "  (no configured applications)") != nullptr,
+		"empty Open with state omitted its disabled placeholder");
+}
+
 void TestContextMenuColumnLayoutAndNavigation() {
 	using jpegview_linux::MenuColumn;
 	using jpegview_linux::MenuItem;
@@ -2167,6 +2263,7 @@ int main() {
 	RunTest("viewport-navigation-resets-transient-zoom", TestViewportNavigationResetsTransientZoom, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
+	RunTest("context-menu-catalog-and-state", TestContextMenuCatalogAndState, failures);
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);

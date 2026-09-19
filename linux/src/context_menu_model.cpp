@@ -1,6 +1,12 @@
 #include "context_menu_model.h"
 
+#include "input_commands.h"
+#include "sort_mode.h"
+
+#include "../../src/JPEGView/resource.h"
+
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 
@@ -17,6 +23,207 @@ int ItemHeight(const MenuItem& item, int itemHeight, int separatorHeight) {
 }
 
 } // namespace
+
+std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
+	bool advancedOptions) {
+	const std::string sortingLabel = "Current order: " +
+		std::string(SortModeShortLabel(state.sortMode)) + " (" +
+		SortModeDescription(state.sortMode) + ")";
+	std::vector<MenuItem> items = {
+		// This is a flattened rendering of the complete Windows PopupMenu
+		// resource.  Indented entries are the portable equivalent of its
+		// submenus. Unsupported Windows-only commands remain visible but
+		// disabled instead of silently doing nothing.
+		{"Stop slide show/movie", IDM_STOP_MOVIE, false, false,
+			state.playbackMode != PlaybackMode::None || state.animationPlaying, "Esc", true},
+		{nullptr, 0, true},
+		{"Open image...", IDM_OPEN, false, false, true, "Ctrl+O"},
+		{"Open image with", 0, false, false, true, nullptr, true},
+		{"  (no configured applications)", 0, false, false, false, nullptr, true},
+		{"Save processed image...", IDM_SAVE, false, false, true, "Ctrl+S"},
+		{"Save displayed image...", IDM_SAVE_SCREEN, false, false, true, "Ctrl+Shift+S"},
+		{"Reload image", IDM_RELOAD, false, false, true, "Ctrl+R"},
+		{"Open containing folder", IDM_EXPLORE, false, false, true, "W"},
+		{"Print image...", IDM_PRINT, false, false, true, "Ctrl+P", true},
+		{"Batch rename/copy...", IDM_BATCH_COPY, false, false, true, nullptr, true},
+		{"Set modification date", 0, false, false, true, nullptr, true},
+		{"  To current date", IDM_TOUCH_IMAGE, false, false, true, "Ctrl+Shift+M", true},
+		{"  To EXIF date", IDM_TOUCH_IMAGE_EXIF, false, false, true, "Ctrl+Shift+E", true},
+		{"  To EXIF date all files in folder", IDM_TOUCH_IMAGE_EXIF_FOLDER, false, false, true, nullptr, true},
+		{"Set as desktop wallpaper", 0, false, false, true, nullptr, true},
+		{"  Use original image", IDM_SET_WALLPAPER_ORIG, false, false, true, nullptr, true},
+		{"  Use processed image as displayed", IDM_SET_WALLPAPER_DISPLAY, false, false, true, nullptr, true},
+		{nullptr, 0, true},
+		{"Copy original size image", IDM_COPY_FULL, false, false, true, "Ctrl+C"},
+		{"Copy file path", IDM_COPY_PATH, false, false, true, "Ctrl+Shift+C"},
+		{"Paste from clipboard", IDM_PASTE, false, false, true, "Ctrl+V"},
+		{nullptr, 0, true},
+		{"Show picture info (EXIF)", IDM_SHOW_FILEINFO, false, state.infoVisible, true, "F2"},
+		{"Show filename", IDM_SHOW_FILENAME, false, state.filenameVisible, true, "Shift+N / Ctrl+F2"},
+		{"Show navigation panel", IDM_SHOW_NAVPANEL, false, state.navigationPanelEnabled, true, "Ctrl+N"},
+		{"Show navigation panel on bottom hover", kToggleNavigationPanelAutoReveal, false,
+			state.navigationPanelAutoReveal, true},
+		{"Show thumbnail panel", jpegview_linux::kCommandToggleThumbnailPanel,
+			false, state.thumbnailPanelVisible, true, "Ctrl+T"},
+		{nullptr, 0, true},
+		{"Next image", IDM_NEXT, false, false, true, "Right/PgDn"},
+		{"Previous image", IDM_PREV, false, false, true, "Left/PgUp"},
+		{"First image", IDM_FIRST, false, false, true, "Home"},
+		{"Last image", IDM_LAST, false, false, true, "End"},
+		{nullptr, 0, true},
+		{"Navigation", 0, false, false, true, nullptr, true},
+		{"  Loop folder", IDM_LOOP_FOLDER, false,
+			state.navigationMode == jpegview_linux::FileList::NavigationMode::LoopDirectory, true, "F7", true},
+		{"  Loop recursively", IDM_LOOP_RECURSIVELY, false,
+			state.navigationMode == jpegview_linux::FileList::NavigationMode::LoopSubDirectories, true, "F8", true},
+		{"  Loop siblings", IDM_LOOP_SIBLINGS, false,
+			state.navigationMode == jpegview_linux::FileList::NavigationMode::LoopSameDirectoryLevel, true, "F9", true},
+		{"Display order", 0, false, false, true, nullptr, true},
+		{sortingLabel.c_str(), 0, false, false, true, nullptr, true},
+		{"  Modification date", IDM_SORT_MOD_DATE, false,
+			state.sortMode == jpegview_linux::FileList::SortMode::LastModificationTime, true, "M", true},
+		{"  Creation date", IDM_SORT_CREATION_DATE, false,
+			state.sortMode == jpegview_linux::FileList::SortMode::CreationTime, true, "C", true},
+		{"  File name", IDM_SORT_NAME, false,
+			state.sortMode == jpegview_linux::FileList::SortMode::FileName, true, "N", true},
+		{"  File size", IDM_SORT_SIZE, false,
+			state.sortMode == jpegview_linux::FileList::SortMode::FileSize, true, nullptr, true},
+		{"  Random", IDM_SORT_RANDOM, false,
+			state.sortMode == jpegview_linux::FileList::SortMode::Random, true, "Z", true},
+		{"  Ascending", IDM_SORT_ASCENDING, false, state.sortAscending, true, nullptr, true},
+		{"  Descending", IDM_SORT_DESCENDING, false, !state.sortAscending, true, nullptr, true},
+		{nullptr, 0, true},
+		{"Transform image", 0, false, false, true, nullptr, true},
+		{"  Rotate +90", IDM_ROTATE_90, false, false, true, "Down", true},
+		{"  Rotate -90", IDM_ROTATE_270, false, false, true, "Up", true},
+		{"  Rotate...", IDM_ROTATE, false, false, false, nullptr, true},
+		{"  Change size...", IDM_CHANGESIZE, false, false, state.imageAvailable, "Ctrl+Shift+R", true},
+		{"  Perspective correction...", IDM_PERSPECTIVE, false, false, false, nullptr, true},
+		{"  Mirror horizontally", IDM_MIRROR_H, false, false, true, nullptr, true},
+		{"  Mirror vertically", IDM_MIRROR_V, false, false, true, nullptr, true},
+		{"Lossless JPEG transformations", 0, false, false, true, nullptr, true},
+		{"  Rotate +90", IDM_ROTATE_90_LOSSLESS, false, false, state.losslessJpegAvailable, "R", true},
+		{"  Rotate -90", IDM_ROTATE_270_LOSSLESS, false, false, state.losslessJpegAvailable, "T", true},
+		{"  Rotate 180", IDM_ROTATE_180_LOSSLESS, false, false, state.losslessJpegAvailable, nullptr, true},
+		{"  Mirror horizontally", IDM_MIRROR_H_LOSSLESS, false, false, state.losslessJpegAvailable, nullptr, true},
+		{"  Mirror vertically", IDM_MIRROR_V_LOSSLESS, false, false, state.losslessJpegAvailable, nullptr, true},
+		{"Auto correction", IDM_AUTO_CORRECTION, false, state.autoCorrectionEnabled, state.imageAvailable, "F5", true},
+		{"Local density correction", IDM_LDC, false, false, false, nullptr, true},
+		{"Keep parameters", IDM_KEEP_PARAMETERS, false, false, false, nullptr, true},
+		{"Save parameters to DB", IDM_SAVE_PARAM_DB, false, false, false, nullptr, true},
+		{"Clear parameters from DB", IDM_CLEAR_PARAM_DB, false, false, false, nullptr, true},
+		{nullptr, 0, true},
+		{"Scale / zoom", 0},
+		{"  Fit to screen", IDM_FIT_TO_SCREEN, false, state.fitToWindow && !state.fillWithCrop, true, "Return/0"},
+		{"  Fill with crop", IDM_FILL_WITH_CROP, false,
+			state.fitToWindow && state.fillWithCrop && !state.noEnlarge, true, "Ctrl+Return", true},
+		{"  Span all screens", IDM_SPAN_SCREENS, false, state.fullscreen, true, "F12", true},
+		{"  400 %", IDM_ZOOM_400, false, false, true, nullptr, true},
+		{"  200 %", IDM_ZOOM_200, false, false, true, nullptr, true},
+		{"  Actual size (100 %)", IDM_ZOOM_100, false, !state.fitToWindow && std::abs(state.zoom - 1.0) < 0.01, true, "Space"},
+		{"  50 %", IDM_ZOOM_50, false, false, true, nullptr, true},
+		{"  25 %", IDM_ZOOM_25, false, false, true, nullptr, true},
+		{"  Full screen mode", IDM_FULL_SCREEN_MODE, false, state.fullscreen, true, "F11/F"},
+		{"  Fit window to image", IDM_FIT_WINDOW_TO_IMAGE, false, false, true, "Ctrl+F11"},
+		{"  Hide window title bar", IDM_HIDE_TITLE_BAR, false, state.borderless, true, "Shift+F11", true},
+		{"  Set window always on top", IDM_ALWAYS_ON_TOP, false, state.alwaysOnTop, true, "Shift+F12", true},
+		{"Auto zoom mode", 0, false, false, true, nullptr, true},
+		{"  Fit to screen no zoom", IDM_AUTO_ZOOM_FIT_NO_ZOOM,
+			false, state.fitToWindow && !state.fillWithCrop && state.noEnlarge, true, nullptr, true},
+		{"  Fill with crop no zoom", IDM_AUTO_ZOOM_FILL_NO_ZOOM,
+			false, state.fitToWindow && state.fillWithCrop && state.noEnlarge, true, nullptr, true},
+		{"  Fit to screen", IDM_AUTO_ZOOM_FIT,
+			false, state.fitToWindow && !state.fillWithCrop && !state.noEnlarge, true, nullptr, true},
+		{"  Fill with crop", IDM_AUTO_ZOOM_FILL,
+			false, state.fitToWindow && state.fillWithCrop && !state.noEnlarge, true, nullptr, true},
+		{nullptr, 0, true},
+		{"Play folder as slideshow/movie", 0, false, false, true, nullptr, true},
+		{state.playbackMode == PlaybackMode::Slideshow ? "  Stop slideshow" : "  Slideshow",
+			state.playbackMode == PlaybackMode::Slideshow ? IDM_STOP_MOVIE : IDM_SLIDESHOW_START,
+			false, false, true, "1-9", true},
+		{"  Waiting time 1 sec", IDM_SLIDESHOW_1, false, false, true, "1", true},
+		{"  Waiting time 2 sec", IDM_SLIDESHOW_2, false, false, true, "2", true},
+		{"  Waiting time 3 sec", IDM_SLIDESHOW_3, false, false, true, "3", true},
+		{"  Waiting time 4 sec", IDM_SLIDESHOW_4, false, false, true, "4", true},
+		{"  Waiting time 5 sec", IDM_SLIDESHOW_5, false, false, true, "5", true},
+		{"  Waiting time 7 sec", IDM_SLIDESHOW_7, false, false, true, "7", true},
+		{"  Waiting time 10 sec", IDM_SLIDESHOW_10, false, false, true, nullptr, true},
+		{"  Waiting time 20 sec", IDM_SLIDESHOW_20, false, false, true, nullptr, true},
+		{"  Transition effect", 0, false, false, true, nullptr, true},
+		{"    None", IDM_EFFECT_NONE, false, state.transitionEffect == IDM_EFFECT_NONE, true, nullptr, true},
+		{"    Blend", IDM_EFFECT_BLEND, false, state.transitionEffect == IDM_EFFECT_BLEND, true, nullptr, true},
+		{"    Slide from right", IDM_EFFECT_SLIDE_RL, false, state.transitionEffect == IDM_EFFECT_SLIDE_RL, true, nullptr, true},
+		{"    Slide from left", IDM_EFFECT_SLIDE_LR, false, state.transitionEffect == IDM_EFFECT_SLIDE_LR, true, nullptr, true},
+		{"    Slide from top", IDM_EFFECT_SLIDE_TB, false, state.transitionEffect == IDM_EFFECT_SLIDE_TB, true, nullptr, true},
+		{"    Slide from bottom", IDM_EFFECT_SLIDE_BT, false, state.transitionEffect == IDM_EFFECT_SLIDE_BT, true, nullptr, true},
+		{"    Roll from right", IDM_EFFECT_ROLL_RL, false, state.transitionEffect == IDM_EFFECT_ROLL_RL, true, nullptr, true},
+		{"    Roll from left", IDM_EFFECT_ROLL_LR, false, state.transitionEffect == IDM_EFFECT_ROLL_LR, true, nullptr, true},
+		{"    Roll from top", IDM_EFFECT_ROLL_TB, false, state.transitionEffect == IDM_EFFECT_ROLL_TB, true, nullptr, true},
+		{"    Roll from bottom", IDM_EFFECT_ROLL_BT, false, state.transitionEffect == IDM_EFFECT_ROLL_BT, true, nullptr, true},
+		{"    Scroll from right", IDM_EFFECT_SCROLL_RL, false, state.transitionEffect == IDM_EFFECT_SCROLL_RL, true, nullptr, true},
+		{"    Scroll from left", IDM_EFFECT_SCROLL_LR, false, state.transitionEffect == IDM_EFFECT_SCROLL_LR, true, nullptr, true},
+		{"    Scroll from top", IDM_EFFECT_SCROLL_TB, false, state.transitionEffect == IDM_EFFECT_SCROLL_TB, true, nullptr, true},
+		{"    Scroll from bottom", IDM_EFFECT_SCROLL_BT, false, state.transitionEffect == IDM_EFFECT_SCROLL_BT, true, nullptr, true},
+		{"  Transition speed", 0, false, false, true, nullptr, true},
+		{"    Very fast", IDM_EFFECTTIME_VERY_FAST, false, state.transitionDurationMs == 100, true, nullptr, true},
+		{"    Fast", IDM_EFFECTTIME_FAST, false, state.transitionDurationMs == 250, true, nullptr, true},
+		{"    Normal", IDM_EFFECTTIME_NORMAL, false, state.transitionDurationMs == 500, true, nullptr, true},
+		{"    Slow", IDM_EFFECTTIME_SLOW, false, state.transitionDurationMs == 1000, true, nullptr, true},
+		{"    Very slow", IDM_EFFECTTIME_VERY_SLOW, false, state.transitionDurationMs == 2000, true, nullptr, true},
+		{"  Resume playback", IDM_SLIDESHOW_RESUME, false, false,
+			(!state.animationPlaying &&
+				(state.playbackMode != PlaybackMode::None || state.animationAvailable)), "Alt+R", true},
+		{"  Movie", IDM_MOVIE_START_FPS, false, state.playbackMode == PlaybackMode::Movie &&
+			std::abs(state.movieFramesPerSecond - 25.0) < 0.01, true, "25 fps", true},
+		{"  Playback speed 5 fps", IDM_MOVIE_5_FPS, false, state.playbackMode == PlaybackMode::Movie &&
+			std::abs(state.movieFramesPerSecond - 5.0) < 0.01, true, "5", true},
+		{"  Playback speed 10 fps", IDM_MOVIE_10_FPS, false, state.playbackMode == PlaybackMode::Movie &&
+			std::abs(state.movieFramesPerSecond - 10.0) < 0.01, true, "10", true},
+		{"  Playback speed 25 fps", IDM_MOVIE_25_FPS, false, state.playbackMode == PlaybackMode::Movie &&
+			std::abs(state.movieFramesPerSecond - 25.0) < 0.01, true, "25", true},
+		{"  Playback speed 30 fps", IDM_MOVIE_30_FPS, false, state.playbackMode == PlaybackMode::Movie &&
+			std::abs(state.movieFramesPerSecond - 30.0) < 0.01, true, "30", true},
+		{"  Playback speed 50 fps", IDM_MOVIE_50_FPS, false, state.playbackMode == PlaybackMode::Movie &&
+			std::abs(state.movieFramesPerSecond - 50.0) < 0.01, true, "50", true},
+		{"  Playback speed 100 fps", IDM_MOVIE_100_FPS, false, state.playbackMode == PlaybackMode::Movie &&
+			std::abs(state.movieFramesPerSecond - 100.0) < 0.01, true, "100", true},
+		{nullptr, 0, true},
+		{"Settings Admin", 0, false, false, true, nullptr, true},
+		{"  Edit global settings...", IDM_EDIT_GLOBAL_CONFIG, false, false, false, nullptr, true},
+		{"  Edit user settings...", IDM_EDIT_USER_CONFIG, false, false, false, nullptr, true},
+		{"  Update user settings...", IDM_UPDATE_USER_CONFIG, false, false, false, nullptr, true},
+		{"  Manage Open image with menu...", IDM_MANAGE_OPEN_WITH_MENU, false, false, false, nullptr, true},
+		{"  Set current parameters as default...", IDM_SAVE_PARAMETERS, false, false, false, nullptr, true},
+		{"  Set as default viewer...", IDM_SET_AS_DEFAULT_VIEWER, false, false, false, nullptr, true},
+		{"  Backup parameter DB...", IDM_BACKUP_PARAMDB, false, false, false, nullptr, true},
+		{"  Restore parameter DB...", IDM_RESTORE_PARAMDB, false, false, false, nullptr, true},
+		{"User commands", 0, false, false, true, nullptr, true},
+		{"  (none configured)", 0, false, false, false, nullptr, true},
+		{nullptr, 0, true},
+		{"About JPEGView...", IDM_ABOUT},
+		{nullptr, 0, true},
+		{"Exit", IDM_EXIT, false, false, true, "Q/Esc"},
+	};
+
+	const auto openWithHeader = std::find_if(items.begin(), items.end(), [](const MenuItem& item) {
+		return item.label == "Open image with";
+	});
+	if (openWithHeader != items.end() && !state.openWithApplicationNames.empty()) {
+		const std::size_t headerIndex = static_cast<std::size_t>(std::distance(items.begin(), openWithHeader));
+		items.erase(items.begin() + static_cast<std::ptrdiff_t>(headerIndex + 1));
+		for (std::size_t index = 0; index < state.openWithApplicationNames.size(); ++index) {
+			const std::string label = "  " + state.openWithApplicationNames[index];
+			items.insert(items.begin() + static_cast<std::ptrdiff_t>(headerIndex + 1 + index),
+				MenuItem{label.c_str(), static_cast<int>(IDM_FIRST_OPENWITH_CMD + index),
+					false, false, true, nullptr, true});
+		}
+	}
+	if (!advancedOptions) {
+		items = CompactMenuItems(items, kContextMenuShowAdvanced, "Show Advanced Options");
+	}
+	return items;
+}
+
 
 std::vector<MenuItem> CompactMenuItems(const std::vector<MenuItem>& items,
 	int showAdvancedCommand, const char* showAdvancedLabel) {
