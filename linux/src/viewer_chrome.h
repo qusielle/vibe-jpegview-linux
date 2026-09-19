@@ -56,6 +56,7 @@ struct NavigationButtonPaint {
 	UiRect rect;
 	int command = 0;
 	bool hovered = false;
+	UiColor foreground{243, 242, 231, 255};
 	std::vector<UiLine> lines;
 	std::vector<UiRect> outlines;
 	std::vector<UiText> text;
@@ -63,8 +64,7 @@ struct NavigationButtonPaint {
 
 struct NavigationPanelPaint {
 	UiRect panel;
-	UiColor background{8, 8, 8, 205};
-	UiColor border{105, 105, 105, 255};
+	std::uint8_t opacity = 128;
 	std::vector<NavigationButtonPaint> buttons;
 };
 

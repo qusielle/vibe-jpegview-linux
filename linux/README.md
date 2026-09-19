@@ -55,7 +55,9 @@ they support.
 7. **Native navigation panel with automatic reveal.** The lower panel provides first/previous/next/
    last, ordering, fit/actual, rotate, and fullscreen controls with action tooltips. By default it
    appears when the pointer reaches the lower edge, with options to keep it shown or disable it.
-   Rendering is clipped to its bounds, and its visibility and hover preference persist.
+   Its compact 32-pixel height, 26-pixel outlined buttons, off-white icons, and yellow hover feedback
+   follow the original Windows panel style. Rendering is clipped to its bounds, and its visibility
+   and hover preference persist.
 
 8. **Complete adaptive context menu.** The Linux-rendered menu uses the Windows `PopupMenu` command
    vocabulary and shows shortcuts and checked states. Its compact view keeps common actions visible;

@@ -1925,26 +1925,34 @@ void TestViewerChromePaintPlans() {
 		"information overlay paint plan ignored visible lines or emphasis colors");
 
 	jpegview_linux::NavigationPanelPaint navigation = jpegview_linux::BuildNavigationPanelPaint(
-		800, 600, 385, 560, true, FileList::SortMode::LastModificationTime, 7, 11);
-	Expect(navigation.panel.x == 180 && navigation.panel.y == 544 &&
-		navigation.panel.width == 440 && navigation.panel.height == 56 &&
-		navigation.buttons.size() == 9,
-		"navigation paint plan changed panel geometry or button count");
-	Expect(navigation.buttons[0].rect.x == 188 && navigation.buttons[3].rect.x == 323 &&
-		navigation.buttons[4].rect.x == 380 && navigation.buttons[7].rect.x == 527,
+		800, 600, 385, 585, true, FileList::SortMode::LastModificationTime, 7, 11);
+	Expect(navigation.panel.x == 249 && navigation.panel.y == 568 &&
+		navigation.panel.width == 302 && navigation.panel.height == 32 &&
+		navigation.opacity == 255 && navigation.buttons.size() == 9,
+		"navigation paint plan did not keep Windows-sized panel geometry or the Linux button count");
+	Expect(navigation.buttons[0].rect.x == 255 && navigation.buttons[3].rect.x == 348 &&
+		navigation.buttons[4].rect.x == 379 && navigation.buttons[5].rect.x == 418 &&
+		navigation.buttons[7].rect.x == 488,
 		"navigation paint plan lost section spacing");
 	Expect(navigation.buttons[0].command == IDM_FIRST && navigation.buttons[0].lines.size() == 4 &&
-		navigation.buttons[0].lines[0].x1 == 196 && navigation.buttons[0].lines[0].y1 == 560,
+		navigation.buttons[0].lines[0].x1 == 263 && navigation.buttons[0].lines[0].y1 == 579 &&
+		navigation.buttons[0].foreground.red == 243 &&
+		navigation.buttons[0].foreground.green == 242 &&
+		navigation.buttons[0].foreground.blue == 231,
 		"first-image navigation icon geometry is incorrect");
 	Expect(navigation.buttons[4].command == jpegview_linux::kNavigationSortModeCommand &&
 		navigation.buttons[4].hovered && navigation.buttons[4].text.size() == 1 &&
-		navigation.buttons[4].text[0].text == "D",
+		navigation.buttons[4].text[0].text == "D" &&
+		navigation.buttons[4].foreground.red == 255 &&
+		navigation.buttons[4].foreground.green == 205 &&
+		navigation.buttons[4].foreground.blue == 0,
 		"navigation sort button did not expose state and hover in its paint plan");
-	Expect(navigation.buttons[5].lines.size() == 8,
-		"fit-mode navigation icon did not use outward-corner geometry");
+	Expect(navigation.buttons[5].lines.size() == 12,
+		"fit-mode navigation icon did not use compact outward-corner geometry");
 	navigation = jpegview_linux::BuildNavigationPanelPaint(
 		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 11);
-	Expect(navigation.buttons[5].lines.size() == 6 && navigation.buttons[4].text[0].text == "N",
+	Expect(navigation.opacity == 128 && navigation.buttons[0].foreground.alpha == 128 &&
+		navigation.buttons[5].lines.size() == 6 && navigation.buttons[4].text[0].text == "N",
 		"actual-size navigation icon or name-order label is incorrect");
 
 	Expect(jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, false,

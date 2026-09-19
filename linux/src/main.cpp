@@ -2915,23 +2915,28 @@ private:
 		return &inserted->second;
 	}
 
-	void DrawText(const std::string& text, int x, int y, int scale, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
+	void DrawText(const std::string& text, int x, int y, int scale,
+		Uint8 r = 235, Uint8 g = 235, Uint8 b = 235, Uint8 alpha = 255) {
 		TextTextureCacheEntry* cached = TextTexture(text, scale);
 		if (cached == nullptr) return;
 		SDL_SetTextureColorMod(cached->texture, r, g, b);
+		SDL_SetTextureAlphaMod(cached->texture, alpha);
 		const SDL_Rect destination{x + cached->offsetX, y + cached->offsetY,
 			cached->width, cached->height};
 		SDL_RenderCopy(renderer_, cached->texture, nullptr, &destination);
+		SDL_SetTextureAlphaMod(cached->texture, 255);
 	}
 
-	void DrawLine(int x1, int y1, int x2, int y2, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
-		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
+	void DrawLine(int x1, int y1, int x2, int y2, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235,
+		Uint8 alpha = 255) {
+		SDL_SetRenderDrawColor(renderer_, r, g, b, alpha);
 		SDL_RenderDrawLine(renderer_, x1, y1, x2, y2);
 	}
 
-	void DrawRect(const SDL_Rect& rect, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235) {
+	void DrawRect(const SDL_Rect& rect, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235,
+		Uint8 alpha = 255) {
 		if (rect.w <= 0 || rect.h <= 0) return;
-		SDL_SetRenderDrawColor(renderer_, r, g, b, 255);
+		SDL_SetRenderDrawColor(renderer_, r, g, b, alpha);
 		const SDL_Rect top{rect.x, rect.y, rect.w, 1};
 		SDL_RenderFillRect(renderer_, &top);
 		if (rect.h > 1) {
@@ -2964,22 +2969,31 @@ private:
 
 	void RenderNavigationButton(const jpegview_linux::NavigationButtonPaint& button) {
 		const SDL_Rect rect = SdlRect(button.rect);
-		if (button.hovered) {
-			SDL_SetRenderDrawColor(renderer_, 65, 65, 65, 165);
-			SDL_RenderFillRect(renderer_, &rect);
-		}
-		DrawRect(rect, 150, 150, 150);
-		for (const jpegview_linux::UiRect& outline : button.outlines) {
-			DrawRect(SdlRect(outline));
-		}
-		for (const jpegview_linux::UiLine& line : button.lines) {
-			DrawLine(line.x1, line.y1, line.x2, line.y2,
-				line.color.red, line.color.green, line.color.blue);
-		}
-		for (const jpegview_linux::UiText& text : button.text) {
-			DrawText(text.text, text.x, text.y, kUiTextScale,
-				text.color.red, text.color.green, text.color.blue);
-		}
+		auto drawLayer = [&](int offsetX, int offsetY, Uint8 red, Uint8 green, Uint8 blue,
+			Uint8 alpha) {
+			const SDL_Rect frame{rect.x + offsetX, rect.y + offsetY, rect.w, rect.h};
+			DrawRect(frame, red, green, blue, alpha);
+			for (const jpegview_linux::UiRect& outline : button.outlines) {
+				const SDL_Rect shape = SdlRect(outline);
+				DrawRect({shape.x + offsetX, shape.y + offsetY, shape.w, shape.h},
+					red, green, blue, alpha);
+			}
+			for (const jpegview_linux::UiLine& line : button.lines) {
+				DrawLine(line.x1 + offsetX, line.y1 + offsetY,
+					line.x2 + offsetX, line.y2 + offsetY, red, green, blue, alpha);
+			}
+			for (const jpegview_linux::UiText& text : button.text) {
+				DrawText(text.text, text.x + offsetX, text.y + offsetY, kUiTextScale,
+					red, green, blue, alpha);
+			}
+		};
+		const Uint8 alpha = button.foreground.alpha;
+		drawLayer(-1, 0, 0, 0, 0, alpha);
+		drawLayer(1, 0, 0, 0, 0, alpha);
+		drawLayer(0, -1, 0, 0, 0, alpha);
+		drawLayer(0, 1, 0, 0, 0, alpha);
+		drawLayer(0, 0, button.foreground.red, button.foreground.green,
+			button.foreground.blue, alpha);
 	}
 
 	void RenderFileName() {
@@ -3174,10 +3188,6 @@ private:
 		// beyond its logical bounds. Keep every navigation-panel primitive inside
 		// the panel so reopening it after a context menu cannot damage the image.
 		SDL_RenderSetClipRect(renderer_, &panel);
-		SDL_SetRenderDrawColor(renderer_, paint.background.red, paint.background.green,
-			paint.background.blue, paint.background.alpha);
-		SDL_RenderFillRect(renderer_, &panel);
-		DrawRect(panel, paint.border.red, paint.border.green, paint.border.blue);
 		for (const jpegview_linux::NavigationButtonPaint& button : paint.buttons) {
 			if (button.hovered) hoveredButton = &button;
 			RenderNavigationButton(button);

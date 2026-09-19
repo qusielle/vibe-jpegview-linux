@@ -11,14 +11,15 @@
 namespace jpegview_linux {
 namespace {
 
-constexpr UiColor kIconColor{235, 235, 235, 255};
+constexpr UiColor kGuiColor{243, 242, 231, 255};
+constexpr UiColor kHighlightColor{255, 205, 0, 255};
 
 UiRect AsRect(const OverlayLayout& layout) {
 	return {layout.x, layout.y, layout.width, layout.height};
 }
 
 void AddLine(NavigationButtonPaint& button, int x1, int y1, int x2, int y2) {
-	button.lines.push_back({x1, y1, x2, y2, kIconColor});
+	button.lines.push_back({x1, y1, x2, y2, button.foreground});
 }
 
 void AddNavigationIcon(NavigationButtonPaint& button, bool fitToWindow,
@@ -54,26 +55,54 @@ void AddNavigationIcon(NavigationButtonPaint& button, bool fitToWindow,
 		break;
 	case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
 		if (fitToWindow) {
-			AddLine(button, left + 5, top + 4, left + 14, top + 4);
-			AddLine(button, left + 5, top + 4, left + 5, top + 13);
-			AddLine(button, right - 5, top + 4, right - 14, top + 4);
-			AddLine(button, right - 5, top + 4, right - 5, top + 13);
-			AddLine(button, left + 5, bottom - 4, left + 14, bottom - 4);
-			AddLine(button, left + 5, bottom - 4, left + 5, bottom - 13);
-			AddLine(button, right - 5, bottom - 4, right - 14, bottom - 4);
-			AddLine(button, right - 5, bottom - 4, right - 5, bottom - 13);
+			const int inset = rect.width / 4;
+			const int leftEdge = rect.x + inset;
+			const int rightEdge = rect.x + rect.width - inset;
+			const int topEdge = rect.y + inset;
+			const int bottomEdge = rect.y + rect.height - inset;
+			const int corner = (rightEdge - leftEdge) / 3;
+			const int diagonal = (rightEdge - leftEdge) / 2 - 1;
+			for (int index = 0; index < 4; ++index) {
+				const bool onLeft = index < 2;
+				const bool onTop = (index & 1) == 0;
+				const int x = onLeft ? leftEdge : rightEdge;
+				const int y = onTop ? topEdge : bottomEdge;
+				const int cornerX = onLeft ? corner : -corner;
+				const int diagonalX = onLeft ? diagonal : -diagonal;
+				const int diagonalY = onTop ? diagonal : -diagonal;
+				const int cornerY = onTop ? corner : -corner;
+				const int adjacentX = onLeft ? 1 : -1;
+				AddLine(button, x, y + cornerY, x, y);
+				AddLine(button, x, y, x + cornerX + adjacentX, y);
+				AddLine(button, x, y, x + diagonalX, y + diagonalY);
+			}
 		} else {
-			AddLine(button, left + 7, top + 3, left + 7, bottom - 3);
-			AddLine(button, left + 7, top + 3, left + 16, top + 3);
-			AddLine(button, left + 7, bottom - 3, left + 16, bottom - 3);
-			AddLine(button, right - 7, top + 3, right - 7, bottom - 3);
-			AddLine(button, right - 7, top + 3, right - 16, top + 3);
-			AddLine(button, right - 7, bottom - 3, right - 16, bottom - 3);
+			const int inset = rect.width / 3;
+			const int leftEdge = rect.x + inset;
+			const int rightEdge = rect.x + rect.width - inset;
+			const int topEdge = rect.y + inset;
+			const int bottomEdge = rect.y + rect.height - inset;
+			const int middle = (leftEdge + rightEdge) / 2;
+			AddLine(button, leftEdge, topEdge, leftEdge, bottomEdge);
+			AddLine(button, leftEdge, topEdge, middle, topEdge);
+			AddLine(button, leftEdge, bottomEdge, middle, bottomEdge);
+			AddLine(button, rightEdge, topEdge, rightEdge, bottomEdge);
+			AddLine(button, rightEdge, topEdge, middle, topEdge);
+			AddLine(button, rightEdge, bottomEdge, middle, bottomEdge);
 		}
 		break;
 	case IDM_FULL_SCREEN_MODE:
-		button.outlines.push_back({left, top, right - left, bottom - top});
-		AddLine(button, left, top + 7, right, top + 7);
+		{
+			const int inset = rect.width / 4;
+			const int leftEdge = rect.x + inset;
+			const int rightEdge = rect.x + rect.width - inset;
+			const int topEdge = rect.y + inset;
+			const int bottomEdge = rect.y + rect.height - inset;
+			button.outlines.push_back({leftEdge, topEdge,
+				rightEdge - leftEdge, bottomEdge - topEdge});
+			AddLine(button, leftEdge, topEdge + (bottomEdge - topEdge) / 4, rightEdge,
+				topEdge + (bottomEdge - topEdge) / 4);
+		}
 		break;
 	case IDM_ROTATE_90:
 		AddLine(button, left + 4, bottom - 2, right - 2, bottom - 2);
@@ -93,7 +122,7 @@ void AddNavigationIcon(NavigationButtonPaint& button, bool fitToWindow,
 		button.text.push_back({sortLabel,
 			rect.x + (rect.width - sortLabelWidth) / 2,
 			rect.y + (rect.height - textLineHeight) / 2,
-			kIconColor});
+			button.foreground});
 		break;
 	default:
 		break;
@@ -127,10 +156,11 @@ OverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight,
 	int mouseX, int mouseY, bool fitToWindow, FileList::SortMode sortMode,
 	int sortLabelWidth, int textLineHeight) {
-	constexpr int buttonSize = 40;
+	constexpr int buttonSize = 26;
+	constexpr int panelHeight = 32;
 	constexpr int gap = 5;
-	constexpr int margin = 8;
-	constexpr int separator = 12;
+	constexpr int margin = 6;
+	constexpr int separator = 8;
 	constexpr std::array<int, 9> commands = {
 		IDM_FIRST, IDM_PREV, IDM_NEXT, IDM_LAST, kNavigationSortModeCommand,
 		IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, IDM_FULL_SCREEN_MODE,
@@ -139,19 +169,22 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 	const int panelWidth = margin * 2 + buttonSize * static_cast<int>(commands.size()) +
 		gap * (static_cast<int>(commands.size()) - 1) + separator * 2;
 	NavigationPanelPaint plan;
-	plan.panel = {(windowWidth - panelWidth) / 2, windowHeight - buttonSize - margin * 2,
-		panelWidth, buttonSize + margin * 2};
+	plan.panel = {(windowWidth - panelWidth) / 2, windowHeight - panelHeight,
+		panelWidth, panelHeight};
+	plan.opacity = Contains(plan.panel, mouseX, mouseY) ? 255 : 128;
 	const std::string sortLabel = SortModeShortLabel(sortMode);
 	int x = plan.panel.x + margin;
 	for (std::size_t index = 0; index < commands.size(); ++index) {
 		NavigationButtonPaint button;
-		button.rect = {x, plan.panel.y + margin, buttonSize, buttonSize};
+		button.rect = {x, plan.panel.y + (panelHeight - buttonSize) / 2, buttonSize, buttonSize};
 		button.command = commands[index];
 		button.hovered = Contains(button.rect, mouseX, mouseY);
+		button.foreground = button.hovered ? kHighlightColor : kGuiColor;
+		button.foreground.alpha = plan.opacity;
 		AddNavigationIcon(button, fitToWindow, sortLabel, sortLabelWidth, textLineHeight);
 		plan.buttons.push_back(std::move(button));
 		x += buttonSize + gap;
-		if (index == 3 || index == 6) x += separator;
+		if (index == 4 || index == 6) x += separator;
 	}
 	return plan;
 }
