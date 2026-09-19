@@ -14,7 +14,18 @@ struct FileDialogEntry {
 	std::filesystem::path path;
 	bool directory = false;
 	bool parent = false;
+	std::filesystem::file_time_type modificationTime{};
 };
+
+enum class FileDialogSortMode {
+	Name,
+	ModificationDate,
+};
+
+// Keeps the parent entry first and directories before files. Names are sorted
+// case-insensitively in ascending order; modification dates are newest first,
+// with names providing deterministic ordering for equal timestamps.
+void SortFileDialogEntries(std::vector<FileDialogEntry>& entries, FileDialogSortMode mode);
 
 // Applies a case-insensitive filename substring filter. The parent-directory
 // entry is always retained so filtering never traps the user in a directory.

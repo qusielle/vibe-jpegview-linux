@@ -43,6 +43,20 @@ DirectorySummary CountImmediateDirectoryContentsWhile(
 
 } // namespace
 
+void SortFileDialogEntries(std::vector<FileDialogEntry>& entries, FileDialogSortMode mode) {
+	std::sort(entries.begin(), entries.end(), [mode](const FileDialogEntry& left, const FileDialogEntry& right) {
+		if (left.parent != right.parent) return left.parent;
+		if (left.directory != right.directory) return left.directory;
+		if (mode == FileDialogSortMode::ModificationDate &&
+			left.modificationTime != right.modificationTime) {
+			return left.modificationTime > right.modificationTime;
+		}
+		const std::string leftName = Lower(left.path.filename().string());
+		const std::string rightName = Lower(right.path.filename().string());
+		return leftName == rightName ? left.path.string() < right.path.string() : leftName < rightName;
+	});
+}
+
 std::vector<FileDialogEntry> FilterFileDialogEntries(
 	const std::vector<FileDialogEntry>& entries, std::string_view filter) {
 	if (filter.empty()) return entries;

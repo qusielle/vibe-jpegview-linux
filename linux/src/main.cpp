@@ -3455,6 +3455,11 @@ private:
 		return SDL_Rect{dialog.x + 12, dialog.y + 86, dialog.w - 24, 28};
 	}
 
+	SDL_Rect FileDialogSortRect() const {
+		const SDL_Rect dialog = FileDialogRect();
+		return SDL_Rect{dialog.x + dialog.w - 158, dialog.y + 61, 140, 23};
+	}
+
 	void ApplyFileDialogFilter() {
 		fileDialogEntries_ = jpegview_linux::FilterFileDialogEntries(
 			fileDialogAllEntries_, fileDialogSave_ ? std::string_view{} : std::string_view(fileDialogFilter_));
@@ -3511,18 +3516,28 @@ private:
 				!jpegview_linux::IsSupportedImagePath(entry.path())))) {
 				continue;
 			}
-			fileDialogAllEntries_.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory, false});
+			std::error_code modificationError;
+			const fs::file_time_type modificationTime = entry.last_write_time(modificationError);
+			fileDialogAllEntries_.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory, false,
+				modificationError ? fs::file_time_type{} : modificationTime});
 		}
 
-		std::sort(fileDialogAllEntries_.begin(), fileDialogAllEntries_.end(), [](const FileDialogEntry& left, const FileDialogEntry& right) {
-			if (left.parent != right.parent) return left.parent;
-			if (left.directory != right.directory) return left.directory;
-			const std::string leftName = Lower(left.path.filename().string());
-			const std::string rightName = Lower(right.path.filename().string());
-			return leftName == rightName ? left.path.string() < right.path.string() : leftName < rightName;
-		});
+		jpegview_linux::SortFileDialogEntries(fileDialogAllEntries_, fileDialogSave_ ?
+			jpegview_linux::FileDialogSortMode::Name : fileDialogSortMode_);
 		ApplyFileDialogFilter();
 		RequestFileDialogDirectorySummaries();
+	}
+
+	void ToggleFileDialogSortMode() {
+		fs::path selectedPath;
+		if (fileDialogSelected_ >= 0 && fileDialogSelected_ < static_cast<int>(fileDialogEntries_.size())) {
+			selectedPath = fileDialogEntries_[fileDialogSelected_].path;
+		}
+		fileDialogSortMode_ = fileDialogSortMode_ == jpegview_linux::FileDialogSortMode::Name ?
+			jpegview_linux::FileDialogSortMode::ModificationDate : jpegview_linux::FileDialogSortMode::Name;
+		jpegview_linux::SortFileDialogEntries(fileDialogAllEntries_, fileDialogSortMode_);
+		ApplyFileDialogFilter();
+		if (!selectedPath.empty()) FocusFileDialogEntry(selectedPath);
 	}
 
 	void OpenFileDialog() {
@@ -3706,9 +3721,13 @@ private:
 		case SDL_MOUSEBUTTONDOWN: {
 			const int item = FileDialogItemAt(event.button.x, event.button.y);
 			const bool inputClicked = PointInRect(event.button.x, event.button.y, FileDialogInputRect());
+			const bool sortClicked = !fileDialogSave_ &&
+				PointInRect(event.button.x, event.button.y, FileDialogSortRect());
 			if (event.button.button == SDL_BUTTON_RIGHT ||
-				(event.button.button == SDL_BUTTON_LEFT && item < 0 && !inputClicked)) {
+				(event.button.button == SDL_BUTTON_LEFT && item < 0 && !inputClicked && !sortClicked)) {
 				CloseFileDialog();
+			} else if (event.button.button == SDL_BUTTON_LEFT && sortClicked) {
+				ToggleFileDialogSortMode();
 			} else if (event.button.button == SDL_BUTTON_LEFT && inputClicked) {
 				if (fileDialogSave_) fileDialogSelected_ = -1;
 			} else if (event.button.button == SDL_BUTTON_LEFT) {
@@ -3738,6 +3757,16 @@ private:
 		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
 		DrawText(fileDialogSave_ ? "File name" : "Filter", dialog.x + 18, dialog.y + 68,
 			kUiTextScale, 190, 190, 190);
+		if (!fileDialogSave_) {
+			const SDL_Rect sortRect = FileDialogSortRect();
+			SDL_SetRenderDrawColor(renderer_, 36, 36, 36, 230);
+			SDL_RenderFillRect(renderer_, &sortRect);
+			DrawRect(sortRect, 100, 130, 165);
+			const std::string sortLabel = fileDialogSortMode_ == jpegview_linux::FileDialogSortMode::Name ?
+				"Sort: Name" : "Sort: Mod.date";
+			const int labelX = sortRect.x + std::max(6, (sortRect.w - TextWidth(sortLabel, kUiTextScale)) / 2);
+			DrawText(sortLabel, labelX, sortRect.y + 3, kUiTextScale, 210, 220, 230);
+		}
 		SDL_Rect inputRect = FileDialogInputRect();
 		SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
 		SDL_RenderFillRect(renderer_, &inputRect);
@@ -4671,6 +4700,7 @@ private:
 	std::string fileDialogFilename_;
 	std::string fileDialogFilter_;
 	std::string fileDialogMessage_;
+	jpegview_linux::FileDialogSortMode fileDialogSortMode_ = jpegview_linux::FileDialogSortMode::Name;
 	std::vector<FileDialogEntry> fileDialogAllEntries_;
 	std::vector<FileDialogEntry> fileDialogEntries_;
 	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;

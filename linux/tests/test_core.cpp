@@ -1654,6 +1654,37 @@ void TestFileDialogFiltering() {
 		"open-dialog filter did not retain only the parent entry when nothing matched");
 }
 
+void TestFileDialogSorting() {
+	using SortMode = jpegview_linux::FileDialogSortMode;
+	using FileTime = fs::file_time_type;
+	using namespace std::chrono_literals;
+	const FileTime epoch{};
+	std::vector<jpegview_linux::FileDialogEntry> entries = {
+		{fs::path("/pictures/z-last.jpg"), false, false, epoch + 40s},
+		{fs::path("/pictures/B-folder"), true, false, epoch + 30s},
+		{fs::path("/pictures"), true, true, epoch + 50s},
+		{fs::path("/pictures/a-first.jpg"), false, false, epoch + 20s},
+		{fs::path("/pictures/a-folder"), true, false, epoch + 10s},
+	};
+
+	jpegview_linux::SortFileDialogEntries(entries, SortMode::Name);
+	Expect(entries[0].parent && entries[1].path.filename() == "a-folder" &&
+		entries[2].path.filename() == "B-folder" && entries[3].path.filename() == "a-first.jpg" &&
+		entries[4].path.filename() == "z-last.jpg",
+		"open-dialog name sorting did not retain parent/directory grouping or ignore case");
+
+	jpegview_linux::SortFileDialogEntries(entries, SortMode::ModificationDate);
+	Expect(entries[0].parent && entries[1].path.filename() == "B-folder" &&
+		entries[2].path.filename() == "a-folder" && entries[3].path.filename() == "z-last.jpg" &&
+		entries[4].path.filename() == "a-first.jpg",
+		"open-dialog modification-date sorting did not order each entry group newest first");
+
+	entries[3].modificationTime = entries[4].modificationTime;
+	jpegview_linux::SortFileDialogEntries(entries, SortMode::ModificationDate);
+	Expect(entries[3].path.filename() == "a-first.jpg" && entries[4].path.filename() == "z-last.jpg",
+		"open-dialog modification-date ties did not fall back to deterministic name order");
+}
+
 void TestFileDialogDirectorySummaries() {
 	TemporaryDirectory temporary;
 	const fs::path album = temporary.path() / "album";
@@ -1765,6 +1796,7 @@ int main() {
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
+	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
 	RunTest("file-dialog-directory-summaries", TestFileDialogDirectorySummaries, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {

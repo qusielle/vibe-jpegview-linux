@@ -62,6 +62,8 @@ mkdir -p "$temporary/images/00-entry-test"
 write_ppm "$temporary/images/00-entry-test/inside-first.ppm" 64 128 32
 touch -t 202001010000.00 "$temporary/images/01-red.ppm" "$temporary/images/02-green.ppm" \
 	"$temporary/images/03-blue.ppm" "$temporary/images/04-yellow.ppm" "$temporary/images/05-cyan.ppm"
+touch -t 202001010000.00 "$temporary/images/00-album"
+touch -t 202201010000.00 "$temporary/images/00-entry-test"
 
 help_text=$($BINARY --help)
 case "$help_text" in
@@ -109,6 +111,20 @@ stop_viewer() {
 	DISPLAY=":$display_number" xdotool key q || true
 	wait "$viewer_pid" || true
 	viewer_pid=''
+}
+
+click_file_dialog_sort() {
+	dialog_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+	dialog_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	dialog_width=$((dialog_window_width - 40))
+	if [ "$dialog_width" -gt 900 ]; then dialog_width=900; fi
+	if [ "$dialog_width" -lt 320 ]; then dialog_width=320; fi
+	dialog_height=$((dialog_window_height - 40))
+	if [ "$dialog_height" -gt 650 ]; then dialog_height=650; fi
+	if [ "$dialog_height" -lt 260 ]; then dialog_height=260; fi
+	sort_x=$(((dialog_window_width - dialog_width) / 2 + dialog_width - 88))
+	sort_y=$(((dialog_window_height - dialog_height) / 2 + 72))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$sort_x" "$sort_y" click 1
 }
 
 launch_viewer
@@ -169,18 +185,20 @@ case "$filtered_title" in
 esac
 
 DISPLAY=":$display_number" xdotool key ctrl+o
-DISPLAY=":$display_number" xdotool type --delay 20 '00-ENTRY-TEST'
+click_file_dialog_sort
+DISPLAY=":$display_number" xdotool key Up
 DISPLAY=":$display_number" xdotool key ctrl+Return
 sleep 0.3
 immediate_directory_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 case "$immediate_directory_title" in
 	inside-first.ppm*) ;;
-	*) echo "UI smoke test: Ctrl+Return did not open the first image in the selected directory" >&2; exit 1 ;;
+	*) echo "UI smoke test: modification-date sorting did not reorder folders newest first" >&2; exit 1 ;;
 esac
 
-# Return to a root-level image so the ordinary directory-entry behavior below
-# starts from the same directory as the initial open-dialog checks.
+# Restore name sorting and a root-level image so the ordinary directory-entry
+# behavior below starts from the same state as the initial open-dialog checks.
 DISPLAY=":$display_number" xdotool key ctrl+o
+click_file_dialog_sort
 DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
 DISPLAY=":$display_number" xdotool key Return
