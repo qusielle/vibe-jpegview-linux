@@ -186,7 +186,8 @@ esac
 
 DISPLAY=":$display_number" xdotool key ctrl+o
 click_file_dialog_sort
-DISPLAY=":$display_number" xdotool key Up
+DISPLAY=":$display_number" xdotool key Home
+DISPLAY=":$display_number" xdotool key Down
 DISPLAY=":$display_number" xdotool key ctrl+Return
 sleep 0.3
 immediate_directory_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")

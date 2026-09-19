@@ -2678,6 +2678,9 @@ private:
 		fileDialogOpen_ = true;
 		contextMenuOpen_ = false;
 		RefreshFileDialog();
+		if (!fileList_.Empty()) {
+			fileDialogModel_.Focus(AbsoluteNormalized(fileList_.Current()), FileDialogVisibleRows());
+		}
 		SDL_StartTextInput();
 	}
 

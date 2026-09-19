@@ -2469,6 +2469,11 @@ void TestFileDialogModelStateAndNavigation() {
 		"open-dialog could not focus an entry by path");
 	Expect(!model.Focus(fs::path("/pictures/missing.jpg"), 2),
 		"open-dialog reported focusing a missing path");
+	model.SelectFirst(2);
+	Expect(model.Focus(fs::path("/pictures/01-first.jpg"), 2) &&
+		model.SelectedEntry() != nullptr && model.SelectedEntry()->path.filename() == "01-first.jpg" &&
+		model.Scroll() == 2,
+		"open-dialog could not focus the current file and scroll it into view");
 
 	model.AppendFilter(u8"写真");
 	Expect(model.Filter() == u8"写真" && model.Entries().size() == 2 &&
