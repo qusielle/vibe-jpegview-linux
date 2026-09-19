@@ -14,6 +14,7 @@
 #include "overlay_layout.h"
 #include "thumbnail_panel_model.h"
 #include "app_icon.h"
+#include "image_info_model.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -1529,6 +1530,19 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 		"thumbnail row added horizontal margins or incorrect vertical margins");
 }
 
+void TestImageInfoFormatting() {
+	Expect(jpegview_linux::FormatImageDimensionsAndSize(1920, 1080, "2.5 MB") ==
+		"1920x1080, 2.5 MB",
+		"image dimensions and file size were not compacted into one line");
+	Expect(jpegview_linux::FormatImageDimensionsAndSize(640, 480, {}) == "640x480",
+		"missing file size left punctuation in the dimensions line");
+	Expect(jpegview_linux::FormatModificationDateLine("2026-09-19 12:34:56") ==
+		"Mod.date: 2026-09-19 12:34:56",
+		"modification date label was not shortened");
+	Expect(jpegview_linux::FormatFileSize(1536) == "1.5 KB",
+		"file-size formatting changed while moving it into the information model");
+}
+
 void TestEmbeddedApplicationIcon() {
 	jpegview_linux::ApplicationIcon icon;
 	std::string error;
@@ -1590,6 +1604,7 @@ int main() {
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
+	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";

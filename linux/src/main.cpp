@@ -16,6 +16,7 @@
 #include "overlay_layout.h"
 #include "thumbnail_panel_model.h"
 #include "app_icon.h"
+#include "image_info_model.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -654,23 +655,6 @@ std::time_t FileModificationTime(const fs::path& filename) {
 	return status.st_mtime;
 }
 
-std::string FormatFileSize(std::uintmax_t size) {
-	static constexpr const char* suffixes[] = {"B", "KB", "MB", "GB"};
-	double value = static_cast<double>(size);
-	std::size_t suffix = 0;
-	while (value >= 1024.0 && suffix + 1 < std::size(suffixes)) {
-		value /= 1024.0;
-		++suffix;
-	}
-	std::ostringstream stream;
-	if (suffix == 0) {
-		stream << size << ' ' << suffixes[suffix];
-	} else {
-		stream << std::fixed << std::setprecision(value >= 10.0 ? 0 : 1) << value << ' ' << suffixes[suffix];
-	}
-	return stream.str();
-}
-
 bool HasExecutable(const std::string& executable) {
 	const char* path = std::getenv("PATH");
 	if (path == nullptr) return false;
@@ -1271,7 +1255,7 @@ private:
 		std::ostringstream title;
 		title << fileList_.Current().filename().string()
 			<< " (" << image_.originalWidth << 'x' << image_.originalHeight;
-		if (!fileError) title << ", " << FormatFileSize(fileSize);
+		if (!fileError) title << ", " << jpegview_linux::FormatFileSize(fileSize);
 		title << ") - JPEGView";
 		SetTitle(title.str());
 	}
@@ -1961,8 +1945,11 @@ private:
 			<< InfoText(fileList_.Current().filename().string());
 		lines.push_back(title.str());
 
-		lines.push_back("Image width: " + std::to_string(image_.originalWidth));
-		lines.push_back("Image height: " + std::to_string(image_.originalHeight));
+		std::error_code fileError;
+		const std::uintmax_t fileSize = fs::file_size(fileList_.Current(), fileError);
+		lines.push_back(jpegview_linux::FormatImageDimensionsAndSize(
+			image_.originalWidth, image_.originalHeight,
+			fileError ? std::string() : jpegview_linux::FormatFileSize(fileSize)));
 		if (animationFrames_.size() > 1) {
 			lines.push_back("Frame: " + std::to_string(animationFrameIndex_ + 1) + "/" +
 				std::to_string(animationFrames_.size()));
@@ -1971,17 +1958,13 @@ private:
 		if (image_.width != image_.originalWidth || image_.height != image_.originalHeight) {
 			lines.push_back("Displayed size: " + std::to_string(image_.width) + " x " + std::to_string(image_.height));
 		}
-		std::error_code fileError;
-		const std::uintmax_t fileSize = fs::file_size(fileList_.Current(), fileError);
-		if (!fileError) lines.push_back("File size: " + FormatFileSize(fileSize));
-
 		const std::string modificationDate = FormatFileTime(fileList_.Current());
 		if (!metadata_.acquisitionDate.empty()) {
 			lines.push_back("Acquisition date: " + InfoText(metadata_.acquisitionDate));
 		} else if (!metadata_.dateTime.empty()) {
 			lines.push_back("Exif Date Time: " + InfoText(metadata_.dateTime));
 		} else if (!modificationDate.empty()) {
-			lines.push_back("Modification date: " + modificationDate);
+			lines.push_back(jpegview_linux::FormatModificationDateLine(modificationDate));
 		}
 		if (!metadata_.cameraModel.empty()) lines.push_back("Camera model: " + InfoText(metadata_.cameraModel));
 		if (!metadata_.exposureTime.empty()) lines.push_back("Exposure time (s): " + metadata_.exposureTime);
