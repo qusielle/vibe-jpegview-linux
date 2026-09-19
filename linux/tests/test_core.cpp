@@ -407,6 +407,27 @@ void TestKeyboardCommandMappings() {
 	Expect(jpegview_linux::CommandForKey(unknown, false) == 0, "unknown key was accepted");
 }
 
+void TestHeldNavigationCoalescesKeyRepeats() {
+	jpegview_linux::HeldNavigationController navigation;
+	Expect(navigation.KeyDown(1, 79, false) == 1 && navigation.Scancode() == 79,
+		"physical right-arrow press did not request one immediate navigation step");
+	for (int repeat = 0; repeat < 100; ++repeat) {
+		Expect(navigation.KeyDown(1, 79, true) == 0 && navigation.Scancode() == 79,
+			"OS key-repeat queued another navigation step");
+	}
+	Expect(navigation.KeyDown(-1, 80, true) == 0 && navigation.Scancode() == 79,
+		"stale key-repeat changed the active navigation direction");
+	Expect(navigation.AfterImageShown(true) == 1 && navigation.AfterImageShown(true) == 1,
+		"held right-arrow did not request one step after each displayed image");
+	Expect(navigation.AfterImageShown(false) == 0 && navigation.Scancode() == -1,
+		"released right-arrow continued navigating after the displayed image");
+	Expect(navigation.KeyDown(-1, 80, false) == -1 && navigation.AfterImageShown(true) == -1,
+		"held left-arrow did not continue in the requested direction");
+	navigation.Reset();
+	Expect(navigation.AfterImageShown(true) == 0 && navigation.Scancode() == -1,
+		"reset navigation state retained a pending repeat");
+}
+
 void TestFileListDateSortingAndSelectionPreservation() {
 	TemporaryDirectory temporary;
 	const fs::path directory = temporary.path() / "images";
@@ -2616,6 +2637,7 @@ int main() {
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);
+	RunTest("held-navigation-repeat-coalescing", TestHeldNavigationCoalescesKeyRepeats, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
 	RunTest("file-list-size-and-random-sorting", TestFileListSizeAndRandomSorting, failures);
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);

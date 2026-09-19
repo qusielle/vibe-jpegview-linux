@@ -269,6 +269,8 @@ int SDL_SetRenderDrawBlendMode(SDL_Renderer* renderer, int blendMode);
 void SDL_RenderPresent(SDL_Renderer* renderer);
 int SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
 int SDL_PollEvent(SDL_Event* event);
+void SDL_PumpEvents();
+const Uint8* SDL_GetKeyboardState(int* numkeys);
 void SDL_Delay(Uint32 ms);
 Uint32 SDL_GetTicks();
 }

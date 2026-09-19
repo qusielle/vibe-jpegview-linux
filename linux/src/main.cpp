@@ -355,6 +355,7 @@ public:
 			TickThumbnailPreload();
 			TickFileDialogDirectorySummaries();
 			Render();
+			TickHeldNavigation();
 			SDL_Delay(4);
 		}
 
@@ -1362,6 +1363,29 @@ private:
 		} else if (action.type == jpegview_linux::PlaybackActionType::NextImage) {
 			NextImage();
 		}
+	}
+
+	void TickHeldNavigation() {
+		if (heldNavigation_.Scancode() < 0) return;
+		if (contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ || aboutOpen_ ||
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() ||
+			(SDL_GetModState() & 0x03C3u) != 0) {
+			heldNavigation_.Reset();
+			return;
+		}
+
+		SDL_PumpEvents();
+		int keyCount = 0;
+		const Uint8* keyStates = SDL_GetKeyboardState(&keyCount);
+		const int scancode = heldNavigation_.Scancode();
+		const bool keyIsHeld = keyStates != nullptr && scancode < keyCount && keyStates[scancode] != 0;
+		const int direction = heldNavigation_.AfterImageShown(keyIsHeld);
+		if (direction == 0 || fileList_.Empty()) return;
+
+		const std::size_t previousIndex = fileList_.CurrentIndex();
+		if (direction > 0) NextImage(true);
+		else PreviousImage(true);
+		if (fileList_.CurrentIndex() == previousIndex) heldNavigation_.Reset();
 	}
 
 	bool SetAnimationFrame(std::size_t index) {
@@ -3485,9 +3509,18 @@ private:
 					(event.key.keysym.sym == SDLK_LEFT || event.key.keysym.sym == SDLK_RIGHT ||
 						event.key.keysym.sym == SDLK_UP || event.key.keysym.sym == SDLK_DOWN);
 				// SDL marks OS key-repeat events instead of generating a fresh
-				// physical key press. Keep repeating navigation and keyboard
-				// panning, while retaining one-shot behavior for other commands.
+				// physical key press. Pan on repeats, but let held-navigation poll
+				// the actual key state after each rendered image to avoid a backlog.
 				if (event.key.repeat != 0 && !plainNavigationKey && !shiftPanKey) break;
+				if (plainNavigationKey && event.key.repeat != 0) {
+					const int direction = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
+					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, true);
+					break;
+				}
+				if (plainNavigationKey) {
+					const int direction = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
+					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, false);
+				}
 				if (event.key.keysym.sym == SDLK_MENU) {
 					OpenContextMenu();
 					break;
@@ -3501,10 +3534,7 @@ private:
 				}
 				const int command = jpegview_linux::CommandForKey(event.key,
 					playback_.Mode() != PlaybackMode::None || playback_.AnimationPlaying());
-				if (plainNavigationKey && event.key.repeat != 0) {
-					if (command == IDM_NEXT) NextImage(true);
-					else if (command == IDM_PREV) PreviousImage(true);
-				} else if (command != 0) {
+				if (command != 0) {
 					ExecuteCommand(command);
 				}
 				if (quitRequested_) running = false;
@@ -3672,6 +3702,7 @@ private:
 	bool showHistogram_ = false;
 	bool showFileName_ = false;
 	bool navigationLoading_ = false;
+	jpegview_linux::HeldNavigationController heldNavigation_;
 	bool confirmationOpen_ = false;
 	int confirmationCommand_ = 0;
 	std::string confirmationMessage_;

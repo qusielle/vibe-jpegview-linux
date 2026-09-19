@@ -297,6 +297,12 @@ if [ "$title_before_hold" = "$title_after_hold" ]; then
 	echo "UI smoke test: held Right key did not repeat navigation" >&2
 	exit 1
 fi
+sleep 0.3
+title_after_release_settled=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+if [ "$title_after_hold" != "$title_after_release_settled" ]; then
+	echo "UI smoke test: navigation continued after Right was released" >&2
+	exit 1
+fi
 
 DISPLAY=":$display_number" xdotool keydown ctrl
 DISPLAY=":$display_number" xdotool click 5

@@ -76,4 +76,24 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	return 0;
 }
 
+int HeldNavigationController::KeyDown(int direction, int scancode, bool repeated) {
+	if (repeated || (direction != -1 && direction != 1) || scancode < 0) return 0;
+	direction_ = direction;
+	scancode_ = scancode;
+	return direction_;
+}
+
+int HeldNavigationController::AfterImageShown(bool keyIsHeld) {
+	if (!keyIsHeld) {
+		Reset();
+		return 0;
+	}
+	return direction_;
+}
+
+void HeldNavigationController::Reset() {
+	direction_ = 0;
+	scancode_ = -1;
+}
+
 } // namespace jpegview_linux

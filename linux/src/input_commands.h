@@ -13,4 +13,19 @@ constexpr int kCommandToggleThumbnailPanel = -4;
 // exits only when there is nothing to stop.
 int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive);
 
+// Converts key-downs into one immediate navigation step, then requests one
+// more step only after the previous image has been shown and the key remains
+// physically held. SDL auto-repeat notifications never queue extra steps.
+class HeldNavigationController {
+public:
+	int KeyDown(int direction, int scancode, bool repeated);
+	int AfterImageShown(bool keyIsHeld);
+	int Scancode() const { return scancode_; }
+	void Reset();
+
+private:
+	int direction_ = 0;
+	int scancode_ = -1;
+};
+
 } // namespace jpegview_linux
