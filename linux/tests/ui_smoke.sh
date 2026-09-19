@@ -277,6 +277,19 @@ case "$home_dialog_title" in
 	*) echo "UI smoke test: Home did not select the first row in the Ctrl+O dialog" >&2; exit 1 ;;
 esac
 
+# A short press must advance exactly once. Background display preparation can
+# delay a frame, so treating the still-physical key as a hold immediately after
+# the first render used to advance from 01 directly to 03.
+DISPLAY=":$display_number" xdotool key Right
+sleep 0.2
+single_press_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$single_press_title" in
+	02-green.ppm*) ;;
+	*) echo "UI smoke test: one Right press skipped over the adjacent image" >&2; exit 1 ;;
+esac
+DISPLAY=":$display_number" xdotool key Left
+sleep 0.2
+
 title_before=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 DISPLAY=":$display_number" xdotool mousemove 640 400
 DISPLAY=":$display_number" xdotool click 4

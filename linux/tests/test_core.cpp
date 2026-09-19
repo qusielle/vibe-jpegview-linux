@@ -416,18 +416,24 @@ void TestHeldNavigationCoalescesKeyRepeats() {
 	jpegview_linux::HeldNavigationController navigation;
 	Expect(navigation.KeyDown(1, 79, false) == 1 && navigation.Scancode() == 79,
 		"physical right-arrow press did not request one immediate navigation step");
+	Expect(navigation.AfterImageShown(true) == 0,
+		"held navigation skipped an image before the initial repeat threshold");
+	Expect(navigation.KeyDown(-1, 80, true) == 0 && navigation.Scancode() == 79,
+		"stale key-repeat changed the active navigation direction");
+	Expect(navigation.AfterImageShown(true) == 0,
+		"stale key-repeat enabled continuous navigation");
 	for (int repeat = 0; repeat < 100; ++repeat) {
 		Expect(navigation.KeyDown(1, 79, true) == 0 && navigation.Scancode() == 79,
 			"OS key-repeat queued another navigation step");
 	}
-	Expect(navigation.KeyDown(-1, 80, true) == 0 && navigation.Scancode() == 79,
-		"stale key-repeat changed the active navigation direction");
 	Expect(navigation.AfterImageShown(true) == 1 && navigation.AfterImageShown(true) == 1,
 		"held right-arrow did not request one step after each displayed image");
 	Expect(navigation.AfterImageShown(false) == 0 && navigation.Scancode() == -1,
 		"released right-arrow continued navigating after the displayed image");
-	Expect(navigation.KeyDown(-1, 80, false) == -1 && navigation.AfterImageShown(true) == -1,
-		"held left-arrow did not continue in the requested direction");
+	Expect(navigation.KeyDown(-1, 80, false) == -1 && navigation.AfterImageShown(true) == 0,
+		"new left-arrow press bypassed the initial repeat threshold");
+	Expect(navigation.KeyDown(-1, 80, true) == 0 && navigation.AfterImageShown(true) == -1,
+		"held left-arrow did not continue after its repeat threshold");
 	navigation.Reset();
 	Expect(navigation.AfterImageShown(true) == 0 && navigation.Scancode() == -1,
 		"reset navigation state retained a pending repeat");

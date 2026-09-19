@@ -77,9 +77,14 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 }
 
 int HeldNavigationController::KeyDown(int direction, int scancode, bool repeated) {
-	if (repeated || (direction != -1 && direction != 1) || scancode < 0) return 0;
+	if ((direction != -1 && direction != 1) || scancode < 0) return 0;
+	if (repeated) {
+		if (direction == direction_ && scancode == scancode_) repeatObserved_ = true;
+		return 0;
+	}
 	direction_ = direction;
 	scancode_ = scancode;
+	repeatObserved_ = false;
 	return direction_;
 }
 
@@ -88,12 +93,13 @@ int HeldNavigationController::AfterImageShown(bool keyIsHeld) {
 		Reset();
 		return 0;
 	}
-	return direction_;
+	return repeatObserved_ ? direction_ : 0;
 }
 
 void HeldNavigationController::Reset() {
 	direction_ = 0;
 	scancode_ = -1;
+	repeatObserved_ = false;
 }
 
 } // namespace jpegview_linux
