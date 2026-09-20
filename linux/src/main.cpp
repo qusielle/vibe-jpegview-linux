@@ -75,6 +75,8 @@ constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr int kUiTextScale = 1;
 constexpr int kContextMenuSeparatorHeight = 7;
+constexpr int kContextMenuVerticalPadding = 3;
+constexpr int kContextMenuWindowInset = 4;
 constexpr int kNavigationPanelHoverHeight = 64;
 constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
@@ -117,7 +119,7 @@ int TextLineHeight(int scale = kUiTextScale) {
 }
 
 int ContextMenuRowHeight() {
-	return std::max(18, TextLineHeight() + 8);
+	return std::max(16, TextLineHeight() + 4);
 }
 
 int OverlayLineHeight() {
@@ -2451,7 +2453,9 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, nullptr, &windowHeight);
 		const std::vector<jpegview_linux::MenuColumn> layout = jpegview_linux::LayoutMenuColumns(
-			contextMenuItems_, windowHeight - 24, ContextMenuRowHeight(), kContextMenuSeparatorHeight);
+			contextMenuItems_, windowHeight - 2 *
+				(kContextMenuVerticalPadding + kContextMenuWindowInset),
+			ContextMenuRowHeight(), kContextMenuSeparatorHeight);
 		std::vector<ContextMenuColumn> columns;
 		columns.reserve(layout.size());
 		for (const jpegview_linux::MenuColumn& source : layout) {
@@ -2485,14 +2489,14 @@ private:
 			width = std::max(width, column.x + column.width);
 			contentHeight = std::max(contentHeight, column.height);
 		}
-		const int height = contentHeight + 12;
+		const int height = contentHeight + 2 * kContextMenuVerticalPadding;
 		int x = contextMenuX_;
 		int y = contextMenuY_;
 		if (!contextMenuPositionLocked_) {
-			if (x + width > windowWidth) x = windowWidth - width - 4;
-			if (y + height > windowHeight) y = windowHeight - height - 4;
-			x = std::max(4, x);
-			y = std::max(4, y);
+			if (x + width > windowWidth) x = windowWidth - width - kContextMenuWindowInset;
+			if (y + height > windowHeight) y = windowHeight - height - kContextMenuWindowInset;
+			x = std::max(kContextMenuWindowInset, x);
+			y = std::max(kContextMenuWindowInset, y);
 		}
 		return SDL_Rect{x, y, width, height};
 	}
@@ -2512,7 +2516,7 @@ private:
 		for (const ContextMenuColumn& column : columns) {
 			const int columnLeft = menu.x + column.x;
 			if (x < columnLeft || x >= columnLeft + column.width) continue;
-			int itemTop = menu.y + 6;
+			int itemTop = menu.y + kContextMenuVerticalPadding;
 			for (std::size_t index = column.begin; index < column.end; ++index) {
 				const int itemHeight = ContextMenuItemHeight(index);
 				if (y >= itemTop && y < itemTop + itemHeight) {
@@ -4198,7 +4202,7 @@ private:
 
 		for (const ContextMenuColumn& column : columns) {
 			const int columnX = menu.x + column.x;
-			int itemTop = menu.y + 6;
+			int itemTop = menu.y + kContextMenuVerticalPadding;
 			for (std::size_t i = column.begin; i < column.end; ++i) {
 				const MenuItem& item = contextMenuItems_[i];
 				if (item.separator) {
@@ -4227,8 +4231,9 @@ private:
 				itemTop += ContextMenuRowHeight();
 			}
 			if (&column != &columns.back()) {
-				DrawLine(columnX + column.width, menu.y + 6, columnX + column.width,
-					menu.y + menu.h - 6, 75, 75, 75);
+				DrawLine(columnX + column.width, menu.y + kContextMenuVerticalPadding,
+					columnX + column.width, menu.y + menu.h - kContextMenuVerticalPadding,
+					75, 75, 75);
 			}
 		}
 	}

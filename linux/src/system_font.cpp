@@ -1,4 +1,5 @@
 #include "system_font.h"
+#include "bitmap_font.h"
 
 #include <pango/pangoft2.h>
 
@@ -15,6 +16,52 @@ namespace jpegview_linux {
 namespace {
 
 constexpr const char* kFallbackFont = "Sans 10";
+
+RasterizedText RasterizeTerminus9(std::string_view text, int scale) {
+	RasterizedText result;
+	if (text.empty() || scale <= 0 || !Terminus9CanRender(text)) return result;
+	int cursorX = 0;
+	int left = 0;
+	int right = 0;
+	for (unsigned char character : text) {
+		const BitmapFontGlyph& glyph = Terminus9Glyph(character);
+		const int glyphX = cursorX + glyph.bearingLeft * scale;
+		left = std::min(left, glyphX);
+		right = std::max(right, glyphX + glyph.width * scale);
+		cursorX += glyph.advance * scale;
+		right = std::max(right, cursorX);
+	}
+	result.width = right - left;
+	result.height = Terminus9LineHeight() * scale;
+	result.offsetX = left;
+	if (result.width <= 0 || result.height <= 0) return {};
+	result.argb.assign(static_cast<std::size_t>(result.width) * result.height, 0x00ffffffu);
+
+	cursorX = 0;
+	for (unsigned char character : text) {
+		const BitmapFontGlyph& glyph = Terminus9Glyph(character);
+		const std::uint8_t* pixels = Terminus9GlyphPixels(glyph);
+		const int glyphX = cursorX + glyph.bearingLeft * scale - left;
+		const int glyphY = (Terminus9Ascent() - glyph.bearingTop) * scale;
+		for (int row = 0; row < glyph.height; ++row) {
+			for (int column = 0; column < glyph.width; ++column) {
+				if (pixels[row * glyph.width + column] == 0) continue;
+				for (int scaleY = 0; scaleY < scale; ++scaleY) {
+					for (int scaleX = 0; scaleX < scale; ++scaleX) {
+						const int x = glyphX + column * scale + scaleX;
+						const int y = glyphY + row * scale + scaleY;
+						if (x >= 0 && x < result.width && y >= 0 && y < result.height) {
+							result.argb[static_cast<std::size_t>(y) * result.width + x] =
+								0xffffffffu;
+						}
+					}
+				}
+			}
+		}
+		cursorX += glyph.advance * scale;
+	}
+	return result;
+}
 
 std::string Trim(std::string value) {
 	auto isSpace = [](unsigned char character) { return std::isspace(character) != 0; };
@@ -274,17 +321,26 @@ struct SystemFont::Impl {
 			requestedDescription = ResolveDesktopFontDescription(home, config);
 		}
 		description = requestedDescription.empty() ? kFallbackFont : std::move(requestedDescription);
+	}
+
+	bool EnsureSystemFont() const {
+		if (initializationAttempted) return layout != nullptr && font != nullptr;
+		initializationAttempted = true;
 		api = &FontApi::Instance();
-		if (!api->available) return;
+		if (!api->available) return false;
 		font = api->fontDescriptionFromString(description.c_str());
 		if (font == nullptr) {
 			description = kFallbackFont;
 			font = api->fontDescriptionFromString(description.c_str());
 		}
+		if (font == nullptr) return false;
 		map = api->ft2FontMapNew();
+		if (map == nullptr) return false;
 		api->ft2FontMapSetResolution(reinterpret_cast<PangoFT2FontMap*>(map), 96.0, 96.0);
 		context = api->fontMapCreateContext(map);
+		if (context == nullptr) return false;
 		layout = api->layoutNew(context);
+		return layout != nullptr;
 	}
 
 	~Impl() {
@@ -296,7 +352,7 @@ struct SystemFont::Impl {
 	}
 
 	PangoLayout* Layout(std::string_view text, int scale) const {
-		if (layout == nullptr || font == nullptr) return nullptr;
+		if (!EnsureSystemFont()) return nullptr;
 		if (scale == 1) {
 			api->layoutSetFontDescription(layout, font);
 		} else {
@@ -310,12 +366,13 @@ struct SystemFont::Impl {
 		return layout;
 	}
 
-	FontApi* api = nullptr;
-	std::string description;
-	PangoFontDescription* font = nullptr;
-	PangoFontMap* map = nullptr;
-	PangoContext* context = nullptr;
-	PangoLayout* layout = nullptr;
+	mutable bool initializationAttempted = false;
+	mutable FontApi* api = nullptr;
+	mutable std::string description;
+	mutable PangoFontDescription* font = nullptr;
+	mutable PangoFontMap* map = nullptr;
+	mutable PangoContext* context = nullptr;
+	mutable PangoLayout* layout = nullptr;
 };
 
 SystemFont::SystemFont(std::string description) : impl_(std::make_unique<Impl>(std::move(description))) {}
@@ -325,6 +382,7 @@ SystemFont& SystemFont::operator=(SystemFont&&) noexcept = default;
 
 int SystemFont::TextWidth(std::string_view text, int scale) const {
 	if (text.empty() || scale <= 0) return 0;
+	if (Terminus9CanRender(text)) return Terminus9TextWidth(text, scale);
 	PangoLayout* layout = impl_->Layout(text, scale);
 	if (layout == nullptr) return 0;
 	int width = 0;
@@ -334,16 +392,13 @@ int SystemFont::TextWidth(std::string_view text, int scale) const {
 
 int SystemFont::LineHeight(int scale) const {
 	if (scale <= 0) return 0;
-	PangoLayout* layout = impl_->Layout("Mg", scale);
-	if (layout == nullptr) return 0;
-	int height = 0;
-	impl_->api->layoutGetPixelSize(layout, nullptr, &height);
-	return height;
+	return Terminus9LineHeight() * scale;
 }
 
 RasterizedText SystemFont::Rasterize(std::string_view text, int scale) const {
 	RasterizedText result;
 	if (text.empty() || scale <= 0) return result;
+	if (Terminus9CanRender(text)) return RasterizeTerminus9(text, scale);
 	PangoLayout* layout = impl_->Layout(text, scale);
 	if (layout == nullptr) return result;
 	PangoRectangle ink{};

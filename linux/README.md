@@ -128,7 +128,7 @@ they support.
     a readable `W X H, Size` line and an unlabeled modification date. The EXIF popup includes a
     toggleable grayscale histogram, hidden by default. Overlay visibility persists
     immediately. The window title shows filename, dimensions, and size. Menus, dialogs, tooltips,
-    and panels use the hinted 12-point Terminus bitmap when the complete string is printable ASCII,
+    and panels use the hinted 9-point Terminus bitmap when the complete string is printable ASCII,
     preserving lowercase letters as drawn and using crisp one-bit pixels without antialiased edges. Strings
     containing other characters use the desktop's configured UI font through Pango, retaining Unicode
     shaping and automatic installed-font fallback; translucent surfaces provide a consistent visual
@@ -244,8 +244,8 @@ remain at their native size and are centered. Larger images are reduced to fit a
 
 The native navigation panel, menus, tooltips, information overlays, and modal dialogs use
 semi-transparent backgrounds so the image remains partially visible underneath them. Printable
-ASCII text uses the crisp embedded 12-point Terminus bitmap. The atlas is generated from
-`TerminusTTF-4.47.0.ttf` by extracting its embedded 16-pixel monochrome strike at 96 dpi; the
+ASCII text uses the crisp embedded 9-point Terminus bitmap. The atlas is generated from
+`TerminusTTF-4.47.0.ttf` by extracting its embedded 12-pixel monochrome strike at 96 dpi; the
 scalable outlines are deliberately not used. The TTF itself is not bundled. Text requiring Unicode
 uses the desktop font discovered from XFCE, GTK, xsettingsd, or KDE configuration. Set
 `JPEGVIEW_FONT` to a Pango font description such as `Sans 11` to override desktop discovery for that

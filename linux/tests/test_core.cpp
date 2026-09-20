@@ -3014,38 +3014,41 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 	}
 
 	jpegview_linux::SystemFont font("Sans 10");
-	Expect(font.LineHeight() == jpegview_linux::Terminus12LineHeight() &&
+	Expect(font.LineHeight() == jpegview_linux::Terminus9LineHeight() &&
 		font.TextWidth("iiii") == font.TextWidth("WWWW") &&
-		font.TextWidth("Terminus 12") == jpegview_linux::Terminus12TextWidth("Terminus 12"),
-		"printable ASCII did not use the fixed-width 12-point bitmap metrics");
-	Expect(jpegview_linux::Terminus12CanRender("Mixed Case 123") &&
-		!jpegview_linux::Terminus12CanRender(u8"café"),
+		font.TextWidth("Terminus 9") == jpegview_linux::Terminus9TextWidth("Terminus 9"),
+		"printable ASCII did not use the fixed-width 9-point bitmap metrics");
+	Expect(jpegview_linux::Terminus9CanRender("Mixed Case 123") &&
+		!jpegview_linux::Terminus9CanRender(u8"café"),
 		"bitmap-font coverage did not distinguish printable ASCII from Unicode");
-	const jpegview_linux::BitmapFontGlyph& uppercase = jpegview_linux::Terminus12Glyph('A');
-	const jpegview_linux::BitmapFontGlyph& lowercase = jpegview_linux::Terminus12Glyph('a');
-	Expect(jpegview_linux::Terminus12LineHeight() == 17 && uppercase.advance == 8 &&
-		uppercase.width == 8 && uppercase.height == 16,
-		"12-point font did not use the embedded 16-pixel monochrome bitmap strike");
+	const jpegview_linux::BitmapFontGlyph& uppercase = jpegview_linux::Terminus9Glyph('A');
+	const jpegview_linux::BitmapFontGlyph& lowercase = jpegview_linux::Terminus9Glyph('a');
+	Expect(jpegview_linux::Terminus9LineHeight() == 13 && uppercase.advance == 6 &&
+		uppercase.width == 6 && uppercase.height == 12,
+		"9-point font did not use the embedded 12-pixel monochrome bitmap strike");
 	Expect(uppercase.pixelOffset != lowercase.pixelOffset,
-		"12-point bitmap font mapped lowercase letters to uppercase glyphs");
+		"9-point bitmap font mapped lowercase letters to uppercase glyphs");
 	const std::uint8_t expectedAdvance = uppercase.advance;
 	for (unsigned int character = 32; character <= 126; ++character) {
-		const jpegview_linux::BitmapFontGlyph& glyph = jpegview_linux::Terminus12Glyph(
+		const jpegview_linux::BitmapFontGlyph& glyph = jpegview_linux::Terminus9Glyph(
 			static_cast<unsigned char>(character));
 		Expect(glyph.advance == expectedAdvance,
-			"12-point Terminus bitmap glyphs do not use a fixed-width advance");
-		const std::uint8_t* pixels = jpegview_linux::Terminus12GlyphPixels(glyph);
+			"9-point Terminus bitmap glyphs do not use a fixed-width advance");
+		const std::uint8_t* pixels = jpegview_linux::Terminus9GlyphPixels(glyph);
 		const std::size_t pixelCount = static_cast<std::size_t>(glyph.width) * glyph.height;
 		Expect(std::all_of(pixels, pixels + pixelCount, [](std::uint8_t value) {
 			return value == 0 || value == 255;
 		}), "embedded Terminus glyph contains antialiased pixel values");
 	}
 	const jpegview_linux::RasterizedText asciiRaster = font.Rasterize("Mixed Case");
-	Expect(asciiRaster.width > 0 && asciiRaster.height == jpegview_linux::Terminus12LineHeight() &&
+	Expect(asciiRaster.width > 0 && asciiRaster.height == jpegview_linux::Terminus9LineHeight() &&
 		!asciiRaster.argb.empty() &&
 		std::any_of(asciiRaster.argb.begin(), asciiRaster.argb.end(), [](std::uint32_t pixel) {
-			return (pixel >> 24) > 0 && (pixel >> 24) < 255;
-		}), "12-point ASCII bitmap did not retain its hinted antialiasing");
+			return (pixel >> 24) == 255;
+		}) &&
+		std::all_of(asciiRaster.argb.begin(), asciiRaster.argb.end(), [](std::uint32_t pixel) {
+			return (pixel >> 24) == 0 || (pixel >> 24) == 255;
+		}), "9-point ASCII bitmap was not rasterized with crisp one-bit coverage");
 	const jpegview_linux::RasterizedText raster = font.Rasterize(u8"Привет — 日本語");
 	// Unicode text uses the independently sized system font, not the embedded
 	// bitmap font whose fixed line height is returned by SystemFont::LineHeight.
