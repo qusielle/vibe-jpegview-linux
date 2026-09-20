@@ -60,5 +60,7 @@ until an edit, copy, save, histogram, or another pixel-consuming operation actua
 For fitted JPEGs, header dimensions are cached by file size and modification time and workers decode
 the smallest native libjpeg scale that covers the stable viewport. This makes renderer-ready textures,
 rather than ~96 MiB source frames, the primary navigation cache for high-resolution photo folders.
+JPEG headers and pixels are consumed through read-only file mappings, avoiding another compressed-data
+buffer while allowing the kernel page cache to service repeated neighboring access.
 The speculative display window is conservatively sized from the shared byte budget and viewport area
 (with a finite work cap), rather than using the decoded cache's fixed neighbor count.

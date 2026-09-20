@@ -9,9 +9,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <fcntl.h>
 #include <limits>
 #include <memory>
 #include <string_view>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 extern "C" {
 #include <jpeglib.h>
@@ -243,39 +247,104 @@ bool DecodeStb(const std::filesystem::path& filename, DecodedImage& image,
 	return result;
 }
 
-bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
-	std::string& errorMessage, int minimumWidth = 0, int minimumHeight = 0,
-	int* sourceWidth = nullptr, int* sourceHeight = nullptr) {
-	struct ErrorManager {
-		jpeg_error_mgr base{};
-		jmp_buf jump{};
-		char message[JMSG_LENGTH_MAX]{};
-	};
+struct MappedInput {
+	void* data = MAP_FAILED;
+	std::size_t size = 0;
+};
 
-	auto errorExit = [](j_common_ptr common) {
-		ErrorManager* error = reinterpret_cast<ErrorManager*>(common->err);
-		(*common->err->format_message)(common, error->message);
-		longjmp(error->jump, 1);
-	};
-	const auto suppressMessage = [](j_common_ptr) {};
-
-	FILE* file = std::fopen(filename.string().c_str(), "rb");
-	if (file == nullptr) {
+bool MapInput(const std::filesystem::path& filename, MappedInput& input,
+	std::string& errorMessage) {
+	const int descriptor = ::open(filename.c_str(), O_RDONLY | O_CLOEXEC);
+	if (descriptor < 0) {
 		errorMessage = "cannot open file";
 		return false;
 	}
+	struct stat status{};
+	if (::fstat(descriptor, &status) != 0 || status.st_size <= 0 ||
+		static_cast<std::uintmax_t>(status.st_size) >
+			static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
+		::close(descriptor);
+		errorMessage = status.st_size == 0 ? "empty file" : "cannot read file";
+		return false;
+	}
+	input.size = static_cast<std::size_t>(status.st_size);
+	input.data = ::mmap(nullptr, input.size, PROT_READ, MAP_PRIVATE, descriptor, 0);
+	::close(descriptor);
+	if (input.data == MAP_FAILED) {
+		input.size = 0;
+		errorMessage = "cannot map file";
+		return false;
+	}
+	return true;
+}
 
-	ErrorManager error{};
+void UnmapInput(MappedInput& input) {
+	if (input.data != MAP_FAILED) ::munmap(input.data, input.size);
+	input = {};
+}
+
+struct JpegErrorManager {
+	jpeg_error_mgr base{};
+	jmp_buf jump{};
+	char message[JMSG_LENGTH_MAX]{};
+};
+
+void JpegErrorExit(j_common_ptr common) {
+	JpegErrorManager* error = reinterpret_cast<JpegErrorManager*>(common->err);
+	(*common->err->format_message)(common, error->message);
+	longjmp(error->jump, 1);
+}
+
+void SuppressJpegMessage(j_common_ptr) {}
+
+bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage) {
+	MappedInput input;
+	if (!MapInput(filename, input, errorMessage)) return false;
+	JpegErrorManager error{};
 	jpeg_decompress_struct decoder{};
-	bool created = false;
+	volatile bool created = false;
+	decoder.err = jpeg_std_error(&error.base);
+	error.base.error_exit = JpegErrorExit;
+	error.base.output_message = SuppressJpegMessage;
+	if (setjmp(error.jump) != 0) {
+		if (created) jpeg_destroy_decompress(&decoder);
+		UnmapInput(input);
+		errorMessage = error.message[0] == '\0' ? "invalid JPEG header" : error.message;
+		return false;
+	}
+	jpeg_create_decompress(&decoder);
+	created = true;
+	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
+	const bool valid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK &&
+		ValidDimensions(static_cast<int>(decoder.image_width),
+			static_cast<int>(decoder.image_height), errorMessage);
+	if (valid) {
+		width = static_cast<int>(decoder.image_width);
+		height = static_cast<int>(decoder.image_height);
+	}
+	jpeg_destroy_decompress(&decoder);
+	UnmapInput(input);
+	if (!valid && errorMessage.empty()) errorMessage = "invalid JPEG header";
+	return valid;
+}
+
+bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
+	std::string& errorMessage, int minimumWidth = 0, int minimumHeight = 0,
+	int* sourceWidth = nullptr, int* sourceHeight = nullptr) {
+	MappedInput input;
+	if (!MapInput(filename, input, errorMessage)) return false;
+	JpegErrorManager error{};
+	jpeg_decompress_struct decoder{};
+	volatile bool created = false;
 #ifdef JCS_EXT_BGRA
 	DecodedFrame* volatile directFrame = nullptr;
 #else
 	volatile std::uint8_t* pixels = nullptr;
 #endif
 	decoder.err = jpeg_std_error(&error.base);
-	error.base.error_exit = errorExit;
-	error.base.output_message = suppressMessage;
+	error.base.error_exit = JpegErrorExit;
+	error.base.output_message = SuppressJpegMessage;
 	if (setjmp(error.jump) != 0) {
 		if (created) jpeg_destroy_decompress(&decoder);
 #ifdef JCS_EXT_BGRA
@@ -283,19 +352,19 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 #else
 		std::free(const_cast<std::uint8_t*>(pixels));
 #endif
-		std::fclose(file);
+		UnmapInput(input);
 		errorMessage = error.message[0] == '\0' ? "JPEG decoder failed" : error.message;
 		return false;
 	}
 
 	jpeg_create_decompress(&decoder);
 	created = true;
-	jpeg_stdio_src(&decoder, file);
+	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
 	if (jpeg_read_header(&decoder, TRUE) != JPEG_HEADER_OK ||
 		!ValidDimensions(static_cast<int>(decoder.image_width),
 			static_cast<int>(decoder.image_height), errorMessage)) {
 		jpeg_destroy_decompress(&decoder);
-		std::fclose(file);
+		UnmapInput(input);
 		if (errorMessage.empty()) errorMessage = "invalid JPEG header";
 		return false;
 	}
@@ -339,7 +408,7 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		delete const_cast<DecodedFrame*>(directFrame);
 		directFrame = nullptr;
 		jpeg_destroy_decompress(&decoder);
-		std::fclose(file);
+		UnmapInput(input);
 		errorMessage = "out of memory";
 		return false;
 	}
@@ -347,7 +416,7 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	pixels = static_cast<std::uint8_t*>(std::malloc(byteCount));
 	if (pixels == nullptr) {
 		jpeg_destroy_decompress(&decoder);
-		std::fclose(file);
+		UnmapInput(input);
 		errorMessage = "out of memory";
 		return false;
 	}
@@ -366,7 +435,7 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	jpeg_finish_decompress(&decoder);
 	jpeg_destroy_decompress(&decoder);
 	created = false;
-	std::fclose(file);
+	UnmapInput(input);
 
 #ifdef JCS_EXT_BGRA
 	try {
@@ -1693,23 +1762,12 @@ bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& 
 	std::string& errorMessage) {
 	width = 0;
 	height = 0;
-	// Asking for a one-pixel display decode lets the common decoder validate
-	// the complete stream, but that still unnecessarily decompresses pixels.
-	// stbi_info performs only format/header parsing and is independent of the
-	// pixel decoder selected for the actual image.
-	int components = 0;
-	if (!IsJpegPath(filename) ||
-		stbi_info(filename.string().c_str(), &width, &height, &components) == 0 ||
-		!ValidDimensions(width, height, errorMessage)) {
-		width = 0;
-		height = 0;
-		if (errorMessage.empty()) {
-			errorMessage = stbi_failure_reason() == nullptr ?
-				"invalid JPEG header" : stbi_failure_reason();
-		}
+	errorMessage.clear();
+	if (!IsJpegPath(filename)) {
+		errorMessage = "invalid JPEG header";
 		return false;
 	}
-	return true;
+	return ReadJpegSize(filename, width, height, errorMessage);
 }
 
 bool DecodeJpegForDisplay(const std::filesystem::path& filename,
