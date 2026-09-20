@@ -544,6 +544,12 @@ void TestFileListNavigationModesAndReload() {
 		"previous sibling navigation did not return to the prior populated folder");
 	Expect(!directSiblings.PreviousSiblingDirectory(),
 		"previous sibling navigation wrapped before the first sibling folder");
+	FileList loopingSiblingJump({(siblingA / "a.png").string()}, FileList::SortMode::FileName, true, true);
+	Expect(loopingSiblingJump.NextSiblingDirectory(),
+		"direct sibling navigation did not enter the next folder for looping navigation");
+	Expect(loopingSiblingJump.Previous() && loopingSiblingJump.Current().parent_path().filename() == "c" &&
+		loopingSiblingJump.Current().filename() == "z-last.png",
+		"previous navigation restored the pre-jump folder instead of wrapping in the current folder");
 	FileList siblingList({siblingA.string()}, FileList::SortMode::FileName, true, false);
 	siblingList.SetNavigationMode(FileList::NavigationMode::LoopSameDirectoryLevel);
 	Expect(siblingList.Next(), "sibling navigation did not enter the next populated sibling");

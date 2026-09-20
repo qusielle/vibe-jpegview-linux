@@ -372,7 +372,9 @@ subfolders, and `F9` traverses sibling folders. Alt+Left/Right opens the first i
 or next populated sibling folder without changing the active navigation mode. The navigation panel
 and context menu show the current display-order mode, and the context menu exposes the same
 navigation and sorting commands, including these sibling-folder jumps.
-Previous-folder history is retained when recursive or sibling navigation enters another directory.
+Previous-folder history is retained when F8/F9 traversal enters another directory. Explicit Alt+Left/Right
+jumps discard that history so subsequent Left/Right navigation follows the active mode within the
+destination folder.
 
 The context menu is a native rendering of the Windows `PopupMenu` resource, including its navigation,
 sorting, slideshow/movie, transform, zoom, auto-zoom, settings, and administration sections. The

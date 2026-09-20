@@ -84,7 +84,7 @@ private:
 	void SortEntries();
 	void RebuildPaths();
 	void LoadDirectory(const std::filesystem::path& directory, const std::filesystem::path& selected);
-	bool EnterDirectory(const std::filesystem::path& directory);
+	bool EnterDirectory(const std::filesystem::path& directory, bool rememberCurrentFolder = true);
 	bool NavigateSiblingDirectory(int direction);
 	bool RestorePreviousFolder();
 	bool RestoreNextFolder();

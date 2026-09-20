@@ -279,10 +279,14 @@ void FileList::LoadDirectory(const fs::path& directory, const fs::path& selected
 	RebuildPaths();
 }
 
-bool FileList::EnterDirectory(const fs::path& directory) {
+bool FileList::EnterDirectory(const fs::path& directory, bool rememberCurrentFolder) {
 	std::vector<Entry> nextEntries = ScanDirectory(directory);
 	if (nextEntries.empty()) return false;
-	previousFolders_.push_back(FolderState{currentDirectory_, std::move(entries_), currentIndex_});
+	if (rememberCurrentFolder) {
+		previousFolders_.push_back(FolderState{currentDirectory_, std::move(entries_), currentIndex_});
+	} else {
+		previousFolders_.clear();
+	}
 	entries_ = std::move(nextEntries);
 	currentDirectory_ = Normalize(directory);
 	currentIndex_ = 0;
@@ -308,7 +312,7 @@ bool FileList::NavigateSiblingDirectory(int direction) {
 		index >= 0 && index < static_cast<std::ptrdiff_t>(siblings.size()); index += direction) {
 		const fs::path& candidate = siblings[static_cast<std::size_t>(index)];
 		if (ScanDirectory(candidate).empty()) continue;
-		if (!EnterDirectory(candidate)) continue;
+		if (!EnterDirectory(candidate, false)) continue;
 		rootDirectory_ = parent;
 		return true;
 	}
