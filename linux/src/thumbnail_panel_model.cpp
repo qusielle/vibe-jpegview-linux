@@ -128,6 +128,12 @@ std::vector<std::string> ThumbnailCacheScheduler::Complete(
 	return Trim();
 }
 
+std::vector<std::string> ThumbnailCacheScheduler::Store(const std::string& key) {
+	if (key.empty()) return {};
+	cache_[key].lastUsed = ++useCounter_;
+	return Trim();
+}
+
 void ThumbnailCacheScheduler::Touch(const std::string& key) {
 	const auto found = cache_.find(key);
 	if (found != cache_.end()) found->second.lastUsed = ++useCounter_;

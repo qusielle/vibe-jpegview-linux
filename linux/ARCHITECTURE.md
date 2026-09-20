@@ -28,7 +28,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, dynamic labels, and tooltip placement.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry, nearest-first cache scheduling,
-  cancellation/LRU policy, memory sizing, and antialiased source-area reduction.
+  cancellation/LRU policy, memory sizing, antialiased source-area reduction, and low-priority
+  derivation from completed neighbor display frames.
 - `image_info_model`: stable dimensions/date/file-size presentation.
 - `system_font`: desktop-font discovery, UTF-8 shaping, measurement, and rasterization.
 - `app_icon`: extraction of the application icon embedded from the upstream ICO resource.
@@ -66,7 +67,10 @@ renderer thread because SDL renderer objects are not thread-safe. Decoded pixels
 reserve from one configured cache budget. Prepared
 frames are uploaded at most once per event-loop iteration, after the current frame is presented;
 unfinished closer neighbors block farther uploads. Expensive CPU-buffer destruction is handed back to
-cache workers, and static images backed by a ready display texture defer full-pixel materialization
+cache workers. When the thumbnail panel is visible, completed display frames also feed one bounded,
+very-low-priority thumbnail-resampling queue before their CPU pixels are retired; this avoids a
+second large-file decode while leaving renderer upload and display preparation ahead of thumbnail
+work. Static images backed by a ready display texture defer full-pixel materialization
 until an edit, copy, save, histogram, or another pixel-consuming operation actually needs it.
 For fitted JPEGs, header dimensions are cached by file size and modification time and workers decode
 the smallest native libjpeg scale that covers the stable viewport. This makes renderer-ready textures,

@@ -884,7 +884,8 @@ void TestJpegDisplayDecodeScaling() {
 	jpegview_linux::DisplayImageCache display(4096, 1);
 	const jpegview_linux::DisplayImageCache::ImagePtr prepared =
 		display.RequestAndWait(request);
-	Expect(prepared && prepared->width == 10 && prepared->height == 8 &&
+	Expect(prepared && prepared->filename == filename &&
+		prepared->width == 10 && prepared->height == 8 &&
 		prepared->bgra.size() == 10u * 8u * 4u,
 		"file-backed JPEG preparation did not produce exact display-size pixels");
 }
@@ -2764,6 +2765,116 @@ void TestThumbnailCacheSchedulingAndEviction() {
 	const std::vector<std::string> zeroCapacityEvictions = scheduler.Prepare({"wrap-a"}, 0, 0);
 	Expect(zeroCapacityEvictions.size() == 2 && scheduler.CacheSize() == 0,
 		"zero-capacity thumbnail cache retained its protected entry");
+
+	jpegview_linux::ThumbnailCacheScheduler external;
+	external.Prepare(keys, 2, 2);
+	Expect(external.Store("c").empty() && external.Store("b").empty() &&
+		external.Store("e") == std::vector<std::string>({"b"}) && external.IsCached("c") &&
+		external.IsCached("e"),
+		"thumbnail scheduler did not account for externally prepared pixels");
+}
+
+void TestThumbnailBackgroundPreparation() {
+	Expect(jpegview_linux::CanReuseDisplayPixelsForThumbnail(1920, 1080, 4u * 1024u * 1024u) &&
+		!jpegview_linux::CanReuseDisplayPixelsForThumbnail(8000, 6000, 4u * 1024u * 1024u) &&
+		!jpegview_linux::CanReuseDisplayPixelsForThumbnail(0, 1080, 4u * 1024u * 1024u),
+		"thumbnail display-source bound accepted an invalid or oversized frame");
+	auto source = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+	source->width = 4;
+	source->height = 4;
+	source->bgra = MakeIndexedImage(4, 4).bgra;
+	jpegview_linux::ThumbnailPreparationWorker realWorker;
+	Expect(realWorker.Request({"scaled", source, 2, 2, 0}),
+		"thumbnail worker rejected valid display-ready pixels");
+	Expect(realWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not finish source-area downsampling");
+	const auto scaled = realWorker.TakeCompleted(1);
+	Expect(scaled.size() == 1 && scaled[0]->key == "scaled" &&
+		scaled[0]->width == 2 && scaled[0]->height == 2 && scaled[0]->bgra.size() == 16,
+		"thumbnail worker returned incorrect derived pixels");
+
+	std::mutex orderMutex;
+	std::condition_variable orderChanged;
+	bool blockerStarted = false;
+	bool releaseBlocker = false;
+	std::vector<std::string> order;
+	jpegview_linux::ThumbnailPreparationWorker prioritized(
+		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			{
+				std::unique_lock<std::mutex> lock(orderMutex);
+				order.push_back(request.key);
+				if (request.key == "blocker") {
+					blockerStarted = true;
+					orderChanged.notify_all();
+					orderChanged.wait(lock, [&] { return releaseBlocker; });
+				}
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			result->key = request.key;
+			result->width = result->height = 1;
+			result->bgra.assign(4, 255);
+			return result;
+		});
+	Expect(prioritized.Request({"blocker", source, 2, 2, 9}),
+		"thumbnail worker rejected its blocking request");
+	bool blockerStartedInTime = false;
+	{
+		std::unique_lock<std::mutex> lock(orderMutex);
+		blockerStartedInTime = orderChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return blockerStarted; });
+	}
+	const bool queuedNeighbors = blockerStartedInTime &&
+		prioritized.Request({"far", source, 2, 2, 5}) &&
+		prioritized.Request({"near", source, 2, 2, 1});
+	{
+		std::lock_guard<std::mutex> lock(orderMutex);
+		releaseBlocker = true;
+	}
+	orderChanged.notify_all();
+	Expect(blockerStartedInTime, "thumbnail worker did not start in the background");
+	Expect(queuedNeighbors, "thumbnail worker rejected queued neighbors");
+	Expect(prioritized.WaitUntilIdle(std::chrono::seconds(2)),
+		"prioritized thumbnail work did not finish");
+	{
+		std::lock_guard<std::mutex> lock(orderMutex);
+		Expect(order == std::vector<std::string>({"blocker", "near", "far"}),
+			"thumbnail worker did not prefer the closest queued neighbor");
+	}
+	Expect(prioritized.TakeCompleted(3).size() == 3,
+		"thumbnail worker did not publish every prepared neighbor");
+
+	std::mutex staleMutex;
+	std::condition_variable staleChanged;
+	bool staleStarted = false;
+	bool releaseStale = false;
+	jpegview_linux::ThumbnailPreparationWorker cancellable(
+		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			std::unique_lock<std::mutex> lock(staleMutex);
+			staleStarted = true;
+			staleChanged.notify_all();
+			staleChanged.wait(lock, [&] { return releaseStale; });
+			auto result = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			result->key = request.key;
+			return result;
+		});
+	Expect(cancellable.Request({"stale", source, 2, 2, 0}),
+		"thumbnail worker rejected cancellation fixture");
+	bool staleStartedInTime = false;
+	{
+		std::unique_lock<std::mutex> lock(staleMutex);
+		staleStartedInTime = staleChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return staleStarted; });
+	}
+	if (staleStartedInTime) cancellable.Clear();
+	{
+		std::lock_guard<std::mutex> lock(staleMutex);
+		releaseStale = true;
+	}
+	staleChanged.notify_all();
+	Expect(staleStartedInTime, "stale thumbnail work did not start");
+	Expect(cancellable.WaitUntilIdle(std::chrono::seconds(2)) &&
+		cancellable.TakeCompleted(1).empty(),
+		"cleared thumbnail work published a stale result");
 }
 
 void TestThumbnailDownsamplingAntialiasing() {
@@ -3362,6 +3473,7 @@ int main() {
 	RunTest("viewer-chrome-paint-plans", TestViewerChromePaintPlans, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("thumbnail-cache-scheduling-and-eviction", TestThumbnailCacheSchedulingAndEviction, failures);
+	RunTest("thumbnail-background-preparation", TestThumbnailBackgroundPreparation, failures);
 	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);
 	RunTest("grayscale-spectrum-calculation-and-scaling", TestGrayscaleSpectrumCalculationAndScaling, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);

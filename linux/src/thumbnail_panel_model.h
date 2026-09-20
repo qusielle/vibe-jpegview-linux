@@ -83,6 +83,8 @@ public:
 	std::optional<ThumbnailLoadRequest> Next(std::uint32_t now);
 	std::vector<std::string> Complete(const ThumbnailLoadRequest& request,
 		std::uint32_t now, std::uint32_t delayMs = 25);
+	// Records pixels prepared outside the sequential idle-time loader.
+	std::vector<std::string> Store(const std::string& key);
 	void Touch(const std::string& key);
 	void Clear();
 

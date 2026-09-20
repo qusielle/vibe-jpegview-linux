@@ -96,6 +96,7 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		!image.Resize(request.targetWidth, request.targetHeight)) return {};
 
 	auto prepared = std::make_shared<PreparedDisplayImage>();
+	prepared->filename = request.filename;
 	prepared->key = request.key;
 	prepared->width = image.width;
 	prepared->height = image.height;

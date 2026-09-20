@@ -31,6 +31,7 @@ struct DisplayImageRequest {
 };
 
 struct PreparedDisplayImage {
+	std::filesystem::path filename;
 	std::string key;
 	int width = 0;
 	int height = 0;
