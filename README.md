@@ -1,6 +1,6 @@
-[![Documentation](https://img.shields.io/badge/Docs-Outdated-yellowgreen)](https://htmlpreview.github.io/?https://github.com/sylikc/jpegview/blob/master/src/JPEGView/Config/readme.html) [![Localization Progress](https://img.shields.io/badge/Localized-91%25-blueviolet)](#Localization) [![Build x64](https://github.com/sylikc/jpegview/actions/workflows/build-release-x64.yml/badge.svg?branch=master)](https://github.com/sylikc/jpegview/actions/workflows/build-release-x64.yml) [![OS Support](https://img.shields.io/badge/Windows-XP%20%7C%207%20%7C%208%20%7C%2010%20%7C%2011-blue)](#) [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue)](https://github.com/sylikc/jpegview/blob/master/LICENSE.txt)
+[![Documentation](https://img.shields.io/badge/Docs-Outdated-yellowgreen)](https://htmlpreview.github.io/?https://github.com/qusielle/vibe-jpegview-linux/blob/master/src/JPEGView/Config/readme.html) [![Localization Progress](https://img.shields.io/badge/Localized-91%25-blueviolet)](#Localization) [![Build Linux](https://github.com/qusielle/vibe-jpegview-linux/actions/workflows/linux-build.yml/badge.svg)](https://github.com/qusielle/vibe-jpegview-linux/actions/workflows/linux-build.yml) [![OS Support](https://img.shields.io/badge/Windows-XP%20%7C%207%20%7C%208%20%7C%2010%20%7C%2011-blue)](#) [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue)](https://github.com/qusielle/vibe-jpegview-linux/blob/master/LICENSE.txt)
 
-[![Latest GitHub Release](https://img.shields.io/github/v/release/sylikc/jpegview?label=GitHub&style=social)](https://github.com/sylikc/jpegview/releases)[![Downloads](https://badgen.net/github/assets-dl/sylikc/jpegview?cache=3600&color=grey&label=)](#) [![WinGet](https://repology.org/badge/version-for-repo/winget/jpegview.svg?allow_ignored=1&header=WinGet)](https://winstall.app/apps/sylikc.JPEGView) [![PortableApps](https://img.shields.io/badge/PortableApps-Current-green)](https://portableapps.com/apps/graphics_pictures/jpegview_portable) [![Scoop](https://repology.org/badge/version-for-repo/scoop/jpegview-fork.svg?header=Scoop)](https://scoop.sh/#/apps?q=%22jpegview-fork%22) [![Chocolatey](https://img.shields.io/chocolatey/v/jpegview)](https://community.chocolatey.org/packages/jpegview) [![Npackd](https://repology.org/badge/version-for-repo/npackd_stable/jpegview.svg?allow_ignored=1&header=Npackd)](https://www.npackd.org/p/jpegview)
+[![Latest GitHub Release](https://img.shields.io/github/v/release/qusielle/vibe-jpegview-linux?label=GitHub&style=social)](https://github.com/qusielle/vibe-jpegview-linux/releases)[![Downloads](https://badgen.net/github/assets-dl/qusielle/vibe-jpegview-linux?cache=3600&color=grey&label=)](#) [![WinGet](https://repology.org/badge/version-for-repo/winget/jpegview.svg?allow_ignored=1&header=WinGet)](https://winstall.app/apps/sylikc.JPEGView) [![PortableApps](https://img.shields.io/badge/PortableApps-Current-green)](https://portableapps.com/apps/graphics_pictures/jpegview_portable) [![Scoop](https://repology.org/badge/version-for-repo/scoop/jpegview-fork.svg?header=Scoop)](https://scoop.sh/#/apps?q=%22jpegview-fork%22) [![Chocolatey](https://img.shields.io/chocolatey/v/jpegview)](https://community.chocolatey.org/packages/jpegview) [![Npackd](https://repology.org/badge/version-for-repo/npackd_stable/jpegview.svg?allow_ignored=1&header=Npackd)](https://www.npackd.org/p/jpegview)
 
 # JPEGView for Linux - Image Viewer and Editor
 
@@ -63,11 +63,14 @@ Basic on-the-fly image processing is provided - allowing adjusting typical param
 
 ## Official Releases
 
-Official releases will be made to [sylikc's GitHub Releases](https://github.com/sylikc/jpegview/releases) page.  Each release includes:
+Releases are published on [qusielle's GitHub Releases](https://github.com/qusielle/vibe-jpegview-linux/releases).
+Historical Windows packages included portable Zip/7z archives and MSI installers. GitHub also
+provides source archives for releases.
 
-* **Archive Zip/7z** - Portable
-* **Windows Installer MSI** - For Installs
-* **Source code** - Build it yourself
+When a release is published, the Linux workflow adds x86_64 AppImage and native executable
+downloads built for Ubuntu 20.04, 22.04, and 24.04, along with a SHA-256 checksum file for each
+Ubuntu build. The Ubuntu 20.04 artifacts are the broadest-compatibility choice; artifacts built on
+newer Ubuntu releases may require a newer glibc.
 
 ## Portable
 
@@ -129,8 +132,8 @@ After installation, the configuration file is located at `%UserProfile%\scoop\pe
 
 ## What's New
 
-* See what has changed in the [latest releases](https://github.com/sylikc/jpegview/releases)
-* Or Check the [CHANGELOG.txt](https://github.com/sylikc/jpegview/blob/master/CHANGELOG.txt) to review new features in detail.
+* See what has changed in the [latest releases](https://github.com/qusielle/vibe-jpegview-linux/releases)
+* Or Check the [CHANGELOG.txt](https://github.com/qusielle/vibe-jpegview-linux/blob/master/CHANGELOG.txt) to review new features in detail.
 
 # Localization
 
@@ -169,13 +172,13 @@ JPEGView is currently translated/localized to 28 languages:
 | zh-tw | Chinese, Traditional (繁體中文) |
 | zh | Chinese, Simplified (简体中文) |
 
-See the [Localization wiki page](https://github.com/sylikc/jpegview/wiki/Localization#localization-status) for translation status for each language.
+See the [Localization wiki page](https://github.com/qusielle/vibe-jpegview-linux/wiki/Localization#localization-status) for translation status for each language.
 
 # Help / Documentation
 
 The JPEGView documentation is a little out of the date at the moment, but should still give a good summary of the features.
 
-This [readme.html](https://htmlpreview.github.io/?https://github.com/sylikc/jpegview/blob/master/src/JPEGView/Config/readme.html) is part of the JPEGView package.
+This [readme.html](https://htmlpreview.github.io/?https://github.com/qusielle/vibe-jpegview-linux/blob/master/src/JPEGView/Config/readme.html) is part of the JPEGView package.
 
 # Brief History
 
@@ -197,4 +200,4 @@ Special thanks to [qbnu](https://github.com/qbnu) for adding additional codec su
 * LibRaw support (all updated RAW formats, such as CR3)
 * Photoshop PSD support
 
-Thanks to all the _translators_ which keep JPEGView strings up-to-date in different languages!  See [CHANGELOG.txt](https://github.com/sylikc/jpegview/blob/master/CHANGELOG.txt) to find credits for translators at each release!
+Thanks to all the _translators_ which keep JPEGView strings up-to-date in different languages!  See [CHANGELOG.txt](https://github.com/qusielle/vibe-jpegview-linux/blob/master/CHANGELOG.txt) to find credits for translators at each release!

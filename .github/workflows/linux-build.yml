@@ -1,0 +1,49 @@
+name: Build Linux
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Ubuntu ${{ matrix.ubuntu }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["20", "22", "24"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Build and test Linux image
+        env:
+          DOCKER_BUILDKIT: "1"
+          UBUNTU_VERSION: ${{ matrix.ubuntu }}
+        run: |
+          image="jpegview-linux-build:ubuntu${UBUNTU_VERSION}"
+          output_dir="$RUNNER_TEMP/jpegview-linux-ci-ubuntu${UBUNTU_VERSION}"
+          mkdir -p "$output_dir"
+
+          docker build \
+            --file "linux/Dockerfile.ubuntu${UBUNTU_VERSION}" \
+            --tag "$image" \
+            .
+
+          docker run --rm -v "$output_dir:/out" "$image" appimage ci
+          docker run --rm -v "$output_dir:/out" "$image" binary
+
+  shell-check:
+    name: Packaging shell checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Check shell scripts
+        run: make -C linux test-shell
