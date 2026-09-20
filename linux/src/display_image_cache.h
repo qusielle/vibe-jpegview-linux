@@ -50,6 +50,12 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const std::filesystem::path& fil
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
 
+// Conservative number of neighboring full-viewport textures that fit beside
+// the current image. The cap prevents a very large configured budget from
+// scheduling an unbounded directory in one speculative batch.
+std::size_t DisplayPrefetchCount(std::size_t cacheBytes, int viewportWidth,
+	int viewportHeight, std::size_t fileCount);
+
 // Threaded CPU-side display-frame cache. Workers perform correction, copying,
 // and high-quality scaling. SDL texture creation deliberately remains outside
 // this class because SDL_Renderer is confined to its owning thread.

@@ -1057,6 +1057,16 @@ std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height) {
 }
 
 void TestDisplayImageCacheBackgroundPreparation() {
+	Expect(jpegview_linux::DisplayPrefetchCount(1024, 10, 10, 100) == 1,
+		"display prefetch sizing did not reserve one texture slot for the current image");
+	Expect(jpegview_linux::DisplayPrefetchCount(40000, 10, 10, 100) == 99,
+		"display prefetch sizing did not use the available texture budget");
+	Expect(jpegview_linux::DisplayPrefetchCount(1024 * 1024, 1, 1, 10000) == 512,
+		"display prefetch sizing did not enforce its speculative work cap");
+	Expect(jpegview_linux::DisplayPrefetchCount(399, 10, 10, 5) == 0 &&
+		jpegview_linux::DisplayPrefetchCount(1024, 0, 10, 5) == 0,
+		"display prefetch sizing accepted an unusable cache or viewport");
+
 	TemporaryDirectory temporary;
 	const fs::path firstFile = temporary.path() / "first.jpg";
 	const fs::path secondFile = temporary.path() / "second.jpg";

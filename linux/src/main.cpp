@@ -693,7 +693,8 @@ private:
 		}
 		const std::vector<std::size_t> prefetchOrder = jpegview_linux::ImagePrefetchOrder(
 			fileList_.Files().size(), fileList_.CurrentIndex(), preferredDirection,
-			kDecodedImagePrefetchCount);
+			jpegview_linux::DisplayPrefetchCount(cacheBudget_->Capacity(), imageArea.w,
+				imageArea.h, fileList_.Files().size()));
 		for (std::size_t position = 0; position < prefetchOrder.size(); ++position) {
 			const fs::path& filename = fileList_.Files()[prefetchOrder[position]];
 			batch->priorityByFilename.emplace(filename.string(), position + 1);

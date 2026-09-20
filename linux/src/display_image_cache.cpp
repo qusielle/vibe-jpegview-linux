@@ -158,6 +158,20 @@ std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image) {
 	return image.bgra.size();
 }
 
+std::size_t DisplayPrefetchCount(std::size_t cacheBytes, int viewportWidth,
+	int viewportHeight, std::size_t fileCount) {
+	constexpr std::size_t maximumSpeculativeFiles = 512;
+	if (cacheBytes == 0 || viewportWidth <= 0 || viewportHeight <= 0 || fileCount < 2) return 0;
+	const std::size_t width = static_cast<std::size_t>(viewportWidth);
+	const std::size_t height = static_cast<std::size_t>(viewportHeight);
+	if (width > std::numeric_limits<std::size_t>::max() / height ||
+		width * height > std::numeric_limits<std::size_t>::max() / 4) return 0;
+	const std::size_t textureBytes = width * height * 4;
+	const std::size_t textureSlots = cacheBytes / textureBytes;
+	if (textureSlots < 2) return 0;
+	return std::min({textureSlots - 1, fileCount - 1, maximumSpeculativeFiles});
+}
+
 struct DisplayImageCache::Impl {
 	struct Entry {
 		ImagePtr image;

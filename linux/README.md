@@ -26,7 +26,8 @@ they support.
    sharpening path was ported, with bicubic enlargement and a shared 1 GiB image-cache budget.
    Fitted JPEGs use libjpeg-turbo's native reduced DCT decode, avoiding full 4000×6000 pixel buffers
    when the screen needs only a smaller image. Nearby images are corrected and scaled on low-priority
-   worker threads, then uploaded
+   worker threads; the prefetch window is derived from the configured cache size and current viewport,
+   so the default 1 GiB budget can cover roughly 128 full-HD neighbors. Prepared frames are then uploaded
    incrementally and retained as renderer-ready textures. The closest next and previous files take
    preparation and upload priority, and an already prepared static image is presented without first
    copying its full decoded pixels on the UI thread; navigation therefore avoids CPU resizing and
