@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <csetjmp>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -11,6 +14,7 @@
 #include <string_view>
 
 extern "C" {
+#include <jpeglib.h>
 #include <png.h>
 #include <zlib.h>
 }
@@ -237,6 +241,105 @@ bool DecodeStb(const std::filesystem::path& filename, DecodedImage& image,
 	const bool result = AppendRGBA(image, width, height, rgba, 0, errorMessage);
 	stbi_image_free(rgba);
 	return result;
+}
+
+bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
+	std::string& errorMessage) {
+	struct ErrorManager {
+		jpeg_error_mgr base{};
+		jmp_buf jump{};
+		char message[JMSG_LENGTH_MAX]{};
+	};
+
+	auto errorExit = [](j_common_ptr common) {
+		ErrorManager* error = reinterpret_cast<ErrorManager*>(common->err);
+		(*common->err->format_message)(common, error->message);
+		longjmp(error->jump, 1);
+	};
+
+	FILE* file = std::fopen(filename.string().c_str(), "rb");
+	if (file == nullptr) {
+		errorMessage = "cannot open file";
+		return false;
+	}
+
+	ErrorManager error{};
+	jpeg_decompress_struct decoder{};
+	bool created = false;
+	volatile std::uint8_t* pixels = nullptr;
+	decoder.err = jpeg_std_error(&error.base);
+	error.base.error_exit = errorExit;
+	if (setjmp(error.jump) != 0) {
+		if (created) jpeg_destroy_decompress(&decoder);
+		std::free(const_cast<std::uint8_t*>(pixels));
+		std::fclose(file);
+		errorMessage = error.message[0] == '\0' ? "JPEG decoder failed" : error.message;
+		return false;
+	}
+
+	jpeg_create_decompress(&decoder);
+	created = true;
+	jpeg_stdio_src(&decoder, file);
+	if (jpeg_read_header(&decoder, TRUE) != JPEG_HEADER_OK ||
+		!ValidDimensions(static_cast<int>(decoder.image_width),
+			static_cast<int>(decoder.image_height), errorMessage)) {
+		jpeg_destroy_decompress(&decoder);
+		std::fclose(file);
+		if (errorMessage.empty()) errorMessage = "invalid JPEG header";
+		return false;
+	}
+
+#ifdef JCS_EXT_BGRA
+	decoder.out_color_space = JCS_EXT_BGRA;
+	constexpr int outputComponents = 4;
+#else
+	decoder.out_color_space = JCS_RGB;
+	constexpr int outputComponents = 3;
+#endif
+	jpeg_start_decompress(&decoder);
+	const int width = static_cast<int>(decoder.output_width);
+	const int height = static_cast<int>(decoder.output_height);
+	const std::size_t rowBytes = static_cast<std::size_t>(width) * outputComponents;
+	const std::size_t byteCount = rowBytes * static_cast<std::size_t>(height);
+	pixels = static_cast<std::uint8_t*>(std::malloc(byteCount));
+	if (pixels == nullptr) {
+		jpeg_destroy_decompress(&decoder);
+		std::fclose(file);
+		errorMessage = "out of memory";
+		return false;
+	}
+	while (decoder.output_scanline < decoder.output_height) {
+		JSAMPROW row = const_cast<std::uint8_t*>(pixels) +
+			static_cast<std::size_t>(decoder.output_scanline) * rowBytes;
+		jpeg_read_scanlines(&decoder, &row, 1);
+	}
+	jpeg_finish_decompress(&decoder);
+	jpeg_destroy_decompress(&decoder);
+	created = false;
+	std::fclose(file);
+
+#ifdef JCS_EXT_BGRA
+	const bool appended = AppendBGRA(image, width, height,
+		const_cast<const std::uint8_t*>(pixels), 0, errorMessage);
+#else
+	std::vector<std::uint8_t> bgra;
+	try {
+		bgra.resize(static_cast<std::size_t>(width) * height * 4);
+	} catch (const std::exception&) {
+		std::free(const_cast<std::uint8_t*>(pixels));
+		errorMessage = "out of memory";
+		return false;
+	}
+	for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel) {
+		bgra[pixel * 4] = pixels[pixel * 3 + 2];
+		bgra[pixel * 4 + 1] = pixels[pixel * 3 + 1];
+		bgra[pixel * 4 + 2] = pixels[pixel * 3];
+		bgra[pixel * 4 + 3] = 255;
+	}
+	const bool appended = AppendBGRA(image, width, height, bgra.data(), 0, errorMessage);
+#endif
+	std::free(const_cast<std::uint8_t*>(pixels));
+	return appended;
 }
 
 std::uint32_t ReadBE32(const std::uint8_t* data) {
@@ -1517,6 +1620,9 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	image = {};
 	errorMessage.clear();
 	const std::string extension = Lower(filename.extension().string());
+	if (extension == ".jpg" || extension == ".jpeg" || extension == ".jpe") {
+		return DecodeJpeg(filename, image, errorMessage);
+	}
 	if (extension == ".gif") {
 #if JPEGVIEW_HAVE_GIF
 		return DecodeGif(filename, image, errorMessage);
