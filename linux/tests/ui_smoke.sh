@@ -58,6 +58,7 @@ write_ppm "$temporary/images/05-cyan.ppm" 0 255 255
 mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
 write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
+touch -t 202001010000.00 "$temporary/images/00-album/first.ppm" "$temporary/images/00-album/second.ppm"
 mkdir -p "$temporary/images/00-entry-test"
 write_ppm "$temporary/images/00-entry-test/inside-first.ppm" 64 128 32
 mkdir -p "$temporary/images/00-wheel-test"
@@ -383,6 +384,44 @@ wheel_restore_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_
 case "$wheel_restore_title" in
 	01-red.ppm*) ;;
 	*) echo "UI smoke test: returning from the wheel fixture did not restore the root image listing" >&2; exit 1 ;;
+esac
+
+# Alt+Left/Right jump between populated sibling folders and choose the first
+# image in that folder, independently of the currently selected root image.
+DISPLAY=":$display_number" xdotool key ctrl+o
+sleep 0.2
+DISPLAY=":$display_number" xdotool key Home
+DISPLAY=":$display_number" xdotool key Down
+DISPLAY=":$display_number" xdotool key ctrl+Return
+sleep 0.3
+sibling_start_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$sibling_start_title" in
+	first.ppm*) ;;
+	*) echo "UI smoke test: could not enter the first sibling-folder fixture ($sibling_start_title)" >&2; exit 1 ;;
+esac
+DISPLAY=":$display_number" xdotool key alt+Right
+sleep 0.3
+sibling_next_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$sibling_next_title" in
+	inside-first.ppm*) ;;
+	*) echo "UI smoke test: Alt+Right did not open the next sibling folder's first image" >&2; exit 1 ;;
+esac
+DISPLAY=":$display_number" xdotool key alt+Left
+sleep 0.3
+sibling_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$sibling_previous_title" in
+	first.ppm*) ;;
+	*) echo "UI smoke test: Alt+Left did not open the previous sibling folder's first image" >&2; exit 1 ;;
+esac
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key BackSpace
+DISPLAY=":$display_number" xdotool type --delay 10 '01-RED'
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+sibling_restore_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$sibling_restore_title" in
+	01-red.ppm*) ;;
+	*) echo "UI smoke test: sibling-folder test did not restore the root image" >&2; exit 1 ;;
 esac
 
 # A short press must advance exactly once. Background display preparation can

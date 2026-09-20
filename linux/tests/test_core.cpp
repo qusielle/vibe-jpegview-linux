@@ -356,6 +356,10 @@ void TestKeyboardCommandMappings() {
 		{SDLK_F7, 0, IDM_LOOP_FOLDER},
 		{SDLK_F8, 0, IDM_LOOP_RECURSIVELY},
 		{SDLK_F9, 0, IDM_LOOP_SIBLINGS},
+		{SDLK_LEFT, 0x0100u, jpegview_linux::kCommandPreviousSiblingFolder},
+		{SDLK_RIGHT, 0x0200u, jpegview_linux::kCommandNextSiblingFolder},
+		{SDLK_LEFT, 0x0140u, 0},
+		{SDLK_RIGHT, 0x0101u, 0},
 		{SDLK_DELETE, 0, IDM_MOVE_TO_RECYCLE_BIN_CONFIRM},
 		{'w', 0, IDM_EXPLORE},
 		{SDLK_RIGHT, 0, IDM_NEXT},
@@ -517,15 +521,33 @@ void TestFileListNavigationModesAndReload() {
 
 	const fs::path siblings = temporary.path() / "siblings";
 	const fs::path siblingA = siblings / "a";
-	const fs::path siblingB = siblings / "b";
+	const fs::path siblingEmpty = siblings / "b-empty";
+	const fs::path siblingB = siblings / "c";
 	fs::create_directories(siblingA);
+	fs::create_directories(siblingEmpty);
 	fs::create_directories(siblingB);
 	WriteTinyImage(siblingA / "a.png");
-	WriteTinyImage(siblingB / "b.png");
+	WriteTinyImage(siblingB / "z-last.png");
+	WriteTinyImage(siblingB / "a-first.png");
+	FileList directSiblings({(siblingA / "a.png").string()}, FileList::SortMode::FileName, true, false);
+	directSiblings.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
+	Expect(directSiblings.NextSiblingDirectory() &&
+		directSiblings.Current().parent_path().filename() == "c" &&
+		directSiblings.Current().filename() == "a-first.png" &&
+		directSiblings.GetNavigationMode() == FileList::NavigationMode::LoopSubDirectories,
+		"direct sibling navigation did not skip empty folders, select the first sorted image, or preserve its mode");
+	Expect(!directSiblings.NextSiblingDirectory(),
+		"direct sibling navigation wrapped past the final sibling folder");
+	Expect(directSiblings.PreviousSiblingDirectory() &&
+		directSiblings.Current().parent_path().filename() == "a" &&
+		directSiblings.Current().filename() == "a.png",
+		"previous sibling navigation did not return to the prior populated folder");
+	Expect(!directSiblings.PreviousSiblingDirectory(),
+		"previous sibling navigation wrapped before the first sibling folder");
 	FileList siblingList({siblingA.string()}, FileList::SortMode::FileName, true, false);
 	siblingList.SetNavigationMode(FileList::NavigationMode::LoopSameDirectoryLevel);
 	Expect(siblingList.Next(), "sibling navigation did not enter the next populated sibling");
-	Expect(siblingList.Current().parent_path().filename() == "b", "sibling navigation entered the wrong folder");
+	Expect(siblingList.Current().parent_path().filename() == "c", "sibling navigation entered the wrong folder");
 	Expect(siblingList.Previous(), "sibling navigation did not restore the previous sibling");
 	Expect(siblingList.Current().parent_path().filename() == "a", "sibling previous navigation restored the wrong folder");
 
@@ -2241,6 +2263,9 @@ void TestContextMenuCatalogAndState() {
 	Expect(findCommand(compact, IDM_OPEN) != nullptr && findCommand(compact, IDM_NEXT) != nullptr &&
 		findCommand(compact, IDM_ZOOM_100) != nullptr && findCommand(compact, IDM_EXIT) != nullptr,
 		"compact context menu lost a primary command");
+	Expect(findCommand(compact, jpegview_linux::kCommandPreviousSiblingFolder) == nullptr &&
+		findCommand(compact, jpegview_linux::kCommandNextSiblingFolder) == nullptr,
+		"compact context menu exposed advanced sibling-folder navigation commands");
 
 	state.playbackMode = jpegview_linux::PlaybackMode::Movie;
 	state.animationAvailable = true;
@@ -2271,6 +2296,14 @@ void TestContextMenuCatalogAndState() {
 	Expect(findCommand(advanced, IDM_PRINT) != nullptr && findCommand(advanced, IDM_LOOP_FOLDER) != nullptr &&
 		findCommand(advanced, IDM_ZOOM_400) != nullptr && findCommand(advanced, IDM_SLIDESHOW_START) != nullptr,
 		"expanded context menu omitted an advanced catalog section");
+	const MenuItem* previousSibling = findCommand(advanced,
+		jpegview_linux::kCommandPreviousSiblingFolder);
+	const MenuItem* nextSibling = findCommand(advanced,
+		jpegview_linux::kCommandNextSiblingFolder);
+	Expect(previousSibling != nullptr && previousSibling->label == "  Previous sibling folder" &&
+		previousSibling->shortcut == "Alt+Left" && nextSibling != nullptr &&
+		nextSibling->label == "  Next sibling folder" && nextSibling->shortcut == "Alt+Right",
+		"expanded context menu omitted sibling-folder navigation items or their shortcuts");
 	Expect(findCommand(advanced, IDM_SHOW_FILEINFO)->checked &&
 		findCommand(advanced, IDM_SHOW_FILENAME)->checked &&
 		!findCommand(advanced, IDM_SHOW_NAVPANEL)->checked &&

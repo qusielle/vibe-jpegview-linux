@@ -10,6 +10,8 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	const bool ctrl = (modifiers & 0x00C0u) != 0;
 	const bool shift = (modifiers & 0x0003u) != 0;
 	const bool alt = (modifiers & 0x0300u) != 0;
+	if (alt && !ctrl && !shift && key == SDLK_LEFT) return kCommandPreviousSiblingFolder;
+	if (alt && !ctrl && !shift && key == SDLK_RIGHT) return kCommandNextSiblingFolder;
 	if (alt && !ctrl && !shift && key == SDLK_r) return IDM_SLIDESHOW_RESUME;
 	if (alt) return 0;
 

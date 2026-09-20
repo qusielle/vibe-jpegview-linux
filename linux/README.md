@@ -43,7 +43,9 @@ they support.
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
-   sibling folders; reload; and previous-folder history. Ordering supports logical filename,
+   sibling folders; reload; and previous-folder history. Alt+Left/Right jumps directly to the first
+   image in the previous/next populated sibling folder, independent of the active navigation mode.
+   Ordering supports logical filename,
    filesystem modification date, creation date, file size, and random modes in either direction.
    The active filename/date ordering is visible and switchable from both the navigation panel and
    context menu, and the selected mode is preserved between runs.
@@ -280,7 +282,7 @@ trips across static and animated formats, all PNM variants, malformed input, bat
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, focus restoration, paging,
 Home/End, held-key movement, wheel scrolling, and dialog/preview resizing; thumbnail
-display/resizing/clicking/persistence; context-menu expansion and repainting; startup controls;
+display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu expansion and repainting; startup controls;
 mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; maximize restoration; and
 persisted settings:
 
@@ -365,8 +367,10 @@ thumbnails without large fixed vertical gaps. The width and visibility are prese
 The port follows the Windows `CFileList` navigation model: the default display order is ascending
 file modification time from the filesystem; `N`, `M`, `C`, and `Z` select filename, modification
 date, creation date, and random order. `F7` loops the current folder, `F8` traverses non-empty
-subfolders, and `F9` traverses sibling folders. The navigation panel and context menu show the
-current display-order mode, and the context menu exposes the same navigation and sorting commands.
+subfolders, and `F9` traverses sibling folders. Alt+Left/Right opens the first image in the previous
+or next populated sibling folder without changing the active navigation mode. The navigation panel
+and context menu show the current display-order mode, and the context menu exposes the same
+navigation and sorting commands, including these sibling-folder jumps.
 Previous-folder history is retained when recursive or sibling navigation enters another directory.
 
 The context menu is a native rendering of the Windows `PopupMenu` resource, including its navigation,

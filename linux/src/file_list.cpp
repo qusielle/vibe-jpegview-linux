@@ -294,6 +294,27 @@ bool FileList::EnterDirectory(const fs::path& directory) {
 	return true;
 }
 
+bool FileList::NavigateSiblingDirectory(int direction) {
+	if (direction != -1 && direction != 1) return false;
+	if (multipleInputMode_) PrepareDirectoryNavigation();
+	if (entries_.empty() || currentDirectory_.empty()) return false;
+	const fs::path parent = currentDirectory_.parent_path();
+	if (parent.empty() || parent == currentDirectory_) return false;
+	const std::vector<fs::path> siblings = ChildDirectories(parent);
+	const auto current = std::find(siblings.begin(), siblings.end(), currentDirectory_);
+	if (current == siblings.end()) return false;
+	const std::ptrdiff_t currentIndex = std::distance(siblings.begin(), current);
+	for (std::ptrdiff_t index = currentIndex + direction;
+		index >= 0 && index < static_cast<std::ptrdiff_t>(siblings.size()); index += direction) {
+		const fs::path& candidate = siblings[static_cast<std::size_t>(index)];
+		if (ScanDirectory(candidate).empty()) continue;
+		if (!EnterDirectory(candidate)) continue;
+		rootDirectory_ = parent;
+		return true;
+	}
+	return false;
+}
+
 bool FileList::RestorePreviousFolder() {
 	if (previousFolders_.empty()) return false;
 	nextFolders_.push_back(FolderState{currentDirectory_, std::move(entries_), currentIndex_});
@@ -442,6 +463,14 @@ void FileList::SetNavigationMode(NavigationMode navigationMode) {
 		PrepareDirectoryNavigation();
 		if (!currentDirectory_.empty()) rootDirectory_ = currentDirectory_;
 	}
+}
+
+bool FileList::PreviousSiblingDirectory() {
+	return NavigateSiblingDirectory(-1);
+}
+
+bool FileList::NextSiblingDirectory() {
+	return NavigateSiblingDirectory(1);
 }
 
 } // namespace jpegview_linux

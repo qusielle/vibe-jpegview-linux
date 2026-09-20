@@ -3,7 +3,8 @@
 The SDL frontend deliberately keeps platform-independent behavior outside `main.cpp`. New logic
 should normally be added to one of these focused modules and covered by `tests/test_core.cpp`:
 
-- `file_list`: discovery, ordering, navigation modes, and current-file preservation.
+- `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, and current-file
+  preservation.
 - `image`: validated mutable BGRA storage, rotate/mirror transforms, high-quality resizing, and
   histogram-derived automatic correction.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.

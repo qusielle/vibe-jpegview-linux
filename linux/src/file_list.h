@@ -53,6 +53,8 @@ public:
 
 	void SetNavigationMode(NavigationMode navigationMode);
 	NavigationMode GetNavigationMode() const { return navigationMode_; }
+	bool PreviousSiblingDirectory();
+	bool NextSiblingDirectory();
 
 private:
 	struct Entry {
@@ -83,6 +85,7 @@ private:
 	void RebuildPaths();
 	void LoadDirectory(const std::filesystem::path& directory, const std::filesystem::path& selected);
 	bool EnterDirectory(const std::filesystem::path& directory);
+	bool NavigateSiblingDirectory(int direction);
 	bool RestorePreviousFolder();
 	bool RestoreNextFolder();
 	std::filesystem::path FindNextFolder() const;

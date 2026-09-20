@@ -1720,6 +1720,13 @@ private:
 		if (loaded && animate) StartTransition(previousImage);
 	}
 
+	void NavigateToSiblingFolder(int direction) {
+		if (clipboardMode_) RestoreClipboardImage();
+		const bool navigated = direction < 0 ? fileList_.PreviousSiblingDirectory() :
+			fileList_.NextSiblingDirectory();
+		if (navigated) LoadCurrent(direction);
+	}
+
 	void FirstImage() {
 		if (clipboardMode_) RestoreClipboardImage();
 		if (fileList_.Empty() || fileList_.CurrentIndex() == 0) return;
@@ -1995,6 +2002,12 @@ private:
 			return;
 		}
 		switch (command) {
+		case jpegview_linux::kCommandPreviousSiblingFolder:
+			NavigateToSiblingFolder(-1);
+			break;
+		case jpegview_linux::kCommandNextSiblingFolder:
+			NavigateToSiblingFolder(1);
+			break;
 		case IDM_FIRST:
 			FirstImage();
 			break;
@@ -4537,7 +4550,8 @@ void PrintUsage(const char* program) {
 		<< "  --help             Show this help\n\n"
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel up/down navigates previous/next, Ctrl+mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
-		<< "          F7/F8/F9 select folder/recursive/sibling navigation, N/M/C/Z select display order,\n"
+		<< "          F7/F8/F9 select folder/recursive/sibling navigation, Alt+Left/Right open the first image in adjacent sibling folders,\n"
+		<< "          N/M/C/Z select display order,\n"
 		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails,\n"
 		<< "          right-click or the Context Menu key opens the context menu, Esc or Q quits.\n";
 }
