@@ -140,8 +140,13 @@ The final handoff must list the exact test commands that passed and any check th
 
 ## Commit rules
 
-- Make atomic commits: one feature, fix, refactor, test-only improvement, documentation update, or
-  build-system change per commit. A feature commit may include its direct tests and documentation.
+- Make commits the smallest independently reviewable and revertible units practical. One commit
+  should represent one behavior or maintenance concern; include that change's direct tests and
+  documentation with it, but keep unrelated behaviors in separate commits.
+- Do not combine distinct user-visible capabilities merely because they touch the same dialog,
+  module, or broader task. For example, file-list scrolling and dialog resizing belong in separate
+  commits; likewise, separately requested changes should remain separate unless they are genuinely
+  coupled and cannot sensibly be reviewed or reverted independently.
 - Separate behavior-preserving refactors from behavior changes so either can be reverted independently.
 - Do not mix opportunistic cleanup with a requested fix. Record larger follow-up ideas separately.
 - Use a domain-prefixed imperative subject, for example:
