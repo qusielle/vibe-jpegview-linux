@@ -4096,7 +4096,7 @@ private:
 	// Declaration order is intentional: the decoder (destroyed first) may
 	// schedule final display work while joining its worker during teardown.
 	jpegview_linux::DisplayImageCache displayImageCache_{
-		std::numeric_limits<std::size_t>::max(), 2, {}, cacheBudget_};
+		std::numeric_limits<std::size_t>::max(), 0, {}, cacheBudget_};
 	jpegview_linux::DecodedImageCache imageCache_{
 		std::numeric_limits<std::size_t>::max(), {}, cacheBudget_, 2};
 	std::size_t cacheSizeMiB_ = jpegview_linux::kDefaultCacheSizeMiB;

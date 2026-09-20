@@ -25,8 +25,9 @@ they support.
 3. **High-quality viewing, fitting, zooming, and panning.** JPEGView's high-quality downsampling and
    sharpening path was ported, with bicubic enlargement and a shared 1 GiB image-cache budget.
    Fitted JPEGs use libjpeg-turbo's native reduced DCT decode, avoiding full 4000×6000 pixel buffers
-   when the screen needs only a smaller image. Nearby images are corrected and scaled on low-priority
-   worker threads; the prefetch window is derived from the configured cache size and current viewport,
+   when the screen needs only a smaller image. Up to four hardware-aware, low-priority workers prepare
+   the closest forward/backward pairs concurrently; the prefetch window is derived from the configured
+   cache size and current viewport,
    so the default 1 GiB budget can cover roughly 128 full-HD neighbors. Large JPEG input is memory-mapped,
    letting native decoding and repeated neighboring access use the kernel page cache without an extra
    stdio copy layer. Prepared frames are then uploaded incrementally and retained as renderer-ready
