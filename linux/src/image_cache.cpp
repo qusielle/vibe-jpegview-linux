@@ -111,10 +111,12 @@ struct DecodedImageCache::Impl {
 		Completion completion;
 	};
 
-	explicit Impl(std::size_t budget, Decoder decode)
-		: byteBudget(budget), decoder(std::move(decode)) {
+	explicit Impl(std::size_t budget, Decoder decode,
+		std::shared_ptr<SharedCacheBudget> shared)
+		: byteBudget(budget), decoder(std::move(decode)), sharedBudget(std::move(shared)) {
 		if (!decoder) decoder = DecodeImage;
 		worker = std::thread([this] { Run(); });
+		retirementWorker = std::thread([this] { Retire(); });
 	}
 
 	~Impl() {
@@ -125,12 +127,31 @@ struct DecodedImageCache::Impl {
 			queue.clear();
 		}
 		workAvailable.notify_all();
+		retirementAvailable.notify_all();
 		if (worker.joinable()) worker.join();
+		if (retirementWorker.joinable()) retirementWorker.join();
+		if (sharedBudget) sharedBudget->Release(cachedBytes);
 	}
 
 	void Erase(std::unordered_map<std::string, Entry>::iterator entry) {
-		cachedBytes -= entry->second.bytes;
+		const std::size_t bytes = entry->second.bytes;
+		ImagePtr retiredImage = std::move(entry->second.image);
 		entries.erase(entry);
+		cachedBytes -= bytes;
+		if (sharedBudget) sharedBudget->Release(bytes);
+		if (retiredImage) {
+			retired.push_back(std::move(retiredImage));
+			retirementAvailable.notify_one();
+		}
+	}
+
+	std::unordered_map<std::string, Entry>::iterator Oldest() {
+		if (entries.empty()) return entries.end();
+		auto oldest = entries.begin();
+		for (auto candidate = std::next(entries.begin()); candidate != entries.end(); ++candidate) {
+			if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
+		}
+		return oldest;
 	}
 
 	bool Insert(const std::string& key, const FileIdentity& identity,
@@ -142,13 +163,15 @@ struct DecodedImageCache::Impl {
 		if (existing != entries.end()) Erase(existing);
 		if (!mayEvict && bytes > byteBudget - cachedBytes) return false;
 		while (bytes > byteBudget - cachedBytes && !entries.empty()) {
-			auto oldest = entries.begin();
-			for (auto candidate = std::next(entries.begin()); candidate != entries.end(); ++candidate) {
-				if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
-			}
-			Erase(oldest);
+			Erase(Oldest());
 		}
 		if (bytes > byteBudget - cachedBytes) return false;
+		if (sharedBudget) {
+			while (!sharedBudget->TryReserve(bytes)) {
+				if (!mayEvict || entries.empty()) return false;
+				Erase(Oldest());
+			}
+		}
 		entries.emplace(key, Entry{image, identity, bytes, ++useCounter});
 		cachedBytes += bytes;
 		return true;
@@ -200,14 +223,33 @@ struct DecodedImageCache::Impl {
 		}
 	}
 
+	void Retire() {
+		(void)::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 10);
+		for (;;) {
+			ImagePtr image;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				retirementAvailable.wait(lock, [this] { return stopping || !retired.empty(); });
+				if (stopping) return;
+				image = std::move(retired.front());
+				retired.pop_front();
+			}
+			image.reset();
+		}
+	}
+
 	const std::size_t byteBudget;
 	Decoder decoder;
+	std::shared_ptr<SharedCacheBudget> sharedBudget;
 	mutable std::mutex mutex;
 	std::condition_variable workAvailable;
+	std::condition_variable retirementAvailable;
 	std::condition_variable idle;
 	std::thread worker;
+	std::thread retirementWorker;
 	std::unordered_map<std::string, Entry> entries;
 	std::deque<Work> queue;
+	std::deque<ImagePtr> retired;
 	std::size_t cachedBytes = 0;
 	std::uint64_t useCounter = 0;
 	std::uint64_t generation = 0;
@@ -215,8 +257,9 @@ struct DecodedImageCache::Impl {
 	bool stopping = false;
 };
 
-DecodedImageCache::DecodedImageCache(std::size_t byteBudget, Decoder decoder)
-	: impl_(std::make_unique<Impl>(byteBudget, std::move(decoder))) {}
+DecodedImageCache::DecodedImageCache(std::size_t byteBudget, Decoder decoder,
+	std::shared_ptr<SharedCacheBudget> sharedBudget)
+	: impl_(std::make_unique<Impl>(byteBudget, std::move(decoder), std::move(sharedBudget))) {}
 
 DecodedImageCache::~DecodedImageCache() = default;
 
@@ -238,8 +281,11 @@ void DecodedImageCache::Store(const fs::path& filename,
 	const std::shared_ptr<DecodedImage>& image) {
 	const std::string key = CacheKey(filename);
 	const FileIdentity identity = Identify(filename);
-	std::lock_guard<std::mutex> lock(impl_->mutex);
-	impl_->Insert(key, identity, image, true);
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->Insert(key, identity, image, true);
+	}
+	impl_->workAvailable.notify_one();
 }
 
 void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
@@ -281,9 +327,9 @@ void DecodedImageCache::Clear() {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	++impl_->generation;
 	impl_->queue.clear();
-	impl_->entries.clear();
-	impl_->cachedBytes = 0;
+	while (!impl_->entries.empty()) impl_->Erase(impl_->entries.begin());
 	impl_->idle.notify_all();
+	impl_->workAvailable.notify_one();
 }
 
 std::size_t DecodedImageCache::CachedBytes() const {
@@ -294,6 +340,16 @@ std::size_t DecodedImageCache::CachedBytes() const {
 std::size_t DecodedImageCache::CachedImages() const {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	return impl_->entries.size();
+}
+
+std::size_t DecodedImageCache::EvictLeastRecentlyUsed() {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	const auto oldest = impl_->Oldest();
+	if (oldest == impl_->entries.end()) return 0;
+	const std::size_t bytes = oldest->second.bytes;
+	impl_->Erase(oldest);
+	impl_->workAvailable.notify_one();
+	return bytes;
 }
 
 bool DecodedImageCache::WaitUntilIdle(std::chrono::milliseconds timeout) {

@@ -35,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -940,6 +941,10 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		"display image worker did not produce exact target-size pixels");
 	Expect(realProcessor.TakeCompleted(1).size() == 1 && realProcessor.TakeCompleted(1).empty(),
 		"display image completion queue did not drain exactly once");
+	realProcessor.Prefetch({});
+	realProcessor.Prefetch({scaled});
+	Expect(realProcessor.TakeCompleted(1).size() == 1,
+		"retained display pixels were not rescheduled for upload without recomputation");
 	realProcessor.Release(scaled.key);
 	Expect(realProcessor.CachedImages() == 0 && realProcessor.CachedBytes() == 0,
 		"display image release retained uploaded staging pixels");
@@ -963,33 +968,88 @@ void TestDisplayImageCacheBackgroundPreparation() {
 			return result;
 		});
 	const std::vector<jpegview_linux::DisplayImageRequest> requests = {
-		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 11, 1, false),
-		jpegview_linux::MakeDisplayImageRequest(secondFile, decoded, 0, 22, 1, false),
-		jpegview_linux::MakeDisplayImageRequest(thirdFile, decoded, 0, 33, 1, false),
+		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 11, 1, false, 3),
+		jpegview_linux::MakeDisplayImageRequest(secondFile, decoded, 0, 22, 1, false, 1),
+		jpegview_linux::MakeDisplayImageRequest(thirdFile, decoded, 0, 33, 1, false, 2),
 	};
 	ordered.Prefetch(requests);
 	Expect(ordered.WaitUntilIdle(std::chrono::seconds(2)),
 		"display image prefetch did not finish");
 	{
 		std::lock_guard<std::mutex> lock(orderMutex);
-		Expect(preparationOrder == std::vector<int>({11, 22, 33}),
-			"display image workers did not preserve nearest-first queue order");
+		Expect(preparationOrder == std::vector<int>({22, 33, 11}),
+			"display image workers did not sort preparation by nearest-first priority");
 	}
 	Expect(usedBackgroundThread, "display image processing ran on the calling thread");
 	Expect(ordered.CachedImages() == 2 && ordered.CachedBytes() == 32,
 		"display image cache did not enforce its pixel-memory budget");
-	ordered.Request(requests[2]);
-	Expect(ordered.WaitUntilIdle(std::chrono::seconds(2)) && ordered.Find(requests[2]) != nullptr &&
+	ordered.TakeCompleted(10);
+	ordered.Request(requests[0]);
+	Expect(ordered.WaitUntilIdle(std::chrono::seconds(2)) && ordered.Find(requests[0]) != nullptr &&
 		ordered.CachedImages() == 2 && ordered.CachedBytes() == 32,
 		"foreground display preparation did not evict the least-recently-used entry");
 
-	WriteText(thirdFile, "third-file-was-modified");
-	Expect(ordered.Find(requests[2]) == nullptr,
+	WriteText(firstFile, "first-file-was-modified");
+	Expect(ordered.Find(requests[0]) == nullptr,
 		"display cache served prepared pixels after the source file changed");
 	ordered.Clear();
 	Expect(ordered.CachedImages() == 0 && ordered.CachedBytes() == 0 &&
 		ordered.TakeCompleted(10).empty(),
 		"display cache clear retained pixels or completion notifications");
+
+	std::mutex priorityMutex;
+	std::condition_variable priorityChanged;
+	bool releaseClosest = false;
+	bool fartherFinished = false;
+	jpegview_linux::DisplayImageCache prioritized(64, 2,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			if (request.priority == 1) {
+				std::unique_lock<std::mutex> lock(priorityMutex);
+				priorityChanged.wait(lock, [&] { return releaseClosest; });
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = 1;
+			result->height = 1;
+			result->priority = request.priority;
+			result->bgra.assign(4, 255);
+			if (request.priority == 2) {
+				{
+					std::lock_guard<std::mutex> lock(priorityMutex);
+					fartherFinished = true;
+				}
+				priorityChanged.notify_all();
+			}
+			return result;
+		});
+	const jpegview_linux::DisplayImageRequest closest =
+		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false, 1);
+	const jpegview_linux::DisplayImageRequest farther =
+		jpegview_linux::MakeDisplayImageRequest(secondFile, decoded, 0, 2, 2, false, 2);
+	prioritized.Prefetch({closest, farther});
+	bool fartherCompletedInTime = false;
+	{
+		std::unique_lock<std::mutex> lock(priorityMutex);
+		fartherCompletedInTime = priorityChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return fartherFinished; });
+	}
+	const bool fartherUploadBlocked = prioritized.TakeCompleted(1).empty();
+	{
+		std::lock_guard<std::mutex> lock(priorityMutex);
+		releaseClosest = true;
+	}
+	priorityChanged.notify_all();
+	Expect(fartherCompletedInTime,
+		"farther display preparation did not finish while its closest neighbor was active");
+	Expect(fartherUploadBlocked,
+		"farther display upload bypassed an unfinished closer neighbor");
+	Expect(prioritized.WaitUntilIdle(std::chrono::seconds(2)),
+		"prioritized display preparation did not finish");
+	const std::vector<jpegview_linux::DisplayImageCache::ImagePtr> priorityCompletions =
+		prioritized.TakeCompleted(2);
+	Expect(priorityCompletions.size() == 2 && priorityCompletions[0]->priority == 1 &&
+		priorityCompletions[1]->priority == 2,
+		"display upload queue did not prioritize the closest completed neighbor");
 }
 
 void TestSharedCacheBudgetAccounting() {
@@ -1014,6 +1074,38 @@ void TestSharedCacheBudgetAccounting() {
 		"shared cache budget underflowed while releasing bytes");
 	Expect(jpegview_linux::CacheBytesFromMiB(2) == 2u * 1024u * 1024u,
 		"cache MiB conversion returned the wrong byte count");
+
+	TemporaryDirectory temporary;
+	const fs::path decodedFile = temporary.path() / "decoded.jpg";
+	const fs::path displayFile = temporary.path() / "display.jpg";
+	WriteText(decodedFile, "decoded");
+	WriteText(displayFile, "display");
+	auto shared = std::make_shared<jpegview_linux::SharedCacheBudget>(32);
+	jpegview_linux::DecodedImageCache decodedCache(64, {}, shared);
+	decodedCache.Store(decodedFile, CachedTestImage(16));
+	jpegview_linux::DisplayImageCache displayCache(64, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = 2;
+			result->height = 2;
+			result->bgra.assign(16, 0);
+			return result;
+		}, shared);
+	const jpegview_linux::DisplayImageRequest displayRequest =
+		jpegview_linux::MakeDisplayImageRequest(
+			displayFile, DisplayCacheTestImage(2, 2), 0, 2, 2, false);
+	displayCache.Request(displayRequest);
+	Expect(displayCache.WaitUntilIdle(std::chrono::seconds(2)) && shared->Used() == 32 &&
+		decodedCache.CachedBytes() == 16 && displayCache.CachedBytes() == 16,
+		"decoded and display caches did not share one aggregate limit");
+	displayCache.Release(displayRequest.key);
+	Expect(shared->Used() == 16, "display eviction did not return bytes to the shared cache budget");
+	Expect(shared->TryReserve(16) && shared->Used() == 32,
+		"display staging bytes could not be transferred to a texture reservation");
+	shared->Release(16);
+	decodedCache.Clear();
+	Expect(shared->Used() == 0, "decoded eviction did not return bytes to the shared cache budget");
 }
 
 jpegview_linux::Image MakeIndexedImage(int width, int height) {

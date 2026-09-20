@@ -1,6 +1,7 @@
 #pragma once
 
 #include "image_decoder.h"
+#include "cache_budget.h"
 
 #include <chrono>
 #include <cstddef>
@@ -30,7 +31,8 @@ public:
 	using Decoder = std::function<bool(const std::filesystem::path&, DecodedImage&, std::string&)>;
 	using Completion = std::function<void(const std::filesystem::path&, const ImagePtr&)>;
 
-	explicit DecodedImageCache(std::size_t byteBudget, Decoder decoder = {});
+	explicit DecodedImageCache(std::size_t byteBudget, Decoder decoder = {},
+		std::shared_ptr<SharedCacheBudget> sharedBudget = {});
 	~DecodedImageCache();
 
 	DecodedImageCache(const DecodedImageCache&) = delete;
@@ -46,6 +48,7 @@ public:
 
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;
+	std::size_t EvictLeastRecentlyUsed();
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);
 
 private:

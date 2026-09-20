@@ -23,10 +23,12 @@ they support.
    without pkg-config metadata and HEIF encoders with different supported profiles.
 
 3. **High-quality viewing, fitting, zooming, and panning.** JPEGView's high-quality downsampling and
-   sharpening path was ported, with bicubic enlargement and a 1 GiB display-size texture cache.
+   sharpening path was ported, with bicubic enlargement and a shared 1 GiB image-cache budget.
    Nearby decoded images are corrected and scaled on low-priority worker threads, then uploaded
-   incrementally and retained as renderer-ready textures; navigation therefore avoids CPU resizing
-   and normally avoids texture upload as well. Fit mode
+   incrementally and retained as renderer-ready textures. The closest next and previous files take
+   preparation and upload priority, and an already prepared static image is presented without first
+   copying its full decoded pixels on the UI thread; navigation therefore avoids CPU resizing and
+   normally avoids texture upload as well. Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
    Fit, fill, actual-size, and manual modes survive navigation appropriately, while temporary zoom
    on one image is reset to the selected fit/actual mode for the next image. Ctrl+wheel zooms around
@@ -91,10 +93,13 @@ they support.
     and core rotate/mirror transforms are available non-destructively before save. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
     rates and folder advancement, slideshow transitions are rendered natively, Alt+R resumes, and
-    Escape stops active playback before quitting. Full decoded images use a 1 GiB memory-bounded LRU
-    cache, while a low-contention background worker predecodes nearby files in the current navigation
-    direction. Decode completions feed a separate display-preparation worker pool, and both decoded
-    and display caches reject stale source identities. Previously viewed and prefetched images
+    Escape stops active playback before quitting. Decoded pixels, prepared display frames, and
+    retained renderer textures share one memory budget with per-layer LRU retention, while a
+    low-contention background worker predecodes nearby files in the current navigation direction.
+    Decode completions feed a
+    separate display-preparation worker pool, and both decoded and display caches reject stale source
+    identities. Large evicted CPU buffers are retired on workers rather than destroyed on the event
+    thread. Previously viewed and prefetched images
     therefore avoid repeated synchronous decoding, correction, high-quality scaling, and texture
     creation during navigation.
 
@@ -112,7 +117,8 @@ they support.
 
 13. **Reliable startup and saved session state.** Scale mode, ordering mode/direction, maximized or
     normal state, navigation-panel choices, filename/EXIF/histogram visibility, automatic correction,
-    batch pattern, and thumbnail visibility/width are stored under XDG configuration paths. A previously
+    batch pattern, thumbnail visibility/width, and the image-cache budget are stored under XDG
+    configuration paths. A previously
     maximized window is created maximized before it is shown, avoiding the visible delayed maximize.
     Compatibility handling keeps always-on-top optional on older SDL runtimes.
 
@@ -252,7 +258,8 @@ It covers file-list ordering/navigation, mutable image transforms, all resize fi
 correction invariants, sort and settings persistence mappings, the complete supported
 keyboard-command mapping, viewport fit/fill/zoom/pan geometry, open/save browser state,
 resize-dialog validation, content-sized overlay layout, compact/advanced menu filtering and
-keyboard selection, thumbnail layout/resampling, desktop-font resolution, decoder and writer round
+keyboard selection, thumbnail layout/resampling, shared cache accounting and nearest-display upload
+priority, desktop-font resolution, decoder and writer round
 trips across static and animated formats, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, focus restoration, paging,
@@ -320,6 +327,11 @@ visibility choices. The navigation panel hover preference and current file-order
 also saved, together with the thumbnail panel visibility. These settings are stored in
 `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. Esc stops an active slideshow first,
 matching the Windows default escape command, and otherwise quits.
+
+The same settings file accepts `cache_size_mb=1024` to control the aggregate memory retained for
+decoded images, worker-prepared display frames, and renderer-ready textures. The value is in MiB,
+takes effect at the next launch, and defaults to 1024. Set it to `0` to disable retained image/display
+caching; this does not disable the small, separately bounded thumbnail cache.
 
 The thumbnail panel is hidden by default and can be enabled from the context menu or with Ctrl+T.
 It follows the active file ordering in a vertical strip: the current image remains centered and at

@@ -77,6 +77,7 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	prepared->width = image.width;
 	prepared->height = image.height;
 	prepared->bgra = std::move(image.bgra);
+	prepared->priority = request.priority;
 	return prepared;
 }
 
@@ -91,7 +92,7 @@ bool DisplayImageRequest::Valid() const {
 
 DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
-	int targetWidth, int targetHeight, bool autoContrast) {
+	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority) {
 	DisplayImageRequest request;
 	request.filename = filename;
 	request.decoded = decoded;
@@ -99,6 +100,7 @@ DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	request.targetWidth = targetWidth;
 	request.targetHeight = targetHeight;
 	request.autoContrast = autoContrast;
+	request.priority = priority;
 	if (!decoded || frameIndex >= decoded->frames.size() || targetWidth <= 0 || targetHeight <= 0) {
 		return request;
 	}
@@ -125,8 +127,14 @@ struct DisplayImageCache::Impl {
 		bool foreground = false;
 	};
 
-	explicit Impl(std::size_t budget, std::size_t requestedWorkers, Processor prepare)
-		: byteBudget(budget), processor(std::move(prepare)) {
+	struct Completion {
+		ImagePtr image;
+		std::size_t priority = 0;
+	};
+
+	explicit Impl(std::size_t budget, std::size_t requestedWorkers, Processor prepare,
+		std::shared_ptr<SharedCacheBudget> shared)
+		: byteBudget(budget), processor(std::move(prepare)), sharedBudget(std::move(shared)) {
 		if (!processor) processor = PrepareDisplayImage;
 		std::size_t count = requestedWorkers;
 		if (count == 0) {
@@ -138,6 +146,7 @@ struct DisplayImageCache::Impl {
 		for (std::size_t index = 0; index < count; ++index) {
 			workers.emplace_back([this] { Run(); });
 		}
+		retirementWorker = std::thread([this] { Retire(); });
 	}
 
 	~Impl() {
@@ -150,14 +159,33 @@ struct DisplayImageCache::Impl {
 			queuedKeys.clear();
 		}
 		workAvailable.notify_all();
+		retirementAvailable.notify_all();
 		for (std::thread& worker : workers) {
 			if (worker.joinable()) worker.join();
 		}
+		if (retirementWorker.joinable()) retirementWorker.join();
+		if (sharedBudget) sharedBudget->Release(cachedBytes);
 	}
 
 	void Erase(std::unordered_map<std::string, Entry>::iterator entry) {
-		cachedBytes -= entry->second.bytes;
+		const std::size_t bytes = entry->second.bytes;
+		ImagePtr retiredImage = std::move(entry->second.image);
 		entries.erase(entry);
+		cachedBytes -= bytes;
+		if (sharedBudget) sharedBudget->Release(bytes);
+		if (retiredImage) {
+			retired.push_back(std::move(retiredImage));
+			retirementAvailable.notify_one();
+		}
+	}
+
+	std::unordered_map<std::string, Entry>::iterator Oldest() {
+		if (entries.empty()) return entries.end();
+		auto oldest = entries.begin();
+		for (auto candidate = std::next(entries.begin()); candidate != entries.end(); ++candidate) {
+			if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
+		}
+		return oldest;
 	}
 
 	bool Insert(const ImagePtr& image, bool mayEvict) {
@@ -168,13 +196,15 @@ struct DisplayImageCache::Impl {
 		if (existing != entries.end()) Erase(existing);
 		if (!mayEvict && bytes > byteBudget - cachedBytes) return false;
 		while (bytes > byteBudget - cachedBytes && !entries.empty()) {
-			auto oldest = entries.begin();
-			for (auto candidate = std::next(entries.begin()); candidate != entries.end(); ++candidate) {
-				if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
-			}
-			Erase(oldest);
+			Erase(Oldest());
 		}
 		if (bytes > byteBudget - cachedBytes) return false;
+		if (sharedBudget) {
+			while (!sharedBudget->TryReserve(bytes)) {
+				if (!mayEvict || entries.empty()) return false;
+				Erase(Oldest());
+			}
+		}
 		entries.emplace(image->key, Entry{image, bytes, ++useCounter});
 		cachedBytes += bytes;
 		return true;
@@ -194,6 +224,8 @@ struct DisplayImageCache::Impl {
 				queue.pop_front();
 				queuedKeys.erase(work.request.key);
 				inFlightKeys.insert(work.request.key);
+				inFlightPriorities[work.request.key] =
+					work.foreground ? 0 : work.request.priority;
 				++activeWorkers;
 			}
 
@@ -206,31 +238,55 @@ struct DisplayImageCache::Impl {
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				inFlightKeys.erase(work.request.key);
+				inFlightPriorities.erase(work.request.key);
 				--activeWorkers;
 				const bool foreground = work.foreground ||
 					foregroundKeys.erase(work.request.key) != 0;
 				if (!stopping && work.epoch == epoch && image && image->key == currentKey &&
 					(foreground || desiredPrefetchKeys.find(work.request.key) !=
-						desiredPrefetchKeys.end()) &&
-					Insert(image, foreground)) {
-					completed.push_back(image);
+						desiredPrefetchKeys.end())) {
+					// A finished worker frame remains eligible for immediate SDL upload
+					// even if retained-cache space is currently occupied by decoded data.
+					// The completion queue is transient and bounded by worker throughput.
+					Insert(image, foreground);
+					completed.push_back({image, foreground ? 0 : image->priority});
 				}
 				idle.notify_all();
 			}
 		}
 	}
 
+	void Retire() {
+		(void)::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 10);
+		for (;;) {
+			ImagePtr image;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				retirementAvailable.wait(lock, [this] { return stopping || !retired.empty(); });
+				if (stopping) return;
+				image = std::move(retired.front());
+				retired.pop_front();
+			}
+			image.reset();
+		}
+	}
+
 	const std::size_t byteBudget;
 	Processor processor;
+	std::shared_ptr<SharedCacheBudget> sharedBudget;
 	mutable std::mutex mutex;
 	std::condition_variable workAvailable;
+	std::condition_variable retirementAvailable;
 	std::condition_variable idle;
 	std::vector<std::thread> workers;
+	std::thread retirementWorker;
 	std::unordered_map<std::string, Entry> entries;
 	std::deque<Work> queue;
-	std::deque<ImagePtr> completed;
+	std::deque<Completion> completed;
+	std::deque<ImagePtr> retired;
 	std::unordered_set<std::string> queuedKeys;
 	std::unordered_set<std::string> inFlightKeys;
+	std::unordered_map<std::string, std::size_t> inFlightPriorities;
 	std::unordered_set<std::string> desiredPrefetchKeys;
 	std::unordered_set<std::string> foregroundKeys;
 	std::size_t cachedBytes = 0;
@@ -242,8 +298,10 @@ struct DisplayImageCache::Impl {
 };
 
 DisplayImageCache::DisplayImageCache(std::size_t byteBudget,
-	std::size_t workerCount, Processor processor)
-	: impl_(std::make_unique<Impl>(byteBudget, workerCount, std::move(processor))) {}
+	std::size_t workerCount, Processor processor,
+	std::shared_ptr<SharedCacheBudget> sharedBudget)
+	: impl_(std::make_unique<Impl>(byteBudget, workerCount, std::move(processor),
+		std::move(sharedBudget))) {}
 
 DisplayImageCache::~DisplayImageCache() = default;
 
@@ -254,18 +312,40 @@ DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& r
 		request.autoContrast)) return {};
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	const auto found = impl_->entries.find(request.key);
-	if (found == impl_->entries.end()) return {};
-	found->second.lastUsed = ++impl_->useCounter;
-	return found->second.image;
+	if (found != impl_->entries.end()) {
+		found->second.lastUsed = ++impl_->useCounter;
+		return found->second.image;
+	}
+	const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
+		[&request](const Impl::Completion& completion) {
+			return completion.image && completion.image->key == request.key;
+		});
+	return completed == impl_->completed.end() ? ImagePtr{} : completed->image;
 }
 
 void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	if (!request.Valid()) return;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		if (impl_->entries.find(request.key) != impl_->entries.end()) return;
+		const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
+			[&request](const Impl::Completion& completion) {
+				return completion.image && completion.image->key == request.key;
+			});
+		if (completed != impl_->completed.end()) {
+			completed->priority = 0;
+			return;
+		}
+		const auto cached = impl_->entries.find(request.key);
+		if (cached != impl_->entries.end()) {
+			// A speculative frame can become the foreground between worker
+			// completion and renderer upload. Promote the shared completion object
+			// so it cannot wait behind any neighboring frame.
+			impl_->completed.push_front({cached->second.image, 0});
+			return;
+		}
 		if (impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) {
 			impl_->foregroundKeys.insert(request.key);
+			impl_->inFlightPriorities[request.key] = 0;
 			return;
 		}
 		if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end()) {
@@ -287,19 +367,43 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 }
 
 void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& requests) {
+	std::vector<DisplayImageRequest> prioritizedRequests = requests;
+	std::stable_sort(prioritizedRequests.begin(), prioritizedRequests.end(),
+		[](const DisplayImageRequest& left, const DisplayImageRequest& right) {
+			return left.priority < right.priority;
+		});
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		++impl_->generation;
+		if (requests.empty()) {
+			while (!impl_->completed.empty()) {
+				impl_->retired.push_back(std::move(impl_->completed.front().image));
+				impl_->completed.pop_front();
+			}
+			impl_->retirementAvailable.notify_one();
+		}
 		impl_->queue.erase(std::remove_if(impl_->queue.begin(), impl_->queue.end(),
 			[](const Impl::Work& work) { return !work.foreground; }), impl_->queue.end());
 		impl_->queuedKeys.clear();
 		impl_->desiredPrefetchKeys.clear();
 		for (const Impl::Work& work : impl_->queue) impl_->queuedKeys.insert(work.request.key);
-		for (const DisplayImageRequest& request : requests) {
+		for (const DisplayImageRequest& request : prioritizedRequests) {
 			if (!request.Valid()) continue;
 			impl_->desiredPrefetchKeys.insert(request.key);
-			if (impl_->entries.find(request.key) != impl_->entries.end() ||
-				impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end() ||
+			const auto retained = impl_->entries.find(request.key);
+			if (retained != impl_->entries.end()) {
+				const auto completion = std::find_if(impl_->completed.begin(),
+					impl_->completed.end(), [&request](const Impl::Completion& completion) {
+						return completion.image && completion.image->key == request.key;
+					});
+				if (completion == impl_->completed.end()) {
+					impl_->completed.push_back({retained->second.image, request.priority});
+				} else {
+					completion->priority = request.priority;
+				}
+				continue;
+			}
+			if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end() ||
 				impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) continue;
 			impl_->queue.push_back(Impl::Work{request, impl_->generation, impl_->epoch, false});
 			impl_->queuedKeys.insert(request.key);
@@ -312,11 +416,23 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 std::vector<DisplayImageCache::ImagePtr> DisplayImageCache::TakeCompleted(std::size_t maximumCount) {
 	std::vector<ImagePtr> result;
 	std::lock_guard<std::mutex> lock(impl_->mutex);
-	const std::size_t count = std::min(maximumCount, impl_->completed.size());
-	result.reserve(count);
-	for (std::size_t index = 0; index < count; ++index) {
-		result.push_back(std::move(impl_->completed.front()));
-		impl_->completed.pop_front();
+	result.reserve(std::min(maximumCount, impl_->completed.size()));
+	while (result.size() < maximumCount && !impl_->completed.empty()) {
+		const auto next = std::min_element(impl_->completed.begin(), impl_->completed.end(),
+			[](const Impl::Completion& left, const Impl::Completion& right) {
+				return left.priority < right.priority;
+			});
+		std::size_t outstandingPriority = std::numeric_limits<std::size_t>::max();
+		for (const Impl::Work& work : impl_->queue) {
+			outstandingPriority = std::min(outstandingPriority,
+				work.foreground ? 0 : work.request.priority);
+		}
+		for (const auto& inFlight : impl_->inFlightPriorities) {
+			outstandingPriority = std::min(outstandingPriority, inFlight.second);
+		}
+		if (outstandingPriority < next->priority) break;
+		result.push_back(std::move(next->image));
+		impl_->completed.erase(next);
 	}
 	return result;
 }
@@ -325,6 +441,16 @@ void DisplayImageCache::Release(const std::string& key) {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	const auto found = impl_->entries.find(key);
 	if (found != impl_->entries.end()) impl_->Erase(found);
+	impl_->workAvailable.notify_one();
+}
+
+void DisplayImageCache::Retire(const ImagePtr& image) {
+	if (!image) return;
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->retired.push_back(image);
+	}
+	impl_->retirementAvailable.notify_one();
 }
 
 void DisplayImageCache::Clear() {
@@ -332,13 +458,17 @@ void DisplayImageCache::Clear() {
 	++impl_->generation;
 	++impl_->epoch;
 	impl_->queue.clear();
-	impl_->completed.clear();
+	while (!impl_->completed.empty()) {
+		impl_->retired.push_back(std::move(impl_->completed.front().image));
+		impl_->completed.pop_front();
+	}
 	impl_->queuedKeys.clear();
 	impl_->desiredPrefetchKeys.clear();
 	impl_->foregroundKeys.clear();
-	impl_->entries.clear();
-	impl_->cachedBytes = 0;
+	while (!impl_->entries.empty()) impl_->Erase(impl_->entries.begin());
 	impl_->idle.notify_all();
+	impl_->workAvailable.notify_all();
+	impl_->retirementAvailable.notify_all();
 }
 
 std::size_t DisplayImageCache::CachedBytes() const {
@@ -349,6 +479,11 @@ std::size_t DisplayImageCache::CachedBytes() const {
 std::size_t DisplayImageCache::CachedImages() const {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	return impl_->entries.size();
+}
+
+bool DisplayImageCache::HasPendingWork() const {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	return !impl_->queue.empty() || impl_->activeWorkers != 0 || !impl_->completed.empty();
 }
 
 bool DisplayImageCache::WaitUntilIdle(std::chrono::milliseconds timeout) {

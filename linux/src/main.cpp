@@ -58,6 +58,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <unistd.h>
 #include <vector>
 
@@ -81,10 +82,7 @@ constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
 constexpr std::size_t kThumbnailCacheLimit = 64;
 constexpr std::size_t kThumbnailCachePixelBudget = 16u * 1024u * 1024u;
-constexpr std::size_t kDecodedImageCacheBudget = 1ull * 1024ull * 1024ull * 1024ull;
 constexpr std::size_t kDecodedImagePrefetchCount = 32;
-constexpr std::size_t kDisplayTextureCacheBudget = 1ull * 1024ull * 1024ull * 1024ull;
-constexpr std::size_t kDisplayPreparationBudget = 1ull * 1024ull * 1024ull * 1024ull;
 constexpr std::size_t kDisplayTextureUploadsPerTick = 1;
 constexpr double kKeyboardPanStep = 48.0;
 constexpr int kBatchSelectAll = 0;
@@ -360,10 +358,15 @@ public:
 			HandleEvents(running);
 			if (quitRequested_) running = false;
 			TickPlayback();
-			TickThumbnailPreload();
-			TickDisplayTexturePreload();
 			TickFileDialogDirectorySummaries();
 			Render();
+			// Present the current image before doing renderer-thread cache uploads.
+			// Held navigation then advances only after the closest ready neighbor
+			// has had an opportunity to become a retained SDL texture.
+			TickDisplayTexturePreload();
+			if (heldNavigation_.Scancode() < 0 && !displayImageCache_.HasPendingWork()) {
+				TickThumbnailPreload();
+			}
 			TickHeldNavigation();
 			SDL_Delay(4);
 		}
@@ -403,6 +406,8 @@ private:
 	struct DisplayPrefetchBatch {
 		std::mutex mutex;
 		std::vector<jpegview_linux::DisplayImageRequest> requests;
+		std::unordered_set<std::string> retainedTextureKeys;
+		std::unordered_map<std::string, std::size_t> priorityByFilename;
 		jpegview_linux::DisplayImageCache* cache = nullptr;
 		DisplayPrefetchContext context;
 	};
@@ -469,6 +474,8 @@ private:
 		showHistogram_ = settings.showHistogram;
 		showFileName_ = settings.showFilename;
 		autoContrastEnabled_ = settings.autoContrast;
+		cacheSizeMiB_ = settings.cacheSizeMiB;
+		cacheBudget_->SetCapacity(jpegview_linux::CacheBytesFromMiB(cacheSizeMiB_));
 		viewport_.LoadScaleMode(settings.scaleMode, settings.manualZoomSet, settings.manualZoom);
 	}
 
@@ -490,8 +497,39 @@ private:
 		settings.showHistogram = showHistogram_;
 		settings.showFilename = showFileName_;
 		settings.autoContrast = autoContrastEnabled_;
+		settings.cacheSizeMiB = cacheSizeMiB_;
 		settings.copyRenamePattern = copyRenamePattern_;
 		jpegview_linux::SaveViewerSettings(settingsPath, settings);
+	}
+
+	bool MaterializeCurrentPixels() {
+		if (currentPixelsMaterialized_) return true;
+		if (!currentDecoded_ || currentDecoded_->frames.empty()) return false;
+		std::vector<Image> decodedFrames;
+		if (currentDecoded_->frames.size() > 1) decodedFrames.reserve(currentDecoded_->frames.size());
+		for (const jpegview_linux::DecodedFrame& decodedFrame : currentDecoded_->frames) {
+			Image frame;
+			if (!frame.StoreBGRA(decodedFrame.bgra.data(), decodedFrame.width, decodedFrame.height)) {
+				SetTitle(fileList_.Current().filename().string() + " — image is too large");
+				return false;
+			}
+			if (currentDecoded_->frames.size() > 1) decodedFrames.push_back(std::move(frame));
+			else image_ = std::move(frame);
+		}
+		if (!decodedFrames.empty()) {
+			animationFrames_ = std::move(decodedFrames);
+			image_ = animationFrames_[currentAnimationFrame_];
+		} else {
+			animationFrames_.clear();
+		}
+		correctionBase_ = image_;
+		correctionBaseValid_ = true;
+		if (autoContrastEnabled_ && !image_.AutoContrast()) {
+			SetTitle(fileList_.Current().filename().string() + " — automatic correction failed");
+			return false;
+		}
+		currentPixelsMaterialized_ = true;
+		return true;
 	}
 
 	bool LoadCurrent(int prefetchDirection = 0) {
@@ -515,29 +553,10 @@ private:
 			imageCache_.Store(fileList_.Current(), loaded);
 			decoded = std::move(loaded);
 		}
-		std::vector<Image> decodedFrames;
-		decodedFrames.reserve(decoded->frames.size());
-		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded->frames) {
-			Image frame;
-			if (!frame.StoreBGRA(decodedFrame.bgra.data(), decodedFrame.width, decodedFrame.height)) {
-				SetTitle(fileList_.Current().filename().string() + " — image is too large");
-				std::cerr << fileList_.Current() << ": image is too large\n";
-				return false;
-			}
-			decodedFrames.push_back(std::move(frame));
-		}
-		animationFrames_ = std::move(decodedFrames);
 		std::vector<int> animationFrameDelaysMs;
 		animationFrameDelaysMs.reserve(decoded->frames.size());
 		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded->frames) {
 			animationFrameDelaysMs.push_back(std::max(10, decodedFrame.delayMs));
-		}
-		image_ = animationFrames_.front();
-		correctionBase_ = image_;
-		correctionBaseValid_ = true;
-		if (autoContrastEnabled_ && !image_.AutoContrast()) {
-			SetTitle(fileList_.Current().filename().string() + " — automatic correction failed");
-			return false;
 		}
 		jpegview_linux::ReadJpegMetadata(fileList_.Current(), metadata_, jpegComment_);
 
@@ -547,15 +566,38 @@ private:
 		currentDecoded_ = decoded;
 		currentAnimationFrame_ = 0;
 		currentDisplayRequest_.reset();
+		currentPixelsMaterialized_ = false;
+		animationFrames_.clear();
+		correctionBase_ = {};
+		correctionBaseValid_ = false;
+		image_ = {};
+		const jpegview_linux::DecodedFrame& firstFrame = decoded->frames.front();
+		image_.width = firstFrame.width;
+		image_.height = firstFrame.height;
+		image_.originalWidth = firstFrame.width;
+		image_.originalHeight = firstFrame.height;
+		imageModified_ = false;
 		RestoreScaleMode(viewportSnapshot);
 		const Uint32 now = SDL_GetTicks();
-		imageModified_ = false;
 		const SDL_Rect imageArea = ImageAreaRect();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
 			image_.width, image_.height, imageArea.w, imageArea.h);
 		const jpegview_linux::DisplayImageRequest* displayRequest =
 			CurrentDisplayRequest(destination.width, destination.height);
-		if (displayRequest == nullptr || FindDisplayTexture(displayRequest->key) == nullptr) {
+		bool cachedDisplay = displayRequest != nullptr &&
+			FindDisplayTexture(displayRequest->key) != nullptr;
+		if (!cachedDisplay && displayRequest != nullptr) {
+			// A worker may have finished between event-loop upload ticks. Convert
+			// that prepared neighbor directly instead of copying and correcting the
+			// full decoded image on this latency-sensitive navigation path.
+			if (const auto prepared = displayImageCache_.Find(*displayRequest)) {
+				cachedDisplay = CacheDisplayTexture(prepared);
+			}
+		}
+		if (!cachedDisplay || decoded->frames.size() > 1) {
+			if (!MaterializeCurrentPixels()) return false;
+		}
+		if (!cachedDisplay) {
 			if (!UpdateTexture()) return false;
 		}
 		playback_.ConfigureImage(std::move(animationFrameDelaysMs), decoded->loopCount,
@@ -574,6 +616,16 @@ private:
 		batch->cache = &displayImageCache_;
 		batch->context = {viewport_.NavigationSnapshot(), imageArea.w, imageArea.h,
 			autoContrastEnabled_};
+		for (const auto& retained : displayTextureCache_) {
+			batch->retainedTextureKeys.insert(retained.first);
+		}
+		const std::vector<std::size_t> prefetchOrder = jpegview_linux::ImagePrefetchOrder(
+			fileList_.Files().size(), fileList_.CurrentIndex(), preferredDirection,
+			kDecodedImagePrefetchCount);
+		for (std::size_t position = 0; position < prefetchOrder.size(); ++position) {
+			batch->priorityByFilename.emplace(
+				fileList_.Files()[prefetchOrder[position]].string(), position + 1);
+		}
 		imageCache_.Prefetch(fileList_.Files(), fileList_.CurrentIndex(),
 			preferredDirection, kDecodedImagePrefetchCount,
 			[batch](const fs::path& filename,
@@ -586,10 +638,15 @@ private:
 				const jpegview_linux::ViewportRect target = viewport.Destination(
 					frame.width, frame.height, batch->context.imageAreaWidth,
 					batch->context.imageAreaHeight);
+				const auto priority = batch->priorityByFilename.find(filename.string());
+				if (priority == batch->priorityByFilename.end()) return;
 				jpegview_linux::DisplayImageRequest request =
 					jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
-						target.width, target.height, batch->context.autoContrast);
-				if (!request.Valid()) return;
+						target.width, target.height, batch->context.autoContrast,
+						priority->second);
+				if (!request.Valid() ||
+					batch->retainedTextureKeys.find(request.key) !=
+						batch->retainedTextureKeys.end()) return;
 				std::lock_guard<std::mutex> lock(batch->mutex);
 				batch->requests.push_back(std::move(request));
 				batch->cache->Prefetch(batch->requests);
@@ -631,6 +688,7 @@ private:
 			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
 		}
 		displayTextureCache_.clear();
+		cacheBudget_->Release(displayTextureCacheBytes_);
 		displayTextureCacheBytes_ = 0;
 		displayImageCache_.Clear();
 	}
@@ -642,9 +700,7 @@ private:
 		return found->second.texture;
 	}
 
-	void EvictDisplayTextures(const std::string& protectedKey, std::size_t incomingBytes) {
-		while (incomingBytes > kDisplayTextureCacheBudget - displayTextureCacheBytes_ &&
-			!displayTextureCache_.empty()) {
+	bool EvictOldestDisplayTexture(const std::string& protectedKey) {
 			auto oldest = displayTextureCache_.end();
 			for (auto candidate = displayTextureCache_.begin(); candidate != displayTextureCache_.end();
 				++candidate) {
@@ -652,34 +708,58 @@ private:
 				if (oldest == displayTextureCache_.end() ||
 					candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
 			}
-			if (oldest == displayTextureCache_.end()) break;
+			if (oldest == displayTextureCache_.end()) return false;
 			if (oldest->second.texture != nullptr) SDL_DestroyTexture(oldest->second.texture);
 			displayTextureCacheBytes_ -= oldest->second.bytes;
+			cacheBudget_->Release(oldest->second.bytes);
 			displayTextureCache_.erase(oldest);
+			return true;
+	}
+
+	bool ReserveDisplayTextureBytes(std::size_t bytes, const std::string& protectedKey) {
+		while (!cacheBudget_->TryReserve(bytes)) {
+			// Display-ready nearest neighbors have precedence: decoded pixels can
+			// be recreated in the background, while a ready texture removes work
+			// from the latency-sensitive navigation path.
+			if (imageCache_.EvictLeastRecentlyUsed() != 0) continue;
+			if (EvictOldestDisplayTexture(protectedKey)) continue;
+			return false;
 		}
+		return true;
 	}
 
 	bool CacheDisplayTexture(const jpegview_linux::DisplayImageCache::ImagePtr& prepared) {
 		if (!prepared || prepared->key.empty()) return false;
 		if (FindDisplayTexture(prepared->key) != nullptr) {
 			displayImageCache_.Release(prepared->key);
+			displayImageCache_.Retire(prepared);
 			return true;
 		}
 		const std::size_t bytes = jpegview_linux::PreparedDisplayImageBytes(*prepared);
-		if (bytes == 0 || bytes > kDisplayTextureCacheBudget) return false;
-		SDL_Texture* texture = CreateTexture(prepared->bgra, prepared->width, prepared->height);
-		if (texture == nullptr) return false;
+		if (bytes == 0 || bytes > cacheBudget_->Capacity()) {
+			displayImageCache_.Release(prepared->key);
+			displayImageCache_.Retire(prepared);
+			return false;
+		}
 		const std::string protectedKey = currentDisplayRequest_.has_value() ?
 			currentDisplayRequest_->key : std::string();
-		EvictDisplayTextures(protectedKey, bytes);
-		if (bytes > kDisplayTextureCacheBudget - displayTextureCacheBytes_) {
-			SDL_DestroyTexture(texture);
+		// Convert the staging reservation into a renderer-texture reservation.
+		// The shared pointer keeps pixels alive until SDL_UpdateTexture returns.
+		displayImageCache_.Release(prepared->key);
+		if (!ReserveDisplayTextureBytes(bytes, protectedKey)) {
+			displayImageCache_.Retire(prepared);
+			return false;
+		}
+		SDL_Texture* texture = CreateTexture(prepared->bgra, prepared->width, prepared->height);
+		if (texture == nullptr) {
+			cacheBudget_->Release(bytes);
+			displayImageCache_.Retire(prepared);
 			return false;
 		}
 		displayTextureCache_.emplace(prepared->key,
 			DisplayTextureCacheEntry{texture, bytes, ++displayTextureUseCounter_});
 		displayTextureCacheBytes_ += bytes;
-		displayImageCache_.Release(prepared->key);
+		displayImageCache_.Retire(prepared);
 		return true;
 	}
 
@@ -720,11 +800,20 @@ private:
 	}
 
 	SDL_Texture* DisplayTextureFor(int width, int height) {
+		std::string previousDisplayKey;
+		if (currentDisplayRequest_.has_value() &&
+			currentDisplayRequest_->decoded == currentDecoded_) {
+			previousDisplayKey = currentDisplayRequest_->key;
+		}
 		const jpegview_linux::DisplayImageRequest* request = CurrentDisplayRequest(width, height);
 		if (request != nullptr) {
 			if (SDL_Texture* cached = FindDisplayTexture(request->key)) return cached;
-			displayImageCache_.Request(*request);
-			if (texture_ == nullptr) texture_ = CreateTexture(image_);
+			if (cacheBudget_->Capacity() != 0) displayImageCache_.Request(*request);
+			if (texture_ == nullptr && !previousDisplayKey.empty() &&
+				previousDisplayKey != request->key) {
+				if (SDL_Texture* previous = FindDisplayTexture(previousDisplayKey)) return previous;
+			}
+			if (texture_ == nullptr && MaterializeCurrentPixels()) texture_ = CreateTexture(image_);
 			// The fallback lets SDL scale the source texture while workers prepare
 			// the high-quality frame. No CPU resize runs on the renderer thread.
 			return texture_;
@@ -863,6 +952,7 @@ private:
 	}
 
 	void ApplyTransform(int command) {
+		if (!MaterializeCurrentPixels()) return;
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		if (!TransformImage(image_, command) ||
 			(correctionBaseValid_ && !TransformImage(correctionBase_, command)) || !UpdateTexture()) {
@@ -886,7 +976,7 @@ private:
 	}
 
 	void ToggleAutoContrast() {
-		if (!correctionBaseValid_) return;
+		if (!MaterializeCurrentPixels() || !correctionBaseValid_) return;
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		autoContrastEnabled_ = !autoContrastEnabled_;
 		RebuildAutoContrastImage(viewportSnapshot);
@@ -1019,6 +1109,10 @@ private:
 
 	void SaveImageFromDialog() {
 		if (!fileDialogSave_ || fileDialogFilename_.empty()) return;
+		if (!MaterializeCurrentPixels()) {
+			fileDialogMessage_ = "Cannot prepare image pixels";
+			return;
+		}
 		fs::path filename(fileDialogFilename_);
 		if (filename.extension().empty()) filename += ".jpg";
 		const fs::path output = AbsoluteNormalized(fileDialogDirectory_ / filename);
@@ -1054,6 +1148,7 @@ private:
 
 	void CopyCurrentImage(bool fullSize) {
 		if (image_.width <= 0 || image_.height <= 0) return;
+		if (!MaterializeCurrentPixels()) return;
 		Image copied = image_;
 		if (!fullSize) {
 			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * viewport_.Zoom())));
@@ -1119,6 +1214,7 @@ private:
 
 	void PrintCurrentImage() {
 		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		if (!MaterializeCurrentPixels()) return;
 		char temporaryDirectoryName[] = "/tmp/jpegview-print-XXXXXX";
 		if (mkdtemp(temporaryDirectoryName) == nullptr) {
 			SetTitle("Print failed: cannot create temporary file");
@@ -1223,6 +1319,7 @@ private:
 		fs::path wallpaperFile = fileList_.Current();
 		std::error_code error;
 		if (processed) {
+			if (!MaterializeCurrentPixels()) return;
 			const char* cacheHome = std::getenv("XDG_CACHE_HOME");
 			fs::path cacheDirectory;
 			if (cacheHome != nullptr && *cacheHome != '\0') {
@@ -1440,7 +1537,8 @@ private:
 	void NextImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
 		const bool animate = playback_.SlideshowSeconds() > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
-		Image previousImage = animate ? image_ : Image{};
+		Image previousImage;
+		if (animate && MaterializeCurrentPixels()) previousImage = image_;
 		if (!fileList_.Next()) return;
 		SetTitle();
 		if (showPendingNavigation) {
@@ -1453,7 +1551,8 @@ private:
 	void PreviousImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
 		const bool animate = playback_.SlideshowSeconds() > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
-		Image previousImage = animate ? image_ : Image{};
+		Image previousImage;
+		if (animate && MaterializeCurrentPixels()) previousImage = image_;
 		if (!fileList_.Previous()) return;
 		SetTitle();
 		if (showPendingNavigation) {
@@ -1670,7 +1769,7 @@ private:
 		return lines;
 	}
 
-	jpegview_linux::InformationOverlayPaintPlan BuildImageInfoPaintPlan() const {
+	jpegview_linux::InformationOverlayPaintPlan BuildImageInfoPaintPlan() {
 		std::vector<std::string> lines = ImageInfoLines();
 		if (lines.empty()) return {};
 		int contentWidth = 0;
@@ -1694,6 +1793,7 @@ private:
 		jpegview_linux::GrayscaleSpectrum spectrum{};
 		const jpegview_linux::GrayscaleSpectrum* spectrumPointer = nullptr;
 		if (showHistogram_) {
+			if (!MaterializeCurrentPixels()) return {};
 			spectrum = jpegview_linux::BuildGrayscaleSpectrum(image_.bgra, image_.width, image_.height);
 			spectrumPointer = &spectrum;
 		}
@@ -2682,6 +2782,10 @@ private:
 		}
 		if (width == image_.width && height == image_.height) {
 			CloseResizeDialog();
+			return;
+		}
+		if (!MaterializeCurrentPixels()) {
+			resizeDialog_.SetMessage("Cannot prepare image pixels");
 			return;
 		}
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
@@ -3866,10 +3970,16 @@ private:
 	}
 
 	jpegview_linux::FileList fileList_;
+	std::shared_ptr<jpegview_linux::SharedCacheBudget> cacheBudget_ =
+		std::make_shared<jpegview_linux::SharedCacheBudget>(
+			jpegview_linux::CacheBytesFromMiB(jpegview_linux::kDefaultCacheSizeMiB));
 	// Declaration order is intentional: the decoder (destroyed first) may
 	// schedule final display work while joining its worker during teardown.
-	jpegview_linux::DisplayImageCache displayImageCache_{kDisplayPreparationBudget};
-	jpegview_linux::DecodedImageCache imageCache_{kDecodedImageCacheBudget};
+	jpegview_linux::DisplayImageCache displayImageCache_{
+		std::numeric_limits<std::size_t>::max(), 2, {}, cacheBudget_};
+	jpegview_linux::DecodedImageCache imageCache_{
+		std::numeric_limits<std::size_t>::max(), {}, cacheBudget_};
+	std::size_t cacheSizeMiB_ = jpegview_linux::kDefaultCacheSizeMiB;
 	double initialSlideshowSeconds_ = 0.0;
 	jpegview_linux::PlaybackScheduler playback_;
 	std::vector<Image> animationFrames_;
@@ -3893,6 +4003,7 @@ private:
 	jpegview_linux::DecodedImageCache::ImagePtr currentDecoded_;
 	std::size_t currentAnimationFrame_ = 0;
 	std::optional<jpegview_linux::DisplayImageRequest> currentDisplayRequest_;
+	bool currentPixelsMaterialized_ = false;
 	Image transitionImage_;
 	SDL_Texture* transitionTexture_ = nullptr;
 	jpegview_linux::Viewport viewport_;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "image_decoder.h"
+#include "cache_budget.h"
 
 #include <chrono>
 #include <cstddef>
@@ -21,6 +22,7 @@ struct DisplayImageRequest {
 	int targetWidth = 0;
 	int targetHeight = 0;
 	bool autoContrast = false;
+	std::size_t priority = 0;
 	std::string key;
 
 	bool Valid() const;
@@ -31,13 +33,14 @@ struct PreparedDisplayImage {
 	int width = 0;
 	int height = 0;
 	std::vector<std::uint8_t> bgra;
+	std::size_t priority = 0;
 };
 
 // Captures the source identity at request time. An invalid request is returned
 // for a missing file, invalid frame, or invalid target dimensions.
 DisplayImageRequest MakeDisplayImageRequest(const std::filesystem::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
-	int targetWidth, int targetHeight, bool autoContrast);
+	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0);
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
 
@@ -50,7 +53,8 @@ public:
 	using Processor = std::function<ImagePtr(const DisplayImageRequest&)>;
 
 	explicit DisplayImageCache(std::size_t byteBudget,
-		std::size_t workerCount = 0, Processor processor = {});
+		std::size_t workerCount = 0, Processor processor = {},
+		std::shared_ptr<SharedCacheBudget> sharedBudget = {});
 	~DisplayImageCache();
 
 	DisplayImageCache(const DisplayImageCache&) = delete;
@@ -61,10 +65,12 @@ public:
 	void Prefetch(const std::vector<DisplayImageRequest>& requests);
 	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount);
 	void Release(const std::string& key);
+	void Retire(const ImagePtr& image);
 	void Clear();
 
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;
+	bool HasPendingWork() const;
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);
 
 private:

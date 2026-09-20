@@ -7,8 +7,9 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `image`: validated mutable BGRA storage, rotate/mirror transforms, high-quality resizing, and
   histogram-derived automatic correction.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
-- `image_cache` and `display_image_cache`: source-aware decoded-image retention, nearest-first
-  decode completion, and threaded correction/scaling of renderer-ready frames.
+- `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
+  source-aware decoded-image retention, nearest-first decode completion, and threaded
+  correction/scaling of renderer-ready frames.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `settings` and `sort_mode`: persisted configuration and stable setting values.
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
@@ -49,4 +50,9 @@ pattern: a small pure C++ object, thin SDL adapter methods in Viewer, focused co
 smoke tests for integration. Worker threads belong behind model APIs (as with directory summaries),
 while SDL windows, textures, cursors, process execution, and event translation remain owned by
 platform adapters. In particular, display pixels may be prepared on workers, but SDL texture upload
-and destruction stay on the renderer thread because SDL renderer objects are not thread-safe.
+and destruction stay on the renderer thread because SDL renderer objects are not thread-safe. Decoded
+pixels, prepared frames, and retained SDL textures reserve from one configured cache budget. Prepared
+frames are uploaded at most once per event-loop iteration, after the current frame is presented;
+unfinished closer neighbors block farther uploads. Expensive CPU-buffer destruction is handed back to
+cache workers, and static images backed by a ready display texture defer full-pixel materialization
+until an edit, copy, save, histogram, or another pixel-consuming operation actually needs it.
