@@ -57,7 +57,7 @@ they support.
 6. **Neighboring-image thumbnail panel.** Ctrl+T or the context menu opens a vertical strip on the
    left in active file order. The current image stays centered and fully bright; neighboring images
    are darkened and clickable. The panel reserves image space instead of covering the picture,
-   preloads nearest files first, and uses a bounded in-memory cache. Its divider is mouse-resizable,
+   preloads nearest files first, and retains every generated thumbnail for the active file list. Its divider is mouse-resizable,
    its width and visibility persist, and thumbnail row height follows panel width so a narrow panel
    fits more images without large fixed gaps. Thumbnails have no forced horizontal inset and only a
    one-pixel vertical margin plus separator; source-area antialiasing keeps reduced images smooth.
@@ -341,7 +341,8 @@ matching the Windows default escape command, and otherwise quits.
 The same settings file accepts `cache_size_mb=1024` to control the aggregate memory retained for
 decoded images, worker-prepared display frames, and renderer-ready textures. The value is in MiB,
 takes effect at the next launch, and defaults to 1024. Set it to `0` to disable retained image/display
-caching; this does not disable the small, separately bounded thumbnail cache.
+caching; this does not disable the separate thumbnail cache, whose generated entries are retained for
+the active file list regardless of the large-image budget.
 
 The thumbnail panel is hidden by default and can be enabled from the context menu or with Ctrl+T.
 It follows the active file ordering in a vertical strip: the current image remains centered and at

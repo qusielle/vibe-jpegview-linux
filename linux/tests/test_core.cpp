@@ -2619,6 +2619,21 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 void TestThumbnailCacheSchedulingAndEviction() {
 	jpegview_linux::ThumbnailCacheScheduler scheduler;
 	const std::vector<std::string> keys = {"a", "b", "c", "d", "e"};
+	jpegview_linux::ThumbnailCacheScheduler retained;
+	Expect(retained.Prepare(keys, 2, keys.size()).empty(),
+		"full-list thumbnail retention unexpectedly evicted an entry");
+	for (std::size_t completed = 0; completed < keys.size(); ++completed) {
+		const auto retainedRequest = retained.Next(0);
+		Expect(retainedRequest.has_value(),
+			"full-list thumbnail retention stopped before every file was cached");
+		Expect(retained.Complete(*retainedRequest, 0, 0).empty(),
+			"full-list thumbnail retention evicted a completed thumbnail");
+	}
+	Expect(retained.CacheSize() == keys.size() &&
+		retained.Prepare(keys, 4, keys.size()).empty() &&
+		retained.CacheSize() == keys.size(),
+		"navigation dropped thumbnails retained for the active file list");
+
 	Expect(scheduler.Prepare(keys, 2, 3).empty() && scheduler.PendingCount() == 3,
 		"thumbnail scheduler did not prepare a capacity-limited queue");
 	auto request = scheduler.Next(100);

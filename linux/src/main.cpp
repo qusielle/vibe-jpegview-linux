@@ -80,8 +80,6 @@ constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
-constexpr std::size_t kThumbnailCacheLimit = 64;
-constexpr std::size_t kThumbnailCachePixelBudget = 16u * 1024u * 1024u;
 constexpr std::size_t kDecodedImagePrefetchCount = 32;
 constexpr std::size_t kDisplayTextureUploadsPerTick = 1;
 constexpr double kKeyboardPanStep = 48.0;
@@ -973,16 +971,15 @@ private:
 			EvictThumbnails(thumbnailScheduler_.Prepare({}, 0, thumbnailCache_.size()));
 			return;
 		}
-		const SDL_Rect panel = ThumbnailPanelRect();
-		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
-		const std::size_t cacheLimit = jpegview_linux::ThumbnailCacheCapacity(panel.w, rowHeight,
-			kThumbnailVerticalMargin, kThumbnailCachePixelBudget, kThumbnailCacheLimit);
 		std::vector<std::string> keys;
 		keys.reserve(fileList_.Files().size());
 		for (const fs::path& path : fileList_.Files()) {
 			keys.push_back(path.string());
 		}
-		EvictThumbnails(thumbnailScheduler_.Prepare(keys, fileList_.CurrentIndex(), cacheLimit));
+		// Thumbnails are intentionally outside the large-image cache budget and
+		// are retained for every file in the active list once generated.
+		EvictThumbnails(thumbnailScheduler_.Prepare(
+			keys, fileList_.CurrentIndex(), keys.size()));
 	}
 
 	void TickThumbnailPreload() {
