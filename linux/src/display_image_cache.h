@@ -19,6 +19,8 @@ struct DisplayImageRequest {
 	std::filesystem::path filename;
 	std::shared_ptr<const DecodedImage> decoded;
 	std::size_t frameIndex = 0;
+	int sourceWidth = 0;
+	int sourceHeight = 0;
 	int targetWidth = 0;
 	int targetHeight = 0;
 	bool autoContrast = false;
@@ -42,6 +44,10 @@ DisplayImageRequest MakeDisplayImageRequest(const std::filesystem::path& filenam
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0);
 
+DisplayImageRequest MakeJpegDisplayImageRequest(const std::filesystem::path& filename,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority = 0);
+
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
 
 // Threaded CPU-side display-frame cache. Workers perform correction, copying,
@@ -62,6 +68,7 @@ public:
 
 	ImagePtr Find(const DisplayImageRequest& request);
 	void Request(const DisplayImageRequest& request);
+	ImagePtr RequestAndWait(const DisplayImageRequest& request);
 	void Prefetch(const std::vector<DisplayImageRequest>& requests);
 	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount);
 	void Release(const std::string& key);

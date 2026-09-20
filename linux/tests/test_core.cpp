@@ -797,6 +797,61 @@ void TestDecoderFailures() {
 	Expect(error == "cannot open file" || !error.empty(), "missing image did not produce an error message");
 }
 
+void TestJpegDisplayDecodeScaling() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "large-preview.jpg";
+	constexpr int width = 64;
+	constexpr int height = 48;
+	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+	for (int y = 0; y < height; ++y) {
+		for (int x = 0; x < width; ++x) {
+			const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * 4;
+			pixels[offset] = static_cast<std::uint8_t>(x * 3);
+			pixels[offset + 1] = static_cast<std::uint8_t>(y * 4);
+			pixels[offset + 2] = static_cast<std::uint8_t>(x + y);
+			pixels[offset + 3] = 255;
+		}
+	}
+	ImageWriteOptions options;
+	options.jpegQuality = 95;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(filename, pixels.data(), width, height, options, error),
+		"cannot create scaled JPEG fixture: " + error);
+	Expect(jpegview_linux::IsJpegPath(filename) &&
+		jpegview_linux::IsJpegPath(temporary.path() / "PHOTO.JPEG") &&
+		!jpegview_linux::IsJpegPath(temporary.path() / "photo.png"),
+		"JPEG display-path extension policy is incorrect");
+
+	int headerWidth = 0;
+	int headerHeight = 0;
+	Expect(jpegview_linux::ReadJpegDimensions(filename, headerWidth, headerHeight, error) &&
+		headerWidth == width && headerHeight == height,
+		"JPEG header probe returned incorrect source dimensions");
+	DecodedImage scaled;
+	int sourceWidth = 0;
+	int sourceHeight = 0;
+	Expect(jpegview_linux::DecodeJpegForDisplay(filename, 9, 7, scaled,
+		sourceWidth, sourceHeight, error),
+		"scaled JPEG display decode failed: " + error);
+	Expect(sourceWidth == width && sourceHeight == height && scaled.frames.size() == 1,
+		"scaled JPEG decode lost its full source dimensions");
+	Expect(scaled.frames[0].width >= 9 && scaled.frames[0].height >= 7 &&
+		scaled.frames[0].width < width && scaled.frames[0].height < height,
+		"JPEG display decode did not select a reduced DCT size above the target");
+
+	const jpegview_linux::DisplayImageRequest request =
+		jpegview_linux::MakeJpegDisplayImageRequest(filename, width, height,
+			10, 8, false, 1);
+	Expect(request.Valid() && !request.decoded,
+		"file-backed JPEG display request was not valid without full decoded pixels");
+	jpegview_linux::DisplayImageCache display(4096, 1);
+	const jpegview_linux::DisplayImageCache::ImagePtr prepared =
+		display.RequestAndWait(request);
+	Expect(prepared && prepared->width == 10 && prepared->height == 8 &&
+		prepared->bgra.size() == 10u * 8u * 4u,
+		"file-backed JPEG preparation did not produce exact display-size pixels");
+}
+
 std::shared_ptr<DecodedImage> CachedTestImage(std::size_t bytes) {
 	auto image = std::make_shared<DecodedImage>();
 	jpegview_linux::DecodedFrame frame;
@@ -3070,6 +3125,7 @@ int main() {
 	RunTest("pnm-variants", TestPnmVariants, failures);
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
+	RunTest("jpeg-display-decode-scaling", TestJpegDisplayDecodeScaling, failures);
 	RunTest("decoded-image-cache-and-background-prefetch", TestDecodedImageCacheAndBackgroundPrefetch, failures);
 	RunTest("display-image-cache-background-preparation", TestDisplayImageCacheBackgroundPreparation, failures);
 	RunTest("shared-cache-budget-accounting", TestSharedCacheBudgetAccounting, failures);

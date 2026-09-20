@@ -9,7 +9,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
 - `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded
-  correction/scaling of renderer-ready frames.
+  correction/scaling of renderer-ready frames. JPEG display requests use native reduced DCT decode
+  before exact scaling, without requiring a retained full-resolution source frame.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `settings` and `sort_mode`: persisted configuration and stable setting values.
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
@@ -56,3 +57,6 @@ frames are uploaded at most once per event-loop iteration, after the current fra
 unfinished closer neighbors block farther uploads. Expensive CPU-buffer destruction is handed back to
 cache workers, and static images backed by a ready display texture defer full-pixel materialization
 until an edit, copy, save, histogram, or another pixel-consuming operation actually needs it.
+For fitted JPEGs, header dimensions are cached by file size and modification time and workers decode
+the smallest native libjpeg scale that covers the stable viewport. This makes renderer-ready textures,
+rather than ~96 MiB source frames, the primary navigation cache for high-resolution photo folders.

@@ -396,6 +396,13 @@ private:
 		std::uint64_t lastUsed = 0;
 	};
 
+	struct JpegDimensionCacheEntry {
+		std::uintmax_t fileSize = 0;
+		fs::file_time_type modified{};
+		int width = 0;
+		int height = 0;
+	};
+
 	struct DisplayPrefetchContext {
 		jpegview_linux::ViewportSnapshot viewport;
 		int imageAreaWidth = 0;
@@ -502,9 +509,47 @@ private:
 		jpegview_linux::SaveViewerSettings(settingsPath, settings);
 	}
 
+	bool JpegDimensions(const fs::path& filename, int& width, int& height,
+		std::string& errorMessage) {
+		std::error_code error;
+		const std::uintmax_t fileSize = fs::file_size(filename, error);
+		if (error) return jpegview_linux::ReadJpegDimensions(
+			filename, width, height, errorMessage);
+		const fs::file_time_type modified = fs::last_write_time(filename, error);
+		if (error) return jpegview_linux::ReadJpegDimensions(
+			filename, width, height, errorMessage);
+		const std::string key = filename.string();
+		const auto cached = jpegDimensionCache_.find(key);
+		if (cached != jpegDimensionCache_.end() && cached->second.fileSize == fileSize &&
+			cached->second.modified == modified) {
+			width = cached->second.width;
+			height = cached->second.height;
+			return true;
+		}
+		if (!jpegview_linux::ReadJpegDimensions(filename, width, height, errorMessage)) return false;
+		jpegDimensionCache_[key] = {fileSize, modified, width, height};
+		return true;
+	}
+
 	bool MaterializeCurrentPixels() {
 		if (currentPixelsMaterialized_) return true;
-		if (!currentDecoded_ || currentDecoded_->frames.empty()) return false;
+		if (!currentDecoded_) {
+			currentDecoded_ = imageCache_.Find(fileList_.Current());
+			if (!currentDecoded_) currentDecoded_ = imageCache_.FindOrWait(fileList_.Current());
+			if (!currentDecoded_) {
+				auto decoded = std::make_shared<jpegview_linux::DecodedImage>();
+				std::string errorMessage;
+				if (!jpegview_linux::DecodeImage(fileList_.Current(), *decoded, errorMessage) ||
+					decoded->frames.empty()) {
+					SetTitle(fileList_.Current().filename().string() +
+						" — decode failed: " + errorMessage);
+					return false;
+				}
+				imageCache_.Store(fileList_.Current(), decoded);
+				currentDecoded_ = std::move(decoded);
+			}
+		}
+		if (currentDecoded_->frames.empty()) return false;
 		std::vector<Image> decodedFrames;
 		if (currentDecoded_->frames.size() > 1) decodedFrames.reserve(currentDecoded_->frames.size());
 		for (const jpegview_linux::DecodedFrame& decodedFrame : currentDecoded_->frames) {
@@ -541,30 +586,12 @@ private:
 		jpegComment_.clear();
 		ClearTransition();
 		std::string errorMessage;
-		jpegview_linux::DecodedImageCache::ImagePtr decoded = imageCache_.Find(fileList_.Current());
-		if (!decoded) decoded = imageCache_.FindOrWait(fileList_.Current());
-		if (!decoded) {
-			auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
-			if (!jpegview_linux::DecodeImage(fileList_.Current(), *loaded, errorMessage) ||
-				loaded->frames.empty()) {
-				SetTitle(fileList_.Current().filename().string() + " — decode failed: " + errorMessage);
-				std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
-				return false;
-			}
-			imageCache_.Store(fileList_.Current(), loaded);
-			decoded = std::move(loaded);
-		}
-		std::vector<int> animationFrameDelaysMs;
-		animationFrameDelaysMs.reserve(decoded->frames.size());
-		for (const jpegview_linux::DecodedFrame& decodedFrame : decoded->frames) {
-			animationFrameDelaysMs.push_back(std::max(10, decodedFrame.delayMs));
-		}
 		jpegview_linux::ReadJpegMetadata(fileList_.Current(), metadata_, jpegComment_);
 
 		if (texture_ != nullptr) SDL_DestroyTexture(texture_);
 		texture_ = nullptr;
 		ClearDisplayTexture();
-		currentDecoded_ = decoded;
+		currentDecoded_.reset();
 		currentAnimationFrame_ = 0;
 		currentDisplayRequest_.reset();
 		currentPixelsMaterialized_ = false;
@@ -572,37 +599,81 @@ private:
 		correctionBase_ = {};
 		correctionBaseValid_ = false;
 		image_ = {};
-		const jpegview_linux::DecodedFrame& firstFrame = decoded->frames.front();
-		image_.width = firstFrame.width;
-		image_.height = firstFrame.height;
-		image_.originalWidth = firstFrame.width;
-		image_.originalHeight = firstFrame.height;
 		imageModified_ = false;
-		RestoreScaleMode(viewportSnapshot);
 		const Uint32 now = SDL_GetTicks();
 		const SDL_Rect imageArea = ImageAreaRect();
-		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, imageArea.w, imageArea.h);
-		const jpegview_linux::DisplayImageRequest* displayRequest =
-			CurrentDisplayRequest(destination.width, destination.height);
-		bool cachedDisplay = displayRequest != nullptr &&
-			FindDisplayTexture(displayRequest->key) != nullptr;
-		if (!cachedDisplay && displayRequest != nullptr) {
-			// A worker may have finished between event-loop upload ticks. Convert
-			// that prepared neighbor directly instead of copying and correcting the
-			// full decoded image on this latency-sensitive navigation path.
-			if (const auto prepared = displayImageCache_.Find(*displayRequest)) {
-				cachedDisplay = CacheDisplayTexture(prepared);
+
+		bool cachedDisplay = false;
+		if (cacheBudget_->Capacity() != 0 && jpegview_linux::IsJpegPath(fileList_.Current())) {
+			int sourceWidth = 0;
+			int sourceHeight = 0;
+			if (JpegDimensions(fileList_.Current(), sourceWidth,
+				sourceHeight, errorMessage)) {
+				image_.width = image_.originalWidth = sourceWidth;
+				image_.height = image_.originalHeight = sourceHeight;
+				RestoreScaleMode(viewportSnapshot);
+				const jpegview_linux::ViewportRect destination = viewport_.Destination(
+					sourceWidth, sourceHeight, imageArea.w, imageArea.h);
+				currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
+					fileList_.Current(), sourceWidth, sourceHeight, destination.width,
+					destination.height, autoContrastEnabled_);
+				if (currentDisplayRequest_->Valid()) {
+					cachedDisplay = FindDisplayTexture(currentDisplayRequest_->key) != nullptr;
+					if (!cachedDisplay) {
+						auto prepared = displayImageCache_.Find(*currentDisplayRequest_);
+						if (!prepared) prepared =
+							displayImageCache_.RequestAndWait(*currentDisplayRequest_);
+						if (prepared) cachedDisplay = CacheDisplayTexture(prepared);
+					}
+				}
 			}
 		}
-		if (!cachedDisplay || decoded->frames.size() > 1) {
-			if (!MaterializeCurrentPixels()) return false;
-		}
+
+		std::vector<int> animationFrameDelaysMs;
 		if (!cachedDisplay) {
-			if (!UpdateTexture()) return false;
+			jpegview_linux::DecodedImageCache::ImagePtr decoded = imageCache_.Find(fileList_.Current());
+			if (!decoded) decoded = imageCache_.FindOrWait(fileList_.Current());
+			if (!decoded) {
+				auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
+				if (!jpegview_linux::DecodeImage(fileList_.Current(), *loaded, errorMessage) ||
+					loaded->frames.empty()) {
+					SetTitle(fileList_.Current().filename().string() +
+						" — decode failed: " + errorMessage);
+					std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
+					return false;
+				}
+				imageCache_.Store(fileList_.Current(), loaded);
+				decoded = std::move(loaded);
+			}
+			currentDecoded_ = decoded;
+			animationFrameDelaysMs.reserve(decoded->frames.size());
+			for (const jpegview_linux::DecodedFrame& decodedFrame : decoded->frames) {
+				animationFrameDelaysMs.push_back(std::max(10, decodedFrame.delayMs));
+			}
+			const jpegview_linux::DecodedFrame& firstFrame = decoded->frames.front();
+			image_.width = image_.originalWidth = firstFrame.width;
+			image_.height = image_.originalHeight = firstFrame.height;
+			RestoreScaleMode(viewportSnapshot);
+			const jpegview_linux::ViewportRect destination = viewport_.Destination(
+				image_.width, image_.height, imageArea.w, imageArea.h);
+			const jpegview_linux::DisplayImageRequest* displayRequest =
+				CurrentDisplayRequest(destination.width, destination.height);
+			cachedDisplay = displayRequest != nullptr &&
+				FindDisplayTexture(displayRequest->key) != nullptr;
+			if (!cachedDisplay && displayRequest != nullptr) {
+				if (const auto prepared = displayImageCache_.Find(*displayRequest)) {
+					cachedDisplay = CacheDisplayTexture(prepared);
+				}
+			}
+			if (!cachedDisplay || decoded->frames.size() > 1) {
+				if (!MaterializeCurrentPixels()) return false;
+			}
+			if (!cachedDisplay && !UpdateTexture()) return false;
+			playback_.ConfigureImage(std::move(animationFrameDelaysMs), decoded->loopCount,
+				decoded->animation, now);
+		} else {
+			playback_.ConfigureImage({}, 0, false, now);
 		}
-		playback_.ConfigureImage(std::move(animationFrameDelaysMs), decoded->loopCount,
-			decoded->animation, now);
 		SetTitle();
 		PrepareThumbnailPreload();
 		PrepareImagePrefetch(prefetchDirection);
@@ -624,9 +695,27 @@ private:
 			fileList_.Files().size(), fileList_.CurrentIndex(), preferredDirection,
 			kDecodedImagePrefetchCount);
 		for (std::size_t position = 0; position < prefetchOrder.size(); ++position) {
-			batch->priorityByFilename.emplace(
-				fileList_.Files()[prefetchOrder[position]].string(), position + 1);
+			const fs::path& filename = fileList_.Files()[prefetchOrder[position]];
+			batch->priorityByFilename.emplace(filename.string(), position + 1);
+			if (!jpegview_linux::IsJpegPath(filename)) continue;
+			int sourceWidth = 0;
+			int sourceHeight = 0;
+			std::string errorMessage;
+			if (!JpegDimensions(filename, sourceWidth, sourceHeight,
+				errorMessage)) continue;
+			jpegview_linux::Viewport viewport;
+			viewport.Restore(batch->context.viewport, sourceWidth, sourceHeight,
+				batch->context.imageAreaWidth, batch->context.imageAreaHeight);
+			const jpegview_linux::ViewportRect target = viewport.Destination(
+				sourceWidth, sourceHeight, batch->context.imageAreaWidth,
+				batch->context.imageAreaHeight);
+			jpegview_linux::DisplayImageRequest request =
+				jpegview_linux::MakeJpegDisplayImageRequest(filename, sourceWidth, sourceHeight,
+					target.width, target.height, batch->context.autoContrast, position + 1);
+			if (request.Valid() && batch->retainedTextureKeys.find(request.key) ==
+				batch->retainedTextureKeys.end()) batch->requests.push_back(std::move(request));
 		}
+		displayImageCache_.Prefetch(batch->requests);
 		imageCache_.Prefetch(fileList_.Files(), fileList_.CurrentIndex(),
 			preferredDirection, kDecodedImagePrefetchCount,
 			[batch](const fs::path& filename,
@@ -651,6 +740,8 @@ private:
 				std::lock_guard<std::mutex> lock(batch->mutex);
 				batch->requests.push_back(std::move(request));
 				batch->cache->Prefetch(batch->requests);
+			}, [](const fs::path& filename) {
+				return !jpegview_linux::IsJpegPath(filename);
 			});
 	}
 
@@ -782,8 +873,8 @@ private:
 	}
 
 	const jpegview_linux::DisplayImageRequest* CurrentDisplayRequest(int width, int height) {
-		if (imageModified_ || !currentDecoded_ || fileList_.Empty() ||
-			currentAnimationFrame_ >= currentDecoded_->frames.size() || width <= 0 || height <= 0) {
+		if (imageModified_ || fileList_.Empty() || width <= 0 || height <= 0 ||
+			(currentDecoded_ && currentAnimationFrame_ >= currentDecoded_->frames.size())) {
 			currentDisplayRequest_.reset();
 			return nullptr;
 		}
@@ -793,9 +884,15 @@ private:
 			currentDisplayRequest_->targetWidth != width ||
 			currentDisplayRequest_->targetHeight != height ||
 			currentDisplayRequest_->autoContrast != autoContrastEnabled_) {
-			currentDisplayRequest_ = jpegview_linux::MakeDisplayImageRequest(
-				fileList_.Current(), currentDecoded_, currentAnimationFrame_, width, height,
-				autoContrastEnabled_);
+			if (currentDecoded_) {
+				currentDisplayRequest_ = jpegview_linux::MakeDisplayImageRequest(
+					fileList_.Current(), currentDecoded_, currentAnimationFrame_, width, height,
+					autoContrastEnabled_);
+			} else {
+				currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
+					fileList_.Current(), image_.originalWidth, image_.originalHeight, width, height,
+					autoContrastEnabled_);
+			}
 		}
 		return currentDisplayRequest_->Valid() ? &*currentDisplayRequest_ : nullptr;
 	}
@@ -892,22 +989,43 @@ private:
 			fileList_.Files()[request->fileIndex].string() != request->key) return;
 		const fs::path& path = fileList_.Files()[request->fileIndex];
 		ThumbnailCacheEntry cached;
-		jpegview_linux::DecodedImageCache::ImagePtr decoded = imageCache_.Find(path);
-		if (!decoded) {
-			auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
+		const SDL_Rect panel = ThumbnailPanelRect();
+		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
+		jpegview_linux::DecodedImageCache::ImagePtr decoded;
+		jpegview_linux::ThumbnailSize size;
+		if (jpegview_linux::IsJpegPath(path)) {
+			int sourceWidth = 0;
+			int sourceHeight = 0;
 			std::string errorMessage;
-			if (jpegview_linux::DecodeImage(path, *loaded, errorMessage) && !loaded->frames.empty()) {
-				imageCache_.Store(path, loaded);
-				decoded = std::move(loaded);
+			if (JpegDimensions(path, sourceWidth, sourceHeight, errorMessage)) {
+				size = jpegview_linux::FitThumbnailSize(sourceWidth, sourceHeight, panel.w,
+					rowHeight - kThumbnailVerticalMargin * 2 - 1);
+				auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
+				int decodedSourceWidth = 0;
+				int decodedSourceHeight = 0;
+				if (size.width > 0 && size.height > 0 &&
+					jpegview_linux::DecodeJpegForDisplay(path, size.width, size.height, *loaded,
+						decodedSourceWidth, decodedSourceHeight, errorMessage) &&
+					!loaded->frames.empty()) decoded = std::move(loaded);
+			}
+		} else {
+			decoded = imageCache_.Find(path);
+			if (!decoded) {
+				auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
+				std::string errorMessage;
+				if (jpegview_linux::DecodeImage(path, *loaded, errorMessage) &&
+					!loaded->frames.empty()) {
+					imageCache_.Store(path, loaded);
+					decoded = std::move(loaded);
+				}
 			}
 		}
 		if (decoded && !decoded->frames.empty()) {
 			const jpegview_linux::DecodedFrame& frame = decoded->frames.front();
-			const SDL_Rect panel = ThumbnailPanelRect();
-			const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
-			const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
-				frame.width, frame.height, panel.w,
-				rowHeight - kThumbnailVerticalMargin * 2 - 1);
+			if (size.width <= 0 || size.height <= 0) {
+				size = jpegview_linux::FitThumbnailSize(frame.width, frame.height, panel.w,
+					rowHeight - kThumbnailVerticalMargin * 2 - 1);
+			}
 			Image thumbnail;
 			std::vector<std::uint8_t> thumbnailPixels;
 			if (size.width > 0 && size.height > 0 &&
@@ -3999,6 +4117,7 @@ private:
 	int displayTextureWidth_ = 0;
 	int displayTextureHeight_ = 0;
 	std::unordered_map<std::string, DisplayTextureCacheEntry> displayTextureCache_;
+	std::unordered_map<std::string, JpegDimensionCacheEntry> jpegDimensionCache_;
 	std::size_t displayTextureCacheBytes_ = 0;
 	std::uint64_t displayTextureUseCounter_ = 0;
 	jpegview_linux::DecodedImageCache::ImagePtr currentDecoded_;

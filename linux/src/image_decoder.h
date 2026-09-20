@@ -26,4 +26,18 @@ struct DecodedImage {
 bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage);
 
+bool IsJpegPath(const std::filesystem::path& filename);
+
+// Reads only the JPEG header. This is used to calculate a stable fitted
+// viewport before committing CPU time and memory to pixel decompression.
+bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage);
+
+// Uses libjpeg's native DCT scaling to decode the smallest available image
+// that is still at least the requested size. sourceWidth/sourceHeight always
+// report the full JPEG dimensions; the returned frame can be smaller.
+bool DecodeJpegForDisplay(const std::filesystem::path& filename,
+	int minimumWidth, int minimumHeight, DecodedImage& image,
+	int& sourceWidth, int& sourceHeight, std::string& errorMessage);
+
 } // namespace jpegview_linux

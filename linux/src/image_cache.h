@@ -30,6 +30,7 @@ public:
 	using ImagePtr = std::shared_ptr<const DecodedImage>;
 	using Decoder = std::function<bool(const std::filesystem::path&, DecodedImage&, std::string&)>;
 	using Completion = std::function<void(const std::filesystem::path&, const ImagePtr&)>;
+	using Filter = std::function<bool(const std::filesystem::path&)>;
 
 	explicit DecodedImageCache(std::size_t byteBudget, Decoder decoder = {},
 		std::shared_ptr<SharedCacheBudget> sharedBudget = {},
@@ -48,7 +49,7 @@ public:
 		const std::shared_ptr<DecodedImage>& image);
 	void Prefetch(const std::vector<std::filesystem::path>& files,
 		std::size_t currentIndex, int preferredDirection,
-		std::size_t maximumCount, Completion completion = {});
+		std::size_t maximumCount, Completion completion = {}, Filter filter = {});
 	void Clear();
 
 	std::size_t CachedBytes() const;

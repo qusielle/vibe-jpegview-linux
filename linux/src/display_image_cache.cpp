@@ -65,9 +65,22 @@ std::string RequestKey(const fs::path& filename, const FileIdentity& identity,
 
 DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& request) {
 	if (!request.Valid()) return {};
-	const DecodedFrame& decodedFrame = request.decoded->frames[request.frameIndex];
+	DecodedImage displayDecoded;
+	const DecodedFrame* decodedFrame = nullptr;
+	if (request.decoded) {
+		decodedFrame = &request.decoded->frames[request.frameIndex];
+	} else {
+		int sourceWidth = 0;
+		int sourceHeight = 0;
+		std::string errorMessage;
+		if (!DecodeJpegForDisplay(request.filename, request.targetWidth, request.targetHeight,
+			displayDecoded, sourceWidth, sourceHeight, errorMessage) ||
+			displayDecoded.frames.empty() || sourceWidth != request.sourceWidth ||
+			sourceHeight != request.sourceHeight) return {};
+		decodedFrame = &displayDecoded.frames.front();
+	}
 	Image image;
-	if (!image.StoreBGRA(decodedFrame.bgra.data(), decodedFrame.width, decodedFrame.height)) return {};
+	if (!image.StoreBGRA(decodedFrame->bgra.data(), decodedFrame->width, decodedFrame->height)) return {};
 	if (request.autoContrast && !image.AutoContrast()) return {};
 	if ((request.targetWidth < image.width || request.targetHeight < image.height) &&
 		!image.Resize(request.targetWidth, request.targetHeight)) return {};
@@ -84,8 +97,10 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 } // namespace
 
 bool DisplayImageRequest::Valid() const {
-	if (key.empty() || !decoded || frameIndex >= decoded->frames.size() ||
+	if (key.empty() ||
 		targetWidth <= 0 || targetHeight <= 0) return false;
+	if (!decoded) return sourceWidth > 0 && sourceHeight > 0 && IsJpegPath(filename);
+	if (frameIndex >= decoded->frames.size()) return false;
 	const DecodedFrame& frame = decoded->frames[frameIndex];
 	return frame.width > 0 && frame.height > 0 && !frame.bgra.empty();
 }
@@ -104,7 +119,27 @@ DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	if (!decoded || frameIndex >= decoded->frames.size() || targetWidth <= 0 || targetHeight <= 0) {
 		return request;
 	}
+	request.sourceWidth = decoded->frames[frameIndex].width;
+	request.sourceHeight = decoded->frames[frameIndex].height;
 	request.key = RequestKey(filename, Identify(filename), frameIndex,
+		targetWidth, targetHeight, autoContrast);
+	return request;
+}
+
+DisplayImageRequest MakeJpegDisplayImageRequest(const fs::path& filename,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority) {
+	DisplayImageRequest request;
+	request.filename = filename;
+	request.sourceWidth = sourceWidth;
+	request.sourceHeight = sourceHeight;
+	request.targetWidth = targetWidth;
+	request.targetHeight = targetHeight;
+	request.autoContrast = autoContrast;
+	request.priority = priority;
+	if (!IsJpegPath(filename) || sourceWidth <= 0 || sourceHeight <= 0 ||
+		targetWidth <= 0 || targetHeight <= 0) return request;
+	request.key = RequestKey(filename, Identify(filename), 0,
 		targetWidth, targetHeight, autoContrast);
 	return request;
 }
@@ -364,6 +399,36 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 		impl_->queuedKeys.insert(request.key);
 	}
 	impl_->workAvailable.notify_one();
+}
+
+DisplayImageCache::ImagePtr DisplayImageCache::RequestAndWait(
+	const DisplayImageRequest& request) {
+	if (!request.Valid()) return {};
+	Request(request);
+	std::unique_lock<std::mutex> lock(impl_->mutex);
+	const auto findCompleted = [&]() -> ImagePtr {
+		const auto cached = impl_->entries.find(request.key);
+		if (cached != impl_->entries.end()) {
+			cached->second.lastUsed = ++impl_->useCounter;
+			return cached->second.image;
+		}
+		const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
+			[&request](const Impl::Completion& completion) {
+				return completion.image && completion.image->key == request.key;
+			});
+		return completed == impl_->completed.end() ? ImagePtr{} : completed->image;
+	};
+	if (ImagePtr ready = findCompleted()) return ready;
+	impl_->idle.wait(lock, [&] {
+		if (impl_->stopping || impl_->entries.find(request.key) != impl_->entries.end()) return true;
+		if (std::any_of(impl_->completed.begin(), impl_->completed.end(),
+			[&request](const Impl::Completion& completion) {
+				return completion.image && completion.image->key == request.key;
+			})) return true;
+		return impl_->queuedKeys.find(request.key) == impl_->queuedKeys.end() &&
+			impl_->inFlightKeys.find(request.key) == impl_->inFlightKeys.end();
+	});
+	return findCompleted();
 }
 
 void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& requests) {

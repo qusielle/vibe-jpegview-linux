@@ -244,7 +244,8 @@ bool DecodeStb(const std::filesystem::path& filename, DecodedImage& image,
 }
 
 bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
-	std::string& errorMessage) {
+	std::string& errorMessage, int minimumWidth = 0, int minimumHeight = 0,
+	int* sourceWidth = nullptr, int* sourceHeight = nullptr) {
 	struct ErrorManager {
 		jpeg_error_mgr base{};
 		jmp_buf jump{};
@@ -287,6 +288,22 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		std::fclose(file);
 		if (errorMessage.empty()) errorMessage = "invalid JPEG header";
 		return false;
+	}
+	if (sourceWidth != nullptr) *sourceWidth = static_cast<int>(decoder.image_width);
+	if (sourceHeight != nullptr) *sourceHeight = static_cast<int>(decoder.image_height);
+	if (minimumWidth > 0 && minimumHeight > 0) {
+		for (const unsigned int denominator : {8u, 4u, 2u}) {
+			const unsigned int scaledWidth =
+				(decoder.image_width + denominator - 1) / denominator;
+			const unsigned int scaledHeight =
+				(decoder.image_height + denominator - 1) / denominator;
+			if (scaledWidth >= static_cast<unsigned int>(minimumWidth) &&
+				scaledHeight >= static_cast<unsigned int>(minimumHeight)) {
+				decoder.scale_num = 1;
+				decoder.scale_denom = denominator;
+				break;
+			}
+		}
 	}
 
 #ifdef JCS_EXT_BGRA
@@ -1615,12 +1632,55 @@ bool DecodeRaw(const std::filesystem::path& filename, DecodedImage& image,
 
 } // namespace
 
+bool IsJpegPath(const std::filesystem::path& filename) {
+	const std::string extension = Lower(filename.extension().string());
+	return extension == ".jpg" || extension == ".jpeg" || extension == ".jpe";
+}
+
+bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage) {
+	width = 0;
+	height = 0;
+	// Asking for a one-pixel display decode lets the common decoder validate
+	// the complete stream, but that still unnecessarily decompresses pixels.
+	// stbi_info performs only format/header parsing and is independent of the
+	// pixel decoder selected for the actual image.
+	int components = 0;
+	if (!IsJpegPath(filename) ||
+		stbi_info(filename.string().c_str(), &width, &height, &components) == 0 ||
+		!ValidDimensions(width, height, errorMessage)) {
+		width = 0;
+		height = 0;
+		if (errorMessage.empty()) {
+			errorMessage = stbi_failure_reason() == nullptr ?
+				"invalid JPEG header" : stbi_failure_reason();
+		}
+		return false;
+	}
+	return true;
+}
+
+bool DecodeJpegForDisplay(const std::filesystem::path& filename,
+	int minimumWidth, int minimumHeight, DecodedImage& image,
+	int& sourceWidth, int& sourceHeight, std::string& errorMessage) {
+	image = {};
+	sourceWidth = 0;
+	sourceHeight = 0;
+	errorMessage.clear();
+	if (!IsJpegPath(filename) || minimumWidth <= 0 || minimumHeight <= 0) {
+		errorMessage = "invalid JPEG display request";
+		return false;
+	}
+	return DecodeJpeg(filename, image, errorMessage, minimumWidth, minimumHeight,
+		&sourceWidth, &sourceHeight);
+}
+
 bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
 	image = {};
 	errorMessage.clear();
 	const std::string extension = Lower(filename.extension().string());
-	if (extension == ".jpg" || extension == ".jpeg" || extension == ".jpe") {
+	if (IsJpegPath(filename)) {
 		return DecodeJpeg(filename, image, errorMessage);
 	}
 	if (extension == ".gif") {

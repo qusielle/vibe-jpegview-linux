@@ -340,13 +340,14 @@ void DecodedImageCache::Store(const fs::path& filename,
 
 void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 	std::size_t currentIndex, int preferredDirection, std::size_t maximumCount,
-	Completion completion) {
+	Completion completion, Filter filter) {
 	std::vector<Impl::Work> prepared;
 	std::vector<std::pair<fs::path, ImagePtr>> alreadyCached;
 	for (const std::size_t index : ImagePrefetchOrder(files.size(), currentIndex,
 		preferredDirection, maximumCount)) {
 		Impl::Work work;
 		work.filename = files[index];
+		if (filter && !filter(work.filename)) continue;
 		work.key = CacheKey(work.filename);
 		work.identity = Identify(work.filename);
 		work.completion = completion;

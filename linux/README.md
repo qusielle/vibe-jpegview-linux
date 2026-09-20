@@ -24,7 +24,9 @@ they support.
 
 3. **High-quality viewing, fitting, zooming, and panning.** JPEGView's high-quality downsampling and
    sharpening path was ported, with bicubic enlargement and a shared 1 GiB image-cache budget.
-   Nearby decoded images are corrected and scaled on low-priority worker threads, then uploaded
+   Fitted JPEGs use libjpeg-turbo's native reduced DCT decode, avoiding full 4000×6000 pixel buffers
+   when the screen needs only a smaller image. Nearby images are corrected and scaled on low-priority
+   worker threads, then uploaded
    incrementally and retained as renderer-ready textures. The closest next and previous files take
    preparation and upload priority, and an already prepared static image is presented without first
    copying its full decoded pixels on the UI thread; navigation therefore avoids CPU resizing and
@@ -95,7 +97,8 @@ they support.
     rates and folder advancement, slideshow transitions are rendered natively, Alt+R resumes, and
     Escape stops active playback before quitting. Decoded pixels, prepared display frames, and
     retained renderer textures share one memory budget with per-layer LRU retention, while a
-    low-contention background worker predecodes nearby files in the current navigation direction.
+    low-contention background workers predecode nearby non-JPEG files in both directions. JPEG
+    neighbors take the reduced-resolution display path directly, while full pixels remain lazy.
     Decode completions feed a
     separate display-preparation worker pool, and both decoded and display caches reject stale source
     identities. Large evicted CPU buffers are retired on workers rather than destroyed on the event
@@ -191,14 +194,18 @@ Supported input formats are JPEG, PNG/APNG (including animation), GIF (including
 QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
 formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. The save dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF,
 PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is view-only.
-Common single-frame formats use the vendored public-domain/MIT `stb_image`
-single-header library, while the additional formats use their native codec libraries.
+JPEG uses the linked libjpeg implementation (libjpeg-turbo in the supported builds), common
+single-frame formats use the vendored public-domain/MIT `stb_image` single-header library, and the
+additional formats use their native codec libraries.
 
 Display resizing follows JPEGView's high-quality path: downsampling uses its integrated
 best-quality filter with the default sharpening value, and enlargement uses endpoint-preserving
-Catmull-Rom bicubic interpolation. Decoded neighbors are converted to exact display-size bitmaps on
-low-priority background workers. The SDL thread uploads completed frames incrementally—SDL renderer
-objects are thread-confined—and retains the resulting textures in a separate 1 GiB LRU keyed by
+Catmull-Rom bicubic interpolation. JPEG neighbors are first decoded at the smallest native DCT scale
+(1/8, 1/4, 1/2, or full size) that still covers the target, then converted to exact display-size
+bitmaps on low-priority background workers. This keeps fitted 4000×6000 files out of the
+full-resolution path during ordinary navigation; requesting original pixels still performs and
+caches a full decode. The SDL thread uploads completed frames incrementally—SDL renderer objects are
+thread-confined—and retains the resulting textures under the shared configured LRU budget, keyed by
 source identity, animation frame, correction mode, and target size. If preparation misses, SDL can
 temporarily scale the source texture while the high-quality result is produced; the expensive CPU
 resize never runs in the render loop.
@@ -258,8 +265,8 @@ It covers file-list ordering/navigation, mutable image transforms, all resize fi
 correction invariants, sort and settings persistence mappings, the complete supported
 keyboard-command mapping, viewport fit/fill/zoom/pan geometry, open/save browser state,
 resize-dialog validation, content-sized overlay layout, compact/advanced menu filtering and
-keyboard selection, thumbnail layout/resampling, shared cache accounting and nearest-display upload
-priority, desktop-font resolution, decoder and writer round
+keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
+decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
 trips across static and animated formats, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, focus restoration, paging,
