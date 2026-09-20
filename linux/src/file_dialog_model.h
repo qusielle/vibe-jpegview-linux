@@ -64,6 +64,7 @@ public:
 
 	void MoveSelection(int direction, int visibleRows);
 	void MoveSelectionByPage(int direction, int visibleRows);
+	void ScrollBy(int rows, int visibleRows);
 	void SelectFirst(int visibleRows);
 	void SelectLast(int visibleRows);
 	void Select(int index, int visibleRows);

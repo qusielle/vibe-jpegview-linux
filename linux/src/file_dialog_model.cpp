@@ -193,6 +193,13 @@ void FileDialogModel::MoveSelectionByPage(int direction, int visibleRows) {
 	MoveSelection(direction * std::max(1, visibleRows), visibleRows);
 }
 
+void FileDialogModel::ScrollBy(int rows, int visibleRows) {
+	visibleRows = std::max(1, visibleRows);
+	const int maximumScroll = std::max(0, static_cast<int>(entries_.size()) - visibleRows);
+	const std::int64_t nextScroll = static_cast<std::int64_t>(scroll_) + rows;
+	scroll_ = static_cast<int>(std::clamp<std::int64_t>(nextScroll, 0, maximumScroll));
+}
+
 void FileDialogModel::SelectFirst(int visibleRows) {
 	Select(0, visibleRows);
 }

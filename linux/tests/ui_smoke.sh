@@ -60,10 +60,16 @@ write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
 write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
 mkdir -p "$temporary/images/00-entry-test"
 write_ppm "$temporary/images/00-entry-test/inside-first.ppm" 64 128 32
+mkdir -p "$temporary/images/00-wheel-test"
+for index in $(seq 0 39); do
+	filename=$(printf '%02d' "$index")
+	write_ppm "$temporary/images/00-wheel-test/wheel-$filename.ppm" 64 32 16
+done
 touch -t 202001010000.00 "$temporary/images/01-red.ppm" "$temporary/images/02-green.ppm" \
 	"$temporary/images/03-blue.ppm" "$temporary/images/04-yellow.ppm" "$temporary/images/05-cyan.ppm"
 touch -t 202001010000.00 "$temporary/images/00-album"
 touch -t 202201010000.00 "$temporary/images/00-entry-test"
+touch -t 201901010000.00 "$temporary/images/00-wheel-test"
 
 help_text=$($BINARY --help)
 case "$help_text" in
@@ -190,6 +196,64 @@ case "$filtered_title" in
 	*) echo "UI smoke test: Ctrl+O filename filter did not open the matching image" >&2; exit 1 ;;
 esac
 
+# The open dialog can grow from its bottom-right grip, and its preview divider
+# can be dragged independently without closing the modal dialog.
+DISPLAY=":$display_number" xdotool key ctrl+o
+sleep 0.2
+open_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+open_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+dialog_width=$((open_width - 40))
+if [ "$dialog_width" -gt 900 ]; then dialog_width=900; fi
+if [ "$dialog_width" -lt 320 ]; then dialog_width=320; fi
+dialog_height=$((open_height - 40))
+if [ "$dialog_height" -gt 650 ]; then dialog_height=650; fi
+if [ "$dialog_height" -lt 260 ]; then dialog_height=260; fi
+dialog_x=$(((open_width - dialog_width) / 2))
+dialog_y=$(((open_height - dialog_height) / 2))
+resize_delta_x=60
+resize_delta_y=35
+resize_start_x=$((dialog_x + dialog_width - 2))
+resize_start_y=$((dialog_y + dialog_height - 2))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$resize_start_x" "$resize_start_y"
+DISPLAY=":$display_number" xdotool mousedown 1
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	$((resize_start_x + resize_delta_x)) $((resize_start_y + resize_delta_y))
+DISPLAY=":$display_number" xdotool mouseup 1
+dialog_width=$((dialog_width + resize_delta_x))
+dialog_height=$((dialog_height + resize_delta_y))
+preview_width=$((dialog_width / 3))
+if [ "$preview_width" -lt 200 ]; then preview_width=200; fi
+if [ "$preview_width" -gt 260 ]; then preview_width=260; fi
+divider_x=$((dialog_x + dialog_width - preview_width - 18))
+divider_y=$((dialog_y + 112 + 120))
+preview_expand=60
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$divider_x" "$divider_y"
+DISPLAY=":$display_number" xdotool mousedown 1
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	$((divider_x - preview_expand)) "$divider_y"
+DISPLAY=":$display_number" xdotool mouseup 1
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((dialog_x + 40)) $((dialog_y + 20))
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-resized.png"
+	resize_right_x=$((dialog_x + dialog_width - 1))
+	resize_border=$(convert "$temporary/open-dialog-resized.png" \
+		-format "%[hex:p{$resize_right_x,$((dialog_y + 10))}]" info:)
+	if [ "${resize_border#BEBEBE}" = "$resize_border" ]; then
+		echo "UI smoke test: dragging the file-dialog corner did not resize its right edge" >&2
+		exit 1
+	fi
+	preview_left_x=$((dialog_x + dialog_width - 12 - preview_width - preview_expand))
+	preview_border=$(convert "$temporary/open-dialog-resized.png" \
+		-format "%[hex:p{$preview_left_x,$((dialog_y + 122))}]" info:)
+	if [ "${preview_border#4B4B4B}" = "$preview_border" ]; then
+		echo "UI smoke test: dragging the preview divider did not resize the preview" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key Escape
+
 DISPLAY=":$display_number" xdotool key ctrl+o
 click_file_dialog_sort
 DISPLAY=":$display_number" xdotool key Home
@@ -281,6 +345,44 @@ home_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id
 case "$home_dialog_title" in
 	01-red.ppm*) ;;
 	*) echo "UI smoke test: Home did not select the first row in the Ctrl+O dialog" >&2; exit 1 ;;
+esac
+
+# A wheel event over an overflowing listing scrolls rows under the pointer and
+# activates the newly focused item, instead of navigating the viewer behind it.
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool type --delay 10 '00-WHEEL-TEST'
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.2
+wheel_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+wheel_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+wheel_dialog_width=$((wheel_window_width - 40))
+if [ "$wheel_dialog_width" -gt 900 ]; then wheel_dialog_width=900; fi
+if [ "$wheel_dialog_width" -lt 320 ]; then wheel_dialog_width=320; fi
+wheel_dialog_height=$((wheel_window_height - 40))
+if [ "$wheel_dialog_height" -gt 650 ]; then wheel_dialog_height=650; fi
+if [ "$wheel_dialog_height" -lt 260 ]; then wheel_dialog_height=260; fi
+wheel_dialog_x=$(((wheel_window_width - wheel_dialog_width) / 2))
+wheel_dialog_y=$(((wheel_window_height - wheel_dialog_height) / 2))
+wheel_list_x=$((wheel_dialog_x + 28))
+wheel_list_y=$((wheel_dialog_y + 112 + 2 * 26 + 13))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$wheel_list_x" "$wheel_list_y"
+DISPLAY=":$display_number" xdotool click 5
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+wheel_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$wheel_dialog_title" in
+	wheel-04.ppm*) ;;
+	*) echo "UI smoke test: mouse wheel did not scroll and select through the open-dialog file list" >&2; exit 1 ;;
+esac
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key BackSpace
+DISPLAY=":$display_number" xdotool type --delay 10 '01-RED'
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+wheel_restore_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$wheel_restore_title" in
+	01-red.ppm*) ;;
+	*) echo "UI smoke test: returning from the wheel fixture did not restore the root image listing" >&2; exit 1 ;;
 esac
 
 # A short press must advance exactly once. Background display preparation can

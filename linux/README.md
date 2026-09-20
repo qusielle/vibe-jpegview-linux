@@ -83,7 +83,9 @@ they support.
    full-size and screen-size saving with overwrite confirmation, live case-insensitive filename
    filtering, name/newest-modification-date listing order, Ctrl+Return direct folder opening, and
    non-blocking direct image/subdirectory counts for folder rows, plus a focused-item preview that
-   shows the selected image or the first image in a selected folder. Preview decoding runs in the
+   shows the selected image or the first image in a selected folder. The dialog can be resized from
+   its lower-right corner, its preview width can be adjusted by dragging the list/preview divider,
+   and the mouse wheel scrolls an overflowing file list. Preview decoding runs in the
    background, uses the thumbnail panel's source-area antialiasing when reducing the image, and keeps
    its temporary pixels outside the viewer caches. It also provides move-to-trash
    confirmation, original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
@@ -277,9 +279,10 @@ decoding, and nearest-display upload priority, desktop-font resolution, decoder 
 trips across static and animated formats, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, focus restoration, paging,
-Home/End and held-key movement; thumbnail display/resizing/clicking/persistence; context-menu
-expansion and repainting; startup controls; mouse-wheel navigation versus Ctrl+wheel zoom; held
-image navigation; maximize restoration; and persisted settings:
+Home/End, held-key movement, wheel scrolling, and dialog/preview resizing; thumbnail
+display/resizing/clicking/persistence; context-menu expansion and repainting; startup controls;
+mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; maximize restoration; and
+persisted settings:
 
 ```sh
 make -C linux test-ui
@@ -313,8 +316,10 @@ PageUp/PageDown move one visible page, and Home/End select the first/last row; a
 while held. Entering a folder selects its first child rather than the `[..]` parent row; returning
 to the parent selects the folder that was just exited. Folder rows show
 right-aligned counts of compatible images and subdirectories at their immediate level; these are
-calculated in the background. A preview alongside the list follows the focused file, or the first
-image in a focused folder using the current listing order. Ctrl+R reloads, and
+calculated in the background. The mouse wheel scrolls the visible file list; drag the dialog's
+lower-right corner to resize it, or drag the vertical separator to adjust the preview width. A
+preview alongside the list follows the focused file, or the first image in a focused folder using
+the current listing order. Ctrl+R reloads, and
 Ctrl+N toggles the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the
 image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
 PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.

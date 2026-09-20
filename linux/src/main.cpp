@@ -80,6 +80,12 @@ constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
+constexpr int kFileDialogMinimumWidth = 320;
+constexpr int kFileDialogMinimumHeight = 260;
+constexpr int kFileDialogDividerWidth = 12;
+constexpr int kFileDialogResizeHandleSize = 18;
+constexpr int kFileDialogMinimumListWidth = 180;
+constexpr int kFileDialogMinimumPreviewWidth = 120;
 constexpr int kFileDialogPreviewMaximumWidth = 256;
 constexpr int kFileDialogPreviewMaximumHeight = 256;
 constexpr std::size_t kDecodedImagePrefetchCount = 32;
@@ -330,6 +336,7 @@ public:
 			}
 		}
 		thumbnailResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
+		fileDialogResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
 
 		if (startFullscreen_) {
 			fullscreen_ = true;
@@ -428,6 +435,12 @@ private:
 		std::uint64_t lastUsed = 0;
 	};
 
+	enum class FileDialogDragMode {
+		None,
+		Resize,
+		PreviewDivider,
+	};
+
 	void Cleanup() {
 		SaveSettings();
 		ClearFileDialogPreview();
@@ -453,10 +466,16 @@ private:
 			SDL_DestroyWindow(window_);
 			window_ = nullptr;
 		}
-		if (thumbnailResizeCursor_ != nullptr) {
+		if (thumbnailResizeCursor_ != nullptr || fileDialogResizeCursor_ != nullptr) {
 			SDL_SetCursor(SDL_GetDefaultCursor());
+		}
+		if (thumbnailResizeCursor_ != nullptr) {
 			SDL_FreeCursor(thumbnailResizeCursor_);
 			thumbnailResizeCursor_ = nullptr;
+		}
+		if (fileDialogResizeCursor_ != nullptr) {
+			SDL_FreeCursor(fileDialogResizeCursor_);
+			fileDialogResizeCursor_ = nullptr;
 		}
 		SDL_Quit();
 	}
@@ -1233,6 +1252,9 @@ private:
 
 	void CloseFileDialog() {
 		if (fileDialogOpen_) SDL_StopTextInput();
+		if (fileDialogDragMode_ != FileDialogDragMode::None) SDL_CaptureMouse(SDL_FALSE);
+		fileDialogDragMode_ = FileDialogDragMode::None;
+		SDL_SetCursor(SDL_GetDefaultCursor());
 		ClearFileDialogPreview();
 		++fileDialogSummaryGeneration_;
 		fileDialogSummaryLoader_.Request({}, fileDialogSummaryGeneration_);
@@ -3054,9 +3076,25 @@ private:
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const int width = std::min(900, std::max(320, windowWidth - 40));
-		const int height = std::min(650, std::max(260, windowHeight - 40));
-		return SDL_Rect{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+		const int maximumWidth = std::max(kFileDialogMinimumWidth, windowWidth - 40);
+		const int maximumHeight = std::max(kFileDialogMinimumHeight, windowHeight - 40);
+		const int width = std::clamp(fileDialogWidth_, kFileDialogMinimumWidth, maximumWidth);
+		const int height = std::clamp(fileDialogHeight_, kFileDialogMinimumHeight, maximumHeight);
+		const int x = std::clamp(fileDialogX_, 0, std::max(0, windowWidth - width));
+		const int y = std::clamp(fileDialogY_, 0, std::max(0, windowHeight - height));
+		return SDL_Rect{x, y, width, height};
+	}
+
+	void ResetFileDialogGeometry() {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		fileDialogWidth_ = std::min(900, std::max(kFileDialogMinimumWidth, windowWidth - 40));
+		fileDialogHeight_ = std::min(650, std::max(kFileDialogMinimumHeight, windowHeight - 40));
+		fileDialogX_ = std::max(0, (windowWidth - fileDialogWidth_) / 2);
+		fileDialogY_ = std::max(0, (windowHeight - fileDialogHeight_) / 2);
+		fileDialogPreviewWidthOverride_ = 0;
+		fileDialogDragMode_ = FileDialogDragMode::None;
 	}
 
 	int FileDialogListTop() const {
@@ -3083,14 +3121,25 @@ private:
 
 	SDL_Rect FileDialogListRect() const {
 		const SDL_Rect dialog = FileDialogRect();
-		const int previewWidth = FileDialogHasPreviewColumn() ? FileDialogPreviewWidth() + 12 : 0;
+		const int previewWidth = FileDialogHasPreviewColumn() ?
+			FileDialogPreviewWidth() + kFileDialogDividerWidth : 0;
 		const int width = dialog.w - 24 - previewWidth;
 		return SDL_Rect{dialog.x + 12, FileDialogListTop(), width,
 			FileDialogVisibleRows() * 26};
 	}
 
 	int FileDialogPreviewWidth() const {
-		return std::min(260, std::max(200, FileDialogRect().w / 3));
+		const int defaultWidth = std::min(260, std::max(200, FileDialogRect().w / 3));
+		const int requestedWidth = fileDialogPreviewWidthOverride_ > 0 ?
+			fileDialogPreviewWidthOverride_ : defaultWidth;
+		const int maximumWidth = std::max(kFileDialogMinimumPreviewWidth,
+			FileDialogRect().w - 24 - kFileDialogDividerWidth - kFileDialogMinimumListWidth);
+		return std::clamp(requestedWidth, kFileDialogMinimumPreviewWidth, maximumWidth);
+	}
+
+	SDL_Rect FileDialogDividerRect() const {
+		const SDL_Rect list = FileDialogListRect();
+		return SDL_Rect{list.x + list.w, list.y, kFileDialogDividerWidth, list.h};
 	}
 
 	SDL_Rect FileDialogPreviewRect() const {
@@ -3098,6 +3147,80 @@ private:
 		const int width = FileDialogPreviewWidth();
 		return SDL_Rect{dialog.x + dialog.w - 12 - width, FileDialogListTop(), width,
 			FileDialogVisibleRows() * 26};
+	}
+
+	SDL_Rect FileDialogResizeHandleRect() const {
+		const SDL_Rect dialog = FileDialogRect();
+		return SDL_Rect{dialog.x + dialog.w - kFileDialogResizeHandleSize,
+			dialog.y + dialog.h - kFileDialogResizeHandleSize,
+			kFileDialogResizeHandleSize, kFileDialogResizeHandleSize};
+	}
+
+	void KeepFileDialogSelectionVisible() {
+		const int selected = fileDialogModel_.SelectedIndex();
+		if (selected >= 0) fileDialogModel_.Select(selected, FileDialogVisibleRows());
+	}
+
+	void ResizeFileDialog(int x, int y) {
+		if (fileDialogDragMode_ == FileDialogDragMode::Resize) {
+			int windowWidth = 0;
+			int windowHeight = 0;
+			SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+			const int availableWidth = std::max(1,
+				windowWidth - fileDialogDragStartRect_.x - 20);
+			const int availableHeight = std::max(1,
+				windowHeight - fileDialogDragStartRect_.y - 20);
+			fileDialogWidth_ = std::clamp(fileDialogDragStartRect_.w + x - fileDialogDragStartX_,
+				std::min(kFileDialogMinimumWidth, availableWidth), availableWidth);
+			fileDialogHeight_ = std::clamp(fileDialogDragStartRect_.h + y - fileDialogDragStartY_,
+				std::min(kFileDialogMinimumHeight, availableHeight), availableHeight);
+			fileDialogX_ = fileDialogDragStartRect_.x;
+			fileDialogY_ = fileDialogDragStartRect_.y;
+			KeepFileDialogSelectionVisible();
+		} else if (fileDialogDragMode_ == FileDialogDragMode::PreviewDivider) {
+			fileDialogPreviewWidthOverride_ = fileDialogDragStartPreviewWidth_ +
+				fileDialogDragStartX_ - x;
+		}
+	}
+
+	bool BeginFileDialogResize(int x, int y) {
+		if (!PointInRect(x, y, FileDialogResizeHandleRect())) return false;
+		fileDialogDragMode_ = FileDialogDragMode::Resize;
+		fileDialogDragStartX_ = x;
+		fileDialogDragStartY_ = y;
+		fileDialogDragStartRect_ = FileDialogRect();
+		SDL_CaptureMouse(SDL_TRUE);
+		UpdateFileDialogCursor(x, y);
+		return true;
+	}
+
+	bool BeginFileDialogPreviewResize(int x, int y) {
+		if (!FileDialogHasPreviewColumn() || !PointInRect(x, y, FileDialogDividerRect())) return false;
+		fileDialogDragMode_ = FileDialogDragMode::PreviewDivider;
+		fileDialogDragStartX_ = x;
+		fileDialogDragStartPreviewWidth_ = FileDialogPreviewWidth();
+		SDL_CaptureMouse(SDL_TRUE);
+		UpdateFileDialogCursor(x, y);
+		return true;
+	}
+
+	void EndFileDialogResize(int x, int y) {
+		if (fileDialogDragMode_ == FileDialogDragMode::None) return;
+		fileDialogDragMode_ = FileDialogDragMode::None;
+		SDL_CaptureMouse(SDL_FALSE);
+		UpdateFileDialogCursor(x, y);
+	}
+
+	void UpdateFileDialogCursor(int x, int y) const {
+		if (fileDialogDragMode_ == FileDialogDragMode::Resize ||
+			PointInRect(x, y, FileDialogResizeHandleRect())) {
+			if (fileDialogResizeCursor_ != nullptr) SDL_SetCursor(fileDialogResizeCursor_);
+		} else if (fileDialogDragMode_ == FileDialogDragMode::PreviewDivider ||
+			(FileDialogHasPreviewColumn() && PointInRect(x, y, FileDialogDividerRect()))) {
+			if (thumbnailResizeCursor_ != nullptr) SDL_SetCursor(thumbnailResizeCursor_);
+		} else {
+			SDL_SetCursor(SDL_GetDefaultCursor());
+		}
 	}
 
 	void ClearFileDialogPreview() {
@@ -3252,10 +3375,13 @@ private:
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = false;
 		fileDialogSaveFullSize_ = true;
+		ResetFileDialogGeometry();
 		fileDialogFilename_.clear();
 		fileDialogModel_.Begin(false);
 		fileDialogMessage_.clear();
 		fileDialogOpen_ = true;
+		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
 		contextMenuOpen_ = false;
 		RefreshFileDialog();
 		if (!fileList_.Empty()) {
@@ -3271,11 +3397,14 @@ private:
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = true;
 		fileDialogSaveFullSize_ = fullSize;
+		ResetFileDialogGeometry();
 		fileDialogFilename_ = fileList_.Current().stem().string() + "_proc.jpg";
 		fileDialogModel_.Begin(true);
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
 		fileDialogOpen_ = true;
+		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
 		contextMenuOpen_ = false;
 		RefreshFileDialog();
 		fileDialogModel_.ClearSelection();
@@ -3388,14 +3517,39 @@ private:
 				fileDialogModel_.AppendFilter(event.text.text);
 			}
 			break;
+		case SDL_MOUSEWHEEL: {
+			SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+			const SDL_Rect listRect = FileDialogListRect();
+			if (!PointInRect(lastMouseX_, lastMouseY_, listRect)) break;
+			int wheelTicks = std::clamp(event.wheel.y, -100, 100);
+			if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) wheelTicks = -wheelTicks;
+			if (wheelTicks == 0) break;
+			fileDialogModel_.ScrollBy(-wheelTicks * 3, FileDialogVisibleRows());
+			const int item = FileDialogItemAt(lastMouseX_, lastMouseY_);
+			if (item >= 0) fileDialogModel_.Select(item, FileDialogVisibleRows());
+			break;
+		}
 		case SDL_MOUSEMOTION: {
+			lastMouseX_ = event.motion.x;
+			lastMouseY_ = event.motion.y;
+			if (fileDialogDragMode_ != FileDialogDragMode::None) {
+				ResizeFileDialog(lastMouseX_, lastMouseY_);
+				UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
+				break;
+			}
 			const int item = FileDialogItemAt(event.motion.x, event.motion.y);
 			if (item >= 0) {
 				fileDialogModel_.Select(item, FileDialogVisibleRows());
 			}
+			UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
 			break;
 		}
 		case SDL_MOUSEBUTTONDOWN: {
+			lastMouseX_ = event.button.x;
+			lastMouseY_ = event.button.y;
+			if (event.button.button == SDL_BUTTON_LEFT && BeginFileDialogResize(lastMouseX_, lastMouseY_)) break;
+			if (event.button.button == SDL_BUTTON_LEFT &&
+				BeginFileDialogPreviewResize(lastMouseX_, lastMouseY_)) break;
 			const int item = FileDialogItemAt(event.button.x, event.button.y);
 			const bool inputClicked = PointInRect(event.button.x, event.button.y, FileDialogInputRect());
 			const bool sortClicked = !fileDialogSave_ &&
@@ -3422,6 +3576,11 @@ private:
 			}
 			break;
 		}
+		case SDL_MOUSEBUTTONUP:
+			lastMouseX_ = event.button.x;
+			lastMouseY_ = event.button.y;
+			if (event.button.button == SDL_BUTTON_LEFT) EndFileDialogResize(lastMouseX_, lastMouseY_);
+			break;
 		default:
 			break;
 		}
@@ -3489,13 +3648,29 @@ private:
 				DrawText(summaryText, summaryX, rowTop + 5, kUiTextScale, 155, 175, 195);
 			}
 		}
-		if (FileDialogHasPreviewColumn()) RenderFileDialogPreview(FileDialogPreviewRect());
+		if (FileDialogHasPreviewColumn()) {
+			RenderFileDialogPreview(FileDialogPreviewRect());
+			const SDL_Rect divider = FileDialogDividerRect();
+			const int centerX = divider.x + divider.w / 2;
+			const int centerY = divider.y + divider.h / 2;
+			DrawLine(centerX, divider.y + 8, centerX, divider.y + divider.h - 9, 74, 84, 96);
+			for (int offset = -6; offset <= 6; offset += 6) {
+				DrawLine(centerX - 2, centerY + offset, centerX + 2, centerY + offset,
+					145, 160, 178);
+			}
+		}
 		if (!fileDialogMessage_.empty()) {
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
 		DrawText(fileDialogSave_ ? "Enter: Save   Backspace: Edit/parent   Esc: Cancel" :
 			"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel",
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
+		const SDL_Rect resizeHandle = FileDialogResizeHandleRect();
+		for (int offset = 5; offset <= 13; offset += 4) {
+			DrawLine(resizeHandle.x + offset, resizeHandle.y + resizeHandle.h - 2,
+				resizeHandle.x + resizeHandle.w - 2, resizeHandle.y + offset,
+				135, 145, 155);
+		}
 	}
 
 	void ClearTextTextureCache() {
@@ -4282,6 +4457,7 @@ private:
 	bool thumbnailPanelResizeChanged_ = false;
 	int thumbnailResizeOffset_ = 0;
 	SDL_Cursor* thumbnailResizeCursor_ = nullptr;
+	SDL_Cursor* fileDialogResizeCursor_ = nullptr;
 	bool infoVisible_ = false;
 	bool showHistogram_ = false;
 	bool showFileName_ = false;
@@ -4310,6 +4486,16 @@ private:
 	bool quitRequested_ = false;
 	bool fileDialogOpen_ = false;
 	bool fileDialogSave_ = false;
+	int fileDialogX_ = 0;
+	int fileDialogY_ = 0;
+	int fileDialogWidth_ = 900;
+	int fileDialogHeight_ = 650;
+	int fileDialogPreviewWidthOverride_ = 0;
+	FileDialogDragMode fileDialogDragMode_ = FileDialogDragMode::None;
+	int fileDialogDragStartX_ = 0;
+	int fileDialogDragStartY_ = 0;
+	int fileDialogDragStartPreviewWidth_ = 0;
+	SDL_Rect fileDialogDragStartRect_{};
 	bool fileDialogSaveFullSize_ = true;
 	bool fileDialogOverwriteConfirmed_ = false;
 	fs::path fileDialogDirectory_;

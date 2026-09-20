@@ -3000,6 +3000,15 @@ void TestFileDialogModelStateAndNavigation() {
 	Expect(model.Entries().size() == entries.size() && model.Entries()[0].parent &&
 		model.Entries()[1].path.filename() == "a-folder" && model.SelectedIndex() == 1,
 		"open-dialog model did not sort by name or select the first child");
+	model.ScrollBy(2, 2);
+	Expect(model.Scroll() == 2 && model.SelectedIndex() == 1,
+		"open-dialog wheel scrolling changed selection or ignored its scroll offset");
+	model.ScrollBy(100, 2);
+	Expect(model.Scroll() == 4,
+		"open-dialog wheel scrolling did not clamp at the last complete viewport");
+	model.ScrollBy(-100, 2);
+	Expect(model.Scroll() == 0,
+		"open-dialog wheel scrolling did not clamp at the first row");
 
 	model.MoveSelectionByPage(1, 2);
 	Expect(model.SelectedIndex() == 3 && model.Scroll() == 2,
@@ -3059,6 +3068,8 @@ void TestFileDialogModelStateAndNavigation() {
 	model.Clear();
 	Expect(model.Entries().empty() && model.AllEntries().empty() && model.SelectedEntry() == nullptr,
 		"clearing the file-dialog model retained stale state");
+	model.ScrollBy(5, 1);
+	Expect(model.Scroll() == 0, "scrolling an empty file-dialog listing created a scroll offset");
 
 	std::string malformed = std::string("ok") + static_cast<char>(0x80);
 	Expect(jpegview_linux::EraseLastUtf8CodePoint(malformed) && malformed == "ok",

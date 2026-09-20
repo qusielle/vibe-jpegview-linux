@@ -19,9 +19,9 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `context_menu_model`: the complete menu catalog, state-derived enablement/checkmarks,
   compact/advanced filtering, and actionable-item keyboard navigation.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
-- `file_dialog_model`: filtering, name/date sorting, UTF-8 editing, selection, paging, scrolling,
-  focus restoration, cancellable background directory summaries, and replaceable background
-  previews for a focused image or a directory's first image.
+- `file_dialog_model`: filtering, name/date sorting, UTF-8 editing, selection, paging, independently
+  clamped viewport scrolling, focus restoration, cancellable background directory summaries, and
+  replaceable background previews for a focused image or a directory's first image.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, dynamic labels, and tooltip placement.
@@ -51,9 +51,11 @@ external-command, font, image-information, and viewer-chrome extractions establi
 pattern: a small pure C++ object, thin SDL adapter methods in Viewer, focused core tests, then UI
 smoke tests for integration. Worker threads belong behind model APIs (as with directory summaries),
 while SDL windows, textures, cursors, process execution, and event translation remain owned by
-platform adapters. File-dialog preview workers resolve and scale only the newest requested selection
-using the thumbnail resampler's source-area antialiasing; their generation check prevents a completed
-stale decode from replacing the current preview. Preview pixels remain outside the persistent viewer
+platform adapters. File-dialog size/position, resize-grip hit testing, and preview-divider dragging
+remain in the SDL Viewer adapter; wheel scroll deltas update the model viewport independently from
+keyboard selection, then the adapter focuses the row under the pointer. File-dialog preview workers resolve and scale only the newest
+requested selection using the thumbnail resampler's source-area antialiasing; their generation check
+prevents a completed stale decode from replacing the current preview. Preview pixels remain outside the persistent viewer
 caches, and their SDL texture is uploaded and destroyed by Viewer. In particular, display pixels may
 be prepared on workers, but SDL texture upload and destruction stay on the renderer thread because
 SDL renderer objects are not thread-safe. Decoded pixels, prepared frames, and retained SDL textures
