@@ -188,7 +188,8 @@ toolchain does not provide those static runtime archives.
 The Ubuntu 20.04, 22.04, and 24.04 Dockerfiles contain the compiler, SDL2, and optional codec
 development libraries for their respective releases. Ubuntu 20.04 builds JPEG XL and AVIF from
 pinned sources; Ubuntu 22.04 uses its AVIF package and builds JPEG XL from source; Ubuntu 24.04
-uses both distro codec packages. The host only needs Docker; build outputs are written to a host
+uses distro codec packages and explicitly installs libheif's HEVC decoder/encoder plugins because
+its image omits recommended packages. The host only needs Docker; build outputs are written to a host
 `out/` directory:
 
 ```sh
