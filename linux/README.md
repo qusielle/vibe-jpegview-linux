@@ -113,7 +113,8 @@ they support.
     neighbors take the reduced-resolution display path directly, while full pixels remain lazy.
     Decode completions feed a
     separate display-preparation worker pool, and both decoded and display caches reject stale source
-    identities. Large evicted CPU buffers are retired on workers rather than destroyed on the event
+    identities. JPEG metadata parsing stops at the compressed scan instead of reading the full file
+    on every navigation. Large evicted CPU buffers are retired on workers rather than destroyed on the event
     thread. Previously viewed and prefetched images
     therefore avoid repeated synchronous decoding, correction, high-quality scaling, and texture
     creation during navigation.

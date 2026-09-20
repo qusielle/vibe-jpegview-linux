@@ -327,30 +327,43 @@ bool ReadJpegMetadata(const fs::path& filename, ExifInfo& info, std::string& jpe
 	jpegComment.clear();
 	std::ifstream input(filename, std::ios::binary);
 	if (!input) return false;
-	const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-	if (bytes.size() < 2 || bytes[0] != 0xFF || bytes[1] != 0xD8) return false;
+	const int first = input.get();
+	const int second = input.get();
+	if (first != 0xFF || second != 0xD8) return false;
 
 	bool foundMetadata = false;
-	std::size_t offset = 2;
-	while (offset + 1 < bytes.size()) {
-		if (bytes[offset] != 0xFF) break;
-		while (offset < bytes.size() && bytes[offset] == 0xFF) ++offset;
-		if (offset >= bytes.size()) break;
-		const std::uint8_t marker = bytes[offset++];
+	for (;;) {
+		int prefix = input.get();
+		if (prefix != 0xFF) break;
+		int markerValue = input.get();
+		while (markerValue == 0xFF) markerValue = input.get();
+		if (markerValue < 0) break;
+		const std::uint8_t marker = static_cast<std::uint8_t>(markerValue);
 		if (marker == 0xD9 || marker == 0xDA) break;
 		if (marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7)) continue;
-		if (offset + 2 > bytes.size()) break;
-		const std::size_t segmentLength = (static_cast<std::size_t>(bytes[offset]) << 8) | bytes[offset + 1];
-		if (segmentLength < 2 || segmentLength - 2 > bytes.size() - (offset + 2)) break;
-		const std::size_t payload = offset + 2;
+		const int lengthHigh = input.get();
+		const int lengthLow = input.get();
+		if (lengthHigh < 0 || lengthLow < 0) break;
+		const std::size_t segmentLength =
+			(static_cast<std::size_t>(lengthHigh) << 8) |
+			static_cast<std::size_t>(lengthLow);
+		if (segmentLength < 2) break;
 		const std::size_t payloadLength = segmentLength - 2;
-		if (marker == 0xE1 && payloadLength >= 6 && std::memcmp(bytes.data() + payload, "Exif\0\0", 6) == 0) {
-			TiffReader reader(bytes, payload + 6);
+		if (marker != 0xE1 && marker != 0xFE) {
+			input.seekg(static_cast<std::streamoff>(payloadLength), std::ios::cur);
+			if (!input) break;
+			continue;
+		}
+		std::vector<std::uint8_t> payload(payloadLength);
+		if (payloadLength > 0 && !input.read(reinterpret_cast<char*>(payload.data()),
+			static_cast<std::streamsize>(payloadLength))) break;
+		if (marker == 0xE1 && payloadLength >= 6 &&
+			std::memcmp(payload.data(), "Exif\0\0", 6) == 0) {
+			TiffReader reader(payload, 6);
 			foundMetadata = reader.Read(info) || foundMetadata;
 		} else if (marker == 0xFE && jpegComment.empty() && payloadLength > 0) {
-			jpegComment = TrimAscii(bytes.data() + payload, payloadLength);
+			jpegComment = TrimAscii(payload.data(), payloadLength);
 		}
-		offset += segmentLength;
 	}
 	return foundMetadata || !jpegComment.empty();
 }

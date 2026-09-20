@@ -41,6 +41,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <initializer_list>
 #include <iostream>
 #include <memory>
@@ -54,6 +55,8 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -1987,6 +1990,29 @@ void TestExifAndJpegCommentParsing() {
 	Expect(info.hasAltitude, "GPS altitude was not detected");
 	ExpectNear(info.altitude, -30.0, 0.0001, "GPS altitude was parsed incorrectly");
 	Expect(comment == "test comment", "JPEG comment was parsed incorrectly");
+
+	const fs::path streaming = temporary.path() / "streaming.jpg";
+	Expect(::mkfifo(streaming.c_str(), 0600) == 0, "cannot create streaming JPEG fixture");
+	const int stream = ::open(streaming.c_str(), O_RDWR | O_CLOEXEC);
+	Expect(stream >= 0, "cannot open streaming JPEG fixture");
+	auto streamingRead = std::async(std::launch::async, [&streaming] {
+		jpegview_linux::ExifInfo streamedInfo;
+		std::string streamedComment;
+		return std::make_pair(
+			jpegview_linux::ReadJpegMetadata(streaming, streamedInfo, streamedComment),
+			streamedComment);
+	});
+	const std::array<std::uint8_t, 12> header = {
+		0xff, 0xd8, 0xff, 0xfe, 0x00, 0x06, 't', 'e', 's', 't', 0xff, 0xda
+	};
+	Expect(::write(stream, header.data(), header.size()) ==
+		static_cast<ssize_t>(header.size()), "cannot write streaming JPEG fixture");
+	const bool stoppedAtScan = streamingRead.wait_for(std::chrono::seconds(2)) ==
+		std::future_status::ready;
+	::close(stream);
+	const auto streamed = streamingRead.get();
+	Expect(stoppedAtScan && streamed.first && streamed.second == "test",
+		"JPEG metadata reader consumed compressed scan data instead of stopping at its header");
 
 	const fs::path plain = temporary.path() / "plain.jpg";
 	Expect(jpegview_linux::WriteImage(plain, pixels.data(), 2, 2, options, error), "cannot create plain JPEG");

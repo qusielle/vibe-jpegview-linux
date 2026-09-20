@@ -33,8 +33,9 @@ struct ExifInfo {
 	double altitude = 0.0;
 };
 
-// Reads JPEG COM and APP1/Exif data. Unsupported or malformed metadata is
-// treated as absent; image decoding itself is handled by stb_image.
+// Reads JPEG COM and APP1/Exif header segments without consuming compressed
+// scan data. Unsupported or malformed metadata is treated as absent; image
+// decoding itself is handled by the codec layer.
 bool ReadJpegMetadata(const std::filesystem::path& filename, ExifInfo& info,
 	std::string& jpegComment);
 
