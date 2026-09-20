@@ -88,9 +88,9 @@ they support.
    shows the selected image or the first image in a selected folder. The dialog can be resized from
    its lower-right corner, its preview width can be adjusted by dragging the list/preview divider,
    and the mouse wheel scrolls an overflowing file list. Dialog dimensions and the preview/list
-   proportion are preserved between runs. Preview decoding runs in the
-   background, uses the thumbnail panel's source-area antialiasing when reducing the image, and keeps
-   its temporary pixels outside the viewer caches. It also provides move-to-trash
+   proportion are preserved between runs. The preview image is resampled to the pane's usable area
+   after resizing, using the thumbnail panel's source-area antialiasing. Preview decoding runs in
+   the background; its temporary pixels stay outside the viewer caches. It also provides move-to-trash
    confirmation, original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
    modification-date updates from now or EXIF, wallpaper integration, folder exploration, and
    lossless JPEG rotation through `jpegtran`. The **Open image with** submenu discovers freedesktop

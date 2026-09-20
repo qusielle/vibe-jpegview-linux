@@ -135,6 +135,13 @@ std::filesystem::path FirstImageInDirectory(
 	return FirstImageInDirectoryWhile(directory, mode, [] { return true; });
 }
 
+FileDialogPreviewSize FileDialogPreviewImageSize(int paneWidth, int paneHeight) {
+	return FileDialogPreviewSize{
+		std::max(1, paneWidth - 16),
+		std::max(1, paneHeight - 82),
+	};
+}
+
 void FileDialogModel::Begin(bool saveDialog) {
 	saveDialog_ = saveDialog;
 	filter_.clear();

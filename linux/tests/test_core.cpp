@@ -3190,15 +3190,25 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 	Expect(jpegview_linux::FirstImageInDirectory(album,
 		jpegview_linux::FileDialogSortMode::ModificationDate) == recent,
 		"directory preview did not resolve the first image in modification-date order");
+	const jpegview_linux::FileDialogPreviewSize defaultPreviewSize =
+		jpegview_linux::FileDialogPreviewImageSize(260, 468);
+	const jpegview_linux::FileDialogPreviewSize widerPreviewSize =
+		jpegview_linux::FileDialogPreviewImageSize(320, 468);
+	const jpegview_linux::FileDialogPreviewSize tinyPreviewSize =
+		jpegview_linux::FileDialogPreviewImageSize(8, 10);
+	Expect(defaultPreviewSize.width == 244 && defaultPreviewSize.height == 386 &&
+		widerPreviewSize.width == 304 && widerPreviewSize.height == 386 &&
+		tinyPreviewSize.width == 1 && tinyPreviewSize.height == 1,
+		"preview image target did not follow the pane size and its content insets");
 
 	const fs::path imageDirectory = temporary.path() / "images";
 	fs::create_directories(imageDirectory);
 	const fs::path ppm = imageDirectory / "wide.ppm";
 	std::vector<std::uint8_t> ppmBytes = {
-		'P', '6', '\n', '8', ' ', '8', '\n', '2', '5', '5', '\n',
+		'P', '6', '\n', '8', '0', '0', ' ', '6', '0', '0', '\n', '2', '5', '5', '\n',
 	};
-	for (int y = 0; y < 8; ++y) {
-		for (int x = 0; x < 8; ++x) {
+	for (int y = 0; y < 600; ++y) {
+		for (int x = 0; x < 800; ++x) {
 			const std::uint8_t value = (x + y) % 2 == 0 ? 0 : 255;
 			ppmBytes.insert(ppmBytes.end(), {value, value, value});
 		}
@@ -3226,6 +3236,20 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 			128, 128, 128, 255, 128, 128, 128, 255,
 			128, 128, 128, 255, 128, 128, 128, 255}),
 		"background image preview did not area-filter high-frequency detail");
+
+	const std::uint64_t resizedGeneration = loader.Request(ppm, false,
+		jpegview_linux::FileDialogSortMode::Name, widerPreviewSize.width, widerPreviewSize.height);
+	Expect(resizedGeneration > currentGeneration,
+		"changing the preview target size did not replace its request");
+	results.clear();
+	const auto resizedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < resizedDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		results = loader.TakeReady();
+	}
+	Expect(results.size() == 1 && results[0].generation == resizedGeneration &&
+		results[0].width == 304 && results[0].height == 228 && results[0].error.empty(),
+		"resized preview request did not return the source image at its new target size");
 
 	loader.Clear();
 	Expect(loader.TakeReady().empty(), "clearing the preview loader retained a completed image");

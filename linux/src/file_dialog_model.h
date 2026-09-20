@@ -51,6 +51,15 @@ std::string FormatDirectorySummary(const DirectorySummary& summary);
 std::filesystem::path FirstImageInDirectory(
 	const std::filesystem::path& directory, FileDialogSortMode mode);
 
+struct FileDialogPreviewSize {
+	int width = 0;
+	int height = 0;
+};
+
+// Returns the preview image area inside a pane, accounting for its label,
+// frame inset, and reserved filename footer.
+FileDialogPreviewSize FileDialogPreviewImageSize(int paneWidth, int paneHeight);
+
 class FileDialogModel {
 public:
 	void Begin(bool saveDialog);
