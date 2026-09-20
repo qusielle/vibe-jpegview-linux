@@ -3111,6 +3111,56 @@ void TestFileDialogDirectorySummaries() {
 		"background directory summary loader published stale work after a replacement request");
 }
 
+void TestFileDialogPreviewSelectionAndBackgroundLoading() {
+	TemporaryDirectory temporary;
+	const fs::path album = temporary.path() / "album";
+	fs::create_directories(album);
+	const fs::path alpha = album / "a-photo.png";
+	const fs::path recent = album / "z-photo.jpg";
+	WriteText(alpha, "supported extension used for order resolution");
+	WriteText(recent, "supported extension used for order resolution");
+	SetModificationTime(alpha, 10);
+	SetModificationTime(recent, 20);
+	Expect(jpegview_linux::FirstImageInDirectory(album,
+		jpegview_linux::FileDialogSortMode::Name) == alpha,
+		"directory preview did not resolve the first image in name order");
+	Expect(jpegview_linux::FirstImageInDirectory(album,
+		jpegview_linux::FileDialogSortMode::ModificationDate) == recent,
+		"directory preview did not resolve the first image in modification-date order");
+
+	const fs::path imageDirectory = temporary.path() / "images";
+	fs::create_directories(imageDirectory);
+	const fs::path ppm = imageDirectory / "wide.ppm";
+	std::vector<std::uint8_t> ppmBytes = {
+		'P', '6', '\n', '4', ' ', '2', '\n', '2', '5', '5', '\n',
+	};
+	for (std::uint8_t pixel = 0; pixel < 24; ++pixel) ppmBytes.push_back(pixel * 7);
+	WriteBytes(ppm, ppmBytes);
+
+	jpegview_linux::FileDialogPreviewLoader loader;
+	const std::uint64_t staleGeneration = loader.Request(ppm, false,
+		jpegview_linux::FileDialogSortMode::Name, 2, 2);
+	const std::uint64_t currentGeneration = loader.Request(imageDirectory, true,
+		jpegview_linux::FileDialogSortMode::Name, 2, 2);
+	Expect(currentGeneration > staleGeneration,
+		"file-dialog preview requests did not advance their generation");
+	std::vector<jpegview_linux::FileDialogPreviewResult> results;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		results = loader.TakeReady();
+	}
+	Expect(results.size() == 1 && results[0].generation == currentGeneration &&
+		results[0].source == ppm && results[0].error.empty(),
+		"background preview loading published stale or failed directory work");
+	Expect(results[0].width == 2 && results[0].height == 1 &&
+		results[0].bgra.size() == 2u * 1u * 4u,
+		"background image preview did not downsize to fit its requested bounds");
+
+	loader.Clear();
+	Expect(loader.TakeReady().empty(), "clearing the preview loader retained a completed image");
+}
+
 void TestEmbeddedApplicationIcon() {
 	jpegview_linux::ApplicationIcon icon;
 	std::string error;
@@ -3195,6 +3245,8 @@ int main() {
 	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
 	RunTest("file-dialog-model-state-and-navigation", TestFileDialogModelStateAndNavigation, failures);
 	RunTest("file-dialog-directory-summaries", TestFileDialogDirectorySummaries, failures);
+	RunTest("file-dialog-preview-selection-and-background-loading",
+		TestFileDialogPreviewSelectionAndBackgroundLoading, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";

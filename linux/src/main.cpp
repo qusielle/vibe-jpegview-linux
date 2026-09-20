@@ -80,6 +80,8 @@ constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
+constexpr int kFileDialogPreviewMaximumWidth = 256;
+constexpr int kFileDialogPreviewMaximumHeight = 256;
 constexpr std::size_t kDecodedImagePrefetchCount = 32;
 constexpr std::size_t kDisplayTextureUploadsPerTick = 1;
 constexpr double kKeyboardPanStep = 48.0;
@@ -428,6 +430,7 @@ private:
 
 	void Cleanup() {
 		SaveSettings();
+		ClearFileDialogPreview();
 		if (clipboardMode_) {
 			std::error_code removeError;
 			fs::remove(clipboardTempFile_, removeError);
@@ -1230,6 +1233,7 @@ private:
 
 	void CloseFileDialog() {
 		if (fileDialogOpen_) SDL_StopTextInput();
+		ClearFileDialogPreview();
 		++fileDialogSummaryGeneration_;
 		fileDialogSummaryLoader_.Request({}, fileDialogSummaryGeneration_);
 		fileDialogOpen_ = false;
@@ -3073,6 +3077,123 @@ private:
 		return SDL_Rect{dialog.x + dialog.w - 158, dialog.y + 61, 140, 23};
 	}
 
+	bool FileDialogHasPreviewColumn() const {
+		return !fileDialogSave_ && FileDialogRect().w >= 560;
+	}
+
+	SDL_Rect FileDialogListRect() const {
+		const SDL_Rect dialog = FileDialogRect();
+		const int previewWidth = FileDialogHasPreviewColumn() ? FileDialogPreviewWidth() + 12 : 0;
+		const int width = dialog.w - 24 - previewWidth;
+		return SDL_Rect{dialog.x + 12, FileDialogListTop(), width,
+			FileDialogVisibleRows() * 26};
+	}
+
+	int FileDialogPreviewWidth() const {
+		return std::min(260, std::max(200, FileDialogRect().w / 3));
+	}
+
+	SDL_Rect FileDialogPreviewRect() const {
+		const SDL_Rect dialog = FileDialogRect();
+		const int width = FileDialogPreviewWidth();
+		return SDL_Rect{dialog.x + dialog.w - 12 - width, FileDialogListTop(), width,
+			FileDialogVisibleRows() * 26};
+	}
+
+	void ClearFileDialogPreview() {
+		fileDialogPreviewLoader_.Clear();
+		if (fileDialogPreviewTexture_ != nullptr) SDL_DestroyTexture(fileDialogPreviewTexture_);
+		fileDialogPreviewTexture_ = nullptr;
+		fileDialogPreviewRequestKey_.clear();
+		fileDialogPreviewSource_.clear();
+		fileDialogPreviewMessage_.clear();
+		fileDialogPreviewGeneration_ = 0;
+	}
+
+	void InvalidateFileDialogPreview() {
+		ClearFileDialogPreview();
+	}
+
+	void UpdateFileDialogPreview() {
+		if (!fileDialogOpen_ || fileDialogSave_ || !FileDialogHasPreviewColumn()) {
+			if (!fileDialogPreviewRequestKey_.empty()) ClearFileDialogPreview();
+			return;
+		}
+
+		const FileDialogEntry* selected = fileDialogModel_.SelectedEntry();
+		std::string requestKey;
+		if (selected != nullptr) {
+			requestKey = selected->path.string() + (selected->directory ? "\nD\n" : "\nF\n") +
+				(fileDialogModel_.SortMode() == jpegview_linux::FileDialogSortMode::Name ? "N" : "M");
+		}
+		if (requestKey != fileDialogPreviewRequestKey_) {
+			if (fileDialogPreviewTexture_ != nullptr) SDL_DestroyTexture(fileDialogPreviewTexture_);
+			fileDialogPreviewTexture_ = nullptr;
+			fileDialogPreviewSource_.clear();
+			fileDialogPreviewMessage_.clear();
+			fileDialogPreviewRequestKey_ = requestKey;
+			if (selected == nullptr) {
+				fileDialogPreviewLoader_.Clear();
+				fileDialogPreviewGeneration_ = 0;
+			} else {
+				fileDialogPreviewGeneration_ = fileDialogPreviewLoader_.Request(selected->path,
+					selected->directory, fileDialogModel_.SortMode(), kFileDialogPreviewMaximumWidth,
+					kFileDialogPreviewMaximumHeight);
+				fileDialogPreviewMessage_ = "Loading preview...";
+			}
+		}
+
+		for (jpegview_linux::FileDialogPreviewResult& result : fileDialogPreviewLoader_.TakeReady()) {
+			if (result.generation != fileDialogPreviewGeneration_) continue;
+			fileDialogPreviewSource_ = result.source;
+			fileDialogPreviewMessage_ = result.error;
+			if (!result.bgra.empty()) {
+				fileDialogPreviewWidth_ = result.width;
+				fileDialogPreviewHeight_ = result.height;
+				fileDialogPreviewTexture_ = CreateTexture(result.bgra, result.width, result.height);
+				if (fileDialogPreviewTexture_ == nullptr) {
+					fileDialogPreviewMessage_ = "Cannot create preview";
+				} else {
+					SDL_SetTextureBlendMode(fileDialogPreviewTexture_, SDL_BLENDMODE_BLEND);
+				}
+			}
+		}
+	}
+
+	void RenderFileDialogPreview(const SDL_Rect& previewRect) {
+		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 210);
+		SDL_RenderFillRect(renderer_, &previewRect);
+		DrawRect(previewRect, 75, 75, 75);
+		DrawText("Preview", previewRect.x + 8, previewRect.y + 6, kUiTextScale,
+			190, 205, 220);
+
+		const int footerHeight = fileDialogPreviewSource_.empty() ? 0 : 24;
+		const SDL_Rect imageRect{previewRect.x + 8, previewRect.y + 28,
+			previewRect.w - 16, std::max(1, previewRect.h - 58 - footerHeight)};
+		if (fileDialogPreviewTexture_ != nullptr && fileDialogPreviewWidth_ > 0 &&
+			fileDialogPreviewHeight_ > 0) {
+			const double scale = std::min({1.0,
+				static_cast<double>(imageRect.w) / fileDialogPreviewWidth_,
+				static_cast<double>(imageRect.h) / fileDialogPreviewHeight_});
+			const int width = std::max(1, static_cast<int>(fileDialogPreviewWidth_ * scale));
+			const int height = std::max(1, static_cast<int>(fileDialogPreviewHeight_ * scale));
+			const SDL_Rect destination{imageRect.x + (imageRect.w - width) / 2,
+				imageRect.y + (imageRect.h - height) / 2, width, height};
+			SDL_RenderCopy(renderer_, fileDialogPreviewTexture_, nullptr, &destination);
+		} else if (!fileDialogPreviewMessage_.empty()) {
+			const int textWidth = TextWidth(fileDialogPreviewMessage_, kUiTextScale);
+			DrawText(ClipText(fileDialogPreviewMessage_, imageRect.w - 12),
+				imageRect.x + std::max(6, (imageRect.w - textWidth) / 2),
+				imageRect.y + std::max(0, (imageRect.h - 12) / 2), kUiTextScale,
+				165, 165, 165);
+		}
+		if (!fileDialogPreviewSource_.empty()) {
+			const std::string filename = fileDialogPreviewSource_.filename().string();
+			DrawText(ClipText(filename, previewRect.w - 16), previewRect.x + 8,
+				previewRect.y + previewRect.h - 19, kUiTextScale, 165, 175, 185);
+		}
+	}
+
 	void RequestFileDialogDirectorySummaries() {
 		++fileDialogSummaryGeneration_;
 		fileDialogDirectorySummaries_.clear();
@@ -3094,6 +3215,7 @@ private:
 	}
 
 	void RefreshFileDialog() {
+		InvalidateFileDialogPreview();
 		std::vector<FileDialogEntry> entries;
 		std::error_code error;
 		const fs::path parent = fileDialogDirectory_.parent_path();
@@ -3166,11 +3288,9 @@ private:
 	}
 
 	int FileDialogItemAt(int x, int y) const {
-		const SDL_Rect dialog = FileDialogRect();
-		const int listTop = FileDialogListTop();
-		const int rows = FileDialogVisibleRows();
-		if (!PointInRect(x, y, SDL_Rect{dialog.x + 12, listTop, dialog.w - 24, rows * 26})) return -1;
-		const int row = (y - listTop) / 26;
+		const SDL_Rect listRect = FileDialogListRect();
+		if (!PointInRect(x, y, listRect)) return -1;
+		const int row = (y - listRect.y) / 26;
 		const int item = fileDialogModel_.Scroll() + row;
 		return item >= 0 && item < static_cast<int>(fileDialogModel_.Entries().size()) ? item : -1;
 	}
@@ -3280,13 +3400,18 @@ private:
 			const bool inputClicked = PointInRect(event.button.x, event.button.y, FileDialogInputRect());
 			const bool sortClicked = !fileDialogSave_ &&
 				PointInRect(event.button.x, event.button.y, FileDialogSortRect());
+			const bool previewClicked = FileDialogHasPreviewColumn() &&
+				PointInRect(event.button.x, event.button.y, FileDialogPreviewRect());
 			if (event.button.button == SDL_BUTTON_RIGHT ||
-				(event.button.button == SDL_BUTTON_LEFT && item < 0 && !inputClicked && !sortClicked)) {
+				(event.button.button == SDL_BUTTON_LEFT && item < 0 && !inputClicked && !sortClicked &&
+					!previewClicked)) {
 				CloseFileDialog();
 			} else if (event.button.button == SDL_BUTTON_LEFT && sortClicked) {
 				fileDialogModel_.ToggleSortMode(FileDialogVisibleRows());
 			} else if (event.button.button == SDL_BUTTON_LEFT && inputClicked) {
 				if (fileDialogSave_) fileDialogModel_.ClearSelection();
+			} else if (event.button.button == SDL_BUTTON_LEFT && previewClicked) {
+				// The preview is informational; clicking it leaves the selection alone.
 			} else if (event.button.button == SDL_BUTTON_LEFT) {
 				fileDialogModel_.Select(item, FileDialogVisibleRows());
 				const FileDialogEntry* selected = fileDialogModel_.SelectedEntry();
@@ -3304,6 +3429,7 @@ private:
 
 	void RenderFileDialog() {
 		if (!fileDialogOpen_) return;
+		UpdateFileDialogPreview();
 		const SDL_Rect dialog = FileDialogRect();
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
 		SDL_RenderFillRect(renderer_, &dialog);
@@ -3332,7 +3458,7 @@ private:
 
 		const int listTop = FileDialogListTop();
 		const int rows = FileDialogVisibleRows();
-		SDL_Rect listRect{dialog.x + 12, listTop, dialog.w - 24, rows * 26};
+		const SDL_Rect listRect = FileDialogListRect();
 		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 210);
 		SDL_RenderFillRect(renderer_, &listRect);
 		DrawRect(listRect, 75, 75, 75);
@@ -3363,6 +3489,7 @@ private:
 				DrawText(summaryText, summaryX, rowTop + 5, kUiTextScale, 155, 175, 195);
 			}
 		}
+		if (FileDialogHasPreviewColumn()) RenderFileDialogPreview(FileDialogPreviewRect());
 		if (!fileDialogMessage_.empty()) {
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
@@ -4190,8 +4317,16 @@ private:
 	std::string fileDialogMessage_;
 	jpegview_linux::FileDialogModel fileDialogModel_;
 	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;
+	jpegview_linux::FileDialogPreviewLoader fileDialogPreviewLoader_;
 	std::unordered_map<std::string, jpegview_linux::DirectorySummary> fileDialogDirectorySummaries_;
 	std::uint64_t fileDialogSummaryGeneration_ = 0;
+	SDL_Texture* fileDialogPreviewTexture_ = nullptr;
+	int fileDialogPreviewWidth_ = 0;
+	int fileDialogPreviewHeight_ = 0;
+	std::uint64_t fileDialogPreviewGeneration_ = 0;
+	std::string fileDialogPreviewRequestKey_;
+	fs::path fileDialogPreviewSource_;
+	std::string fileDialogPreviewMessage_;
 	std::string copyRenamePattern_;
 	jpegview_linux::BatchCopyDialogController batchCopyDialog_;
 	jpegview_linux::ResizeDialogController resizeDialog_;

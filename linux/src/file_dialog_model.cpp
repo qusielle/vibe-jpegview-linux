@@ -1,12 +1,17 @@
 #include "file_dialog_model.h"
 #include "image_formats.h"
+#include "image.h"
+#include "image_decoder.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -39,6 +44,30 @@ DirectorySummary CountImmediateDirectoryContentsWhile(
 		iterator.increment(iteratorError);
 	}
 	return summary;
+}
+
+std::filesystem::path FirstImageInDirectoryWhile(
+	const std::filesystem::path& directory, FileDialogSortMode mode,
+	const std::function<bool()>& shouldContinue) {
+	std::vector<FileDialogEntry> images;
+	std::error_code iteratorError;
+	std::filesystem::directory_iterator iterator(directory, iteratorError);
+	const std::filesystem::directory_iterator end;
+	while (!iteratorError && iterator != end && shouldContinue()) {
+		std::error_code statusError;
+		if (iterator->is_regular_file(statusError) && !statusError &&
+			IsSupportedImagePath(iterator->path())) {
+			std::error_code modificationError;
+			const std::filesystem::file_time_type modificationTime =
+				iterator->last_write_time(modificationError);
+			images.push_back({iterator->path(), false, false,
+				modificationError ? std::filesystem::file_time_type{} : modificationTime});
+		}
+		iterator.increment(iteratorError);
+	}
+	if (!shouldContinue()) return {};
+	SortFileDialogEntries(images, mode);
+	return images.empty() ? std::filesystem::path{} : images.front().path;
 }
 
 } // namespace
@@ -99,6 +128,11 @@ std::string FormatDirectorySummary(const DirectorySummary& summary) {
 	text << summary.imageCount << (summary.imageCount == 1 ? " image, " : " images, ")
 		<< summary.subdirectoryCount << (summary.subdirectoryCount == 1 ? " dir" : " dirs");
 	return text.str();
+}
+
+std::filesystem::path FirstImageInDirectory(
+	const std::filesystem::path& directory, FileDialogSortMode mode) {
+	return FirstImageInDirectoryWhile(directory, mode, [] { return true; });
 }
 
 void FileDialogModel::Begin(bool saveDialog) {
@@ -284,6 +318,138 @@ void DirectorySummaryLoader::Request(
 std::vector<DirectorySummaryResult> DirectorySummaryLoader::TakeReady() {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	std::vector<DirectorySummaryResult> results;
+	results.swap(impl_->ready);
+	return results;
+}
+
+struct FileDialogPreviewLoader::Impl {
+	struct Task {
+		std::filesystem::path path;
+		bool directory = false;
+		FileDialogSortMode mode = FileDialogSortMode::Name;
+		int maximumWidth = 0;
+		int maximumHeight = 0;
+		std::uint64_t generation = 0;
+	};
+
+	Impl() : worker([this] { Run(); }) {}
+
+	~Impl() {
+		stopping.store(true);
+		condition.notify_one();
+		if (worker.joinable()) worker.join();
+	}
+
+	bool IsCurrent(std::uint64_t requestedGeneration) const {
+		return !stopping.load() && generation.load() == requestedGeneration;
+	}
+
+	void Run() {
+		while (!stopping.load()) {
+			Task task;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				condition.wait(lock, [this] { return stopping.load() || pending.has_value(); });
+				if (stopping.load()) return;
+				task = std::move(*pending);
+				pending.reset();
+			}
+
+			FileDialogPreviewResult result;
+			result.generation = task.generation;
+			try {
+				result.source = task.directory ? FirstImageInDirectoryWhile(task.path, task.mode,
+					[this, &task] { return IsCurrent(task.generation); }) : task.path;
+				if (IsCurrent(task.generation)) {
+					if (result.source.empty()) {
+						result.error = "No images in this folder";
+					} else {
+						DecodedImage decoded;
+						bool success = false;
+						if (IsJpegPath(result.source)) {
+							int sourceWidth = 0;
+							int sourceHeight = 0;
+							success = DecodeJpegForDisplay(result.source, task.maximumWidth,
+								task.maximumHeight, decoded, sourceWidth, sourceHeight, result.error);
+						} else {
+							success = DecodeImage(result.source, decoded, result.error);
+						}
+						if (success && !decoded.frames.empty()) {
+							DecodedFrame frame = std::move(decoded.frames.front());
+							Image image;
+							image.width = frame.width;
+							image.height = frame.height;
+							image.originalWidth = frame.width;
+							image.originalHeight = frame.height;
+							image.bgra = std::move(frame.bgra);
+							const double scale = std::min({1.0,
+								static_cast<double>(task.maximumWidth) / image.width,
+								static_cast<double>(task.maximumHeight) / image.height});
+							const int width = std::max(1,
+								static_cast<int>(std::floor(image.width * scale + 0.5)));
+							const int height = std::max(1,
+								static_cast<int>(std::floor(image.height * scale + 0.5)));
+							if ((width != image.width || height != image.height) && !image.Resize(width, height, 1)) {
+								result.error = "Cannot resize preview";
+							} else {
+								result.width = image.width;
+								result.height = image.height;
+								result.bgra = std::move(image.bgra);
+							}
+						} else if (success) {
+							result.error = "Image has no preview frame";
+						}
+					}
+				}
+			}
+			} catch (const std::exception& error) {
+				result.error = error.what();
+			}
+			if (!IsCurrent(task.generation)) continue;
+
+			std::lock_guard<std::mutex> lock(mutex);
+			if (IsCurrent(task.generation)) {
+				ready.clear();
+				ready.push_back(std::move(result));
+			}
+		}
+	}
+
+	std::mutex mutex;
+	std::condition_variable condition;
+	std::optional<Task> pending;
+	std::vector<FileDialogPreviewResult> ready;
+	std::atomic<std::uint64_t> generation{0};
+	std::atomic<bool> stopping{false};
+	std::thread worker;
+};
+
+FileDialogPreviewLoader::FileDialogPreviewLoader() : impl_(std::make_unique<Impl>()) {}
+FileDialogPreviewLoader::~FileDialogPreviewLoader() = default;
+
+std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path,
+	bool directory, FileDialogSortMode mode, int maximumWidth, int maximumHeight) {
+	const std::uint64_t requestedGeneration = impl_->generation.fetch_add(1) + 1;
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->ready.clear();
+		impl_->pending.reset();
+		if (!path.empty() && maximumWidth > 0 && maximumHeight > 0) {
+			impl_->pending = Impl::Task{path, directory, mode,
+				maximumWidth, maximumHeight, requestedGeneration};
+		}
+	}
+	impl_->condition.notify_one();
+	return requestedGeneration;
+}
+
+void FileDialogPreviewLoader::Clear() {
+	(void)Request({}, false, FileDialogSortMode::Name, 0, 0);
+}
+
+std::vector<FileDialogPreviewResult> FileDialogPreviewLoader::TakeReady() {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	std::vector<FileDialogPreviewResult> results;
 	results.swap(impl_->ready);
 	return results;
 }

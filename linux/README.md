@@ -82,7 +82,9 @@ they support.
 9. **Portable file and desktop operations.** The branch adds a native open/save browser, processed
    full-size and screen-size saving with overwrite confirmation, live case-insensitive filename
    filtering, name/newest-modification-date listing order, Ctrl+Return direct folder opening, and
-   non-blocking direct image/subdirectory counts for folder rows. It also provides move-to-trash
+   non-blocking direct image/subdirectory counts for folder rows, plus a focused-item preview that
+   shows the selected image or the first image in a selected folder. Preview decoding runs in the
+   background and its temporary pixels stay outside the viewer caches. It also provides move-to-trash
    confirmation, original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
    modification-date updates from now or EXIF, wallpaper integration, folder exploration, and
    lossless JPEG rotation through `jpegtran`. The **Open image with** submenu discovers freedesktop
@@ -310,7 +312,8 @@ PageUp/PageDown move one visible page, and Home/End select the first/last row; a
 while held. Entering a folder selects its first child rather than the `[..]` parent row; returning
 to the parent selects the folder that was just exited. Folder rows show
 right-aligned counts of compatible images and subdirectories at their immediate level; these are
-calculated in the background. Ctrl+R reloads, and
+calculated in the background. A preview alongside the list follows the focused file, or the first
+image in a focused folder using the current listing order. Ctrl+R reloads, and
 Ctrl+N toggles the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the
 image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
 PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.

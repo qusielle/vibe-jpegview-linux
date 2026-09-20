@@ -150,7 +150,13 @@ if [ "$visual_assertions" -eq 1 ]; then
 		dialog_height=$((open_height - 40))
 		if [ "$dialog_height" -gt 650 ]; then dialog_height=650; fi
 		if [ "$dialog_height" -lt 260 ]; then dialog_height=260; fi
-		summary_probe_x=$(((open_width - dialog_width) / 2 + dialog_width - 119))
+		preview_width=0
+		if [ "$dialog_width" -ge 560 ]; then
+			preview_width=$((dialog_width / 3))
+			if [ "$preview_width" -lt 200 ]; then preview_width=200; fi
+			if [ "$preview_width" -gt 260 ]; then preview_width=260; fi
+		fi
+		summary_probe_x=$(((open_width - dialog_width) / 2 + dialog_width - 24 - preview_width - 119))
 		summary_probe_y=$(((open_height - dialog_height) / 2 + 141))
 		convert "$temporary/open-dialog-empty.png" -crop "28x11+${summary_probe_x}+${summary_probe_y}" +repage \
 			-format %c histogram:info:- >"$temporary/summary-histogram.txt"

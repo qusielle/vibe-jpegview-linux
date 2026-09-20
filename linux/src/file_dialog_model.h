@@ -46,6 +46,11 @@ struct DirectorySummary {
 DirectorySummary CountImmediateDirectoryContents(const std::filesystem::path& directory);
 std::string FormatDirectorySummary(const DirectorySummary& summary);
 
+// Resolves a directory selection to the first supported image in the order
+// used by the open dialog. Returns an empty path if no image is available.
+std::filesystem::path FirstImageInDirectory(
+	const std::filesystem::path& directory, FileDialogSortMode mode);
+
 class FileDialogModel {
 public:
 	void Begin(bool saveDialog);
@@ -105,6 +110,34 @@ public:
 
 	void Request(const std::vector<std::filesystem::path>& directories, std::uint64_t generation);
 	std::vector<DirectorySummaryResult> TakeReady();
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> impl_;
+};
+
+struct FileDialogPreviewResult {
+	std::uint64_t generation = 0;
+	std::filesystem::path source;
+	int width = 0;
+	int height = 0;
+	std::vector<std::uint8_t> bgra;
+	std::string error;
+};
+
+// Decodes just the latest requested preview on one background worker. Preview
+// pixels are returned to the UI and are deliberately not added to image caches.
+class FileDialogPreviewLoader {
+public:
+	FileDialogPreviewLoader();
+	~FileDialogPreviewLoader();
+	FileDialogPreviewLoader(const FileDialogPreviewLoader&) = delete;
+	FileDialogPreviewLoader& operator=(const FileDialogPreviewLoader&) = delete;
+
+	std::uint64_t Request(const std::filesystem::path& path, bool directory,
+		FileDialogSortMode mode, int maximumWidth, int maximumHeight);
+	void Clear();
+	std::vector<FileDialogPreviewResult> TakeReady();
 
 private:
 	struct Impl;
