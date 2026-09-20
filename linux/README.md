@@ -12,8 +12,8 @@ they support.
 1. **Native Linux viewer and distributable AppImage.** A native SDL2 frontend now opens individual
    images, multiple command-line inputs, and directories without modifying the original Windows
    application. It includes a resizable/maximizable/fullscreen window, drag-and-drop, a desktop
-   entry, the upstream JPEGView application icon, an Ubuntu 20.04 build container, and AppImage
-   packaging with bundled SDL and codec runtimes.
+   entry, the upstream JPEGView application icon, Ubuntu 20.04, 22.04, and 24.04 build containers,
+   and AppImage packaging with bundled SDL and codec runtimes.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
    PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, and LibRaw camera formats. Embedded
@@ -155,7 +155,8 @@ they support.
     modules for image pixels, settings, sorting, input commands, viewport, open-dialog state,
     overlays, thumbnails, fonts, image information, context menus, resize, batch operations, and
     desktop applications. Shell and sanitizer targets supplement the regular suites. Docker builds
-    compile independent codec stages and the viewer/tests in parallel.
+    use distro codec packages where available and build only codecs missing from that Ubuntu
+    release; independent codec stages and the viewer/tests compile in parallel.
 
 ## Build
 
@@ -184,21 +185,28 @@ toolchain does not provide those static runtime archives.
 
 ## Isolated Docker build
 
-The Ubuntu 20.04 Dockerfile contains the compiler, SDL2 and all optional codec development
-libraries. It builds JPEG XL and AVIF from pinned sources because those development packages are
-not present in the Ubuntu 20.04 archive. The host only needs Docker; build outputs are written to
-a host `out/` directory:
+The Ubuntu 20.04, 22.04, and 24.04 Dockerfiles contain the compiler, SDL2, and optional codec
+development libraries for their respective releases. Ubuntu 20.04 builds JPEG XL and AVIF from
+pinned sources; Ubuntu 22.04 uses its AVIF package and builds JPEG XL from source; Ubuntu 24.04
+uses both distro codec packages. The host only needs Docker; build outputs are written to a host
+`out/` directory:
 
 ```sh
 mkdir -p out
-DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build .
-docker run --rm -v "$PWD/out:/out" jpegview-linux-build appimage
+DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build:ubuntu20 .
+DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu22 -t jpegview-linux-build:ubuntu22 .
+DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu24 -t jpegview-linux-build:ubuntu24 .
+docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 appimage
 ```
 
 This creates `out/JPEGView-Linux-1.3.46-linux.1-x86_64.AppImage`. To export only the binary,
-use `jpegview-linux-build binary`; to select another release label, pass it as the second
-argument. The Dockerfile builds the Highway/JPEG XL and AOM/AVIF dependency chains in parallel
-with BuildKit. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded AppImage tool.
+run `docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 binary`; substitute the
+Ubuntu 22.04 or 24.04 image tag to use another build environment. To select another release label,
+pass it as the second argument. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
+dependency chains in parallel with BuildKit. Ubuntu 22.04 builds Highway/JPEG XL; Ubuntu 24.04
+needs no codec source builds. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded
+AppImage tool. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
+must also run on later Ubuntu releases; newer-base artifacts can require newer system glibc.
 
 If SDL2 is installed in a non-standard location, override the linker settings:
 

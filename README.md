@@ -6,7 +6,8 @@
 
 ## Linux
 
-The `linux/` directory contains a native SDL2 frontend and an Ubuntu 20.04 build environment.
+The `linux/` directory contains a native SDL2 frontend and Ubuntu 20.04, 22.04, and 24.04 build
+environments.
 It is a focused viewer port of v1.3.46 with folder navigation, common image formats, zoom/pan,
 and fullscreen support. Build it with:
 

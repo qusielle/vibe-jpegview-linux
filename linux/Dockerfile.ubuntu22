@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+
+FROM ubuntu:22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ARG APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+ARG APPIMAGETOOL_SHA256=
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    g++ make cmake ninja-build pkg-config curl ca-certificates file patchelf nasm \
+    libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev fonts-dejavu-core \
+    libjpeg-dev libpng-dev libjpeg-turbo-progs \
+    libgif-dev libtiff-dev libwebp-dev libheif-dev libraw-dev libjxr-dev \
+    libavif-dev libaom-dev libde265-dev libx265-dev libbrotli-dev liblcms2-dev \
+    xclip wl-clipboard \
+ && curl --fail --location --retry 3 "$APPIMAGETOOL_URL" --output /usr/local/bin/appimagetool \
+ && chmod 755 /usr/local/bin/appimagetool \
+ && if [ -n "$APPIMAGETOOL_SHA256" ]; then echo "$APPIMAGETOOL_SHA256  /usr/local/bin/appimagetool" | sha256sum --check; fi \
+ && rm -rf /var/lib/apt/lists/*
+
+# Jammy provides AVIF development files but not JPEG XL. Build only the
+# missing JPEG XL dependency chain; the distro packages provide the rest.
+FROM base AS highway-jxl
+
+ARG HIGHWAY_VERSION=1.0.7
+ARG LIBJXL_VERSION=0.7.0
+ARG LIBJXL_SKCMS_VERSION=64374756e03700d649f897dbd98c95e78c30c7da
+RUN mkdir -p /tmp/jpegview-codecs \
+ && curl --fail --location --retry 3 "https://github.com/google/highway/archive/refs/tags/${HIGHWAY_VERSION}.tar.gz" \
+    --output /tmp/jpegview-codecs/highway.tar.gz \
+ && tar -xzf /tmp/jpegview-codecs/highway.tar.gz -C /tmp/jpegview-codecs \
+ && cmake -S "/tmp/jpegview-codecs/highway-${HIGHWAY_VERSION}" -B /tmp/jpegview-codecs/highway-build -GNinja \
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DHWY_ENABLE_TESTS=OFF -DHWY_ENABLE_CONTRIB=OFF \
+ && cmake --build /tmp/jpegview-codecs/highway-build --parallel \
+ && cmake --install /tmp/jpegview-codecs/highway-build
+
+RUN curl --fail --location --retry 3 "https://github.com/libjxl/libjxl/archive/refs/tags/v${LIBJXL_VERSION}.tar.gz" \
+    --output /tmp/jpegview-codecs/libjxl.tar.gz \
+ && tar -xzf /tmp/jpegview-codecs/libjxl.tar.gz -C /tmp/jpegview-codecs \
+ && mkdir -p "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}/third_party/skcms" \
+ && curl --fail --location --retry 3 \
+    "https://skia.googlesource.com/skcms/+archive/${LIBJXL_SKCMS_VERSION}.tar.gz" \
+    --output /tmp/jpegview-codecs/skcms.tar.gz \
+ && tar -xzf /tmp/jpegview-codecs/skcms.tar.gz \
+    -C "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}/third_party/skcms" \
+ && cmake -S "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}" -B /tmp/jpegview-codecs/libjxl-build -GNinja \
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF \
+    -DJPEGXL_ENABLE_TOOLS=OFF -DJPEGXL_ENABLE_EXAMPLES=OFF -DJPEGXL_ENABLE_BENCHMARK=OFF \
+    -DJPEGXL_ENABLE_JNI=OFF -DJPEGXL_ENABLE_SKCMS=ON -DJPEGXL_ENABLE_SJPEG=OFF \
+    -DJPEGXL_ENABLE_OPENEXR=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_ENABLE_MANPAGES=OFF \
+    -DJPEGXL_FORCE_SYSTEM_BROTLI=ON -DJPEGXL_FORCE_SYSTEM_LCMS2=ON \
+    -DJPEGXL_FORCE_SYSTEM_HWY=ON \
+ && cmake --build /tmp/jpegview-codecs/libjxl-build --parallel \
+ && cmake --install /tmp/jpegview-codecs/libjxl-build \
+ && rm -rf /tmp/jpegview-codecs
+
+FROM base
+
+COPY --from=highway-jxl /usr/local/ /usr/local/
+RUN ldconfig
+
+WORKDIR /src
+COPY . /src
+COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
+RUN chmod 755 /usr/local/bin/jpegview-docker-build
+
+RUN make -C linux -j"$(nproc)" all test
+
+VOLUME ["/out"]
+ENTRYPOINT ["/usr/local/bin/jpegview-docker-build"]
+CMD ["appimage"]
