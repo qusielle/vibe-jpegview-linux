@@ -12,6 +12,11 @@ inline constexpr double kMaximumZoom = 32.0;
 inline constexpr int kDefaultThumbnailPanelWidth = 164;
 inline constexpr int kMinimumThumbnailPanelWidth = 48;
 inline constexpr int kMaximumThumbnailPanelWidth = 1024;
+inline constexpr int kDefaultFileDialogWidth = 900;
+inline constexpr int kDefaultFileDialogHeight = 650;
+inline constexpr int kMinimumFileDialogWidth = 320;
+inline constexpr int kMinimumFileDialogHeight = 260;
+inline constexpr int kMaximumFileDialogDimension = 16384;
 
 std::filesystem::path ViewerSettingsPath();
 
@@ -26,6 +31,11 @@ struct ViewerSettings {
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
+	int fileDialogWidth = kDefaultFileDialogWidth;
+	int fileDialogHeight = kDefaultFileDialogHeight;
+	// Zero keeps the responsive default preview width; non-zero stores the
+	// preview's fraction of the dialog's available list/preview width.
+	double fileDialogPreviewRatio = 0.0;
 	bool infoVisible = false;
 	bool showHistogram = false;
 	bool showFilename = false;

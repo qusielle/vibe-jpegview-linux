@@ -80,8 +80,8 @@ constexpr int kOverlayInset = 4;
 constexpr int kOverlayTextPadding = 6;
 constexpr int kThumbnailVerticalMargin = 1;
 constexpr int kThumbnailResizeHandleHalfWidth = 3;
-constexpr int kFileDialogMinimumWidth = 320;
-constexpr int kFileDialogMinimumHeight = 260;
+constexpr int kFileDialogMinimumWidth = jpegview_linux::kMinimumFileDialogWidth;
+constexpr int kFileDialogMinimumHeight = jpegview_linux::kMinimumFileDialogHeight;
 constexpr int kFileDialogDividerWidth = 12;
 constexpr int kFileDialogResizeHandleSize = 18;
 constexpr int kFileDialogMinimumListWidth = 180;
@@ -497,6 +497,9 @@ private:
 		navigationPanelAutoReveal_ = settings.navigationPanelAutoReveal;
 		thumbnailPanelVisible_ = settings.thumbnailPanelVisible;
 		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
+		fileDialogWidth_ = settings.fileDialogWidth;
+		fileDialogHeight_ = settings.fileDialogHeight;
+		fileDialogPreviewRatio_ = settings.fileDialogPreviewRatio;
 		infoVisible_ = settings.infoVisible;
 		showHistogram_ = settings.showHistogram;
 		showFileName_ = settings.showFilename;
@@ -520,6 +523,9 @@ private:
 		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
 		settings.thumbnailPanelVisible = thumbnailPanelVisible_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
+		settings.fileDialogWidth = fileDialogWidth_;
+		settings.fileDialogHeight = fileDialogHeight_;
+		settings.fileDialogPreviewRatio = fileDialogPreviewRatio_;
 		settings.infoVisible = infoVisible_;
 		settings.showHistogram = showHistogram_;
 		settings.showFilename = showFileName_;
@@ -3098,15 +3104,13 @@ private:
 		return SDL_Rect{x, y, width, height};
 	}
 
-	void ResetFileDialogGeometry() {
+	void PositionFileDialogGeometry() {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		fileDialogWidth_ = std::min(900, std::max(kFileDialogMinimumWidth, windowWidth - 40));
-		fileDialogHeight_ = std::min(650, std::max(kFileDialogMinimumHeight, windowHeight - 40));
-		fileDialogX_ = std::max(0, (windowWidth - fileDialogWidth_) / 2);
-		fileDialogY_ = std::max(0, (windowHeight - fileDialogHeight_) / 2);
-		fileDialogPreviewWidthOverride_ = 0;
+		const SDL_Rect dialog = FileDialogRect();
+		fileDialogX_ = std::max(0, (windowWidth - dialog.w) / 2);
+		fileDialogY_ = std::max(0, (windowHeight - dialog.h) / 2);
 		fileDialogDragMode_ = FileDialogDragMode::None;
 	}
 
@@ -3142,11 +3146,13 @@ private:
 	}
 
 	int FileDialogPreviewWidth() const {
-		const int defaultWidth = std::min(260, std::max(200, FileDialogRect().w / 3));
-		const int requestedWidth = fileDialogPreviewWidthOverride_ > 0 ?
-			fileDialogPreviewWidthOverride_ : defaultWidth;
+		const SDL_Rect dialog = FileDialogRect();
+		const int availableWidth = dialog.w - 24 - kFileDialogDividerWidth;
+		const int defaultWidth = std::min(260, std::max(200, dialog.w / 3));
+		const int requestedWidth = fileDialogPreviewRatio_ > 0.0 ?
+			static_cast<int>(std::lround(fileDialogPreviewRatio_ * availableWidth)) : defaultWidth;
 		const int maximumWidth = std::max(kFileDialogMinimumPreviewWidth,
-			FileDialogRect().w - 24 - kFileDialogDividerWidth - kFileDialogMinimumListWidth);
+			availableWidth - kFileDialogMinimumListWidth);
 		return std::clamp(requestedWidth, kFileDialogMinimumPreviewWidth, maximumWidth);
 	}
 
@@ -3191,8 +3197,13 @@ private:
 			fileDialogY_ = fileDialogDragStartRect_.y;
 			KeepFileDialogSelectionVisible();
 		} else if (fileDialogDragMode_ == FileDialogDragMode::PreviewDivider) {
-			fileDialogPreviewWidthOverride_ = fileDialogDragStartPreviewWidth_ +
-				fileDialogDragStartX_ - x;
+			const SDL_Rect dialog = FileDialogRect();
+			const int availableWidth = dialog.w - 24 - kFileDialogDividerWidth;
+			const int maximumWidth = std::max(kFileDialogMinimumPreviewWidth,
+				availableWidth - kFileDialogMinimumListWidth);
+			const int previewWidth = std::clamp(fileDialogDragStartPreviewWidth_ +
+				fileDialogDragStartX_ - x, kFileDialogMinimumPreviewWidth, maximumWidth);
+			fileDialogPreviewRatio_ = static_cast<double>(previewWidth) / availableWidth;
 		}
 	}
 
@@ -3222,6 +3233,7 @@ private:
 		fileDialogDragMode_ = FileDialogDragMode::None;
 		SDL_CaptureMouse(SDL_FALSE);
 		UpdateFileDialogCursor(x, y);
+		SaveSettings();
 	}
 
 	void UpdateFileDialogCursor(int x, int y) const {
@@ -3388,7 +3400,7 @@ private:
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = false;
 		fileDialogSaveFullSize_ = true;
-		ResetFileDialogGeometry();
+		PositionFileDialogGeometry();
 		fileDialogFilename_.clear();
 		fileDialogModel_.Begin(false);
 		fileDialogMessage_.clear();
@@ -3410,7 +3422,7 @@ private:
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = true;
 		fileDialogSaveFullSize_ = fullSize;
-		ResetFileDialogGeometry();
+		PositionFileDialogGeometry();
 		fileDialogFilename_ = fileList_.Current().stem().string() + "_proc.jpg";
 		fileDialogModel_.Begin(true);
 		fileDialogMessage_.clear();
@@ -4501,9 +4513,9 @@ private:
 	bool fileDialogSave_ = false;
 	int fileDialogX_ = 0;
 	int fileDialogY_ = 0;
-	int fileDialogWidth_ = 900;
-	int fileDialogHeight_ = 650;
-	int fileDialogPreviewWidthOverride_ = 0;
+	int fileDialogWidth_ = jpegview_linux::kDefaultFileDialogWidth;
+	int fileDialogHeight_ = jpegview_linux::kDefaultFileDialogHeight;
+	double fileDialogPreviewRatio_ = 0.0;
 	FileDialogDragMode fileDialogDragMode_ = FileDialogDragMode::None;
 	int fileDialogDragStartX_ = 0;
 	int fileDialogDragStartY_ = 0;

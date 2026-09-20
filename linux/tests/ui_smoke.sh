@@ -197,64 +197,6 @@ case "$filtered_title" in
 	*) echo "UI smoke test: Ctrl+O filename filter did not open the matching image" >&2; exit 1 ;;
 esac
 
-# The open dialog can grow from its bottom-right grip, and its preview divider
-# can be dragged independently without closing the modal dialog.
-DISPLAY=":$display_number" xdotool key ctrl+o
-sleep 0.2
-open_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
-open_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
-dialog_width=$((open_width - 40))
-if [ "$dialog_width" -gt 900 ]; then dialog_width=900; fi
-if [ "$dialog_width" -lt 320 ]; then dialog_width=320; fi
-dialog_height=$((open_height - 40))
-if [ "$dialog_height" -gt 650 ]; then dialog_height=650; fi
-if [ "$dialog_height" -lt 260 ]; then dialog_height=260; fi
-dialog_x=$(((open_width - dialog_width) / 2))
-dialog_y=$(((open_height - dialog_height) / 2))
-resize_delta_x=60
-resize_delta_y=35
-resize_start_x=$((dialog_x + dialog_width - 2))
-resize_start_y=$((dialog_y + dialog_height - 2))
-DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$resize_start_x" "$resize_start_y"
-DISPLAY=":$display_number" xdotool mousedown 1
-DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
-	$((resize_start_x + resize_delta_x)) $((resize_start_y + resize_delta_y))
-DISPLAY=":$display_number" xdotool mouseup 1
-dialog_width=$((dialog_width + resize_delta_x))
-dialog_height=$((dialog_height + resize_delta_y))
-preview_width=$((dialog_width / 3))
-if [ "$preview_width" -lt 200 ]; then preview_width=200; fi
-if [ "$preview_width" -gt 260 ]; then preview_width=260; fi
-divider_x=$((dialog_x + dialog_width - preview_width - 18))
-divider_y=$((dialog_y + 112 + 120))
-preview_expand=60
-DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$divider_x" "$divider_y"
-DISPLAY=":$display_number" xdotool mousedown 1
-DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
-	$((divider_x - preview_expand)) "$divider_y"
-DISPLAY=":$display_number" xdotool mouseup 1
-if [ "$visual_assertions" -eq 1 ]; then
-	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
-		$((dialog_x + 40)) $((dialog_y + 20))
-	sleep 0.2
-	DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-resized.png"
-	resize_right_x=$((dialog_x + dialog_width - 1))
-	resize_border=$(convert "$temporary/open-dialog-resized.png" \
-		-format "%[hex:p{$resize_right_x,$((dialog_y + 10))}]" info:)
-	if [ "${resize_border#BEBEBE}" = "$resize_border" ]; then
-		echo "UI smoke test: dragging the file-dialog corner did not resize its right edge" >&2
-		exit 1
-	fi
-	preview_left_x=$((dialog_x + dialog_width - 12 - preview_width - preview_expand))
-	preview_border=$(convert "$temporary/open-dialog-resized.png" \
-		-format "%[hex:p{$preview_left_x,$((dialog_y + 122))}]" info:)
-	if [ "${preview_border#4B4B4B}" = "$preview_border" ]; then
-		echo "UI smoke test: dragging the preview divider did not resize the preview" >&2
-		exit 1
-	fi
-fi
-DISPLAY=":$display_number" xdotool key Escape
-
 DISPLAY=":$display_number" xdotool key ctrl+o
 click_file_dialog_sort
 DISPLAY=":$display_number" xdotool key Home
@@ -423,6 +365,65 @@ case "$sibling_restore_title" in
 	01-red.ppm*) ;;
 	*) echo "UI smoke test: sibling-folder test did not restore the root image" >&2; exit 1 ;;
 esac
+
+# Resize the dialog and its preview/list split at the end of the dialog tests,
+# so later launches can verify the saved dimensions and ratio.
+DISPLAY=":$display_number" xdotool key ctrl+o
+sleep 0.2
+open_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+open_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+dialog_width=$((open_width - 40))
+if [ "$dialog_width" -gt 900 ]; then dialog_width=900; fi
+if [ "$dialog_width" -lt 320 ]; then dialog_width=320; fi
+dialog_height=$((open_height - 40))
+if [ "$dialog_height" -gt 650 ]; then dialog_height=650; fi
+if [ "$dialog_height" -lt 260 ]; then dialog_height=260; fi
+dialog_x=$(((open_width - dialog_width) / 2))
+dialog_y=$(((open_height - dialog_height) / 2))
+resize_delta_x=60
+resize_delta_y=35
+resize_start_x=$((dialog_x + dialog_width - 2))
+resize_start_y=$((dialog_y + dialog_height - 2))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$resize_start_x" "$resize_start_y"
+DISPLAY=":$display_number" xdotool mousedown 1
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	$((resize_start_x + resize_delta_x)) $((resize_start_y + resize_delta_y))
+DISPLAY=":$display_number" xdotool mouseup 1
+dialog_width=$((dialog_width + resize_delta_x))
+dialog_height=$((dialog_height + resize_delta_y))
+preview_width=$((dialog_width / 3))
+if [ "$preview_width" -lt 200 ]; then preview_width=200; fi
+if [ "$preview_width" -gt 260 ]; then preview_width=260; fi
+divider_x=$((dialog_x + dialog_width - preview_width - 18))
+divider_y=$((dialog_y + 112 + 120))
+preview_expand=60
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$divider_x" "$divider_y"
+DISPLAY=":$display_number" xdotool mousedown 1
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	$((divider_x - preview_expand)) "$divider_y"
+DISPLAY=":$display_number" xdotool mouseup 1
+preview_width=$((preview_width + preview_expand))
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((dialog_x + 40)) $((dialog_y + 20))
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-resized.png"
+	resize_right_x=$((dialog_x + dialog_width - 1))
+	resize_border=$(convert "$temporary/open-dialog-resized.png" \
+		-format "%[hex:p{$resize_right_x,$((dialog_y + 10))}]" info:)
+	if [ "${resize_border#BEBEBE}" = "$resize_border" ]; then
+		echo "UI smoke test: dragging the file-dialog corner did not resize its right edge" >&2
+		exit 1
+	fi
+	preview_left_x=$((dialog_x + dialog_width - 12 - preview_width))
+	preview_border=$(convert "$temporary/open-dialog-resized.png" \
+		-format "%[hex:p{$preview_left_x,$((dialog_y + 122))}]" info:)
+	if [ "${preview_border#4B4B4B}" = "$preview_border" ]; then
+		echo "UI smoke test: dragging the preview divider did not resize the preview" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key Escape
 
 # A short press must advance exactly once. Background display preparation can
 # delay a frame, so treating the still-physical key as a hold immediately after
@@ -630,6 +631,9 @@ grep -q '^show_filename=1$' "$settings"
 grep -q '^info_visible=1$' "$settings"
 grep -q '^thumbnail_panel_visible=1$' "$settings"
 grep -q '^thumbnail_panel_width=240$' "$settings"
+grep -q '^file_dialog_width=960$' "$settings"
+grep -q '^file_dialog_height=685$' "$settings"
+awk -F= '$1 == "file_dialog_preview_ratio" && $2 > 0.34 && $2 < 0.35 { found = 1 } END { exit !found }' "$settings"
 grep -q '^maximized=1$' "$settings"
 
 launch_viewer
@@ -657,6 +661,33 @@ if [ "$title_after_reload" = "$title_after_restored_thumbnail_click" ]; then
 	echo "UI smoke test: persisted thumbnail panel was not interactive after relaunch" >&2
 	exit 1
 fi
+DISPLAY=":$display_number" xdotool key ctrl+o
+sleep 0.3
+if [ "$visual_assertions" -eq 1 ]; then
+	reopened_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+	reopened_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	reopened_dialog_x=$(((reopened_width - 960) / 2))
+	reopened_dialog_y=$(((reopened_height - 685) / 2))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 40 20
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-restored.png"
+	restored_right_border=$(convert "$temporary/open-dialog-restored.png" \
+		-format "%[hex:p{$((reopened_dialog_x + 959)),$((reopened_dialog_y + 10))}]" info:)
+	restored_bottom_border=$(convert "$temporary/open-dialog-restored.png" \
+		-format "%[hex:p{$((reopened_dialog_x + 10)),$((reopened_dialog_y + 684))}]" info:)
+	if [ "${restored_right_border#BEBEBE}" = "$restored_right_border" ] || \
+		[ "${restored_bottom_border#BEBEBE}" = "$restored_bottom_border" ]; then
+		echo "UI smoke test: the open dialog's resized dimensions were not restored after relaunch" >&2
+		exit 1
+	fi
+	restored_preview_left=$((reopened_dialog_x + 960 - 12 - 320))
+	restored_preview_border=$(convert "$temporary/open-dialog-restored.png" \
+		-format "%[hex:p{$restored_preview_left,$((reopened_dialog_y + 122))}]" info:)
+	if [ "${restored_preview_border#4B4B4B}" = "$restored_preview_border" ]; then
+		echo "UI smoke test: the open dialog's preview proportion was not restored after relaunch" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key Escape
 stop_viewer
 
 if [ "$visual_assertions" -eq 1 ]; then

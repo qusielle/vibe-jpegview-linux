@@ -1448,6 +1448,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.navigationPanelAutoReveal = false;
 	expected.thumbnailPanelVisible = true;
 	expected.thumbnailPanelWidth = 287;
+	expected.fileDialogWidth = 1040;
+	expected.fileDialogHeight = 735;
+	expected.fileDialogPreviewRatio = 0.375;
 	expected.infoVisible = true;
 	expected.showHistogram = true;
 	expected.showFilename = true;
@@ -1471,6 +1474,11 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"thumbnail panel visibility did not round-trip");
 	Expect(loaded.thumbnailPanelWidth == expected.thumbnailPanelWidth,
 		"thumbnail panel width did not round-trip");
+	Expect(loaded.fileDialogWidth == expected.fileDialogWidth &&
+		loaded.fileDialogHeight == expected.fileDialogHeight,
+		"file-dialog dimensions did not round-trip");
+	ExpectNear(loaded.fileDialogPreviewRatio, expected.fileDialogPreviewRatio, 0.0000001,
+		"file-dialog preview proportion did not round-trip");
 	Expect(loaded.infoVisible == expected.infoVisible && loaded.showHistogram == expected.showHistogram &&
 		loaded.showFilename == expected.showFilename &&
 		loaded.autoContrast == expected.autoContrast,
@@ -1483,7 +1491,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 	const fs::path malformed = temporary.path() / "malformed.conf";
 	std::ofstream malformedOutput(malformed);
 	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\n"
-		"thumbnail_panel_width=not-a-number\ncache_size_mb=not-a-number\nunknown_key=value\n";
+		"thumbnail_panel_width=not-a-number\nfile_dialog_width=not-a-number\n"
+		"file_dialog_height=not-a-number\nfile_dialog_preview_ratio=nan\n"
+		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
 	loaded = {};
 	Expect(jpegview_linux::LoadViewerSettings(malformed, loaded), "malformed settings file was rejected entirely");
@@ -1496,15 +1506,24 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"settings without a histogram choice did not retain the hidden default");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
 		"malformed thumbnail width did not retain its default");
+	Expect(loaded.fileDialogWidth == jpegview_linux::kDefaultFileDialogWidth &&
+		loaded.fileDialogHeight == jpegview_linux::kDefaultFileDialogHeight &&
+		loaded.fileDialogPreviewRatio == 0.0,
+		"malformed file-dialog geometry did not retain its defaults");
 	Expect(loaded.cacheSizeMiB == jpegview_linux::kDefaultCacheSizeMiB,
 		"malformed cache size did not retain its default");
 
 	const fs::path clamped = temporary.path() / "clamped.conf";
-	WriteText(clamped, "manual_zoom=1000\nthumbnail_panel_width=2\ncache_size_mb=999999999\n");
+	WriteText(clamped, "manual_zoom=1000\nthumbnail_panel_width=2\n"
+		"file_dialog_width=1\nfile_dialog_height=999999\nfile_dialog_preview_ratio=4\n"
+		"cache_size_mb=999999999\n");
 	loaded = {};
 	Expect(jpegview_linux::LoadViewerSettings(clamped, loaded) && loaded.manualZoomSet &&
 		loaded.manualZoom == jpegview_linux::kMaximumZoom &&
 		loaded.thumbnailPanelWidth == jpegview_linux::kMinimumThumbnailPanelWidth &&
+		loaded.fileDialogWidth == jpegview_linux::kMinimumFileDialogWidth &&
+		loaded.fileDialogHeight == jpegview_linux::kMaximumFileDialogDimension &&
+		loaded.fileDialogPreviewRatio == 0.8 &&
 		loaded.cacheSizeMiB == jpegview_linux::kMaximumCacheSizeMiB,
 		"out-of-range settings were not clamped to their public limits");
 

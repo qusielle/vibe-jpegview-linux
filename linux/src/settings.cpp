@@ -91,6 +91,31 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			} catch (const std::exception&) {
 				// Ignore malformed settings and retain the built-in default.
 			}
+		} else if (key == "file_dialog_width" || key == "file_dialog_height") {
+			try {
+				std::size_t parsedCharacters = 0;
+				const int parsedDimension = std::stoi(value, &parsedCharacters);
+				if (parsedCharacters == value.size()) {
+					const bool width = key == "file_dialog_width";
+					const int minimum = width ? kMinimumFileDialogWidth : kMinimumFileDialogHeight;
+					const int dimension = std::clamp(parsedDimension, minimum,
+						kMaximumFileDialogDimension);
+					if (width) loaded.fileDialogWidth = dimension;
+					else loaded.fileDialogHeight = dimension;
+				}
+			} catch (const std::exception&) {
+				// Ignore malformed settings and retain the built-in default.
+			}
+		} else if (key == "file_dialog_preview_ratio") {
+			try {
+				std::size_t parsedCharacters = 0;
+				const double parsedRatio = std::stod(value, &parsedCharacters);
+				if (parsedCharacters == value.size() && std::isfinite(parsedRatio)) {
+					loaded.fileDialogPreviewRatio = std::clamp(parsedRatio, 0.0, 0.8);
+				}
+			} catch (const std::exception&) {
+				// Ignore malformed settings and retain the built-in default.
+			}
 		} else if (key == "info_visible") {
 			loaded.infoVisible = ParseBool(value);
 		} else if (key == "show_histogram") {
@@ -119,6 +144,8 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 
 bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings) {
 	if (filename.empty()) return false;
+	const double fileDialogPreviewRatio = std::isfinite(settings.fileDialogPreviewRatio) ?
+		std::clamp(settings.fileDialogPreviewRatio, 0.0, 0.8) : 0.0;
 
 	std::error_code error;
 	if (!filename.parent_path().empty()) {
@@ -131,7 +158,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 	{
 		std::ofstream output(temporary, std::ios::trunc);
 		if (!output) return false;
-		output << "# JPEGView Linux display and batch-operation settings\n"
+		output << "# JPEGView Linux display, dialog, and batch-operation settings\n"
 		       << "scale_mode=" << settings.scaleMode << '\n'
 		       << "sort_mode=" << settings.sortMode << '\n'
 		       << "sort_ascending=" << (settings.sortAscending ? 1 : 0) << '\n'
@@ -141,6 +168,11 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "navigation_panel_auto_reveal=" << (settings.navigationPanelAutoReveal ? 1 : 0) << '\n'
 		       << "thumbnail_panel_visible=" << (settings.thumbnailPanelVisible ? 1 : 0) << '\n'
 		       << "thumbnail_panel_width=" << settings.thumbnailPanelWidth << '\n'
+		       << "file_dialog_width=" << std::clamp(settings.fileDialogWidth,
+			kMinimumFileDialogWidth, kMaximumFileDialogDimension) << '\n'
+		       << "file_dialog_height=" << std::clamp(settings.fileDialogHeight,
+			kMinimumFileDialogHeight, kMaximumFileDialogDimension) << '\n'
+		       << "file_dialog_preview_ratio=" << fileDialogPreviewRatio << '\n'
 		       << "info_visible=" << (settings.infoVisible ? 1 : 0) << '\n'
 		       << "show_histogram=" << (settings.showHistogram ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'

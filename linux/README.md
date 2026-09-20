@@ -87,7 +87,8 @@ they support.
    non-blocking direct image/subdirectory counts for folder rows, plus a focused-item preview that
    shows the selected image or the first image in a selected folder. The dialog can be resized from
    its lower-right corner, its preview width can be adjusted by dragging the list/preview divider,
-   and the mouse wheel scrolls an overflowing file list. Preview decoding runs in the
+   and the mouse wheel scrolls an overflowing file list. Dialog dimensions and the preview/list
+   proportion are preserved between runs. Preview decoding runs in the
    background, uses the thumbnail panel's source-area antialiasing when reducing the image, and keeps
    its temporary pixels outside the viewer caches. It also provides move-to-trash
    confirmation, original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
@@ -131,8 +132,8 @@ they support.
 
 13. **Reliable startup and saved session state.** Scale mode, ordering mode/direction, maximized or
     normal state, navigation-panel choices, filename/EXIF/histogram visibility, automatic correction,
-    batch pattern, thumbnail visibility/width, and the image-cache budget are stored under XDG
-    configuration paths. A previously
+    batch pattern, thumbnail visibility/width, open-dialog dimensions and preview proportion, and the
+    image-cache budget are stored under XDG configuration paths. A previously
     maximized window is created maximized before it is shown, avoiding the visible delayed maximize.
     Compatibility handling keeps always-on-top optional on older SDL runtimes.
 
