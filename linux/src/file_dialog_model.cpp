@@ -401,7 +401,6 @@ struct FileDialogPreviewLoader::Impl {
 						}
 					}
 				}
-			}
 			} catch (const std::exception& error) {
 				result.error = error.what();
 			}
