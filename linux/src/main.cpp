@@ -764,7 +764,10 @@ private:
 	SDL_Texture* CreateTexture(const std::vector<std::uint8_t>& bgra, int width, int height) {
 		if (width <= 0 || height <= 0 || bgra.size() !=
 			static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4) return nullptr;
-		SDL_Texture* result = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+		// Viewer textures are uploaded once and then sampled repeatedly. Static
+		// access lets accelerated backends place them for rendering instead of
+		// maintaining the lockable staging behavior intended for frequent writes.
+		SDL_Texture* result = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC,
 			width, height);
 		if (result == nullptr) return nullptr;
 		if (SDL_UpdateTexture(result, nullptr, bgra.data(), width * 4) != 0) {
