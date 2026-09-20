@@ -896,6 +896,87 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	Expect(speculativeDecodes == 1 && fullCache.CachedImages() == 1 &&
 		fullCache.Find(files[2]) != nullptr,
 		"speculative decoding evicted an image retained from foreground viewing");
+
+	std::mutex reprioritizeMutex;
+	std::condition_variable reprioritizeChanged;
+	bool firstDecodeStarted = false;
+	bool releaseFirstDecode = false;
+	std::atomic<int> firstCallbacks{0};
+	std::atomic<int> latestCallbacks{0};
+	std::atomic<int> retainedDecodeCount{0};
+	jpegview_linux::DecodedImageCache reprioritized(64,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			if (filename == files[3]) {
+				++retainedDecodeCount;
+				std::unique_lock<std::mutex> lock(reprioritizeMutex);
+				firstDecodeStarted = true;
+				reprioritizeChanged.notify_all();
+				reprioritizeChanged.wait(lock, [&] { return releaseFirstDecode; });
+			}
+			image = *CachedTestImage(4);
+			return true;
+		});
+	reprioritized.Prefetch(files, 2, 1, 1,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
+			++firstCallbacks;
+		});
+	{
+		std::unique_lock<std::mutex> lock(reprioritizeMutex);
+		Expect(reprioritizeChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return firstDecodeStarted; }),
+			"decoded prefetch worker did not start the nearest image");
+	}
+	// The same file is still the nearest neighbor after this direction change.
+	// Its in-flight decode must be retained and delivered to the newest batch.
+	reprioritized.Prefetch(files, 4, -1, 1,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
+			++latestCallbacks;
+		});
+	{
+		std::lock_guard<std::mutex> lock(reprioritizeMutex);
+		releaseFirstDecode = true;
+	}
+	reprioritizeChanged.notify_all();
+	Expect(reprioritized.WaitUntilIdle(std::chrono::seconds(2)),
+		"reprioritized decoded prefetch did not finish");
+	Expect(retainedDecodeCount == 1 && firstCallbacks == 0 && latestCallbacks == 1 &&
+		reprioritized.Find(files[3]) != nullptr,
+		"direction change discarded, duplicated, or misdelivered a useful in-flight decode");
+
+	std::mutex joinMutex;
+	std::condition_variable joinChanged;
+	bool blockerStarted = false;
+	bool releaseBlocker = false;
+	std::atomic<int> joinedDecodeCount{0};
+	jpegview_linux::DecodedImageCache joined(64,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			if (filename == files[3]) {
+				std::unique_lock<std::mutex> lock(joinMutex);
+				blockerStarted = true;
+				joinChanged.notify_all();
+				joinChanged.wait(lock, [&] { return releaseBlocker; });
+			}
+			if (filename == files[1]) ++joinedDecodeCount;
+			image = *CachedTestImage(4);
+			return true;
+		});
+	joined.Prefetch(files, 2, 1, 2);
+	{
+		std::unique_lock<std::mutex> lock(joinMutex);
+		Expect(joinChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return blockerStarted; }),
+			"decoded prefetch blocker did not start");
+	}
+	jpegview_linux::DecodedImageCache::ImagePtr joinedImage;
+	std::thread foreground([&] { joinedImage = joined.FindOrWait(files[1]); });
+	{
+		std::lock_guard<std::mutex> lock(joinMutex);
+		releaseBlocker = true;
+	}
+	joinChanged.notify_all();
+	foreground.join();
+	Expect(joinedImage != nullptr && joinedDecodeCount == 1,
+		"foreground cache miss did not join its promoted speculative decode");
 }
 
 std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height) {

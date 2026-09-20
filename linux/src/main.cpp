@@ -542,6 +542,7 @@ private:
 		ClearTransition();
 		std::string errorMessage;
 		jpegview_linux::DecodedImageCache::ImagePtr decoded = imageCache_.Find(fileList_.Current());
+		if (!decoded) decoded = imageCache_.FindOrWait(fileList_.Current());
 		if (!decoded) {
 			auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
 			if (!jpegview_linux::DecodeImage(fileList_.Current(), *loaded, errorMessage) ||
@@ -3978,7 +3979,7 @@ private:
 	jpegview_linux::DisplayImageCache displayImageCache_{
 		std::numeric_limits<std::size_t>::max(), 2, {}, cacheBudget_};
 	jpegview_linux::DecodedImageCache imageCache_{
-		std::numeric_limits<std::size_t>::max(), {}, cacheBudget_};
+		std::numeric_limits<std::size_t>::max(), {}, cacheBudget_, 2};
 	std::size_t cacheSizeMiB_ = jpegview_linux::kDefaultCacheSizeMiB;
 	double initialSlideshowSeconds_ = 0.0;
 	jpegview_linux::PlaybackScheduler playback_;

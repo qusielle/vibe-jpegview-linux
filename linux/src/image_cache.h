@@ -32,13 +32,18 @@ public:
 	using Completion = std::function<void(const std::filesystem::path&, const ImagePtr&)>;
 
 	explicit DecodedImageCache(std::size_t byteBudget, Decoder decoder = {},
-		std::shared_ptr<SharedCacheBudget> sharedBudget = {});
+		std::shared_ptr<SharedCacheBudget> sharedBudget = {},
+		std::size_t workerCount = 1);
 	~DecodedImageCache();
 
 	DecodedImageCache(const DecodedImageCache&) = delete;
 	DecodedImageCache& operator=(const DecodedImageCache&) = delete;
 
 	ImagePtr Find(const std::filesystem::path& filename);
+	// If the requested file is already queued or being decoded, promote that
+	// work and join it. Returns immediately on a cache hit or when no matching
+	// work exists, allowing the caller to perform its normal foreground load.
+	ImagePtr FindOrWait(const std::filesystem::path& filename);
 	void Store(const std::filesystem::path& filename,
 		const std::shared_ptr<DecodedImage>& image);
 	void Prefetch(const std::vector<std::filesystem::path>& files,
