@@ -3132,9 +3132,14 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 	fs::create_directories(imageDirectory);
 	const fs::path ppm = imageDirectory / "wide.ppm";
 	std::vector<std::uint8_t> ppmBytes = {
-		'P', '6', '\n', '4', ' ', '2', '\n', '2', '5', '5', '\n',
+		'P', '6', '\n', '8', ' ', '8', '\n', '2', '5', '5', '\n',
 	};
-	for (std::uint8_t pixel = 0; pixel < 24; ++pixel) ppmBytes.push_back(pixel * 7);
+	for (int y = 0; y < 8; ++y) {
+		for (int x = 0; x < 8; ++x) {
+			const std::uint8_t value = (x + y) % 2 == 0 ? 0 : 255;
+			ppmBytes.insert(ppmBytes.end(), {value, value, value});
+		}
+	}
 	WriteBytes(ppm, ppmBytes);
 
 	jpegview_linux::FileDialogPreviewLoader loader;
@@ -3153,9 +3158,11 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 	Expect(results.size() == 1 && results[0].generation == currentGeneration &&
 		results[0].source == ppm && results[0].error.empty(),
 		"background preview loading published stale or failed directory work");
-	Expect(results[0].width == 2 && results[0].height == 1 &&
-		results[0].bgra.size() == 2u * 1u * 4u,
-		"background image preview did not downsize to fit its requested bounds");
+	Expect(results[0].width == 2 && results[0].height == 2 &&
+		results[0].bgra == std::vector<std::uint8_t>({
+			128, 128, 128, 255, 128, 128, 128, 255,
+			128, 128, 128, 255, 128, 128, 128, 255}),
+		"background image preview did not area-filter high-frequency detail");
 
 	loader.Clear();
 	Expect(loader.TakeReady().empty(), "clearing the preview loader retained a completed image");

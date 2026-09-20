@@ -51,12 +51,13 @@ external-command, font, image-information, and viewer-chrome extractions establi
 pattern: a small pure C++ object, thin SDL adapter methods in Viewer, focused core tests, then UI
 smoke tests for integration. Worker threads belong behind model APIs (as with directory summaries),
 while SDL windows, textures, cursors, process execution, and event translation remain owned by
-platform adapters. File-dialog preview workers resolve and scale only the newest requested selection;
-their generation check prevents a completed stale decode from replacing the current preview. Preview
-pixels remain outside the persistent viewer caches, and their SDL texture is uploaded and destroyed
-by Viewer. In particular, display pixels may be prepared on workers, but SDL texture upload
-and destruction stay on the renderer thread because SDL renderer objects are not thread-safe. Decoded
-pixels, prepared frames, and retained SDL textures reserve from one configured cache budget. Prepared
+platform adapters. File-dialog preview workers resolve and scale only the newest requested selection
+using the thumbnail resampler's source-area antialiasing; their generation check prevents a completed
+stale decode from replacing the current preview. Preview pixels remain outside the persistent viewer
+caches, and their SDL texture is uploaded and destroyed by Viewer. In particular, display pixels may
+be prepared on workers, but SDL texture upload and destruction stay on the renderer thread because
+SDL renderer objects are not thread-safe. Decoded pixels, prepared frames, and retained SDL textures
+reserve from one configured cache budget. Prepared
 frames are uploaded at most once per event-loop iteration, after the current frame is presented;
 unfinished closer neighbors block farther uploads. Expensive CPU-buffer destruction is handed back to
 cache workers, and static images backed by a ready display texture defer full-pixel materialization

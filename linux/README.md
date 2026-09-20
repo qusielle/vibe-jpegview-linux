@@ -84,7 +84,8 @@ they support.
    filtering, name/newest-modification-date listing order, Ctrl+Return direct folder opening, and
    non-blocking direct image/subdirectory counts for folder rows, plus a focused-item preview that
    shows the selected image or the first image in a selected folder. Preview decoding runs in the
-   background and its temporary pixels stay outside the viewer caches. It also provides move-to-trash
+   background, uses the thumbnail panel's source-area antialiasing when reducing the image, and keeps
+   its temporary pixels outside the viewer caches. It also provides move-to-trash
    confirmation, original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
    modification-date updates from now or EXIF, wallpaper integration, folder exploration, and
    lossless JPEG rotation through `jpegtran`. The **Open image with** submenu discovers freedesktop
@@ -269,8 +270,8 @@ which continues to use fonts installed on the user's system.
 
 It covers file-list ordering/navigation, mutable image transforms, all resize filters and automatic
 correction invariants, sort and settings persistence mappings, the complete supported
-keyboard-command mapping, viewport fit/fill/zoom/pan geometry, open/save browser state,
-resize-dialog validation, content-sized overlay layout, compact/advanced menu filtering and
+keyboard-command mapping, viewport fit/fill/zoom/pan geometry, open/save browser state, preview
+downsampling, resize-dialog validation, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
 trips across static and animated formats, all PNM variants, malformed input, batch-copy planning,

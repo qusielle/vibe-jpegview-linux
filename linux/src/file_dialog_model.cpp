@@ -1,7 +1,7 @@
 #include "file_dialog_model.h"
 #include "image_formats.h"
-#include "image.h"
 #include "image_decoder.h"
+#include "thumbnail_resampler.h"
 
 #include <algorithm>
 #include <atomic>
@@ -376,25 +376,19 @@ struct FileDialogPreviewLoader::Impl {
 						}
 						if (success && !decoded.frames.empty()) {
 							DecodedFrame frame = std::move(decoded.frames.front());
-							Image image;
-							image.width = frame.width;
-							image.height = frame.height;
-							image.originalWidth = frame.width;
-							image.originalHeight = frame.height;
-							image.bgra = std::move(frame.bgra);
 							const double scale = std::min({1.0,
-								static_cast<double>(task.maximumWidth) / image.width,
-								static_cast<double>(task.maximumHeight) / image.height});
+								static_cast<double>(task.maximumWidth) / frame.width,
+								static_cast<double>(task.maximumHeight) / frame.height});
 							const int width = std::max(1,
-								static_cast<int>(std::floor(image.width * scale + 0.5)));
+								static_cast<int>(std::floor(frame.width * scale + 0.5)));
 							const int height = std::max(1,
-								static_cast<int>(std::floor(image.height * scale + 0.5)));
-							if ((width != image.width || height != image.height) && !image.Resize(width, height, 1)) {
+								static_cast<int>(std::floor(frame.height * scale + 0.5)));
+							if (!DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
+								width, height, result.bgra)) {
 								result.error = "Cannot resize preview";
 							} else {
-								result.width = image.width;
-								result.height = image.height;
-								result.bgra = std::move(image.bgra);
+								result.width = width;
+								result.height = height;
 							}
 						} else if (success) {
 							result.error = "Image has no preview frame";
