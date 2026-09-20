@@ -257,6 +257,7 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		(*common->err->format_message)(common, error->message);
 		longjmp(error->jump, 1);
 	};
+	const auto suppressMessage = [](j_common_ptr) {};
 
 	FILE* file = std::fopen(filename.string().c_str(), "rb");
 	if (file == nullptr) {
@@ -267,12 +268,21 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	ErrorManager error{};
 	jpeg_decompress_struct decoder{};
 	bool created = false;
+#ifdef JCS_EXT_BGRA
+	DecodedFrame* volatile directFrame = nullptr;
+#else
 	volatile std::uint8_t* pixels = nullptr;
+#endif
 	decoder.err = jpeg_std_error(&error.base);
 	error.base.error_exit = errorExit;
+	error.base.output_message = suppressMessage;
 	if (setjmp(error.jump) != 0) {
 		if (created) jpeg_destroy_decompress(&decoder);
+#ifdef JCS_EXT_BGRA
+		delete const_cast<DecodedFrame*>(directFrame);
+#else
 		std::free(const_cast<std::uint8_t*>(pixels));
+#endif
 		std::fclose(file);
 		errorMessage = error.message[0] == '\0' ? "JPEG decoder failed" : error.message;
 		return false;
@@ -318,6 +328,22 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	const int height = static_cast<int>(decoder.output_height);
 	const std::size_t rowBytes = static_cast<std::size_t>(width) * outputComponents;
 	const std::size_t byteCount = rowBytes * static_cast<std::size_t>(height);
+#ifdef JCS_EXT_BGRA
+	try {
+		directFrame = new DecodedFrame();
+		DecodedFrame* frame = const_cast<DecodedFrame*>(directFrame);
+		frame->width = width;
+		frame->height = height;
+		frame->bgra.resize(byteCount);
+	} catch (const std::exception&) {
+		delete const_cast<DecodedFrame*>(directFrame);
+		directFrame = nullptr;
+		jpeg_destroy_decompress(&decoder);
+		std::fclose(file);
+		errorMessage = "out of memory";
+		return false;
+	}
+#else
 	pixels = static_cast<std::uint8_t*>(std::malloc(byteCount));
 	if (pixels == nullptr) {
 		jpeg_destroy_decompress(&decoder);
@@ -325,9 +351,16 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		errorMessage = "out of memory";
 		return false;
 	}
+#endif
 	while (decoder.output_scanline < decoder.output_height) {
+#ifdef JCS_EXT_BGRA
+		DecodedFrame* frame = const_cast<DecodedFrame*>(directFrame);
+		JSAMPROW row = frame->bgra.data() +
+			static_cast<std::size_t>(decoder.output_scanline) * rowBytes;
+#else
 		JSAMPROW row = const_cast<std::uint8_t*>(pixels) +
 			static_cast<std::size_t>(decoder.output_scanline) * rowBytes;
+#endif
 		jpeg_read_scanlines(&decoder, &row, 1);
 	}
 	jpeg_finish_decompress(&decoder);
@@ -336,8 +369,17 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	std::fclose(file);
 
 #ifdef JCS_EXT_BGRA
-	const bool appended = AppendBGRA(image, width, height,
-		const_cast<const std::uint8_t*>(pixels), 0, errorMessage);
+	try {
+		DecodedFrame* frame = const_cast<DecodedFrame*>(directFrame);
+		image.frames.push_back(std::move(*frame));
+		delete frame;
+		directFrame = nullptr;
+		return true;
+	} catch (const std::exception&) {
+		delete const_cast<DecodedFrame*>(directFrame);
+		errorMessage = "out of memory";
+		return false;
+	}
 #else
 	std::vector<std::uint8_t> bgra;
 	try {
@@ -353,10 +395,20 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		bgra[pixel * 4 + 2] = pixels[pixel * 3];
 		bgra[pixel * 4 + 3] = 255;
 	}
-	const bool appended = AppendBGRA(image, width, height, bgra.data(), 0, errorMessage);
-#endif
+	try {
+		DecodedFrame frame;
+		frame.width = width;
+		frame.height = height;
+		frame.bgra = std::move(bgra);
+		image.frames.push_back(std::move(frame));
+	} catch (const std::exception&) {
+		std::free(const_cast<std::uint8_t*>(pixels));
+		errorMessage = "out of memory";
+		return false;
+	}
 	std::free(const_cast<std::uint8_t*>(pixels));
-	return appended;
+	return true;
+#endif
 }
 
 std::uint32_t ReadBE32(const std::uint8_t* data) {

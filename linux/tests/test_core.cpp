@@ -795,6 +795,12 @@ void TestDecoderFailures() {
 	Expect(!jpegview_linux::DecodeImage(temporary.path() / "missing.jpg", decoded, error),
 		"missing image was accepted");
 	Expect(error == "cannot open file" || !error.empty(), "missing image did not produce an error message");
+
+	const fs::path truncatedJpeg = temporary.path() / "truncated.jpg";
+	WriteBytes(truncatedJpeg, {0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F'});
+	error.clear();
+	Expect(!jpegview_linux::DecodeImage(truncatedJpeg, decoded, error) && !error.empty(),
+		"truncated native JPEG decode did not fail cleanly");
 }
 
 void TestJpegDisplayDecodeScaling() {

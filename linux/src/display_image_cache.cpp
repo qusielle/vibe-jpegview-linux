@@ -80,7 +80,17 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		decodedFrame = &displayDecoded.frames.front();
 	}
 	Image image;
-	if (!image.StoreBGRA(decodedFrame->bgra.data(), decodedFrame->width, decodedFrame->height)) return {};
+	if (request.decoded) {
+		if (!image.StoreBGRA(decodedFrame->bgra.data(), decodedFrame->width,
+			decodedFrame->height)) return {};
+	} else {
+		// File-backed JPEG pixels are private to this worker. Move them into the
+		// resize stage instead of copying the reduced decode a second time.
+		DecodedFrame& ownedFrame = displayDecoded.frames.front();
+		image.width = image.originalWidth = ownedFrame.width;
+		image.height = image.originalHeight = ownedFrame.height;
+		image.bgra = std::move(ownedFrame.bgra);
+	}
 	if (request.autoContrast && !image.AutoContrast()) return {};
 	if ((request.targetWidth < image.width || request.targetHeight < image.height) &&
 		!image.Resize(request.targetWidth, request.targetHeight)) return {};
