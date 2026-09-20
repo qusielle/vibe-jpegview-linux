@@ -275,6 +275,9 @@ bool MapInput(const std::filesystem::path& filename, MappedInput& input,
 		errorMessage = "cannot map file";
 		return false;
 	}
+	// JPEG entropy decoding consumes the compressed stream from start to end.
+	// Tell the kernel so background workers get useful read-ahead on large files.
+	(void)::madvise(input.data, input.size, MADV_SEQUENTIAL);
 	return true;
 }
 
