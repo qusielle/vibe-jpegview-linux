@@ -589,6 +589,7 @@ private:
 		if (texture_ != nullptr) SDL_DestroyTexture(texture_);
 		texture_ = nullptr;
 		ClearDisplayTexture();
+		displayTextureProtectedKeys_.clear();
 		currentDecoded_.reset();
 		currentAnimationFrame_ = 0;
 		currentDisplayRequest_.reset();
@@ -616,6 +617,7 @@ private:
 					fileList_.Current(), sourceWidth, sourceHeight, destination.width,
 					destination.height, autoContrastEnabled_);
 				if (currentDisplayRequest_->Valid()) {
+					displayTextureProtectedKeys_.insert(currentDisplayRequest_->key);
 					cachedDisplay = FindDisplayTexture(currentDisplayRequest_->key) != nullptr;
 					if (!cachedDisplay) {
 						auto prepared = displayImageCache_.Find(*currentDisplayRequest_);
@@ -656,6 +658,7 @@ private:
 				image_.width, image_.height, imageArea.w, imageArea.h);
 			const jpegview_linux::DisplayImageRequest* displayRequest =
 				CurrentDisplayRequest(destination.width, destination.height);
+			if (displayRequest != nullptr) displayTextureProtectedKeys_.insert(displayRequest->key);
 			cachedDisplay = displayRequest != nullptr &&
 				FindDisplayTexture(displayRequest->key) != nullptr;
 			if (!cachedDisplay && displayRequest != nullptr) {
@@ -689,6 +692,10 @@ private:
 		for (const auto& retained : displayTextureCache_) {
 			batch->retainedTextureKeys.insert(retained.first);
 		}
+		displayTextureProtectedKeys_.clear();
+		if (currentDisplayRequest_.has_value()) {
+			displayTextureProtectedKeys_.insert(currentDisplayRequest_->key);
+		}
 		const std::vector<std::size_t> prefetchOrder = jpegview_linux::ImagePrefetchOrder(
 			fileList_.Files().size(), fileList_.CurrentIndex(), preferredDirection,
 			jpegview_linux::DisplayPrefetchCount(cacheBudget_->Capacity(), imageArea.w,
@@ -711,7 +718,9 @@ private:
 			jpegview_linux::DisplayImageRequest request =
 				jpegview_linux::MakeJpegDisplayImageRequest(filename, sourceWidth, sourceHeight,
 					target.width, target.height, batch->context.autoContrast, position + 1);
-			if (request.Valid() && batch->retainedTextureKeys.find(request.key) ==
+			if (!request.Valid()) continue;
+			displayTextureProtectedKeys_.insert(request.key);
+			if (batch->retainedTextureKeys.find(request.key) ==
 				batch->retainedTextureKeys.end()) batch->requests.push_back(std::move(request));
 		}
 		displayImageCache_.Prefetch(batch->requests);
@@ -782,6 +791,7 @@ private:
 			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
 		}
 		displayTextureCache_.clear();
+		displayTextureProtectedKeys_.clear();
 		cacheBudget_->Release(displayTextureCacheBytes_);
 		displayTextureCacheBytes_ = 0;
 		displayImageCache_.Clear();
@@ -798,7 +808,9 @@ private:
 			auto oldest = displayTextureCache_.end();
 			for (auto candidate = displayTextureCache_.begin(); candidate != displayTextureCache_.end();
 				++candidate) {
-				if (candidate->first == protectedKey) continue;
+				if (candidate->first == protectedKey ||
+					displayTextureProtectedKeys_.find(candidate->first) !=
+						displayTextureProtectedKeys_.end()) continue;
 				if (oldest == displayTextureCache_.end() ||
 					candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
 			}
@@ -4118,6 +4130,7 @@ private:
 	int displayTextureWidth_ = 0;
 	int displayTextureHeight_ = 0;
 	std::unordered_map<std::string, DisplayTextureCacheEntry> displayTextureCache_;
+	std::unordered_set<std::string> displayTextureProtectedKeys_;
 	std::unordered_map<std::string, JpegDimensionCacheEntry> jpegDimensionCache_;
 	std::size_t displayTextureCacheBytes_ = 0;
 	std::uint64_t displayTextureUseCounter_ = 0;
