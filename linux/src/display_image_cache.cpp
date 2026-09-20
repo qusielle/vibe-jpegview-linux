@@ -277,6 +277,10 @@ struct DisplayImageCache::Impl {
 				--activeWorkers;
 				const bool foreground = work.foreground ||
 					foregroundKeys.erase(work.request.key) != 0;
+				const auto desiredPriority = desiredPrefetchPriorities.find(work.request.key);
+				const std::size_t completionPriority = foreground ? 0 :
+					(desiredPriority == desiredPrefetchPriorities.end() ? work.request.priority :
+						desiredPriority->second);
 				if (!stopping && work.epoch == epoch && image && image->key == currentKey &&
 					(foreground || desiredPrefetchKeys.find(work.request.key) !=
 						desiredPrefetchKeys.end())) {
@@ -284,7 +288,7 @@ struct DisplayImageCache::Impl {
 					// even if retained-cache space is currently occupied by decoded data.
 					// The completion queue is transient and bounded by worker throughput.
 					Insert(image, foreground);
-					completed.push_back({image, foreground ? 0 : image->priority});
+					completed.push_back({image, completionPriority});
 				}
 				idle.notify_all();
 			}
@@ -323,6 +327,7 @@ struct DisplayImageCache::Impl {
 	std::unordered_set<std::string> inFlightKeys;
 	std::unordered_map<std::string, std::size_t> inFlightPriorities;
 	std::unordered_set<std::string> desiredPrefetchKeys;
+	std::unordered_map<std::string, std::size_t> desiredPrefetchPriorities;
 	std::unordered_set<std::string> foregroundKeys;
 	std::size_t cachedBytes = 0;
 	std::size_t activeWorkers = 0;
@@ -451,10 +456,12 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 			[](const Impl::Work& work) { return !work.foreground; }), impl_->queue.end());
 		impl_->queuedKeys.clear();
 		impl_->desiredPrefetchKeys.clear();
+		impl_->desiredPrefetchPriorities.clear();
 		for (const Impl::Work& work : impl_->queue) impl_->queuedKeys.insert(work.request.key);
 		for (const DisplayImageRequest& request : prioritizedRequests) {
 			if (!request.Valid()) continue;
 			impl_->desiredPrefetchKeys.insert(request.key);
+			impl_->desiredPrefetchPriorities[request.key] = request.priority;
 			const auto retained = impl_->entries.find(request.key);
 			if (retained != impl_->entries.end()) {
 				const auto completion = std::find_if(impl_->completed.begin(),
@@ -468,8 +475,11 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 				}
 				continue;
 			}
-			if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end() ||
-				impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) continue;
+			if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end()) continue;
+			if (impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) {
+				impl_->inFlightPriorities[request.key] = request.priority;
+				continue;
+			}
 			impl_->queue.push_back(Impl::Work{request, impl_->generation, impl_->epoch, false});
 			impl_->queuedKeys.insert(request.key);
 		}
@@ -529,6 +539,7 @@ void DisplayImageCache::Clear() {
 	}
 	impl_->queuedKeys.clear();
 	impl_->desiredPrefetchKeys.clear();
+	impl_->desiredPrefetchPriorities.clear();
 	impl_->foregroundKeys.clear();
 	while (!impl_->entries.empty()) impl_->Erase(impl_->entries.begin());
 	impl_->idle.notify_all();

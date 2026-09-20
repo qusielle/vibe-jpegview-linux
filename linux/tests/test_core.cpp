@@ -1139,7 +1139,7 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	bool fartherFinished = false;
 	jpegview_linux::DisplayImageCache prioritized(64, 2,
 		[&](const jpegview_linux::DisplayImageRequest& request) {
-			if (request.priority == 1) {
+			if (request.filename == firstFile) {
 				std::unique_lock<std::mutex> lock(priorityMutex);
 				priorityChanged.wait(lock, [&] { return releaseClosest; });
 			}
@@ -1159,7 +1159,7 @@ void TestDisplayImageCacheBackgroundPreparation() {
 			return result;
 		});
 	const jpegview_linux::DisplayImageRequest closest =
-		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false, 1);
+		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false, 3);
 	const jpegview_linux::DisplayImageRequest farther =
 		jpegview_linux::MakeDisplayImageRequest(secondFile, decoded, 0, 2, 2, false, 2);
 	prioritized.Prefetch({closest, farther});
@@ -1169,6 +1169,9 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		fartherCompletedInTime = priorityChanged.wait_for(lock, std::chrono::seconds(2),
 			[&] { return fartherFinished; });
 	}
+	jpegview_linux::DisplayImageRequest reprioritizedClosest = closest;
+	reprioritizedClosest.priority = 1;
+	prioritized.Prefetch({reprioritizedClosest, farther});
 	const bool fartherUploadBlocked = prioritized.TakeCompleted(1).empty();
 	{
 		std::lock_guard<std::mutex> lock(priorityMutex);
@@ -1183,9 +1186,9 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		"prioritized display preparation did not finish");
 	const std::vector<jpegview_linux::DisplayImageCache::ImagePtr> priorityCompletions =
 		prioritized.TakeCompleted(2);
-	Expect(priorityCompletions.size() == 2 && priorityCompletions[0]->priority == 1 &&
-		priorityCompletions[1]->priority == 2,
-		"display upload queue did not prioritize the closest completed neighbor");
+	Expect(priorityCompletions.size() == 2 && priorityCompletions[0]->key == closest.key &&
+		priorityCompletions[1]->key == farther.key,
+		"display upload queue did not apply the latest priority to in-flight neighbors");
 }
 
 void TestSharedCacheBudgetAccounting() {
