@@ -253,7 +253,7 @@ struct MappedInput {
 };
 
 bool MapInput(const std::filesystem::path& filename, MappedInput& input,
-	std::string& errorMessage) {
+	bool sequentialRead, std::string& errorMessage) {
 	const int descriptor = ::open(filename.c_str(), O_RDONLY | O_CLOEXEC);
 	if (descriptor < 0) {
 		errorMessage = "cannot open file";
@@ -275,9 +275,10 @@ bool MapInput(const std::filesystem::path& filename, MappedInput& input,
 		errorMessage = "cannot map file";
 		return false;
 	}
-	// JPEG entropy decoding consumes the compressed stream from start to end.
-	// Tell the kernel so background workers get useful read-ahead on large files.
-	(void)::madvise(input.data, input.size, MADV_SEQUENTIAL);
+	// A full entropy decode consumes the compressed stream from start to end, while
+	// a dimension probe stops near the header. Avoid pulling the bodies of many
+	// large neighboring files into the page cache during prefetch planning.
+	(void)::madvise(input.data, input.size, sequentialRead ? MADV_SEQUENTIAL : MADV_RANDOM);
 	return true;
 }
 
@@ -303,7 +304,7 @@ void SuppressJpegMessage(j_common_ptr) {}
 bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage) {
 	MappedInput input;
-	if (!MapInput(filename, input, errorMessage)) return false;
+	if (!MapInput(filename, input, false, errorMessage)) return false;
 	JpegErrorManager error{};
 	jpeg_decompress_struct decoder{};
 	volatile bool created = false;
@@ -336,7 +337,7 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage, int minimumWidth = 0, int minimumHeight = 0,
 	int* sourceWidth = nullptr, int* sourceHeight = nullptr) {
 	MappedInput input;
-	if (!MapInput(filename, input, errorMessage)) return false;
+	if (!MapInput(filename, input, true, errorMessage)) return false;
 	JpegErrorManager error{};
 	jpeg_decompress_struct decoder{};
 	volatile bool created = false;
