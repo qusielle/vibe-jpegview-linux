@@ -290,8 +290,8 @@ bool StartDetachedProcess(const jpegview_linux::ExternalCommand& command,
 
 class Viewer {
 public:
-	Viewer(jpegview_linux::FileList fileList, double slideshowSeconds, bool startFullscreen)
-		: fileList_(std::move(fileList)), initialSlideshowSeconds_(slideshowSeconds),
+	Viewer(std::vector<std::string> inputs, double slideshowSeconds, bool startFullscreen)
+		: startupInputs_(std::move(inputs)), initialSlideshowSeconds_(slideshowSeconds),
 		  startFullscreen_(startFullscreen) {}
 
 	int Run() {
@@ -305,7 +305,7 @@ public:
 		// visibly appear in its normal size before it is maximized.
 		Uint32 windowFlags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 		if (maximized_ && !startFullscreen_) windowFlags |= SDL_WINDOW_MAXIMIZED;
-		window_ = SDL_CreateWindow("JPEGView Linux", 0x2FFF0000, 0x2FFF0000,
+		window_ = SDL_CreateWindow("JPEGView — Loading", 0x2FFF0000, 0x2FFF0000,
 			kDefaultWidth, kDefaultHeight, windowFlags);
 		if (window_ == nullptr) {
 			std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << '\n';
@@ -351,11 +351,29 @@ public:
 		if (initialSlideshowSeconds_ > 0.0) {
 			playback_.StartSlideshow(initialSlideshowSeconds_, SDL_GetTicks());
 		}
+		SetTitle("JPEGView — Loading");
+		PresentStartupFrame();
+		SDL_ShowWindow(window_);
+		// Some X11 window managers publish the creation title when mapping a
+		// previously hidden window, so repeat the loading title after the map.
+		SetTitle("JPEGView — Loading");
+		PresentStartupFrame();
+		SDL_PumpEvents();
+
+		const jpegview_linux::FileList::SortMode initialSortMode = fileList_.GetSorting();
+		const bool initialSortAscending = fileList_.IsSortedAscending();
+		fileList_ = jpegview_linux::FileList(startupInputs_, initialSortMode,
+			initialSortAscending);
+		startupInputs_.clear();
+		if (fileList_.Empty()) {
+			std::cerr << "No supported images found.\n";
+			Cleanup();
+			return 2;
+		}
 		if (!LoadCurrent()) {
 			Cleanup();
 			return 1;
 		}
-		SDL_ShowWindow(window_);
 		int mouseX = 0;
 		int mouseY = 0;
 		SDL_GetMouseState(&mouseX, &mouseY);
@@ -4499,7 +4517,15 @@ private:
 		if (needsCleanContextMenuFrame) RenderFrame();
 	}
 
+	void PresentStartupFrame() {
+		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
+		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
+		SDL_RenderClear(renderer_);
+		SDL_RenderPresent(renderer_);
+	}
+
 	jpegview_linux::FileList fileList_;
+	std::vector<std::string> startupInputs_;
 	std::shared_ptr<jpegview_linux::SharedCacheBudget> cacheBudget_ =
 		std::make_shared<jpegview_linux::SharedCacheBudget>(
 			jpegview_linux::CacheBytesFromMiB(jpegview_linux::kDefaultCacheSizeMiB));
@@ -4714,13 +4740,12 @@ int main(int argc, char** argv) {
 		return 0;
 	}
 
-	jpegview_linux::FileList fileList(inputs);
-	if (fileList.Empty()) {
-		std::cerr << "No supported images found.\n";
-		return 2;
-	}
-
 	if (decodeCheck) {
+		jpegview_linux::FileList fileList(inputs);
+		if (fileList.Empty()) {
+			std::cerr << "No supported images found.\n";
+			return 2;
+		}
 		for (const fs::path& file : fileList.Files()) {
 			jpegview_linux::DecodedImage decoded;
 			std::string errorMessage;
@@ -4740,7 +4765,7 @@ int main(int argc, char** argv) {
 		return 0;
 	}
 
-	Viewer viewer(std::move(fileList), slideshowSeconds, startFullscreen);
+	Viewer viewer(std::move(inputs), slideshowSeconds, startFullscreen);
 	const int result = viewer.Run();
 	return result;
 }

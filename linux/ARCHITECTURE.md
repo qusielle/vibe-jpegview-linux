@@ -43,6 +43,11 @@ should normally be added to one of these focused modules and covered by `tests/t
 and invoking desktop integrations. It should translate SDL events into operations on the modules
 above rather than duplicate their state.
 
+At startup the composition root creates, paints, and maps the final SDL window before constructing
+the initial `FileList` or loading its current image. Directory enumeration and the existing
+decode/display-cache path then run unchanged while the visible dark startup frame provides feedback;
+renderer resources remain confined to the main thread.
+
 ## Refactoring status
 
 The planned Viewer decomposition is complete. Future extractions should be driven by a concrete

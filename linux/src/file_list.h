@@ -27,6 +27,7 @@ public:
 		LoopSameDirectoryLevel,
 	};
 
+	FileList() = default;
 	FileList(const std::vector<std::string>& inputs,
 		SortMode sortMode = SortMode::LastModificationTime,
 		bool sortAscending = true,

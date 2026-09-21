@@ -139,7 +139,10 @@ they support.
     batch pattern, thumbnail visibility/width, open-dialog dimensions and preview proportion, and the
     image-cache budget are stored under XDG configuration paths. A previously
     maximized window is created maximized before it is shown, avoiding the visible delayed maximize.
-    Compatibility handling keeps always-on-top optional on older SDL runtimes.
+    The real viewer window is painted and shown before the initial directory scan and image decode,
+    so cold AppImage and large-folder startup provides immediate visual feedback without changing the
+    image preparation or navigation path. Compatibility handling keeps always-on-top optional on older
+    SDL runtimes.
 
 14. **Rendering and metadata correctness fixes.** Context-menu close no longer leaves a white pixel
     over the image or revealed navigation panel; borders avoid endpoint rasterization artifacts;

@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+CDPATH=
+export CDPATH
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 BINARY=${1:-./build/jpegview-linux}
 if [ ! -x "$BINARY" ]; then
 	echo "UI smoke test: binary not found: $BINARY" >&2
@@ -119,6 +122,48 @@ stop_viewer() {
 	wait "$viewer_pid" || true
 	viewer_pid=''
 }
+
+if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+	# Delay the decoder's memory map of a known JPEG. The final viewer window
+	# must already be mapped and painted while that initial load is blocked.
+	cc -shared -fPIC "$SCRIPT_DIR/delay_mmap.c" -o "$temporary/slow_map.so" -ldl
+	convert "$temporary/images/01-red.ppm" "$temporary/startup-delay.jpg"
+	DISPLAY=":$display_number" HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/startup-config" \
+		LD_PRELOAD="$temporary/slow_map.so" \
+		JPEGVIEW_TEST_SLOW_MAP="$temporary/startup-delay.jpg" \
+		"$BINARY" "$temporary/startup-delay.jpg" >"$temporary/startup-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 20); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: startup window waited for initial image decoding" >&2
+		exit 1
+	fi
+	startup_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	case "$startup_title" in
+		*Loading*) ;;
+		*) echo "UI smoke test: startup window did not show loading state" >&2; exit 1 ;;
+	esac
+	loaded_title=''
+	for _ in $(seq 1 50); do
+		loaded_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		case "$loaded_title" in
+			startup-delay.jpg\ *) break ;;
+		esac
+		sleep 0.1
+	done
+	case "$loaded_title" in
+		startup-delay.jpg\ *) ;;
+		*) echo "UI smoke test: delayed startup image never completed" >&2; exit 1 ;;
+	esac
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	stop_viewer
+fi
 
 click_file_dialog_sort() {
 	dialog_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
