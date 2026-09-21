@@ -38,6 +38,23 @@ jobs:
           docker run --rm -v "$output_dir:/out" "$image" appimage ci
           docker run --rm -v "$output_dir:/out" "$image" binary
 
+          (
+            cd "$output_dir"
+            sha256sum JPEGView-Linux-ci-x86_64.AppImage jpegview-linux > SHA256SUMS
+          )
+
+      - name: Upload Ubuntu ${{ matrix.ubuntu }} build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: jpegview-linux-ubuntu${{ matrix.ubuntu }}-x86_64
+          path: |
+            ${{ runner.temp }}/jpegview-linux-ci-ubuntu${{ matrix.ubuntu }}/JPEGView-Linux-ci-x86_64.AppImage
+            ${{ runner.temp }}/jpegview-linux-ci-ubuntu${{ matrix.ubuntu }}/jpegview-linux
+            ${{ runner.temp }}/jpegview-linux-ci-ubuntu${{ matrix.ubuntu }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
   shell-check:
     name: Packaging shell checks
     runs-on: ubuntu-24.04

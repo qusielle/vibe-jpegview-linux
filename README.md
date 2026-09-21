@@ -72,6 +72,11 @@ downloads built for Ubuntu 20.04, 22.04, and 24.04, along with a SHA-256 checksu
 Ubuntu build. The Ubuntu 20.04 artifacts are the broadest-compatibility choice; artifacts built on
 newer Ubuntu releases may require a newer glibc.
 
+Successful Ubuntu builds from branch pushes, pull requests, and manual workflow runs also attach
+AppImage, native executable, and SHA-256 checksum workflow artifacts to the Actions run. These are
+available from the run summary for 14 days; use the GitHub Releases downloads for permanent release
+assets.
+
 ## Portable
 
 JPEGView _does not require installation_ to run.  Just **unzip, and run** either the 64-bit version, or the 32-bit version depending on which platform you're on.  It can save the settings to the extracted folder and run entirely portable.

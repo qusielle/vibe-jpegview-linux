@@ -212,10 +212,13 @@ needs no codec source builds. An optional `--build-arg APPIMAGETOOL_SHA256=...` 
 AppImage tool. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
 must also run on later Ubuntu releases; newer-base artifacts can require newer system glibc.
 
-GitHub Actions builds and tests all three Dockerfiles on branch pushes and pull requests. When a
-GitHub Release is published, its workflow uploads an x86_64 AppImage and native executable for
-each Ubuntu base, plus matching SHA-256 checksums. Asset names include the Ubuntu release because
-artifacts built on newer bases may require newer system glibc.
+GitHub Actions builds and tests all three Dockerfiles on branch pushes and pull requests. Each
+successful Ubuntu build job uploads its x86_64 AppImage, native executable, and a `SHA256SUMS` file
+as a downloadable workflow artifact named `jpegview-linux-ubuntu20-x86_64`,
+`jpegview-linux-ubuntu22-x86_64`, or `jpegview-linux-ubuntu24-x86_64`. These workflow artifacts are
+retained for 14 days and are available from the workflow run's summary. When a GitHub Release is
+published, its workflow uploads corresponding versioned assets for each Ubuntu base. Asset names
+include the Ubuntu release because artifacts built on newer bases may require newer system glibc.
 
 If SDL2 is installed in a non-standard location, override the linker settings:
 
