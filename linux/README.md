@@ -535,3 +535,18 @@ Platform-independent behavior is split into small modules under `src/` and exerc
 suite; `main.cpp` is the SDL window, rendering, and event-dispatch composition layer. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for module ownership, the completed Viewer extractions, and the
 ordered refactoring backlog.
+
+## Screenshots
+
+The main viewer with its neighboring-image thumbnail strip and lower navigation panel:
+
+<p><img src="screenshots/main-window-panels.png" width="720" alt="JPEGView Linux main window with thumbnail and navigation panels"></p>
+
+The open dialog with a selected image and its live preview:
+
+<p><img src="screenshots/open-dialog-preview.png" width="720" alt="JPEGView Linux open dialog with a selected-image preview"></p>
+
+The sample photos shown are CC0 images from Wikimedia Commons: [Lake Mountain Landscape](https://commons.wikimedia.org/wiki/File:Lake_Mountain_Landscape.jpg),
+[Waterfall in forest](https://commons.wikimedia.org/wiki/File:Waterfall_in_forest.jpg),
+[Autumn Forest Wet Bark](https://commons.wikimedia.org/wiki/File:Autumn_Forest_Wet_Bark.jpg), and
+[Beach Scene](https://commons.wikimedia.org/wiki/File:Beach_Scene.jpg).
