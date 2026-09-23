@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cache_budget.h"
+#include "image_processing.h"
 
 #include <filesystem>
 #include <string>
@@ -41,6 +42,7 @@ struct ViewerSettings {
 	bool showFilename = false;
 	bool autoContrast = false;
 	bool keepPictureLevels = false;
+	ImageProcessingParams defaultImageProcessing;
 	double unsharpMaskRadius = 1.0;
 	double unsharpMaskAmount = 0.0;
 	double unsharpMaskThreshold = 4.0;

@@ -120,9 +120,10 @@ bool EqualImageProcessing(const ImageProcessingParams& left,
 }
 
 ImageProcessingPreset ResolveImageProcessingForFile(const ImageProcessingPreset& current,
-	const ImageProcessingPreset* saved, bool keepCurrent, bool defaultAutoContrast) {
+	const ImageProcessingPreset* saved, bool keepCurrent, bool defaultAutoContrast,
+	const ImageProcessingParams& defaultProcessing) {
 	if (keepCurrent) return current;
-	return saved == nullptr ? ImageProcessingPreset{{}, defaultAutoContrast} : *saved;
+	return saved == nullptr ? ImageProcessingPreset{defaultProcessing, defaultAutoContrast} : *saved;
 }
 
 } // namespace jpegview_linux

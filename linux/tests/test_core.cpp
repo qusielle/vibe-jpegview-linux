@@ -1567,17 +1567,23 @@ void TestPictureLevelsModelAndProcessing() {
 	jpegview_linux::SetLevelControlValue(current.processing, LevelControl::Contrast, 0.25);
 	current.autoContrast = true;
 	jpegview_linux::SetLevelControlValue(saved.processing, LevelControl::Contrast, -0.25);
-	const auto kept = jpegview_linux::ResolveImageProcessingForFile(current, &saved, true, false);
-	const auto restored = jpegview_linux::ResolveImageProcessingForFile(current, &saved, false, false);
-	const auto defaults = jpegview_linux::ResolveImageProcessingForFile(current, nullptr, false, true);
+	ImageProcessingParams defaultProcessing;
+	jpegview_linux::SetLevelControlValue(defaultProcessing, LevelControl::Saturation, 1.4);
+	const auto kept = jpegview_linux::ResolveImageProcessingForFile(current, &saved, true, false,
+		defaultProcessing);
+	const auto restored = jpegview_linux::ResolveImageProcessingForFile(current, &saved, false, false,
+		defaultProcessing);
+	const auto defaults = jpegview_linux::ResolveImageProcessingForFile(current, nullptr, false, true,
+		defaultProcessing);
 	ExpectNear(kept.processing.contrast, 0.25, 1e-12,
 		"keep-between-images did not override the saved per-file levels");
 	Expect(kept.autoContrast, "keep-between-images did not preserve auto correction state");
 	ExpectNear(restored.processing.contrast, -0.25, 1e-12,
 		"per-file levels were not restored when keep was disabled");
 	Expect(!restored.autoContrast, "per-file auto-correction state was not restored");
-	Expect(jpegview_linux::IsDefaultImageProcessing(defaults.processing) && defaults.autoContrast,
-		"image without saved levels did not receive identity values");
+	ExpectNear(defaults.processing.saturation, 1.4, 1e-12,
+		"image without saved levels did not receive the configured default preset");
+	Expect(defaults.autoContrast, "image without saved levels did not receive default auto correction");
 
 	const std::vector<std::uint8_t> pixels = {
 		32, 64, 96, 17, 64, 96, 128, 18,
@@ -1681,6 +1687,19 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.showFilename = true;
 	expected.autoContrast = true;
 	expected.keepPictureLevels = true;
+	expected.defaultImageProcessing.contrast = 0.18;
+	expected.defaultImageProcessing.gamma = 1.15;
+	expected.defaultImageProcessing.saturation = 1.25;
+	expected.defaultImageProcessing.cyanRed = 0.2;
+	expected.defaultImageProcessing.magentaGreen = -0.2;
+	expected.defaultImageProcessing.yellowBlue = 0.3;
+	expected.defaultImageProcessing.lightenShadows = 0.4;
+	expected.defaultImageProcessing.darkenHighlights = 0.2;
+	expected.defaultImageProcessing.deepShadows = 0.6;
+	expected.defaultImageProcessing.colorCorrection = 0.1;
+	expected.defaultImageProcessing.contrastCorrection = 0.55;
+	expected.defaultImageProcessing.sharpen = 0.15;
+	expected.defaultImageProcessing.localDensityEnabled = true;
 	expected.unsharpMaskRadius = 2.25;
 	expected.unsharpMaskAmount = 3.5;
 	expected.unsharpMaskThreshold = 7.0;
@@ -1714,6 +1733,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"overlay/correction settings did not round-trip");
 	Expect(loaded.keepPictureLevels == expected.keepPictureLevels,
 		"keep picture levels setting did not round-trip");
+	Expect(jpegview_linux::EqualImageProcessing(loaded.defaultImageProcessing,
+		expected.defaultImageProcessing), "default picture levels did not round-trip");
 	ExpectNear(loaded.unsharpMaskRadius, expected.unsharpMaskRadius, 0.0000001,
 		"unsharp radius setting did not round-trip");
 	ExpectNear(loaded.unsharpMaskAmount, expected.unsharpMaskAmount, 0.0000001,
@@ -1727,7 +1748,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 
 	const fs::path malformed = temporary.path() / "malformed.conf";
 	std::ofstream malformedOutput(malformed);
-	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\n"
+	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\ndefault_gamma=not-a-number\n"
 		"thumbnail_panel_width=not-a-number\nfile_dialog_width=not-a-number\n"
 		"file_dialog_height=not-a-number\nfile_dialog_preview_ratio=nan\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
@@ -2602,6 +2623,7 @@ void TestContextMenuCatalogAndState() {
 	Expect(findCommand(advanced, IDM_CHANGESIZE)->enabled &&
 		findCommand(advanced, IDM_ROTATE_90_LOSSLESS)->enabled &&
 		findCommand(advanced, IDM_AUTO_CORRECTION)->checked &&
+		findCommand(advanced, IDM_SAVE_PARAMETERS)->enabled &&
 		findCommand(advanced, jpegview_linux::kCommandEditPictureLevels)->enabled &&
 		findCommand(advanced, IDM_LDC)->checked && findCommand(advanced, IDM_KEEP_PARAMETERS)->checked &&
 		!findCommand(advanced, IDM_SAVE_PARAM_DB)->enabled &&
@@ -2632,7 +2654,8 @@ void TestContextMenuCatalogAndState() {
 	const std::vector<MenuItem> disabled = jpegview_linux::BuildContextMenu(unavailable, true);
 	Expect(!findCommand(disabled, IDM_CHANGESIZE)->enabled &&
 		!findCommand(disabled, IDM_ROTATE_90_LOSSLESS)->enabled &&
-		!findCommand(disabled, IDM_AUTO_CORRECTION)->enabled,
+		!findCommand(disabled, IDM_AUTO_CORRECTION)->enabled &&
+		!findCommand(disabled, IDM_SAVE_PARAMETERS)->enabled,
 		"image-dependent commands were enabled without an image");
 	Expect(findLabel(disabled, "  (no configured applications)") != nullptr,
 		"empty Open with state omitted its disabled placeholder");

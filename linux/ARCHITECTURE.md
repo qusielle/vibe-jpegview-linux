@@ -16,7 +16,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   so an adjustment cannot reuse stale pixels. JPEG display requests use native reduced DCT decode
   before exact scaling, without requiring a retained full-resolution source frame.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
-- `settings` and `sort_mode`: persisted configuration and stable setting values.
+- `settings` and `sort_mode`: persisted configuration (including default picture-level values) and
+  stable setting values.
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, filter selection, and pure
   focus/text-editing transitions.

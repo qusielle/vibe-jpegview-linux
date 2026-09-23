@@ -14,6 +14,26 @@ namespace fs = std::filesystem;
 namespace jpegview_linux {
 namespace {
 
+struct ProcessingSettingKey {
+	const char* key;
+	LevelControl control;
+};
+
+constexpr ProcessingSettingKey kDefaultProcessingSettingKeys[] = {
+	{"default_contrast", LevelControl::Contrast},
+	{"default_gamma", LevelControl::Brightness},
+	{"default_saturation", LevelControl::Saturation},
+	{"default_cyan_red", LevelControl::CyanRed},
+	{"default_magenta_green", LevelControl::MagentaGreen},
+	{"default_yellow_blue", LevelControl::YellowBlue},
+	{"default_lighten_shadows", LevelControl::LightenShadows},
+	{"default_darken_highlights", LevelControl::DarkenHighlights},
+	{"default_deep_shadows", LevelControl::DeepShadows},
+	{"default_color_correction", LevelControl::ColorCorrection},
+	{"default_contrast_correction", LevelControl::ContrastCorrection},
+	{"default_sharpen", LevelControl::Sharpen},
+};
+
 std::string Trim(std::string value) {
 	const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char character) {
 		return std::isspace(character) != 0;
@@ -126,6 +146,8 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			loaded.autoContrast = ParseBool(value);
 		} else if (key == "keep_picture_levels") {
 			loaded.keepPictureLevels = ParseBool(value);
+		} else if (key == "default_local_density") {
+			loaded.defaultImageProcessing.localDensityEnabled = ParseBool(value);
 		} else if (key == "unsharp_mask_radius" || key == "unsharp_mask_amount" ||
 			key == "unsharp_mask_threshold") {
 			try {
@@ -149,6 +171,20 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 				}
 			} catch (const std::exception&) {
 				// Ignore malformed settings and retain the built-in default.
+			}
+		} else {
+			for (const ProcessingSettingKey& setting : kDefaultProcessingSettingKeys) {
+				if (key != setting.key) continue;
+				try {
+					std::size_t parsedCharacters = 0;
+					const double parsed = std::stod(value, &parsedCharacters);
+					if (parsedCharacters == value.size() && std::isfinite(parsed)) {
+						SetLevelControlValue(loaded.defaultImageProcessing, setting.control, parsed);
+					}
+				} catch (const std::exception&) {
+					// Ignore malformed settings and retain the built-in default.
+				}
+				break;
 			}
 		}
 	}
@@ -196,8 +232,14 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "unsharp_mask_radius=" << std::clamp(settings.unsharpMaskRadius, 0.0, 5.0) << '\n'
 		       << "unsharp_mask_amount=" << std::clamp(settings.unsharpMaskAmount, 0.0, 10.0) << '\n'
 		       << "unsharp_mask_threshold=" << std::clamp(settings.unsharpMaskThreshold, 0.0, 20.0) << '\n'
+		       << "default_local_density=" << (settings.defaultImageProcessing.localDensityEnabled ? 1 : 0) << '\n'
 		       << "cache_size_mb=" << std::min(settings.cacheSizeMiB, kMaximumCacheSizeMiB) << '\n'
 		       << "copy_rename_pattern=" << settings.copyRenamePattern << '\n';
+		output << std::setprecision(17);
+		for (const ProcessingSettingKey& setting : kDefaultProcessingSettingKeys) {
+			output << setting.key << '=' << GetLevelControlValue(settings.defaultImageProcessing,
+				setting.control) << '\n';
+		}
 		if (!output) {
 			output.close();
 			fs::remove(temporary, error);

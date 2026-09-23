@@ -511,6 +511,7 @@ private:
 		if (!jpegview_linux::LoadViewerSettings(settingsPath, settings)) return;
 		copyRenamePattern_ = settings.copyRenamePattern;
 		defaultAutoContrastEnabled_ = settings.autoContrast;
+		defaultImageProcessing_ = settings.defaultImageProcessing;
 		autoContrastEnabled_ = settings.autoContrast;
 		keepPictureLevels_ = settings.keepPictureLevels;
 		unsharpMaskRadius_ = settings.unsharpMaskRadius;
@@ -538,9 +539,9 @@ private:
 		viewport_.LoadScaleMode(settings.scaleMode, settings.manualZoomSet, settings.manualZoom);
 	}
 
-	void SaveSettings() const {
+	bool SaveSettings() const {
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
-		if (settingsPath.empty()) return;
+		if (settingsPath.empty()) return false;
 
 		jpegview_linux::ViewerSettings settings;
 		settings.scaleMode = viewport_.NavigationScaleMode();
@@ -559,13 +560,14 @@ private:
 		settings.showHistogram = showHistogram_;
 		settings.showFilename = showFileName_;
 		settings.autoContrast = defaultAutoContrastEnabled_;
+		settings.defaultImageProcessing = defaultImageProcessing_;
 		settings.keepPictureLevels = keepPictureLevels_;
 		settings.unsharpMaskRadius = unsharpMaskRadius_;
 		settings.unsharpMaskAmount = unsharpMaskAmount_;
 		settings.unsharpMaskThreshold = unsharpMaskThreshold_;
 		settings.cacheSizeMiB = cacheSizeMiB_;
 		settings.copyRenamePattern = copyRenamePattern_;
-		jpegview_linux::SaveViewerSettings(settingsPath, settings);
+		return jpegview_linux::SaveViewerSettings(settingsPath, settings);
 	}
 
 	bool JpegDimensions(const fs::path& filename, int& width, int& height,
@@ -654,7 +656,7 @@ private:
 		const jpegview_linux::ImageProcessingPreset selected =
 			jpegview_linux::ResolveImageProcessingForFile(current,
 				saved == imageProcessingStore_.end() ? nullptr : &saved->second,
-				keepPictureLevels_, defaultAutoContrastEnabled_);
+				keepPictureLevels_, defaultAutoContrastEnabled_, defaultImageProcessing_);
 		imageProcessing_ = selected.processing;
 		autoContrastEnabled_ = selected.autoContrast;
 		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
@@ -797,7 +799,7 @@ private:
 			const jpegview_linux::ImageProcessingPreset filePreset =
 				jpegview_linux::ResolveImageProcessingForFile(current,
 					savedProcessing == imageProcessingStore_.end() ? nullptr : &savedProcessing->second,
-					keepPictureLevels_, defaultAutoContrastEnabled_);
+					keepPictureLevels_, defaultAutoContrastEnabled_, defaultImageProcessing_);
 			jpegview_linux::ImageProcessingParams fileProcessing = filePreset.processing;
 			fileProcessing.unsharpRadius = unsharpMaskRadius_;
 			fileProcessing.unsharpAmount = 0.0;
@@ -2378,6 +2380,27 @@ private:
 		SetTitle("Picture-level parameters saved for this image");
 	}
 
+	void SaveCurrentPictureLevelsAsDefault() {
+		if (fileList_.Empty() || clipboardMode_) return;
+		const jpegview_linux::ImageProcessingParams previousProcessing = defaultImageProcessing_;
+		const bool previousAutoContrast = defaultAutoContrastEnabled_;
+		defaultImageProcessing_ = imageProcessing_;
+		defaultAutoContrastEnabled_ = autoContrastEnabled_;
+		defaultImageProcessing_.unsharpRadius = 1.0;
+		defaultImageProcessing_.unsharpAmount = 0.0;
+		defaultImageProcessing_.unsharpThreshold = 4.0;
+		if (!SaveSettings()) {
+			defaultImageProcessing_ = previousProcessing;
+			defaultAutoContrastEnabled_ = previousAutoContrast;
+			SetTitle("Could not save default picture levels");
+			return;
+		}
+		PrepareImagePrefetch();
+		SetTitle(jpegview_linux::IsDefaultImageProcessing(defaultImageProcessing_) ?
+			"Default picture levels restored to neutral" :
+			"Current picture levels saved as defaults for other images");
+	}
+
 	void ClearCurrentPictureLevels() {
 		if (fileList_.Empty() || keepPictureLevels_) return;
 		auto updatedStore = imageProcessingStore_;
@@ -2390,7 +2413,7 @@ private:
 			return;
 		}
 		imageProcessingStore_ = std::move(updatedStore);
-		imageProcessing_ = {};
+		imageProcessing_ = defaultImageProcessing_;
 		autoContrastEnabled_ = defaultAutoContrastEnabled_;
 		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
 		imageProcessing_.unsharpAmount = 0.0;
@@ -2562,6 +2585,9 @@ private:
 			break;
 		case IDM_CLEAR_PARAM_DB:
 			ClearCurrentPictureLevels();
+			break;
+		case IDM_SAVE_PARAMETERS:
+			SaveCurrentPictureLevelsAsDefault();
 			break;
 		case IDM_ROTATE_90_LOSSLESS:
 		case IDM_ROTATE_90_LOSSLESS_CONFIRM:
@@ -5021,6 +5047,7 @@ private:
 	Image image_;
 	Image correctionBase_;
 	jpegview_linux::ImageProcessingParams imageProcessing_;
+	jpegview_linux::ImageProcessingParams defaultImageProcessing_;
 	jpegview_linux::ImageProcessingParams materializedProcessing_;
 	jpegview_linux::ImageProcessingStore imageProcessingStore_;
 	bool correctionBaseValid_ = false;

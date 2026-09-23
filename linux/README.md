@@ -111,8 +111,9 @@ they support.
     brightness/gamma, saturation, three color-balance axes, local shadow/highlight correction,
     correction strengths, and sharpening are editable with live preview. The separate unsharp-mask
     dialog previews radius, amount, and threshold before applying. Adjustments are non-destructive
-    until save; per-image levels can be saved/removed in the parameter database, or kept between
-    images. Automatic histogram correction remains available with F5. Animated GIF,
+    until save; per-image levels can be saved/removed in the parameter database, set as defaults for
+    images without a saved entry, or kept between images. Automatic histogram correction remains
+    available with F5. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
     rates and folder advancement, slideshow transitions are rendered natively, Alt+R resumes, and
     Escape stops active playback before quitting. Decoded pixels, prepared display frames, and
@@ -139,8 +140,9 @@ they support.
     shaping and automatic installed-font fallback; translucent surfaces provide a consistent visual
     treatment.
 
-13. **Reliable startup and saved session state.** Scale mode, ordering mode/direction, maximized or
-    normal state, navigation-panel choices, filename/EXIF/histogram visibility, automatic correction,
+13. **Reliable startup and saved session state.** Scale mode, default picture levels, ordering
+    mode/direction, maximized or normal state, navigation-panel choices,
+    filename/EXIF/histogram visibility, automatic correction,
     batch pattern, thumbnail visibility/width, open-dialog dimensions and preview proportion, and the
     image-cache budget are stored under XDG configuration paths. A previously
     maximized window is created maximized before it is shown, avoiding the visible delayed maximize.
@@ -434,7 +436,9 @@ The separate `Unsharp mask...` dialog previews radius, amount, and threshold and
 actions. `Keep levels` carries current adjustments to the next image and temporarily takes precedence
 over saved per-image values. With keep disabled, each saved entry (including its auto-correction and
 local-density state) is restored for that image. Save/remove actions are disabled while Keep levels is
-on; removing an entry restores the default levels. The Linux-native `picture-levels.db` is stored in
+on; `Set current parameters as default...` stores slider values and automatic-correction state for
+images without a saved entry. Removing an entry restores those defaults. The Linux-native
+`picture-levels.db` is stored in
 the JPEGView Linux configuration directory (`$XDG_CONFIG_HOME/jpegview-linux`, or
 `~/.config/jpegview-linux` when XDG_CONFIG_HOME is unset). All levels remain non-destructive until
 the processed image is saved.
@@ -475,7 +479,7 @@ by comparing the Linux frontend with the Windows menus and feature panels are:
   configuration from the global template are not available. The Linux frontend uses its own XDG
   settings file and does not translate every Windows setting.
 - **Default processing preset.** Saving the current picture-level values as the default for images
-  without a per-image entry is not available yet.
+  without a per-image entry is available through `Set current parameters as default...`.
 - **Open-With management and user commands.** Open-With applications are discovered automatically
   from freedesktop `.desktop` files, but there is no manual menu editor. Windows-style custom user
   command definitions and their invocation menu are also absent.
