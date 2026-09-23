@@ -217,6 +217,29 @@ bool Image::StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageH
 	return true;
 }
 
+bool Image::Crop(int left, int top, int right, int bottom) {
+	if (!HasValidPixels(*this) || left < 0 || top < 0 || right > width || bottom > height ||
+		right <= left || bottom <= top) return false;
+	const int croppedWidth = right - left;
+	const int croppedHeight = bottom - top;
+	std::vector<std::uint8_t> cropped;
+	try {
+		cropped.resize(static_cast<std::size_t>(croppedWidth) * croppedHeight * 4);
+	} catch (const std::exception&) {
+		return false;
+	}
+	const std::size_t rowBytes = static_cast<std::size_t>(croppedWidth) * 4;
+	for (int y = 0; y < croppedHeight; ++y) {
+		const std::size_t sourceOffset = (static_cast<std::size_t>(top + y) * width + left) * 4;
+		const std::size_t targetOffset = static_cast<std::size_t>(y) * rowBytes;
+		std::copy_n(bgra.data() + sourceOffset, rowBytes, cropped.data() + targetOffset);
+	}
+	width = croppedWidth;
+	height = croppedHeight;
+	bgra.swap(cropped);
+	return true;
+}
+
 bool Image::Rotate(bool clockwise) {
 	if (!HasValidPixels(*this)) return false;
 	const int newWidth = height;

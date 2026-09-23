@@ -14,6 +14,7 @@
 #include "desktop_association.h"
 #include "external_commands.h"
 #include "batch_copy.h"
+#include "crop_selection_model.h"
 #include "image_formats.h"
 #include "input_commands.h"
 #include "viewport.h"
@@ -1434,8 +1435,160 @@ void TestImageStorageTransformsAndValidation() {
 	malformed.height = 2;
 	malformed.bgra = {1, 2, 3, 4};
 	Expect(!malformed.Rotate(true) && !malformed.Mirror(true) &&
-		!malformed.Resize(1, 1) && !malformed.AutoContrast(),
+		!malformed.Resize(1, 1) && !malformed.Crop(0, 0, 1, 1) && !malformed.AutoContrast(),
 		"image operations accepted a truncated pixel buffer");
+}
+
+void TestImageCropCopiesHalfOpenRectangle() {
+	jpegview_linux::Image image = MakeIndexedImage(3, 2);
+	Expect(image.Crop(1, 0, 3, 2), "valid image crop was rejected");
+	Expect(image.width == 2 && image.height == 2 &&
+		ImageBlueChannel(image) == std::vector<std::uint8_t>({2, 3, 5, 6}),
+		"crop did not copy the requested half-open pixel rectangle");
+	Expect(image.originalWidth == 3 && image.originalHeight == 2,
+		"crop unexpectedly replaced the dimensions retained from the source image");
+	const std::vector<std::uint8_t> validPixels = image.bgra;
+	for (const auto& bounds : std::vector<std::array<int, 4>>{
+		{{-1, 0, 1, 1}}, {{0, -1, 1, 1}}, {{0, 0, 4, 1}},
+		{{0, 0, 1, 3}}, {{2, 0, 1, 1}}, {{0, 1, 1, 1}}}) {
+		Expect(!image.Crop(bounds[0], bounds[1], bounds[2], bounds[3]) && image.bgra == validPixels,
+			"invalid image crop was accepted or partially changed pixels");
+	}
+	Expect(image.Crop(0, 0, 2, 2) && image.width == 2 && image.height == 2 &&
+		ImageBlueChannel(image) == std::vector<std::uint8_t>({2, 3, 5, 6}),
+		"crop of the full current image changed its pixel content");
+}
+
+void TestCropSelectionModelGeometryAndManipulation() {
+	using jpegview_linux::CropSelectionHandle;
+	using jpegview_linux::CropSelectionMode;
+	using jpegview_linux::CropSelectionModel;
+	using jpegview_linux::SelectionRect;
+	CropSelectionModel selection;
+	selection.SetImageSize(100, 80);
+	Expect(selection.StartNew(2, 1), "selection could not start on a valid image");
+	Expect(selection.Update(5, 3), "drag did not update its selection rectangle");
+	selection.End();
+	Expect(selection.HasSelection() && selection.Rect().left == 2 && selection.Rect().top == 1 &&
+		selection.Rect().right == 6 && selection.Rect().bottom == 4,
+		"forward selection drag did not produce half-open, inclusive-pixel bounds");
+
+	selection.StartNew(5, 3);
+	selection.Update(2, 1);
+	selection.End();
+	Expect(selection.Rect().left == 2 && selection.Rect().top == 1 &&
+		selection.Rect().right == 6 && selection.Rect().bottom == 4,
+		"reverse-direction selection drag changed normalized bounds");
+
+	selection.StartNew(99, 79);
+	selection.Update(1000, 1000);
+	selection.End();
+	Expect(selection.Rect().left == 99 && selection.Rect().top == 79 &&
+		selection.Rect().right == 100 && selection.Rect().bottom == 80,
+		"selection at the bottom-right image boundary exceeded the source dimensions");
+
+	selection.SetImageSize(200, 120);
+	selection.SetAspectRatio(16, 9);
+	selection.StartNew(10, 10);
+	selection.Update(90, 60);
+	selection.End();
+	const SelectionRect widescreen = selection.Rect();
+	ExpectNear(static_cast<double>(widescreen.Width()) / widescreen.Height(), 16.0 / 9.0,
+		0.03, "fixed-aspect creation did not preserve the requested ratio");
+	Expect(widescreen.left >= 0 && widescreen.top >= 0 && widescreen.right <= 200 &&
+		widescreen.bottom <= 120, "fixed-aspect selection escaped image bounds");
+
+	selection.SetImageSize(400, 200);
+	selection.SetMode(CropSelectionMode::ImageAspect);
+	selection.StartNew(10, 10);
+	selection.Update(70, 45);
+	selection.End();
+	ExpectNear(static_cast<double>(selection.Rect().Width()) / selection.Rect().Height(), 2.0,
+		0.04, "same-as-image mode did not use the current image aspect ratio");
+
+	selection.SetFixedSize(320, 200, true);
+	selection.StartNew(4, 7);
+	selection.Update(20, 20, 2.0);
+	selection.End();
+	Expect(selection.Rect().Width() == 160 && selection.Rect().Height() == 100,
+		"screen-pixel fixed size did not scale back to source-image pixels");
+	selection.SetFixedSize(80, 45, false);
+	selection.StartNew(4, 7);
+	selection.Update(20, 20, 3.0);
+	selection.End();
+	Expect(selection.Rect().Width() == 80 && selection.Rect().Height() == 45,
+		"image-pixel fixed size incorrectly depended on viewport zoom");
+
+	selection.SetImageSize(50, 40);
+	selection.SetMode(CropSelectionMode::Free);
+	selection.StartNew(10, 10);
+	selection.Update(29, 29);
+	selection.End();
+	Expect(selection.Rect().Width() == 20 && selection.Rect().Height() == 20,
+		"selection setup for manipulation failed");
+	Expect(selection.StartManipulation(15, 15, CropSelectionHandle::Move),
+		"selection move could not start");
+	selection.Update(20, 22);
+	selection.End();
+	Expect(selection.Rect().left == 15 && selection.Rect().top == 17 &&
+		selection.Rect().right == 35 && selection.Rect().bottom == 37,
+		"moving an existing selection did not preserve its size and pointer offset");
+	selection.StartManipulation(20, 27, CropSelectionHandle::Move);
+	selection.Update(1000, 1000);
+	selection.End();
+	Expect(selection.Rect().right == 50 && selection.Rect().bottom == 40,
+		"moving a selection past the image edge did not clamp it inside the image");
+
+	selection.SetImageSize(50, 50);
+	selection.SetMode(CropSelectionMode::Free);
+	selection.Clear();
+	selection.StartNew(10, 10);
+	selection.Update(29, 29);
+	selection.End();
+	selection.StartManipulation(10, 20, CropSelectionHandle::Left);
+	selection.Update(5, 20);
+	selection.End();
+	Expect(selection.Rect().left == 5 && selection.Rect().right == 30,
+		"left-edge resize did not preserve the opposite edge");
+	selection.SetAspectRatio(1, 1);
+	selection.StartManipulation(selection.Rect().right - 1, selection.Rect().bottom - 1,
+		CropSelectionHandle::BottomRight);
+	selection.Update(selection.Rect().right + 5, selection.Rect().bottom + 2);
+	selection.End();
+	ExpectNear(static_cast<double>(selection.Rect().Width()) / selection.Rect().Height(), 1.0,
+		0.03, "fixed-aspect corner resize did not retain its ratio");
+
+	selection.SetImageSize(0, 0);
+	Expect(!selection.StartNew(0, 0) && !selection.HasSelection(),
+		"selection accepted an empty source image");
+}
+
+void TestCropSelectionViewMappingAndHitTesting() {
+	using jpegview_linux::CropSelectionHandle;
+	using jpegview_linux::CropSelectionModel;
+	using jpegview_linux::SelectionRect;
+	using jpegview_linux::SelectionScreenRect;
+	const SelectionScreenRect imageDestination{100, 50, 200, 100};
+	const SelectionScreenRect mapped = CropSelectionModel::ToScreen(
+		SelectionRect{20, 10, 100, 60}, imageDestination, 400, 200);
+	Expect(mapped.x == 110 && mapped.y == 55 && mapped.width == 40 && mapped.height == 25,
+		"selection screen rectangle did not follow the image scale and offset");
+	const auto point = CropSelectionModel::ScreenToImage(150, 75, imageDestination, 400, 200);
+	Expect(point.x == 100 && point.y == 50,
+		"screen-to-image mapping did not invert the destination scale");
+	const auto clipped = CropSelectionModel::ScreenToImage(-500, 900,
+		imageDestination, 400, 200);
+	Expect(clipped.x == 0 && clipped.y == 199,
+		"screen-to-image mapping did not clamp points outside the rendered image");
+
+	const SelectionScreenRect selected{10, 20, 100, 60};
+	Expect(CropSelectionModel::HitTest(10, 20, selected, false) == CropSelectionHandle::TopLeft &&
+		CropSelectionModel::HitTest(60, 20, selected, false) == CropSelectionHandle::Top &&
+		CropSelectionModel::HitTest(50, 45, selected, false) == CropSelectionHandle::Move &&
+		CropSelectionModel::HitTest(150, 100, selected, false) == CropSelectionHandle::None,
+		"selection handle and interior hit-testing returned incorrect actions");
+	Expect(CropSelectionModel::HitTest(10, 20, selected, true) == CropSelectionHandle::Move,
+		"fixed-size mode exposed a resize handle instead of move-only behavior");
 }
 
 void TestImageResizeFiltersAndLimits() {
@@ -3807,6 +3960,11 @@ int main() {
 	RunTest("display-image-cache-background-preparation", TestDisplayImageCacheBackgroundPreparation, failures);
 	RunTest("shared-cache-budget-accounting", TestSharedCacheBudgetAccounting, failures);
 	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);
+	RunTest("image-crop-copies-half-open-rectangle", TestImageCropCopiesHalfOpenRectangle, failures);
+	RunTest("crop-selection-model-geometry-and-manipulation",
+		TestCropSelectionModelGeometryAndManipulation, failures);
+	RunTest("crop-selection-view-mapping-and-hit-testing",
+		TestCropSelectionViewMappingAndHitTesting, failures);
 	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
 	RunTest("image-auto-contrast-invariants", TestImageAutoContrastInvariants, failures);
 	RunTest("picture-levels-model-and-processing", TestPictureLevelsModelAndProcessing, failures);
