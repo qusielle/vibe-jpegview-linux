@@ -458,11 +458,38 @@ delays. The `Movie` menu plays animated or multi-page images at a selected fixed
 The original frame loop count is honored when a format provides one. `Alt+R` resumes stopped playback.
 `Esc` stops animation, movie, or slideshow playback before it closes the viewer.
 
-The context menu keeps Windows-only operations visible but disabled where their underlying Windows
-subsystem has no Linux implementation yet: free rotation, perspective correction, Windows binary
-parameter-database backup/restore, settings editors, Open-With menu management, default-viewer
-registration, and user-command configuration. The Linux per-image picture-level database is a native
-text store and is not compatible with the Windows binary database format.
+### Known Windows-parity gaps
+
+The Linux port does not yet match every user-facing Windows feature. The outstanding items identified
+by comparing the Linux frontend with the Windows menus and feature panels are:
+
+- **Free rotation and perspective correction.** The quarter-turn/mirror operations are available,
+  but the interactive free-rotation and perspective/tilt-correction panels are not implemented.
+- **Crop and selection tools.** The Windows selection overlay, crop aspect/fixed-size modes, crop,
+  lossless crop, copy-selection, and zoom-selection commands are absent.
+- **Zoom navigator.** Linux has a neighboring-file thumbnail strip, but not Windows' miniature
+  viewport overlay for panning around an enlarged image.
+- **Image comparison shortcuts.** Mark-image/toggle-back and the second processing-parameter set
+  exchange workflow are not implemented.
+- **Settings administration.** Editing global/user Windows configuration files and updating a user
+  configuration from the global template are not available. The Linux frontend uses its own XDG
+  settings file and does not translate every Windows setting.
+- **Default processing preset.** Saving the current picture-level values as the default for images
+  without a per-image entry is not available yet.
+- **Open-With management and user commands.** Open-With applications are discovered automatically
+  from freedesktop `.desktop` files, but there is no manual menu editor. Windows-style custom user
+  command definitions and their invocation menu are also absent.
+- **Desktop association management.** Registering JPEGView as the default viewer/file-type handler is
+  not implemented; associations remain controlled by the Linux desktop environment.
+- **Parameter database administration.** Per-image parameters work in the Linux-native text database,
+  but backup/restore actions are absent and the file is not compatible with the Windows binary DB.
+- **Print setup and built-in help.** Printing currently delegates to `lp` with desktop defaults rather
+  than offering the Windows print-layout/options dialog. The Windows help dialog is not ported; the
+  Linux `--help` text covers the available controls.
+
+The context menu keeps the applicable unsupported Windows commands visible but disabled. This list
+tracks user-facing parity gaps; it does not include Windows-only implementation details that have no
+Linux equivalent.
 
 `Ctrl+S` opens the native save dialog for a full-size processed image; `Ctrl+Shift+S` saves the
 displayed screen-size result. The additional output formats listed above are selected by their
