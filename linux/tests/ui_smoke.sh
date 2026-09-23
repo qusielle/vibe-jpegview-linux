@@ -180,6 +180,41 @@ click_file_dialog_sort() {
 }
 
 launch_viewer
+help_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+DISPLAY=":$display_number" xdotool windowfocus --sync "$window_id"
+DISPLAY=":$display_number" xdotool key --clearmodifiers F1
+sleep 0.2
+help_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$help_title" in
+	*Help*) ;;
+	*) echo "UI smoke test: F1 did not open the quick-help panel (title: $help_title)" >&2; exit 1 ;;
+esac
+if [ "$visual_assertions" -eq 1 ]; then
+	window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+	window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	help_panel_width=$((window_width - 40))
+	if [ "$help_panel_width" -gt 940 ]; then help_panel_width=940; fi
+	if [ "$help_panel_width" -lt 480 ]; then help_panel_width=480; fi
+	help_panel_height=$((window_height - 40))
+	if [ "$help_panel_height" -gt 360 ]; then help_panel_height=360; fi
+	if [ "$help_panel_height" -lt 300 ]; then help_panel_height=300; fi
+	help_panel_x=$(((window_width - help_panel_width) / 2))
+	help_panel_y=$(((window_height - help_panel_height) / 2))
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/help-open.png"
+	help_border=$(convert "$temporary/help-open.png" \
+		-format "%[hex:p{$help_panel_x,$help_panel_y}]" info:)
+	case "$help_border" in
+		A0BEE1*) ;;
+		*) echo "UI smoke test: F1 title changed but the quick-help panel was not rendered" >&2; exit 1 ;;
+	esac
+fi
+DISPLAY=":$display_number" xdotool key Escape
+sleep 0.2
+help_closed_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+if [ "$help_closed_title" != "$help_previous_title" ]; then
+	echo "UI smoke test: Escape did not close quick help and restore the image title" >&2
+	exit 1
+fi
 if [ "$visual_assertions" -eq 1 ]; then
 	window_icon=$(DISPLAY=":$display_number" xprop -id "$window_id" _NET_WM_ICON 2>/dev/null || true)
 	case "$window_icon" in

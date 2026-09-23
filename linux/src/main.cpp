@@ -37,6 +37,7 @@
 #include "../../src/JPEGView/resource.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cctype>
 #include <cmath>
@@ -1836,6 +1837,25 @@ private:
 		}
 	}
 
+	void OpenHelp() {
+		helpOpen_ = true;
+		aboutOpen_ = false;
+		contextMenuOpen_ = false;
+		SetTitle("JPEGView Linux - Help");
+	}
+
+	void HandleHelpEvents(const SDL_Event& event) {
+		if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+			(event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_F1 ||
+			 event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE)) {
+			helpOpen_ = false;
+			SetTitle();
+		} else if (event.type == SDL_MOUSEBUTTONDOWN) {
+			helpOpen_ = false;
+			SetTitle();
+		}
+	}
+
 	void RestoreClipboardImage() {
 		if (!clipboardMode_) return;
 		const fs::path temporaryFile = clipboardTempFile_;
@@ -2059,7 +2079,7 @@ private:
 
 	void TickHeldNavigation() {
 		if (heldNavigation_.Scancode() < 0) return;
-		if (contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ || aboutOpen_ ||
+		if (contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ || aboutOpen_ || helpOpen_ ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() ||
 			(SDL_GetModState() & 0x03C3u) != 0) {
 			heldNavigation_.Reset();
@@ -2958,6 +2978,9 @@ private:
 			break;
 		case IDM_ABOUT:
 			OpenAbout();
+			break;
+		case IDM_HELP:
+			OpenHelp();
 			break;
 		case IDM_MOVIE_START_FPS:
 			StartMovie(25.0);
@@ -4854,6 +4877,37 @@ private:
 		DrawText("PRESS ESC TO CLOSE", panel.x + 18, panel.y + 156, kUiTextScale, 180, 180, 180);
 	}
 
+	void RenderHelp() {
+		if (!helpOpen_) return;
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(940, std::max(480, windowWidth - 40));
+		const int height = std::min(360, std::max(300, windowHeight - 40));
+		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 160, 190, 225);
+		DrawText("QUICK HELP — JPEGVIEW LINUX", panel.x + 18, panel.y + 14,
+			kUiTextScale, 255, 255, 255);
+		static const std::array<const char*, 9> lines = {
+			"Navigate: Left/Right or wheel; Home/End first/last; Alt+Left/Right sibling folders",
+			"Zoom and pan: Ctrl+wheel or Ctrl+Up/Down; drag to pan; Shift+Arrow pans at actual size",
+			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom",
+			"Panels: F2 picture info; Shift+N filename; Ctrl+N navigation panel; Ctrl+T thumbnails",
+			"Files: Ctrl+O open; Ctrl+S save processed; Ctrl+Shift+S save displayed size",
+			"Clipboard: Ctrl+C copy image; Ctrl+Shift+C copy path; Ctrl+V paste PNG",
+			"Adjustments: Up/Down rotate; F5 auto correction; F6 local density; Ctrl+Shift+R resize",
+			"Window: F11 fullscreen; Shift+F11 title bar; Shift+F12 always on top",
+			"Dialogs: type to filter; arrows/pages select; wheel scrolls; drag corner or preview divider to resize"};
+		for (std::size_t index = 0; index < lines.size(); ++index) {
+			DrawText(ClipText(lines[index], width - 36), panel.x + 18,
+				panel.y + 48 + static_cast<int>(index) * 27, kUiTextScale, 220, 225, 235);
+		}
+		DrawText("Right-click or Menu key: context menu     F1 / Esc / click: close help",
+			panel.x + 18, panel.y + height - 32, kUiTextScale, 180, 190, 205);
+	}
+
 	void RenderImageTransition(const SDL_Rect& destination, const SDL_Rect& imageArea, SDL_Texture* currentTexture) {
 		if (transitionTexture_ == nullptr || transitionStartTick_ == 0) {
 			SDL_RenderCopy(renderer_, currentTexture, nullptr, &destination);
@@ -4955,6 +5009,11 @@ private:
 			if (confirmationOpen_) {
 				if (event.type == SDL_QUIT) running = false;
 				else HandleConfirmationEvents(event);
+				continue;
+			}
+			if (helpOpen_) {
+				if (event.type == SDL_QUIT) running = false;
+				else HandleHelpEvents(event);
 				continue;
 			}
 			if (aboutOpen_) {
@@ -5208,6 +5267,7 @@ private:
 		RenderResizeDialog();
 		RenderConfirmation();
 		RenderAbout();
+		RenderHelp();
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_RenderPresent(renderer_);
 	}
@@ -5309,6 +5369,7 @@ private:
 	int confirmationCommand_ = 0;
 	std::string confirmationMessage_;
 	bool aboutOpen_ = false;
+	bool helpOpen_ = false;
 	jpegview_linux::ExifInfo metadata_;
 	std::string jpegComment_;
 	bool contextMenuOpen_ = false;

@@ -102,7 +102,7 @@ they support.
    and expands their file/URI placeholders. **Set as default viewer...** creates a user-local desktop
    entry and makes JPEGView the default for common image MIME types without root access; the desktop
    environment can change those defaults later. For an AppImage, repeat registration after moving the
-   file so the saved launcher path stays current.
+   file so the saved launcher path stays current. F1 opens a concise Linux control-reference panel.
 
 10. **Batch rename/copy and image resizing.** The batch dialog supports image selection, previews,
     saved Windows-compatible naming patterns, safe same-folder renames, and copying into newly
@@ -382,14 +382,14 @@ ordering button shows `N` for file-name order and `D` for modification-date orde
 switches between those two modes. By default the panel is hidden until the pointer enters the
 lower edge of the window; the context menu can disable this automatic reveal mode. Ctrl+N
 disables the panel entirely, and the panel is temporarily suppressed while a modal menu or file
-browser is open. Right-click or the keyboard Context Menu key opens the compact core JPEGView
-context menu; Show Advanced Options temporarily restores Open image with, Print, batch rename/copy,
-date and wallpaper commands, extended navigation and sorting, image transforms and correction,
-extra zoom and window controls, slideshow controls, and settings administration (including
-the user-local default-viewer registration and disabled Windows-only commands) without saving that
-choice. The compact menu keeps common navigation, fit/actual-size, fullscreen, and fit-window-to-image
-commands available. The menu also
-supports keyboard selection with Up/Down and Return; if it spans multiple
+browser is open. F1 opens the Linux quick-help panel. Right-click or the keyboard Context Menu key
+opens the compact core JPEGView context menu; Show Advanced Options temporarily restores Open image
+with, Print, batch rename/copy, date and wallpaper commands, extended navigation and sorting, image
+transforms and correction, extra zoom and window controls, slideshow controls, and settings
+administration, including the user-local default-viewer registration and disabled Windows-only
+commands, without saving that choice. The compact menu keeps common navigation, fit/actual-size,
+fullscreen, and fit-window-to-image commands available. The menu also supports keyboard selection
+with Up/Down and Return; if it spans multiple
 columns to fit the window height, Left/Right moves between columns. Hovering over a lower
 navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
 next or previous image and is saved between application runs, as is the last maximized or
@@ -477,6 +477,12 @@ The original frame loop count is honored when a format provides one. `Alt+R` res
 The Linux port does not yet match every user-facing Windows feature. The outstanding items identified
 by comparing the Linux frontend with the Windows menus and feature panels are:
 
+The intentionally disabled context-menu commands are **Rotate...**, **Perspective correction...**,
+**Edit global settings...**, **Edit user settings...**, **Update user settings...**, and **Manage Open
+image with menu...**. These map to the gaps below; commands disabled only because their current
+preconditions are unmet (for example, an image-only action when no image is loaded) are not missing
+features.
+
 - **Free rotation and perspective correction.** The quarter-turn/mirror operations are available,
   but the interactive free-rotation and perspective/tilt-correction panels are not implemented.
 - **Crop and selection tools.** The Windows selection overlay, crop aspect/fixed-size modes, crop,
@@ -488,8 +494,6 @@ by comparing the Linux frontend with the Windows menus and feature panels are:
 - **Settings administration.** Editing global/user Windows configuration files and updating a user
   configuration from the global template are not available. The Linux frontend uses its own XDG
   settings file and does not translate every Windows setting.
-- **Default processing preset.** Saving the current picture-level values as the default for images
-  without a per-image entry is available through `Set current parameters as default...`.
 - **Open-With management and user commands.** Open-With applications are discovered automatically
   from freedesktop `.desktop` files, but there is no manual menu editor. Windows-style custom user
   command definitions and their invocation menu are also absent.
@@ -500,9 +504,10 @@ by comparing the Linux frontend with the Windows menus and feature panels are:
 - **Parameter database administration.** Per-image parameters work in the Linux-native text database,
   and `Backup parameter DB...` / `Restore parameter DB...` export and restore Linux-native copies.
   Neither the live file nor its backups are compatible with the Windows binary DB.
-- **Print setup and built-in help.** Printing currently delegates to `lp` with desktop defaults rather
-  than offering the Windows print-layout/options dialog. The Windows help dialog is not ported; the
-  Linux `--help` text covers the available controls.
+- **Print setup and full Windows help content.** Printing currently delegates to `lp` with desktop
+  defaults rather than offering the Windows print-layout/options dialog. F1 opens a concise Linux
+  quick-help panel, but the full Windows help content and localization are not ported; `--help` also
+  lists the available controls.
 
 The context menu keeps the applicable unsupported Windows commands visible but disabled. This list
 tracks user-facing parity gaps; it does not include Windows-only implementation details that have no

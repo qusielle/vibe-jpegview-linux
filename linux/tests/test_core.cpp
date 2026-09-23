@@ -335,6 +335,7 @@ void TestKeyboardCommandMappings() {
 		int command;
 	};
 	const std::vector<KeyCase> cases = {
+		{SDLK_F1, 0, IDM_HELP},
 		{SDLK_q, 0, IDM_EXIT},
 		{SDLK_o, 0x00C0u, IDM_OPEN},
 		{SDLK_F2, 0x00C0u, IDM_SHOW_FILENAME},
@@ -2641,6 +2642,9 @@ void TestContextMenuCatalogAndState() {
 	Expect(findCommand(compact, IDM_OPEN) != nullptr && findCommand(compact, IDM_NEXT) != nullptr &&
 		findCommand(compact, IDM_ZOOM_100) != nullptr && findCommand(compact, IDM_EXIT) != nullptr,
 		"compact context menu lost a primary command");
+	Expect(findCommand(compact, IDM_HELP) != nullptr && findCommand(compact, IDM_HELP)->enabled &&
+		findCommand(compact, IDM_HELP)->shortcut == "F1",
+		"compact context menu omitted the built-in help command");
 	Expect(findCommand(compact, jpegview_linux::kCommandEditPictureLevels) != nullptr,
 		"compact context menu omitted the picture-level editor");
 	Expect(findCommand(compact, jpegview_linux::kCommandPreviousSiblingFolder) == nullptr &&
