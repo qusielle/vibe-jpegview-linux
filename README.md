@@ -1,208 +1,77 @@
-[![Documentation](https://img.shields.io/badge/Docs-Outdated-yellowgreen)](https://htmlpreview.github.io/?https://github.com/qusielle/vibe-jpegview-linux/blob/master/src/JPEGView/Config/readme.html) [![Localization Progress](https://img.shields.io/badge/Localized-91%25-blueviolet)](#Localization) [![Build Linux](https://github.com/qusielle/vibe-jpegview-linux/actions/workflows/linux-build.yml/badge.svg)](https://github.com/qusielle/vibe-jpegview-linux/actions/workflows/linux-build.yml) [![OS Support](https://img.shields.io/badge/Windows-XP%20%7C%207%20%7C%208%20%7C%2010%20%7C%2011-blue)](#) [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue)](https://github.com/qusielle/vibe-jpegview-linux/blob/master/LICENSE.txt)
+[![Linux CI](https://github.com/qusielle/vibe-jpegview-linux/actions/workflows/linux-build.yml/badge.svg)](https://github.com/qusielle/vibe-jpegview-linux/actions/workflows/linux-build.yml)
+[![Ubuntu builds](https://img.shields.io/badge/Ubuntu%20builds-20.04%20%7C%2022.04%20%7C%2024.04-E95420?logo=ubuntu&logoColor=white)](https://github.com/qusielle/vibe-jpegview-linux/releases)
+[![Latest release](https://img.shields.io/github/v/release/qusielle/vibe-jpegview-linux?include_prereleases&label=latest%20release)](https://github.com/qusielle/vibe-jpegview-linux/releases)
+[![Downloads](https://img.shields.io/github/downloads/qusielle/vibe-jpegview-linux/total?label=downloads)](https://github.com/qusielle/vibe-jpegview-linux/releases)
+[![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE.txt)
 
-[![Latest GitHub Release](https://img.shields.io/github/v/release/qusielle/vibe-jpegview-linux?label=GitHub&style=social)](https://github.com/qusielle/vibe-jpegview-linux/releases)[![Downloads](https://badgen.net/github/assets-dl/qusielle/vibe-jpegview-linux?cache=3600&color=grey&label=)](#) [![WinGet](https://repology.org/badge/version-for-repo/winget/jpegview.svg?allow_ignored=1&header=WinGet)](https://winstall.app/apps/sylikc.JPEGView) [![PortableApps](https://img.shields.io/badge/PortableApps-Current-green)](https://portableapps.com/apps/graphics_pictures/jpegview_portable) [![Scoop](https://repology.org/badge/version-for-repo/scoop/jpegview-fork.svg?header=Scoop)](https://scoop.sh/#/apps?q=%22jpegview-fork%22) [![Chocolatey](https://img.shields.io/chocolatey/v/jpegview)](https://community.chocolatey.org/packages/jpegview) [![Npackd](https://repology.org/badge/version-for-repo/npackd_stable/jpegview.svg?allow_ignored=1&header=Npackd)](https://www.npackd.org/p/jpegview)
+# JPEGView for Linux
 
-# JPEGView for Linux - Image Viewer and Editor
+A fast native Linux image viewer and editor, and a Linux-focused fork of JPEGView by David Kleiner.
+The Linux frontend is based on the 1.3.46 codebase.
 
-## Linux
+This repository now focuses on maintaining the Linux delivery in [`linux/`](linux/). The original
+Windows implementation remains under [`src/`](src/) as the upstream reference. When a Windows fix
+or feature can be sensibly supported on Linux, the goal is to port or backport it; Linux-specific
+work stays native to the Linux frontend. The project aims for useful cross-platform behavior, not
+automatic one-to-one Windows feature parity.
 
-The `linux/` directory contains a native SDL2 frontend and Ubuntu 20.04, 22.04, and 24.04 build
-environments.
-It is a focused viewer port of v1.3.46 with folder navigation, common image formats, zoom/pan,
-and fullscreen support. Build it with:
+## Highlights
+
+- Browse large images and folders with high-quality scaling, zoom and pan, responsive neighbor
+  prefetch, and a configurable image cache.
+- Navigate folders with flexible ordering, recursive and sibling-folder modes, an in-app browser
+  with live filtering and previews, and a neighboring-image thumbnail strip.
+- Adjust picture levels, resize and transform images, batch rename or copy, and save processed
+  results in a wide range of formats.
+- View animated images and use slideshow/movie playback.
+- Integrate with the Linux desktop through AppImage and `.deb` packages, system applications,
+  clipboard tools, and user-local default-viewer registration.
+
+## Downloads
+
+Get the current Linux release from [GitHub Releases](https://github.com/qusielle/vibe-jpegview-linux/releases).
+Releases include x86_64 AppImages and standalone executables built for Ubuntu 20.04, 22.04, and
+24.04, with SHA-256 checksums. Ubuntu 24.04 releases also provide a `.deb` package. The Ubuntu 20.04
+AppImage is the broadest-compatibility choice; builds made on newer Ubuntu releases may require a
+newer glibc.
+
+To install the Ubuntu 24.04 package, download its `.deb` and run:
+
+```sh
+sudo apt install ./jpegview-linux_<version>_ubuntu24_amd64.deb
+```
+
+## Build from source
+
+Install the Linux build dependencies listed in [`linux/README.md`](linux/README.md), then build and
+launch the viewer:
 
 ```sh
 make -C linux
 linux/build/jpegview-linux /path/to/image-or-folder
 ```
 
-See [`linux/README.md`](linux/README.md) for the prioritized Linux change inventory, controls,
-supported formats, tests, and AppImage packaging instructions.
+The project also provides Ubuntu 20.04, 22.04, and 24.04 Docker build environments. The Linux
+README has full build and packaging instructions, supported formats, keyboard controls, test targets,
+and known Windows-parity gaps.
 
-This is the official re-release of JPEGView.
+## Project direction and contributions
 
-## Description
+Linux is the primary maintenance target for this repository. Windows remains valuable as the source
+of existing behavior and future improvements, but platform-specific UI and system integrations are
+implemented natively. Linux-only features and outstanding parity gaps are tracked in the
+[Linux feature inventory](linux/README.md#linux-branch-changes-in-order-of-importance).
 
-JPEGView is a lean, fast and highly configurable image viewer/editor with a minimal GUI.
+Bug reports and contributions are especially useful when they include the Ubuntu version, package
+type, image format, and concise reproduction steps. Run the Linux checks with:
 
-### Formats Supported
-
-JPEGView has built-in support the following formats:
-
-* Popular: JPEG, GIF
-* Lossless: BMP, PNG, TIFF, PSD
-* Web: WEBP, JXL, HEIF/HEIC, AVIF
-* Legacy: TGA, WDP, HDP, JXR
-* Camera RAW formats:
-  * Adobe (DNG), Canon (CRW, CR2, CR3), Nikon (NEF, NRW), Sony (ARW, SR2)
-  * Olympus (ORF), Panasonic (RW2), Fujifilm (RAF)
-  * Sigma (X3F), Pentax (PEF), Minolta (MRW), Kodak (KDC, DCR)
-  * A full list is available here: [LibRaw supported cameras](https://www.libraw.org/supported-cameras)
-
-Many additional formats are supported by Windows Imaging Component (WIC)
-
-### Basic Image Editor
-
-Basic on-the-fly image processing is provided - allowing adjusting typical parameters:
-
-* sharpness
-* color balance
-* rotation
-* perspective
-* contrast
-* local under-exposure/over-exposure
-
-### Other Features
-
-* Small and fast, uses AVX2/SSE2 and up to 4 CPU cores
-* High quality resampling filter, preserving sharpness of images
-* Basic image processing tools can be applied realtime during viewing
-* Movie/Slideshow mode - to play folder of JPEGs as movie
-
-# Installation
-
-## Official Releases
-
-Releases are published on [qusielle's GitHub Releases](https://github.com/qusielle/vibe-jpegview-linux/releases).
-Historical Windows packages included portable Zip/7z archives and MSI installers. GitHub also
-provides source archives for releases.
-
-When a release is published, the Linux workflow adds x86_64 AppImage and native executable
-downloads built for Ubuntu 20.04, 22.04, and 24.04, along with a SHA-256 checksum file for each
-Ubuntu build. The Ubuntu 20.04 artifacts are the broadest-compatibility choice; artifacts built on
-newer Ubuntu releases may require a newer glibc.
-
-Successful Ubuntu builds from branch pushes, pull requests, and manual workflow runs also attach
-AppImage, native executable, and SHA-256 checksum workflow artifacts to the Actions run. The Ubuntu
-24 artifact also includes a `.deb` package. These are available from the run summary for 14 days;
-use the GitHub Releases downloads for permanent release assets.
-
-## Portable
-
-JPEGView _does not require installation_ to run.  Just **unzip, and run** either the 64-bit version, or the 32-bit version depending on which platform you're on.  It can save the settings to the extracted folder and run entirely portable.
-
-## MSI Installer
-
-For those who prefer to have JPEGView installed for All Users, a 32-bit/64-bit installer is available to download starting with v1.0.40.
-
-(Unfortunately, I don't own a code signing certificate yet, so the MSI release is not signed.  Please verify checksums!)
-
-### WinGet
-
-If you're on Windows 11, or Windows 10 (build 1709 or later), you can also download it directly from the official [Microsoft WinGet tool](https://docs.microsoft.com/en-us/windows/package-manager/winget/) repository.  This downloads the latest MSI installer directly from GitHub for installation.
-
-Example Usage:
-
-C:\> `winget search jpegview`
-```
-Name     Id              Version  Source
------------------------------------------
-JPEGView sylikc.JPEGView 1.1.43  winget
+```sh
+make -C linux check
 ```
 
-C:\> `winget install jpegview`
-```
-Found JPEGView [sylikc.JPEGView] Version 1.1.43
-This application is licensed to you by its owner.
-Microsoft is not responsible for, nor does it grant any licenses to, third-party packages.
-Downloading https://github.com/sylikc/jpegview/releases/download/v1.1.43/JPEGView64_en-us_1.1.43.msi
-  ██████████████████████████████  4.23 MB / 4.23 MB
-Successfully verified installer hash
-Starting package install...
-Successfully installed
-```
+## Upstream and license
 
-## PortableApps
-
-Another option is to use the official [JPEGView on PortableApps](https://portableapps.com/apps/graphics_pictures/jpegview_portable) package.  The PortableApps launcher preserves user settings in a separate directory from the extracted application directory.  This release is signed.
-
-## Scoop
-
-[Scoop](https://scoop.sh/) is a Windows command-line installer and manager for portable applications.
-
-To install with Scoop, run the following commands:
-
-```shell
-scoop bucket add extras
-scoop install extras/jpegview-fork
-```
-
-After installation, the configuration file is located at `%UserProfile%\scoop\persist\JPEGView-fork\JPEGView.ini`.
-
-## System Requirements
-
-* 64-bit version: Windows 7/8/10/11 64-bit or later
-* 32-bit version: Windows 7 or later
-  * A special _32-bit Windows XP SP2_ build is available, which supports most formats (except for formats added after v1.0.37.1, ex. Animated PNG, JXL, HEIC).  Other features and options are the same as the normal builds.
-
-## What's New
-
-* See what has changed in the [latest releases](https://github.com/qusielle/vibe-jpegview-linux/releases)
-* Or Check the [CHANGELOG.txt](https://github.com/qusielle/vibe-jpegview-linux/blob/master/CHANGELOG.txt) to review new features in detail.
-
-# Localization
-
-By default, the language is auto-detected to match your Windows Locale.  All the text in the menus and user interface should show in your language.  To override the auto-detection, manually set `Language` option in `JPEGView.ini`
-
-JPEGView is currently translated/localized to 28 languages:
-
-| INI Option | Language |
-| ---------- | -------- |
-| be | Belarusian |
-| bg | Bulgarian |
-| cs | Czech |
-| de | German |
-| el | Greek, Modern |
-| es-ar | Spanish (Argentina) |
-| es | Spanish |
-| eu | Basque |
-| fi | Finnish |
-| fr | French (Français) |
-| hu | Hungarian |
-| it | Italian |
-| ja | Japanese (日本語) |
-| ko | Korean (한국어) |
-| pl | Polish |
-| pt-br | Portuguese (Brazilian) |
-| pt | Portuguese |
-| ro | Romanian |
-| ru | Russian (Русский) |
-| sk | Slovak |
-| sl | Slovenian (Slovenščina) |
-| sr | Serbian (српски) |
-| sv | Swedish |
-| ta | Tamil |
-| tr | Turkish (Türkçe) |
-| uk | Ukrainian (Українська) |
-| zh-tw | Chinese, Traditional (繁體中文) |
-| zh | Chinese, Simplified (简体中文) |
-
-See the [Localization wiki page](https://github.com/qusielle/vibe-jpegview-linux/wiki/Localization#localization-status) for translation status for each language.
-
-# Help / Documentation
-
-The JPEGView documentation is a little out of the date at the moment, but should still give a good summary of the features.
-
-This [readme.html](https://htmlpreview.github.io/?https://github.com/qusielle/vibe-jpegview-linux/blob/master/src/JPEGView/Config/readme.html) is part of the JPEGView package.
-
-# Brief History
-
-This GitHub repo continues the legacy (is a "fork") of the excellent project [JPEGView by David Kleiner](https://sourceforge.net/projects/jpegview/).  Unfortunately, starting in 2020, the SourceForge project has essentially been abandoned, with the last update being [2018-02-24 (1.0.37)](https://sourceforge.net/projects/jpegview/files/jpegview/).  It's an excellent lightweight image viewer that I use almost daily!
-
-The starting point for this repo was a direct clone from SourceForge SVN to GitHub Git.  By continuing this way, it retains all previous commits and all original author comments.
-
-I'm hoping with this project, some devs might help me keep the project alive!  It's been awhile, and could use some new features or updates.  Looking forward to the community making suggestions, and devs will help with some do pull requests as some of the image code is quite a learning curve for me to pick it up. -sylikc
-
-## Special Thanks
-
-Special thanks to [qbnu](https://github.com/qbnu) for adding additional codec support!
-* Animated WebP
-* Animated PNG
-* JPEG XL with animation support
-* HEIF/HEIC/AVIF support
-* QOI support
-* ICC Profile support for WebP, JPEG XL, HEIF/HEIC, AVIF
-* LibRaw support (all updated RAW formats, such as CR3)
-* Photoshop PSD support
-
-Thanks to all the _translators_ which keep JPEGView strings up-to-date in different languages!  See [CHANGELOG.txt](https://github.com/qusielle/vibe-jpegview-linux/blob/master/CHANGELOG.txt) to find credits for translators at each release!
+The original project began on [SourceForge](https://sourceforge.net/projects/jpegview/) and includes
+contributions from the community, including additional codec support. This fork retains the original
+source history and credits. It is distributed under the
+[GNU General Public License v2](LICENSE.txt).
