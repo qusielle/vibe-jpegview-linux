@@ -106,6 +106,7 @@ constexpr int kResizeHeight = 2;
 constexpr int kResizeFilter = 3;
 constexpr int kResizeApply = 0;
 constexpr int kResizeCancel = 1;
+constexpr int kConfirmRestoreParameterDb = -8;
 
 jpegview_linux::SystemFont& UiFont() {
 	static jpegview_linux::SystemFont font;
@@ -1385,6 +1386,7 @@ private:
 		fileDialogOpen_ = false;
 		fileDialogSave_ = false;
 		fileDialogParameterBackup_ = false;
+		fileDialogParameterRestore_ = false;
 		fileDialogFilename_.clear();
 		fileDialogModel_.Clear();
 		fileDialogDirectorySummaries_.clear();
@@ -1458,6 +1460,44 @@ private:
 		const std::string savedName = output.filename().string();
 		CloseFileDialog();
 		SetTitle("Saved processed image: " + savedName);
+	}
+
+	void BeginParameterDbRestore(const fs::path& source) {
+		const fs::path liveDatabase = AbsoluteNormalized(
+			jpegview_linux::ImageProcessingStorePath());
+		if (source.empty() || AbsoluteNormalized(source) == liveDatabase) {
+			fileDialogMessage_ = "Choose a backup file, not the active parameter database";
+			return;
+		}
+		jpegview_linux::ImageProcessingStore restored;
+		if (!jpegview_linux::LoadImageProcessingStore(source, restored)) {
+			fileDialogMessage_ = "Restore failed: this is not a valid picture-level database";
+			return;
+		}
+		pendingParameterDbRestore_ = std::move(restored);
+		pendingParameterDbRestoreSource_ = source.filename().string();
+		const std::size_t entryCount = pendingParameterDbRestore_.size();
+		CloseFileDialog();
+		RequestConfirmation(kConfirmRestoreParameterDb,
+			"Replace the active database with " + std::to_string(entryCount) +
+			" saved picture-level entr" + (entryCount == 1 ? "y?" : "ies?"));
+	}
+
+	void RestorePendingParameterDb() {
+		if (pendingParameterDbRestoreSource_.empty()) return;
+		if (!jpegview_linux::SaveImageProcessingStore(
+			jpegview_linux::ImageProcessingStorePath(), pendingParameterDbRestore_)) {
+			pendingParameterDbRestore_.clear();
+			pendingParameterDbRestoreSource_.clear();
+			SetTitle("Could not restore the picture-level database");
+			return;
+		}
+		imageProcessingStore_ = std::move(pendingParameterDbRestore_);
+		pendingParameterDbRestore_.clear();
+		pendingParameterDbRestoreSource_.clear();
+		if (!fileList_.Empty() && !keepPictureLevels_) SelectPictureLevelsForCurrentFile();
+		RefreshPictureLevels();
+		SetTitle("Restored picture-level database");
 	}
 
 	void CopyCurrentImage(bool fullSize) {
@@ -1721,11 +1761,17 @@ private:
 	void HandleConfirmationEvents(const SDL_Event& event) {
 		if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
 			if (event.key.keysym.sym == SDLK_ESCAPE) {
+				if (confirmationCommand_ == kConfirmRestoreParameterDb) {
+					pendingParameterDbRestore_.clear();
+					pendingParameterDbRestoreSource_.clear();
+				}
 				confirmationOpen_ = false;
 			} else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE) {
 				const int command = confirmationCommand_;
 				confirmationOpen_ = false;
-				if (command == IDM_MOVE_TO_RECYCLE_BIN || command == IDM_MOVE_TO_RECYCLE_BIN_CONFIRM ||
+				if (command == kConfirmRestoreParameterDb) {
+					RestorePendingParameterDb();
+				} else if (command == IDM_MOVE_TO_RECYCLE_BIN || command == IDM_MOVE_TO_RECYCLE_BIN_CONFIRM ||
 					command == IDM_MOVE_TO_RECYCLE_BIN_CONFIRM_PERMANENT_DELETE) {
 					MoveCurrentToTrash();
 				}
@@ -2620,6 +2666,9 @@ private:
 			break;
 		case IDM_BACKUP_PARAMDB:
 			OpenParameterDbBackupDialog();
+			break;
+		case IDM_RESTORE_PARAMDB:
+			OpenParameterDbRestoreDialog();
 			break;
 		case IDM_SAVE_PARAMETERS:
 			SaveCurrentPictureLevelsAsDefault();
@@ -3721,7 +3770,11 @@ private:
 	}
 
 	bool FileDialogHasPreviewColumn() const {
-		return !fileDialogSave_ && FileDialogRect().w >= 560;
+		return !fileDialogSave_ && !fileDialogParameterRestore_ && FileDialogRect().w >= 560;
+	}
+
+	bool FileDialogCanSort() const {
+		return !fileDialogSave_ && !fileDialogParameterRestore_;
 	}
 
 	SDL_Rect FileDialogListRect() const {
@@ -3962,7 +4015,7 @@ private:
 		++fileDialogSummaryGeneration_;
 		fileDialogDirectorySummaries_.clear();
 		std::vector<fs::path> directories;
-		if (!fileDialogSave_) {
+		if (!fileDialogSave_ && !fileDialogParameterRestore_) {
 			for (const FileDialogEntry& entry : fileDialogModel_.AllEntries()) {
 				if (entry.directory && !entry.parent) directories.push_back(entry.path);
 			}
@@ -3972,7 +4025,7 @@ private:
 
 	void TickFileDialogDirectorySummaries() {
 		for (jpegview_linux::DirectorySummaryResult& result : fileDialogSummaryLoader_.TakeReady()) {
-			if (!fileDialogOpen_ || fileDialogSave_ ||
+			if (!fileDialogOpen_ || fileDialogSave_ || fileDialogParameterRestore_ ||
 				result.generation != fileDialogSummaryGeneration_) continue;
 			fileDialogDirectorySummaries_[result.directory.string()] = result.summary;
 		}
@@ -3992,7 +4045,8 @@ private:
 			std::error_code statusError;
 			const bool directory = entry.is_directory(statusError);
 			if (statusError || (!directory && (!entry.is_regular_file(statusError) ||
-				(!fileDialogParameterBackup_ && !jpegview_linux::IsSupportedImagePath(entry.path()))))) {
+				(!(fileDialogParameterBackup_ || fileDialogParameterRestore_) &&
+					!jpegview_linux::IsSupportedImagePath(entry.path()))))) {
 				continue;
 			}
 			std::error_code modificationError;
@@ -4016,6 +4070,7 @@ private:
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = false;
 		fileDialogParameterBackup_ = false;
+		fileDialogParameterRestore_ = false;
 		fileDialogSaveFullSize_ = true;
 		PositionFileDialogGeometry();
 		fileDialogFilename_.clear();
@@ -4039,6 +4094,7 @@ private:
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = true;
 		fileDialogParameterBackup_ = false;
+		fileDialogParameterRestore_ = false;
 		fileDialogSaveFullSize_ = fullSize;
 		PositionFileDialogGeometry();
 		fileDialogFilename_ = fileList_.Current().stem().string() + "_proc.jpg";
@@ -4063,10 +4119,36 @@ private:
 		fileDialogDirectory_ = database.parent_path();
 		fileDialogSave_ = true;
 		fileDialogParameterBackup_ = true;
+		fileDialogParameterRestore_ = false;
 		fileDialogSaveFullSize_ = true;
 		PositionFileDialogGeometry();
 		fileDialogFilename_ = database.stem().string() + "-backup" + database.extension().string();
 		fileDialogModel_.Begin(true);
+		fileDialogMessage_.clear();
+		fileDialogOverwriteConfirmed_ = false;
+		fileDialogOpen_ = true;
+		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
+		contextMenuOpen_ = false;
+		RefreshFileDialog();
+		fileDialogModel_.ClearSelection();
+		SDL_StartTextInput();
+	}
+
+	void OpenParameterDbRestoreDialog() {
+		const fs::path database = jpegview_linux::ImageProcessingStorePath();
+		if (database.empty()) {
+			SetTitle("Cannot determine the picture-level database path");
+			return;
+		}
+		fileDialogDirectory_ = database.parent_path();
+		fileDialogSave_ = false;
+		fileDialogParameterBackup_ = false;
+		fileDialogParameterRestore_ = true;
+		fileDialogSaveFullSize_ = true;
+		PositionFileDialogGeometry();
+		fileDialogFilename_.clear();
+		fileDialogModel_.Begin(false);
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
 		fileDialogOpen_ = true;
@@ -4117,7 +4199,7 @@ private:
 		if (selected == nullptr) return;
 		const FileDialogEntry entry = *selected;
 		if (entry.directory) {
-			if (openDirectoryImmediately && !fileDialogSave_) {
+			if (openDirectoryImmediately && !fileDialogSave_ && !fileDialogParameterRestore_) {
 				OpenDroppedFiles({entry.path.string()});
 			} else {
 				NavigateFileDialogDirectory(entry.path, entry.parent);
@@ -4128,6 +4210,8 @@ private:
 			fileDialogFilename_ = entry.path.filename().string();
 			fileDialogOverwriteConfirmed_ = false;
 			SaveImageFromDialog();
+		} else if (fileDialogParameterRestore_) {
+			BeginParameterDbRestore(entry.path);
 		} else {
 			OpenDroppedFiles({entry.path.string()});
 		}
@@ -4223,7 +4307,7 @@ private:
 				BeginFileDialogPreviewResize(lastMouseX_, lastMouseY_)) break;
 			const int item = FileDialogItemAt(event.button.x, event.button.y);
 			const bool inputClicked = PointInRect(event.button.x, event.button.y, FileDialogInputRect());
-			const bool sortClicked = !fileDialogSave_ &&
+			const bool sortClicked = FileDialogCanSort() &&
 				PointInRect(event.button.x, event.button.y, FileDialogSortRect());
 			const bool previewClicked = FileDialogHasPreviewColumn() &&
 				PointInRect(event.button.x, event.button.y, FileDialogPreviewRect());
@@ -4265,12 +4349,15 @@ private:
 		SDL_RenderFillRect(renderer_, &dialog);
 		DrawRect(dialog, 190, 190, 190);
 		DrawText(fileDialogParameterBackup_ ? "Back up picture-level database" :
-			(fileDialogSave_ ? "Save processed image" : "Open image"),
+			(fileDialogParameterRestore_ ? "Restore picture-level database" :
+				(fileDialogSave_ ? "Save processed image" : "Open image")),
 			dialog.x + 18, dialog.y + 14, kUiTextScale);
 		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
-		DrawText(fileDialogSave_ ? "File name" : "Filter", dialog.x + 18, dialog.y + 68,
+		DrawText(fileDialogSave_ ? "File name" :
+			(fileDialogParameterRestore_ ? "Backup filter" : "Filter"),
+			dialog.x + 18, dialog.y + 68,
 			kUiTextScale, 190, 190, 190);
-		if (!fileDialogSave_) {
+		if (FileDialogCanSort()) {
 			const SDL_Rect sortRect = FileDialogSortRect();
 			SDL_SetRenderDrawColor(renderer_, 36, 36, 36, 230);
 			SDL_RenderFillRect(renderer_, &sortRect);
@@ -4304,7 +4391,7 @@ private:
 				SDL_RenderFillRect(renderer_, &selection);
 			}
 			std::string summaryText;
-			if (!fileDialogSave_ && entry.directory && !entry.parent) {
+			if (FileDialogCanSort() && entry.directory && !entry.parent) {
 				const auto summary = fileDialogDirectorySummaries_.find(entry.path.string());
 				summaryText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
 					jpegview_linux::FormatDirectorySummary(summary->second);
@@ -4335,7 +4422,9 @@ private:
 			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
 		}
 		DrawText(fileDialogSave_ ? "Enter: Save   Backspace: Edit/parent   Esc: Cancel" :
-			"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel",
+			(fileDialogParameterRestore_ ?
+				"Type: Filter   Enter: Restore backup   Backspace: Parent   Esc: Cancel" :
+				"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel"),
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 		const SDL_Rect resizeHandle = FileDialogResizeHandleRect();
 		for (int offset = 5; offset <= 13; offset += 4) {
@@ -4697,8 +4786,10 @@ private:
 		DrawRect(panel, 220, 170, 110);
 		DrawText("CONFIRM ACTION", panel.x + 18, panel.y + 14, kUiTextScale, 255, 220, 150);
 		DrawText(confirmationMessage_, panel.x + 18, panel.y + 42, kUiTextScale);
-		const std::string filename = fileList_.Empty() ? std::string() :
-			ClipText(InfoText(fileList_.Current().filename().string()), width - 36);
+		const std::string filename = confirmationCommand_ == kConfirmRestoreParameterDb ?
+			ClipText(InfoText(pendingParameterDbRestoreSource_), width - 36) :
+			(fileList_.Empty() ? std::string() :
+				ClipText(InfoText(fileList_.Current().filename().string()), width - 36));
 		DrawText(filename, panel.x + 18, panel.y + 68, kUiTextScale, 220, 220, 220);
 		DrawText("ENTER or SPACE: YES     ESC: CANCEL", panel.x + 18, panel.y + 104, kUiTextScale, 180, 180, 180);
 	}
@@ -5118,6 +5209,8 @@ private:
 	jpegview_linux::ImageProcessingParams defaultImageProcessing_;
 	jpegview_linux::ImageProcessingParams materializedProcessing_;
 	jpegview_linux::ImageProcessingStore imageProcessingStore_;
+	jpegview_linux::ImageProcessingStore pendingParameterDbRestore_;
+	std::string pendingParameterDbRestoreSource_;
 	bool correctionBaseValid_ = false;
 	SDL_Window* window_ = nullptr;
 	SDL_Renderer* renderer_ = nullptr;
@@ -5197,6 +5290,7 @@ private:
 	bool fileDialogOpen_ = false;
 	bool fileDialogSave_ = false;
 	bool fileDialogParameterBackup_ = false;
+	bool fileDialogParameterRestore_ = false;
 	int fileDialogX_ = 0;
 	int fileDialogY_ = 0;
 	int fileDialogWidth_ = jpegview_linux::kDefaultFileDialogWidth;

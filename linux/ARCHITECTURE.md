@@ -8,7 +8,7 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `image`: validated mutable BGRA storage, rotate/mirror transforms, high-quality resizing, and
   the automatic/manual picture-level processing pipeline.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
-  pixel processing, the atomic native per-image levels database, and its portable backup export.
+  pixel processing, the atomic native per-image levels database, and its portable backup/restore.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
 - `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level

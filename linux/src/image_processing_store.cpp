@@ -49,7 +49,8 @@ bool LoadImageProcessingStore(const fs::path& filename, ImageProcessingStore& st
 				break;
 			}
 		}
-		if (valid && !key.empty()) loaded[key] = preset;
+		if (!valid || key.empty()) return false;
+		loaded[key] = preset;
 	}
 	if (!input.eof()) return false;
 	store = std::move(loaded);

@@ -1668,12 +1668,18 @@ void TestPictureLevelsStoreRoundTrip() {
 		std::abs(loaded.begin()->second.processing.contrast - 0.36) < 1e-12 &&
 		!loaded.begin()->second.autoContrast,
 		"replaced picture-level store did not contain the new backup contents");
-	loaded.clear();
 	std::ofstream malformed(database, std::ios::trunc);
 	malformed << "\"/broken\" 1 no-number\n";
 	malformed.close();
-	Expect(!jpegview_linux::LoadImageProcessingStore(database, loaded) && loaded.empty(),
-		"malformed picture-level database was accepted or partially loaded");
+	Expect(!jpegview_linux::LoadImageProcessingStore(database, loaded) && loaded.size() == 1 &&
+		std::abs(loaded.begin()->second.processing.contrast - 0.36) < 1e-12,
+		"malformed picture-level database was accepted or replaced the current store");
+	std::ofstream outOfRange(database, std::ios::trunc);
+	outOfRange << "\"/invalid\" 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 0\n";
+	outOfRange.close();
+	Expect(!jpegview_linux::LoadImageProcessingStore(database, loaded) && loaded.size() == 1 &&
+		std::abs(loaded.begin()->second.processing.contrast - 0.36) < 1e-12,
+		"out-of-range picture-level database was accepted or replaced the current store");
 }
 
 void TestSettingsRoundTripAndMalformedValues() {
@@ -2635,6 +2641,7 @@ void TestContextMenuCatalogAndState() {
 		findCommand(advanced, IDM_AUTO_CORRECTION)->checked &&
 		findCommand(advanced, IDM_SAVE_PARAMETERS)->enabled &&
 		findCommand(advanced, IDM_BACKUP_PARAMDB)->enabled &&
+		findCommand(advanced, IDM_RESTORE_PARAMDB)->enabled &&
 		findCommand(advanced, jpegview_linux::kCommandEditPictureLevels)->enabled &&
 		findCommand(advanced, IDM_LDC)->checked && findCommand(advanced, IDM_KEEP_PARAMETERS)->checked &&
 		!findCommand(advanced, IDM_SAVE_PARAM_DB)->enabled &&
@@ -2668,7 +2675,8 @@ void TestContextMenuCatalogAndState() {
 		!findCommand(disabled, IDM_ROTATE_90_LOSSLESS)->enabled &&
 		!findCommand(disabled, IDM_AUTO_CORRECTION)->enabled &&
 		!findCommand(disabled, IDM_SAVE_PARAMETERS)->enabled &&
-		!findCommand(disabled, IDM_BACKUP_PARAMDB)->enabled,
+		!findCommand(disabled, IDM_BACKUP_PARAMDB)->enabled &&
+		!findCommand(disabled, IDM_RESTORE_PARAMDB)->enabled,
 		"image-dependent commands were enabled without an image");
 	Expect(findLabel(disabled, "  (no configured applications)") != nullptr,
 		"empty Open with state omitted its disabled placeholder");
