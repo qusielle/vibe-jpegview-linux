@@ -29,6 +29,7 @@
 #include "file_dialog_model.h"
 #include "system_font.h"
 #include "spectrum_model.h"
+#include "desktop_association.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -187,6 +188,15 @@ fs::path AbsoluteNormalized(const fs::path& path) {
 	std::error_code error;
 	const fs::path absolute = fs::absolute(path, error);
 	return (error ? path : absolute).lexically_normal();
+}
+
+fs::path CurrentViewerExecutable() {
+	if (const char* appImage = std::getenv("APPIMAGE"); appImage != nullptr && *appImage != '\0') {
+		return AbsoluteNormalized(fs::path(appImage));
+	}
+	std::error_code error;
+	const fs::path executable = fs::read_symlink("/proc/self/exe", error);
+	return error ? fs::path() : AbsoluteNormalized(executable);
 }
 
 
@@ -1566,6 +1576,35 @@ private:
 			"Cannot open image with " + application.name + ": " + errorMessage);
 	}
 
+	void SetAsDefaultViewer() {
+		const char* homeValue = std::getenv("HOME");
+		if (homeValue == nullptr || *homeValue == '\0') {
+			SetTitle("Cannot register default viewer: HOME is not set");
+			return;
+		}
+		const fs::path home(homeValue);
+		const auto xdgHome = [&home](const char* variable, const fs::path& fallback) {
+			if (const char* value = std::getenv(variable); value != nullptr && *value != '\0') {
+				const fs::path configured(value);
+				if (configured.is_absolute()) return configured;
+			}
+			return fallback;
+		};
+		const fs::path dataHome = xdgHome("XDG_DATA_HOME", home / ".local" / "share");
+		const fs::path configHome = xdgHome("XDG_CONFIG_HOME", home / ".config");
+		const fs::path executable = CurrentViewerExecutable();
+		if (executable.empty()) {
+			SetTitle("Cannot determine the running JPEGView executable path");
+			return;
+		}
+		std::string errorMessage;
+		if (!jpegview_linux::RegisterDefaultViewer(executable, dataHome, configHome, errorMessage)) {
+			SetTitle("Default viewer registration failed: " + errorMessage);
+			return;
+		}
+		SetTitle("JPEGView is now the default viewer for common image formats");
+	}
+
 	void PrintCurrentImage() {
 		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
 		if (!MaterializeCurrentPixels()) return;
@@ -2669,6 +2708,9 @@ private:
 			break;
 		case IDM_RESTORE_PARAMDB:
 			OpenParameterDbRestoreDialog();
+			break;
+		case IDM_SET_AS_DEFAULT_VIEWER:
+			SetAsDefaultViewer();
 			break;
 		case IDM_SAVE_PARAMETERS:
 			SaveCurrentPictureLevelsAsDefault();

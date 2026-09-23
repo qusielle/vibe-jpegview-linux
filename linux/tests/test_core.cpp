@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "sort_mode.h"
 #include "desktop_applications.h"
+#include "desktop_association.h"
 #include "external_commands.h"
 #include "batch_copy.h"
 #include "image_formats.h"
@@ -2015,6 +2016,67 @@ void TestDesktopApplicationParsingAndExecExpansion() {
 		"desktop Exec did not append an image when no field code was present");
 }
 
+void TestDefaultViewerRegistration() {
+	TemporaryDirectory temporary;
+	const fs::path dataHome = temporary.path() / "data";
+	const fs::path configHome = temporary.path() / "config";
+	const fs::path executable = temporary.path() / "JPEG View%\".AppImage";
+	const fs::path mimeApps = configHome / "mimeapps.list";
+	fs::create_directories(configHome);
+	WriteText(mimeApps,
+		"[Added Associations]\n"
+		"image/jpeg=existing-viewer.desktop;\n"
+		"\n[Default Applications]\n"
+		"image/jpeg=existing-viewer.desktop;\n"
+		"text/plain=editor.desktop;\n");
+	std::string errorMessage;
+	Expect(jpegview_linux::RegisterDefaultViewer(executable, dataHome, configHome, errorMessage),
+		"default viewer could not be registered: " + errorMessage);
+	const fs::path desktopFile = dataHome / "applications" / "jpegview-linux-user.desktop";
+	const std::string desktop = [&desktopFile]() {
+		std::ifstream input(desktopFile);
+		std::ostringstream contents;
+		contents << input.rdbuf();
+		return contents.str();
+	}();
+	std::string escapedExecutable;
+	for (const char character : executable.string()) {
+		if (character == '\\' || character == '"') escapedExecutable.push_back('\\');
+		if (character == '%') escapedExecutable.push_back('%');
+		escapedExecutable.push_back(character);
+	}
+	Expect(desktop.find("Exec=\"" + escapedExecutable + "\" %F") != std::string::npos &&
+		desktop.find("%%") != std::string::npos && desktop.find("NoDisplay=true") != std::string::npos,
+		"default viewer desktop entry did not safely quote its executable or hide its launcher duplicate");
+	Expect(desktop.find("MimeType=image/jpeg;") != std::string::npos &&
+		desktop.find("image/tiff;") != std::string::npos &&
+		desktop.find("image/jxl;") != std::string::npos,
+		"default viewer desktop entry omitted supported MIME types");
+	jpegview_linux::OpenWithApplication registeredEntry;
+	Expect(!jpegview_linux::ReadDesktopApplication(desktopFile, "image/jpeg", registeredEntry),
+		"the NoDisplay default-viewer entry leaked into Open With discovery");
+	std::ifstream associationInput(mimeApps);
+	std::ostringstream associationContents;
+	associationContents << associationInput.rdbuf();
+	const std::string associations = associationContents.str();
+	Expect(associations.find("[Added Associations]\nimage/jpeg=existing-viewer.desktop;\n") !=
+		std::string::npos &&
+		associations.find("image/jpeg=jpegview-linux-user.desktop;") != std::string::npos &&
+		associations.find("text/plain=editor.desktop;") != std::string::npos &&
+		associations.find("image/jxl=jpegview-linux-user.desktop;") != std::string::npos,
+		"default viewer registration did not preserve unrelated MIME associations");
+	Expect(jpegview_linux::RegisterDefaultViewer(executable, dataHome, configHome, errorMessage),
+		"repeated default viewer registration failed: " + errorMessage);
+	std::ifstream repeatedInput(mimeApps);
+	std::ostringstream repeatedContents;
+	repeatedContents << repeatedInput.rdbuf();
+	const std::string repeated = repeatedContents.str();
+	const std::string mimeDefault = "image/jpeg=jpegview-linux-user.desktop;";
+	const std::size_t first = repeated.find(mimeDefault);
+	Expect(first != std::string::npos && repeated.find(mimeDefault, first + mimeDefault.size()) == std::string::npos,
+		"repeated default viewer registration duplicated a MIME association");
+}
+
 void TestExternalCommandPlanning() {
 	using jpegview_linux::ClipboardBackend;
 	using jpegview_linux::ExternalCommand;
@@ -2642,6 +2704,7 @@ void TestContextMenuCatalogAndState() {
 		findCommand(advanced, IDM_SAVE_PARAMETERS)->enabled &&
 		findCommand(advanced, IDM_BACKUP_PARAMDB)->enabled &&
 		findCommand(advanced, IDM_RESTORE_PARAMDB)->enabled &&
+		findCommand(advanced, IDM_SET_AS_DEFAULT_VIEWER)->enabled &&
 		findCommand(advanced, jpegview_linux::kCommandEditPictureLevels)->enabled &&
 		findCommand(advanced, IDM_LDC)->checked && findCommand(advanced, IDM_KEEP_PARAMETERS)->checked &&
 		!findCommand(advanced, IDM_SAVE_PARAM_DB)->enabled &&
@@ -3750,6 +3813,7 @@ int main() {
 	RunTest("batch-copy-pattern-expansion-and-preview", TestBatchCopyPatternExpansionAndPreview, failures);
 	RunTest("batch-copy-dialog-controller", TestBatchCopyDialogController, failures);
 	RunTest("desktop-application-parsing-and-expansion", TestDesktopApplicationParsingAndExecExpansion, failures);
+	RunTest("default-viewer-registration", TestDefaultViewerRegistration, failures);
 	RunTest("external-command-planning", TestExternalCommandPlanning, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);

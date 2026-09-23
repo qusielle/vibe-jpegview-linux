@@ -16,6 +16,7 @@ should normally be added to one of these focused modules and covered by `tests/t
   so an adjustment cannot reuse stale pixels. JPEG display requests use native reduced DCT decode
   before exact scaling, without requiring a retained full-resolution source frame.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
+- `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
 - `settings` and `sort_mode`: persisted configuration (including default picture-level values) and
   stable setting values.
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.

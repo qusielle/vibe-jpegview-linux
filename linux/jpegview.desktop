@@ -6,4 +6,4 @@ Exec=jpegview-linux %F
 Icon=jpegview-linux
 Terminal=false
 Categories=Graphics;Viewer;
-MimeType=image/jpeg;image/png;image/gif;image/bmp;image/x-tga;image/x-photoshop;image/webp;
+MimeType=image/jpeg;image/png;image/gif;image/apng;image/bmp;image/x-tga;image/vnd.adobe.photoshop;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;image/x-portable-arbitrarymap;image/qoi;image/webp;image/tiff;image/heic;image/heif;image/avif;image/jxl;image/jxr;

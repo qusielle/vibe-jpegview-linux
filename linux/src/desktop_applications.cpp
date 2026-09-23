@@ -248,7 +248,7 @@ bool ReadDesktopApplication(const fs::path& filename, const std::string& current
 		else if (line.compare(0, 8, "TryExec=") == 0) tryExec = DesktopEntryField(line, "TryExec");
 		else if (line.compare(0, 9, "MimeType=") == 0) mimeTypes = DesktopEntryField(line, "MimeType");
 		else if (line.compare(0, 7, "Hidden=") == 0) hidden = DesktopBoolean(DesktopEntryField(line, "Hidden"));
-		else if (line.compare(0, 9, "NoDisplay=") == 0) noDisplay = DesktopBoolean(DesktopEntryField(line, "NoDisplay"));
+		else if (line.compare(0, 10, "NoDisplay=") == 0) noDisplay = DesktopBoolean(DesktopEntryField(line, "NoDisplay"));
 		else if (line.compare(0, 9, "Terminal=") == 0) terminal = DesktopBoolean(DesktopEntryField(line, "Terminal"));
 	}
 

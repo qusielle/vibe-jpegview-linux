@@ -99,7 +99,10 @@ they support.
    modification-date updates from now or EXIF, wallpaper integration, folder exploration, and
    lossless JPEG rotation through `jpegtran`. The **Open image with** submenu discovers freedesktop
    `.desktop` applications
-   and expands their file/URI placeholders.
+   and expands their file/URI placeholders. **Set as default viewer...** creates a user-local desktop
+   entry and makes JPEGView the default for common image MIME types without root access; the desktop
+   environment can change those defaults later. For an AppImage, repeat registration after moving the
+   file so the saved launcher path stays current.
 
 10. **Batch rename/copy and image resizing.** The batch dialog supports image selection, previews,
     saved Windows-compatible naming patterns, safe same-folder renames, and copying into newly
@@ -383,8 +386,9 @@ browser is open. Right-click or the keyboard Context Menu key opens the compact 
 context menu; Show Advanced Options temporarily restores Open image with, Print, batch rename/copy,
 date and wallpaper commands, extended navigation and sorting, image transforms and correction,
 extra zoom and window controls, slideshow controls, and settings administration (including
-disabled Windows-only commands) without saving that choice. The compact menu keeps common
-navigation, fit/actual-size, fullscreen, and fit-window-to-image commands available. The menu also
+the user-local default-viewer registration and disabled Windows-only commands) without saving that
+choice. The compact menu keeps common navigation, fit/actual-size, fullscreen, and fit-window-to-image
+commands available. The menu also
 supports keyboard selection with Up/Down and Return; if it spans multiple
 columns to fit the window height, Left/Right moves between columns. Hovering over a lower
 navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
@@ -489,8 +493,10 @@ by comparing the Linux frontend with the Windows menus and feature panels are:
 - **Open-With management and user commands.** Open-With applications are discovered automatically
   from freedesktop `.desktop` files, but there is no manual menu editor. Windows-style custom user
   command definitions and their invocation menu are also absent.
-- **Desktop association management.** Registering JPEGView as the default viewer/file-type handler is
-  not implemented; associations remain controlled by the Linux desktop environment.
+- **Desktop association management.** `Set as default viewer...` registers common image MIME types
+  for the current executable. A Windows-style per-extension selection dialog is not implemented,
+  and specialized camera-RAW MIME aliases vary between Linux desktops; the desktop environment can
+  refine the resulting defaults.
 - **Parameter database administration.** Per-image parameters work in the Linux-native text database,
   and `Backup parameter DB...` / `Restore parameter DB...` export and restore Linux-native copies.
   Neither the live file nor its backups are compatible with the Windows binary DB.
