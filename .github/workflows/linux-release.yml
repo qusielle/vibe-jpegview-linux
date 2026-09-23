@@ -36,29 +36,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           UBUNTU_VERSION: ${{ matrix.ubuntu }}
-        run: |
-          safe_version=${RELEASE_TAG//[^a-zA-Z0-9._+-]/-}
-          image="jpegview-linux-build:ubuntu${UBUNTU_VERSION}"
-          output_dir="$RUNNER_TEMP/jpegview-linux-release"
-          appimage_name="JPEGView-Linux-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64.AppImage"
-          binary_name="jpegview-linux-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64"
-          checksums_name="SHA256SUMS-ubuntu${UBUNTU_VERSION}.txt"
-
-          mkdir -p "$output_dir"
-
-          docker run --rm -v "$output_dir:/out" "$image" appimage "$safe_version"
-          mv "$output_dir/JPEGView-Linux-${safe_version}-x86_64.AppImage" "$output_dir/$appimage_name"
-
-          docker run --rm -v "$output_dir:/out" "$image" binary
-          mv "$output_dir/jpegview-linux" "$output_dir/$binary_name"
-
-          (
-            cd "$output_dir"
-            sha256sum "$appimage_name" "$binary_name" > "$checksums_name"
-          )
-
-          gh release upload "$RELEASE_TAG" \
-            "$output_dir/$appimage_name" \
-            "$output_dir/$binary_name" \
-            "$output_dir/$checksums_name" \
-            --clobber
+          OUTPUT_DIR: ${{ runner.temp }}/jpegview-linux-release
+        run: bash linux/release-assets.sh

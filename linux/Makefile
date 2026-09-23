@@ -95,9 +95,10 @@ test-ui: $(TARGET)
 	./tests/ui_smoke.sh $(TARGET)
 
 test-shell:
-	sh -n tests/ui_smoke.sh package-appimage.sh embed-icon.sh docker-build.sh
+	sh -n tests/ui_smoke.sh package-appimage.sh package-deb.sh embed-icon.sh docker-build.sh
+	bash -n release-assets.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck tests/ui_smoke.sh package-appimage.sh embed-icon.sh docker-build.sh; \
+		shellcheck tests/ui_smoke.sh package-appimage.sh package-deb.sh embed-icon.sh docker-build.sh release-assets.sh; \
 	else \
 		echo "ShellCheck: SKIP (shellcheck not installed)"; \
 	fi

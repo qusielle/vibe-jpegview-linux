@@ -240,8 +240,11 @@ file as a downloadable workflow artifact named `jpegview-linux-ubuntu20-x86_64`,
 `jpegview-linux-ubuntu22-x86_64`, or `jpegview-linux-ubuntu24-x86_64`. The Ubuntu 24 artifact also
 includes its `.deb` package. These workflow artifacts are retained for 14 days and are
 available from the workflow run's summary. When a GitHub Release is published, its workflow uploads
-versioned AppImage and native executable assets for each Ubuntu base. Asset names include the Ubuntu
-release because artifacts built on newer bases may require newer system glibc.
+versioned AppImage and native executable assets for each Ubuntu base. The Ubuntu 24 release job also
+builds and installs the `.deb` on an Ubuntu 24 runner, checks that the installed executable starts
+with `--help`, and uploads the package. Each release checksum file covers every asset for its Ubuntu
+base. Asset names include the Ubuntu release because artifacts built on newer bases may require
+newer system glibc.
 
 If SDL2 is installed in a non-standard location, override the linker settings:
 
