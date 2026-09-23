@@ -1658,6 +1658,16 @@ void TestPictureLevelsStoreRoundTrip() {
 		"picture-level store did not round-trip parameters and correction state");
 	Expect(loaded.begin()->first == expected.begin()->first,
 		"picture-level store did not preserve quoted path characters");
+	preset.processing.contrast = 0.36;
+	preset.autoContrast = false;
+	expected.begin()->second = preset;
+	Expect(jpegview_linux::SaveImageProcessingStore(database, expected),
+		"picture-level store could not replace an existing database atomically");
+	loaded.clear();
+	Expect(jpegview_linux::LoadImageProcessingStore(database, loaded) && loaded.size() == 1 &&
+		std::abs(loaded.begin()->second.processing.contrast - 0.36) < 1e-12 &&
+		!loaded.begin()->second.autoContrast,
+		"replaced picture-level store did not contain the new backup contents");
 	loaded.clear();
 	std::ofstream malformed(database, std::ios::trunc);
 	malformed << "\"/broken\" 1 no-number\n";
@@ -2624,6 +2634,7 @@ void TestContextMenuCatalogAndState() {
 		findCommand(advanced, IDM_ROTATE_90_LOSSLESS)->enabled &&
 		findCommand(advanced, IDM_AUTO_CORRECTION)->checked &&
 		findCommand(advanced, IDM_SAVE_PARAMETERS)->enabled &&
+		findCommand(advanced, IDM_BACKUP_PARAMDB)->enabled &&
 		findCommand(advanced, jpegview_linux::kCommandEditPictureLevels)->enabled &&
 		findCommand(advanced, IDM_LDC)->checked && findCommand(advanced, IDM_KEEP_PARAMETERS)->checked &&
 		!findCommand(advanced, IDM_SAVE_PARAM_DB)->enabled &&
@@ -2651,11 +2662,13 @@ void TestContextMenuCatalogAndState() {
 		"unsupported settings command unexpectedly became actionable");
 
 	ContextMenuState unavailable;
+	unavailable.parameterDatabaseAvailable = false;
 	const std::vector<MenuItem> disabled = jpegview_linux::BuildContextMenu(unavailable, true);
 	Expect(!findCommand(disabled, IDM_CHANGESIZE)->enabled &&
 		!findCommand(disabled, IDM_ROTATE_90_LOSSLESS)->enabled &&
 		!findCommand(disabled, IDM_AUTO_CORRECTION)->enabled &&
-		!findCommand(disabled, IDM_SAVE_PARAMETERS)->enabled,
+		!findCommand(disabled, IDM_SAVE_PARAMETERS)->enabled &&
+		!findCommand(disabled, IDM_BACKUP_PARAMDB)->enabled,
 		"image-dependent commands were enabled without an image");
 	Expect(findLabel(disabled, "  (no configured applications)") != nullptr,
 		"empty Open with state omitted its disabled placeholder");

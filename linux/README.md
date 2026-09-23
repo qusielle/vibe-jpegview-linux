@@ -438,10 +438,12 @@ over saved per-image values. With keep disabled, each saved entry (including its
 local-density state) is restored for that image. Save/remove actions are disabled while Keep levels is
 on; `Set current parameters as default...` stores slider values and automatic-correction state for
 images without a saved entry. Removing an entry restores those defaults. The Linux-native
-`picture-levels.db` is stored in
-the JPEGView Linux configuration directory (`$XDG_CONFIG_HOME/jpegview-linux`, or
+`picture-levels.db` is stored in the JPEGView Linux configuration directory
+(`$XDG_CONFIG_HOME/jpegview-linux`, or
 `~/.config/jpegview-linux` when XDG_CONFIG_HOME is unset). All levels remain non-destructive until
 the processed image is saved.
+`Backup parameter DB...` opens the save browser, defaults to `picture-levels-backup.db` beside the live
+database, and writes an atomic Linux-native copy that can be moved to another installation.
 The `Open image with` submenu is populated from matching freedesktop `.desktop` applications and
 launches them with the current image, including standard `%f`/`%F` and URI placeholders. Applications
 are discovered from the user and system application directories at menu-open time.
@@ -486,7 +488,8 @@ by comparing the Linux frontend with the Windows menus and feature panels are:
 - **Desktop association management.** Registering JPEGView as the default viewer/file-type handler is
   not implemented; associations remain controlled by the Linux desktop environment.
 - **Parameter database administration.** Per-image parameters work in the Linux-native text database,
-  but backup/restore actions are absent and the file is not compatible with the Windows binary DB.
+  and `Backup parameter DB...` exports a copy. Restore is not available yet, and neither the live
+  file nor its backups are compatible with the Windows binary DB.
 - **Print setup and built-in help.** Printing currently delegates to `lp` with desktop defaults rather
   than offering the Windows print-layout/options dialog. The Windows help dialog is not ported; the
   Linux `--help` text covers the available controls.

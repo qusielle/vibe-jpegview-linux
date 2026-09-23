@@ -1384,6 +1384,7 @@ private:
 		fileDialogSummaryLoader_.Request({}, fileDialogSummaryGeneration_);
 		fileDialogOpen_ = false;
 		fileDialogSave_ = false;
+		fileDialogParameterBackup_ = false;
 		fileDialogFilename_.clear();
 		fileDialogModel_.Clear();
 		fileDialogDirectorySummaries_.clear();
@@ -1391,6 +1392,37 @@ private:
 
 	void SaveImageFromDialog() {
 		if (!fileDialogSave_ || fileDialogFilename_.empty()) return;
+		if (fileDialogParameterBackup_) {
+			fs::path filename(fileDialogFilename_);
+			const fs::path output = AbsoluteNormalized(fileDialogDirectory_ / filename);
+			if (output == AbsoluteNormalized(jpegview_linux::ImageProcessingStorePath())) {
+				fileDialogMessage_ = "Choose another name; this is the live parameter database";
+				return;
+			}
+			const fs::path liveDatabase = jpegview_linux::ImageProcessingStorePath();
+			std::error_code databaseStatusError;
+			const bool liveDatabaseExists = fs::exists(liveDatabase, databaseStatusError);
+			jpegview_linux::ImageProcessingStore backupContents;
+			if (databaseStatusError || (liveDatabaseExists &&
+				!jpegview_linux::LoadImageProcessingStore(liveDatabase, backupContents))) {
+				fileDialogMessage_ = "Backup failed: the live parameter database is unreadable";
+				return;
+			}
+			std::error_code existsError;
+			if (fs::exists(output, existsError) && !existsError && !fileDialogOverwriteConfirmed_) {
+				fileDialogOverwriteConfirmed_ = true;
+				fileDialogMessage_ = "File exists; press ENTER to overwrite or ESC to cancel";
+				return;
+			}
+			if (!jpegview_linux::SaveImageProcessingStore(output, backupContents)) {
+				fileDialogMessage_ = "Backup failed: could not write the parameter database";
+				return;
+			}
+			const std::string savedName = output.filename().string();
+			CloseFileDialog();
+			SetTitle("Backed up picture-level parameters: " + savedName);
+			return;
+		}
 		if (!MaterializeCurrentPixels()) {
 			fileDialogMessage_ = "Cannot prepare image pixels";
 			return;
@@ -2586,6 +2618,9 @@ private:
 		case IDM_CLEAR_PARAM_DB:
 			ClearCurrentPictureLevels();
 			break;
+		case IDM_BACKUP_PARAMDB:
+			OpenParameterDbBackupDialog();
+			break;
 		case IDM_SAVE_PARAMETERS:
 			SaveCurrentPictureLevelsAsDefault();
 			break;
@@ -2920,6 +2955,8 @@ private:
 		state.keepPictureLevels = keepPictureLevels_;
 		state.pictureLevelsSaved = !fileList_.Empty() && imageProcessingStore_.find(
 			AbsoluteNormalized(fileList_.Current()).string()) != imageProcessingStore_.end();
+		state.parameterDatabaseAvailable =
+			!jpegview_linux::ImageProcessingStorePath().empty();
 		state.fitToWindow = viewport_.IsFitToWindow();
 		state.fillWithCrop = viewport_.FillWithCrop();
 		state.noEnlarge = viewport_.NoEnlarge();
@@ -3955,7 +3992,7 @@ private:
 			std::error_code statusError;
 			const bool directory = entry.is_directory(statusError);
 			if (statusError || (!directory && (!entry.is_regular_file(statusError) ||
-				!jpegview_linux::IsSupportedImagePath(entry.path())))) {
+				(!fileDialogParameterBackup_ && !jpegview_linux::IsSupportedImagePath(entry.path()))))) {
 				continue;
 			}
 			std::error_code modificationError;
@@ -3978,6 +4015,7 @@ private:
 		if (error || directory.empty()) directory = fs::path(".");
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = false;
+		fileDialogParameterBackup_ = false;
 		fileDialogSaveFullSize_ = true;
 		PositionFileDialogGeometry();
 		fileDialogFilename_.clear();
@@ -4000,9 +4038,34 @@ private:
 		if (directory.empty()) directory = fs::current_path();
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = true;
+		fileDialogParameterBackup_ = false;
 		fileDialogSaveFullSize_ = fullSize;
 		PositionFileDialogGeometry();
 		fileDialogFilename_ = fileList_.Current().stem().string() + "_proc.jpg";
+		fileDialogModel_.Begin(true);
+		fileDialogMessage_.clear();
+		fileDialogOverwriteConfirmed_ = false;
+		fileDialogOpen_ = true;
+		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
+		contextMenuOpen_ = false;
+		RefreshFileDialog();
+		fileDialogModel_.ClearSelection();
+		SDL_StartTextInput();
+	}
+
+	void OpenParameterDbBackupDialog() {
+		const fs::path database = jpegview_linux::ImageProcessingStorePath();
+		if (database.empty()) {
+			SetTitle("Cannot determine the picture-level database path");
+			return;
+		}
+		fileDialogDirectory_ = database.parent_path();
+		fileDialogSave_ = true;
+		fileDialogParameterBackup_ = true;
+		fileDialogSaveFullSize_ = true;
+		PositionFileDialogGeometry();
+		fileDialogFilename_ = database.stem().string() + "-backup" + database.extension().string();
 		fileDialogModel_.Begin(true);
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
@@ -4042,6 +4105,10 @@ private:
 	}
 
 	void ActivateFileDialogSelection(bool openDirectoryImmediately = false) {
+		if (fileDialogSave_ && fileDialogOverwriteConfirmed_ && !fileDialogFilename_.empty()) {
+			SaveImageFromDialog();
+			return;
+		}
 		if (fileDialogSave_ && fileDialogModel_.SelectedIndex() < 0) {
 			SaveImageFromDialog();
 			return;
@@ -4197,7 +4264,8 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
 		SDL_RenderFillRect(renderer_, &dialog);
 		DrawRect(dialog, 190, 190, 190);
-		DrawText(fileDialogSave_ ? "Save processed image" : "Open image",
+		DrawText(fileDialogParameterBackup_ ? "Back up picture-level database" :
+			(fileDialogSave_ ? "Save processed image" : "Open image"),
 			dialog.x + 18, dialog.y + 14, kUiTextScale);
 		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
 		DrawText(fileDialogSave_ ? "File name" : "Filter", dialog.x + 18, dialog.y + 68,
@@ -5128,6 +5196,7 @@ private:
 	bool quitRequested_ = false;
 	bool fileDialogOpen_ = false;
 	bool fileDialogSave_ = false;
+	bool fileDialogParameterBackup_ = false;
 	int fileDialogX_ = 0;
 	int fileDialogY_ = 0;
 	int fileDialogWidth_ = jpegview_linux::kDefaultFileDialogWidth;

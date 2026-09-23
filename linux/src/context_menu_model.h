@@ -58,6 +58,7 @@ struct ContextMenuState {
 	bool localDensityEnabled = false;
 	bool keepPictureLevels = false;
 	bool pictureLevelsSaved = false;
+	bool parameterDatabaseAvailable = true;
 	bool fitToWindow = true;
 	bool fillWithCrop = false;
 	bool noEnlarge = true;
