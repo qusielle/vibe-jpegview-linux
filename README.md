@@ -15,6 +15,10 @@ or feature can be sensibly supported on Linux, the goal is to port or backport i
 work stays native to the Linux frontend. The project aims for useful cross-platform behavior, not
 automatic one-to-one Windows feature parity.
 
+The archived [Windows README](src/README.md), [build notes](src/COMPILING.txt), installation
+guides ([English](src/HowToInstall.txt), [Russian](src/HowToInstall_ru.txt)), and
+[changelog](src/CHANGELOG.txt) are kept with the Windows source.
+
 ## Highlights
 
 - Browse large images and folders with high-quality scaling, zoom and pan, responsive neighbor

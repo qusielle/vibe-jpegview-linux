@@ -125,10 +125,10 @@ call :BUILD_COPY_JPV x64 x64 64
 IF ERRORLEVEL 1 exit /b 1
 
 REM Copy HowToInstall.txt and HowToInstall_ru.txt to OUTPUT
-copy "%JPV_ROOT%\HowToInstall.txt" "%XRAW_OUT%"
-copy "%JPV_ROOT%\HowToInstall_ru.txt" "%XRAW_OUT%"
+copy "%JPV_ROOT%\src\HowToInstall.txt" "%XRAW_OUT%"
+copy "%JPV_ROOT%\src\HowToInstall_ru.txt" "%XRAW_OUT%"
 REM I didn't realize this was never in any releases
-copy "%JPV_ROOT%\CHANGELOG.txt" "%XRAW_OUT%"
+copy "%JPV_ROOT%\src\CHANGELOG.txt" "%XRAW_OUT%"
 
 REM run in OUTPUT, remove intermediates
 del /s "%XRAW_OUT%\*.exp" "%XRAW_OUT%\*.lib" "%XRAW_OUT%\*.pdb"
@@ -199,7 +199,7 @@ echo + Autogenerate last chunk of changelog ...
 REM too lazy to make into a real script
 
 SET JPV_ROOT=..\..
-python.exe -c "from pathlib import Path; from util_common import get_all_text_between; print(get_all_text_between(Path(r'%JPV_ROOT%\CHANGELOG.txt'), '\[%JPV_VER%', '\['))"
+python.exe -c "from pathlib import Path; from util_common import get_all_text_between; print(get_all_text_between(Path(r'%JPV_ROOT%\src\CHANGELOG.txt'), '\[%JPV_VER%', '\['))"
 
 
 
