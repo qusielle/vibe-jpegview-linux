@@ -6,8 +6,9 @@
 
 # JPEGView for Linux
 
-A fast native Linux image viewer and editor, and a Linux-focused fork of JPEGView by David Kleiner.
-The Linux frontend is based on the 1.3.46 codebase.
+A fast native Linux image viewer and editor, and a Linux-focused fork of the
+[sylikc/jpegview GitHub project](https://github.com/sylikc/jpegview), itself based on JPEGView by
+David Kleiner. The Linux frontend is based on the 1.3.46 codebase.
 
 This repository now focuses on maintaining the Linux delivery in [`linux/`](linux/). The original
 Windows implementation remains under [`src/`](src/) as the upstream reference. When a Windows fix
