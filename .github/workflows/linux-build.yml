@@ -28,7 +28,8 @@ jobs:
         run: |
           image="jpegview-linux-build:ubuntu${UBUNTU_VERSION}"
           output_dir="$RUNNER_TEMP/jpegview-linux-ci-ubuntu${UBUNTU_VERSION}"
-          mkdir -p "$output_dir"
+          artifact_dir="$RUNNER_TEMP/jpegview-linux-ci-artifacts-ubuntu${UBUNTU_VERSION}"
+          mkdir -p "$output_dir" "$artifact_dir"
 
           docker build \
             --file "linux/Dockerfile.ubuntu${UBUNTU_VERSION}" \
@@ -38,19 +39,44 @@ jobs:
           docker run --rm -v "$output_dir:/out" "$image" appimage ci
           docker run --rm -v "$output_dir:/out" "$image" binary
 
-          (
-            cd "$output_dir"
-            sha256sum JPEGView-Linux-ci-x86_64.AppImage jpegview-linux > SHA256SUMS
-          )
+          if [ "$UBUNTU_VERSION" = "24" ]; then
+            deb_image="jpegview-linux-deb-build:ubuntu${UBUNTU_VERSION}"
+            deb_version="1.3.46+ci.${GITHUB_RUN_NUMBER}"
+            deb_name="jpegview-linux_${deb_version}_ubuntu${UBUNTU_VERSION}_amd64.deb"
+
+            docker build \
+              --file "linux/Dockerfile.deb.ubuntu${UBUNTU_VERSION}" \
+              --tag "$deb_image" \
+              .
+            docker run --rm -v "$output_dir:/out" "$deb_image" \
+              deb "$deb_version" "$UBUNTU_VERSION"
+
+            (
+              cd "$output_dir"
+              sha256sum \
+                JPEGView-Linux-ci-x86_64.AppImage \
+                jpegview-linux \
+                "$deb_name" > SHA256SUMS
+            )
+            cp "$output_dir/$deb_name" "$artifact_dir/"
+          else
+            (
+              cd "$output_dir"
+              sha256sum JPEGView-Linux-ci-x86_64.AppImage jpegview-linux > SHA256SUMS
+            )
+          fi
+
+          cp \
+            "$output_dir/JPEGView-Linux-ci-x86_64.AppImage" \
+            "$output_dir/jpegview-linux" \
+            "$output_dir/SHA256SUMS" \
+            "$artifact_dir/"
 
       - name: Upload Ubuntu ${{ matrix.ubuntu }} build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: jpegview-linux-ubuntu${{ matrix.ubuntu }}-x86_64
-          path: |
-            ${{ runner.temp }}/jpegview-linux-ci-ubuntu${{ matrix.ubuntu }}/JPEGView-Linux-ci-x86_64.AppImage
-            ${{ runner.temp }}/jpegview-linux-ci-ubuntu${{ matrix.ubuntu }}/jpegview-linux
-            ${{ runner.temp }}/jpegview-linux-ci-ubuntu${{ matrix.ubuntu }}/SHA256SUMS
+          path: ${{ runner.temp }}/jpegview-linux-ci-artifacts-ubuntu${{ matrix.ubuntu }}
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

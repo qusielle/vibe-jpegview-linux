@@ -73,9 +73,9 @@ Ubuntu build. The Ubuntu 20.04 artifacts are the broadest-compatibility choice; 
 newer Ubuntu releases may require a newer glibc.
 
 Successful Ubuntu builds from branch pushes, pull requests, and manual workflow runs also attach
-AppImage, native executable, and SHA-256 checksum workflow artifacts to the Actions run. These are
-available from the run summary for 14 days; use the GitHub Releases downloads for permanent release
-assets.
+AppImage, native executable, and SHA-256 checksum workflow artifacts to the Actions run. The Ubuntu
+24 artifact also includes a `.deb` package. These are available from the run summary for 14 days;
+use the GitHub Releases downloads for permanent release assets.
 
 ## Portable
 

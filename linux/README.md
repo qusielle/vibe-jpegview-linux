@@ -9,11 +9,12 @@ This is the complete grouped summary of features and changes made since the nati
 split from the Windows frontend. Later fixes, tests, and refactorings are grouped with the feature
 they support.
 
-1. **Native Linux viewer and distributable AppImage.** A native SDL2 frontend now opens individual
+1. **Native Linux viewer, AppImage, and Ubuntu 24 Debian package.** A native SDL2 frontend now opens individual
    images, multiple command-line inputs, and directories without modifying the original Windows
    application. It includes a resizable/maximizable/fullscreen window, drag-and-drop, a desktop
    entry, the upstream JPEGView application icon, Ubuntu 20.04, 22.04, and 24.04 build containers,
-   and AppImage packaging with bundled SDL and codec runtimes.
+   AppImage packaging with bundled SDL and codec runtimes, and an Ubuntu 24.04 `.deb` package whose
+   build and runtime dependencies come from the standard Ubuntu repositories.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
    PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, and LibRaw camera formats. Embedded
@@ -212,13 +213,26 @@ needs no codec source builds. An optional `--build-arg APPIMAGETOOL_SHA256=...` 
 AppImage tool. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
 must also run on later Ubuntu releases; newer-base artifacts can require newer system glibc.
 
-GitHub Actions builds and tests all three Dockerfiles on branch pushes and pull requests. Each
-successful Ubuntu build job uploads its x86_64 AppImage, native executable, and a `SHA256SUMS` file
-as a downloadable workflow artifact named `jpegview-linux-ubuntu20-x86_64`,
-`jpegview-linux-ubuntu22-x86_64`, or `jpegview-linux-ubuntu24-x86_64`. These workflow artifacts are
-retained for 14 days and are available from the workflow run's summary. When a GitHub Release is
-published, its workflow uploads corresponding versioned assets for each Ubuntu base. Asset names
-include the Ubuntu release because artifacts built on newer bases may require newer system glibc.
+The Debian package Dockerfile uses only the standard Ubuntu 24.04 repositories for build tools and
+runtime libraries. Ubuntu 20.04 and 22.04 do not produce a `.deb`.
+
+```sh
+DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.deb.ubuntu24 -t jpegview-linux-deb-build:ubuntu24 .
+docker run --rm -v "$PWD/out:/out" jpegview-linux-deb-build:ubuntu24 deb 1.3.46-linux.1 24
+```
+
+This creates `jpegview-linux_1.3.46-linux.1_ubuntu24_amd64.deb` in `out/`. Install it with
+`sudo apt install ./out/jpegview-linux_1.3.46-linux.1_ubuntu24_amd64.deb`; APT resolves its
+shared-library dependencies from Ubuntu 24.04.
+
+GitHub Actions builds and tests all three AppImage Dockerfiles on branch pushes and pull requests.
+Each successful Ubuntu build job uploads its x86_64 AppImage, native executable, and a `SHA256SUMS`
+file as a downloadable workflow artifact named `jpegview-linux-ubuntu20-x86_64`,
+`jpegview-linux-ubuntu22-x86_64`, or `jpegview-linux-ubuntu24-x86_64`. The Ubuntu 24 artifact also
+includes its `.deb` package. These workflow artifacts are retained for 14 days and are
+available from the workflow run's summary. When a GitHub Release is published, its workflow uploads
+versioned AppImage and native executable assets for each Ubuntu base. Asset names include the Ubuntu
+release because artifacts built on newer bases may require newer system glibc.
 
 If SDL2 is installed in a non-standard location, override the linker settings:
 
