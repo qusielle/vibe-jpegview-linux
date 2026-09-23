@@ -124,6 +124,21 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			loaded.showFilename = ParseBool(value);
 		} else if (key == "auto_contrast") {
 			loaded.autoContrast = ParseBool(value);
+		} else if (key == "keep_picture_levels") {
+			loaded.keepPictureLevels = ParseBool(value);
+		} else if (key == "unsharp_mask_radius" || key == "unsharp_mask_amount" ||
+			key == "unsharp_mask_threshold") {
+			try {
+				std::size_t parsedCharacters = 0;
+				const double parsed = std::stod(value, &parsedCharacters);
+				if (parsedCharacters == value.size() && std::isfinite(parsed)) {
+					if (key == "unsharp_mask_radius") loaded.unsharpMaskRadius = std::clamp(parsed, 0.0, 5.0);
+					else if (key == "unsharp_mask_amount") loaded.unsharpMaskAmount = std::clamp(parsed, 0.0, 10.0);
+					else loaded.unsharpMaskThreshold = std::clamp(parsed, 0.0, 20.0);
+				}
+			} catch (const std::exception&) {
+				// Ignore malformed settings and retain the built-in default.
+			}
 		} else if (key == "cache_size_mb") {
 			try {
 				std::size_t parsedCharacters = 0;
@@ -177,6 +192,10 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "show_histogram=" << (settings.showHistogram ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'
 		       << "auto_contrast=" << (settings.autoContrast ? 1 : 0) << '\n'
+		       << "keep_picture_levels=" << (settings.keepPictureLevels ? 1 : 0) << '\n'
+		       << "unsharp_mask_radius=" << std::clamp(settings.unsharpMaskRadius, 0.0, 5.0) << '\n'
+		       << "unsharp_mask_amount=" << std::clamp(settings.unsharpMaskAmount, 0.0, 10.0) << '\n'
+		       << "unsharp_mask_threshold=" << std::clamp(settings.unsharpMaskThreshold, 0.0, 20.0) << '\n'
 		       << "cache_size_mb=" << std::min(settings.cacheSizeMiB, kMaximumCacheSizeMiB) << '\n'
 		       << "copy_rename_pattern=" << settings.copyRenamePattern << '\n';
 		if (!output) {

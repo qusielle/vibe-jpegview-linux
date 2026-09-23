@@ -5,6 +5,8 @@
 #include "display_image_cache.h"
 #include "cache_budget.h"
 #include "image.h"
+#include "image_processing.h"
+#include "image_processing_store.h"
 #include "image_writer.h"
 #include "settings.h"
 #include "sort_mode.h"
@@ -44,6 +46,7 @@
 #include <future>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -1114,6 +1117,83 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	const jpegview_linux::DisplayImageRequest scaled =
 		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false);
 	Expect(scaled.Valid(), "display cache rejected a valid preparation request");
+	jpegview_linux::ImageProcessingParams adjustedLevels;
+	adjustedLevels.contrast = 0.2;
+	const jpegview_linux::DisplayImageRequest adjusted =
+		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false, 0, adjustedLevels);
+	Expect(adjusted.Valid() && adjusted.key != scaled.key,
+		"display cache key omitted image processing parameters");
+	jpegview_linux::ImageProcessingParams inactiveLevels;
+	inactiveLevels.colorCorrection = 0.25;
+	inactiveLevels.contrastCorrection = 0.5;
+	inactiveLevels.deepShadows = 0.75;
+	inactiveLevels.unsharpRadius = 4.0;
+	inactiveLevels.unsharpThreshold = 10.0;
+	const auto inactiveRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, inactiveLevels);
+	Expect(inactiveRequest.key == scaled.key,
+		"display cache key changed for controls that are disabled or have no effect");
+	inactiveLevels.unsharpAmount = 1.0;
+	const auto activeUnsharpRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, inactiveLevels);
+	Expect(activeUnsharpRequest.key != scaled.key,
+		"display cache key omitted an enabled unsharp-mask adjustment");
+
+	std::mutex coalesceMutex;
+	std::condition_variable coalesceChanged;
+	bool firstPreparationStarted = false;
+	bool releaseFirstPreparation = false;
+	std::vector<double> coalescedContrasts;
+	jpegview_linux::ImageProcessingParams intermediateLevels;
+	intermediateLevels.contrast = 0.1;
+	jpegview_linux::ImageProcessingParams latestLevels;
+	latestLevels.contrast = 0.4;
+	const auto intermediateRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, intermediateLevels);
+	const auto latestRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, latestLevels);
+	jpegview_linux::DisplayImageCache coalesced(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			{
+				std::unique_lock<std::mutex> lock(coalesceMutex);
+				coalescedContrasts.push_back(request.processing.contrast);
+				if (coalescedContrasts.size() == 1) {
+					firstPreparationStarted = true;
+					coalesceChanged.notify_all();
+					coalesceChanged.wait(lock, [&] { return releaseFirstPreparation; });
+				}
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = 2;
+			result->height = 2;
+			result->bgra.assign(16, 255);
+			return result;
+		});
+	coalesced.Request(scaled);
+	{
+		std::unique_lock<std::mutex> lock(coalesceMutex);
+		Expect(coalesceChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return firstPreparationStarted; }),
+			"foreground display preparation did not start for coalescing test");
+	}
+	coalesced.Request(intermediateRequest);
+	coalesced.Request(latestRequest);
+	{
+		std::lock_guard<std::mutex> lock(coalesceMutex);
+		releaseFirstPreparation = true;
+	}
+	coalesceChanged.notify_all();
+	Expect(coalesced.WaitUntilIdle(std::chrono::seconds(2)),
+		"coalesced foreground display work did not finish");
+	{
+		std::lock_guard<std::mutex> lock(coalesceMutex);
+		Expect(coalescedContrasts == std::vector<double>({0.0, 0.4}),
+			"obsolete queued picture-level previews were not coalesced to the latest value");
+	}
+	Expect(coalesced.Find(latestRequest) != nullptr && coalesced.Find(scaled) == nullptr &&
+		coalesced.Find(intermediateRequest) == nullptr,
+		"obsolete foreground preview replaced or remained alongside the latest one");
 
 	jpegview_linux::DisplayImageCache realProcessor(64, 1);
 	realProcessor.Request(scaled);
@@ -1445,6 +1525,141 @@ void TestImageAutoContrastInvariants() {
 	Expect(colorChanged, "auto contrast left a non-uniform low-range fixture unchanged");
 }
 
+void TestPictureLevelsModelAndProcessing() {
+	using jpegview_linux::ImageProcessingParams;
+	using jpegview_linux::LevelControl;
+	ImageProcessingParams params;
+	Expect(jpegview_linux::IsDefaultImageProcessing(params), "picture-level defaults are not identity values");
+	Expect(static_cast<std::size_t>(LevelControl::Count) == 12,
+		"not all Windows picture-level sliders are represented");
+	Expect(jpegview_linux::GetLevelControlInfo(LevelControl::ColorCorrection).enabledByAutoContrast &&
+		jpegview_linux::GetLevelControlInfo(LevelControl::ContrastCorrection).enabledByAutoContrast,
+		"automatic-correction refinement sliders were not tied to auto-contrast state");
+	for (std::size_t index = 0; index < static_cast<std::size_t>(LevelControl::Count); ++index) {
+		const LevelControl control = static_cast<LevelControl>(index);
+		const auto& info = jpegview_linux::GetLevelControlInfo(control);
+		jpegview_linux::SetLevelControlValue(params, control, info.minimum - 10.0);
+		ExpectNear(jpegview_linux::GetLevelControlValue(params, control), info.minimum, 1e-12,
+			"picture-level minimum was not clamped");
+		jpegview_linux::SetLevelControlValue(params, control, info.maximum + 10.0);
+		ExpectNear(jpegview_linux::GetLevelControlValue(params, control), info.maximum, 1e-12,
+			"picture-level maximum was not clamped");
+		jpegview_linux::SetLevelControlValue(params, control, info.defaultValue);
+	}
+	Expect(jpegview_linux::IsDefaultImageProcessing(params),
+		"range-boundary testing failed to restore slider identity values");
+	ExpectNear(jpegview_linux::LevelControlValueAtPosition(LevelControl::Brightness, 0.0),
+		2.0, 1e-12, "brightness slider left endpoint is not logarithmic maximum");
+	ExpectNear(jpegview_linux::LevelControlValueAtPosition(LevelControl::Brightness, 1.0),
+		0.5, 1e-12, "brightness slider right endpoint is not logarithmic minimum");
+	jpegview_linux::SetLevelControlValue(params, LevelControl::Brightness, 1.0);
+	ExpectNear(jpegview_linux::LevelControlPosition(params, LevelControl::Brightness),
+		0.5, 1e-12, "brightness slider logarithmic position did not round-trip");
+	jpegview_linux::SetLevelControlValue(params, LevelControl::Contrast, 1.0);
+	ExpectNear(params.contrast, 0.5, 1e-12, "contrast slider was not clamped to its Windows range");
+	jpegview_linux::SetLevelControlValue(params, LevelControl::Brightness,
+		std::numeric_limits<double>::quiet_NaN());
+	ExpectNear(params.gamma, 1.0, 1e-12, "malformed slider input did not restore its default");
+	jpegview_linux::SetLevelControlValue(params, LevelControl::Contrast, 0.0);
+	Expect(jpegview_linux::IsDefaultImageProcessing(params), "reset slider values did not restore defaults");
+	jpegview_linux::ImageProcessingPreset current;
+	jpegview_linux::ImageProcessingPreset saved;
+	jpegview_linux::SetLevelControlValue(current.processing, LevelControl::Contrast, 0.25);
+	current.autoContrast = true;
+	jpegview_linux::SetLevelControlValue(saved.processing, LevelControl::Contrast, -0.25);
+	const auto kept = jpegview_linux::ResolveImageProcessingForFile(current, &saved, true, false);
+	const auto restored = jpegview_linux::ResolveImageProcessingForFile(current, &saved, false, false);
+	const auto defaults = jpegview_linux::ResolveImageProcessingForFile(current, nullptr, false, true);
+	ExpectNear(kept.processing.contrast, 0.25, 1e-12,
+		"keep-between-images did not override the saved per-file levels");
+	Expect(kept.autoContrast, "keep-between-images did not preserve auto correction state");
+	ExpectNear(restored.processing.contrast, -0.25, 1e-12,
+		"per-file levels were not restored when keep was disabled");
+	Expect(!restored.autoContrast, "per-file auto-correction state was not restored");
+	Expect(jpegview_linux::IsDefaultImageProcessing(defaults.processing) && defaults.autoContrast,
+		"image without saved levels did not receive identity values");
+
+	const std::vector<std::uint8_t> pixels = {
+		32, 64, 96, 17, 64, 96, 128, 18,
+		96, 128, 160, 19, 128, 160, 192, 20,
+	};
+	jpegview_linux::Image original;
+	Expect(original.StoreBGRA(pixels.data(), 2, 2), "could not create levels fixture");
+	ImageProcessingParams color;
+	jpegview_linux::SetLevelControlValue(color, LevelControl::Saturation, 0.0);
+	jpegview_linux::Image grayscale = original;
+	Expect(grayscale.ApplyProcessing(color, false), "saturation processing rejected a valid image");
+	for (std::size_t offset = 0; offset < grayscale.bgra.size(); offset += 4) {
+		Expect(std::abs(static_cast<int>(grayscale.bgra[offset]) - grayscale.bgra[offset + 1]) <= 1 &&
+			std::abs(static_cast<int>(grayscale.bgra[offset + 1]) - grayscale.bgra[offset + 2]) <= 1,
+			"zero saturation did not produce grayscale");
+		Expect(grayscale.bgra[offset + 3] == pixels[offset + 3], "levels processing changed alpha");
+	}
+	color = {};
+	jpegview_linux::SetLevelControlValue(color, LevelControl::CyanRed, 1.0);
+	jpegview_linux::Image redTint = original;
+	Expect(redTint.ApplyProcessing(color, false) && redTint.bgra[2] > original.bgra[2],
+		"cyan-red level did not tint toward red");
+	color = {};
+	jpegview_linux::SetLevelControlValue(color, LevelControl::Brightness, 0.5);
+	jpegview_linux::Image brighter = original;
+	Expect(brighter.ApplyProcessing(color, false) && brighter.bgra[0] > original.bgra[0],
+		"brightness/gamma level did not brighten the image");
+	color = {};
+	color.localDensityEnabled = true;
+	color.lightenShadows = 1.0;
+	color.deepShadows = 0.8;
+	jpegview_linux::Image locallyCorrected = original;
+	Expect(locallyCorrected.ApplyProcessing(color, false) &&
+		locallyCorrected.bgra.size() == original.bgra.size(),
+		"local density correction failed on a small image");
+	color = {};
+	color.unsharpRadius = 1.0;
+	color.unsharpAmount = 2.0;
+	color.unsharpThreshold = 0.0;
+	jpegview_linux::Image unsharp = original;
+	Expect(unsharp.ApplyProcessing(color, false) && unsharp.bgra != original.bgra,
+		"unsharp mask did not alter detail when enabled");
+	color = {};
+	color.colorCorrection = 0.3;
+	color.contrastCorrection = 0.6;
+	color.deepShadows = 0.8;
+	color.unsharpRadius = 4.0;
+	color.unsharpThreshold = 10.0;
+	jpegview_linux::Image inactive = original;
+	Expect(inactive.ApplyProcessing(color, false) && inactive.bgra == original.bgra,
+		"inactive correction controls needlessly changed image pixels");
+}
+
+void TestPictureLevelsStoreRoundTrip() {
+	TemporaryDirectory temporary;
+	const fs::path database = temporary.path() / "picture-levels.db";
+	jpegview_linux::ImageProcessingStore expected;
+	jpegview_linux::ImageProcessingPreset preset;
+	preset.processing.contrast = 0.23;
+	preset.processing.gamma = 1.2;
+	preset.processing.cyanRed = -0.4;
+	preset.processing.localDensityEnabled = true;
+	preset.autoContrast = true;
+	expected["/images/a \"quoted\" photo.jpg"] = preset;
+	Expect(jpegview_linux::SaveImageProcessingStore(database, expected),
+		"picture-level store could not be written");
+	jpegview_linux::ImageProcessingStore loaded;
+	Expect(jpegview_linux::LoadImageProcessingStore(database, loaded),
+		"picture-level store could not be read");
+	Expect(loaded.size() == 1 && jpegview_linux::EqualImageProcessing(
+		loaded.begin()->second.processing, preset.processing) && loaded.begin()->second.autoContrast,
+		"picture-level store did not round-trip parameters and correction state");
+	Expect(loaded.begin()->first == expected.begin()->first,
+		"picture-level store did not preserve quoted path characters");
+	loaded.clear();
+	std::ofstream malformed(database, std::ios::trunc);
+	malformed << "\"/broken\" 1 no-number\n";
+	malformed.close();
+	Expect(!jpegview_linux::LoadImageProcessingStore(database, loaded) && loaded.empty(),
+		"malformed picture-level database was accepted or partially loaded");
+}
+
 void TestSettingsRoundTripAndMalformedValues() {
 	TemporaryDirectory temporary;
 	const fs::path settingsPath = temporary.path() / "config" / "settings.conf";
@@ -1465,6 +1680,10 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.showHistogram = true;
 	expected.showFilename = true;
 	expected.autoContrast = true;
+	expected.keepPictureLevels = true;
+	expected.unsharpMaskRadius = 2.25;
+	expected.unsharpMaskAmount = 3.5;
+	expected.unsharpMaskThreshold = 7.0;
 	expected.cacheSizeMiB = 1536;
 	expected.copyRenamePattern = "%F=%n";
 	Expect(jpegview_linux::SaveViewerSettings(settingsPath, expected), "settings could not be saved");
@@ -1493,6 +1712,14 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.showFilename == expected.showFilename &&
 		loaded.autoContrast == expected.autoContrast,
 		"overlay/correction settings did not round-trip");
+	Expect(loaded.keepPictureLevels == expected.keepPictureLevels,
+		"keep picture levels setting did not round-trip");
+	ExpectNear(loaded.unsharpMaskRadius, expected.unsharpMaskRadius, 0.0000001,
+		"unsharp radius setting did not round-trip");
+	ExpectNear(loaded.unsharpMaskAmount, expected.unsharpMaskAmount, 0.0000001,
+		"unsharp amount setting did not round-trip");
+	ExpectNear(loaded.unsharpMaskThreshold, expected.unsharpMaskThreshold, 0.0000001,
+		"unsharp threshold setting did not round-trip");
 	Expect(loaded.copyRenamePattern == expected.copyRenamePattern, "batch pattern did not round-trip");
 	Expect(loaded.cacheSizeMiB == expected.cacheSizeMiB, "cache size did not round-trip");
 	Expect(loaded.manualZoomSet, "saved manual zoom was not marked present");
@@ -2315,6 +2542,8 @@ void TestContextMenuCatalogAndState() {
 	Expect(findCommand(compact, IDM_OPEN) != nullptr && findCommand(compact, IDM_NEXT) != nullptr &&
 		findCommand(compact, IDM_ZOOM_100) != nullptr && findCommand(compact, IDM_EXIT) != nullptr,
 		"compact context menu lost a primary command");
+	Expect(findCommand(compact, jpegview_linux::kCommandEditPictureLevels) != nullptr,
+		"compact context menu omitted the picture-level editor");
 	Expect(findCommand(compact, jpegview_linux::kCommandPreviousSiblingFolder) == nullptr &&
 		findCommand(compact, jpegview_linux::kCommandNextSiblingFolder) == nullptr,
 		"compact context menu exposed advanced sibling-folder navigation commands");
@@ -2333,6 +2562,10 @@ void TestContextMenuCatalogAndState() {
 	state.imageAvailable = true;
 	state.losslessJpegAvailable = true;
 	state.autoCorrectionEnabled = true;
+	state.pictureLevelsAvailable = true;
+	state.localDensityEnabled = true;
+	state.keepPictureLevels = true;
+	state.pictureLevelsSaved = true;
 	state.fitToWindow = false;
 	state.zoom = 1.0;
 	state.fullscreen = true;
@@ -2368,8 +2601,17 @@ void TestContextMenuCatalogAndState() {
 		"context menu did not reflect navigation and ordering state");
 	Expect(findCommand(advanced, IDM_CHANGESIZE)->enabled &&
 		findCommand(advanced, IDM_ROTATE_90_LOSSLESS)->enabled &&
-		findCommand(advanced, IDM_AUTO_CORRECTION)->checked,
+		findCommand(advanced, IDM_AUTO_CORRECTION)->checked &&
+		findCommand(advanced, jpegview_linux::kCommandEditPictureLevels)->enabled &&
+		findCommand(advanced, IDM_LDC)->checked && findCommand(advanced, IDM_KEEP_PARAMETERS)->checked &&
+		!findCommand(advanced, IDM_SAVE_PARAM_DB)->enabled &&
+		!findCommand(advanced, IDM_CLEAR_PARAM_DB)->enabled,
 		"context menu did not enable image-dependent commands");
+	state.keepPictureLevels = false;
+	const std::vector<MenuItem> editableDatabase = jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(editableDatabase, IDM_SAVE_PARAM_DB)->enabled &&
+		findCommand(editableDatabase, IDM_CLEAR_PARAM_DB)->enabled,
+		"parameter database actions stayed disabled after keep-between-images was turned off");
 	Expect(findCommand(advanced, IDM_ZOOM_100)->checked &&
 		findCommand(advanced, IDM_FULL_SCREEN_MODE)->checked &&
 		findCommand(advanced, IDM_HIDE_TITLE_BAR)->checked &&
@@ -3456,6 +3698,8 @@ int main() {
 	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);
 	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
 	RunTest("image-auto-contrast-invariants", TestImageAutoContrastInvariants, failures);
+	RunTest("picture-levels-model-and-processing", TestPictureLevelsModelAndProcessing, failures);
+	RunTest("picture-levels-store-round-trip", TestPictureLevelsStoreRoundTrip, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
 	RunTest("settings-path-selection", TestSettingsPathSelection, failures);
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);

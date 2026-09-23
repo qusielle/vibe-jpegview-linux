@@ -1,5 +1,7 @@
 #pragma once
 
+#include "image_processing.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -25,7 +27,11 @@ public:
 	bool Resize(int newWidth, int newHeight, int filter = 3);
 
 	// Applies JPEGView's histogram-derived automatic correction in place.
-	bool AutoContrast();
+	bool AutoContrast(double colorCorrection = 0.0, double contrastCorrection = 0.0);
+
+	// Applies the picture-level controls to the current pixels. Automatic
+	// correction remains independently switchable and is applied first.
+	bool ApplyProcessing(const ImageProcessingParams& params, bool autoContrast);
 };
 
 } // namespace jpegview_linux

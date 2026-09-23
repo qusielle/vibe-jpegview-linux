@@ -6,11 +6,14 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, and current-file
   preservation.
 - `image`: validated mutable BGRA storage, rotate/mirror transforms, high-quality resizing, and
-  histogram-derived automatic correction.
+  the automatic/manual picture-level processing pipeline.
+- `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
+  pixel processing, and the atomic native per-image levels database.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
 - `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
-  source-aware decoded-image retention, nearest-first decode completion, and threaded
-  correction/scaling of renderer-ready frames. JPEG display requests use native reduced DCT decode
+  source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
+  processing/scaling of renderer-ready frames. Display keys capture every active processing value
+  so an adjustment cannot reuse stale pixels. JPEG display requests use native reduced DCT decode
   before exact scaling, without requiring a retained full-resolution source frame.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `settings` and `sort_mode`: persisted configuration and stable setting values.
@@ -85,3 +88,12 @@ buffer while allowing the kernel page cache to service repeated neighboring acce
 parsing reads only bounded JPEG header segments and stops before compressed scan data.
 The speculative display window is conservatively sized from the shared byte budget and viewport area
 (with a finite work cap), rather than using the decoded cache's fixed neighbor count.
+Ordinary picture-level previews are processed by the display workers; full-resolution pixels are
+processed only when save, copy, resize, transform, or another pixel-consuming operation requires
+them. Rapid foreground preview requests coalesce queued obsolete adjustments, and an in-flight stale
+foreground result cannot replace the latest one. The per-image parameter store is keyed by normalized
+absolute filename and stores both the adjustment values and per-image automatic-correction state.
+With keep-between-images enabled, current values take precedence; otherwise a saved entry is
+restored. `image_processing` provides clamped ranges and identity defaults for the panel.
+Unsharp-mask parameters are included in display request keys so changing its preview cannot reuse
+stale prepared pixels.

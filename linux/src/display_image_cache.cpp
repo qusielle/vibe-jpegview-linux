@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <iterator>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -53,13 +54,28 @@ std::string NormalizedPath(const fs::path& filename) {
 }
 
 std::string RequestKey(const fs::path& filename, const FileIdentity& identity,
-	std::size_t frameIndex, int width, int height, bool autoContrast) {
+	std::size_t frameIndex, int width, int height, bool autoContrast,
+	const ImageProcessingParams& processing) {
 	if (!identity.valid) return {};
+	const bool localDensity = processing.localDensityEnabled &&
+		(processing.lightenShadows > 0.0 || processing.darkenHighlights > 0.0);
+	const bool unsharp = processing.unsharpRadius > 0.0 && processing.unsharpAmount > 0.0;
 	std::ostringstream key;
+	key << std::setprecision(17);
 	key << NormalizedPath(filename) << '\n'
 		<< identity.device << ':' << identity.inode << ':' << identity.size << ':'
 		<< identity.modifiedSeconds << ':' << identity.modifiedNanoseconds << '\n'
-		<< frameIndex << ':' << width << 'x' << height << ':' << autoContrast;
+		<< frameIndex << ':' << width << 'x' << height << ':' << autoContrast << ':'
+		<< processing.contrast << ':' << processing.gamma << ':' << processing.saturation << ':'
+		<< processing.cyanRed << ':' << processing.magentaGreen << ':' << processing.yellowBlue << ':'
+		<< (localDensity ? processing.lightenShadows : 0.0) << ':' <<
+		(localDensity ? processing.darkenHighlights : 0.0) << ':' <<
+		(localDensity ? processing.deepShadows : 0.0) << ':' <<
+		(autoContrast ? processing.colorCorrection : 0.0) << ':' <<
+		(autoContrast ? processing.contrastCorrection : 0.0) << ':' << processing.sharpen << ':' <<
+		(unsharp ? processing.unsharpRadius : 0.0) << ':' <<
+		(unsharp ? processing.unsharpAmount : 0.0) << ':' <<
+		(unsharp ? processing.unsharpThreshold : 0.0) << ':' << localDensity;
 	return key.str();
 }
 
@@ -91,7 +107,7 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		image.height = image.originalHeight = ownedFrame.height;
 		image.bgra = std::move(ownedFrame.bgra);
 	}
-	if (request.autoContrast && !image.AutoContrast()) return {};
+	if (!image.ApplyProcessing(request.processing, request.autoContrast)) return {};
 	if ((request.targetWidth < image.width || request.targetHeight < image.height) &&
 		!image.Resize(request.targetWidth, request.targetHeight)) return {};
 
@@ -118,7 +134,8 @@ bool DisplayImageRequest::Valid() const {
 
 DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
-	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority) {
+	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority,
+	const ImageProcessingParams& processing) {
 	DisplayImageRequest request;
 	request.filename = filename;
 	request.decoded = decoded;
@@ -126,6 +143,7 @@ DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	request.targetWidth = targetWidth;
 	request.targetHeight = targetHeight;
 	request.autoContrast = autoContrast;
+	request.processing = processing;
 	request.priority = priority;
 	if (!decoded || frameIndex >= decoded->frames.size() || targetWidth <= 0 || targetHeight <= 0) {
 		return request;
@@ -133,13 +151,13 @@ DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	request.sourceWidth = decoded->frames[frameIndex].width;
 	request.sourceHeight = decoded->frames[frameIndex].height;
 	request.key = RequestKey(filename, Identify(filename), frameIndex,
-		targetWidth, targetHeight, autoContrast);
+		targetWidth, targetHeight, autoContrast, processing);
 	return request;
 }
 
 DisplayImageRequest MakeJpegDisplayImageRequest(const fs::path& filename,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
-	bool autoContrast, std::size_t priority) {
+	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing) {
 	DisplayImageRequest request;
 	request.filename = filename;
 	request.sourceWidth = sourceWidth;
@@ -147,11 +165,12 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const fs::path& filename,
 	request.targetWidth = targetWidth;
 	request.targetHeight = targetHeight;
 	request.autoContrast = autoContrast;
+	request.processing = processing;
 	request.priority = priority;
 	if (!IsJpegPath(filename) || sourceWidth <= 0 || sourceHeight <= 0 ||
 		targetWidth <= 0 || targetHeight <= 0) return request;
 	request.key = RequestKey(filename, Identify(filename), 0,
-		targetWidth, targetHeight, autoContrast);
+		targetWidth, targetHeight, autoContrast, processing);
 	return request;
 }
 
@@ -293,7 +312,7 @@ struct DisplayImageCache::Impl {
 			const std::string currentKey = RequestKey(work.request.filename,
 				Identify(work.request.filename), work.request.frameIndex,
 				work.request.targetWidth, work.request.targetHeight,
-				work.request.autoContrast);
+				work.request.autoContrast, work.request.processing);
 
 			{
 				std::lock_guard<std::mutex> lock(mutex);
@@ -302,11 +321,13 @@ struct DisplayImageCache::Impl {
 				--activeWorkers;
 				const bool foreground = work.foreground ||
 					foregroundKeys.erase(work.request.key) != 0;
+				const bool stillCurrentForeground = !foreground ||
+					work.request.key == latestForegroundKey;
 				const auto desiredPriority = desiredPrefetchPriorities.find(work.request.key);
 				const std::size_t completionPriority = foreground ? 0 :
 					(desiredPriority == desiredPrefetchPriorities.end() ? work.request.priority :
 						desiredPriority->second);
-				if (!stopping && work.epoch == epoch && image && image->key == currentKey &&
+				if (!stopping && stillCurrentForeground && work.epoch == epoch && image && image->key == currentKey &&
 					(foreground || desiredPrefetchKeys.find(work.request.key) !=
 						desiredPrefetchKeys.end())) {
 					// A finished worker frame remains eligible for immediate SDL upload
@@ -354,6 +375,7 @@ struct DisplayImageCache::Impl {
 	std::unordered_set<std::string> desiredPrefetchKeys;
 	std::unordered_map<std::string, std::size_t> desiredPrefetchPriorities;
 	std::unordered_set<std::string> foregroundKeys;
+	std::string latestForegroundKey;
 	std::size_t cachedBytes = 0;
 	std::size_t activeWorkers = 0;
 	std::uint64_t useCounter = 0;
@@ -374,7 +396,7 @@ DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& r
 	if (!request.Valid()) return {};
 	if (request.key != RequestKey(request.filename, Identify(request.filename),
 		request.frameIndex, request.targetWidth, request.targetHeight,
-		request.autoContrast)) return {};
+		request.autoContrast, request.processing)) return {};
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	const auto found = impl_->entries.find(request.key);
 	if (found != impl_->entries.end()) {
@@ -390,30 +412,47 @@ DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& r
 
 void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	if (!request.Valid()) return;
+	bool removedQueuedForeground = false;
+	bool hasQueuedWork = false;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->latestForegroundKey != request.key) {
+			impl_->latestForegroundKey = request.key;
+			for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
+				if (queued->foreground && queued->request.key != request.key) {
+					impl_->queuedKeys.erase(queued->request.key);
+					impl_->foregroundKeys.erase(queued->request.key);
+					queued = impl_->queue.erase(queued);
+					removedQueuedForeground = true;
+				} else {
+					++queued;
+				}
+			}
+			for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
+				if (completed->priority == 0 && completed->image && completed->image->key != request.key) {
+					impl_->retired.push_back(std::move(completed->image));
+					completed = impl_->completed.erase(completed);
+				} else {
+					++completed;
+				}
+			}
+			if (!impl_->retired.empty()) impl_->retirementAvailable.notify_one();
+		}
 		const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
 			[&request](const Impl::Completion& completion) {
 				return completion.image && completion.image->key == request.key;
 			});
 		if (completed != impl_->completed.end()) {
 			completed->priority = 0;
-			return;
-		}
-		const auto cached = impl_->entries.find(request.key);
-		if (cached != impl_->entries.end()) {
+		} else if (const auto cached = impl_->entries.find(request.key); cached != impl_->entries.end()) {
 			// A speculative frame can become the foreground between worker
 			// completion and renderer upload. Promote the shared completion object
 			// so it cannot wait behind any neighboring frame.
 			impl_->completed.push_front({cached->second.image, 0});
-			return;
-		}
-		if (impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) {
+		} else if (impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) {
 			impl_->foregroundKeys.insert(request.key);
 			impl_->inFlightPriorities[request.key] = 0;
-			return;
-		}
-		if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end()) {
+		} else if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end()) {
 			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
 				[&request](const Impl::Work& work) { return work.request.key == request.key; });
 			if (queued != impl_->queue.end()) {
@@ -422,13 +461,16 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 				promoted.foreground = true;
 				promoted.epoch = impl_->epoch;
 				impl_->queue.push_front(std::move(promoted));
+				hasQueuedWork = true;
 			}
-			return;
+		} else {
+			impl_->queue.push_front(Impl::Work{request, 0, impl_->epoch, true});
+			impl_->queuedKeys.insert(request.key);
+			hasQueuedWork = true;
 		}
-		impl_->queue.push_front(Impl::Work{request, 0, impl_->epoch, true});
-		impl_->queuedKeys.insert(request.key);
 	}
-	impl_->workAvailable.notify_one();
+	if (removedQueuedForeground) impl_->idle.notify_all();
+	if (hasQueuedWork) impl_->workAvailable.notify_one();
 }
 
 DisplayImageCache::ImagePtr DisplayImageCache::RequestAndWait(
@@ -566,6 +608,7 @@ void DisplayImageCache::Clear() {
 	impl_->desiredPrefetchKeys.clear();
 	impl_->desiredPrefetchPriorities.clear();
 	impl_->foregroundKeys.clear();
+	impl_->latestForegroundKey.clear();
 	while (!impl_->entries.empty()) impl_->Erase(impl_->entries.begin());
 	impl_->idle.notify_all();
 	impl_->workAvailable.notify_all();

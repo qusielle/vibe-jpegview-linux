@@ -40,6 +40,10 @@ struct ViewerSettings {
 	bool showHistogram = false;
 	bool showFilename = false;
 	bool autoContrast = false;
+	bool keepPictureLevels = false;
+	double unsharpMaskRadius = 1.0;
+	double unsharpMaskAmount = 0.0;
+	double unsharpMaskThreshold = 4.0;
 	std::size_t cacheSizeMiB = kDefaultCacheSizeMiB;
 	std::string copyRenamePattern;
 };

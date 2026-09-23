@@ -12,6 +12,7 @@ namespace jpegview_linux {
 
 constexpr int kContextMenuShowAdvanced = -1;
 constexpr int kToggleNavigationPanelAutoReveal = -3;
+constexpr int kCommandEditPictureLevels = -7;
 
 struct MenuItem {
 	std::string label;
@@ -53,6 +54,10 @@ struct ContextMenuState {
 	bool imageAvailable = false;
 	bool losslessJpegAvailable = false;
 	bool autoCorrectionEnabled = false;
+	bool pictureLevelsAvailable = false;
+	bool localDensityEnabled = false;
+	bool keepPictureLevels = false;
+	bool pictureLevelsSaved = false;
 	bool fitToWindow = true;
 	bool fillWithCrop = false;
 	bool noEnlarge = true;

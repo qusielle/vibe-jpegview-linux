@@ -2,6 +2,7 @@
 
 #include "image_decoder.h"
 #include "cache_budget.h"
+#include "image_processing.h"
 
 #include <chrono>
 #include <cstddef>
@@ -24,6 +25,7 @@ struct DisplayImageRequest {
 	int targetWidth = 0;
 	int targetHeight = 0;
 	bool autoContrast = false;
+	ImageProcessingParams processing;
 	std::size_t priority = 0;
 	std::string key;
 
@@ -43,11 +45,13 @@ struct PreparedDisplayImage {
 // for a missing file, invalid frame, or invalid target dimensions.
 DisplayImageRequest MakeDisplayImageRequest(const std::filesystem::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
-	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0);
+	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0,
+	const ImageProcessingParams& processing = {});
 
 DisplayImageRequest MakeJpegDisplayImageRequest(const std::filesystem::path& filename,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
-	bool autoContrast, std::size_t priority = 0);
+	bool autoContrast, std::size_t priority = 0,
+	const ImageProcessingParams& processing = {});
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
 

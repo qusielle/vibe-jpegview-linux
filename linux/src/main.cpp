@@ -7,6 +7,8 @@
 #include "image_cache.h"
 #include "display_image_cache.h"
 #include "image.h"
+#include "image_processing.h"
+#include "image_processing_store.h"
 #include "settings.h"
 #include "sort_mode.h"
 #include "desktop_applications.h"
@@ -432,7 +434,6 @@ private:
 		jpegview_linux::ViewportSnapshot viewport;
 		int imageAreaWidth = 0;
 		int imageAreaHeight = 0;
-		bool autoContrast = false;
 	};
 
 	struct DisplayPrefetchBatch {
@@ -440,6 +441,8 @@ private:
 		std::vector<jpegview_linux::DisplayImageRequest> requests;
 		std::unordered_set<std::string> retainedTextureKeys;
 		std::unordered_map<std::string, std::size_t> priorityByFilename;
+		std::unordered_map<std::string, jpegview_linux::ImageProcessingParams> processingByFilename;
+		std::unordered_map<std::string, bool> autoContrastByFilename;
 		jpegview_linux::DisplayImageCache* cache = nullptr;
 		DisplayPrefetchContext context;
 	};
@@ -499,12 +502,20 @@ private:
 	}
 
 	void LoadSettings() {
+		jpegview_linux::LoadImageProcessingStore(
+			jpegview_linux::ImageProcessingStorePath(), imageProcessingStore_);
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
 		if (settingsPath.empty()) return;
 
 		jpegview_linux::ViewerSettings settings;
 		if (!jpegview_linux::LoadViewerSettings(settingsPath, settings)) return;
 		copyRenamePattern_ = settings.copyRenamePattern;
+		defaultAutoContrastEnabled_ = settings.autoContrast;
+		autoContrastEnabled_ = settings.autoContrast;
+		keepPictureLevels_ = settings.keepPictureLevels;
+		unsharpMaskRadius_ = settings.unsharpMaskRadius;
+		unsharpMaskAmount_ = settings.unsharpMaskAmount;
+		unsharpMaskThreshold_ = settings.unsharpMaskThreshold;
 		jpegview_linux::FileList::SortMode sortMode;
 		if (jpegview_linux::ParseSortMode(settings.sortMode, sortMode)) {
 			fileList_.SetSorting(sortMode, settings.sortAscending);
@@ -547,7 +558,11 @@ private:
 		settings.infoVisible = infoVisible_;
 		settings.showHistogram = showHistogram_;
 		settings.showFilename = showFileName_;
-		settings.autoContrast = autoContrastEnabled_;
+		settings.autoContrast = defaultAutoContrastEnabled_;
+		settings.keepPictureLevels = keepPictureLevels_;
+		settings.unsharpMaskRadius = unsharpMaskRadius_;
+		settings.unsharpMaskAmount = unsharpMaskAmount_;
+		settings.unsharpMaskThreshold = unsharpMaskThreshold_;
 		settings.cacheSizeMiB = cacheSizeMiB_;
 		settings.copyRenamePattern = copyRenamePattern_;
 		jpegview_linux::SaveViewerSettings(settingsPath, settings);
@@ -576,7 +591,16 @@ private:
 	}
 
 	bool MaterializeCurrentPixels() {
-		if (currentPixelsMaterialized_) return true;
+		if (currentPixelsMaterialized_ &&
+			jpegview_linux::EqualImageProcessing(materializedProcessing_, imageProcessing_) &&
+			materializedAutoContrast_ == autoContrastEnabled_) return true;
+		if (currentPixelsMaterialized_ && correctionBaseValid_) {
+			image_ = correctionBase_;
+			if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) return false;
+			materializedProcessing_ = imageProcessing_;
+			materializedAutoContrast_ = autoContrastEnabled_;
+			return true;
+		}
 		if (!currentDecoded_) {
 			currentDecoded_ = imageCache_.Find(fileList_.Current());
 			if (!currentDecoded_) currentDecoded_ = imageCache_.FindOrWait(fileList_.Current());
@@ -613,18 +637,36 @@ private:
 		}
 		correctionBase_ = image_;
 		correctionBaseValid_ = true;
-		if (autoContrastEnabled_ && !image_.AutoContrast()) {
-			SetTitle(fileList_.Current().filename().string() + " — automatic correction failed");
+		if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) {
+			SetTitle(fileList_.Current().filename().string() + " — picture-level processing failed");
 			return false;
 		}
+		materializedProcessing_ = imageProcessing_;
+		materializedAutoContrast_ = autoContrastEnabled_;
 		currentPixelsMaterialized_ = true;
 		return true;
+	}
+
+	void SelectPictureLevelsForCurrentFile() {
+		const std::string key = AbsoluteNormalized(fileList_.Current()).string();
+		const auto saved = imageProcessingStore_.find(key);
+		const jpegview_linux::ImageProcessingPreset current{imageProcessing_, autoContrastEnabled_};
+		const jpegview_linux::ImageProcessingPreset selected =
+			jpegview_linux::ResolveImageProcessingForFile(current,
+				saved == imageProcessingStore_.end() ? nullptr : &saved->second,
+				keepPictureLevels_, defaultAutoContrastEnabled_);
+		imageProcessing_ = selected.processing;
+		autoContrastEnabled_ = selected.autoContrast;
+		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
+		imageProcessing_.unsharpAmount = 0.0;
+		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
 	}
 
 	bool LoadCurrent(int prefetchDirection = 0) {
 		if (fileList_.Empty()) {
 			return false;
 		}
+		SelectPictureLevelsForCurrentFile();
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.NavigationSnapshot();
 		metadata_ = {};
 		jpegComment_.clear();
@@ -640,6 +682,8 @@ private:
 		currentAnimationFrame_ = 0;
 		currentDisplayRequest_.reset();
 		currentPixelsMaterialized_ = false;
+		materializedProcessing_ = {};
+		materializedAutoContrast_ = false;
 		animationFrames_.clear();
 		correctionBase_ = {};
 		correctionBaseValid_ = false;
@@ -661,7 +705,7 @@ private:
 					sourceWidth, sourceHeight, imageArea.w, imageArea.h);
 				currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
 					fileList_.Current(), sourceWidth, sourceHeight, destination.width,
-					destination.height, autoContrastEnabled_);
+					destination.height, autoContrastEnabled_, 0, imageProcessing_);
 				if (currentDisplayRequest_->Valid()) {
 					displayTextureProtectedKeys_.insert(currentDisplayRequest_->key);
 					cachedDisplay = FindDisplayTexture(currentDisplayRequest_->key) != nullptr;
@@ -733,8 +777,7 @@ private:
 		const SDL_Rect imageArea = ImageAreaRect();
 		auto batch = std::make_shared<DisplayPrefetchBatch>();
 		batch->cache = &displayImageCache_;
-		batch->context = {viewport_.NavigationSnapshot(), imageArea.w, imageArea.h,
-			autoContrastEnabled_};
+		batch->context = {viewport_.NavigationSnapshot(), imageArea.w, imageArea.h};
 		for (const auto& retained : displayTextureCache_) {
 			batch->retainedTextureKeys.insert(retained.first);
 		}
@@ -749,6 +792,18 @@ private:
 		for (std::size_t position = 0; position < prefetchOrder.size(); ++position) {
 			const fs::path& filename = fileList_.Files()[prefetchOrder[position]];
 			batch->priorityByFilename.emplace(filename.string(), position + 1);
+			const auto savedProcessing = imageProcessingStore_.find(AbsoluteNormalized(filename).string());
+			const jpegview_linux::ImageProcessingPreset current{imageProcessing_, autoContrastEnabled_};
+			const jpegview_linux::ImageProcessingPreset filePreset =
+				jpegview_linux::ResolveImageProcessingForFile(current,
+					savedProcessing == imageProcessingStore_.end() ? nullptr : &savedProcessing->second,
+					keepPictureLevels_, defaultAutoContrastEnabled_);
+			jpegview_linux::ImageProcessingParams fileProcessing = filePreset.processing;
+			fileProcessing.unsharpRadius = unsharpMaskRadius_;
+			fileProcessing.unsharpAmount = 0.0;
+			fileProcessing.unsharpThreshold = unsharpMaskThreshold_;
+			batch->processingByFilename.emplace(filename.string(), fileProcessing);
+			batch->autoContrastByFilename.emplace(filename.string(), filePreset.autoContrast);
 			if (!jpegview_linux::IsJpegPath(filename)) continue;
 			int sourceWidth = 0;
 			int sourceHeight = 0;
@@ -763,7 +818,8 @@ private:
 				batch->context.imageAreaHeight);
 			jpegview_linux::DisplayImageRequest request =
 				jpegview_linux::MakeJpegDisplayImageRequest(filename, sourceWidth, sourceHeight,
-					target.width, target.height, batch->context.autoContrast, position + 1);
+					target.width, target.height, filePreset.autoContrast, position + 1,
+					fileProcessing);
 			if (!request.Valid()) continue;
 			displayTextureProtectedKeys_.insert(request.key);
 			if (batch->retainedTextureKeys.find(request.key) ==
@@ -783,11 +839,15 @@ private:
 					frame.width, frame.height, batch->context.imageAreaWidth,
 					batch->context.imageAreaHeight);
 				const auto priority = batch->priorityByFilename.find(filename.string());
-				if (priority == batch->priorityByFilename.end()) return;
+				const auto processing = batch->processingByFilename.find(filename.string());
+				const auto autoContrast = batch->autoContrastByFilename.find(filename.string());
+				if (priority == batch->priorityByFilename.end() ||
+					processing == batch->processingByFilename.end() ||
+					autoContrast == batch->autoContrastByFilename.end()) return;
 				jpegview_linux::DisplayImageRequest request =
 					jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
-						target.width, target.height, batch->context.autoContrast,
-						priority->second);
+						target.width, target.height, autoContrast->second,
+						priority->second, processing->second);
 				if (!request.Valid() ||
 					batch->retainedTextureKeys.find(request.key) !=
 						batch->retainedTextureKeys.end()) return;
@@ -944,15 +1004,17 @@ private:
 			currentDisplayRequest_->frameIndex != currentAnimationFrame_ ||
 			currentDisplayRequest_->targetWidth != width ||
 			currentDisplayRequest_->targetHeight != height ||
-			currentDisplayRequest_->autoContrast != autoContrastEnabled_) {
+			currentDisplayRequest_->autoContrast != autoContrastEnabled_ ||
+			!jpegview_linux::EqualImageProcessing(currentDisplayRequest_->processing,
+				imageProcessing_)) {
 			if (currentDecoded_) {
 				currentDisplayRequest_ = jpegview_linux::MakeDisplayImageRequest(
 					fileList_.Current(), currentDecoded_, currentAnimationFrame_, width, height,
-					autoContrastEnabled_);
+					autoContrastEnabled_, 0, imageProcessing_);
 			} else {
 				currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
 					fileList_.Current(), image_.originalWidth, image_.originalHeight, width, height,
-					autoContrastEnabled_);
+					autoContrastEnabled_, 0, imageProcessing_);
 			}
 		}
 		return currentDisplayRequest_->Valid() ? &*currentDisplayRequest_ : nullptr;
@@ -1181,26 +1243,22 @@ private:
 		RestoreScaleMode(viewportSnapshot);
 	}
 
-	void RebuildAutoContrastImage(const jpegview_linux::ViewportSnapshot& viewportSnapshot) {
-		if (!correctionBaseValid_) return;
-		image_ = correctionBase_;
-		if (autoContrastEnabled_) image_.AutoContrast();
-		if (!UpdateTexture()) {
-			SetTitle("Automatic correction failed: could not update the display texture");
-			return;
-		}
-		RestoreScaleMode(viewportSnapshot);
-		SetTitle();
+	void ToggleAutoContrast() {
+		autoContrastEnabled_ = !autoContrastEnabled_;
+		defaultAutoContrastEnabled_ = autoContrastEnabled_;
+		RefreshPictureLevels();
+		SaveSettings();
 	}
 
-	void ToggleAutoContrast() {
-		if (!MaterializeCurrentPixels() || !correctionBaseValid_) return;
-		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
-		autoContrastEnabled_ = !autoContrastEnabled_;
-		RebuildAutoContrastImage(viewportSnapshot);
+	void RefreshPictureLevels(bool refreshNeighbors = true) {
 		currentDisplayRequest_.reset();
-		PrepareImagePrefetch();
-		SaveSettings();
+		if (imageModified_ || cacheBudget_->Capacity() == 0) {
+			if (!MaterializeCurrentPixels() || !UpdateTexture()) {
+				SetTitle("Picture-level processing failed: could not update the image");
+				return;
+			}
+		}
+		if (refreshNeighbors) PrepareImagePrefetch();
 	}
 
 	void ApplyLosslessJpegTransform(int command) {
@@ -1908,12 +1966,15 @@ private:
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		Image base = animationFrames_[index];
 		Image displayed = base;
-		if (autoContrastEnabled_ && !displayed.AutoContrast()) return false;
+		if (!displayed.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) return false;
 		image_ = std::move(displayed);
 		correctionBase_ = std::move(base);
 		correctionBaseValid_ = true;
 		imageModified_ = false;
 		currentAnimationFrame_ = index;
+		currentPixelsMaterialized_ = true;
+		materializedProcessing_ = imageProcessing_;
+		materializedAutoContrast_ = autoContrastEnabled_;
 		currentDisplayRequest_.reset();
 		if (!UpdateTexture()) return false;
 		RestoreScaleMode(viewportSnapshot);
@@ -2044,6 +2105,383 @@ private:
 			TextLineHeight(kUiTextScale));
 	}
 
+	SDL_Rect PictureLevelsPanelRect() const {
+		int windowWidth = 0, windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::max(320, windowWidth - 16);
+		const int height = 144;
+		return {std::max(8, (windowWidth - width) / 2), std::max(8, windowHeight - height - 8),
+			width, std::min(height, std::max(1, windowHeight - 16))};
+	}
+
+	SDL_Rect PictureLevelsActionRect(int action) const {
+		const SDL_Rect panel = PictureLevelsPanelRect();
+		const int gap = 4;
+		const int buttonWidth = (panel.w - 16 - 6 * gap) / 7;
+		return {panel.x + 8 + action * (buttonWidth + gap), panel.y + 5,
+			buttonWidth, 22};
+	}
+
+	SDL_Rect UnsharpMaskDialogRect() const {
+		int windowWidth = 0, windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(560, std::max(420, windowWidth - 32));
+		const int height = 236;
+		return {(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+	}
+
+	SDL_Rect UnsharpMaskSliderRect(int index) const {
+		const SDL_Rect dialog = UnsharpMaskDialogRect();
+		return {dialog.x + 20, dialog.y + 58 + index * 40, dialog.w - 40, 34};
+	}
+
+	SDL_Rect UnsharpMaskActionRect(bool apply) const {
+		const SDL_Rect dialog = UnsharpMaskDialogRect();
+		return {dialog.x + dialog.w - (apply ? 124 : 244), dialog.y + dialog.h - 42, 108, 28};
+	}
+
+	int UnsharpMaskSliderAt(int x, int y) const {
+		for (int index = 0; index < 3; ++index) {
+			if (PointInRect(x, y, UnsharpMaskSliderRect(index))) return index;
+		}
+		return -1;
+	}
+
+	void SetUnsharpMaskValueFromX(int index, int x) {
+		if (index < 0 || index >= 3) return;
+		const SDL_Rect slider = UnsharpMaskSliderRect(index);
+		const int left = slider.x + 156;
+		const int right = slider.x + slider.w - 12;
+		const double maximum = index == 0 ? 5.0 : index == 1 ? 10.0 : 20.0;
+		const double value = std::clamp(static_cast<double>(x - left) / std::max(1, right - left), 0.0, 1.0) * maximum;
+		if (index == 0) unsharpMaskRadius_ = value;
+		else if (index == 1) unsharpMaskAmount_ = value;
+		else unsharpMaskThreshold_ = value;
+		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
+		imageProcessing_.unsharpAmount = unsharpMaskAmount_;
+		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
+		RefreshPictureLevels(false);
+	}
+
+	void OpenUnsharpMaskDialog() {
+		if (fileList_.Empty() || image_.width <= 0) return;
+		unsharpOriginalProcessing_ = imageProcessing_;
+		unsharpOriginalRadius_ = unsharpMaskRadius_;
+		unsharpOriginalAmount_ = unsharpMaskAmount_;
+		unsharpOriginalThreshold_ = unsharpMaskThreshold_;
+		if (imageProcessing_.unsharpAmount > 0.0) {
+			unsharpMaskRadius_ = imageProcessing_.unsharpRadius;
+			unsharpMaskAmount_ = imageProcessing_.unsharpAmount;
+			unsharpMaskThreshold_ = imageProcessing_.unsharpThreshold;
+		}
+		unsharpDialogOpen_ = true;
+		unsharpDraggingControl_ = -1;
+		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
+		imageProcessing_.unsharpAmount = unsharpMaskAmount_;
+		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
+		RefreshPictureLevels(false);
+	}
+
+	void CancelUnsharpMaskDialog() {
+		imageProcessing_.unsharpRadius = unsharpOriginalProcessing_.unsharpRadius;
+		imageProcessing_.unsharpAmount = unsharpOriginalProcessing_.unsharpAmount;
+		imageProcessing_.unsharpThreshold = unsharpOriginalProcessing_.unsharpThreshold;
+		unsharpMaskRadius_ = unsharpOriginalRadius_;
+		unsharpMaskAmount_ = unsharpOriginalAmount_;
+		unsharpMaskThreshold_ = unsharpOriginalThreshold_;
+		unsharpDialogOpen_ = false;
+		unsharpDraggingControl_ = -1;
+		RefreshPictureLevels();
+	}
+
+	void ApplyUnsharpMaskDialog() {
+		unsharpDialogOpen_ = false;
+		unsharpDraggingControl_ = -1;
+		SaveSettings();
+		RefreshPictureLevels();
+	}
+
+	void HandleUnsharpMaskDialogEvents(const SDL_Event& event, bool& running) {
+		if (event.type == SDL_QUIT) {
+			running = false;
+			return;
+		}
+		if (event.type == SDL_KEYDOWN) {
+			if (event.key.repeat == 0 && event.key.keysym.sym == SDLK_ESCAPE) CancelUnsharpMaskDialog();
+			else if (event.key.repeat == 0 && event.key.keysym.sym == SDLK_RETURN) ApplyUnsharpMaskDialog();
+			return;
+		}
+		if (event.type == SDL_MOUSEMOTION) {
+			lastMouseX_ = event.motion.x;
+			lastMouseY_ = event.motion.y;
+			if (unsharpDraggingControl_ >= 0) SetUnsharpMaskValueFromX(unsharpDraggingControl_, event.motion.x);
+			return;
+		}
+		if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+			lastMouseX_ = event.button.x;
+			lastMouseY_ = event.button.y;
+			if (PointInRect(event.button.x, event.button.y, UnsharpMaskActionRect(true))) {
+				ApplyUnsharpMaskDialog();
+			} else if (PointInRect(event.button.x, event.button.y, UnsharpMaskActionRect(false))) {
+				CancelUnsharpMaskDialog();
+			} else {
+				unsharpDraggingControl_ = UnsharpMaskSliderAt(event.button.x, event.button.y);
+				SetUnsharpMaskValueFromX(unsharpDraggingControl_, event.button.x);
+			}
+			return;
+		}
+		if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
+			if (unsharpDraggingControl_ >= 0) PrepareImagePrefetch();
+			unsharpDraggingControl_ = -1;
+		}
+	}
+
+	void RenderUnsharpMaskDialog() {
+		if (!unsharpDialogOpen_) return;
+		const SDL_Rect dialog = UnsharpMaskDialogRect();
+		SDL_SetRenderDrawColor(renderer_, 8, 12, 18, 248);
+		SDL_RenderFillRect(renderer_, &dialog);
+		DrawRect(dialog, 205, 210, 220);
+		DrawText("APPLY UNSHARP MASK", dialog.x + 20, dialog.y + 18, kUiTextScale, 245, 245, 250);
+		const char* labels[] = {"Radius", "Amount", "Threshold"};
+		const double values[] = {unsharpMaskRadius_, unsharpMaskAmount_, unsharpMaskThreshold_};
+		const double maxima[] = {5.0, 10.0, 20.0};
+		for (int index = 0; index < 3; ++index) {
+			const SDL_Rect slider = UnsharpMaskSliderRect(index);
+			std::ostringstream value;
+			value << std::fixed << std::setprecision(2) << values[index];
+			DrawText(labels[index], slider.x, slider.y + 2, kUiTextScale, 220, 225, 232);
+			DrawText(value.str(), slider.x + 72, slider.y + 2, kUiTextScale, 190, 200, 212);
+			const int left = slider.x + 156, right = slider.x + slider.w - 12, trackY = slider.y + 25;
+			DrawLine(left, trackY, right, trackY, 95, 108, 124);
+			const int knobX = left + static_cast<int>(std::lround(values[index] / maxima[index] * (right - left)));
+			SDL_Rect knob{knobX - 4, trackY - 5, 9, 11};
+			SDL_SetRenderDrawColor(renderer_, 120, 190, 235, 255);
+			SDL_RenderFillRect(renderer_, &knob);
+		}
+		const auto drawButton = [this](const SDL_Rect& button, const char* label) {
+			const bool hovered = PointInRect(lastMouseX_, lastMouseY_, button);
+			SDL_SetRenderDrawColor(renderer_, hovered ? 66 : 36, hovered ? 82 : 48,
+				hovered ? 104 : 62, 245);
+			SDL_RenderFillRect(renderer_, &button);
+			DrawRect(button, 130, 145, 165);
+			DrawText(label, button.x + (button.w - TextWidth(label, kUiTextScale)) / 2,
+				button.y + 8, kUiTextScale, 235, 240, 245);
+		};
+		drawButton(UnsharpMaskActionRect(false), "Cancel");
+		drawButton(UnsharpMaskActionRect(true), "Apply");
+	}
+
+	SDL_Rect PictureLevelSliderRect(std::size_t index) const {
+		const SDL_Rect panel = PictureLevelsPanelRect();
+		constexpr int columns = 4;
+		const int gap = 4;
+		const int cellWidth = (panel.w - 16 - (columns - 1) * gap) / columns;
+		const int row = static_cast<int>(index / columns);
+		const int column = static_cast<int>(index % columns);
+		return {panel.x + 8 + column * (cellWidth + gap), panel.y + 31 + row * 34,
+			cellWidth, 32};
+	}
+
+	int PictureLevelSliderAt(int x, int y) const {
+		for (std::size_t index = 0; index < static_cast<std::size_t>(jpegview_linux::LevelControl::Count); ++index) {
+			if (PointInRect(x, y, PictureLevelSliderRect(index))) return static_cast<int>(index);
+		}
+		return -1;
+	}
+
+	double PictureLevelSliderPosition(jpegview_linux::LevelControl control) const {
+		return jpegview_linux::LevelControlPosition(imageProcessing_, control);
+	}
+
+	void SetPictureLevelFromX(int index, int x) {
+		if (index < 0 || index >= static_cast<int>(jpegview_linux::LevelControl::Count)) return;
+		const auto control = static_cast<jpegview_linux::LevelControl>(index);
+		const jpegview_linux::LevelControlInfo& info = jpegview_linux::GetLevelControlInfo(control);
+		if ((info.enabledByLocalDensity && !imageProcessing_.localDensityEnabled) ||
+			(info.enabledByAutoContrast && !autoContrastEnabled_)) return;
+		const SDL_Rect cell = PictureLevelSliderRect(static_cast<std::size_t>(index));
+		const int left = cell.x + 7;
+		const int right = std::max(left + 1, cell.x + cell.w - 7);
+		const double fraction = std::clamp(static_cast<double>(x - left) / (right - left), 0.0, 1.0);
+		const double value = jpegview_linux::LevelControlValueAtPosition(control, fraction);
+		jpegview_linux::ImageProcessingParams updated = imageProcessing_;
+		jpegview_linux::SetLevelControlValue(updated, control, value);
+		if (jpegview_linux::EqualImageProcessing(updated, imageProcessing_)) return;
+		imageProcessing_ = updated;
+		RefreshPictureLevels(false);
+	}
+
+	void HandlePictureLevelsEvents(const SDL_Event& event, bool& running) {
+		if (event.type == SDL_QUIT) {
+			running = false;
+			return;
+		}
+		if (event.type == SDL_KEYDOWN) {
+			if (event.key.repeat == 0 && event.key.keysym.sym == SDLK_ESCAPE) {
+				pictureLevelsPanelOpen_ = false;
+				levelsDraggingControl_ = -1;
+			} else if (event.key.repeat == 0 && event.key.keysym.sym == SDLK_r) {
+				imageProcessing_ = {};
+				RefreshPictureLevels();
+			}
+			return;
+		}
+		if (event.type == SDL_MOUSEMOTION) {
+			lastMouseX_ = event.motion.x;
+			lastMouseY_ = event.motion.y;
+			if (levelsDraggingControl_ >= 0) SetPictureLevelFromX(levelsDraggingControl_, event.motion.x);
+			return;
+		}
+		if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+			lastMouseX_ = event.button.x;
+			lastMouseY_ = event.button.y;
+			if (!PointInRect(event.button.x, event.button.y, PictureLevelsPanelRect())) {
+				pictureLevelsPanelOpen_ = false;
+				levelsDraggingControl_ = -1;
+				return;
+			}
+			for (int action = 0; action < 7; ++action) {
+				if (PointInRect(event.button.x, event.button.y, PictureLevelsActionRect(action))) {
+					if (keepPictureLevels_ && (action == 2 || action == 3)) return;
+					HandlePictureLevelsAction(action);
+					return;
+				}
+			}
+			levelsDraggingControl_ = PictureLevelSliderAt(event.button.x, event.button.y);
+			SetPictureLevelFromX(levelsDraggingControl_, event.button.x);
+			return;
+		}
+		if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
+			if (levelsDraggingControl_ >= 0) PrepareImagePrefetch();
+			levelsDraggingControl_ = -1;
+		}
+	}
+
+	void OpenPictureLevelsPanel() {
+		if (image_.width <= 0 || fileList_.Empty()) return;
+		pictureLevelsPanelOpen_ = true;
+		levelsDraggingControl_ = -1;
+	}
+
+	void SaveCurrentPictureLevels() {
+		if (fileList_.Empty() || keepPictureLevels_) return;
+		auto updatedStore = imageProcessingStore_;
+		updatedStore[AbsoluteNormalized(fileList_.Current()).string()] =
+			jpegview_linux::ImageProcessingPreset{imageProcessing_, autoContrastEnabled_};
+		if (!jpegview_linux::SaveImageProcessingStore(
+			jpegview_linux::ImageProcessingStorePath(), updatedStore)) {
+			SetTitle("Could not save picture-level parameters");
+			return;
+		}
+		imageProcessingStore_ = std::move(updatedStore);
+		SetTitle("Picture-level parameters saved for this image");
+	}
+
+	void ClearCurrentPictureLevels() {
+		if (fileList_.Empty() || keepPictureLevels_) return;
+		auto updatedStore = imageProcessingStore_;
+		const bool hadSavedValues = updatedStore.erase(
+			AbsoluteNormalized(fileList_.Current()).string()) != 0;
+		if (!hadSavedValues) return;
+		if (!jpegview_linux::SaveImageProcessingStore(
+			jpegview_linux::ImageProcessingStorePath(), updatedStore)) {
+			SetTitle("Could not update picture-level parameter database");
+			return;
+		}
+		imageProcessingStore_ = std::move(updatedStore);
+		imageProcessing_ = {};
+		autoContrastEnabled_ = defaultAutoContrastEnabled_;
+		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
+		imageProcessing_.unsharpAmount = 0.0;
+		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
+		SetTitle("Saved picture-level parameters removed");
+		RefreshPictureLevels();
+	}
+
+	void HandlePictureLevelsAction(int action) {
+		switch (action) {
+		case 0:
+			imageProcessing_.localDensityEnabled = !imageProcessing_.localDensityEnabled;
+			RefreshPictureLevels();
+			break;
+		case 1:
+			keepPictureLevels_ = !keepPictureLevels_;
+			SaveSettings();
+			break;
+		case 2:
+			SaveCurrentPictureLevels();
+			break;
+		case 3:
+			ClearCurrentPictureLevels();
+			break;
+		case 4:
+			imageProcessing_ = {};
+			RefreshPictureLevels();
+			break;
+		case 5:
+			OpenUnsharpMaskDialog();
+			break;
+		case 6:
+			pictureLevelsPanelOpen_ = false;
+			levelsDraggingControl_ = -1;
+			break;
+		}
+	}
+
+	void RenderPictureLevels() {
+		if (!pictureLevelsPanelOpen_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
+		const SDL_Rect panel = PictureLevelsPanelRect();
+		SDL_SetRenderDrawColor(renderer_, 10, 15, 22, 238);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 170, 190, 215);
+		DrawText("PICTURE LEVELS", panel.x + 9, panel.y + 8, kUiTextScale, 235, 240, 248);
+		const char* labels[] = {
+			imageProcessing_.localDensityEnabled ? "Local density: on" : "Local density: off",
+			keepPictureLevels_ ? "Keep levels: on" : "Keep levels: off",
+			"Save to DB", "Remove from DB", "Reset", "Unsharp mask...", "Close",
+		};
+		for (int action = 0; action < 7; ++action) {
+			const SDL_Rect button = PictureLevelsActionRect(action);
+			const bool disabled = keepPictureLevels_ && (action == 2 || action == 3);
+			const bool hovered = PointInRect(lastMouseX_, lastMouseY_, button);
+			const Uint8 base = disabled ? 20 : hovered ? 64 : 34;
+			SDL_SetRenderDrawColor(renderer_, base, base + 8, base + 16, 240);
+			SDL_RenderFillRect(renderer_, &button);
+			DrawRect(button, 105, 125, 145);
+			DrawText(ClipText(labels[action], button.w - 8), button.x + 4, button.y + 6,
+				kUiTextScale, disabled ? 105 : 225, disabled ? 110 : 230, disabled ? 115 : 235);
+		}
+		for (std::size_t index = 0; index < static_cast<std::size_t>(jpegview_linux::LevelControl::Count); ++index) {
+			const auto control = static_cast<jpegview_linux::LevelControl>(index);
+			const jpegview_linux::LevelControlInfo& info = jpegview_linux::GetLevelControlInfo(control);
+			const SDL_Rect cell = PictureLevelSliderRect(index);
+			const bool disabled = (info.enabledByLocalDensity && !imageProcessing_.localDensityEnabled) ||
+				(info.enabledByAutoContrast && !autoContrastEnabled_);
+			const bool hovered = PictureLevelSliderAt(lastMouseX_, lastMouseY_) == static_cast<int>(index);
+			SDL_SetRenderDrawColor(renderer_, hovered ? 34 : 22, hovered ? 40 : 27, hovered ? 48 : 35, 230);
+			SDL_RenderFillRect(renderer_, &cell);
+			const double value = jpegview_linux::GetLevelControlValue(imageProcessing_, control);
+			std::ostringstream formatted;
+			formatted << std::fixed << std::setprecision(2) << value;
+			const std::string valueText = formatted.str();
+			const int valueWidth = TextWidth(valueText, kUiTextScale);
+			DrawText(ClipText(info.label, std::max(12, cell.w - valueWidth - 16)),
+				cell.x + 4, cell.y + 2, kUiTextScale, disabled ? 100 : 220, disabled ? 105 : 225, disabled ? 110 : 232);
+			DrawText(valueText, cell.x + cell.w - valueWidth - 4, cell.y + 2, kUiTextScale,
+				disabled ? 100 : 195, disabled ? 105 : 205, disabled ? 110 : 215);
+			const int trackLeft = cell.x + 7;
+			const int trackRight = std::max(trackLeft + 1, cell.x + cell.w - 7);
+			const int trackY = cell.y + 24;
+			DrawLine(trackLeft, trackY, trackRight, trackY, disabled ? 65 : 90, disabled ? 70 : 100, disabled ? 75 : 110);
+			const int knobX = trackLeft + static_cast<int>(std::lround(PictureLevelSliderPosition(control) * (trackRight - trackLeft)));
+			SDL_Rect knob{knobX - 3, trackY - 4, 7, 9};
+			SDL_SetRenderDrawColor(renderer_, disabled ? 100 : 110, disabled ? 105 : 190, disabled ? 110 : 235, 255);
+			SDL_RenderFillRect(renderer_, &knob);
+		}
+	}
+
 	static bool PointInRect(int x, int y, const SDL_Rect& rect) {
 		return x >= rect.x && y >= rect.y && x < rect.x + rect.w && y < rect.y + rect.h;
 	}
@@ -2071,6 +2509,9 @@ private:
 			break;
 		case jpegview_linux::kCommandNextSiblingFolder:
 			NavigateToSiblingFolder(1);
+			break;
+		case jpegview_linux::kCommandEditPictureLevels:
+			OpenPictureLevelsPanel();
 			break;
 		case IDM_FIRST:
 			FirstImage();
@@ -2107,6 +2548,20 @@ private:
 			break;
 		case IDM_AUTO_CORRECTION:
 			ToggleAutoContrast();
+			break;
+		case IDM_LDC:
+			imageProcessing_.localDensityEnabled = !imageProcessing_.localDensityEnabled;
+			RefreshPictureLevels();
+			break;
+		case IDM_KEEP_PARAMETERS:
+			keepPictureLevels_ = !keepPictureLevels_;
+			SaveSettings();
+			break;
+		case IDM_SAVE_PARAM_DB:
+			SaveCurrentPictureLevels();
+			break;
+		case IDM_CLEAR_PARAM_DB:
+			ClearCurrentPictureLevels();
 			break;
 		case IDM_ROTATE_90_LOSSLESS:
 		case IDM_ROTATE_90_LOSSLESS_CONFIRM:
@@ -2434,6 +2889,11 @@ private:
 		state.losslessJpegAvailable = !clipboardMode_ && HasExecutable("jpegtran") &&
 			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
 		state.autoCorrectionEnabled = autoContrastEnabled_;
+		state.pictureLevelsAvailable = !clipboardMode_ && !fileList_.Empty() && image_.width > 0;
+		state.localDensityEnabled = imageProcessing_.localDensityEnabled;
+		state.keepPictureLevels = keepPictureLevels_;
+		state.pictureLevelsSaved = !fileList_.Empty() && imageProcessingStore_.find(
+			AbsoluteNormalized(fileList_.Current()).string()) != imageProcessingStore_.end();
 		state.fitToWindow = viewport_.IsFitToWindow();
 		state.fillWithCrop = viewport_.FillWithCrop();
 		state.noEnlarge = viewport_.NoEnlarge();
@@ -3036,7 +3496,12 @@ private:
 		correctionBase_ = std::move(resizedImage);
 		correctionBaseValid_ = true;
 		image_ = correctionBase_;
-		if (autoContrastEnabled_) image_.AutoContrast();
+		if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) {
+			resizeDialog_.SetMessage("Image processing failed");
+			return;
+		}
+		materializedProcessing_ = imageProcessing_;
+		materializedAutoContrast_ = autoContrastEnabled_;
 		if (!UpdateTexture()) {
 			resizeDialog_.SetMessage("Resizing failed: could not update the display texture");
 			return;
@@ -4282,6 +4747,14 @@ private:
 				HandleResizeDialogEvents(event, running);
 				continue;
 			}
+			if (unsharpDialogOpen_) {
+				HandleUnsharpMaskDialogEvents(event, running);
+				continue;
+			}
+			if (pictureLevelsPanelOpen_) {
+				HandlePictureLevelsEvents(event, running);
+				continue;
+			}
 			if (contextMenuOpen_) {
 				switch (event.type) {
 				case SDL_QUIT:
@@ -4500,6 +4973,8 @@ private:
 		RenderFileName();
 		RenderImageInfo();
 		RenderControls();
+		RenderPictureLevels();
+		RenderUnsharpMaskDialog();
 		RenderContextMenu();
 		RenderFileDialog();
 		RenderBatchCopy();
@@ -4545,6 +5020,9 @@ private:
 	bool startFullscreen_ = false;
 	Image image_;
 	Image correctionBase_;
+	jpegview_linux::ImageProcessingParams imageProcessing_;
+	jpegview_linux::ImageProcessingParams materializedProcessing_;
+	jpegview_linux::ImageProcessingStore imageProcessingStore_;
 	bool correctionBaseValid_ = false;
 	SDL_Window* window_ = nullptr;
 	SDL_Renderer* renderer_ = nullptr;
@@ -4562,6 +5040,7 @@ private:
 	std::size_t currentAnimationFrame_ = 0;
 	std::optional<jpegview_linux::DisplayImageRequest> currentDisplayRequest_;
 	bool currentPixelsMaterialized_ = false;
+	bool materializedAutoContrast_ = false;
 	Image transitionImage_;
 	SDL_Texture* transitionTexture_ = nullptr;
 	jpegview_linux::Viewport viewport_;
@@ -4571,6 +5050,18 @@ private:
 	bool alwaysOnTop_ = false;
 	bool dragging_ = false;
 	bool controlsVisible_ = true;
+	bool pictureLevelsPanelOpen_ = false;
+	int levelsDraggingControl_ = -1;
+	bool unsharpDialogOpen_ = false;
+	int unsharpDraggingControl_ = -1;
+	jpegview_linux::ImageProcessingParams unsharpOriginalProcessing_;
+	double unsharpMaskRadius_ = 1.0;
+	double unsharpMaskAmount_ = 0.0;
+	double unsharpMaskThreshold_ = 4.0;
+	double unsharpOriginalRadius_ = 1.0;
+	double unsharpOriginalAmount_ = 0.0;
+	double unsharpOriginalThreshold_ = 4.0;
+	bool keepPictureLevels_ = false;
 	bool navigationPanelEnabled_ = true;
 	bool navigationPanelAutoReveal_ = true;
 	bool thumbnailPanelVisible_ = false;
@@ -4606,6 +5097,7 @@ private:
 	std::vector<jpegview_linux::OpenWithApplication> openWithApplications_;
 	bool imageModified_ = false;
 	bool autoContrastEnabled_ = false;
+	bool defaultAutoContrastEnabled_ = false;
 	bool quitRequested_ = false;
 	bool fileDialogOpen_ = false;
 	bool fileDialogSave_ = false;

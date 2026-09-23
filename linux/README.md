@@ -107,8 +107,12 @@ they support.
     width, and height fields and provides point, Lanczos/Bicubic, sharpen-low, and sharpen-medium
     filters. Both areas were separated into independently tested planning/model modules.
 
-11. **Image processing and animation.** The Windows histogram-derived automatic contrast correction
-    and core rotate/mirror transforms are available non-destructively before save. Animated GIF,
+11. **Image processing and animation.** The Windows picture-level panel is ported: contrast,
+    brightness/gamma, saturation, three color-balance axes, local shadow/highlight correction,
+    correction strengths, and sharpening are editable with live preview. The separate unsharp-mask
+    dialog previews radius, amount, and threshold before applying. Adjustments are non-destructive
+    until save; per-image levels can be saved/removed in the parameter database, or kept between
+    images. Automatic histogram correction remains available with F5. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
     rates and folder advancement, slideshow transitions are rendered natively, Alt+R resumes, and
     Escape stops active playback before quitting. Decoded pixels, prepared display frames, and
@@ -422,7 +426,18 @@ portable commands include folder opening, printing through `lp`, modification-da
 `feh`/`nitrogen` wallpaper integration, text/image clipboard copy and paste, filename and EXIF
 overlays, slideshow transitions, window mode toggles, and `jpegtran`-backed lossless JPEG transforms.
 The `Auto correction` command uses the Windows histogram-derived RGB correction LUT and can be toggled
-with `F5`; it remains non-destructive until the processed result is explicitly saved.
+with `F5`. `Edit picture levels...` opens the bottom adjustment panel; drag its sliders for live
+preview, turn on `Local density` to enable the shadow/highlight controls, and use `Reset` to restore
+the neutral slider values. Color/contrast correction strength controls refine automatic correction
+and are available while automatic correction is enabled.
+The separate `Unsharp mask...` dialog previews radius, amount, and threshold and has Apply/Cancel
+actions. `Keep levels` carries current adjustments to the next image and temporarily takes precedence
+over saved per-image values. With keep disabled, each saved entry (including its auto-correction and
+local-density state) is restored for that image. Save/remove actions are disabled while Keep levels is
+on; removing an entry restores the default levels. The Linux-native `picture-levels.db` is stored in
+the JPEGView Linux configuration directory (`$XDG_CONFIG_HOME/jpegview-linux`, or
+`~/.config/jpegview-linux` when XDG_CONFIG_HOME is unset). All levels remain non-destructive until
+the processed image is saved.
 The `Open image with` submenu is populated from matching freedesktop `.desktop` applications and
 launches them with the current image, including standard `%f`/`%F` and URI placeholders. Applications
 are discovered from the user and system application directories at menu-open time.
@@ -444,11 +459,10 @@ The original frame loop count is honored when a format provides one. `Alt+R` res
 `Esc` stops animation, movie, or slideshow playback before it closes the viewer.
 
 The context menu keeps Windows-only operations visible but disabled where their underlying Windows
-subsystem has no Linux implementation yet: free rotation, perspective
-correction, local density correction, the remaining JPEGView image-processing parameter engine,
-parameter databases, settings
-editors, Open-With menu management, default-viewer registration, and user-command configuration. This
-makes the remaining port boundary explicit while preserving the original command vocabulary.
+subsystem has no Linux implementation yet: free rotation, perspective correction, Windows binary
+parameter-database backup/restore, settings editors, Open-With menu management, default-viewer
+registration, and user-command configuration. The Linux per-image picture-level database is a native
+text store and is not compatible with the Windows binary database format.
 
 `Ctrl+S` opens the native save dialog for a full-size processed image; `Ctrl+Shift+S` saves the
 displayed screen-size result. The additional output formats listed above are selected by their
