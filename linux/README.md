@@ -40,7 +40,9 @@ they support.
    Fit, fill, actual-size, and manual modes survive navigation appropriately, while temporary zoom
    on one image is reset to the selected fit/actual mode for the next image. Ctrl+wheel zooms around
    the pointer, mouse dragging pans, and repeatable Shift+Arrow commands pan an actual-size image in
-   the original 48-pixel steps.
+   the original 48-pixel steps. The Windows crop/selection workflow is also ported: source-pixel
+   selections can be moved and resized independently of zoom, then cropped, copied, losslessly
+   cropped from JPEG, or used to zoom the view.
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
@@ -323,10 +325,11 @@ The Unicode font-rendering test requires at least one installed system font. The
 build installs `fonts-dejavu-core` for this purpose; this font is not bundled into the AppImage,
 which continues to use fonts installed on the user's system.
 
-It covers file-list ordering/navigation, mutable image transforms, all resize filters and automatic
-correction invariants, sort and settings persistence mappings, the complete supported
+It covers file-list ordering/navigation, mutable image transforms, source-coordinate crop selection,
+aspect/fixed-size geometry, manipulation/hit-testing, MCU alignment and image cropping, all resize
+filters and automatic correction invariants, sort and settings persistence mappings, the complete supported
 keyboard-command mapping, viewport fit/fill/zoom/pan geometry, open/save browser state, preview
-downsampling, resize-dialog validation, content-sized overlay layout, compact/advanced menu filtering and
+downsampling, resize- and crop-size-dialog editing/validation, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
 trips across static and animated formats, all PNM variants, malformed input, batch-copy planning,
@@ -334,8 +337,8 @@ desktop-application command expansion, and JPEG metadata. The optional X11 smoke
 open browser's filtering, folder counts, sorting, direct-folder opening, focus restoration, paging,
 Home/End, held-key movement, wheel scrolling, and dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu expansion and repainting; startup controls;
-mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; maximize restoration; and
-persisted settings:
+mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; crop-mode dialog, selection
+overlay, crop, and lossless JPEG output; maximize restoration; and persisted settings:
 
 ```sh
 make -C linux test-ui
@@ -378,7 +381,13 @@ image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
 PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.
 Ctrl+Shift+M/E set the modification date to now/EXIF date; R/T perform lossless JPEG rotations when
 bundled `jpegtran` is available; F5 toggles the ported automatic histogram contrast correction, and
-Ctrl+Shift+R opens the image resize dialog. Move the pointer to the lower edge of the window to
+Ctrl+Shift+R opens the image resize dialog. On the image, drag pans when the image extends past the
+window; otherwise drag creates a selection. Ctrl+drag creates a selection at any zoom, while
+Shift+drag zooms to the selected region. Drag the selection body to move it or its handles to resize
+it; release opens the crop menu, right-click reopens it, and Escape clears the selection. Crop
+Selection crops the processed image in memory, Lossless Crop saves an MCU-aligned JPEG to a chosen
+path, Copy Selection places source-resolution pixels on the clipboard, and Zoom to Selection fits
+the selected rectangle into the view. Move the pointer to the lower edge of the window to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, ordering mode, fit/actual, and fullscreen). The
 ordering button shows `N` for file-name order and `D` for modification-date order; clicking it
@@ -465,6 +474,25 @@ overwriting existing files. Its `%pictures%` placeholder maps to `$XDG_PICTURES_
 the aspect ratio, and the point, Lanczos/Bicubic, sharpen-low, and sharpen-medium filters are available.
 The resize is applied to the processed image in memory and can then be saved with `Ctrl+S`; `Ctrl+Shift+R`
 opens the same dialog directly.
+
+Crop and selection are available by dragging on an image when panning is not needed, or by holding
+Ctrl while dragging at any zoom. Shift-drag zooms into the selected region; otherwise releasing a new
+selection opens its crop menu. Drag the selection interior to move it and its border handles to resize
+it; right-click reopens the menu and Escape clears the selection. The menu can crop the processed image
+in memory, copy the selection at source resolution, or zoom to it. A lossless JPEG crop opens the save
+browser and aligns the requested rectangle to the JPEG's actual MCU grid; the displayed dimensions are
+the aligned dimensions and the source is not replaced unless explicitly chosen. Crop recalculates
+active picture-level/automatic corrections on the cropped source pixels. Cropping an animated image
+flattens the currently displayed frame.
+
+`Fixed size...` opens a dialog for width, height, and screen-pixel versus image-pixel units. Screen-pixel
+sizes track the current zoom, while image-pixel sizes remain in source pixels; while drawing, the
+pointer positions the fixed rectangle's top-left corner. The fixed size and unit choice are persisted
+when applied. To customize the final crop-menu ratio, set
+`user_crop_aspect_width=14` and `user_crop_aspect_height=11` (or another positive pair) in
+`${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. The same file accepts
+`default_selection_mode=0` to require Ctrl-drag for normal selection creation; Ctrl-drag still works
+at every zoom. Its default is enabled, matching Windows JPEGView.
 The AppImage bundles `xclip`, `wl-copy`/`wl-paste`, and `jpegtran` when the build environment provides
 them. `lp`, `gsettings`, `feh`, and `nitrogen` remain host desktop integrations. The clipboard tools
 are also needed for image copy/paste in a local non-AppImage build.
@@ -488,8 +516,6 @@ features.
 
 - **Free rotation and perspective correction.** The quarter-turn/mirror operations are available,
   but the interactive free-rotation and perspective/tilt-correction panels are not implemented.
-- **Crop and selection tools.** The Windows selection overlay, crop aspect/fixed-size modes, crop,
-  lossless crop, copy-selection, and zoom-selection commands are absent.
 - **Zoom navigator.** Linux has a neighboring-file thumbnail strip, but not Windows' miniature
   viewport overlay for panning around an enlarged image.
 - **Image comparison shortcuts.** Mark-image/toggle-back and the second processing-parameter set

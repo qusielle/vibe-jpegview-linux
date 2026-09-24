@@ -29,6 +29,15 @@ ExternalCommand LosslessJpegCommand(LosslessJpegOperation operation,
 	return command;
 }
 
+ExternalCommand LosslessJpegCropCommand(const std::filesystem::path& source,
+	const std::filesystem::path& output, int x, int y, int width, int height) {
+	if (x < 0 || y < 0 || width <= 0 || height <= 0 || source.empty() || output.empty()) return {};
+	const std::string rectangle = std::to_string(width) + "x" + std::to_string(height) +
+		"+" + std::to_string(x) + "+" + std::to_string(y);
+	return {"jpegtran", {"-copy", "all", "-crop", rectangle,
+		"-outfile", output.string(), source.string()}};
+}
+
 ExternalCommand PrintCommand(const std::filesystem::path& image) {
 	return {"lp", {image.string()}};
 }

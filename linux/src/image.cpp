@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <exception>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace jpegview_linux {
@@ -217,7 +218,7 @@ bool Image::StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageH
 	return true;
 }
 
-bool Image::Crop(int left, int top, int right, int bottom) {
+bool Image::CopyCrop(int left, int top, int right, int bottom, Image& output) const {
 	if (!HasValidPixels(*this) || left < 0 || top < 0 || right > width || bottom > height ||
 		right <= left || bottom <= top) return false;
 	const int croppedWidth = right - left;
@@ -234,9 +235,20 @@ bool Image::Crop(int left, int top, int right, int bottom) {
 		const std::size_t targetOffset = static_cast<std::size_t>(y) * rowBytes;
 		std::copy_n(bgra.data() + sourceOffset, rowBytes, cropped.data() + targetOffset);
 	}
-	width = croppedWidth;
-	height = croppedHeight;
-	bgra.swap(cropped);
+	Image result;
+	result.width = croppedWidth;
+	result.height = croppedHeight;
+	result.originalWidth = originalWidth;
+	result.originalHeight = originalHeight;
+	result.bgra = std::move(cropped);
+	output = std::move(result);
+	return true;
+}
+
+bool Image::Crop(int left, int top, int right, int bottom) {
+	Image cropped;
+	if (!CopyCrop(left, top, right, bottom, cropped)) return false;
+	*this = std::move(cropped);
 	return true;
 }
 

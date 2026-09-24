@@ -26,6 +26,61 @@ int ItemHeight(const MenuItem& item, int itemHeight, int separatorHeight) {
 
 std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 	bool advancedOptions) {
+	if (state.cropContextMenu) {
+		std::vector<MenuItem> cropItems = {
+			{"Crop Selection", IDM_CROP_SEL, false, false, state.cropSelectionAvailable, nullptr, false},
+			{"Crop Selection Lossless...", IDM_LOSSLESS_CROP_SEL, false, false,
+				state.cropSelectionAvailable && state.losslessJpegCropAvailable, nullptr, false},
+			{"Copy Selection to Clipboard", IDM_COPY_SEL, false, false,
+				state.cropSelectionAvailable, nullptr, false},
+			{nullptr, 0, true},
+			{"Crop Mode", 0, false, false, false, nullptr, false},
+			{"  Free", IDM_CROPMODE_FREE, false,
+				state.cropMode == CropSelectionMode::Free, true, nullptr, false},
+			{"  Same as Image", IDM_CROPMODE_IMAGE, false,
+				state.cropMode == CropSelectionMode::ImageAspect, true, nullptr, false},
+			{"  Fixed size...", IDM_CROPMODE_FIXED_SIZE, false,
+				state.cropMode == CropSelectionMode::FixedSize, true, nullptr, false},
+			{nullptr, 0, true},
+			{"  1 : 1", IDM_CROPMODE_1_1, false,
+				state.cropMode == CropSelectionMode::FixedAspect &&
+				state.cropAspectWidth == 1 && state.cropAspectHeight == 1, true, nullptr, false},
+			{"  5 : 4", IDM_CROPMODE_5_4, false,
+				state.cropMode == CropSelectionMode::FixedAspect &&
+				state.cropAspectWidth == 5 && state.cropAspectHeight == 4, true, nullptr, false},
+			{"  4 : 3", IDM_CROPMODE_4_3, false,
+				state.cropMode == CropSelectionMode::FixedAspect &&
+				state.cropAspectWidth == 4 && state.cropAspectHeight == 3, true, nullptr, false},
+			{"  7 : 5", IDM_CROPMODE_7_5, false,
+				state.cropMode == CropSelectionMode::FixedAspect &&
+				state.cropAspectWidth == 7 && state.cropAspectHeight == 5, true, nullptr, false},
+			{"  3 : 2", IDM_CROPMODE_3_2, false,
+				state.cropMode == CropSelectionMode::FixedAspect &&
+				state.cropAspectWidth == 3 && state.cropAspectHeight == 2, true, nullptr, false},
+			{"  16 : 10", IDM_CROPMODE_16_10, false,
+				state.cropMode == CropSelectionMode::FixedAspect &&
+				state.cropAspectWidth == 16 && state.cropAspectHeight == 10, true, nullptr, false},
+			{"  16 : 9", IDM_CROPMODE_16_9, false,
+				state.cropMode == CropSelectionMode::FixedAspect &&
+				state.cropAspectWidth == 16 && state.cropAspectHeight == 9, true, nullptr, false},
+			{nullptr, 0, true},
+			{"User aspect", IDM_CROPMODE_USER, false,
+				state.cropMode == CropSelectionMode::FixedAspect &&
+				state.cropAspectWidth == state.userCropAspectWidth &&
+				state.cropAspectHeight == state.userCropAspectHeight, true, nullptr, false},
+			{nullptr, 0, true},
+			{"Zoom to Selection", IDM_ZOOM_SEL, false, false,
+				state.cropSelectionAvailable, nullptr, false},
+		};
+		for (MenuItem& item : cropItems) {
+			if (item.command == IDM_CROPMODE_USER) {
+				item.label = "  User aspect (" + std::to_string(state.userCropAspectWidth) +
+					" : " + std::to_string(state.userCropAspectHeight) + ")";
+				break;
+			}
+		}
+		return cropItems;
+	}
 	const std::string sortingLabel = "Current order: " +
 		std::string(SortModeShortLabel(state.sortMode)) + " (" +
 		SortModeDescription(state.sortMode) + ")";

@@ -19,6 +19,9 @@ public:
 	std::vector<std::uint8_t> bgra;
 
 	bool StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageHeight);
+	// Copies a half-open source rectangle into a separate image without first
+	// duplicating the full source buffer. The output retains the original source size.
+	bool CopyCrop(int left, int top, int right, int bottom, Image& output) const;
 	// Retains the half-open pixel rectangle [left,right) x [top,bottom).
 	bool Crop(int left, int top, int right, int bottom);
 	bool Rotate(bool clockwise);

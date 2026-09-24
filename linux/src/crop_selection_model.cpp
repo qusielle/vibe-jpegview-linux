@@ -2,13 +2,17 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
+#include <limits>
 
 namespace jpegview_linux {
 namespace {
 
 int RoundedPositive(double value) {
-	return std::max(1, static_cast<int>(std::lround(value)));
+	if (std::isnan(value)) return 1;
+	if (!std::isfinite(value)) return value > 0.0 ? std::numeric_limits<int>::max() : 1;
+	const double bounded = std::clamp(value, 1.0,
+		static_cast<double>(std::numeric_limits<int>::max()));
+	return static_cast<int>(std::lround(bounded));
 }
 
 bool HasLeft(CropSelectionHandle handle) {
@@ -44,9 +48,8 @@ void CropSelectionModel::SetImageSize(int width, int height) {
 
 void CropSelectionModel::SetAspectRatio(int width, int height) {
 	if (width <= 0 || height <= 0) return;
-	const int divisor = std::gcd(width, height);
-	aspectWidth_ = width / divisor;
-	aspectHeight_ = height / divisor;
+	aspectWidth_ = width;
+	aspectHeight_ = height;
 	mode_ = CropSelectionMode::FixedAspect;
 }
 
@@ -102,6 +105,35 @@ bool CropSelectionModel::Update(int imageX, int imageY, double zoom) {
 	}
 	if (!next.Valid() || (next.left == selection_.left && next.top == selection_.top &&
 		next.right == selection_.right && next.bottom == selection_.bottom)) return false;
+	selection_ = next;
+	return true;
+}
+
+bool CropSelectionModel::ReapplyMode(double zoom) {
+	if (!selection_.Valid() || imageWidth_ <= 0 || imageHeight_ <= 0) return false;
+	SelectionRect next = selection_;
+	if (mode_ == CropSelectionMode::FixedSize) {
+		const double safeZoom = std::isfinite(zoom) && zoom > 0.0 ? zoom : 1.0;
+		const int width = std::min(imageWidth_, fixedSizeScreenPixels_ ?
+			RoundedPositive(fixedWidth_ / safeZoom) : fixedWidth_);
+		const int height = std::min(imageHeight_, fixedSizeScreenPixels_ ?
+			RoundedPositive(fixedHeight_ / safeZoom) : fixedHeight_);
+		next.right = next.left + width;
+		next.bottom = next.top + height;
+	} else if (mode_ == CropSelectionMode::FixedAspect ||
+		mode_ == CropSelectionMode::ImageAspect) {
+		const double ratio = EffectiveAspectRatio();
+		if (ratio > 0.0) {
+			// Keep the existing height anchored at the top-left, as when creating
+			// a selection in an aspect-constrained mode.
+			const int width = std::min(imageWidth_,
+				RoundedPositive((next.Height() - 1) * ratio + 1.0));
+			next.right = next.left + width;
+		}
+	}
+	next = ClampRect(next);
+	if (next.left == selection_.left && next.top == selection_.top &&
+		next.right == selection_.right && next.bottom == selection_.bottom) return false;
 	selection_ = next;
 	return true;
 }
@@ -173,13 +205,32 @@ CropSelectionHandle CropSelectionModel::HitTest(int screenX, int screenY,
 	return CropSelectionHandle::Move;
 }
 
+SelectionRect CropSelectionModel::AlignToMcu(const SelectionRect& selection,
+	int imageWidth, int imageHeight, int mcuWidth, int mcuHeight) {
+	if (!selection.Valid() || imageWidth <= 0 || imageHeight <= 0 ||
+		mcuWidth <= 0 || mcuHeight <= 0 || selection.right > imageWidth ||
+		selection.bottom > imageHeight) return {};
+	SelectionRect aligned = selection;
+	aligned.left = (aligned.left / mcuWidth) * mcuWidth;
+	aligned.top = (aligned.top / mcuHeight) * mcuHeight;
+	aligned.right = ((aligned.right + mcuWidth - 1) / mcuWidth) * mcuWidth;
+	aligned.bottom = ((aligned.bottom + mcuHeight - 1) / mcuHeight) * mcuHeight;
+	if (aligned.right > imageWidth) aligned.right -= mcuWidth;
+	if (aligned.bottom > imageHeight) aligned.bottom -= mcuHeight;
+	if (aligned.right <= aligned.left || aligned.bottom <= aligned.top) return {};
+	return aligned;
+}
+
 SelectionRect CropSelectionModel::BuildNewSelection(int imageX, int imageY, double zoom) const {
 	if (mode_ == CropSelectionMode::FixedSize) {
 		const double safeZoom = std::isfinite(zoom) && zoom > 0.0 ? zoom : 1.0;
-		const int width = fixedSizeScreenPixels_ ? RoundedPositive(fixedWidth_ / safeZoom) : fixedWidth_;
-		const int height = fixedSizeScreenPixels_ ? RoundedPositive(fixedHeight_ / safeZoom) : fixedHeight_;
-		return ClampRect({creationAnchor_.x, creationAnchor_.y,
-			creationAnchor_.x + width, creationAnchor_.y + height});
+		const int width = std::min(imageWidth_, fixedSizeScreenPixels_ ?
+			RoundedPositive(fixedWidth_ / safeZoom) : fixedWidth_);
+		const int height = std::min(imageHeight_, fixedSizeScreenPixels_ ?
+			RoundedPositive(fixedHeight_ / safeZoom) : fixedHeight_);
+		// Windows' fixed-size crop follows the pointer as its top-left corner;
+		// unlike free/aspect selection, the initial mouse-down is not an anchor.
+		return ClampRect({imageX, imageY, imageX + width, imageY + height});
 	}
 	const int dx = imageX - creationAnchor_.x;
 	const int dy = imageY - creationAnchor_.y;
@@ -187,8 +238,8 @@ SelectionRect CropSelectionModel::BuildNewSelection(int imageX, int imageY, doub
 	int height = std::abs(dy) + 1;
 	const double ratio = EffectiveAspectRatio();
 	if (ratio > 0.0 && mode_ != CropSelectionMode::Free) {
-		const int widthFromHeight = RoundedPositive(height * ratio);
-		const int heightFromWidth = RoundedPositive(width / ratio);
+		const int widthFromHeight = std::min(imageWidth_, RoundedPositive(height * ratio));
+		const int heightFromWidth = std::min(imageHeight_, RoundedPositive(width / ratio));
 		if (std::abs(dx) >= std::abs(dy) * ratio) height = heightFromWidth;
 		else width = widthFromHeight;
 	}
@@ -219,17 +270,19 @@ SelectionRect CropSelectionModel::BuildResizedSelection(int imageX, int imageY) 
 		const int width = result.Width();
 		const int height = result.Height();
 		if (width > height * ratio) {
-			result.bottom = HasTop(handle_) ? result.bottom : result.top + RoundedPositive(width / ratio);
+			result.bottom = HasTop(handle_) ? result.bottom : result.top +
+				std::min(imageHeight_, RoundedPositive(width / ratio));
 		} else {
-			result.right = HasLeft(handle_) ? result.right : result.left + RoundedPositive(height * ratio);
+			result.right = HasLeft(handle_) ? result.right : result.left +
+				std::min(imageWidth_, RoundedPositive(height * ratio));
 		}
 	} else if (horizontal) {
-		const int height = RoundedPositive(result.Width() / ratio);
+		const int height = std::min(imageHeight_, RoundedPositive(result.Width() / ratio));
 		const int center = (manipulationStart_.top + manipulationStart_.bottom) / 2;
 		result.top = center - height / 2;
 		result.bottom = result.top + height;
 	} else if (vertical) {
-		const int width = RoundedPositive(result.Height() * ratio);
+		const int width = std::min(imageWidth_, RoundedPositive(result.Height() * ratio));
 		const int center = (manipulationStart_.left + manipulationStart_.right) / 2;
 		result.left = center - width / 2;
 		result.right = result.left + width;
@@ -254,7 +307,9 @@ SelectionRect CropSelectionModel::ClampRect(SelectionRect rect) const {
 		if (ratio > 0.0 && std::abs(static_cast<double>(width) / height - ratio) > 0.0001) {
 			const int fitWidth = std::min(imageWidth_, RoundedPositive(height * ratio));
 			const int fitHeight = std::min(imageHeight_, RoundedPositive(width / ratio));
-			if (fitWidth <= imageWidth_ && std::abs(fitWidth / ratio - height) <= std::abs(width / ratio - height)) width = fitWidth;
+			const double widthRatioError = std::abs(static_cast<double>(fitWidth) / height - ratio);
+			const double heightRatioError = std::abs(static_cast<double>(width) / fitHeight - ratio);
+			if (widthRatioError <= heightRatioError) width = fitWidth;
 			else height = fitHeight;
 			left = std::clamp(left, 0, imageWidth_ - width);
 			top = std::clamp(top, 0, imageHeight_ - height);

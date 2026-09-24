@@ -31,6 +31,8 @@ enum class LosslessJpegOperation {
 
 ExternalCommand LosslessJpegCommand(LosslessJpegOperation operation,
 	const std::filesystem::path& source, const std::filesystem::path& output);
+ExternalCommand LosslessJpegCropCommand(const std::filesystem::path& source,
+	const std::filesystem::path& output, int x, int y, int width, int height);
 ExternalCommand PrintCommand(const std::filesystem::path& image);
 std::vector<ExternalCommand> OpenContainingFolderCommands(const std::filesystem::path& directory);
 std::optional<ExternalCommand> OpenWithCommand(const OpenWithApplication& application,

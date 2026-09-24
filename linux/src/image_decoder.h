@@ -33,6 +33,11 @@ bool IsJpegPath(const std::filesystem::path& filename);
 bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage);
 
+// Returns the source JPEG's minimum-coded-unit dimensions from its component
+// sampling factors. Lossless crop origins and interior boundaries use these.
+bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage);
+
 // Uses libjpeg's native DCT scaling to decode the smallest available image
 // that is still at least the requested size. sourceWidth/sourceHeight always
 // report the full JPEG dimensions; the returned frame can be smaller.

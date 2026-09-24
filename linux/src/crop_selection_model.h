@@ -62,6 +62,9 @@ public:
 	bool StartNew(int imageX, int imageY);
 	bool StartManipulation(int imageX, int imageY, CropSelectionHandle handle);
 	bool Update(int imageX, int imageY, double zoom = 1.0);
+	// Applies a newly selected aspect or fixed-size mode to existing bounds,
+	// retaining their top-left corner and using the current view zoom if needed.
+	bool ReapplyMode(double zoom = 1.0);
 	void End() { dragging_ = false; handle_ = CropSelectionHandle::None; }
 	void Clear();
 	void Cancel() { End(); }
@@ -83,6 +86,8 @@ public:
 	static CropSelectionHandle HitTest(int screenX, int screenY,
 		const SelectionScreenRect& selectionOnScreen, bool fixedSizeMode,
 		int tolerance = 12);
+	static SelectionRect AlignToMcu(const SelectionRect& selection, int imageWidth,
+		int imageHeight, int mcuWidth, int mcuHeight);
 
 private:
 	SelectionRect BuildNewSelection(int imageX, int imageY, double zoom) const;

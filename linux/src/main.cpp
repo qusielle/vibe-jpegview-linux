@@ -18,6 +18,8 @@
 #include "input_commands.h"
 #include "viewport.h"
 #include "resize_model.h"
+#include "crop_selection_model.h"
+#include "crop_size_dialog_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
 #include "viewer_chrome.h"
@@ -63,6 +65,7 @@
 #include <sys/stat.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <unistd.h>
 #include <vector>
 
@@ -108,6 +111,8 @@ constexpr int kResizeHeight = 2;
 constexpr int kResizeFilter = 3;
 constexpr int kResizeApply = 0;
 constexpr int kResizeCancel = 1;
+constexpr int kCropSizeApply = 0;
+constexpr int kCropSizeCancel = 1;
 constexpr int kConfirmRestoreParameterDb = -8;
 
 jpegview_linux::SystemFont& UiFont() {
@@ -352,6 +357,12 @@ public:
 		}
 		thumbnailResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
 		fileDialogResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
+		cropCrosshairCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
+		cropMoveCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEALL);
+		cropHorizontalCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
+		cropVerticalCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENS);
+		cropDiagonalDownCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
+		cropDiagonalUpCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENESW);
 
 		if (startFullscreen_) {
 			fullscreen_ = true;
@@ -499,7 +510,10 @@ private:
 			SDL_DestroyWindow(window_);
 			window_ = nullptr;
 		}
-		if (thumbnailResizeCursor_ != nullptr || fileDialogResizeCursor_ != nullptr) {
+		if (thumbnailResizeCursor_ != nullptr || fileDialogResizeCursor_ != nullptr ||
+			cropCrosshairCursor_ != nullptr || cropMoveCursor_ != nullptr ||
+			cropHorizontalCursor_ != nullptr || cropVerticalCursor_ != nullptr ||
+			cropDiagonalDownCursor_ != nullptr || cropDiagonalUpCursor_ != nullptr) {
 			SDL_SetCursor(SDL_GetDefaultCursor());
 		}
 		if (thumbnailResizeCursor_ != nullptr) {
@@ -510,6 +524,18 @@ private:
 			SDL_FreeCursor(fileDialogResizeCursor_);
 			fileDialogResizeCursor_ = nullptr;
 		}
+		const auto freeCursor = [](SDL_Cursor*& cursor) {
+			if (cursor != nullptr) {
+				SDL_FreeCursor(cursor);
+				cursor = nullptr;
+			}
+		};
+		freeCursor(cropCrosshairCursor_);
+		freeCursor(cropMoveCursor_);
+		freeCursor(cropHorizontalCursor_);
+		freeCursor(cropVerticalCursor_);
+		freeCursor(cropDiagonalDownCursor_);
+		freeCursor(cropDiagonalUpCursor_);
 		SDL_Quit();
 	}
 
@@ -542,6 +568,12 @@ private:
 		fileDialogWidth_ = settings.fileDialogWidth;
 		fileDialogHeight_ = settings.fileDialogHeight;
 		fileDialogPreviewRatio_ = settings.fileDialogPreviewRatio;
+		cropSelection_.SetFixedSize(settings.fixedCropWidth, settings.fixedCropHeight,
+			settings.fixedCropScreenPixels);
+		cropSelection_.SetMode(jpegview_linux::CropSelectionMode::Free);
+		cropUserAspectWidth_ = settings.userCropAspectWidth;
+		cropUserAspectHeight_ = settings.userCropAspectHeight;
+		defaultSelectionMode_ = settings.defaultSelectionMode;
 		infoVisible_ = settings.infoVisible;
 		showHistogram_ = settings.showHistogram;
 		showFileName_ = settings.showFilename;
@@ -568,6 +600,12 @@ private:
 		settings.fileDialogWidth = fileDialogWidth_;
 		settings.fileDialogHeight = fileDialogHeight_;
 		settings.fileDialogPreviewRatio = fileDialogPreviewRatio_;
+		settings.fixedCropWidth = cropSelection_.FixedWidth();
+		settings.fixedCropHeight = cropSelection_.FixedHeight();
+		settings.fixedCropScreenPixels = cropSelection_.FixedSizeUsesScreenPixels();
+		settings.userCropAspectWidth = cropUserAspectWidth_;
+		settings.userCropAspectHeight = cropUserAspectHeight_;
+		settings.defaultSelectionMode = defaultSelectionMode_;
 		settings.infoVisible = infoVisible_;
 		settings.showHistogram = showHistogram_;
 		settings.showFilename = showFileName_;
@@ -680,6 +718,7 @@ private:
 		if (fileList_.Empty()) {
 			return false;
 		}
+		ClearCropSelection();
 		SelectPictureLevelsForCurrentFile();
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.NavigationSnapshot();
 		metadata_ = {};
@@ -779,6 +818,7 @@ private:
 		} else {
 			playback_.ConfigureImage({}, 0, false, now);
 		}
+		cropSelection_.SetImageSize(image_.width, image_.height);
 		SetTitle();
 		PrepareThumbnailPreload();
 		PrepareImagePrefetch(prefetchDirection);
@@ -1247,6 +1287,7 @@ private:
 
 	void ApplyTransform(int command) {
 		if (!MaterializeCurrentPixels()) return;
+		ClearCropSelection();
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		if (!TransformImage(image_, command) ||
 			(correctionBaseValid_ && !TransformImage(correctionBase_, command)) || !UpdateTexture()) {
@@ -1398,13 +1439,123 @@ private:
 		fileDialogSave_ = false;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = false;
+		fileDialogLosslessCrop_ = false;
+		fileDialogLosslessCropRect_ = {};
 		fileDialogFilename_.clear();
 		fileDialogModel_.Clear();
 		fileDialogDirectorySummaries_.clear();
 	}
 
+	void OpenLosslessCropDialog() {
+		if (fileList_.Empty() || clipboardMode_ || imageModified_ ||
+			!jpegview_linux::IsJpegPath(fileList_.Current()) || !cropSelection_.HasSelection()) {
+			SetTitle("Lossless crop requires an untransformed JPEG selection");
+			return;
+		}
+		int mcuWidth = 0;
+		int mcuHeight = 0;
+		std::string errorMessage;
+		if (!jpegview_linux::ReadJpegMcuSize(fileList_.Current(), mcuWidth, mcuHeight,
+			errorMessage)) {
+			SetTitle("Cannot read JPEG crop block size: " + errorMessage);
+			return;
+		}
+		const jpegview_linux::SelectionRect aligned = jpegview_linux::CropSelectionModel::AlignToMcu(
+			cropSelection_.Rect(), image_.width, image_.height, mcuWidth, mcuHeight);
+		if (!aligned.Valid()) {
+			SetTitle("Lossless crop is too small after JPEG block alignment");
+			return;
+		}
+		OpenSaveFileDialog(true);
+		if (!fileDialogOpen_) return;
+		fileDialogLosslessCrop_ = true;
+		fileDialogLosslessCropRect_ = aligned;
+		fileDialogFilename_ = fileList_.Current().stem().string() + "_crop.jpg";
+		fileDialogMessage_ = "Lossless JPEG crop: " + std::to_string(aligned.Width()) + " x " +
+			std::to_string(aligned.Height()) + " pixels (MCU-aligned)";
+	}
+
+	void SaveLosslessCropFromDialog() {
+		if (!fileDialogLosslessCrop_ || !fileDialogLosslessCropRect_.Valid() ||
+			fileDialogFilename_.empty() || fileList_.Empty()) return;
+		fs::path filename(fileDialogFilename_);
+		if (filename.extension().empty()) filename += ".jpg";
+		const std::string extension = Lower(filename.extension().string());
+		if (extension != ".jpg" && extension != ".jpeg" && extension != ".jpe") {
+			fileDialogMessage_ = "Lossless crop output must use a JPEG extension";
+			return;
+		}
+		const fs::path output = AbsoluteNormalized(fileDialogDirectory_ / filename);
+		std::error_code existsError;
+		if (fs::exists(output, existsError) && !existsError && !fileDialogOverwriteConfirmed_) {
+			fileDialogOverwriteConfirmed_ = true;
+			fileDialogMessage_ = "File exists; press ENTER to overwrite or ESC to cancel";
+			return;
+		}
+		if (existsError) {
+			fileDialogMessage_ = "Cannot check output file: " + existsError.message();
+			return;
+		}
+		std::string pattern = (output.parent_path() / ".jpegview-crop-XXXXXX").string();
+		std::vector<char> temporaryName(pattern.begin(), pattern.end());
+		temporaryName.push_back('\0');
+		const int descriptor = mkstemp(temporaryName.data());
+		if (descriptor < 0) {
+			fileDialogMessage_ = "Lossless crop failed: cannot create a temporary output";
+			return;
+		}
+		struct stat existingOutputStatus{};
+		mode_t outputMode = 0;
+		if (::stat(output.c_str(), &existingOutputStatus) == 0) {
+			outputMode = existingOutputStatus.st_mode & 0777;
+		} else {
+			const mode_t processMask = ::umask(0);
+			::umask(processMask);
+			outputMode = static_cast<mode_t>(0666 & ~processMask);
+		}
+		::close(descriptor);
+		const fs::path temporary(temporaryName.data());
+		const jpegview_linux::SelectionRect bounds = fileDialogLosslessCropRect_;
+		const jpegview_linux::ExternalCommand command = jpegview_linux::LosslessJpegCropCommand(
+			fileList_.Current(), temporary, bounds.left, bounds.top,
+			bounds.Width(), bounds.Height());
+		std::string errorMessage;
+		if (!RunProcess(command, errorMessage)) {
+			std::error_code removeError;
+			fs::remove(temporary, removeError);
+			fileDialogMessage_ = "Lossless crop failed: " + errorMessage;
+			return;
+		}
+		if (::chmod(temporary.c_str(), outputMode) != 0) {
+			std::error_code removeError;
+			fs::remove(temporary, removeError);
+			fileDialogMessage_ = "Lossless crop failed: cannot set output permissions";
+			return;
+		}
+		if (::rename(temporary.c_str(), output.c_str()) != 0) {
+			std::error_code removeError;
+			fs::remove(temporary, removeError);
+			fileDialogMessage_ = "Lossless crop failed: cannot finalize output";
+			return;
+		}
+		const fs::path source = AbsoluteNormalized(fileList_.Current());
+		const std::string savedName = output.filename().string();
+		CloseFileDialog();
+		if (output == source) {
+			ReloadAfterFileChange();
+		} else {
+			fileList_.Reload();
+			PrepareThumbnailPreload();
+		}
+		SetTitle("Saved lossless crop: " + savedName);
+	}
+
 	void SaveImageFromDialog() {
 		if (!fileDialogSave_ || fileDialogFilename_.empty()) return;
+		if (fileDialogLosslessCrop_) {
+			SaveLosslessCropFromDialog();
+			return;
+		}
 		if (fileDialogParameterBackup_) {
 			fs::path filename(fileDialogFilename_);
 			const fs::path output = AbsoluteNormalized(fileDialogDirectory_ / filename);
@@ -1529,6 +1680,100 @@ private:
 		} else {
 			SetTitle("Copy image failed: " + errorMessage);
 		}
+	}
+
+	bool CropCurrentSelection() {
+		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return false;
+		if (!MaterializeCurrentPixels()) return false;
+		const jpegview_linux::SelectionRect bounds = cropSelection_.Rect();
+		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
+		Image croppedBase;
+		const Image& sourceBase = correctionBaseValid_ ? correctionBase_ : image_;
+		if (!sourceBase.CopyCrop(bounds.left, bounds.top, bounds.right, bounds.bottom, croppedBase)) {
+			SetTitle("Crop failed: invalid selection or insufficient memory");
+			return false;
+		}
+		croppedBase.originalWidth = croppedBase.width;
+		croppedBase.originalHeight = croppedBase.height;
+		Image croppedImage;
+		if (!croppedBase.CopyCrop(0, 0, croppedBase.width, croppedBase.height, croppedImage)) {
+			SetTitle("Crop failed: insufficient memory for the processed image");
+			return false;
+		}
+		if (!croppedImage.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) {
+			SetTitle("Crop failed: picture-level processing could not be reapplied");
+			return false;
+		}
+		correctionBase_ = std::move(croppedBase);
+		correctionBaseValid_ = true;
+		image_ = std::move(croppedImage);
+		currentPixelsMaterialized_ = true;
+		materializedProcessing_ = imageProcessing_;
+		materializedAutoContrast_ = autoContrastEnabled_;
+		if (animationFrames_.size() > 1) {
+			animationFrames_.clear();
+			playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
+		}
+		imageModified_ = true;
+		currentDisplayRequest_.reset();
+		ClearCropSelection();
+		cropSelection_.SetImageSize(image_.width, image_.height);
+		if (!UpdateTexture()) {
+			SetTitle("Crop applied, but the display texture could not be refreshed");
+			return false;
+		}
+		RestoreScaleMode(viewportSnapshot);
+		SetTitle();
+		return true;
+	}
+
+	void CopyCurrentSelection() {
+		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return;
+		if (!MaterializeCurrentPixels()) return;
+		const jpegview_linux::SelectionRect bounds = cropSelection_.Rect();
+		Image copied;
+		if (!image_.CopyCrop(bounds.left, bounds.top, bounds.right, bounds.bottom, copied)) {
+			SetTitle("Copy selection failed: invalid selection or insufficient memory");
+			return;
+		}
+		std::string errorMessage;
+		if (jpegview_linux::CopyImageToClipboard(copied.bgra.data(), copied.width,
+			copied.height, errorMessage)) {
+			SetTitle("Copied selection to clipboard");
+		} else {
+			SetTitle("Copy selection failed: " + errorMessage);
+		}
+	}
+
+	void ZoomToSelection() {
+		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return;
+		const jpegview_linux::SelectionRect bounds = cropSelection_.Rect();
+		const SDL_Rect imageArea = ImageAreaRect();
+		const double targetZoom = std::min(
+			static_cast<double>(std::max(1, imageArea.w)) / bounds.Width(),
+			static_cast<double>(std::max(1, imageArea.h)) / bounds.Height());
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			image_.width, image_.height, imageArea.w, imageArea.h);
+		const int selectionCenterX = destination.x + static_cast<int>(std::lround(
+			(bounds.left + bounds.right) * 0.5 * viewport_.Zoom()));
+		const int selectionCenterY = destination.y + static_cast<int>(std::lround(
+			(bounds.top + bounds.bottom) * 0.5 * viewport_.Zoom()));
+		viewport_.ZoomAt(targetZoom / viewport_.Zoom(), selectionCenterX, selectionCenterY,
+			image_.width, image_.height, imageArea.w, imageArea.h);
+		viewport_.Pan(imageArea.w / 2.0 - selectionCenterX,
+			imageArea.h / 2.0 - selectionCenterY);
+		currentDisplayRequest_.reset();
+		PrepareImagePrefetch();
+		playback_.NotifyInteraction(SDL_GetTicks());
+		SetTitle();
+	}
+
+	void SetCropAspect(int width, int height) {
+		if (width <= 0 || height <= 0) return;
+		cropAspectWidth_ = width;
+		cropAspectHeight_ = height;
+		cropSelection_.SetAspectRatio(width, height);
+		cropSelection_.ReapplyMode(viewport_.Zoom());
 	}
 
 	void CopyCurrentPath() {
@@ -2080,7 +2325,7 @@ private:
 	void TickHeldNavigation() {
 		if (heldNavigation_.Scancode() < 0) return;
 		if (contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ || aboutOpen_ || helpOpen_ ||
-			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() ||
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
 			(SDL_GetModState() & 0x03C3u) != 0) {
 			heldNavigation_.Reset();
 			return;
@@ -2664,6 +2909,53 @@ private:
 			return;
 		}
 		switch (command) {
+		case IDM_CROP_SEL:
+			CropCurrentSelection();
+			break;
+		case IDM_LOSSLESS_CROP_SEL:
+			OpenLosslessCropDialog();
+			break;
+		case IDM_COPY_SEL:
+			CopyCurrentSelection();
+			break;
+		case IDM_ZOOM_SEL:
+			ZoomToSelection();
+			ClearCropSelection();
+			break;
+		case IDM_CROPMODE_FREE:
+			cropSelection_.SetMode(jpegview_linux::CropSelectionMode::Free);
+			break;
+		case IDM_CROPMODE_FIXED_SIZE:
+			OpenFixedCropSizeDialog();
+			break;
+		case IDM_CROPMODE_1_1:
+			SetCropAspect(1, 1);
+			break;
+		case IDM_CROPMODE_5_4:
+			SetCropAspect(5, 4);
+			break;
+		case IDM_CROPMODE_4_3:
+			SetCropAspect(4, 3);
+			break;
+		case IDM_CROPMODE_7_5:
+			SetCropAspect(7, 5);
+			break;
+		case IDM_CROPMODE_3_2:
+			SetCropAspect(3, 2);
+			break;
+		case IDM_CROPMODE_16_10:
+			SetCropAspect(16, 10);
+			break;
+		case IDM_CROPMODE_16_9:
+			SetCropAspect(16, 9);
+			break;
+		case IDM_CROPMODE_USER:
+			SetCropAspect(cropUserAspectWidth_, cropUserAspectHeight_);
+			break;
+		case IDM_CROPMODE_IMAGE:
+			cropSelection_.SetMode(jpegview_linux::CropSelectionMode::ImageAspect);
+			cropSelection_.ReapplyMode(viewport_.Zoom());
+			break;
 		case jpegview_linux::kCommandPreviousSiblingFolder:
 			NavigateToSiblingFolder(-1);
 			break;
@@ -3045,7 +3337,8 @@ private:
 	std::vector<MenuItem> ContextMenuItems(bool advancedOptions) {
 		const std::string extension = fileList_.Empty() ? std::string() :
 			Lower(fileList_.Current().extension().string());
-		openWithApplications_ = jpegview_linux::DiscoverOpenWithApplications(extension);
+		if (contextMenuCropOnly_) openWithApplications_.clear();
+		else openWithApplications_ = jpegview_linux::DiscoverOpenWithApplications(extension);
 
 		jpegview_linux::ContextMenuState state;
 		state.playbackMode = playback_.Mode();
@@ -3063,6 +3356,14 @@ private:
 		state.imageAvailable = image_.width > 0;
 		state.losslessJpegAvailable = !clipboardMode_ && HasExecutable("jpegtran") &&
 			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
+		state.cropContextMenu = contextMenuCropOnly_;
+		state.cropSelectionAvailable = cropSelection_.HasSelection();
+		state.losslessJpegCropAvailable = state.losslessJpegAvailable && !imageModified_;
+		state.cropMode = cropSelection_.Mode();
+		state.cropAspectWidth = cropAspectWidth_;
+		state.cropAspectHeight = cropAspectHeight_;
+		state.userCropAspectWidth = cropUserAspectWidth_;
+		state.userCropAspectHeight = cropUserAspectHeight_;
 		state.autoCorrectionEnabled = autoContrastEnabled_;
 		state.pictureLevelsAvailable = !clipboardMode_ && !fileList_.Empty() && image_.width > 0;
 		state.localDensityEnabled = imageProcessing_.localDensityEnabled;
@@ -3196,9 +3497,22 @@ private:
 		int y = 0;
 		SDL_GetMouseState(&x, &y);
 		contextMenuAdvancedOptions_ = false;
+		contextMenuCropOnly_ = false;
 		contextMenuItems_ = ContextMenuItems(contextMenuAdvancedOptions_);
 		contextMenuX_ = x;
 		contextMenuY_ = y;
+		RepositionContextMenuToFit();
+		contextMenuOpen_ = true;
+		menuSelected_ = -1;
+	}
+
+	void OpenCropContextMenu() {
+		if (!cropSelection_.HasSelection()) return;
+		contextMenuAdvancedOptions_ = false;
+		contextMenuCropOnly_ = true;
+		contextMenuItems_ = ContextMenuItems(false);
+		contextMenuX_ = lastMouseX_;
+		contextMenuY_ = lastMouseY_;
 		RepositionContextMenuToFit();
 		contextMenuOpen_ = true;
 		menuSelected_ = -1;
@@ -3208,6 +3522,7 @@ private:
 		if (!contextMenuOpen_) return;
 		contextMenuOpen_ = false;
 		contextMenuAdvancedOptions_ = false;
+		contextMenuCropOnly_ = false;
 		contextMenuPositionLocked_ = false;
 		menuSelected_ = -1;
 		contextMenuItems_.clear();
@@ -3793,6 +4108,166 @@ private:
 		RenderResizeButton(kResizeCancel, "CANCEL");
 	}
 
+	SDL_Rect CropSizeDialogRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(460, std::max(360, windowWidth - 40));
+		const int height = 290;
+		return SDL_Rect{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+	}
+
+	SDL_Rect CropSizeFieldRect(int field) const {
+		const SDL_Rect dialog = CropSizeDialogRect();
+		return SDL_Rect{dialog.x + 190, dialog.y + 68 + field * 42, 190, 30};
+	}
+
+	SDL_Rect CropSizeUnitRect(bool screenPixels) const {
+		const SDL_Rect dialog = CropSizeDialogRect();
+		return screenPixels ? SDL_Rect{dialog.x + 20, dialog.y + 164, 185, 30} :
+			SDL_Rect{dialog.x + 218, dialog.y + 164, 185, 30};
+	}
+
+	SDL_Rect CropSizeButtonRect(int button) const {
+		const SDL_Rect dialog = CropSizeDialogRect();
+		const int y = dialog.y + dialog.h - 48;
+		if (button == kCropSizeApply) return SDL_Rect{dialog.x + dialog.w - 198, y, 86, 30};
+		if (button == kCropSizeCancel) return SDL_Rect{dialog.x + dialog.w - 102, y, 86, 30};
+		return {};
+	}
+
+	void OpenFixedCropSizeDialog() {
+		cropSizeDialog_.Open(cropSelection_.FixedWidth(), cropSelection_.FixedHeight(),
+			cropSelection_.FixedSizeUsesScreenPixels());
+		contextMenuOpen_ = false;
+		fileDialogOpen_ = false;
+		batchCopyDialog_.Close();
+		resizeDialog_.Close();
+		SDL_StartTextInput();
+		SetTitle("Set fixed crop size");
+	}
+
+	void CloseFixedCropSizeDialog() {
+		if (!cropSizeDialog_.IsOpen()) return;
+		SDL_StopTextInput();
+		cropSizeDialog_.Close();
+		SetTitle();
+	}
+
+	void ApplyFixedCropSizeDialog() {
+		int width = 0;
+		int height = 0;
+		bool screenPixels = true;
+		if (!cropSizeDialog_.Apply(width, height, screenPixels)) return;
+		cropSelection_.SetFixedSize(width, height, screenPixels);
+		cropSelection_.ReapplyMode(viewport_.Zoom());
+		SaveSettings();
+		CloseFixedCropSizeDialog();
+	}
+
+	void RenderCropSizeButton(int button, const char* label) {
+		const SDL_Rect rect = CropSizeButtonRect(button);
+		const bool hovered = PointInRect(lastMouseX_, lastMouseY_, rect);
+		SDL_SetRenderDrawColor(renderer_, hovered ? 52 : 28, hovered ? 78 : 28,
+			hovered ? 108 : 28, 220);
+		SDL_RenderFillRect(renderer_, &rect);
+		DrawRect(rect, 125, 145, 165);
+		DrawText(label, rect.x + 12, rect.y + 10, kUiTextScale, 255, 255, 255);
+	}
+
+	void RenderFixedCropSizeDialog() {
+		if (!cropSizeDialog_.IsOpen()) return;
+		const SDL_Rect dialog = CropSizeDialogRect();
+		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 232);
+		SDL_RenderFillRect(renderer_, &dialog);
+		DrawRect(dialog, 190, 190, 190);
+		DrawText("SET FIXED CROP SIZE", dialog.x + 20, dialog.y + 16,
+			kUiTextScale, 255, 255, 255);
+		const char* labels[] = {"WIDTH", "HEIGHT"};
+		const std::string values[] = {cropSizeDialog_.WidthText(), cropSizeDialog_.HeightText()};
+		for (int field = 0; field < 2; ++field) {
+			const SDL_Rect rect = CropSizeFieldRect(field);
+			const bool focused = cropSizeDialog_.FocusedField() == field;
+			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 225);
+			SDL_RenderFillRect(renderer_, &rect);
+			DrawRect(rect, focused ? 100 : 75, focused ? 130 : 75, focused ? 165 : 75);
+			DrawText(labels[field], dialog.x + 20, rect.y + 10, kUiTextScale, 205, 215, 230);
+			DrawText(ClipText(values[field], rect.w - 16), rect.x + 8, rect.y + 10,
+				kUiTextScale, 255, 255, 255);
+		}
+		for (const bool screenPixels : {true, false}) {
+			const SDL_Rect rect = CropSizeUnitRect(screenPixels);
+			const bool selected = cropSizeDialog_.UsesScreenPixels() == screenPixels;
+			SDL_SetRenderDrawColor(renderer_, selected ? 45 : 28, selected ? 68 : 28,
+				selected ? 92 : 28, 220);
+			SDL_RenderFillRect(renderer_, &rect);
+			DrawRect(rect, selected ? 120 : 75, selected ? 150 : 75, selected ? 190 : 75);
+			DrawText(screenPixels ? "Screen pixels" : "Image pixels", rect.x + 10,
+				rect.y + 9, kUiTextScale, 235, 235, 235);
+		}
+		if (!cropSizeDialog_.Message().empty()) {
+			DrawText(ClipText(cropSizeDialog_.Message(), dialog.w - 40), dialog.x + 20,
+				dialog.y + 222, kUiTextScale, 235, 180, 130);
+		}
+		DrawText("Screen-pixel sizes follow zoom; image-pixel sizes use source pixels.",
+			dialog.x + 20, dialog.y + 201, kUiTextScale, 160, 160, 160);
+		RenderCropSizeButton(kCropSizeApply, "APPLY");
+		RenderCropSizeButton(kCropSizeCancel, "CANCEL");
+	}
+
+	void HandleFixedCropSizeDialogEvents(const SDL_Event& event, bool& running) {
+		switch (event.type) {
+		case SDL_QUIT:
+			running = false;
+			break;
+		case SDL_KEYDOWN: {
+			if (event.key.repeat != 0) break;
+			const bool control = (event.key.keysym.mod & 0x00c0u) != 0;
+			if (event.key.keysym.sym == SDLK_ESCAPE) {
+				CloseFixedCropSizeDialog();
+			} else if (event.key.keysym.sym == SDLK_RETURN) {
+				ApplyFixedCropSizeDialog();
+			} else if (event.key.keysym.sym == SDLK_TAB || event.key.keysym.sym == SDLK_UP ||
+				event.key.keysym.sym == SDLK_DOWN) {
+				cropSizeDialog_.MoveFocus(1);
+			} else if (control && event.key.keysym.sym == 'a') {
+				cropSizeDialog_.SelectAll();
+			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
+				cropSizeDialog_.Backspace();
+			} else if (event.key.keysym.sym == SDLK_LEFT || event.key.keysym.sym == SDLK_RIGHT) {
+				cropSizeDialog_.ToggleUnits();
+			}
+			break;
+		}
+		case SDL_TEXTINPUT:
+			cropSizeDialog_.AppendText(event.text.text);
+			break;
+		case SDL_MOUSEMOTION:
+			lastMouseX_ = event.motion.x;
+			lastMouseY_ = event.motion.y;
+			break;
+		case SDL_MOUSEBUTTONDOWN:
+			if (event.button.button != SDL_BUTTON_LEFT) break;
+			if (PointInRect(event.button.x, event.button.y, CropSizeButtonRect(kCropSizeApply))) {
+				ApplyFixedCropSizeDialog();
+			} else if (PointInRect(event.button.x, event.button.y,
+				CropSizeButtonRect(kCropSizeCancel))) {
+				CloseFixedCropSizeDialog();
+			} else if (PointInRect(event.button.x, event.button.y, CropSizeFieldRect(0))) {
+				cropSizeDialog_.SelectField(jpegview_linux::CropSizeDialogController::kWidthField);
+			} else if (PointInRect(event.button.x, event.button.y, CropSizeFieldRect(1))) {
+				cropSizeDialog_.SelectField(jpegview_linux::CropSizeDialogController::kHeightField);
+			} else if (PointInRect(event.button.x, event.button.y, CropSizeUnitRect(true))) {
+				cropSizeDialog_.SetScreenPixels(true);
+			} else if (PointInRect(event.button.x, event.button.y, CropSizeUnitRect(false))) {
+				cropSizeDialog_.SetScreenPixels(false);
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
 	SDL_Rect FileDialogRect() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
@@ -4160,6 +4635,8 @@ private:
 		fileDialogSave_ = true;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = false;
+		fileDialogLosslessCrop_ = false;
+		fileDialogLosslessCropRect_ = {};
 		fileDialogSaveFullSize_ = fullSize;
 		PositionFileDialogGeometry();
 		fileDialogFilename_ = fileList_.Current().stem().string() + "_proc.jpg";
@@ -4413,9 +4890,10 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
 		SDL_RenderFillRect(renderer_, &dialog);
 		DrawRect(dialog, 190, 190, 190);
-		DrawText(fileDialogParameterBackup_ ? "Back up picture-level database" :
+		DrawText(fileDialogLosslessCrop_ ? "Save lossless JPEG crop" :
+			(fileDialogParameterBackup_ ? "Back up picture-level database" :
 			(fileDialogParameterRestore_ ? "Restore picture-level database" :
-				(fileDialogSave_ ? "Save processed image" : "Open image")),
+				(fileDialogSave_ ? "Save processed image" : "Open image"))),
 			dialog.x + 18, dialog.y + 14, kUiTextScale);
 		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
 		DrawText(fileDialogSave_ ? "File name" :
@@ -4681,6 +5159,175 @@ private:
 		return SDL_Rect{layout.imageX, 0, layout.imageWidth, layout.imageHeight};
 	}
 
+	jpegview_linux::SelectionScreenRect ImageDestinationScreenRect() const {
+		const SDL_Rect imageArea = ImageAreaRect();
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			image_.width, image_.height, imageArea.w, imageArea.h);
+		return {imageArea.x + destination.x, imageArea.y + destination.y,
+			destination.width, destination.height};
+	}
+
+	bool BeginCropDrag(int screenX, int screenY) {
+		if (image_.width <= 0 || image_.height <= 0 || pictureLevelsPanelOpen_ ||
+			unsharpDialogOpen_ || resizeDialog_.IsOpen()) return false;
+		const SDL_Rect imageArea = ImageAreaRect();
+		const jpegview_linux::SelectionScreenRect destination = ImageDestinationScreenRect();
+		if (!PointInRect(screenX, screenY, imageArea) || destination.width <= 0 ||
+			destination.height <= 0 || screenX < destination.x || screenY < destination.y ||
+			screenX >= destination.x + destination.width ||
+			screenY >= destination.y + destination.height) return false;
+
+		const Uint16 modifiers = static_cast<Uint16>(SDL_GetModState());
+		const bool control = (modifiers & 0x00c0u) != 0;
+		const bool shift = (modifiers & 0x0003u) != 0;
+		const jpegview_linux::SelectionPoint point = jpegview_linux::CropSelectionModel::ScreenToImage(
+			screenX, screenY, destination, image_.width, image_.height);
+		if (cropSelection_.HasSelection()) {
+			const jpegview_linux::SelectionScreenRect selected =
+				jpegview_linux::CropSelectionModel::ToScreen(cropSelection_.Rect(), destination,
+					image_.width, image_.height);
+			const auto handle = jpegview_linux::CropSelectionModel::HitTest(screenX, screenY,
+				selected, cropSelection_.Mode() == jpegview_linux::CropSelectionMode::FixedSize);
+			if (handle != jpegview_linux::CropSelectionHandle::None &&
+				cropSelection_.StartManipulation(point.x, point.y, handle)) {
+				cropMouseDragging_ = true;
+				cropDragHandle_ = handle;
+				cropDragWasNew_ = false;
+				cropZoomOnRelease_ = shift;
+				cropDragMoved_ = false;
+				cropDragStartX_ = screenX;
+				cropDragStartY_ = screenY;
+				SDL_CaptureMouse(SDL_TRUE);
+				UpdateCropCursor(screenX, screenY);
+				dragging_ = false;
+				return true;
+			}
+		}
+
+		const bool requiresPanning = destination.width > imageArea.w ||
+			destination.height > imageArea.h;
+		if (!control && !shift && (requiresPanning || !defaultSelectionMode_)) return false;
+		if (!cropSelection_.StartNew(point.x, point.y)) return false;
+		cropMouseDragging_ = true;
+		cropDragHandle_ = jpegview_linux::CropSelectionHandle::NewSelection;
+		cropDragWasNew_ = true;
+		cropZoomOnRelease_ = shift;
+		cropDragMoved_ = false;
+		cropDragStartX_ = screenX;
+		cropDragStartY_ = screenY;
+		SDL_CaptureMouse(SDL_TRUE);
+		UpdateCropCursor(screenX, screenY);
+		dragging_ = false;
+		return true;
+	}
+
+	SDL_Cursor* CropCursorForHandle(jpegview_linux::CropSelectionHandle handle) const {
+		using jpegview_linux::CropSelectionHandle;
+		switch (handle) {
+		case CropSelectionHandle::Move: return cropMoveCursor_;
+		case CropSelectionHandle::Left:
+		case CropSelectionHandle::Right: return cropHorizontalCursor_;
+		case CropSelectionHandle::Top:
+		case CropSelectionHandle::Bottom: return cropVerticalCursor_;
+		case CropSelectionHandle::TopLeft:
+		case CropSelectionHandle::BottomRight: return cropDiagonalDownCursor_;
+		case CropSelectionHandle::TopRight:
+		case CropSelectionHandle::BottomLeft: return cropDiagonalUpCursor_;
+		case CropSelectionHandle::NewSelection: return cropCrosshairCursor_;
+		default: return nullptr;
+		}
+	}
+
+	void UpdateCropCursor(int screenX, int screenY) const {
+		if (thumbnailPanelResizing_ || IsThumbnailPanelResizeHandle(screenX, screenY)) return;
+		if (dragging_ && !cropMouseDragging_) {
+			SDL_SetCursor(SDL_GetDefaultCursor());
+			return;
+		}
+		if (cropMouseDragging_) {
+			SDL_Cursor* cursor = CropCursorForHandle(cropDragHandle_);
+			SDL_SetCursor(cursor != nullptr ? cursor : SDL_GetDefaultCursor());
+			return;
+		}
+		const SDL_Rect imageArea = ImageAreaRect();
+		const jpegview_linux::SelectionScreenRect destination = ImageDestinationScreenRect();
+		if (cropSelection_.HasSelection() && PointInRect(screenX, screenY, imageArea) &&
+			screenX >= destination.x && screenY >= destination.y &&
+			screenX < destination.x + destination.width &&
+			screenY < destination.y + destination.height) {
+			const jpegview_linux::SelectionScreenRect selected =
+				jpegview_linux::CropSelectionModel::ToScreen(cropSelection_.Rect(), destination,
+					image_.width, image_.height);
+			const auto handle = jpegview_linux::CropSelectionModel::HitTest(screenX, screenY,
+				selected, cropSelection_.Mode() == jpegview_linux::CropSelectionMode::FixedSize);
+			SDL_Cursor* cursor = CropCursorForHandle(handle);
+			SDL_SetCursor(cursor != nullptr ? cursor : SDL_GetDefaultCursor());
+			return;
+		}
+		const Uint16 modifiers = static_cast<Uint16>(SDL_GetModState());
+		const bool canStartSelection = defaultSelectionMode_ ||
+			(modifiers & (0x00c0u | 0x0003u)) != 0;
+		const bool canCreateHere = destination.width <= imageArea.w &&
+			destination.height <= imageArea.h;
+		if (canStartSelection && canCreateHere && PointInRect(screenX, screenY, imageArea) &&
+			screenX >= destination.x && screenY >= destination.y &&
+			screenX < destination.x + destination.width &&
+			screenY < destination.y + destination.height && cropCrosshairCursor_ != nullptr) {
+			SDL_SetCursor(cropCrosshairCursor_);
+		} else {
+			SDL_SetCursor(SDL_GetDefaultCursor());
+		}
+	}
+
+	void UpdateCropDrag(int screenX, int screenY) {
+		if (!cropMouseDragging_) return;
+		const jpegview_linux::SelectionPoint point = jpegview_linux::CropSelectionModel::ScreenToImage(
+			screenX, screenY, ImageDestinationScreenRect(), image_.width, image_.height);
+		const bool updated = cropSelection_.Update(point.x, point.y, viewport_.Zoom());
+		if (updated && (cropSelection_.Mode() == jpegview_linux::CropSelectionMode::FixedSize ||
+			std::abs(screenX - cropDragStartX_) >= 2 ||
+			std::abs(screenY - cropDragStartY_) >= 2)) cropDragMoved_ = true;
+	}
+
+	void EndCropDrag(int screenX, int screenY) {
+		if (!cropMouseDragging_) return;
+		lastMouseX_ = screenX;
+		lastMouseY_ = screenY;
+		UpdateCropDrag(screenX, screenY);
+		cropSelection_.End();
+		cropMouseDragging_ = false;
+		SDL_CaptureMouse(SDL_FALSE);
+		if (cropDragWasNew_) {
+			if (!cropDragMoved_) {
+				cropSelection_.Clear();
+			} else if (cropZoomOnRelease_) {
+				ZoomToSelection();
+				cropSelection_.Clear();
+			} else {
+				OpenCropContextMenu();
+			}
+		} else if (cropDragMoved_ && cropZoomOnRelease_) {
+			ZoomToSelection();
+			cropSelection_.Clear();
+		}
+		cropDragWasNew_ = false;
+		cropZoomOnRelease_ = false;
+		cropDragMoved_ = false;
+		cropDragHandle_ = jpegview_linux::CropSelectionHandle::None;
+		UpdateCropCursor(screenX, screenY);
+	}
+
+	void ClearCropSelection() {
+		if (cropMouseDragging_) SDL_CaptureMouse(SDL_FALSE);
+		cropSelection_.Clear();
+		cropMouseDragging_ = false;
+		cropDragWasNew_ = false;
+		cropZoomOnRelease_ = false;
+		cropDragMoved_ = false;
+		cropDragHandle_ = jpegview_linux::CropSelectionHandle::None;
+		UpdateCropCursor(lastMouseX_, lastMouseY_);
+	}
+
 	bool IsThumbnailPanelResizeHandle(int x, int y) const {
 		if (!thumbnailPanelVisible_) return false;
 		const SDL_Rect panel = ThumbnailPanelRect();
@@ -4812,7 +5459,7 @@ private:
 
 	void RenderControls() {
 		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
-			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen()) return;
 		const jpegview_linux::NavigationPanelPaint paint = CurrentNavigationPanelPaint();
 		const SDL_Rect panel = SdlRect(paint.panel);
 		const jpegview_linux::NavigationButtonPaint* hoveredButton = nullptr;
@@ -4956,6 +5603,54 @@ private:
 		SDL_RenderCopy(renderer_, currentTexture, nullptr, &enteringDestination);
 	}
 
+	void RenderCropSelection() {
+		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return;
+		const jpegview_linux::SelectionScreenRect destination = ImageDestinationScreenRect();
+		const jpegview_linux::SelectionScreenRect selected =
+			jpegview_linux::CropSelectionModel::ToScreen(cropSelection_.Rect(), destination,
+				image_.width, image_.height);
+		if (selected.width <= 0 || selected.height <= 0) return;
+		const int left = selected.x;
+		const int top = selected.y;
+		const int right = selected.x + selected.width - 1;
+		const int bottom = selected.y + selected.height - 1;
+		// A black under-stroke keeps the selection legible on both dark and bright
+		// image content; short yellow dashes mirror the Windows dotted white frame
+		// while matching the Linux frontend's existing focus accent.
+		DrawLine(left - 1, top - 1, right + 1, top - 1, 0, 0, 0, 255);
+		DrawLine(left - 1, bottom + 1, right + 1, bottom + 1, 0, 0, 0, 255);
+		DrawLine(left - 1, top - 1, left - 1, bottom + 1, 0, 0, 0, 255);
+		DrawLine(right + 1, top - 1, right + 1, bottom + 1, 0, 0, 0, 255);
+		for (int x = left; x <= right; x += 4) {
+			DrawLine(x, top, std::min(right, x + 1), top, 255, 205, 0, 255);
+			DrawLine(x, bottom, std::min(right, x + 1), bottom, 255, 205, 0, 255);
+		}
+		for (int y = top; y <= bottom; y += 4) {
+			DrawLine(left, y, left, std::min(bottom, y + 1), 255, 205, 0, 255);
+			DrawLine(right, y, right, std::min(bottom, y + 1), 255, 205, 0, 255);
+		}
+		if (cropSelection_.Mode() == jpegview_linux::CropSelectionMode::FixedSize ||
+			selected.width < 18 || selected.height < 18) return;
+		const int middleX = (left + right) / 2;
+		const int middleY = (top + bottom) / 2;
+		std::array<std::pair<int, int>, 8> points = {{
+			{left, top}, {middleX, top}, {right, top}, {left, middleY},
+			{right, middleY}, {left, bottom}, {middleX, bottom}, {right, bottom}}};
+		const std::size_t pointCount = selected.width > 70 && selected.height > 70 ? points.size() : 4;
+		const std::array<std::size_t, 4> corners = {{0, 2, 5, 7}};
+		for (std::size_t index = 0; index < pointCount; ++index) {
+			const std::size_t pointIndex = pointCount == 4 ? corners[index] : index;
+			const int x = points[pointIndex].first;
+			const int y = points[pointIndex].second;
+			SDL_Rect outer{x - 4, y - 4, 9, 9};
+			SDL_SetRenderDrawColor(renderer_, 245, 245, 245, 255);
+			SDL_RenderFillRect(renderer_, &outer);
+			SDL_Rect inner{x - 2, y - 2, 5, 5};
+			SDL_SetRenderDrawColor(renderer_, 20, 20, 20, 255);
+			SDL_RenderFillRect(renderer_, &inner);
+		}
+	}
+
 	void RenderContextMenu() {
 		if (!contextMenuOpen_) return;
 		const SDL_Rect menu = ContextMenuRect();
@@ -5033,6 +5728,10 @@ private:
 				HandleResizeDialogEvents(event, running);
 				continue;
 			}
+			if (cropSizeDialog_.IsOpen()) {
+				HandleFixedCropSizeDialogEvents(event, running);
+				continue;
+			}
 			if (unsharpDialogOpen_) {
 				HandleUnsharpMaskDialogEvents(event, running);
 				continue;
@@ -5101,6 +5800,9 @@ private:
 					maximized_ = false;
 				} else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
 					EndThumbnailPanelResize(lastMouseX_, lastMouseY_);
+					if (cropMouseDragging_) {
+						ClearCropSelection();
+					}
 				} else if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
 					event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
 					if (viewport_.IsFitToWindow()) {
@@ -5132,7 +5834,13 @@ private:
 					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, false);
 				}
 				if (event.key.keysym.sym == SDLK_MENU) {
-					OpenContextMenu();
+					if (cropSelection_.HasSelection()) OpenCropContextMenu();
+					else OpenContextMenu();
+					break;
+				}
+				if (event.key.repeat == 0 && event.key.keysym.sym == SDLK_ESCAPE &&
+					cropSelection_.HasSelection()) {
+					ClearCropSelection();
 					break;
 				}
 				const bool plainKey = (modifiers & 0x03C3u) == 0;
@@ -5169,25 +5877,37 @@ private:
 						dragging_ = false;
 						break;
 					}
+					if (BeginCropDrag(event.button.x, event.button.y)) break;
 					dragging_ = true;
 					lastMouseX_ = event.button.x;
 					lastMouseY_ = event.button.y;
 					imageCenterX_ = event.button.x;
 					imageCenterY_ = event.button.y;
 				} else if (event.button.button == SDL_BUTTON_RIGHT) {
-					OpenContextMenu();
+					if (cropSelection_.HasSelection()) OpenCropContextMenu();
+					else OpenContextMenu();
 				}
 				break;
 			case SDL_MOUSEBUTTONUP:
 				if (event.button.button == SDL_BUTTON_LEFT) {
-					EndThumbnailPanelResize(event.button.x, event.button.y);
-					dragging_ = false;
+					if (cropMouseDragging_) EndCropDrag(event.button.x, event.button.y);
+					else {
+						EndThumbnailPanelResize(event.button.x, event.button.y);
+						dragging_ = false;
+					}
 				}
 				break;
 			case SDL_MOUSEMOTION:
 				UpdateThumbnailPanelCursor(event.motion.x, event.motion.y);
+				UpdateCropCursor(event.motion.x, event.motion.y);
 				if (thumbnailPanelResizing_) {
 					ResizeThumbnailPanel(event.motion.x);
+					lastMouseX_ = event.motion.x;
+					lastMouseY_ = event.motion.y;
+					break;
+				}
+				if (cropMouseDragging_) {
+					UpdateCropDrag(event.motion.x, event.motion.y);
 					lastMouseX_ = event.motion.x;
 					lastMouseY_ = event.motion.y;
 					break;
@@ -5253,6 +5973,8 @@ private:
 		SDL_RenderFillRect(renderer_, &imageArea);
 		SDL_RenderSetClipRect(renderer_, &imageArea);
 		RenderImageTransition(destination, imageArea, renderTexture);
+		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+		RenderCropSelection();
 		SDL_RenderSetClipRect(renderer_, nullptr);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderThumbnailPanel();
@@ -5265,6 +5987,7 @@ private:
 		RenderFileDialog();
 		RenderBatchCopy();
 		RenderResizeDialog();
+		RenderFixedCropSizeDialog();
 		RenderConfirmation();
 		RenderAbout();
 		RenderHelp();
@@ -5334,6 +6057,18 @@ private:
 	Image transitionImage_;
 	SDL_Texture* transitionTexture_ = nullptr;
 	jpegview_linux::Viewport viewport_;
+	jpegview_linux::CropSelectionModel cropSelection_;
+	bool defaultSelectionMode_ = true;
+	bool cropMouseDragging_ = false;
+	bool cropDragWasNew_ = false;
+	bool cropZoomOnRelease_ = false;
+	bool cropDragMoved_ = false;
+	int cropDragStartX_ = 0;
+	int cropDragStartY_ = 0;
+	int cropAspectWidth_ = 1;
+	int cropAspectHeight_ = 1;
+	int cropUserAspectWidth_ = jpegview_linux::kDefaultUserCropAspectWidth;
+	int cropUserAspectHeight_ = jpegview_linux::kDefaultUserCropAspectHeight;
 	bool fullscreen_ = false;
 	bool maximized_ = false;
 	bool borderless_ = false;
@@ -5361,6 +6096,13 @@ private:
 	int thumbnailResizeOffset_ = 0;
 	SDL_Cursor* thumbnailResizeCursor_ = nullptr;
 	SDL_Cursor* fileDialogResizeCursor_ = nullptr;
+	SDL_Cursor* cropCrosshairCursor_ = nullptr;
+	SDL_Cursor* cropMoveCursor_ = nullptr;
+	SDL_Cursor* cropHorizontalCursor_ = nullptr;
+	SDL_Cursor* cropVerticalCursor_ = nullptr;
+	SDL_Cursor* cropDiagonalDownCursor_ = nullptr;
+	SDL_Cursor* cropDiagonalUpCursor_ = nullptr;
+	jpegview_linux::CropSelectionHandle cropDragHandle_ = jpegview_linux::CropSelectionHandle::None;
 	bool infoVisible_ = false;
 	bool showHistogram_ = false;
 	bool showFileName_ = false;
@@ -5374,6 +6116,7 @@ private:
 	std::string jpegComment_;
 	bool contextMenuOpen_ = false;
 	bool contextMenuAdvancedOptions_ = false;
+	bool contextMenuCropOnly_ = false;
 	bool contextMenuPositionLocked_ = false;
 	bool contextMenuNeedsCleanFrame_ = false;
 	int contextMenuX_ = 0;
@@ -5406,6 +6149,8 @@ private:
 	SDL_Rect fileDialogDragStartRect_{};
 	bool fileDialogSaveFullSize_ = true;
 	bool fileDialogOverwriteConfirmed_ = false;
+	bool fileDialogLosslessCrop_ = false;
+	jpegview_linux::SelectionRect fileDialogLosslessCropRect_;
 	fs::path fileDialogDirectory_;
 	std::string fileDialogFilename_;
 	std::string fileDialogMessage_;
@@ -5425,6 +6170,7 @@ private:
 	std::string copyRenamePattern_;
 	jpegview_linux::BatchCopyDialogController batchCopyDialog_;
 	jpegview_linux::ResizeDialogController resizeDialog_;
+	jpegview_linux::CropSizeDialogController cropSizeDialog_;
 	std::vector<std::string> pendingDroppedFiles_;
 	std::unique_ptr<jpegview_linux::FileList> fileListBeforeClipboard_;
 	fs::path clipboardTempFile_;

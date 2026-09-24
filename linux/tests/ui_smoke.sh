@@ -826,4 +826,233 @@ if [ "$visual_assertions" -eq 1 ]; then
 	stop_viewer
 fi
 
+if command -v convert >/dev/null 2>&1; then
+	mkdir -p "$temporary/crop-images" "$temporary/crop-config"
+	convert -size 160x128 xc:red -fill blue -draw 'rectangle 80,0 159,127' \
+		-sampling-factor 2x2 "$temporary/crop-images/01-crop.jpg"
+	env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \
+		HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/crop-config" \
+		"$BINARY" "$temporary/crop-images/01-crop.jpg" \
+		>"$temporary/crop-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: crop viewer did not appear" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	sleep 0.3
+	crop_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+	crop_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	crop_image_left=$((crop_window_width / 2 - 80))
+	crop_image_top=$((crop_window_height / 2 - 64))
+	# Shift-drag selects the source rectangle, zooms into it, and clears the overlay.
+	DISPLAY=":$display_number" xdotool keydown Shift_L
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 32)) $((crop_image_top + 32)) mousedown 1
+	sleep 0.1
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 127)) $((crop_image_top + 95))
+	DISPLAY=":$display_number" xdotool mouseup 1 keyup Shift_L
+	sleep 0.3
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-zoom.png"
+		zoom_sample_y=$((crop_window_height / 2))
+		zoom_red_x=$((crop_window_width / 2 - 200))
+		zoom_blue_x=$((crop_window_width / 2 + 200))
+		zoom_red=$(convert "$temporary/crop-zoom.png" -format \
+			"%[fx:p{$zoom_red_x,$zoom_sample_y}.r>0.7&&p{$zoom_red_x,$zoom_sample_y}.b<0.3]" info:)
+		zoom_blue=$(convert "$temporary/crop-zoom.png" -format \
+			"%[fx:p{$zoom_blue_x,$zoom_sample_y}.b>0.7&&p{$zoom_blue_x,$zoom_sample_y}.r<0.3]" info:)
+		if [ "$zoom_red" != "1" ] || [ "$zoom_blue" != "1" ]; then
+			echo "UI smoke test: Shift-drag did not zoom to the selected source pixels ($zoom_red/$zoom_blue)" >&2
+			exit 1
+		fi
+	fi
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	# Make a selection and use its context menu to open the fixed-size editor.
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 32)) $((crop_image_top + 32)) mousedown 1
+	sleep 0.1
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 127)) $((crop_image_top + 95)) mouseup 1
+	sleep 0.2
+	if command -v jpegtran >/dev/null 2>&1; then crop_fixed_mode_steps=6; else crop_fixed_mode_steps=5; fi
+	for _ in $(seq 1 "$crop_fixed_mode_steps"); do DISPLAY=":$display_number" xdotool key Down; done
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	crop_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	if [ "$crop_dialog_title" != "Set fixed crop size" ]; then
+		echo "UI smoke test: crop menu did not open the fixed-size editor ($crop_dialog_title)" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool type --delay 30 '64'
+	DISPLAY=":$display_number" xdotool key Tab
+	DISPLAY=":$display_number" xdotool type --delay 30 '48'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	crop_settings="$temporary/crop-config/jpegview-linux/settings.conf"
+	grep -q '^fixed_crop_width=64$' "$crop_settings"
+	grep -q '^fixed_crop_height=48$' "$crop_settings"
+	grep -q '^fixed_crop_screen_pixels=1$' "$crop_settings"
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-fixed-resized.png"
+		fixed_top_left=$(convert "$temporary/crop-fixed-resized.png" -format \
+			"%[pixel:p{$((crop_image_left + 32)),$((crop_image_top + 32))}]" info:)
+		fixed_right_edge=$(convert "$temporary/crop-fixed-resized.png" -format \
+			"%[pixel:p{$((crop_image_left + 95)),$((crop_image_top + 56))}]" info:)
+		old_right_edge=$(convert "$temporary/crop-fixed-resized.png" -format \
+			"%[pixel:p{$((crop_image_left + 127)),$((crop_image_top + 56))}]" info:)
+		if [ "$fixed_top_left" != "srgb(255,205,0)" ] || \
+			[ "$fixed_right_edge" != "srgb(255,205,0)" ] || \
+			[ "$old_right_edge" = "srgb(255,205,0)" ]; then
+			echo "UI smoke test: applying fixed size did not resize the active selection ($fixed_top_left/$fixed_right_edge/$old_right_edge)" >&2
+			exit 1
+		fi
+	fi
+	# A fixed-size selection uses the configured screen dimensions at fit zoom.
+	DISPLAY=":$display_number" xdotool key Escape
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 10)) $((crop_image_top + 10)) mousedown 1
+	sleep 0.1
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 12)) $((crop_image_top + 12)) mouseup 1
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Escape
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-selection.png"
+		selection_border=$(convert "$temporary/crop-selection.png" -format \
+			"%[pixel:p{$((crop_image_left + 12)),$((crop_image_top + 12))}]" info:)
+		if [ "$selection_border" != "srgb(255,205,0)" ]; then
+			echo "UI smoke test: fixed-size crop selection border is missing ($selection_border)" >&2
+			exit 1
+		fi
+	fi
+	if command -v xclip >/dev/null 2>&1; then
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((crop_image_left + 24)) $((crop_image_top + 24)) click 3
+		if command -v jpegtran >/dev/null 2>&1; then crop_copy_steps=3; else crop_copy_steps=2; fi
+		for _ in $(seq 1 "$crop_copy_steps"); do DISPLAY=":$display_number" xdotool key Down; done
+		DISPLAY=":$display_number" xdotool key Return
+		for _ in $(seq 1 30); do
+			if DISPLAY=":$display_number" xclip -selection clipboard -t image/png -o \
+				>"$temporary/copied-selection.png" 2>/dev/null; then break; fi
+			sleep 0.1
+		done
+		if [ ! -s "$temporary/copied-selection.png" ] || \
+			[ "$(identify -format '%wx%h' "$temporary/copied-selection.png")" != "64x48" ]; then
+			echo "UI smoke test: Copy Selection did not place its source-size crop on the clipboard" >&2
+			exit 1
+		fi
+		copied_selection_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		case "$copied_selection_title" in
+			"Copied selection to clipboard"*) ;;
+			*) echo "UI smoke test: Copy Selection did not complete ($copied_selection_title)" >&2; exit 1 ;;
+		esac
+	fi
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 24)) $((crop_image_top + 24)) click 3
+	DISPLAY=":$display_number" xdotool key Down Return
+	sleep 0.3
+	if [ "$(identify -format '%wx%h' "$temporary/crop-images/01-crop.jpg")" != "160x128" ]; then
+		echo "UI smoke test: regular crop unexpectedly modified its source file" >&2
+		exit 1
+	fi
+	cropped_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	case "$cropped_title" in
+		"01-crop.jpg (64x48,"*) ;;
+		*) echo "UI smoke test: in-memory crop did not update the current image dimensions ($cropped_title)" >&2; exit 1 ;;
+	esac
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-applied.png"
+		crop_sample_x=$((crop_window_width / 2))
+		crop_sample_y=$((crop_window_height / 2))
+		crop_center=$(convert "$temporary/crop-applied.png" -format \
+			"%[fx:p{$crop_sample_x,$crop_sample_y}.r>0.7&&p{$crop_sample_x,$crop_sample_y}.b<0.3]" info:)
+		crop_old_edge=$(convert "$temporary/crop-applied.png" -format \
+			"%[pixel:p{$((crop_sample_x - 50)),$crop_sample_y}]" info:)
+		if [ "$crop_center" != "1" ] || [ "$crop_old_edge" != "srgb(18,18,18)" ]; then
+			echo "UI smoke test: regular crop did not replace the display with the selected area ($crop_center/$crop_old_edge)" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+
+	if command -v jpegtran >/dev/null 2>&1; then
+		mkdir -p "$temporary/lossless-crop-config"
+		env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \
+			HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/lossless-crop-config" "$BINARY" \
+			"$temporary/crop-images/01-crop.jpg" >"$temporary/lossless-crop-viewer.log" 2>&1 &
+		viewer_pid=$!
+		window_id=''
+		for _ in $(seq 1 50); do
+			window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+				--class jpegview-linux 2>/dev/null | head -1 || true)
+			if [ -n "$window_id" ]; then break; fi
+			sleep 0.1
+		done
+		if [ -z "$window_id" ]; then
+			echo "UI smoke test: lossless crop viewer did not appear" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+		sleep 0.3
+		lossless_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+		lossless_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+		lossless_left=$((lossless_width / 2 - 80))
+		lossless_top=$((lossless_height / 2 - 64))
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((lossless_left + 29)) $((lossless_top + 29)) mousedown 1
+		sleep 0.1
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((lossless_left + 120)) $((lossless_top + 94)) mouseup 1
+		sleep 0.2
+		DISPLAY=":$display_number" xdotool key Escape
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((lossless_left + 80)) $((lossless_top + 64)) click 3
+		DISPLAY=":$display_number" xdotool key Down Down Return
+		sleep 0.2
+		DISPLAY=":$display_number" xdotool key Return
+		for _ in $(seq 1 50); do
+			if [ -f "$temporary/crop-images/01-crop_crop.jpg" ]; then break; fi
+			sleep 0.1
+		done
+		if [ ! -f "$temporary/crop-images/01-crop_crop.jpg" ] || \
+			[ "$(identify -format '%wx%h' "$temporary/crop-images/01-crop_crop.jpg")" != "112x80" ]; then
+			echo "UI smoke test: lossless JPEG crop did not save its MCU-aligned region" >&2
+			exit 1
+		fi
+		if [ "$visual_assertions" -eq 1 ]; then
+			convert "$temporary/crop-images/01-crop.jpg" -crop 112x80+16+16 +repage \
+				"$temporary/crop-lossless-reference.png"
+			convert "$temporary/crop-images/01-crop_crop.jpg" "$temporary/crop-lossless-result.png"
+			if ! compare -metric AE "$temporary/crop-lossless-reference.png" \
+				"$temporary/crop-lossless-result.png" null: 2>"$temporary/crop-lossless-difference.txt"; then
+				echo "UI smoke test: lossless JPEG crop changed decoded pixels" >&2
+				exit 1
+			fi
+		fi
+		crop_umask=$(umask)
+		expected_crop_mode=$(printf '%o' $((0666 & ~crop_umask)))
+		actual_crop_mode=$(stat -c '%a' "$temporary/crop-images/01-crop_crop.jpg")
+		if [ "$actual_crop_mode" != "$expected_crop_mode" ]; then
+			echo "UI smoke test: new lossless crop did not respect the process umask ($actual_crop_mode/$expected_crop_mode)" >&2
+			exit 1
+		fi
+		lossless_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		case "$lossless_title" in
+			*"Saved lossless crop: 01-crop_crop.jpg"*) ;;
+			*) echo "UI smoke test: lossless crop did not return to the viewer ($lossless_title)" >&2; exit 1 ;;
+		esac
+		stop_viewer
+	fi
+fi
+
 echo "UI smoke tests passed"

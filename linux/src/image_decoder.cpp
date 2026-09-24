@@ -1774,6 +1774,44 @@ bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& 
 	return ReadJpegSize(filename, width, height, errorMessage);
 }
 
+bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage) {
+	width = 0;
+	height = 0;
+	errorMessage.clear();
+	if (!IsJpegPath(filename)) {
+		errorMessage = "invalid JPEG header";
+		return false;
+	}
+	MappedInput input;
+	if (!MapInput(filename, input, false, errorMessage)) return false;
+	JpegErrorManager error{};
+	jpeg_decompress_struct decoder{};
+	volatile bool created = false;
+	decoder.err = jpeg_std_error(&error.base);
+	error.base.error_exit = JpegErrorExit;
+	error.base.output_message = SuppressJpegMessage;
+	if (setjmp(error.jump) != 0) {
+		if (created) jpeg_destroy_decompress(&decoder);
+		UnmapInput(input);
+		errorMessage = error.message[0] == '\0' ? "invalid JPEG header" : error.message;
+		return false;
+	}
+	jpeg_create_decompress(&decoder);
+	created = true;
+	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
+	const bool valid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK &&
+		decoder.max_h_samp_factor > 0 && decoder.max_v_samp_factor > 0;
+	if (valid) {
+		width = decoder.max_h_samp_factor * DCTSIZE;
+		height = decoder.max_v_samp_factor * DCTSIZE;
+	}
+	jpeg_destroy_decompress(&decoder);
+	UnmapInput(input);
+	if (!valid) errorMessage = "invalid JPEG sampling factors";
+	return valid;
+}
+
 bool DecodeJpegForDisplay(const std::filesystem::path& filename,
 	int minimumWidth, int minimumHeight, DecodedImage& image,
 	int& sourceWidth, int& sourceHeight, std::string& errorMessage) {

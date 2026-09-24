@@ -2,6 +2,7 @@
 
 #include "file_list.h"
 #include "playback_scheduler.h"
+#include "crop_selection_model.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +54,14 @@ struct ContextMenuState {
 	bool sortAscending = true;
 	bool imageAvailable = false;
 	bool losslessJpegAvailable = false;
+	bool cropContextMenu = false;
+	bool cropSelectionAvailable = false;
+	bool losslessJpegCropAvailable = false;
+	CropSelectionMode cropMode = CropSelectionMode::Free;
+	int cropAspectWidth = 1;
+	int cropAspectHeight = 1;
+	int userCropAspectWidth = 1;
+	int userCropAspectHeight = 1;
 	bool autoCorrectionEnabled = false;
 	bool pictureLevelsAvailable = false;
 	bool localDensityEnabled = false;

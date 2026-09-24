@@ -49,6 +49,28 @@ bool ParseBool(const std::string& value) {
 	return value == "1" || value == "true";
 }
 
+bool ParseBoolStrict(const std::string& value, bool& parsed) {
+	if (value == "1" || value == "true") {
+		parsed = true;
+		return true;
+	}
+	if (value == "0" || value == "false") {
+		parsed = false;
+		return true;
+	}
+	return false;
+}
+
+bool ParseInt(const std::string& value, int& parsed) {
+	try {
+		std::size_t parsedCharacters = 0;
+		parsed = std::stoi(value, &parsedCharacters);
+		return parsedCharacters == value.size();
+	} catch (const std::exception&) {
+		return false;
+	}
+}
+
 } // namespace
 
 fs::path ViewerSettingsPath() {
@@ -136,6 +158,27 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			} catch (const std::exception&) {
 				// Ignore malformed settings and retain the built-in default.
 			}
+		} else if (key == "fixed_crop_width" || key == "fixed_crop_height") {
+			int parsed = 0;
+			if (ParseInt(value, parsed)) {
+				const int dimension = std::clamp(parsed, kMinimumFixedCropDimension,
+					kMaximumFixedCropDimension);
+				if (key == "fixed_crop_width") loaded.fixedCropWidth = dimension;
+				else loaded.fixedCropHeight = dimension;
+			}
+		} else if (key == "fixed_crop_screen_pixels") {
+			bool parsed = false;
+			if (ParseBoolStrict(value, parsed)) loaded.fixedCropScreenPixels = parsed;
+		} else if (key == "user_crop_aspect_width" || key == "user_crop_aspect_height") {
+			int parsed = 0;
+			if (ParseInt(value, parsed) && parsed > 0) {
+				const int dimension = std::min(parsed, kMaximumFixedCropDimension);
+				if (key == "user_crop_aspect_width") loaded.userCropAspectWidth = dimension;
+				else loaded.userCropAspectHeight = dimension;
+			}
+		} else if (key == "default_selection_mode") {
+			bool parsed = false;
+			if (ParseBoolStrict(value, parsed)) loaded.defaultSelectionMode = parsed;
 		} else if (key == "info_visible") {
 			loaded.infoVisible = ParseBool(value);
 		} else if (key == "show_histogram") {
@@ -224,6 +267,16 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "file_dialog_height=" << std::clamp(settings.fileDialogHeight,
 			kMinimumFileDialogHeight, kMaximumFileDialogDimension) << '\n'
 		       << "file_dialog_preview_ratio=" << fileDialogPreviewRatio << '\n'
+		       << "fixed_crop_width=" << std::clamp(settings.fixedCropWidth,
+			kMinimumFixedCropDimension, kMaximumFixedCropDimension) << '\n'
+		       << "fixed_crop_height=" << std::clamp(settings.fixedCropHeight,
+			kMinimumFixedCropDimension, kMaximumFixedCropDimension) << '\n'
+		       << "fixed_crop_screen_pixels=" << (settings.fixedCropScreenPixels ? 1 : 0) << '\n'
+		       << "user_crop_aspect_width=" << std::clamp(settings.userCropAspectWidth,
+			kMinimumFixedCropDimension, kMaximumFixedCropDimension) << '\n'
+		       << "user_crop_aspect_height=" << std::clamp(settings.userCropAspectHeight,
+			kMinimumFixedCropDimension, kMaximumFixedCropDimension) << '\n'
+		       << "default_selection_mode=" << (settings.defaultSelectionMode ? 1 : 0) << '\n'
 		       << "info_visible=" << (settings.infoVisible ? 1 : 0) << '\n'
 		       << "show_histogram=" << (settings.showHistogram ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'

@@ -5,11 +5,12 @@ should normally be added to one of these focused modules and covered by `tests/t
 
 - `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, and current-file
   preservation.
-- `image`: validated mutable BGRA storage, rotate/mirror transforms, high-quality resizing, and
-  the automatic/manual picture-level processing pipeline.
+- `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
+  high-quality resizing, and the automatic/manual picture-level processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
-  move/resize hit testing, and image/view coordinate conversion; pixel-buffer cropping remains in
-  `image`.
+  move/resize hit testing, image/view coordinate conversion, and JPEG MCU-boundary alignment;
+  pixel-buffer cropping remains in `image`.
+- `crop_size_dialog_model`: fixed-crop dimension text, focus/unit transitions, and validation.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
   pixel processing, the atomic native per-image levels database, and its portable backup/restore.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
@@ -20,8 +21,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   before exact scaling, without requiring a retained full-resolution source frame.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
-- `settings` and `sort_mode`: persisted configuration (including default picture-level values) and
-  stable setting values.
+- `settings` and `sort_mode`: persisted configuration (including default picture-level values,
+  fixed crop dimensions/units, user crop aspect, and default selection mode) and stable setting
+  values.
 - `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, filter selection, and pure
   focus/text-editing transitions.
@@ -44,7 +46,7 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `batch_copy`: pattern expansion, previews, and pure dialog focus/selection/scroll transitions.
 - `desktop_applications`: non-UI discovery and planning for Open with commands.
 - `external_commands`: pure argv plans and fallback order for printing, wallpaper, clipboard,
-  desktop opening, trash, and lossless JPEG helpers.
+  desktop opening, trash, lossless JPEG crop, and lossless JPEG transforms.
 - `exif_reader`: JPEG metadata parsing.
 
 `main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
@@ -102,3 +104,16 @@ With keep-between-images enabled, current values take precedence; otherwise a sa
 restored. `image_processing` provides clamped ranges and identity defaults for the panel.
 Unsharp-mask parameters are included in display request keys so changing its preview cannot reuse
 stale prepared pixels.
+
+Crop selection remains in source-image coordinates while the SDL adapter maps pointer gestures and
+the dotted/handled overlay through the current viewport destination. Crop and copy actions first
+materialize the full-resolution processed image, then extract only the selected region instead of
+copying a second full-size source buffer; destructive crop updates both the cropped correction
+base and its reprocessed display image as one operation, and flattening an animation is explicit.
+Lossless JPEG crop reads sampling factors from the JPEG header, aligns the source selection to the
+corresponding MCU grid, and delegates the crop to `jpegtran` through a direct argv plan. Fixed crop
+size and custom aspect choices are user settings; fixed-size editor layout and rendering are owned by
+the SDL composition root, with text and validation transitions in `crop_size_dialog_model`. Applying
+a crop updates the current logical image dimensions, while copying a
+selection leaves the viewed image unchanged. Lossless output is staged beside its destination for an
+atomic rename and adopts the existing file's mode or the normal umask-derived mode for a new file.

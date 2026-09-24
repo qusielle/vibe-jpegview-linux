@@ -15,6 +15,7 @@
 #include "external_commands.h"
 #include "batch_copy.h"
 #include "crop_selection_model.h"
+#include "crop_size_dialog_model.h"
 #include "image_formats.h"
 #include "input_commands.h"
 #include "viewport.h"
@@ -642,6 +643,19 @@ void TestImageWriterDecoderRoundTrips() {
 		Expect(jpegview_linux::WriteImage(filename, pixels.data(), 2, 2, options, error),
 			"cannot write " + filename.extension().string() + ": " + error);
 		ExpectDecoded(filename, pixels, format.exactRgb, format.exactAlpha);
+		if (std::string(format.extension) == ".jpg") {
+			int mcuWidth = 0;
+			int mcuHeight = 0;
+			Expect(jpegview_linux::ReadJpegMcuSize(filename, mcuWidth, mcuHeight, error) &&
+				mcuWidth >= 8 && mcuHeight >= 8 && mcuWidth % 8 == 0 && mcuHeight % 8 == 0,
+				"JPEG MCU dimensions were not read from the sampling factors");
+			Expect(!jpegview_linux::ReadJpegMcuSize(temporary.path() / "missing.jpg",
+				mcuWidth, mcuHeight, error), "JPEG MCU reader accepted a missing file");
+			const fs::path malformed = temporary.path() / "malformed.jpg";
+			WriteText(malformed, "not a JPEG image");
+			Expect(!jpegview_linux::ReadJpegMcuSize(malformed, mcuWidth, mcuHeight, error),
+				"JPEG MCU reader accepted a malformed file");
+		}
 	}
 
 	const fs::path uppercase = temporary.path() / "uppercase.PNG";
@@ -1441,6 +1455,23 @@ void TestImageStorageTransformsAndValidation() {
 
 void TestImageCropCopiesHalfOpenRectangle() {
 	jpegview_linux::Image image = MakeIndexedImage(3, 2);
+	const std::vector<std::uint8_t> originalPixels = image.bgra;
+	jpegview_linux::Image copied;
+	Expect(image.CopyCrop(1, 0, 3, 2, copied) && copied.width == 2 && copied.height == 2 &&
+		copied.originalWidth == 3 && copied.originalHeight == 2 &&
+		ImageBlueChannel(copied) == std::vector<std::uint8_t>({2, 3, 5, 6}) &&
+		image.bgra == originalPixels,
+		"copy-crop did not extract the half-open rectangle while retaining its source");
+	jpegview_linux::Image preserved = MakeIndexedImage(1, 1);
+	const std::vector<std::uint8_t> preservedPixels = preserved.bgra;
+	Expect(!image.CopyCrop(1, 0, 4, 2, preserved) && preserved.width == 1 &&
+		preserved.height == 1 && preserved.bgra == preservedPixels,
+		"invalid copy-crop changed its output image");
+	Expect(image.CopyCrop(1, 0, 3, 2, image) && image.width == 2 && image.height == 2 &&
+		image.originalWidth == 3 && image.originalHeight == 2 &&
+		ImageBlueChannel(image) == std::vector<std::uint8_t>({2, 3, 5, 6}),
+		"copy-crop could not safely replace its source image");
+	image = MakeIndexedImage(3, 2);
 	Expect(image.Crop(1, 0, 3, 2), "valid image crop was rejected");
 	Expect(image.width == 2 && image.height == 2 &&
 		ImageBlueChannel(image) == std::vector<std::uint8_t>({2, 3, 5, 6}),
@@ -1510,14 +1541,23 @@ void TestCropSelectionModelGeometryAndManipulation() {
 	selection.StartNew(4, 7);
 	selection.Update(20, 20, 2.0);
 	selection.End();
-	Expect(selection.Rect().Width() == 160 && selection.Rect().Height() == 100,
+	Expect(selection.Rect().left == 20 && selection.Rect().top == 20 &&
+		selection.Rect().Width() == 160 && selection.Rect().Height() == 100,
 		"screen-pixel fixed size did not scale back to source-image pixels");
 	selection.SetFixedSize(80, 45, false);
 	selection.StartNew(4, 7);
 	selection.Update(20, 20, 3.0);
 	selection.End();
-	Expect(selection.Rect().Width() == 80 && selection.Rect().Height() == 45,
+	Expect(selection.Rect().left == 20 && selection.Rect().top == 20 &&
+		selection.Rect().Width() == 80 && selection.Rect().Height() == 45,
 		"image-pixel fixed size incorrectly depended on viewport zoom");
+	selection.SetFixedSize(60, 30, true);
+	selection.StartNew(15, 15);
+	selection.Update(25, 30, 2.0);
+	selection.End();
+	Expect(selection.Rect().left == 25 && selection.Rect().top == 30 &&
+		selection.Rect().Width() == 30 && selection.Rect().Height() == 15,
+		"fixed screen-pixel selection did not follow the pointer at the current zoom");
 
 	selection.SetImageSize(50, 40);
 	selection.SetMode(CropSelectionMode::Free);
@@ -1557,6 +1597,38 @@ void TestCropSelectionModelGeometryAndManipulation() {
 	selection.End();
 	ExpectNear(static_cast<double>(selection.Rect().Width()) / selection.Rect().Height(), 1.0,
 		0.03, "fixed-aspect corner resize did not retain its ratio");
+	selection.SetImageSize(200, 200);
+	selection.SetMode(CropSelectionMode::Free);
+	selection.StartNew(20, 30);
+	selection.Update(49, 49);
+	selection.End();
+	const SelectionRect beforeAspectChange = selection.Rect();
+	selection.SetAspectRatio(16, 9);
+	Expect(selection.ReapplyMode() && selection.Rect().left == beforeAspectChange.left &&
+		selection.Rect().top == beforeAspectChange.top,
+		"changing aspect mode did not retain the selection's top-left anchor");
+	ExpectNear(static_cast<double>(selection.Rect().Width()) / selection.Rect().Height(), 16.0 / 9.0,
+		0.03, "changing aspect mode did not immediately resize the selection");
+	selection.SetFixedSize(12, 8, false);
+	Expect(selection.ReapplyMode() && selection.Rect().left == beforeAspectChange.left &&
+		selection.Rect().top == beforeAspectChange.top && selection.Rect().Width() == 12 &&
+		selection.Rect().Height() == 8,
+		"applying fixed-size mode did not immediately resize the selection");
+	selection.SetMode(CropSelectionMode::Free);
+	const SelectionRect beforeFreeMode = selection.Rect();
+	Expect(!selection.ReapplyMode() && selection.Rect().left == beforeFreeMode.left &&
+		selection.Rect().top == beforeFreeMode.top && selection.Rect().right == beforeFreeMode.right &&
+		selection.Rect().bottom == beforeFreeMode.bottom,
+		"free mode unexpectedly changed the selection bounds");
+	selection.SetImageSize(65535, 65535);
+	selection.SetAspectRatio(65535, 1);
+	selection.StartNew(0, 0);
+	selection.Update(65534, 65534);
+	selection.End();
+	Expect(selection.Rect().Width() == 65535 && selection.Rect().Height() == 1 &&
+		selection.Rect().right <= selection.ImageWidth() &&
+		selection.Rect().bottom <= selection.ImageHeight(),
+		"extreme aspect ratio overflowed or failed to fit within image boundaries");
 
 	selection.SetImageSize(0, 0);
 	Expect(!selection.StartNew(0, 0) && !selection.HasSelection(),
@@ -1589,6 +1661,17 @@ void TestCropSelectionViewMappingAndHitTesting() {
 		"selection handle and interior hit-testing returned incorrect actions");
 	Expect(CropSelectionModel::HitTest(10, 20, selected, true) == CropSelectionHandle::Move,
 		"fixed-size mode exposed a resize handle instead of move-only behavior");
+	const SelectionRect aligned = CropSelectionModel::AlignToMcu(
+		SelectionRect{10, 10, 61, 51}, 100, 80, 16, 16);
+	Expect(aligned.left == 0 && aligned.top == 0 && aligned.right == 64 && aligned.bottom == 64,
+		"lossless crop did not expand bounds to MCU edges");
+	const SelectionRect edgeAligned = CropSelectionModel::AlignToMcu(
+		SelectionRect{80, 64, 100, 80}, 100, 80, 16, 16);
+	Expect(edgeAligned.left == 80 && edgeAligned.top == 64 &&
+		edgeAligned.right == 96 && edgeAligned.bottom == 80,
+		"lossless crop did not trim a partial right-edge MCU like the Windows implementation");
+	Expect(!CropSelectionModel::AlignToMcu(SelectionRect{96, 0, 100, 8},
+		100, 80, 16, 8).Valid(), "lossless crop accepted a rectangle trimmed to zero width");
 }
 
 void TestImageResizeFiltersAndLimits() {
@@ -1853,6 +1936,12 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.fileDialogWidth = 1040;
 	expected.fileDialogHeight = 735;
 	expected.fileDialogPreviewRatio = 0.375;
+	expected.fixedCropWidth = 512;
+	expected.fixedCropHeight = 288;
+	expected.fixedCropScreenPixels = false;
+	expected.userCropAspectWidth = 13;
+	expected.userCropAspectHeight = 7;
+	expected.defaultSelectionMode = false;
 	expected.infoVisible = true;
 	expected.showHistogram = true;
 	expected.showFilename = true;
@@ -1898,6 +1987,14 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"file-dialog dimensions did not round-trip");
 	ExpectNear(loaded.fileDialogPreviewRatio, expected.fileDialogPreviewRatio, 0.0000001,
 		"file-dialog preview proportion did not round-trip");
+	Expect(loaded.fixedCropWidth == expected.fixedCropWidth &&
+		loaded.fixedCropHeight == expected.fixedCropHeight &&
+		loaded.fixedCropScreenPixels == expected.fixedCropScreenPixels,
+		"fixed crop size and pixel units did not round-trip");
+	Expect(loaded.userCropAspectWidth == expected.userCropAspectWidth &&
+		loaded.userCropAspectHeight == expected.userCropAspectHeight &&
+		loaded.defaultSelectionMode == expected.defaultSelectionMode,
+		"user crop ratio or default selection mode did not round-trip");
 	Expect(loaded.infoVisible == expected.infoVisible && loaded.showHistogram == expected.showHistogram &&
 		loaded.showFilename == expected.showFilename &&
 		loaded.autoContrast == expected.autoContrast,
@@ -1922,6 +2019,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\ndefault_gamma=not-a-number\n"
 		"thumbnail_panel_width=not-a-number\nfile_dialog_width=not-a-number\n"
 		"file_dialog_height=not-a-number\nfile_dialog_preview_ratio=nan\n"
+		"fixed_crop_width=not-a-number\nfixed_crop_height=0\n"
+		"user_crop_aspect_width=0\nuser_crop_aspect_height=nan\n"
+		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=maybe\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
 	loaded = {};
@@ -1939,12 +2039,21 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.fileDialogHeight == jpegview_linux::kDefaultFileDialogHeight &&
 		loaded.fileDialogPreviewRatio == 0.0,
 		"malformed file-dialog geometry did not retain its defaults");
+	Expect(loaded.fixedCropWidth == jpegview_linux::kDefaultFixedCropWidth &&
+		loaded.fixedCropHeight == jpegview_linux::kMinimumFixedCropDimension &&
+		loaded.fixedCropScreenPixels &&
+		loaded.userCropAspectWidth == jpegview_linux::kDefaultUserCropAspectWidth &&
+		loaded.userCropAspectHeight == jpegview_linux::kDefaultUserCropAspectHeight &&
+		loaded.defaultSelectionMode,
+		"malformed crop settings did not retain their defaults");
 	Expect(loaded.cacheSizeMiB == jpegview_linux::kDefaultCacheSizeMiB,
 		"malformed cache size did not retain its default");
 
 	const fs::path clamped = temporary.path() / "clamped.conf";
 	WriteText(clamped, "manual_zoom=1000\nthumbnail_panel_width=2\n"
 		"file_dialog_width=1\nfile_dialog_height=999999\nfile_dialog_preview_ratio=4\n"
+		"fixed_crop_width=999999\nfixed_crop_height=-10\n"
+		"user_crop_aspect_width=999999\nuser_crop_aspect_height=5\n"
 		"cache_size_mb=999999999\n");
 	loaded = {};
 	Expect(jpegview_linux::LoadViewerSettings(clamped, loaded) && loaded.manualZoomSet &&
@@ -1953,6 +2062,10 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.fileDialogWidth == jpegview_linux::kMinimumFileDialogWidth &&
 		loaded.fileDialogHeight == jpegview_linux::kMaximumFileDialogDimension &&
 		loaded.fileDialogPreviewRatio == 0.8 &&
+		loaded.fixedCropWidth == jpegview_linux::kMaximumFixedCropDimension &&
+		loaded.fixedCropHeight == jpegview_linux::kMinimumFixedCropDimension &&
+		loaded.userCropAspectWidth == jpegview_linux::kMaximumFixedCropDimension &&
+		loaded.userCropAspectHeight == 5 &&
 		loaded.cacheSizeMiB == jpegview_linux::kMaximumCacheSizeMiB,
 		"out-of-range settings were not clamped to their public limits");
 
@@ -2247,6 +2360,14 @@ void TestExternalCommandPlanning() {
 		LosslessJpegOperation::FlipVertical, source, output);
 	Expect(command.arguments[2] == "-flip" && command.arguments[3] == "vertical",
 		"lossless JPEG mirror plan has incorrect arguments");
+	command = jpegview_linux::LosslessJpegCropCommand(source, output, 16, 32, 640, 480);
+	Expect(command.executable == "jpegtran" && command.arguments ==
+		std::vector<std::string>({"-copy", "all", "-crop", "640x480+16+32",
+			"-outfile", output.string(), source.string()}),
+		"lossless JPEG crop plan has incorrect arguments");
+	Expect(!jpegview_linux::LosslessJpegCropCommand(source, output, -1, 0, 1, 1).Valid() &&
+		!jpegview_linux::LosslessJpegCropCommand(source, output, 0, 0, 0, 1).Valid(),
+		"lossless JPEG crop plan accepted invalid geometry");
 	Expect(jpegview_linux::PrintCommand(output).executable == "lp" &&
 		jpegview_linux::PrintCommand(output).arguments == std::vector<std::string>({output.string()}),
 		"print command plan is incorrect");
@@ -2712,6 +2833,47 @@ void TestResizeDialogController() {
 		"resize dialog did not clear transient state when closed");
 }
 
+void TestCropSizeDialogController() {
+	using jpegview_linux::CropSizeDialogController;
+	CropSizeDialogController dialog;
+	dialog.Open(320, 200, true);
+	Expect(dialog.IsOpen() && dialog.FocusedField() == CropSizeDialogController::kWidthField &&
+		dialog.WidthText() == "320" && dialog.HeightText() == "200" && dialog.UsesScreenPixels(),
+		"fixed crop-size dialog did not open with its persisted values and units");
+	dialog.AppendText("64px");
+	dialog.MoveFocus(-1);
+	Expect(dialog.FocusedField() == CropSizeDialogController::kHeightField,
+		"fixed crop-size dialog did not cycle focus backward");
+	dialog.AppendText("48");
+	int width = 0;
+	int height = 0;
+	bool screenPixels = false;
+	Expect(dialog.Apply(width, height, screenPixels) && width == 64 && height == 48 && screenPixels,
+		"fixed crop-size dialog did not filter and apply valid dimensions");
+	dialog.ToggleUnits();
+	Expect(dialog.Apply(width, height, screenPixels) && !screenPixels,
+		"fixed crop-size dialog did not preserve the selected pixel unit");
+	dialog.SelectField(CropSizeDialogController::kWidthField);
+	dialog.SelectAll();
+	dialog.AppendText("65536");
+	dialog.SelectField(CropSizeDialogController::kHeightField);
+	dialog.SelectAll();
+	dialog.AppendText("65535");
+	Expect(!dialog.Apply(width, height, screenPixels) && !dialog.Message().empty(),
+		"fixed crop-size dialog accepted an out-of-range dimension");
+	dialog.SelectField(CropSizeDialogController::kWidthField);
+	dialog.SelectAll();
+	dialog.AppendText("65535");
+	Expect(dialog.Apply(width, height, screenPixels) && width == 65535 && height == 65535,
+		"fixed crop-size dialog rejected its maximum dimension");
+	dialog.SelectField(CropSizeDialogController::kWidthField);
+	dialog.Backspace();
+	Expect(dialog.WidthText().empty(), "backspace did not clear a newly focused fixed crop field");
+	dialog.Close();
+	Expect(!dialog.IsOpen() && dialog.Message().empty(),
+		"fixed crop-size dialog did not clear transient state on close");
+}
+
 void TestContextMenuCompactionAndSelection() {
 	using jpegview_linux::MenuItem;
 	const std::vector<jpegview_linux::MenuItem> complete = {
@@ -2900,6 +3062,54 @@ void TestContextMenuCatalogAndState() {
 		"image-dependent commands were enabled without an image");
 	Expect(findLabel(disabled, "  (no configured applications)") != nullptr,
 		"empty Open with state omitted its disabled placeholder");
+}
+
+void TestCropContextMenuCommandsAndModes() {
+	using jpegview_linux::ContextMenuState;
+	using jpegview_linux::CropSelectionMode;
+	using jpegview_linux::MenuItem;
+	ContextMenuState state;
+	state.cropContextMenu = true;
+	state.cropSelectionAvailable = true;
+	state.losslessJpegCropAvailable = true;
+	state.cropMode = CropSelectionMode::FixedAspect;
+	state.cropAspectWidth = 16;
+	state.cropAspectHeight = 9;
+	state.userCropAspectWidth = 14;
+	state.userCropAspectHeight = 11;
+	const std::vector<MenuItem> items = jpegview_linux::BuildContextMenu(state, false);
+	const auto find = [&items](int command) -> const MenuItem* {
+		const auto found = std::find_if(items.begin(), items.end(), [command](const MenuItem& item) {
+			return item.command == command;
+		});
+		return found == items.end() ? nullptr : &*found;
+	};
+	Expect(find(IDM_CROP_SEL) != nullptr && find(IDM_CROP_SEL)->enabled &&
+		find(IDM_LOSSLESS_CROP_SEL) != nullptr && find(IDM_LOSSLESS_CROP_SEL)->enabled &&
+		find(IDM_COPY_SEL) != nullptr && find(IDM_COPY_SEL)->enabled &&
+		find(IDM_ZOOM_SEL) != nullptr && find(IDM_ZOOM_SEL)->enabled,
+		"crop menu omitted an enabled selection action");
+	Expect(find(IDM_CROPMODE_FREE) != nullptr &&
+		find(IDM_CROPMODE_16_9) != nullptr && find(IDM_CROPMODE_16_9)->checked &&
+		find(IDM_CROPMODE_USER) != nullptr &&
+		find(IDM_CROPMODE_USER)->label == "  User aspect (14 : 11)",
+		"crop menu omitted a mode, checked aspect, or configured user ratio");
+	state.losslessJpegCropAvailable = false;
+	state.cropSelectionAvailable = false;
+	const std::vector<MenuItem> unavailable = jpegview_linux::BuildContextMenu(state, true);
+	const auto findUnavailable = [&unavailable](int command) -> const MenuItem* {
+		const auto found = std::find_if(unavailable.begin(), unavailable.end(), [command](const MenuItem& item) {
+			return item.command == command;
+		});
+		return found == unavailable.end() ? nullptr : &*found;
+	};
+	Expect(findUnavailable(IDM_CROP_SEL) != nullptr && !findUnavailable(IDM_CROP_SEL)->enabled &&
+		findUnavailable(IDM_LOSSLESS_CROP_SEL) != nullptr &&
+		!findUnavailable(IDM_LOSSLESS_CROP_SEL)->enabled &&
+		findUnavailable(IDM_ZOOM_SEL) != nullptr && !findUnavailable(IDM_ZOOM_SEL)->enabled,
+		"crop menu left selection actions enabled after the selection became unavailable");
+	Expect(findUnavailable(jpegview_linux::kContextMenuShowAdvanced) == nullptr,
+		"crop-only menu was incorrectly compacted into advanced options");
 }
 
 void TestContextMenuColumnLayoutAndNavigation() {
@@ -3983,8 +4193,10 @@ int main() {
 	RunTest("viewport-navigation-resets-transient-zoom", TestViewportNavigationResetsTransientZoom, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("resize-dialog-controller", TestResizeDialogController, failures);
+	RunTest("crop-size-dialog-controller", TestCropSizeDialogController, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
 	RunTest("context-menu-catalog-and-state", TestContextMenuCatalogAndState, failures);
+	RunTest("crop-context-menu-commands-and-modes", TestCropContextMenuCommandsAndModes, failures);
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("viewer-chrome-paint-plans", TestViewerChromePaintPlans, failures);

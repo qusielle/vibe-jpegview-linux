@@ -18,6 +18,12 @@ inline constexpr int kDefaultFileDialogHeight = 650;
 inline constexpr int kMinimumFileDialogWidth = 320;
 inline constexpr int kMinimumFileDialogHeight = 260;
 inline constexpr int kMaximumFileDialogDimension = 16384;
+inline constexpr int kDefaultFixedCropWidth = 320;
+inline constexpr int kDefaultFixedCropHeight = 200;
+inline constexpr int kMinimumFixedCropDimension = 1;
+inline constexpr int kMaximumFixedCropDimension = 65535;
+inline constexpr int kDefaultUserCropAspectWidth = 14;
+inline constexpr int kDefaultUserCropAspectHeight = 11;
 
 std::filesystem::path ViewerSettingsPath();
 
@@ -37,6 +43,12 @@ struct ViewerSettings {
 	// Zero keeps the responsive default preview width; non-zero stores the
 	// preview's fraction of the dialog's available list/preview width.
 	double fileDialogPreviewRatio = 0.0;
+	int fixedCropWidth = kDefaultFixedCropWidth;
+	int fixedCropHeight = kDefaultFixedCropHeight;
+	bool fixedCropScreenPixels = true;
+	int userCropAspectWidth = kDefaultUserCropAspectWidth;
+	int userCropAspectHeight = kDefaultUserCropAspectHeight;
+	bool defaultSelectionMode = true;
 	bool infoVisible = false;
 	bool showHistogram = false;
 	bool showFilename = false;
