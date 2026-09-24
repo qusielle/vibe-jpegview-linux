@@ -50,8 +50,10 @@ they support.
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
-   sibling folders; reload; and previous-folder history. Alt+Left/Right jumps directly to the first
-   image in the previous/next populated sibling folder, independent of the active navigation mode.
+   sibling folders; reload; and previous-folder history. Ctrl+M marks one image; after moving to a
+   second image, Ctrl+Left/Right alternates between the marked image and the image that was current
+   when toggling began. Marking another image replaces the mark. Alt+Left/Right jumps directly to
+   the first image in the previous/next populated sibling folder, independent of the active mode.
    Ordering supports logical filename,
    filesystem modification date, creation date, file size, and random modes in either direction.
    The active filename/date ordering is visible and switchable from both the navigation panel and
@@ -393,6 +395,9 @@ the current listing order. Ctrl+R reloads, and
 Ctrl+N toggles the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the
 image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
 PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.
+Ctrl+M marks the current image; after navigating to another image, Ctrl+Left/Right alternates between
+the marked image and the image current when toggling began. The mark stays in memory only, is not
+saved between runs, and is replaced by the next Ctrl+M.
 Ctrl+Shift+M/E set the modification date to now/EXIF date; R/T perform lossless JPEG rotations when
 bundled `jpegtran` is available; F5 toggles the ported automatic histogram contrast correction, and
 Ctrl+Shift+R opens the image resize dialog. Ctrl+E toggles crop selection mode; the new last button
@@ -543,8 +548,8 @@ features.
 
 - **Free rotation and perspective correction.** The quarter-turn/mirror operations are available,
   but the interactive free-rotation and perspective/tilt-correction panels are not implemented.
-- **Image comparison shortcuts.** Mark-image/toggle-back and the second processing-parameter set
-  exchange workflow are not implemented.
+- **Image comparison.** Mark-image/toggle-back is available with Ctrl+M and Ctrl+Left/Right. The
+  second processing-parameter set exchange workflow is not implemented.
 - **Settings administration.** Editing global/user Windows configuration files and updating a user
   configuration from the global template are not available. The Linux frontend uses its own XDG
   settings file and does not translate every Windows setting.

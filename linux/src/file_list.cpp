@@ -270,6 +270,40 @@ std::size_t FileList::FindEntry(const fs::path& path) const {
 	return entries_.empty() ? 0 : entries_.size() - 1;
 }
 
+bool FileList::SelectPath(const fs::path& path) {
+	const fs::path normalized = Normalize(path);
+	if (!IsSupportedImagePath(normalized)) return false;
+	std::error_code error;
+	if (!fs::is_regular_file(normalized, error) || error) return false;
+
+	const auto existing = std::find(paths_.begin(), paths_.end(), normalized);
+	if (existing != paths_.end()) {
+		currentIndex_ = static_cast<std::size_t>(std::distance(paths_.begin(), existing));
+		return true;
+	}
+
+	const fs::path directory = normalized.parent_path();
+	std::vector<Entry> replacement = ScanDirectory(directory);
+	const auto selected = std::find_if(replacement.begin(), replacement.end(), [&normalized](const Entry& entry) {
+		return entry.path == normalized;
+	});
+	if (selected == replacement.end()) return false;
+	const std::size_t selectedIndex = static_cast<std::size_t>(
+		std::distance(replacement.begin(), selected));
+
+	entries_ = std::move(replacement);
+	currentDirectory_ = directory;
+	rootDirectory_ = directory;
+	currentIndex_ = selectedIndex;
+	previousFolders_.clear();
+	nextFolders_.clear();
+	multipleInputMode_ = false;
+	SortEntries();
+	currentIndex_ = FindEntry(normalized);
+	RebuildPaths();
+	return !Empty() && Current() == normalized;
+}
+
 void FileList::LoadDirectory(const fs::path& directory, const fs::path& selected) {
 	currentDirectory_ = Normalize(directory);
 	entries_ = ScanDirectory(currentDirectory_);
@@ -419,6 +453,28 @@ bool FileList::Previous() {
 bool FileList::Select(std::size_t index) {
 	if (index >= entries_.size()) return false;
 	currentIndex_ = index;
+	return true;
+}
+
+bool FileList::MarkCurrentForToggle() {
+	if (Empty() || Current().empty()) return false;
+	std::error_code error;
+	if (!fs::is_regular_file(Current(), error) || error) return false;
+	markedFile_ = Current();
+	markedFileCurrent_.clear();
+	markedToggleIndex_ = -1;
+	return true;
+}
+
+bool FileList::ToggleBetweenMarkedAndCurrent() {
+	if (markedFile_.empty() || Empty()) return false;
+	const int targetIndex = markedToggleIndex_ < 0 ? 0 : markedToggleIndex_;
+	if (targetIndex != 0 && markedFileCurrent_.empty()) return false;
+	const fs::path current = Current();
+	const fs::path target = targetIndex == 0 ? markedFile_ : markedFileCurrent_;
+	if (!SelectPath(target)) return false;
+	if (targetIndex == 0) markedFileCurrent_ = current;
+	markedToggleIndex_ = (targetIndex + 1) & 1;
 	return true;
 }
 

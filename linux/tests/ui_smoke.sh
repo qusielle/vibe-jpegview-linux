@@ -80,6 +80,10 @@ case "$help_text" in
 	*"mouse wheel up/down navigates previous/next"*"Ctrl+mouse wheel zooms"*) ;;
 	*) echo "UI smoke test: --help does not describe wheel controls" >&2; exit 1 ;;
 esac
+case "$help_text" in
+	*"Ctrl+M marks an image"*"Ctrl+Left/Right toggles"*) ;;
+	*) echo "UI smoke test: --help does not describe marked-image toggling" >&2; exit 1 ;;
+esac
 
 Xvfb -displayfd 1 -screen 0 1280x800x24 >"$temporary/display" 2>"$temporary/xvfb.log" &
 xvfb_pid=$!
@@ -121,6 +125,21 @@ stop_viewer() {
 	DISPLAY=":$display_number" xdotool key q || true
 	wait "$viewer_pid" || true
 	viewer_pid=''
+}
+
+assert_title_prefix() {
+	expected_prefix=$1
+	failure_message=$2
+	current_title=''
+	for _ in $(seq 1 40); do
+		current_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		case "$current_title" in
+			"$expected_prefix"*) return 0 ;;
+		esac
+		sleep 0.05
+	done
+	echo "UI smoke test: $failure_message ($current_title)" >&2
+	exit 1
 }
 
 if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
@@ -215,6 +234,19 @@ if [ "$help_closed_title" != "$help_previous_title" ]; then
 	echo "UI smoke test: Escape did not close quick help and restore the image title" >&2
 	exit 1
 fi
+
+# Ctrl+M marks one image. Ctrl+Left/Right then alternate between it and the
+# image that was current at the first toggle.
+DISPLAY=":$display_number" xdotool key ctrl+m
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "02-green.ppm" "mark/toggle fixture did not reach the second image"
+DISPLAY=":$display_number" xdotool key ctrl+Left
+assert_title_prefix "01-red.ppm" "Ctrl+Left did not return to the marked image"
+DISPLAY=":$display_number" xdotool key ctrl+Right
+assert_title_prefix "02-green.ppm" "Ctrl+Right did not toggle back to the paired image"
+DISPLAY=":$display_number" xdotool key Left
+assert_title_prefix "01-red.ppm" "mark/toggle smoke test did not restore its starting image"
+
 if [ "$visual_assertions" -eq 1 ]; then
 	window_icon=$(DISPLAY=":$display_number" xprop -id "$window_id" _NET_WM_ICON 2>/dev/null || true)
 	case "$window_icon" in

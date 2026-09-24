@@ -42,6 +42,9 @@ public:
 	bool Next();
 	bool Previous();
 	bool Select(std::size_t index);
+	bool MarkCurrentForToggle();
+	bool ToggleBetweenMarkedAndCurrent();
+	bool HasMarkedFile() const { return !markedFile_.empty(); }
 	void First();
 	void Last();
 	bool Reload();
@@ -92,6 +95,7 @@ private:
 	std::filesystem::path FindNextFolder() const;
 	void PrepareDirectoryNavigation();
 	std::size_t FindEntry(const std::filesystem::path& path) const;
+	bool SelectPath(const std::filesystem::path& path);
 
 	std::vector<Entry> entries_;
 	std::vector<std::filesystem::path> paths_;
@@ -100,7 +104,10 @@ private:
 	std::vector<std::string> inputs_;
 	std::filesystem::path currentDirectory_;
 	std::filesystem::path rootDirectory_;
+	std::filesystem::path markedFile_;
+	std::filesystem::path markedFileCurrent_;
 	std::size_t currentIndex_ = 0;
+	int markedToggleIndex_ = -1;
 	SortMode sortMode_ = SortMode::LastModificationTime;
 	bool sortAscending_ = true;
 	bool wrapAroundFolder_ = true;

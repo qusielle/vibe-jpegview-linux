@@ -318,6 +318,66 @@ void TestFileListFilteringAndLogicalSorting() {
 		"descending logical filename ordering is incorrect");
 }
 
+void TestFileListMarkedImageToggle() {
+	TemporaryDirectory temporary;
+	const fs::path root = temporary.path() / "root";
+	const fs::path first = root / "01-first.png";
+	const fs::path second = root / "02-second.png";
+	fs::create_directories(root);
+	WriteTinyImage(first);
+	WriteTinyImage(second);
+
+	FileList files({root.string()}, FileList::SortMode::FileName, true, false);
+	Expect(!files.HasMarkedFile() && !files.ToggleBetweenMarkedAndCurrent(),
+		"toggle succeeded before a file was marked");
+	Expect(files.MarkCurrentForToggle() && files.HasMarkedFile(),
+		"current image could not be marked for toggling");
+	Expect(files.Next() && files.Current() == second,
+		"file-list setup did not navigate away from the marked image");
+	Expect(files.ToggleBetweenMarkedAndCurrent() && files.Current() == first,
+		"first toggle did not return to the marked image");
+	Expect(files.ToggleBetweenMarkedAndCurrent() && files.Current() == second,
+		"second toggle did not return to the image viewed before the first toggle");
+	Expect(files.ToggleBetweenMarkedAndCurrent() && files.Current() == first,
+		"repeated toggling did not alternate between the same image pair");
+
+	Expect(files.Select(1) && files.MarkCurrentForToggle(),
+		"marking a replacement image failed");
+	Expect(files.Select(0) && files.ToggleBetweenMarkedAndCurrent() && files.Current() == second,
+		"a new mark did not replace the previous marked image and reset the toggle pair");
+	Expect(files.ToggleBetweenMarkedAndCurrent() && files.Current() == first,
+		"replacement mark did not toggle back to the newly captured image");
+
+	const fs::path nestedRoot = temporary.path() / "nested-root";
+	const fs::path nestedImage = nestedRoot / "child" / "03-nested.png";
+	fs::create_directories(nestedImage.parent_path());
+	const fs::path topImage = nestedRoot / "01-top.png";
+	WriteTinyImage(topImage);
+	WriteTinyImage(nestedImage);
+	FileList nestedNavigation({nestedRoot.string()}, FileList::SortMode::FileName, true, false);
+	Expect(nestedNavigation.MarkCurrentForToggle(),
+		"nested-navigation fixture could not mark its root image");
+	nestedNavigation.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
+	Expect(nestedNavigation.Next() && nestedNavigation.Current() == nestedImage,
+		"nested-navigation fixture did not enter its child directory");
+	Expect(nestedNavigation.ToggleBetweenMarkedAndCurrent() && nestedNavigation.Current() == topImage &&
+		nestedNavigation.Size() == 1,
+		"toggle did not load the marked image's directory when it was outside the active list");
+	Expect(nestedNavigation.ToggleBetweenMarkedAndCurrent() && nestedNavigation.Current() == nestedImage &&
+		nestedNavigation.Size() == 1,
+		"toggle did not restore the captured image and its directory");
+
+	FileList missingMarked({root.string()}, FileList::SortMode::FileName, true, false);
+	Expect(missingMarked.MarkCurrentForToggle() && missingMarked.Next(),
+		"missing-mark fixture did not initialize");
+	const fs::path stillCurrent = missingMarked.Current();
+	std::error_code removeError;
+	fs::remove(first, removeError);
+	Expect(!removeError, "could not remove the marked-image fixture");
+	Expect(!missingMarked.ToggleBetweenMarkedAndCurrent() && missingMarked.Current() == stillCurrent,
+		"toggle to a removed marked image changed the current selection");
+}
+
 void TestSupportedImageExtensionPolicy() {
 	const std::vector<std::string> supported = {
 		"photo.JPG", "photo.apng", "photo.PAM", "camera.CR3", "camera.rwl"};
@@ -351,6 +411,7 @@ void TestKeyboardCommandMappings() {
 		{SDLK_r, 0x00C0u, IDM_RELOAD},
 		{SDLK_r, 0x00C3u, IDM_CHANGESIZE},
 		{'m', 0x00C3u, IDM_TOUCH_IMAGE},
+		{'m', 0x00C0u, IDM_MARK_FOR_TOGGLE},
 		{'e', 0x00C3u, IDM_TOUCH_IMAGE_EXIF},
 		{'e', 0x00C0u, jpegview_linux::kCommandToggleSelectionMode},
 		{'n', 0x00C0u, IDM_SHOW_NAVPANEL},
@@ -370,6 +431,8 @@ void TestKeyboardCommandMappings() {
 		{SDLK_F9, 0, IDM_LOOP_SIBLINGS},
 		{SDLK_LEFT, 0x0100u, jpegview_linux::kCommandPreviousSiblingFolder},
 		{SDLK_RIGHT, 0x0200u, jpegview_linux::kCommandNextSiblingFolder},
+		{SDLK_LEFT, 0x00C0u, IDM_TOGGLE},
+		{SDLK_RIGHT, 0x00C0u, IDM_TOGGLE},
 		{SDLK_LEFT, 0x0140u, 0},
 		{SDLK_RIGHT, 0x0101u, 0},
 		{SDLK_DELETE, 0, IDM_MOVE_TO_RECYCLE_BIN_CONFIRM},
@@ -4273,6 +4336,7 @@ void RunTest(const char* name, void (*test)(), int& failures) {
 int main() {
 	int failures = 0;
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
+	RunTest("file-list-marked-image-toggle", TestFileListMarkedImageToggle, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);
 	RunTest("held-navigation-repeat-coalescing", TestHeldNavigationCoalescesKeyRepeats, failures);

@@ -15,6 +15,7 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	if (alt && !ctrl && !shift && key == SDLK_RIGHT) return kCommandNextSiblingFolder;
 	if (alt && !ctrl && !shift && key == SDLK_r) return IDM_SLIDESHOW_RESUME;
 	if (alt) return 0;
+	if (ctrl && !shift && (key == SDLK_LEFT || key == SDLK_RIGHT)) return IDM_TOGGLE;
 
 	if (key == SDLK_ESCAPE) return playbackActive ? IDM_DEFAULT_ESC : IDM_EXIT;
 	if (!ctrl && !shift && key == SDLK_q) return IDM_EXIT;
@@ -29,6 +30,7 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	if (ctrl && !shift && key == SDLK_r) return IDM_RELOAD;
 	if (ctrl && shift && key == SDLK_r) return IDM_CHANGESIZE;
 	if (ctrl && shift && key == 'm') return IDM_TOUCH_IMAGE;
+	if (ctrl && !shift && key == 'm') return IDM_MARK_FOR_TOGGLE;
 	if (ctrl && shift && key == 'e') return IDM_TOUCH_IMAGE_EXIF;
 	if (ctrl && !shift && key == 'e') return kCommandToggleSelectionMode;
 	if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;

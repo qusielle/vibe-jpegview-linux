@@ -2998,6 +2998,19 @@ private:
 		case IDM_PREV:
 			PreviousImage();
 			break;
+		case IDM_TOGGLE:
+			if (fileList_.HasMarkedFile()) {
+				if (clipboardMode_) RestoreClipboardImage();
+				if (fileList_.ToggleBetweenMarkedAndCurrent()) {
+					LoadCurrent();
+				}
+			}
+			break;
+		case IDM_MARK_FOR_TOGGLE:
+			if (!clipboardMode_ && image_.width > 0 && image_.height > 0) {
+				fileList_.MarkCurrentForToggle();
+			}
+			break;
 		case IDM_NEXT:
 			NextImage();
 			break;
@@ -5693,7 +5706,7 @@ private:
 		DrawText("QUICK HELP — JPEGVIEW LINUX", panel.x + 18, panel.y + 14,
 			kUiTextScale, 255, 255, 255);
 		static const std::array<const char*, 10> lines = {
-			"Navigate: Left/Right or wheel; Home/End first/last; Alt+Left/Right sibling folders",
+			"Navigate: arrows/wheel; Home/End; Ctrl+M mark; Ctrl+Left/Right toggle; Alt+arrows siblings",
 			"Zoom and pan: Ctrl+wheel or Ctrl+Up/Down; drag to pan; Shift+Arrow pans at actual size",
 			"Navigator: hover upper-right when magnified; click or drag its map to reposition",
 			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom",
@@ -6370,6 +6383,7 @@ void PrintUsage(const char* program) {
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel up/down navigates previous/next, Ctrl+mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, Alt+Left/Right open the first image in adjacent sibling folders,\n"
+		<< "          Ctrl+M marks an image; Ctrl+Left/Right toggles between it and the paired image,\n"
 		<< "          N/M/C/Z select display order,\n"
 		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails, Ctrl+E toggles crop selection mode,\n"
 		<< "          right-click or the Context Menu key opens the context menu, Esc or Q quits.\n";
