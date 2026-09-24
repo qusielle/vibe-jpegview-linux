@@ -37,6 +37,7 @@ struct ViewerSettings {
 	bool navigationPanelEnabled = true;
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
+	bool showZoomNavigator = true;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	int fileDialogWidth = kDefaultFileDialogWidth;
 	int fileDialogHeight = kDefaultFileDialogHeight;

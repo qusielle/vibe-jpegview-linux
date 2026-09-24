@@ -20,6 +20,7 @@
 #include "resize_model.h"
 #include "crop_selection_model.h"
 #include "crop_size_dialog_model.h"
+#include "zoom_navigator_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
 #include "viewer_chrome.h"
@@ -564,6 +565,7 @@ private:
 		navigationPanelEnabled_ = settings.navigationPanelEnabled;
 		navigationPanelAutoReveal_ = settings.navigationPanelAutoReveal;
 		thumbnailPanelVisible_ = settings.thumbnailPanelVisible;
+		showZoomNavigator_ = settings.showZoomNavigator;
 		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
 		fileDialogWidth_ = settings.fileDialogWidth;
 		fileDialogHeight_ = settings.fileDialogHeight;
@@ -596,6 +598,7 @@ private:
 		settings.navigationPanelEnabled = navigationPanelEnabled_;
 		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
 		settings.thumbnailPanelVisible = thumbnailPanelVisible_;
+		settings.showZoomNavigator = showZoomNavigator_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.fileDialogWidth = fileDialogWidth_;
 		settings.fileDialogHeight = fileDialogHeight_;
@@ -1760,7 +1763,8 @@ private:
 			(bounds.top + bounds.bottom) * 0.5 * viewport_.Zoom()));
 		viewport_.ZoomAt(targetZoom / viewport_.Zoom(), selectionCenterX, selectionCenterY,
 			image_.width, image_.height, imageArea.w, imageArea.h);
-		viewport_.Pan(imageArea.w / 2.0 - selectionCenterX,
+		viewport_.ClampToView(image_.width, image_.height, imageArea.w, imageArea.h);
+		PanViewport(imageArea.w / 2.0 - selectionCenterX,
 			imageArea.h / 2.0 - selectionCenterY);
 		currentDisplayRequest_.reset();
 		PrepareImagePrefetch();
@@ -2180,9 +2184,20 @@ private:
 			command == IDM_PAN_RIGHT ? -kKeyboardPanStep : 0.0;
 		const double deltaY = command == IDM_PAN_UP ? kKeyboardPanStep :
 			command == IDM_PAN_DOWN ? -kKeyboardPanStep : 0.0;
-		viewport_.Pan(deltaX, deltaY);
+		PanViewport(deltaX, deltaY);
 		playback_.NotifyInteraction(SDL_GetTicks());
 		SetTitle();
+	}
+
+	void PanViewport(double deltaX, double deltaY) {
+		viewport_.Pan(deltaX, deltaY);
+		const SDL_Rect imageArea = ImageAreaRect();
+		viewport_.ClampToView(image_.width, image_.height, imageArea.w, imageArea.h);
+		ShowZoomNavigatorTemporarily();
+	}
+
+	void ShowZoomNavigatorTemporarily() {
+		zoomNavigatorVisibleUntil_ = SDL_GetTicks() + 1200;
 	}
 
 	void ZoomAt(double factor, int mouseX, int mouseY) {
@@ -2194,6 +2209,8 @@ private:
 		const int localMouseY = std::clamp(mouseY - imageArea.y, 0, imageArea.h);
 		viewport_.ZoomAt(factor, localMouseX, localMouseY, image_.width, image_.height,
 			imageArea.w, imageArea.h);
+		viewport_.ClampToView(image_.width, image_.height, imageArea.w, imageArea.h);
+		ShowZoomNavigatorTemporarily();
 		playback_.NotifyInteraction(SDL_GetTicks());
 		SetTitle();
 	}
@@ -3113,6 +3130,12 @@ private:
 			}
 			SaveSettings();
 			break;
+		case jpegview_linux::kCommandToggleZoomNavigator:
+			showZoomNavigator_ = !showZoomNavigator_;
+			SaveSettings();
+			UpdateCropCursor(lastMouseX_, lastMouseY_);
+			UpdateZoomNavigatorCursor(lastMouseX_, lastMouseY_);
+			break;
 		case jpegview_linux::kToggleNavigationPanelAutoReveal:
 			navigationPanelAutoReveal_ = !navigationPanelAutoReveal_;
 			UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
@@ -3350,6 +3373,7 @@ private:
 		state.navigationPanelEnabled = navigationPanelEnabled_;
 		state.navigationPanelAutoReveal = navigationPanelAutoReveal_;
 		state.thumbnailPanelVisible = thumbnailPanelVisible_;
+		state.showZoomNavigator = showZoomNavigator_;
 		state.navigationMode = fileList_.GetNavigationMode();
 		state.sortMode = fileList_.GetSorting();
 		state.sortAscending = fileList_.IsSortedAscending();
@@ -5159,6 +5183,120 @@ private:
 		return SDL_Rect{layout.imageX, 0, layout.imageWidth, layout.imageHeight};
 	}
 
+	jpegview_linux::ZoomNavigatorLayout CurrentZoomNavigatorLayout() const {
+		const SDL_Rect area = ImageAreaRect();
+		return jpegview_linux::CalculateZoomNavigatorLayout(image_.width, image_.height,
+			area.x, area.y, area.w, area.h);
+	}
+
+	bool IsZoomNavigatorVisibleAt(int mouseX, int mouseY) const {
+		if (!showZoomNavigator_ || image_.width <= 0 || image_.height <= 0 ||
+			cropSelection_.HasSelection() || cropMouseDragging_ || pictureLevelsPanelOpen_ ||
+			unsharpDialogOpen_ || contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ ||
+			aboutOpen_ || helpOpen_ || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
+			batchCopyDialog_.IsOpen()) return false;
+		const SDL_Rect area = ImageAreaRect();
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			image_.width, image_.height, area.w, area.h);
+		if (!jpegview_linux::ImageNeedsZoomNavigator(destination.width, destination.height,
+			area.w, area.h)) return false;
+		const jpegview_linux::ZoomNavigatorLayout layout = CurrentZoomNavigatorLayout();
+		const bool visibleAfterZoom = static_cast<std::int32_t>(
+			zoomNavigatorVisibleUntil_ - SDL_GetTicks()) > 0;
+		return zoomNavigatorDragging_ || dragging_ || visibleAfterZoom ||
+			PointInRect(mouseX, mouseY, SDL_Rect{layout.hotArea.x, layout.hotArea.y,
+				layout.hotArea.width, layout.hotArea.height});
+	}
+
+	bool BeginZoomNavigatorDrag(int screenX, int screenY) {
+		if (!IsZoomNavigatorVisibleAt(screenX, screenY)) return false;
+		const jpegview_linux::ZoomNavigatorLayout layout = CurrentZoomNavigatorLayout();
+		if (!PointInRect(screenX, screenY, SDL_Rect{layout.image.x, layout.image.y,
+			layout.image.width, layout.image.height})) return false;
+		const SDL_Rect area = ImageAreaRect();
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			image_.width, image_.height, area.w, area.h);
+		const jpegview_linux::ZoomNavigatorPoint requested =
+			jpegview_linux::NavigatorPointToImage(screenX, screenY, layout.image);
+		const double currentCenterX = (area.w * 0.5 - destination.x) / destination.width;
+		const double currentCenterY = (area.h * 0.5 - destination.y) / destination.height;
+		const jpegview_linux::ZoomNavigatorPan pan =
+			jpegview_linux::CalculateNavigatorCenterPan(currentCenterX, currentCenterY,
+				requested.x, requested.y,
+				static_cast<double>(area.w) / destination.width,
+				static_cast<double>(area.h) / destination.height,
+				destination.width, destination.height);
+		PanViewport(pan.x, pan.y);
+		zoomNavigatorDragging_ = true;
+		lastMouseX_ = screenX;
+		lastMouseY_ = screenY;
+		SDL_CaptureMouse(SDL_TRUE);
+		SDL_Cursor* cursor = cropMoveCursor_;
+		SDL_SetCursor(cursor != nullptr ? cursor : SDL_GetDefaultCursor());
+		playback_.NotifyInteraction(SDL_GetTicks());
+		return true;
+	}
+
+	void UpdateZoomNavigatorDrag(int deltaX, int deltaY) {
+		if (!zoomNavigatorDragging_) return;
+		const SDL_Rect area = ImageAreaRect();
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			image_.width, image_.height, area.w, area.h);
+		const jpegview_linux::ZoomNavigatorLayout layout = CurrentZoomNavigatorLayout();
+		const jpegview_linux::ZoomNavigatorPan pan = jpegview_linux::CalculateNavigatorDragPan(
+			deltaX, deltaY, layout.image, destination.width, destination.height);
+		PanViewport(pan.x, pan.y);
+		playback_.NotifyInteraction(SDL_GetTicks());
+	}
+
+	void EndZoomNavigatorDrag(int screenX, int screenY) {
+		if (!zoomNavigatorDragging_) return;
+		zoomNavigatorDragging_ = false;
+		lastMouseX_ = screenX;
+		lastMouseY_ = screenY;
+		SDL_CaptureMouse(SDL_FALSE);
+		UpdateCropCursor(screenX, screenY);
+		UpdateZoomNavigatorCursor(screenX, screenY);
+	}
+
+	void UpdateZoomNavigatorCursor(int screenX, int screenY) const {
+		if (thumbnailPanelResizing_ || IsThumbnailPanelResizeHandle(screenX, screenY)) return;
+		const jpegview_linux::ZoomNavigatorLayout layout = CurrentZoomNavigatorLayout();
+		if ((zoomNavigatorDragging_ || IsZoomNavigatorVisibleAt(screenX, screenY)) &&
+			PointInRect(screenX, screenY, SDL_Rect{layout.image.x, layout.image.y,
+				layout.image.width, layout.image.height})) {
+			SDL_Cursor* cursor = cropMoveCursor_;
+			SDL_SetCursor(cursor != nullptr ? cursor : SDL_GetDefaultCursor());
+		}
+	}
+
+	void RenderZoomNavigator(SDL_Texture* imageTexture) {
+		if (imageTexture == nullptr || !IsZoomNavigatorVisibleAt(lastMouseX_, lastMouseY_)) return;
+		const SDL_Rect area = ImageAreaRect();
+		const jpegview_linux::ZoomNavigatorLayout layout = CurrentZoomNavigatorLayout();
+		const SDL_Rect imageRect{layout.image.x, layout.image.y,
+			layout.image.width, layout.image.height};
+		const SDL_Rect frame{imageRect.x - 2, imageRect.y - 2,
+			imageRect.w + 4, imageRect.h + 4};
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 230);
+		SDL_RenderFillRect(renderer_, &frame);
+		SDL_RenderCopy(renderer_, imageTexture, nullptr, &imageRect);
+		DrawRect({frame.x, frame.y, frame.w, frame.h}, 245, 245, 245, 255);
+
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			image_.width, image_.height, area.w, area.h);
+		const jpegview_linux::NormalizedImageRect visible =
+			jpegview_linux::CalculateVisibleImageRect(destination.x + area.x,
+				destination.y + area.y, destination.width, destination.height,
+				area.x, area.y, area.w, area.h);
+		const jpegview_linux::ZoomNavigatorRect mapped =
+			jpegview_linux::MapVisibleRectToNavigator(visible, layout.image);
+		if (mapped.width <= 0 || mapped.height <= 0) return;
+		DrawRect({mapped.x - 1, mapped.y - 1, mapped.width + 2, mapped.height + 2},
+			0, 0, 0, 255);
+		DrawRect({mapped.x, mapped.y, mapped.width, mapped.height}, 255, 255, 255, 255);
+	}
+
 	jpegview_linux::SelectionScreenRect ImageDestinationScreenRect() const {
 		const SDL_Rect imageArea = ImageAreaRect();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
@@ -5537,9 +5675,10 @@ private:
 		DrawRect(panel, 160, 190, 225);
 		DrawText("QUICK HELP — JPEGVIEW LINUX", panel.x + 18, panel.y + 14,
 			kUiTextScale, 255, 255, 255);
-		static const std::array<const char*, 9> lines = {
+		static const std::array<const char*, 10> lines = {
 			"Navigate: Left/Right or wheel; Home/End first/last; Alt+Left/Right sibling folders",
 			"Zoom and pan: Ctrl+wheel or Ctrl+Up/Down; drag to pan; Shift+Arrow pans at actual size",
+			"Navigator: hover upper-right when magnified; click or drag its map to reposition",
 			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom",
 			"Panels: F2 picture info; Shift+N filename; Ctrl+N navigation panel; Ctrl+T thumbnails",
 			"Files: Ctrl+O open; Ctrl+S save processed; Ctrl+Shift+S save displayed size",
@@ -5800,6 +5939,7 @@ private:
 					maximized_ = false;
 				} else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
 					EndThumbnailPanelResize(lastMouseX_, lastMouseY_);
+					EndZoomNavigatorDrag(lastMouseX_, lastMouseY_);
 					if (cropMouseDragging_) {
 						ClearCropSelection();
 					}
@@ -5877,6 +6017,10 @@ private:
 						dragging_ = false;
 						break;
 					}
+					if (BeginZoomNavigatorDrag(event.button.x, event.button.y)) {
+						dragging_ = false;
+						break;
+					}
 					if (BeginCropDrag(event.button.x, event.button.y)) break;
 					dragging_ = true;
 					lastMouseX_ = event.button.x;
@@ -5890,7 +6034,8 @@ private:
 				break;
 			case SDL_MOUSEBUTTONUP:
 				if (event.button.button == SDL_BUTTON_LEFT) {
-					if (cropMouseDragging_) EndCropDrag(event.button.x, event.button.y);
+					if (zoomNavigatorDragging_) EndZoomNavigatorDrag(event.button.x, event.button.y);
+					else if (cropMouseDragging_) EndCropDrag(event.button.x, event.button.y);
 					else {
 						EndThumbnailPanelResize(event.button.x, event.button.y);
 						dragging_ = false;
@@ -5900,8 +6045,15 @@ private:
 			case SDL_MOUSEMOTION:
 				UpdateThumbnailPanelCursor(event.motion.x, event.motion.y);
 				UpdateCropCursor(event.motion.x, event.motion.y);
+				UpdateZoomNavigatorCursor(event.motion.x, event.motion.y);
 				if (thumbnailPanelResizing_) {
 					ResizeThumbnailPanel(event.motion.x);
+					lastMouseX_ = event.motion.x;
+					lastMouseY_ = event.motion.y;
+					break;
+				}
+				if (zoomNavigatorDragging_) {
+					UpdateZoomNavigatorDrag(event.motion.xrel, event.motion.yrel);
 					lastMouseX_ = event.motion.x;
 					lastMouseY_ = event.motion.y;
 					break;
@@ -5916,7 +6068,7 @@ private:
 				imageCenterY_ = event.motion.y;
 				UpdateNavigationPanelVisibility(event.motion.x, event.motion.y);
 				if (dragging_) {
-					viewport_.Pan(event.motion.xrel, event.motion.yrel);
+					PanViewport(event.motion.xrel, event.motion.yrel);
 					SetTitle();
 				}
 				lastMouseX_ = event.motion.x;
@@ -5975,6 +6127,7 @@ private:
 		RenderImageTransition(destination, imageArea, renderTexture);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderCropSelection();
+		RenderZoomNavigator(renderTexture);
 		SDL_RenderSetClipRect(renderer_, nullptr);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderThumbnailPanel();
@@ -6060,6 +6213,8 @@ private:
 	jpegview_linux::CropSelectionModel cropSelection_;
 	bool defaultSelectionMode_ = true;
 	bool cropMouseDragging_ = false;
+	bool zoomNavigatorDragging_ = false;
+	Uint32 zoomNavigatorVisibleUntil_ = 0;
 	bool cropDragWasNew_ = false;
 	bool cropZoomOnRelease_ = false;
 	bool cropDragMoved_ = false;
@@ -6090,6 +6245,7 @@ private:
 	bool navigationPanelEnabled_ = true;
 	bool navigationPanelAutoReveal_ = true;
 	bool thumbnailPanelVisible_ = false;
+	bool showZoomNavigator_ = true;
 	int thumbnailPanelWidth_ = jpegview_linux::kDefaultThumbnailPanelWidth;
 	bool thumbnailPanelResizing_ = false;
 	bool thumbnailPanelResizeChanged_ = false;

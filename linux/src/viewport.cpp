@@ -111,6 +111,26 @@ void Viewport::Pan(double deltaX, double deltaY) {
 	noEnlarge_ = false;
 }
 
+void Viewport::ClampToView(int imageWidth, int imageHeight, int windowWidth, int windowHeight) {
+	if (imageWidth <= 0 || imageHeight <= 0 || windowWidth <= 0 || windowHeight <= 0) return;
+	const int destinationWidth = std::max(1, static_cast<int>(std::round(imageWidth * zoom_)));
+	const int destinationHeight = std::max(1, static_cast<int>(std::round(imageHeight * zoom_)));
+	if (destinationWidth <= windowWidth) {
+		offsetX_ = 0.0;
+	} else {
+		const double centeredOffset = (windowWidth - destinationWidth) / 2.0;
+		offsetX_ = std::clamp(offsetX_, windowWidth - destinationWidth - centeredOffset,
+			-centeredOffset);
+	}
+	if (destinationHeight <= windowHeight) {
+		offsetY_ = 0.0;
+	} else {
+		const double centeredOffset = (windowHeight - destinationHeight) / 2.0;
+		offsetY_ = std::clamp(offsetY_, windowHeight - destinationHeight - centeredOffset,
+			-centeredOffset);
+	}
+}
+
 ViewportRect Viewport::Destination(int imageWidth, int imageHeight,
 	int windowWidth, int windowHeight) const {
 	const int renderWidth = std::max(1, static_cast<int>(std::round(imageWidth * zoom_)));

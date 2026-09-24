@@ -16,6 +16,7 @@
 #include "batch_copy.h"
 #include "crop_selection_model.h"
 #include "crop_size_dialog_model.h"
+#include "zoom_navigator_model.h"
 #include "image_formats.h"
 #include "input_commands.h"
 #include "viewport.h"
@@ -1932,6 +1933,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.navigationPanelEnabled = false;
 	expected.navigationPanelAutoReveal = false;
 	expected.thumbnailPanelVisible = true;
+	expected.showZoomNavigator = false;
 	expected.thumbnailPanelWidth = 287;
 	expected.fileDialogWidth = 1040;
 	expected.fileDialogHeight = 735;
@@ -1980,6 +1982,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"navigation panel settings did not round-trip");
 	Expect(loaded.thumbnailPanelVisible == expected.thumbnailPanelVisible,
 		"thumbnail panel visibility did not round-trip");
+	Expect(loaded.showZoomNavigator == expected.showZoomNavigator,
+		"zoom navigator visibility did not round-trip");
 	Expect(loaded.thumbnailPanelWidth == expected.thumbnailPanelWidth,
 		"thumbnail panel width did not round-trip");
 	Expect(loaded.fileDialogWidth == expected.fileDialogWidth &&
@@ -2022,6 +2026,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"fixed_crop_width=not-a-number\nfixed_crop_height=0\n"
 		"user_crop_aspect_width=0\nuser_crop_aspect_height=nan\n"
 		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=maybe\n"
+		"show_zoom_navigator=maybe\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
 	loaded = {};
@@ -2033,6 +2038,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"settings without thumbnail visibility did not retain the hidden default");
 	Expect(!loaded.showHistogram,
 		"settings without a histogram choice did not retain the hidden default");
+	Expect(loaded.showZoomNavigator,
+		"malformed zoom navigator visibility did not retain its enabled default");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
 		"malformed thumbnail width did not retain its default");
 	Expect(loaded.fileDialogWidth == jpegview_linux::kDefaultFileDialogWidth &&
@@ -2687,6 +2694,19 @@ void TestViewportManualZoomPanAndRestore() {
 	viewport.Pan(48.0, -48.0);
 	Expect(viewport.IsActualSize() && viewport.OffsetX() == 48.0 && viewport.OffsetY() == -48.0,
 		"actual-size keyboard-style pan did not preserve scale or update offsets");
+	viewport.ActualSize();
+	viewport.Pan(10000.0, 10000.0);
+	viewport.ClampToView(1000, 600, 500, 300);
+	ExpectRect(viewport.Destination(1000, 600, 500, 300), 0, 0, 1000, 600,
+		"viewport clamping did not retain the top-left image edge");
+	viewport.Pan(-20000.0, -20000.0);
+	viewport.ClampToView(1000, 600, 500, 300);
+	ExpectRect(viewport.Destination(1000, 600, 500, 300), -500, -300, 1000, 600,
+		"viewport clamping did not retain the bottom-right image edge");
+	viewport.Pan(100.0, 100.0);
+	viewport.ClampToView(100, 50, 500, 300);
+	ExpectRect(viewport.Destination(100, 50, 500, 300), 200, 125, 100, 50,
+		"viewport clamping did not center image axes smaller than the view");
 
 	viewport.Fit(800, 600, 400, 300);
 	viewport.Restore(manual, 320, 200, 640, 480);
@@ -2705,6 +2725,61 @@ void TestViewportManualZoomPanAndRestore() {
 	viewport.ZoomAt(2.0, 0, 0, 0, 100, 500, 300);
 	viewport.ZoomAt(-1.0, 0, 0, 100, 100, 500, 300);
 	ExpectNear(viewport.Zoom(), zoomBeforeInvalidInput, 0.0001, "invalid zoom input changed viewport state");
+}
+
+void TestZoomNavigatorGeometryAndPanning() {
+	using namespace jpegview_linux;
+	const ZoomNavigatorLayout layout = CalculateZoomNavigatorLayout(1600, 1200,
+		0, 0, 1280, 800);
+	Expect(layout.hotArea.x == 976 && layout.hotArea.y == 8 &&
+		layout.hotArea.width == 296 && layout.hotArea.height == 222 &&
+		layout.image.x == layout.hotArea.x && layout.image.y == layout.hotArea.y &&
+		layout.image.width == 296 && layout.image.height == 222,
+		"zoom navigator did not use its responsive corner layout and image aspect ratio");
+	const ZoomNavigatorLayout portrait = CalculateZoomNavigatorLayout(900, 1600,
+		10, 5, 1280, 800);
+	Expect(portrait.image.height == portrait.hotArea.height &&
+		portrait.image.width < portrait.hotArea.width &&
+		portrait.image.x > portrait.hotArea.x,
+		"portrait overview was not fitted and centered inside its hot area");
+	Expect(ImageNeedsZoomNavigator(1600, 1200, 1280, 800) &&
+		!ImageNeedsZoomNavigator(800, 600, 1280, 800) &&
+		!ImageNeedsZoomNavigator(0, 600, 1280, 800),
+		"navigator visibility did not follow image overflow");
+
+	const NormalizedImageRect visible = CalculateVisibleImageRect(
+		-160, -200, 1600, 1200, 0, 0, 1280, 800);
+	Expect(visible.valid, "zoomed image viewport was not mapped onto the source image");
+	ExpectNear(visible.left, 0.1, 0.0001, "navigator viewport left edge is incorrect");
+	ExpectNear(visible.top, 1.0 / 6.0, 0.0001, "navigator viewport top edge is incorrect");
+	ExpectNear(visible.right, 0.9, 0.0001, "navigator viewport right edge is incorrect");
+	ExpectNear(visible.bottom, 5.0 / 6.0, 0.0001, "navigator viewport bottom edge is incorrect");
+	const ZoomNavigatorRect mapped = MapVisibleRectToNavigator(visible, layout.image);
+	Expect(mapped.x == 1006 && mapped.y == 45 && mapped.width == 236 && mapped.height == 148,
+		"navigator visible rectangle was mapped to the wrong thumbnail pixels");
+	const ZoomNavigatorPoint mappedPoint = NavigatorPointToImage(1035, 119, layout.image);
+	ExpectNear(mappedPoint.x, 59.0 / 296.0, 0.0001,
+		"navigator click did not map to the source-image horizontal fraction");
+	ExpectNear(mappedPoint.y, 0.5, 0.0001,
+		"navigator click did not map to the source-image vertical fraction");
+
+	const ZoomNavigatorPan centering = CalculateNavigatorCenterPan(
+		0.5, 0.5, 0.1, 0.5, 0.8, 2.0 / 3.0, 1600, 1200);
+	ExpectNear(centering.x, 160.0, 0.0001,
+		"navigator click did not clamp the requested center to the visible image bounds");
+	ExpectNear(centering.y, 0.0, 0.0001,
+		"navigator click moved an axis whose complete image was already visible");
+	const ZoomNavigatorPan drag = CalculateNavigatorDragPan(90, -20,
+		layout.image, 1600, 1200);
+	ExpectNear(drag.x, -90.0 * 1600.0 / 296.0, 0.0001,
+		"navigator drag did not scale pan distance by the image overview");
+	ExpectNear(drag.y, 20.0 * 1200.0 / 222.0, 0.0001,
+		"navigator drag did not scale vertical pan distance by the overview");
+	Expect(!CalculateVisibleImageRect(3000, 0, 1600, 1200, 0, 0, 1280, 800).valid &&
+		MapVisibleRectToNavigator({}, layout.image).width == 0 &&
+		NavigatorPointToImage(0, 0, {}).x == 0.0 &&
+		CalculateNavigatorDragPan(10, 10, {}, 1600, 1200).x == 0.0,
+		"navigator geometry accepted invalid or fully off-screen input");
 }
 
 void TestViewportNavigationResetsTransientZoom() {
@@ -3010,8 +3085,14 @@ void TestContextMenuCatalogAndState() {
 	Expect(findCommand(advanced, IDM_SHOW_FILEINFO)->checked &&
 		findCommand(advanced, IDM_SHOW_FILENAME)->checked &&
 		!findCommand(advanced, IDM_SHOW_NAVPANEL)->checked &&
-		findCommand(advanced, jpegview_linux::kCommandToggleThumbnailPanel)->checked,
+		findCommand(advanced, jpegview_linux::kCommandToggleThumbnailPanel)->checked &&
+		findCommand(advanced, jpegview_linux::kCommandToggleZoomNavigator)->checked,
 		"context menu did not reflect panel visibility state");
+	state.showZoomNavigator = false;
+	const std::vector<MenuItem> navigatorHidden = jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(navigatorHidden, jpegview_linux::kCommandToggleZoomNavigator) != nullptr &&
+		!findCommand(navigatorHidden, jpegview_linux::kCommandToggleZoomNavigator)->checked,
+		"context menu did not reflect the disabled zoom navigator setting");
 	Expect(findCommand(advanced, IDM_LOOP_RECURSIVELY)->checked &&
 		findCommand(advanced, IDM_SORT_MOD_DATE)->checked &&
 		findCommand(advanced, IDM_SORT_DESCENDING)->checked &&
@@ -4190,6 +4271,7 @@ int main() {
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
+	RunTest("zoom-navigator-geometry-and-panning", TestZoomNavigatorGeometryAndPanning, failures);
 	RunTest("viewport-navigation-resets-transient-zoom", TestViewportNavigationResetsTransientZoom, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("resize-dialog-controller", TestResizeDialogController, failures);

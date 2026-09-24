@@ -40,9 +40,11 @@ they support.
    Fit, fill, actual-size, and manual modes survive navigation appropriately, while temporary zoom
    on one image is reset to the selected fit/actual mode for the next image. Ctrl+wheel zooms around
    the pointer, mouse dragging pans, and repeatable Shift+Arrow commands pan an actual-size image in
-   the original 48-pixel steps. The Windows crop/selection workflow is also ported: source-pixel
-   selections can be moved and resized independently of zoom, then cropped, copied, losslessly
-   cropped from JPEG, or used to zoom the view.
+   the original 48-pixel steps. When magnified beyond the viewport, a transient upper-right zoom
+   navigator shows the whole image and the visible area; click or drag it to pan. Its visibility
+   can be toggled from the context menu and persists between runs. The Windows crop/selection
+   workflow is also ported: source-pixel selections can be moved and resized independently of zoom,
+   then cropped, copied, losslessly cropped from JPEG, or used to zoom the view.
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
@@ -328,7 +330,8 @@ which continues to use fonts installed on the user's system.
 It covers file-list ordering/navigation, mutable image transforms, source-coordinate crop selection,
 aspect/fixed-size geometry, manipulation/hit-testing, MCU alignment and image cropping, all resize
 filters and automatic correction invariants, sort and settings persistence mappings, the complete supported
-keyboard-command mapping, viewport fit/fill/zoom/pan geometry, open/save browser state, preview
+keyboard-command mapping, viewport fit/fill/zoom/pan and zoom-navigator geometry, bounded navigator
+panning, open/save browser state, preview
 downsampling, resize- and crop-size-dialog editing/validation, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
@@ -338,7 +341,8 @@ open browser's filtering, folder counts, sorting, direct-folder opening, focus r
 Home/End, held-key movement, wheel scrolling, and dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu expansion and repainting; startup controls;
 mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; crop-mode dialog, selection
-overlay, crop, and lossless JPEG output; maximize restoration; and persisted settings:
+overlay, crop, and lossless JPEG output; zoom-navigator visibility, click-to-pan, and drag-to-pan;
+maximize restoration; and persisted settings:
 
 ```sh
 make -C linux test-ui
@@ -356,6 +360,9 @@ core suite.
 
 Right/Left or PageUp/PageDown navigate; Home/End select the first/last image; mouse wheel up/down
 navigates previous/next, while Ctrl+mouse wheel and Ctrl+Up/Down zoom around the pointer or center.
+When the image extends beyond the viewport, hover the upper-right corner to show the zoom navigator;
+click or drag the miniature image to reposition the view. **Show zoom navigator** in the context menu
+toggles it, and that preference is saved between runs.
 Up/Down rotate 90 degrees. Space toggles fit/actual, Return/0 fits, Ctrl+Return fills with crop,
 `+`/`-` zoom, and F11/F toggles fullscreen; F12 spans screens, Ctrl+F11 fits the window to the
 image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`–`9` start a
@@ -407,9 +414,13 @@ navigation-panel button displays its Windows-style action hint. The selected fit
 next or previous image and is saved between application runs, as is the last maximized or
 normal window mode, the lower navigation panel's show/hide selection, and the F2/Ctrl+F2 overlay
 visibility choices. The navigation panel hover preference and current file-order mode/direction are
-also saved, together with the thumbnail panel visibility. These settings are stored in
+also saved, together with the thumbnail-panel visibility and zoom-navigator preference. These
+settings are stored in
 `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. Esc stops an active slideshow first,
 matching the Windows default escape command, and otherwise quits.
+
+The zoom navigator is enabled by default. Set `show_zoom_navigator=0` in the settings file to hide
+it; the context-menu toggle updates this preference immediately.
 
 The same settings file accepts `cache_size_mb=1024` to control the aggregate memory retained for
 decoded images, worker-prepared display frames, and renderer-ready textures. The value is in MiB,
@@ -516,8 +527,6 @@ features.
 
 - **Free rotation and perspective correction.** The quarter-turn/mirror operations are available,
   but the interactive free-rotation and perspective/tilt-correction panels are not implemented.
-- **Zoom navigator.** Linux has a neighboring-file thumbnail strip, but not Windows' miniature
-  viewport overlay for panning around an enlarged image.
 - **Image comparison shortcuts.** Mark-image/toggle-back and the second processing-parameter set
   exchange workflow are not implemented.
 - **Settings administration.** Editing global/user Windows configuration files and updating a user

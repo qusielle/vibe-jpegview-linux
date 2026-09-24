@@ -22,9 +22,12 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
 - `settings` and `sort_mode`: persisted configuration (including default picture-level values,
-  fixed crop dimensions/units, user crop aspect, and default selection mode) and stable setting
-  values.
-- `viewport`: fit/fill/manual zoom modes, pan state, and destination geometry.
+  fixed crop dimensions/units, user crop aspect, default selection mode, and zoom-navigator visibility)
+  and stable setting values.
+- `viewport`: fit/fill/manual zoom modes, pan state, destination geometry, and panning bounds that
+  keep the viewport inside the image.
+- `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,
+  and click/drag pan calculations for the transient zoom navigator.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, filter selection, and pure
   focus/text-editing transitions.
 - `context_menu_model`: the complete menu catalog, state-derived enablement/checkmarks,
@@ -117,3 +120,11 @@ the SDL composition root, with text and validation transitions in `crop_size_dia
 a crop updates the current logical image dimensions, while copying a
 selection leaves the viewed image unchanged. Lossless output is staged beside its destination for an
 atomic rename and adopts the existing file's mode or the normal umask-derived mode for a new file.
+
+The zoom navigator is a transient renderer overlay: when the image exceeds the viewport, hovering
+its upper-right hotspot, zooming, or panning reveals a miniature of the current renderer-ready image
+and a rectangle marking the visible source region. The SDL adapter owns hit testing, capture, cursor,
+and drawing; `zoom_navigator_model` owns only the geometry and pointer-to-pan math. The overlay reuses
+the current image texture, so it does not schedule another decode, resize, or cache entry. Click and
+drag pans are clamped by `Viewport::ClampToView` so they cannot expose empty space beyond the image.
+The user-visible toggle is persisted through `settings`.

@@ -827,6 +827,89 @@ if [ "$visual_assertions" -eq 1 ]; then
 fi
 
 if command -v convert >/dev/null 2>&1; then
+	mkdir -p "$temporary/navigator-config"
+	convert -size 1600x1200 xc:red -fill blue -draw 'rectangle 800,0 1599,1199' \
+		"$temporary/zoom-navigator.ppm"
+	env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \
+		HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/navigator-config" \
+		"$BINARY" "$temporary/zoom-navigator.ppm" \
+		>"$temporary/zoom-navigator-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: zoom-navigator viewer did not appear" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	sleep 0.3
+	DISPLAY=":$display_number" xdotool key space
+	sleep 0.2
+	navigator_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+	navigator_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	navigator_hot_width=$(((navigator_window_width * 20 + 50) / 100 + 40))
+	if [ "$navigator_hot_width" -gt 320 ]; then navigator_hot_width=320; fi
+	if [ "$navigator_hot_width" -lt 133 ]; then navigator_hot_width=133; fi
+	if [ "$navigator_hot_width" -gt $((navigator_window_width - 16)) ]; then
+		navigator_hot_width=$((navigator_window_width - 16))
+	fi
+	navigator_hot_height=$(((navigator_hot_width * 3 + 2) / 4))
+	if [ "$navigator_hot_height" -gt $((navigator_window_height - 16)) ]; then
+		navigator_hot_height=$((navigator_window_height - 16))
+	fi
+	navigator_x=$((navigator_window_width - navigator_hot_width - 8))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((navigator_x + 24)) 24
+	sleep 0.2
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/zoom-navigator.png"
+		navigator_frame=$(convert "$temporary/zoom-navigator.png" -format \
+			"%[pixel:p{$((navigator_x - 2)),$((8 - 2))}]" info:)
+		if [ "$navigator_frame" != "srgb(245,245,245)" ]; then
+			echo "UI smoke test: zoom navigator did not appear in its corner hot area ($navigator_frame)" >&2
+			exit 1
+		fi
+	fi
+	# The overview click recenters the image around the selected source point.
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((navigator_x + navigator_hot_width / 5)) $((navigator_hot_height / 2 + 8)) click 1
+	sleep 0.2
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/zoom-navigator-click.png"
+		navigator_center_x=$((navigator_window_width / 2))
+		navigator_center_y=$((navigator_window_height / 2))
+		navigator_click_color=$(convert "$temporary/zoom-navigator-click.png" -format \
+			"%[fx:p{$navigator_center_x,$navigator_center_y}.r>0.7&&p{$navigator_center_x,$navigator_center_y}.b<0.3]" info:)
+		if [ "$navigator_click_color" != "1" ]; then
+			echo "UI smoke test: clicking the navigator did not pan to the left image area ($navigator_click_color)" >&2
+			exit 1
+		fi
+	fi
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((navigator_x + navigator_hot_width / 2)) $((navigator_hot_height / 2 + 8)) mousedown 1
+	sleep 0.1
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((navigator_x + navigator_hot_width / 2 + navigator_hot_width / 3)) \
+		$((navigator_hot_height / 2 + 8)) mouseup 1
+	sleep 0.2
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/zoom-navigator-drag.png"
+		navigator_center_x=$((navigator_window_width / 2))
+		navigator_center_y=$((navigator_window_height / 2))
+		navigator_drag_color=$(convert "$temporary/zoom-navigator-drag.png" -format \
+			"%[fx:p{$navigator_center_x,$navigator_center_y}.b>0.7&&p{$navigator_center_x,$navigator_center_y}.r<0.3]" info:)
+		if [ "$navigator_drag_color" != "1" ]; then
+			echo "UI smoke test: dragging the navigator did not pan to the right image area ($navigator_drag_color)" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+
 	mkdir -p "$temporary/crop-images" "$temporary/crop-config"
 	convert -size 160x128 xc:red -fill blue -draw 'rectangle 80,0 159,127' \
 		-sampling-factor 2x2 "$temporary/crop-images/01-crop.jpg"

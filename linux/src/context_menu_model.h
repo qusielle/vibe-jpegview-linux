@@ -14,6 +14,7 @@ namespace jpegview_linux {
 constexpr int kContextMenuShowAdvanced = -1;
 constexpr int kToggleNavigationPanelAutoReveal = -3;
 constexpr int kCommandEditPictureLevels = -7;
+constexpr int kCommandToggleZoomNavigator = -9;
 
 struct MenuItem {
 	std::string label;
@@ -49,6 +50,7 @@ struct ContextMenuState {
 	bool navigationPanelEnabled = true;
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
+	bool showZoomNavigator = true;
 	FileList::NavigationMode navigationMode = FileList::NavigationMode::LoopDirectory;
 	FileList::SortMode sortMode = FileList::SortMode::FileName;
 	bool sortAscending = true;

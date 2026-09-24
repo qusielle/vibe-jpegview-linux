@@ -45,6 +45,7 @@ public:
 	void ZoomAt(double factor, int mouseX, int mouseY, int imageWidth, int imageHeight,
 		int windowWidth, int windowHeight);
 	void Pan(double deltaX, double deltaY);
+	void ClampToView(int imageWidth, int imageHeight, int windowWidth, int windowHeight);
 
 	ViewportRect Destination(int imageWidth, int imageHeight,
 		int windowWidth, int windowHeight) const;
