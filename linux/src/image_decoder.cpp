@@ -1554,6 +1554,27 @@ bool DecodeAvif(const std::filesystem::path& filename, DecodedImage& image,
 #endif
 
 #if JPEGVIEW_HAVE_JXL
+JxlDecoderStatus GetJxlOriginalIccProfileSize(const JxlDecoder* decoder, size_t* profileSize) {
+#if JPEGXL_NUMERIC_VERSION < JPEGXL_COMPUTE_NUMERIC_VERSION(0, 9, 0)
+	return JxlDecoderGetICCProfileSize(decoder, nullptr,
+		JXL_COLOR_PROFILE_TARGET_ORIGINAL, profileSize);
+#else
+	return JxlDecoderGetICCProfileSize(decoder, JXL_COLOR_PROFILE_TARGET_ORIGINAL,
+		profileSize);
+#endif
+}
+
+JxlDecoderStatus GetJxlOriginalIccProfile(const JxlDecoder* decoder,
+	uint8_t* profile, size_t profileSize) {
+#if JPEGXL_NUMERIC_VERSION < JPEGXL_COMPUTE_NUMERIC_VERSION(0, 9, 0)
+	return JxlDecoderGetColorAsICCProfile(decoder, nullptr,
+		JXL_COLOR_PROFILE_TARGET_ORIGINAL, profile, profileSize);
+#else
+	return JxlDecoderGetColorAsICCProfile(decoder, JXL_COLOR_PROFILE_TARGET_ORIGINAL,
+		profile, profileSize);
+#endif
+}
+
 bool DecodeJxl(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
 	std::vector<std::uint8_t> encoded;
@@ -1597,11 +1618,11 @@ bool DecodeJxl(const std::filesystem::path& filename, DecodedImage& image,
 				JxlResizableParallelRunnerSuggestThreads(basicInfo.xsize, basicInfo.ysize));
 		} else if (status == JXL_DEC_COLOR_ENCODING) {
 			size_t profileSize = 0;
-			if (JxlDecoderGetICCProfileSize(decoder, nullptr, JXL_COLOR_PROFILE_TARGET_ORIGINAL,
-				&profileSize) == JXL_DEC_SUCCESS && profileSize > 0 && profileSize <= kMaxAnimationBytes) {
+			if (GetJxlOriginalIccProfileSize(decoder, &profileSize) == JXL_DEC_SUCCESS &&
+				profileSize > 0 && profileSize <= kMaxAnimationBytes) {
 				iccProfile.resize(profileSize);
-				if (JxlDecoderGetColorAsICCProfile(decoder, nullptr, JXL_COLOR_PROFILE_TARGET_ORIGINAL,
-					iccProfile.data(), iccProfile.size()) != JXL_DEC_SUCCESS) iccProfile.clear();
+				if (GetJxlOriginalIccProfile(decoder, iccProfile.data(), iccProfile.size()) !=
+					JXL_DEC_SUCCESS) iccProfile.clear();
 			}
 			if (iccProfile.empty()) {
 				JxlColorEncoding preferredProfile{};
