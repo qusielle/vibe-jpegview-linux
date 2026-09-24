@@ -332,6 +332,8 @@ void TestFileListMarkedImageToggle() {
 		"toggle succeeded before a file was marked");
 	Expect(files.MarkCurrentForToggle() && files.HasMarkedFile(),
 		"current image could not be marked for toggling");
+	Expect(files.MarkedIndex() && *files.MarkedIndex() == 0,
+		"marked image index was not exposed in the active file list");
 	Expect(files.Next() && files.Current() == second,
 		"file-list setup did not navigate away from the marked image");
 	Expect(files.ToggleBetweenMarkedAndCurrent() && files.Current() == first,
@@ -343,10 +345,15 @@ void TestFileListMarkedImageToggle() {
 
 	Expect(files.Select(1) && files.MarkCurrentForToggle(),
 		"marking a replacement image failed");
+	Expect(files.MarkedIndex() && *files.MarkedIndex() == 1,
+		"replacement mark did not update its active file-list index");
 	Expect(files.Select(0) && files.ToggleBetweenMarkedAndCurrent() && files.Current() == second,
 		"a new mark did not replace the previous marked image and reset the toggle pair");
 	Expect(files.ToggleBetweenMarkedAndCurrent() && files.Current() == first,
 		"replacement mark did not toggle back to the newly captured image");
+	files.SetSorting(FileList::SortMode::FileName, false);
+	Expect(files.MarkedIndex() && *files.MarkedIndex() == 0 && files.Current() == first,
+		"marked-image index was not refreshed after file-list reordering");
 
 	const fs::path nestedRoot = temporary.path() / "nested-root";
 	const fs::path nestedImage = nestedRoot / "child" / "03-nested.png";
@@ -357,9 +364,13 @@ void TestFileListMarkedImageToggle() {
 	FileList nestedNavigation({nestedRoot.string()}, FileList::SortMode::FileName, true, false);
 	Expect(nestedNavigation.MarkCurrentForToggle(),
 		"nested-navigation fixture could not mark its root image");
+	Expect(nestedNavigation.MarkedIndex() && *nestedNavigation.MarkedIndex() == 0,
+		"marked root image was not visible in the initial file list");
 	nestedNavigation.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
 	Expect(nestedNavigation.Next() && nestedNavigation.Current() == nestedImage,
 		"nested-navigation fixture did not enter its child directory");
+	Expect(!nestedNavigation.MarkedIndex(),
+		"marked image incorrectly appeared in a different active directory's list");
 	Expect(nestedNavigation.ToggleBetweenMarkedAndCurrent() && nestedNavigation.Current() == topImage &&
 		nestedNavigation.Size() == 1,
 		"toggle did not load the marked image's directory when it was outside the active list");
@@ -3546,6 +3557,16 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 	Expect(std::count_if(slots.begin(), slots.end(), [](const jpegview_linux::ThumbnailSlot& slot) {
 		return slot.current;
 	}) == 1, "thumbnail panel marked more than one current image");
+	const std::vector<jpegview_linux::ThumbnailSlot> markedSlots =
+		jpegview_linux::ThumbnailPanelSlots(10, 5, 500, 100, 7);
+	Expect(markedSlots[2].current && !markedSlots[2].marked && markedSlots[4].fileIndex == 7 &&
+		markedSlots[4].marked && !markedSlots[4].current,
+		"thumbnail panel did not distinguish the marked image from the current image");
+	const std::vector<jpegview_linux::ThumbnailSlot> unmarkedVisibleSlots =
+		jpegview_linux::ThumbnailPanelSlots(10, 5, 100, 100, 0);
+	Expect(std::none_of(unmarkedVisibleSlots.begin(), unmarkedVisibleSlots.end(),
+		[](const jpegview_linux::ThumbnailSlot& slot) { return slot.marked; }),
+		"thumbnail panel marked an image outside the visible rows");
 
 	const std::vector<jpegview_linux::ThumbnailSlot> firstSlots =
 		jpegview_linux::ThumbnailPanelSlots(4, 0, 300, 100);

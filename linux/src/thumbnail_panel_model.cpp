@@ -22,7 +22,8 @@ int ThumbnailRowHeight(int panelWidth, int verticalMargin) {
 }
 
 std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
-	std::size_t currentIndex, int windowHeight, int rowHeight) {
+	std::size_t currentIndex, int windowHeight, int rowHeight,
+	std::optional<std::size_t> markedIndex) {
 	std::vector<ThumbnailSlot> slots;
 	if (fileCount == 0 || currentIndex >= fileCount || windowHeight <= 0 || rowHeight <= 0) return slots;
 	const int currentY = (windowHeight - rowHeight) / 2;
@@ -32,7 +33,8 @@ std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
 		if (index < 0 || index >= static_cast<long long>(fileCount)) continue;
 		const int y = currentY + offset * rowHeight;
 		if (y >= windowHeight || y + rowHeight <= 0) continue;
-		slots.push_back({static_cast<std::size_t>(index), y, offset == 0});
+		const std::size_t fileIndex = static_cast<std::size_t>(index);
+		slots.push_back({fileIndex, y, offset == 0, markedIndex && *markedIndex == fileIndex});
 	}
 	return slots;
 }

@@ -4,7 +4,8 @@ The SDL frontend deliberately keeps platform-independent behavior outside `main.
 should normally be added to one of these focused modules and covered by `tests/test_core.cpp`:
 
 - `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, current-file
-  preservation, and the transient marked-image toggle pair used for A/B comparison.
+  preservation, and the transient marked-image toggle pair used for A/B comparison. The marked
+  path's index in the active ordered list is cached for constant-time thumbnail rendering.
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality resizing, and the automatic/manual picture-level processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
@@ -40,7 +41,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, dynamic labels, and tooltip placement.
-- `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry, nearest-first cache scheduling,
+- `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
+  nearest-first cache scheduling,
   cancellation/LRU policy, memory sizing, antialiased source-area reduction, and low-priority
   derivation from completed neighbor display frames.
 - `image_info_model`: stable dimensions/date/file-size presentation.

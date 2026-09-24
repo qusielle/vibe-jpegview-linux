@@ -152,6 +152,7 @@ void FileList::CollectDescendantDirectories(const fs::path& directory, std::vect
 void FileList::Initialize(const std::vector<std::string>& inputs) {
 	entries_.clear();
 	paths_.clear();
+	markedIndex_.reset();
 	previousFolders_.clear();
 	nextFolders_.clear();
 	currentIndex_ = 0;
@@ -260,6 +261,13 @@ void FileList::RebuildPaths() {
 	paths_.reserve(entries_.size());
 	for (const Entry& entry : entries_) paths_.push_back(entry.path);
 	if (currentIndex_ >= paths_.size()) currentIndex_ = paths_.empty() ? 0 : paths_.size() - 1;
+	markedIndex_.reset();
+	if (!markedFile_.empty()) {
+		const auto marked = std::find(paths_.begin(), paths_.end(), markedFile_);
+		if (marked != paths_.end()) {
+			markedIndex_ = static_cast<std::size_t>(std::distance(paths_.begin(), marked));
+		}
+	}
 }
 
 std::size_t FileList::FindEntry(const fs::path& path) const {
@@ -462,6 +470,7 @@ bool FileList::MarkCurrentForToggle() {
 	if (!fs::is_regular_file(Current(), error) || error) return false;
 	markedFile_ = Current();
 	markedFileCurrent_.clear();
+	markedIndex_ = currentIndex_;
 	markedToggleIndex_ = -1;
 	return true;
 }
@@ -476,6 +485,10 @@ bool FileList::ToggleBetweenMarkedAndCurrent() {
 	if (targetIndex == 0) markedFileCurrent_ = current;
 	markedToggleIndex_ = (targetIndex + 1) & 1;
 	return true;
+}
+
+std::optional<std::size_t> FileList::MarkedIndex() const {
+	return markedIndex_;
 }
 
 void FileList::First() {

@@ -5558,7 +5558,7 @@ private:
 		SDL_RenderFillRect(renderer_, &panel);
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
 		const std::vector<jpegview_linux::ThumbnailSlot> slots = jpegview_linux::ThumbnailPanelSlots(
-			fileList_.Size(), fileList_.CurrentIndex(), panel.h, rowHeight);
+			fileList_.Size(), fileList_.CurrentIndex(), panel.h, rowHeight, fileList_.MarkedIndex());
 		for (const jpegview_linux::ThumbnailSlot& slot : slots) {
 			const SDL_Rect row{panel.x, slot.y, panel.w, rowHeight};
 			if (slot.current) {
@@ -5593,6 +5593,10 @@ private:
 			}
 			DrawLine(panel.x, row.y + row.h - 1, std::max(panel.x, panel.x + panel.w - 2),
 				row.y + row.h - 1, 48, 48, 48);
+			if (slot.marked) {
+				const SDL_Rect markedFrame{row.x + 1, row.y + 1, row.w - 2, row.h - 2};
+				DrawRect(markedFrame, 255, 195, 65);
+			}
 		}
 		DrawLine(panel.x + panel.w - 1, panel.y, panel.x + panel.w - 1,
 			panel.y + panel.h - 1, 100, 100, 100);

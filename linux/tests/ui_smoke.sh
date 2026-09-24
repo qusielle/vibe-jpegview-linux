@@ -657,6 +657,21 @@ DISPLAY=":$display_number" xdotool mousedown 1
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 240 300
 DISPLAY=":$display_number" xdotool mouseup 1
 sleep 0.3
+DISPLAY=":$display_number" xdotool key Right
+DISPLAY=":$display_number" xdotool key ctrl+m
+DISPLAY=":$display_number" xdotool key Home
+sleep 0.2
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/thumbnail-marked.png"
+	thumbnail_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	thumbnail_mark_y=$(((thumbnail_window_height + 163) / 2 + 1))
+	thumbnail_mark_outline=$(convert "$temporary/thumbnail-marked.png" \
+		-format "%[hex:p{2,$thumbnail_mark_y}]" info: | tr 'A-F' 'a-f')
+	case "$thumbnail_mark_outline" in
+		ffc341*) ;;
+		*) echo "UI smoke test: Ctrl+M did not outline the marked thumbnail (pixel $thumbnail_mark_outline at y=$thumbnail_mark_y)" >&2; exit 1 ;;
+	esac
+fi
 title_before_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 thumbnail_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
 thumbnail_neighbor_y=$(((thumbnail_window_height + 163) / 2))

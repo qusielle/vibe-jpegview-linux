@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,7 @@ public:
 	bool MarkCurrentForToggle();
 	bool ToggleBetweenMarkedAndCurrent();
 	bool HasMarkedFile() const { return !markedFile_.empty(); }
+	std::optional<std::size_t> MarkedIndex() const;
 	void First();
 	void Last();
 	bool Reload();
@@ -106,6 +108,7 @@ private:
 	std::filesystem::path rootDirectory_;
 	std::filesystem::path markedFile_;
 	std::filesystem::path markedFileCurrent_;
+	std::optional<std::size_t> markedIndex_;
 	std::size_t currentIndex_ = 0;
 	int markedToggleIndex_ = -1;
 	SortMode sortMode_ = SortMode::LastModificationTime;

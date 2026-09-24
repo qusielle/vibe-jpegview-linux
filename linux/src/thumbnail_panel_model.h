@@ -13,6 +13,7 @@ struct ThumbnailSlot {
 	std::size_t fileIndex = 0;
 	int y = 0;
 	bool current = false;
+	bool marked = false;
 };
 
 struct ThumbnailSize {
@@ -46,7 +47,8 @@ int ThumbnailRowHeight(int panelWidth, int verticalMargin);
 // Returns visible rows in file-list order. The current file's row is centered
 // vertically; rows outside the window are omitted rather than wrapping.
 std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
-	std::size_t currentIndex, int windowHeight, int rowHeight);
+	std::size_t currentIndex, int windowHeight, int rowHeight,
+	std::optional<std::size_t> markedIndex = std::nullopt);
 
 // Returns file indices nearest to the current file first. Equal-distance
 // entries prefer the preceding file, matching their top-to-bottom placement.
