@@ -22,9 +22,9 @@ case "$VERSION" in
 esac
 
 case "$UBUNTU_VERSION" in
-	24) ;;
+	24|26) ;;
 	*)
-		echo "Only Ubuntu 24 .deb builds are supported." >&2
+		echo "Only Ubuntu 24 and 26 .deb builds are supported." >&2
 		exit 2
 		;;
 esac
@@ -72,7 +72,7 @@ esac
 
 # These are loaded at runtime through dlopen and are not present in ELF NEEDED.
 DEPENDS="$DEPENDS, libpangoft2-1.0-0, libfontconfig1"
-# Noble splits HEVC support into optional libheif plugins.
+# Ubuntu 24.04 and newer split HEVC support into optional libheif plugins.
 DEPENDS="$DEPENDS, libheif-plugin-libde265, libheif-plugin-x265"
 
 install -D -m 0755 "$BINARY" "$PACKAGE_ROOT/usr/bin/jpegview-linux"

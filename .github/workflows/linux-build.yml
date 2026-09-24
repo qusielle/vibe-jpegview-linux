@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ubuntu: ["20", "22", "24"]
+        ubuntu: ["20", "22", "24", "26"]
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -39,7 +39,7 @@ jobs:
           docker run --rm -v "$output_dir:/out" "$image" appimage ci
           docker run --rm -v "$output_dir:/out" "$image" binary
 
-          if [ "$UBUNTU_VERSION" = "24" ]; then
+          if [ "$UBUNTU_VERSION" = "24" ] || [ "$UBUNTU_VERSION" = "26" ]; then
             deb_image="jpegview-linux-deb-build:ubuntu${UBUNTU_VERSION}"
             deb_version="1.3.46+ci.${GITHUB_RUN_NUMBER}"
             deb_name="jpegview-linux_${deb_version}_ubuntu${UBUNTU_VERSION}_amd64.deb"
@@ -50,6 +50,16 @@ jobs:
               .
             docker run --rm -v "$output_dir:/out" "$deb_image" \
               deb "$deb_version" "$UBUNTU_VERSION"
+
+            docker run --rm \
+              --env DEB_NAME="$deb_name" \
+              --volume "$output_dir:/out" \
+              "ubuntu:${UBUNTU_VERSION}.04" \
+              bash -euc '
+                apt-get update
+                apt-get install --yes --no-install-recommends "/out/$DEB_NAME"
+                jpegview-linux --help >/dev/null
+              '
 
             (
               cd "$output_dir"

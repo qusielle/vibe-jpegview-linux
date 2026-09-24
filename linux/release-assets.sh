@@ -22,21 +22,28 @@ mv "$OUTPUT_DIR/JPEGView-Linux-${safe_version}-x86_64.AppImage" \
 docker run --rm -v "$OUTPUT_DIR:/out" "$image" binary
 mv "$OUTPUT_DIR/jpegview-linux" "$OUTPUT_DIR/$binary_name"
 
-if [[ "$UBUNTU_VERSION" == 24 ]]; then
-	deb_image=jpegview-linux-deb-build:ubuntu24
-	deb_name="jpegview-linux_${safe_version}_ubuntu24_amd64.deb"
+if [[ "$UBUNTU_VERSION" == 24 || "$UBUNTU_VERSION" == 26 ]]; then
+	deb_image="jpegview-linux-deb-build:ubuntu${UBUNTU_VERSION}"
+	deb_name="jpegview-linux_${safe_version}_ubuntu${UBUNTU_VERSION}_amd64.deb"
 	deb_path="$OUTPUT_DIR/$deb_name"
 
 	docker build \
-		--file linux/Dockerfile.deb.ubuntu24 \
+		--file "linux/Dockerfile.deb.ubuntu${UBUNTU_VERSION}" \
 		--tag "$deb_image" \
 		.
 	docker run --rm -v "$OUTPUT_DIR:/out" "$deb_image" \
-		deb "$safe_version" 24
+		deb "$safe_version" "$UBUNTU_VERSION"
 
 	dpkg-deb --info "$deb_path" >/dev/null
-	sudo apt-get install --yes --no-install-recommends "$deb_path"
-	jpegview-linux --help >/dev/null
+	docker run --rm \
+		--env DEB_NAME="$deb_name" \
+		--volume "$OUTPUT_DIR:/out" \
+		"ubuntu:${UBUNTU_VERSION}.04" \
+		bash -euc '
+			apt-get update
+			apt-get install --yes --no-install-recommends "/out/$DEB_NAME"
+			jpegview-linux --help >/dev/null
+		'
 
 	checksum_inputs+=("$deb_name")
 	assets+=("$deb_path")

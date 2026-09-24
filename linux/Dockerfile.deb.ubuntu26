@@ -1,0 +1,23 @@
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    g++ make pkg-config dpkg-dev patchelf \
+    libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev fonts-dejavu-core \
+    libjpeg-dev libpng-dev \
+    libgif-dev libtiff-dev libwebp-dev libheif-dev libraw-dev libjxr-dev \
+    libheif-plugin-libde265 libheif-plugin-x265 \
+    libavif-dev libjxl-dev libaom-dev libde265-dev libx265-dev \
+    libbrotli-dev liblcms2-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
+RUN chmod 755 /usr/local/bin/jpegview-docker-build
+
+VOLUME ["/out"]
+ENTRYPOINT ["/usr/local/bin/jpegview-docker-build"]
+CMD ["deb"]

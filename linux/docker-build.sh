@@ -19,7 +19,7 @@ case "$MODE" in
 		;;
 	deb)
 		if [ -z "${3:-}" ]; then
-			echo "The deb mode requires the Ubuntu release (24)." >&2
+			echo "The deb mode requires the Ubuntu release (24 or 26)." >&2
 			exit 2
 		fi
 		OUTPUT_DIR="$OUTPUT_DIR" sh /src/linux/package-deb.sh "$VERSION" "$3"

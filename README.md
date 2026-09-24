@@ -1,5 +1,5 @@
 [![Linux CI](https://github.com/qusielle/vibe-jpegview-linux/actions/workflows/linux-build.yml/badge.svg)](https://github.com/qusielle/vibe-jpegview-linux/actions/workflows/linux-build.yml)
-[![Ubuntu builds](https://img.shields.io/badge/Ubuntu%20builds-20.04%20%7C%2022.04%20%7C%2024.04-E95420?logo=ubuntu&logoColor=white)](https://github.com/qusielle/vibe-jpegview-linux/releases)
+[![Ubuntu builds](https://img.shields.io/badge/Ubuntu%20builds-20.04%20%7C%2022.04%20%7C%2024.04%20%7C%2026.04-E95420?logo=ubuntu&logoColor=white)](https://github.com/qusielle/vibe-jpegview-linux/releases)
 [![Latest release](https://img.shields.io/github/v/release/qusielle/vibe-jpegview-linux?include_prereleases&label=latest%20release)](https://github.com/qusielle/vibe-jpegview-linux/releases)
 [![Downloads](https://img.shields.io/github/downloads/qusielle/vibe-jpegview-linux/total?label=downloads)](https://github.com/qusielle/vibe-jpegview-linux/releases)
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE.txt)
@@ -35,15 +35,22 @@ guides ([English](src/HowToInstall.txt), [Russian](src/HowToInstall_ru.txt)), an
 ## Downloads
 
 Get the current Linux release from [GitHub Releases](https://github.com/qusielle/vibe-jpegview-linux/releases).
-Releases include x86_64 AppImages and standalone executables built for Ubuntu 20.04, 22.04, and
-24.04, with SHA-256 checksums. Ubuntu 24.04 releases also provide a `.deb` package. The Ubuntu 20.04
-AppImage is the broadest-compatibility choice; builds made on newer Ubuntu releases may require a
-newer glibc.
+Releases include x86_64 AppImages and standalone executables built for Ubuntu 20.04, 22.04, 24.04,
+and 26.04, with SHA-256 checksums. Ubuntu 24.04 and 26.04 releases also provide `.deb` packages.
+The Ubuntu 20.04 AppImage is the broadest-compatibility choice; builds made on newer Ubuntu releases
+may require a newer glibc.
 
-To install the Ubuntu 24.04 package, download its `.deb` and run:
+To install a `.deb`, download the package for your Ubuntu release and run its matching command.
+For Ubuntu 24.04:
 
 ```sh
-sudo apt install ./jpegview-linux_<version>_ubuntu24_amd64.deb
+sudo apt install ./jpegview-linux_*_ubuntu24_amd64.deb
+```
+
+For Ubuntu 26.04:
+
+```sh
+sudo apt install ./jpegview-linux_*_ubuntu26_amd64.deb
 ```
 
 ## Build from source
@@ -56,7 +63,7 @@ make -C linux
 linux/build/jpegview-linux /path/to/image-or-folder
 ```
 
-The project also provides Ubuntu 20.04, 22.04, and 24.04 Docker build environments. The Linux
+The project also provides Ubuntu 20.04, 22.04, 24.04, and 26.04 Docker build environments. The Linux
 README has full build and packaging instructions, supported formats, keyboard controls, test targets,
 and known Windows-parity gaps.
 

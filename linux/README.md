@@ -9,12 +9,12 @@ This is the complete grouped summary of features and changes made since the nati
 split from the Windows frontend. Later fixes, tests, and refactorings are grouped with the feature
 they support.
 
-1. **Native Linux viewer, AppImage, and Ubuntu 24 Debian package.** A native SDL2 frontend now opens individual
+1. **Native Linux viewer, AppImage, and Ubuntu 24/26 Debian packages.** A native SDL2 frontend now opens individual
    images, multiple command-line inputs, and directories without modifying the original Windows
    application. It includes a resizable/maximizable/fullscreen window, drag-and-drop, a desktop
-   entry, the upstream JPEGView application icon, Ubuntu 20.04, 22.04, and 24.04 build containers,
-   AppImage packaging with bundled SDL and codec runtimes, and an Ubuntu 24.04 `.deb` package whose
-   build and runtime dependencies come from the standard Ubuntu repositories.
+   entry, the upstream JPEGView application icon, Ubuntu 20.04, 22.04, 24.04, and 26.04 build containers,
+   AppImage packaging with bundled SDL and codec runtimes, and Ubuntu 24.04/26.04 `.deb` packages
+   whose build and runtime dependencies come from the corresponding standard Ubuntu repositories.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
    PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, and LibRaw camera formats. Embedded
@@ -204,11 +204,11 @@ toolchain does not provide those static runtime archives.
 
 ## Isolated Docker build
 
-The Ubuntu 20.04, 22.04, and 24.04 Dockerfiles contain the compiler, SDL2, and optional codec
+The Ubuntu 20.04, 22.04, 24.04, and 26.04 Dockerfiles contain the compiler, SDL2, and optional codec
 development libraries for their respective releases. Ubuntu 20.04 builds JPEG XL and AVIF from
-pinned sources; Ubuntu 22.04 uses its AVIF package and builds JPEG XL from source; Ubuntu 24.04
-uses distro codec packages and explicitly installs libheif's HEVC decoder/encoder plugins because
-its image omits recommended packages. The host only needs Docker; build outputs are written to a host
+pinned sources; Ubuntu 22.04 uses its AVIF package and builds JPEG XL from source; Ubuntu 24.04 and
+26.04 use distro codec packages and explicitly install libheif's HEVC decoder/encoder plugins because
+their images omit recommended packages. The host only needs Docker; build outputs are written to a host
 `out/` directory:
 
 ```sh
@@ -216,41 +216,46 @@ mkdir -p out
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build:ubuntu20 .
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu22 -t jpegview-linux-build:ubuntu22 .
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu24 -t jpegview-linux-build:ubuntu24 .
+DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu26 -t jpegview-linux-build:ubuntu26 .
 docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 appimage
 ```
 
 This creates `out/JPEGView-Linux-1.3.46-linux.1-x86_64.AppImage`. To export only the binary,
 run `docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 binary`; substitute the
-Ubuntu 22.04 or 24.04 image tag to use another build environment. To select another release label,
+Ubuntu 22.04, 24.04, or 26.04 image tag to use another build environment. To select another release label,
 pass it as the second argument. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
-dependency chains in parallel with BuildKit. Ubuntu 22.04 builds Highway/JPEG XL; Ubuntu 24.04
-needs no codec source builds. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded
+dependency chains in parallel with BuildKit. Ubuntu 22.04 builds Highway/JPEG XL; Ubuntu 24.04 and
+26.04 need no codec source builds. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded
 AppImage tool. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
 must also run on later Ubuntu releases; newer-base artifacts can require newer system glibc.
 
-The Debian package Dockerfile uses only the standard Ubuntu 24.04 repositories for build tools and
-runtime libraries. Ubuntu 20.04 and 22.04 do not produce a `.deb`.
+The Debian package Dockerfiles use only the standard Ubuntu 24.04 or 26.04 repositories for build
+tools and runtime libraries. Ubuntu 20.04 and 22.04 do not produce a `.deb`.
 
 ```sh
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.deb.ubuntu24 -t jpegview-linux-deb-build:ubuntu24 .
 docker run --rm -v "$PWD/out:/out" jpegview-linux-deb-build:ubuntu24 deb 1.3.46-linux.1 24
+DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.deb.ubuntu26 -t jpegview-linux-deb-build:ubuntu26 .
+docker run --rm -v "$PWD/out:/out" jpegview-linux-deb-build:ubuntu26 deb 1.3.46-linux.1 26
 ```
 
-This creates `jpegview-linux_1.3.46-linux.1_ubuntu24_amd64.deb` in `out/`. Install it with
-`sudo apt install ./out/jpegview-linux_1.3.46-linux.1_ubuntu24_amd64.deb`; APT resolves its
-shared-library dependencies from Ubuntu 24.04.
+These create `jpegview-linux_1.3.46-linux.1_ubuntu24_amd64.deb` and
+`jpegview-linux_1.3.46-linux.1_ubuntu26_amd64.deb` in `out/`. Install the matching package with APT;
+its shared-library dependencies are resolved from the corresponding Ubuntu repositories.
 
-GitHub Actions builds and tests all three AppImage Dockerfiles on branch pushes and pull requests.
+GitHub Actions builds and tests all four AppImage Dockerfiles on branch pushes and pull requests.
 Each successful Ubuntu build job uploads its x86_64 AppImage, native executable, and a `SHA256SUMS`
 file as a downloadable workflow artifact named `jpegview-linux-ubuntu20-x86_64`,
-`jpegview-linux-ubuntu22-x86_64`, or `jpegview-linux-ubuntu24-x86_64`. The Ubuntu 24 artifact also
-includes its `.deb` package. These workflow artifacts are retained for 14 days and are
+`jpegview-linux-ubuntu22-x86_64`, `jpegview-linux-ubuntu24-x86_64`, or
+`jpegview-linux-ubuntu26-x86_64`. The Ubuntu 24 and 26 artifacts also include their matching `.deb`
+packages; CI installs each package in its matching Ubuntu runtime container and checks `--help`.
+These workflow artifacts are retained for 14 days and are
 available from the workflow run's summary. When a GitHub Release is published, its workflow uploads
 versioned AppImage and native executable assets for each Ubuntu base. The Ubuntu 24 release job also
-builds and installs the `.deb` on an Ubuntu 24 runner, checks that the installed executable starts
-with `--help`, and uploads the package. Each release checksum file covers every asset for its Ubuntu
-base. Asset names include the Ubuntu release because artifacts built on newer bases may require
-newer system glibc.
+builds and validates its `.deb` on Ubuntu 24, and the Ubuntu 26 job does the same on Ubuntu 26. Both
+packages use only their release's standard repositories. Each release checksum file covers every
+asset for its Ubuntu base. Asset names include the Ubuntu release because artifacts built on newer
+bases may require newer system glibc.
 
 If SDL2 is installed in a non-standard location, override the linker settings:
 

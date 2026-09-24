@@ -6,7 +6,7 @@
 set -eu
 
 CDPATH=
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 if command -v apt-get >/dev/null 2>&1 && [ "${SET_ENV_SKIP_APT:-0}" != "1" ]; then
 	apt_run()
@@ -24,7 +24,7 @@ if command -v apt-get >/dev/null 2>&1 && [ "${SET_ENV_SKIP_APT:-0}" != "1" ]; th
 	echo "Updating package lists..."
 	apt_run update
 
-	# Ubuntu 20.04 provides libwebp6; newer Ubuntu releases provide libwebp7.
+	# Ubuntu 20.04 provides libwebp6; Ubuntu 22.04 and newer provide libwebp7.
 	WEBP_PACKAGE=libwebp6
 	if ! apt-cache show "$WEBP_PACKAGE" >/dev/null 2>&1; then
 		WEBP_PACKAGE=libwebp7
@@ -39,6 +39,8 @@ if command -v apt-get >/dev/null 2>&1 && [ "${SET_ENV_SKIP_APT:-0}" != "1" ]; th
 	done
 
 	echo "Installing Linux build, packaging, and headless-X11 test tools..."
+	# CODEC_PACKAGES intentionally expands to multiple apt package arguments.
+	# shellcheck disable=SC2086
 	apt_run install -y --no-install-recommends \
 		ca-certificates \
 		curl \
@@ -97,11 +99,19 @@ Useful commands:
   "$SCRIPT_DIR/linux/build/jpegview-linux" --decode-check /path/to/fixture-directory
   sh -n "$SCRIPT_DIR/linux/AppRun" "$SCRIPT_DIR/linux/package-appimage.sh" "$SCRIPT_DIR/linux/docker-build.sh"
 
-Ubuntu 20.04 Docker build (Docker must be available to the host/container):
+Ubuntu Docker builds (Docker must be available to the host/container):
   cd "$SCRIPT_DIR"
-  docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build .
-  docker run --rm -v "\$PWD/out:/out" jpegview-linux-build appimage
-  docker run --rm -v "\$PWD/out:/out" jpegview-linux-build binary
+  docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build:ubuntu20 .
+  docker build -f linux/Dockerfile.ubuntu22 -t jpegview-linux-build:ubuntu22 .
+  docker build -f linux/Dockerfile.ubuntu24 -t jpegview-linux-build:ubuntu24 .
+  docker build -f linux/Dockerfile.ubuntu26 -t jpegview-linux-build:ubuntu26 .
+  docker run --rm -v "\$PWD/out:/out" jpegview-linux-build:ubuntu26 appimage
+  docker run --rm -v "\$PWD/out:/out" jpegview-linux-build:ubuntu26 binary
+  docker build -f linux/Dockerfile.deb.ubuntu24 -t jpegview-linux-deb-build:ubuntu24 .
+  docker run --rm -v "\$PWD/out:/out" jpegview-linux-deb-build:ubuntu24 deb 1.3.46-linux.1 24
+  docker build -f linux/Dockerfile.deb.ubuntu26 -t jpegview-linux-deb-build:ubuntu26 .
+  docker run --rm -v "\$PWD/out:/out" jpegview-linux-deb-build:ubuntu26 deb 1.3.46-linux.1 26
+  # Ubuntu 20.04 and 22.04 do not have .deb Dockerfiles.
 
 Local AppImage packaging when appimagetool is installed:
   make -C "$SCRIPT_DIR/linux" appimage VERSION=1.3.46-linux.1
