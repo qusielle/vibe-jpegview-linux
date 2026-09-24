@@ -1496,6 +1496,16 @@ bool DecodeHeif(const std::filesystem::path& filename, DecodedImage& image,
 #endif
 
 #if JPEGVIEW_HAVE_AVIF
+bool AllocateAvifRgbPixels(avifRGBImage& rgb) {
+	// libavif 1.0 changed this helper from void to avifResult.
+#if AVIF_VERSION >= 1000000
+	return avifRGBImageAllocatePixels(&rgb) == AVIF_RESULT_OK && rgb.pixels != nullptr;
+#else
+	avifRGBImageAllocatePixels(&rgb);
+	return rgb.pixels != nullptr;
+#endif
+}
+
 bool DecodeAvif(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
 	avifDecoder* decoder = avifDecoderCreate();
@@ -1519,9 +1529,13 @@ bool DecodeAvif(const std::filesystem::path& filename, DecodedImage& image,
 		avifRGBImageSetDefaults(&rgb, decoder->image);
 		rgb.depth = 8;
 		rgb.format = AVIF_RGB_FORMAT_BGRA;
-		avifRGBImageAllocatePixels(&rgb);
-		if (rgb.pixels == nullptr ||
-			avifImageYUVToRGB(decoder->image, &rgb) != AVIF_RESULT_OK) {
+		if (!AllocateAvifRgbPixels(rgb)) {
+			errorMessage = "AVIF pixel allocation failed";
+			avifRGBImageFreePixels(&rgb);
+			avifDecoderDestroy(decoder);
+			return false;
+		}
+		if (avifImageYUVToRGB(decoder->image, &rgb) != AVIF_RESULT_OK) {
 			errorMessage = "AVIF color conversion failed";
 			avifRGBImageFreePixels(&rgb);
 			avifDecoderDestroy(decoder);
