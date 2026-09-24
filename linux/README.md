@@ -45,6 +45,8 @@ they support.
    can be toggled from the context menu and persists between runs. The Windows crop/selection
    workflow is also ported: source-pixel selections can be moved and resized independently of zoom,
    then cropped, copied, losslessly cropped from JPEG, or used to zoom the view.
+   Crop selection mode is off by default and can be enabled from the new navigation-panel button,
+   either context menu, or with Ctrl+E; the explicit mode choice is saved between runs.
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
@@ -388,13 +390,16 @@ image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
 PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.
 Ctrl+Shift+M/E set the modification date to now/EXIF date; R/T perform lossless JPEG rotations when
 bundled `jpegtran` is available; F5 toggles the ported automatic histogram contrast correction, and
-Ctrl+Shift+R opens the image resize dialog. On the image, drag pans when the image extends past the
-window; otherwise drag creates a selection. Ctrl+drag creates a selection at any zoom, while
-Shift+drag zooms to the selected region. Drag the selection body to move it or its handles to resize
-it; release opens the crop menu, right-click reopens it, and Escape clears the selection. Crop
-Selection crops the processed image in memory, Lossless Crop saves an MCU-aligned JPEG to a chosen
-path, Copy Selection places source-resolution pixels on the clipboard, and Zoom to Selection fits
-the selected rectangle into the view. Move the pointer to the lower edge of the window to
+Ctrl+Shift+R opens the image resize dialog. Ctrl+E toggles crop selection mode; the new last button
+on the bottom navigation panel and the context-menu item toggle the same mode. On the image, drag
+pans when the image extends past the window. When the image fits, an ordinary drag creates a
+selection only while crop selection mode is enabled; Ctrl-drag remains a one-off selection override
+at any zoom. Shift-drag zooms to the selected region. Drag the selection body to move it or its
+handles to resize it; release opens the crop menu, right-click reopens it, and Escape clears the
+selection. Choosing Free, an aspect ratio, or applying a fixed-size crop also enables crop selection
+mode. Crop Selection crops the processed image in memory; Lossless Crop saves an MCU-aligned JPEG
+to a chosen path; Copy Selection places source-resolution pixels on the clipboard; and Zoom to
+Selection fits the selected rectangle into the view. Move the pointer to the lower edge of the window to
 show the navigation panel, whose buttons mirror the core controls from JPEGView's Windows
 navigation panel (first/previous/next/last, ordering mode, fit/actual, and fullscreen). The
 ordering button shows `N` for file-name order and `D` for modification-date order; clicking it
@@ -486,11 +491,16 @@ the aspect ratio, and the point, Lanczos/Bicubic, sharpen-low, and sharpen-mediu
 The resize is applied to the processed image in memory and can then be saved with `Ctrl+S`; `Ctrl+Shift+R`
 opens the same dialog directly.
 
-Crop and selection are available by dragging on an image when panning is not needed, or by holding
-Ctrl while dragging at any zoom. Shift-drag zooms into the selected region; otherwise releasing a new
-selection opens its crop menu. Drag the selection interior to move it and its border handles to resize
-it; right-click reopens the menu and Escape clears the selection. The menu can crop the processed image
-in memory, copy the selection at source resolution, or zoom to it. A lossless JPEG crop opens the save
+Crop selection mode is off by default. Enable or disable it with Ctrl+E, the last button on the bottom
+navigation panel, or **Crop selection mode** in the regular or selection context menu; its state is
+saved between runs. When enabled, an ordinary drag on an image that fits the view creates a
+selection. Ctrl-drag remains a one-off way to create a selection at any zoom, even while the mode is
+off; dragging an image larger than the viewport pans unless Ctrl is held. Shift-drag zooms into the
+selected region; otherwise releasing a new selection opens its crop menu. Choosing Free, an aspect
+ratio, or applying a fixed-size crop also enables crop selection mode. Drag the selection interior
+to move it and its border handles to resize it; right-click reopens the menu and Escape clears the
+selection. The menu can crop the processed image in memory, copy the selection at source resolution,
+or zoom to it. A lossless JPEG crop opens the save
 browser and aligns the requested rectangle to the JPEG's actual MCU grid; the displayed dimensions are
 the aligned dimensions and the source is not replaced unless explicitly chosen. Crop recalculates
 active picture-level/automatic corrections on the cropped source pixels. Cropping an animated image
@@ -501,9 +511,10 @@ sizes track the current zoom, while image-pixel sizes remain in source pixels; w
 pointer positions the fixed rectangle's top-left corner. The fixed size and unit choice are persisted
 when applied. To customize the final crop-menu ratio, set
 `user_crop_aspect_width=14` and `user_crop_aspect_height=11` (or another positive pair) in
-`${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. The same file accepts
-`default_selection_mode=0` to require Ctrl-drag for normal selection creation; Ctrl-drag still works
-at every zoom. Its default is enabled, matching Windows JPEGView.
+`${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. The explicit crop-selection mode
+is persisted as `selection_mode_enabled=0` or `selection_mode_enabled=1` and defaults to `0`. The
+older `default_selection_mode` setting is ignored so an existing Windows-parity default cannot
+silently reactivate crop mode.
 The AppImage bundles `xclip`, `wl-copy`/`wl-paste`, and `jpegtran` when the build environment provides
 them. `lp`, `gsettings`, `feh`, and `nitrogen` remain host desktop integrations. The clipboard tools
 are also needed for image copy/paste in a local non-AppImage build.

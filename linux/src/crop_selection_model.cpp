@@ -37,6 +37,11 @@ bool HasBottom(CropSelectionHandle handle) {
 
 } // namespace
 
+bool ShouldStartNewCropSelection(bool selectionModeEnabled,
+	bool forcedByModifier, bool imageNeedsPanning) {
+	return forcedByModifier || (selectionModeEnabled && !imageNeedsPanning);
+}
+
 void CropSelectionModel::SetImageSize(int width, int height) {
 	width = std::max(0, width);
 	height = std::max(0, height);

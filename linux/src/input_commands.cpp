@@ -30,6 +30,7 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	if (ctrl && shift && key == SDLK_r) return IDM_CHANGESIZE;
 	if (ctrl && shift && key == 'm') return IDM_TOUCH_IMAGE;
 	if (ctrl && shift && key == 'e') return IDM_TOUCH_IMAGE_EXIF;
+	if (ctrl && !shift && key == 'e') return kCommandToggleSelectionMode;
 	if (ctrl && !shift && key == 'n') return IDM_SHOW_NAVPANEL;
 	if (ctrl && !shift && key == 't') return kCommandToggleThumbnailPanel;
 	if (!ctrl && shift && key == 'n') return IDM_SHOW_FILENAME;

@@ -28,6 +28,9 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 	bool advancedOptions) {
 	if (state.cropContextMenu) {
 		std::vector<MenuItem> cropItems = {
+			{"Crop selection mode", jpegview_linux::kCommandToggleSelectionMode,
+				false, state.selectionModeEnabled, true, "Ctrl+E", false},
+			{nullptr, 0, true},
 			{"Crop Selection", IDM_CROP_SEL, false, false, state.cropSelectionAvailable, nullptr, false},
 			{"Crop Selection Lossless...", IDM_LOSSLESS_CROP_SEL, false, false,
 				state.cropSelectionAvailable && state.losslessJpegCropAvailable, nullptr, false},
@@ -122,6 +125,8 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 			false, state.thumbnailPanelVisible, true, "Ctrl+T"},
 		{"Show zoom navigator", jpegview_linux::kCommandToggleZoomNavigator,
 			false, state.showZoomNavigator, true},
+		{"Crop selection mode", jpegview_linux::kCommandToggleSelectionMode,
+			false, state.selectionModeEnabled, true, "Ctrl+E"},
 		{nullptr, 0, true},
 		{"Next image", IDM_NEXT, false, false, true, "Right/PgDn"},
 		{"Previous image", IDM_PREV, false, false, true, "Left/PgUp"},

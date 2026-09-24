@@ -51,6 +51,7 @@ struct ContextMenuState {
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
 	bool showZoomNavigator = true;
+	bool selectionModeEnabled = false;
 	FileList::NavigationMode navigationMode = FileList::NavigationMode::LoopDirectory;
 	FileList::SortMode sortMode = FileList::SortMode::FileName;
 	bool sortAscending = true;

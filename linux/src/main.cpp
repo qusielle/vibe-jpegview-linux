@@ -575,7 +575,7 @@ private:
 		cropSelection_.SetMode(jpegview_linux::CropSelectionMode::Free);
 		cropUserAspectWidth_ = settings.userCropAspectWidth;
 		cropUserAspectHeight_ = settings.userCropAspectHeight;
-		defaultSelectionMode_ = settings.defaultSelectionMode;
+		selectionModeEnabled_ = settings.selectionModeEnabled;
 		infoVisible_ = settings.infoVisible;
 		showHistogram_ = settings.showHistogram;
 		showFileName_ = settings.showFilename;
@@ -608,7 +608,7 @@ private:
 		settings.fixedCropScreenPixels = cropSelection_.FixedSizeUsesScreenPixels();
 		settings.userCropAspectWidth = cropUserAspectWidth_;
 		settings.userCropAspectHeight = cropUserAspectHeight_;
-		settings.defaultSelectionMode = defaultSelectionMode_;
+		settings.selectionModeEnabled = selectionModeEnabled_;
 		settings.infoVisible = infoVisible_;
 		settings.showHistogram = showHistogram_;
 		settings.showFilename = showFileName_;
@@ -1778,6 +1778,14 @@ private:
 		cropAspectHeight_ = height;
 		cropSelection_.SetAspectRatio(width, height);
 		cropSelection_.ReapplyMode(viewport_.Zoom());
+		SetSelectionModeEnabled(true);
+	}
+
+	void SetSelectionModeEnabled(bool enabled) {
+		if (selectionModeEnabled_ == enabled) return;
+		selectionModeEnabled_ = enabled;
+		SaveSettings();
+		UpdateCropCursor(lastMouseX_, lastMouseY_);
 	}
 
 	void CopyCurrentPath() {
@@ -2503,7 +2511,7 @@ private:
 		return jpegview_linux::BuildNavigationPanelPaint(windowWidth, windowHeight,
 			lastMouseX_, lastMouseY_, viewport_.IsFitToWindow(), fileList_.GetSorting(),
 			TextWidth(sortLabel, kUiTextScale), TextWidth("1:1", kUiTextScale),
-			TextLineHeight(kUiTextScale));
+			TextLineHeight(kUiTextScale), selectionModeEnabled_);
 	}
 
 	SDL_Rect PictureLevelsPanelRect() const {
@@ -2941,6 +2949,7 @@ private:
 			break;
 		case IDM_CROPMODE_FREE:
 			cropSelection_.SetMode(jpegview_linux::CropSelectionMode::Free);
+			SetSelectionModeEnabled(true);
 			break;
 		case IDM_CROPMODE_FIXED_SIZE:
 			OpenFixedCropSizeDialog();
@@ -2972,6 +2981,7 @@ private:
 		case IDM_CROPMODE_IMAGE:
 			cropSelection_.SetMode(jpegview_linux::CropSelectionMode::ImageAspect);
 			cropSelection_.ReapplyMode(viewport_.Zoom());
+			SetSelectionModeEnabled(true);
 			break;
 		case jpegview_linux::kCommandPreviousSiblingFolder:
 			NavigateToSiblingFolder(-1);
@@ -3135,6 +3145,9 @@ private:
 			SaveSettings();
 			UpdateCropCursor(lastMouseX_, lastMouseY_);
 			UpdateZoomNavigatorCursor(lastMouseX_, lastMouseY_);
+			break;
+		case jpegview_linux::kCommandToggleSelectionMode:
+			SetSelectionModeEnabled(!selectionModeEnabled_);
 			break;
 		case jpegview_linux::kToggleNavigationPanelAutoReveal:
 			navigationPanelAutoReveal_ = !navigationPanelAutoReveal_;
@@ -3374,6 +3387,7 @@ private:
 		state.navigationPanelAutoReveal = navigationPanelAutoReveal_;
 		state.thumbnailPanelVisible = thumbnailPanelVisible_;
 		state.showZoomNavigator = showZoomNavigator_;
+		state.selectionModeEnabled = selectionModeEnabled_;
 		state.navigationMode = fileList_.GetNavigationMode();
 		state.sortMode = fileList_.GetSorting();
 		state.sortAscending = fileList_.IsSortedAscending();
@@ -4185,6 +4199,7 @@ private:
 		if (!cropSizeDialog_.Apply(width, height, screenPixels)) return;
 		cropSelection_.SetFixedSize(width, height, screenPixels);
 		cropSelection_.ReapplyMode(viewport_.Zoom());
+		SetSelectionModeEnabled(true);
 		SaveSettings();
 		CloseFixedCropSizeDialog();
 	}
@@ -5344,7 +5359,8 @@ private:
 
 		const bool requiresPanning = destination.width > imageArea.w ||
 			destination.height > imageArea.h;
-		if (!control && !shift && (requiresPanning || !defaultSelectionMode_)) return false;
+		if (!jpegview_linux::ShouldStartNewCropSelection(selectionModeEnabled_,
+			control || shift, requiresPanning)) return false;
 		if (!cropSelection_.StartNew(point.x, point.y)) return false;
 		cropMouseDragging_ = true;
 		cropDragHandle_ = jpegview_linux::CropSelectionHandle::NewSelection;
@@ -5403,11 +5419,12 @@ private:
 			return;
 		}
 		const Uint16 modifiers = static_cast<Uint16>(SDL_GetModState());
-		const bool canStartSelection = defaultSelectionMode_ ||
-			(modifiers & (0x00c0u | 0x0003u)) != 0;
-		const bool canCreateHere = destination.width <= imageArea.w &&
-			destination.height <= imageArea.h;
-		if (canStartSelection && canCreateHere && PointInRect(screenX, screenY, imageArea) &&
+		const bool forcedByModifier = (modifiers & (0x00c0u | 0x0003u)) != 0;
+		const bool imageNeedsPanning = destination.width > imageArea.w ||
+			destination.height > imageArea.h;
+		const bool canStartSelection = jpegview_linux::ShouldStartNewCropSelection(
+			selectionModeEnabled_, forcedByModifier, imageNeedsPanning);
+		if (canStartSelection && PointInRect(screenX, screenY, imageArea) &&
 			screenX >= destination.x && screenY >= destination.y &&
 			screenX < destination.x + destination.width &&
 			screenY < destination.y + destination.height && cropCrosshairCursor_ != nullptr) {
@@ -5613,7 +5630,7 @@ private:
 		SDL_RenderSetClipRect(renderer_, nullptr);
 		if (hoveredButton == nullptr) return;
 		const std::string text = jpegview_linux::NavigationTooltip(hoveredButton->command,
-			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting());
+			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting(), selectionModeEnabled_);
 		if (text.empty()) return;
 		int windowWidth = 0;
 		int windowHeight = 0;
@@ -5680,7 +5697,7 @@ private:
 			"Zoom and pan: Ctrl+wheel or Ctrl+Up/Down; drag to pan; Shift+Arrow pans at actual size",
 			"Navigator: hover upper-right when magnified; click or drag its map to reposition",
 			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom",
-			"Panels: F2 picture info; Shift+N filename; Ctrl+N navigation panel; Ctrl+T thumbnails",
+			"Panels: F2 info; Shift+N filename; Ctrl+N nav; Ctrl+T thumbs; Ctrl+E crop mode",
 			"Files: Ctrl+O open; Ctrl+S save processed; Ctrl+Shift+S save displayed size",
 			"Clipboard: Ctrl+C copy image; Ctrl+Shift+C copy path; Ctrl+V paste PNG",
 			"Adjustments: Up/Down rotate; F5 auto correction; F6 local density; Ctrl+Shift+R resize",
@@ -6022,6 +6039,10 @@ private:
 						break;
 					}
 					if (BeginCropDrag(event.button.x, event.button.y)) break;
+					const SDL_Rect imageArea = ImageAreaRect();
+					const jpegview_linux::ViewportRect destination = viewport_.Destination(
+						image_.width, image_.height, imageArea.w, imageArea.h);
+					if (destination.width <= imageArea.w && destination.height <= imageArea.h) break;
 					dragging_ = true;
 					lastMouseX_ = event.button.x;
 					lastMouseY_ = event.button.y;
@@ -6211,7 +6232,7 @@ private:
 	SDL_Texture* transitionTexture_ = nullptr;
 	jpegview_linux::Viewport viewport_;
 	jpegview_linux::CropSelectionModel cropSelection_;
-	bool defaultSelectionMode_ = true;
+	bool selectionModeEnabled_ = false;
 	bool cropMouseDragging_ = false;
 	bool zoomNavigatorDragging_ = false;
 	Uint32 zoomNavigatorVisibleUntil_ = 0;
@@ -6350,7 +6371,7 @@ void PrintUsage(const char* program) {
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, Alt+Left/Right open the first image in adjacent sibling folders,\n"
 		<< "          N/M/C/Z select display order,\n"
-		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails,\n"
+		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails, Ctrl+E toggles crop selection mode,\n"
 		<< "          right-click or the Context Menu key opens the context menu, Esc or Q quits.\n";
 }
 

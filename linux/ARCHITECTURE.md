@@ -8,8 +8,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality resizing, and the automatic/manual picture-level processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
-  move/resize hit testing, image/view coordinate conversion, and JPEG MCU-boundary alignment;
-  pixel-buffer cropping remains in `image`.
+  move/resize hit testing, image/view coordinate conversion, crop-mode drag eligibility, and JPEG
+  MCU-boundary alignment; pixel-buffer cropping remains in `image`.
 - `crop_size_dialog_model`: fixed-crop dimension text, focus/unit transitions, and validation.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
   pixel processing, the atomic native per-image levels database, and its portable backup/restore.
@@ -22,8 +22,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
 - `settings` and `sort_mode`: persisted configuration (including default picture-level values,
-  fixed crop dimensions/units, user crop aspect, default selection mode, and zoom-navigator visibility)
-  and stable setting values.
+  fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
+  default), and zoom-navigator visibility), plus stable sort-mode values.
 - `viewport`: fit/fill/manual zoom modes, pan state, destination geometry, and panning bounds that
   keep the viewport inside the image.
 - `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,

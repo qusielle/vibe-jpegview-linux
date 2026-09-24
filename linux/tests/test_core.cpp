@@ -352,6 +352,7 @@ void TestKeyboardCommandMappings() {
 		{SDLK_r, 0x00C3u, IDM_CHANGESIZE},
 		{'m', 0x00C3u, IDM_TOUCH_IMAGE},
 		{'e', 0x00C3u, IDM_TOUCH_IMAGE_EXIF},
+		{'e', 0x00C0u, jpegview_linux::kCommandToggleSelectionMode},
 		{'n', 0x00C0u, IDM_SHOW_NAVPANEL},
 		{'t', 0x00C0u, jpegview_linux::kCommandToggleThumbnailPanel},
 		{'n', 0x0003u, IDM_SHOW_FILENAME},
@@ -1496,6 +1497,12 @@ void TestCropSelectionModelGeometryAndManipulation() {
 	using jpegview_linux::CropSelectionMode;
 	using jpegview_linux::CropSelectionModel;
 	using jpegview_linux::SelectionRect;
+	Expect(!jpegview_linux::ShouldStartNewCropSelection(false, false, false) &&
+		!jpegview_linux::ShouldStartNewCropSelection(false, false, true) &&
+		jpegview_linux::ShouldStartNewCropSelection(true, false, false) &&
+		!jpegview_linux::ShouldStartNewCropSelection(true, false, true) &&
+		jpegview_linux::ShouldStartNewCropSelection(false, true, true),
+		"crop-selection drag gating did not keep selection off by default or preserve modifier override");
 	CropSelectionModel selection;
 	selection.SetImageSize(100, 80);
 	Expect(selection.StartNew(2, 1), "selection could not start on a valid image");
@@ -1943,7 +1950,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.fixedCropScreenPixels = false;
 	expected.userCropAspectWidth = 13;
 	expected.userCropAspectHeight = 7;
-	expected.defaultSelectionMode = false;
+	expected.selectionModeEnabled = true;
 	expected.infoVisible = true;
 	expected.showHistogram = true;
 	expected.showFilename = true;
@@ -1997,8 +2004,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"fixed crop size and pixel units did not round-trip");
 	Expect(loaded.userCropAspectWidth == expected.userCropAspectWidth &&
 		loaded.userCropAspectHeight == expected.userCropAspectHeight &&
-		loaded.defaultSelectionMode == expected.defaultSelectionMode,
-		"user crop ratio or default selection mode did not round-trip");
+		loaded.selectionModeEnabled == expected.selectionModeEnabled,
+		"user crop ratio or selection mode did not round-trip");
 	Expect(loaded.infoVisible == expected.infoVisible && loaded.showHistogram == expected.showHistogram &&
 		loaded.showFilename == expected.showFilename &&
 		loaded.autoContrast == expected.autoContrast,
@@ -2025,7 +2032,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"file_dialog_height=not-a-number\nfile_dialog_preview_ratio=nan\n"
 		"fixed_crop_width=not-a-number\nfixed_crop_height=0\n"
 		"user_crop_aspect_width=0\nuser_crop_aspect_height=nan\n"
-		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=maybe\n"
+		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=1\n"
+		"selection_mode_enabled=maybe\n"
 		"show_zoom_navigator=maybe\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
@@ -2051,8 +2059,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.fixedCropScreenPixels &&
 		loaded.userCropAspectWidth == jpegview_linux::kDefaultUserCropAspectWidth &&
 		loaded.userCropAspectHeight == jpegview_linux::kDefaultUserCropAspectHeight &&
-		loaded.defaultSelectionMode,
-		"malformed crop settings did not retain their defaults");
+		!loaded.selectionModeEnabled,
+		"malformed or legacy selection-mode settings did not retain the disabled default");
 	Expect(loaded.cacheSizeMiB == jpegview_linux::kDefaultCacheSizeMiB,
 		"malformed cache size did not retain its default");
 
@@ -3037,6 +3045,11 @@ void TestContextMenuCatalogAndState() {
 		"compact context menu omitted the built-in help command");
 	Expect(findCommand(compact, jpegview_linux::kCommandEditPictureLevels) != nullptr,
 		"compact context menu omitted the picture-level editor");
+	const MenuItem* compactSelectionMode = findCommand(compact,
+		jpegview_linux::kCommandToggleSelectionMode);
+	Expect(compactSelectionMode != nullptr && compactSelectionMode->label == "Crop selection mode" &&
+		!compactSelectionMode->checked && compactSelectionMode->shortcut == "Ctrl+E",
+		"compact context menu did not expose the disabled-by-default crop selection mode");
 	Expect(findCommand(compact, jpegview_linux::kCommandPreviousSiblingFolder) == nullptr &&
 		findCommand(compact, jpegview_linux::kCommandNextSiblingFolder) == nullptr,
 		"compact context menu exposed advanced sibling-folder navigation commands");
@@ -3056,6 +3069,7 @@ void TestContextMenuCatalogAndState() {
 	state.losslessJpegAvailable = true;
 	state.autoCorrectionEnabled = true;
 	state.pictureLevelsAvailable = true;
+	state.selectionModeEnabled = true;
 	state.localDensityEnabled = true;
 	state.keepPictureLevels = true;
 	state.pictureLevelsSaved = true;
@@ -3088,6 +3102,8 @@ void TestContextMenuCatalogAndState() {
 		findCommand(advanced, jpegview_linux::kCommandToggleThumbnailPanel)->checked &&
 		findCommand(advanced, jpegview_linux::kCommandToggleZoomNavigator)->checked,
 		"context menu did not reflect panel visibility state");
+	Expect(findCommand(advanced, jpegview_linux::kCommandToggleSelectionMode)->checked,
+		"context menu did not reflect enabled crop selection mode");
 	state.showZoomNavigator = false;
 	const std::vector<MenuItem> navigatorHidden = jpegview_linux::BuildContextMenu(state, true);
 	Expect(findCommand(navigatorHidden, jpegview_linux::kCommandToggleZoomNavigator) != nullptr &&
@@ -3175,6 +3191,19 @@ void TestCropContextMenuCommandsAndModes() {
 		find(IDM_CROPMODE_USER) != nullptr &&
 		find(IDM_CROPMODE_USER)->label == "  User aspect (14 : 11)",
 		"crop menu omitted a mode, checked aspect, or configured user ratio");
+	const MenuItem* cropSelectionMode = find(jpegview_linux::kCommandToggleSelectionMode);
+	Expect(cropSelectionMode != nullptr && !cropSelectionMode->checked &&
+		cropSelectionMode->shortcut == "Ctrl+E" && items.front().command ==
+		jpegview_linux::kCommandToggleSelectionMode,
+		"selection context menu did not put the crop-mode toggle first and unchecked");
+	state.selectionModeEnabled = true;
+	const std::vector<MenuItem> enabledModeItems = jpegview_linux::BuildContextMenu(state, false);
+	const auto enabledMode = std::find_if(enabledModeItems.begin(), enabledModeItems.end(),
+		[](const MenuItem& item) {
+			return item.command == jpegview_linux::kCommandToggleSelectionMode;
+		});
+	Expect(enabledMode != enabledModeItems.end() && enabledMode->checked,
+		"selection context menu did not check the active crop mode");
 	state.losslessJpegCropAvailable = false;
 	state.cropSelectionAvailable = false;
 	const std::vector<MenuItem> unavailable = jpegview_linux::BuildContextMenu(state, true);
@@ -3350,19 +3379,19 @@ void TestViewerChromePaintPlans() {
 
 	jpegview_linux::NavigationPanelPaint navigation = jpegview_linux::BuildNavigationPanelPaint(
 		800, 600, 385, 585, true, FileList::SortMode::LastModificationTime, 7, 18, 11);
-	Expect(navigation.panel.x == 249 && navigation.panel.y == 568 &&
-		navigation.panel.width == 302 && navigation.panel.height == 32 &&
-		navigation.opacity == 255 && navigation.buttons.size() == 9,
+	Expect(navigation.panel.x == 233 && navigation.panel.y == 568 &&
+		navigation.panel.width == 333 && navigation.panel.height == 32 &&
+		navigation.opacity == 255 && navigation.buttons.size() == 10,
 		"navigation paint plan did not keep Windows-sized panel geometry or the Linux button count");
-	Expect(navigation.buttons[0].rect.x == 255 && navigation.buttons[3].rect.x == 348 &&
-		navigation.buttons[4].rect.x == 379 && navigation.buttons[5].rect.x == 418 &&
-		navigation.buttons[7].rect.x == 488,
+	Expect(navigation.buttons[0].rect.x == 239 && navigation.buttons[3].rect.x == 332 &&
+		navigation.buttons[4].rect.x == 363 && navigation.buttons[5].rect.x == 402 &&
+		navigation.buttons[7].rect.x == 472 && navigation.buttons[9].rect.x == 534,
 		"navigation paint plan lost section spacing");
 	Expect(navigation.buttons[0].command == IDM_FIRST && navigation.buttons[0].lines.size() == 4 &&
-		navigation.buttons[0].lines[0].x1 == 262 && navigation.buttons[0].lines[0].y1 == 578 &&
+		navigation.buttons[0].lines[0].x1 == 246 && navigation.buttons[0].lines[0].y1 == 578 &&
 		navigation.buttons[0].lines[0].y2 == 590 &&
-		navigation.buttons[0].lines[2].x1 == 274 &&
-		navigation.buttons[0].lines[2].x2 == 269 &&
+		navigation.buttons[0].lines[2].x1 == 258 &&
+		navigation.buttons[0].lines[2].x2 == 253 &&
 		navigation.buttons[0].foreground.red == 243 &&
 		navigation.buttons[0].foreground.green == 242 &&
 		navigation.buttons[0].foreground.blue == 231,
@@ -3379,15 +3408,20 @@ void TestViewerChromePaintPlans() {
 		navigation.buttons[6].outlines.size() == 1 &&
 		navigation.buttons[6].outlines[0].width == 14 &&
 		navigation.buttons[7].lines.size() == 6 &&
-		navigation.buttons[7].lines[0].x1 == 493 &&
-		navigation.buttons[7].lines[0].x2 == 502 &&
-		navigation.buttons[8].lines.size() == 6,
+		navigation.buttons[7].lines[0].x1 == 477 &&
+		navigation.buttons[7].lines[0].x2 == 486 &&
+		navigation.buttons[8].lines.size() == 6 &&
+		navigation.buttons[9].command == jpegview_linux::kCommandToggleSelectionMode &&
+		navigation.buttons[9].lines.size() == 8,
 		"fit or rotation controls did not use the original Windows action glyphs");
 	navigation = jpegview_linux::BuildNavigationPanelPaint(
-		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 18, 11);
+		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 18, 11, true);
 	Expect(navigation.opacity == 128 && navigation.buttons[0].foreground.alpha == 128 &&
 		navigation.buttons[5].lines.size() == 12 && navigation.buttons[5].text.empty() &&
-		navigation.buttons[4].text[0].text == "N",
+		navigation.buttons[4].text[0].text == "N" &&
+		navigation.buttons[9].foreground.red == 255 &&
+		navigation.buttons[9].foreground.green == 205 &&
+		navigation.buttons[9].foreground.blue == 0,
 		"fit-action navigation icon or name-order label is incorrect");
 
 	Expect(jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, false,
@@ -3395,7 +3429,11 @@ void TestViewerChromePaintPlans() {
 		jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, true,
 			FileList::SortMode::FileName) == "Window mode (F11)" &&
 		jpegview_linux::NavigationTooltip(jpegview_linux::kNavigationSortModeCommand, true, false,
-			FileList::SortMode::LastModificationTime).find("click for file name") != std::string::npos,
+			FileList::SortMode::LastModificationTime).find("click for file name") != std::string::npos &&
+		jpegview_linux::NavigationTooltip(jpegview_linux::kCommandToggleSelectionMode, true, false,
+			FileList::SortMode::FileName, false) == "Enable crop selection mode (Ctrl+E)" &&
+		jpegview_linux::NavigationTooltip(jpegview_linux::kCommandToggleSelectionMode, true, false,
+			FileList::SortMode::FileName, true) == "Disable crop selection mode (Ctrl+E)",
 		"navigation tooltip did not reflect fullscreen or sort state");
 	const jpegview_linux::UiRect anchor{2, 5, 40, 40};
 	overlay = jpegview_linux::NavigationTooltipPaint(anchor, "tip", 21, 11, 100, 60);

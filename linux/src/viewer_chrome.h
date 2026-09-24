@@ -80,9 +80,10 @@ struct NavigationPanelPaint {
 
 NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight,
 	int mouseX, int mouseY, bool fitToWindow, FileList::SortMode sortMode,
-	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight);
+	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight,
+	bool selectionModeEnabled = false);
 std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
-	FileList::SortMode sortMode);
+	FileList::SortMode sortMode, bool selectionModeEnabled = false);
 OverlayPaintPlan NavigationTooltipPaint(const UiRect& anchor, std::string label,
 	int labelWidth, int textLineHeight, int windowWidth, int windowHeight);
 bool Contains(const UiRect& rect, int x, int y);

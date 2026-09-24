@@ -1,5 +1,6 @@
 #include "viewer_chrome.h"
 
+#include "input_commands.h"
 #include "sort_mode.h"
 
 #include "../../src/JPEGView/resource.h"
@@ -153,6 +154,22 @@ void AddNavigationIcon(NavigationButtonPaint& button, bool fitToWindow,
 			rect.y + (rect.height - textLineHeight) / 2,
 			button.foreground});
 		break;
+	case kCommandToggleSelectionMode: {
+		const int left = rect.x + 7;
+		const int top = rect.y + 7;
+		const int right = rect.x + rect.width - 8;
+		const int bottom = rect.y + rect.height - 8;
+		const int corner = 4;
+		AddLine(button, left, top, left + corner, top);
+		AddLine(button, left, top, left, top + corner);
+		AddLine(button, right - corner, top, right, top);
+		AddLine(button, right, top, right, top + corner);
+		AddLine(button, left, bottom - corner, left, bottom);
+		AddLine(button, left, bottom, left + corner, bottom);
+		AddLine(button, right, bottom - corner, right, bottom);
+		AddLine(button, right - corner, bottom, right, bottom);
+		break;
+	}
 	default:
 		break;
 	}
@@ -221,16 +238,17 @@ InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 
 NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight,
 	int mouseX, int mouseY, bool fitToWindow, FileList::SortMode sortMode,
-	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight) {
+	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight,
+	bool selectionModeEnabled) {
 	constexpr int buttonSize = 26;
 	constexpr int panelHeight = 32;
 	constexpr int gap = 5;
 	constexpr int margin = 6;
 	constexpr int separator = 8;
-	constexpr std::array<int, 9> commands = {
+	constexpr std::array<int, 10> commands = {
 		IDM_FIRST, IDM_PREV, IDM_NEXT, IDM_LAST, kNavigationSortModeCommand,
 		IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, IDM_FULL_SCREEN_MODE,
-		IDM_ROTATE_90, IDM_ROTATE_270
+		IDM_ROTATE_90, IDM_ROTATE_270, kCommandToggleSelectionMode
 	};
 	const int panelWidth = margin * 2 + buttonSize * static_cast<int>(commands.size()) +
 		gap * (static_cast<int>(commands.size()) - 1) + separator * 2;
@@ -245,7 +263,9 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 		button.rect = {x, plan.panel.y + (panelHeight - buttonSize) / 2, buttonSize, buttonSize};
 		button.command = commands[index];
 		button.hovered = Contains(button.rect, mouseX, mouseY);
-		button.foreground = button.hovered ? kHighlightColor : kGuiColor;
+		button.foreground = button.hovered ||
+			(button.command == kCommandToggleSelectionMode && selectionModeEnabled) ?
+			kHighlightColor : kGuiColor;
 		button.foreground.alpha = plan.opacity;
 		AddNavigationIcon(button, fitToWindow, sortLabel, sortLabelWidth,
 			oneToOneLabelWidth, textLineHeight);
@@ -257,7 +277,7 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 }
 
 std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
-	FileList::SortMode sortMode) {
+	FileList::SortMode sortMode, bool selectionModeEnabled) {
 	switch (command) {
 	case IDM_FIRST: return "Show first image in folder (Home)";
 	case IDM_PREV: return "Show previous image (Left)";
@@ -269,6 +289,9 @@ std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
 		return fullscreen ? "Window mode (F11)" : "Full screen mode (F11)";
 	case IDM_ROTATE_90: return "Rotate image 90 deg clockwise (Down)";
 	case IDM_ROTATE_270: return "Rotate image 90 deg counter-clockwise (Up)";
+	case kCommandToggleSelectionMode:
+		return selectionModeEnabled ? "Disable crop selection mode (Ctrl+E)" :
+			"Enable crop selection mode (Ctrl+E)";
 	case kNavigationSortModeCommand: {
 		const std::string nextMode = sortMode == FileList::SortMode::FileName ?
 			"modification date" : "file name";

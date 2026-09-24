@@ -935,6 +935,51 @@ if command -v convert >/dev/null 2>&1; then
 	crop_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
 	crop_image_left=$((crop_window_width / 2 - 80))
 	crop_image_top=$((crop_window_height / 2 - 64))
+	crop_settings="$temporary/crop-config/jpegview-linux/settings.conf"
+	# A fresh launch must leave normal drags in view mode rather than silently creating a crop.
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-disabled-before.png"
+	fi
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 32)) $((crop_image_top + 32)) mousedown 1
+	sleep 0.1
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 127)) $((crop_image_top + 95)) mouseup 1
+	sleep 0.2
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-disabled-after.png"
+		convert "$temporary/crop-disabled-before.png" -crop "160x128+$crop_image_left+$crop_image_top" +repage \
+			"$temporary/crop-disabled-before-area.png"
+		convert "$temporary/crop-disabled-after.png" -crop "160x128+$crop_image_left+$crop_image_top" +repage \
+			"$temporary/crop-disabled-after-area.png"
+		if ! compare -metric AE "$temporary/crop-disabled-before-area.png" \
+			"$temporary/crop-disabled-after-area.png" null: 2>"$temporary/crop-disabled-difference.txt"; then
+			echo "UI smoke test: an ordinary drag created a crop while crop mode was disabled ($(sed -n '1p' "$temporary/crop-disabled-difference.txt"))" >&2
+			exit 1
+		fi
+	fi
+	# The final navigation-panel button enables crop selection mode.
+	selection_button_x=$((crop_window_width / 2 + 148))
+	selection_button_y=$((crop_window_height - 16))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$selection_button_x" "$selection_button_y" click 1
+	sleep 0.2
+	grep -q '^selection_mode_enabled=1$' "$crop_settings"
+	# A normal drag now opens the crop menu. Its first actionable item toggles the mode off.
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 32)) $((crop_image_top + 32)) mousedown 1
+	sleep 0.1
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		$((crop_image_left + 127)) $((crop_image_top + 95)) mouseup 1
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Down Return
+	sleep 0.2
+	grep -q '^selection_mode_enabled=0$' "$crop_settings"
+	# Ctrl+E is the direct toggle; restore the mode for the rest of the crop regression.
+	DISPLAY=":$display_number" xdotool key ctrl+e
+	sleep 0.2
+	grep -q '^selection_mode_enabled=1$' "$crop_settings"
+	DISPLAY=":$display_number" xdotool key Escape
 	# Shift-drag selects the source rectangle, zooms into it, and clears the overlay.
 	DISPLAY=":$display_number" xdotool keydown Shift_L
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
@@ -967,7 +1012,7 @@ if command -v convert >/dev/null 2>&1; then
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 		$((crop_image_left + 127)) $((crop_image_top + 95)) mouseup 1
 	sleep 0.2
-	if command -v jpegtran >/dev/null 2>&1; then crop_fixed_mode_steps=6; else crop_fixed_mode_steps=5; fi
+	if command -v jpegtran >/dev/null 2>&1; then crop_fixed_mode_steps=7; else crop_fixed_mode_steps=6; fi
 	for _ in $(seq 1 "$crop_fixed_mode_steps"); do DISPLAY=":$display_number" xdotool key Down; done
 	DISPLAY=":$display_number" xdotool key Return
 	sleep 0.2
@@ -981,7 +1026,6 @@ if command -v convert >/dev/null 2>&1; then
 	DISPLAY=":$display_number" xdotool type --delay 30 '48'
 	DISPLAY=":$display_number" xdotool key Return
 	sleep 0.2
-	crop_settings="$temporary/crop-config/jpegview-linux/settings.conf"
 	grep -q '^fixed_crop_width=64$' "$crop_settings"
 	grep -q '^fixed_crop_height=48$' "$crop_settings"
 	grep -q '^fixed_crop_screen_pixels=1$' "$crop_settings"
@@ -1021,7 +1065,7 @@ if command -v convert >/dev/null 2>&1; then
 	if command -v xclip >/dev/null 2>&1; then
 		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 			$((crop_image_left + 24)) $((crop_image_top + 24)) click 3
-		if command -v jpegtran >/dev/null 2>&1; then crop_copy_steps=3; else crop_copy_steps=2; fi
+		if command -v jpegtran >/dev/null 2>&1; then crop_copy_steps=4; else crop_copy_steps=3; fi
 		for _ in $(seq 1 "$crop_copy_steps"); do DISPLAY=":$display_number" xdotool key Down; done
 		DISPLAY=":$display_number" xdotool key Return
 		for _ in $(seq 1 30); do
@@ -1042,7 +1086,7 @@ if command -v convert >/dev/null 2>&1; then
 	fi
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 		$((crop_image_left + 24)) $((crop_image_top + 24)) click 3
-	DISPLAY=":$display_number" xdotool key Down Return
+	DISPLAY=":$display_number" xdotool key Down Down Return
 	sleep 0.3
 	if [ "$(identify -format '%wx%h' "$temporary/crop-images/01-crop.jpg")" != "160x128" ]; then
 		echo "UI smoke test: regular crop unexpectedly modified its source file" >&2
@@ -1091,6 +1135,10 @@ if command -v convert >/dev/null 2>&1; then
 		lossless_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
 		lossless_left=$((lossless_width / 2 - 80))
 		lossless_top=$((lossless_height / 2 - 64))
+		DISPLAY=":$display_number" xdotool key ctrl+e
+		sleep 0.2
+		grep -q '^selection_mode_enabled=1$' \
+			"$temporary/lossless-crop-config/jpegview-linux/settings.conf"
 		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 			$((lossless_left + 29)) $((lossless_top + 29)) mousedown 1
 		sleep 0.1
@@ -1100,7 +1148,7 @@ if command -v convert >/dev/null 2>&1; then
 		DISPLAY=":$display_number" xdotool key Escape
 		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 			$((lossless_left + 80)) $((lossless_top + 64)) click 3
-		DISPLAY=":$display_number" xdotool key Down Down Return
+		DISPLAY=":$display_number" xdotool key Down Down Down Return
 		sleep 0.2
 		DISPLAY=":$display_number" xdotool key Return
 		for _ in $(seq 1 50); do

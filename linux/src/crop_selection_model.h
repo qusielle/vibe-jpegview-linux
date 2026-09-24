@@ -35,6 +35,9 @@ enum class CropSelectionMode {
 	FixedSize,
 };
 
+bool ShouldStartNewCropSelection(bool selectionModeEnabled,
+	bool forcedByModifier, bool imageNeedsPanning);
+
 enum class CropSelectionHandle {
 	None,
 	NewSelection,

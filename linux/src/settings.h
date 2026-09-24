@@ -49,7 +49,7 @@ struct ViewerSettings {
 	bool fixedCropScreenPixels = true;
 	int userCropAspectWidth = kDefaultUserCropAspectWidth;
 	int userCropAspectHeight = kDefaultUserCropAspectHeight;
-	bool defaultSelectionMode = true;
+	bool selectionModeEnabled = false;
 	bool infoVisible = false;
 	bool showHistogram = false;
 	bool showFilename = false;
