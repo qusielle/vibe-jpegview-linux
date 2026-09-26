@@ -60,6 +60,52 @@ are independent of the JPEGView_L comparison below. The current behavior documen
   profiles.
 - **Per-folder single-instance mode:** optionally route launches for a folder to one viewer window.
 
+## Candidates from [andrewvladved/jpegview's `annotations` branch](https://github.com/andrewvladved/jpegview/tree/annotations)
+
+Reviewed at `v1.3.46-annotations` (`dc2c4e7`). These are additions on that branch, compared with
+its `master` base and with the current Linux frontend; they are not a claim that every Windows
+feature is absent from Linux.
+
+- **Image annotations (major):** add image-coordinate freehand strokes, text, rectangles, ellipses,
+  and triangles, with arrowheads, fill/outline, color, opacity, width, and text-background controls.
+  Include undo/redo, clear-all, drawing tools in the navigation panel, and a save/discard/cancel
+  prompt before navigation, geometry edits, or close. The branch burns annotations into the image
+  and offers overwrite or Save As; it does not keep editable annotations in sidecar files or allow
+  individual marks to be moved/deleted. This is distinct from Linux's existing Ctrl+M
+  mark-image/toggle-back navigation feature. See the branch's [design](https://github.com/andrewvladved/jpegview/blob/annotations/docs/superpowers/specs/2026-09-25-image-annotations-design.md),
+  [annotation types](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/AnnotationTypes.h),
+  and [implementation plan](https://github.com/andrewvladved/jpegview/blob/annotations/docs/superpowers/plans/2026-09-25-image-annotations.md).
+- **Vertical scroll reading mode:** play a folder by holding each image at its top, gliding down
+  at a configurable screen-pixel speed, holding at the bottom, then advancing. By default, fit/crop
+  each image to fill the window; an alternate setting preserves the current zoom and scrolls through
+  the part extending beyond the viewport. Configure the hold duration; short images need no glide.
+  This is separate from the existing slideshow and movie modes. See the branch's
+  [scroll state model](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/ScrollMath.cpp).
+- **Fit-relative zoom mode:** optionally define the window-fitted image as 100%, so zoom presets,
+  steps, snap points, and pause points have the same relative effect for differently sized images.
+  Retain the current source-pixel scale in the zoom readout as well. Linux currently preserves the
+  chosen zoom mode across navigation, but its 100% zoom still means original-pixel scale. See
+  [zoom calculations](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/ZoomMath.cpp).
+- **Shared cross-fade for playback modes:** extend Linux's existing slideshow transitions with an
+  optional cross-fade between files during movie playback and the proposed scroll mode, using one
+  transition duration. Do not fade frames within an animated image; cap or skip fades that would
+  consume most of a movie frame interval. Preserve the existing directional slideshow effects. See
+  the branch's [playback handoff](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/MainDlg.cpp).
+- **Custom slideshow interval:** supplement the current fixed waiting-time choices with a bounded,
+  persisted numeric interval entry. Reuse the branch's
+  [numeric value dialog](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/SetValueDlg.cpp)
+  as a reference.
+- **Custom movie frame rate:** supplement the current fixed playback-rate choices with a bounded,
+  persisted numeric FPS entry; the branch uses the same
+  [numeric value dialog](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/SetValueDlg.cpp).
+- **Folder wrap-around toggle:** expose a menu setting to stop at the first/last image instead of
+  wrapping to the other end. Linux currently wraps within a folder by default and has no user-facing
+  toggle for this behavior. See the branch's
+  [file-list setting](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/FileList.cpp).
+- **Transparent title-bar presentation:** investigate a Linux-native equivalent to the branch's
+  transparent title-bar panel. The Windows implementation uses DWM frame integration, so this is
+  not a direct API port; Linux already supports hiding the window title bar.
+
 ## Existing Windows-parity gaps
 
 These user-facing gaps are also listed in the [Linux README](README.md#known-windows-parity-gaps)
