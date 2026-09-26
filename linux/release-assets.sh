@@ -24,7 +24,9 @@ mv "$OUTPUT_DIR/JPEGView-Linux-${safe_version}-x86_64.AppImage" \
 
 docker run --rm -v "$OUTPUT_DIR:/out" "$image" binary "$safe_version"
 mv "$OUTPUT_DIR/jpegview-linux" "$OUTPUT_DIR/$binary_name"
-test "$("$OUTPUT_DIR/$binary_name" --version)" = "JPEGView Linux $safe_version"
+binary_version=$(docker run --rm -v "$OUTPUT_DIR:/out" \
+	--entrypoint "/out/$binary_name" "$image" --version)
+test "$binary_version" = "JPEGView Linux $safe_version"
 
 if [[ "$UBUNTU_VERSION" == 24 || "$UBUNTU_VERSION" == 26 ]]; then
 	deb_image="jpegview-linux-deb-build:ubuntu${UBUNTU_VERSION}"

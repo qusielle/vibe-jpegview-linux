@@ -42,7 +42,9 @@ jobs:
 
           docker run --rm -v "$output_dir:/out" "$image" appimage "$app_version"
           docker run --rm -v "$output_dir:/out" "$image" binary "$app_version"
-          test "$("$output_dir/jpegview-linux" --version)" = "JPEGView Linux $app_version"
+          binary_version=$(docker run --rm -v "$output_dir:/out" \
+            --entrypoint /out/jpegview-linux "$image" --version)
+          test "$binary_version" = "JPEGView Linux $app_version"
 
           if [ "$UBUNTU_VERSION" = "24" ] || [ "$UBUNTU_VERSION" = "26" ]; then
             deb_image="jpegview-linux-deb-build:ubuntu${UBUNTU_VERSION}"
