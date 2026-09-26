@@ -30,6 +30,12 @@ are independent of the JPEGView_L comparison below. The current behavior documen
   option; prefer porting or adapting its implementation if feasible rather than reimplementing the
   behavior independently.
 
+## General interaction candidates
+
+- **Context-menu letter hints (mnemonics):** underline a mnemonic letter in each applicable menu
+  item and activate that command when its letter is pressed while the menu is open. For example,
+  underline `O` in “Open file” so pressing `O` opens the file dialog.
+
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
 - **Transparency background setting:** persist a choice of black, white, or checkerboard behind
