@@ -31,7 +31,7 @@ jobs:
           image="jpegview-linux-build:ubuntu${UBUNTU_VERSION}"
           output_dir="$RUNNER_TEMP/jpegview-linux-ci-ubuntu${UBUNTU_VERSION}"
           artifact_dir="$RUNNER_TEMP/jpegview-linux-ci-artifacts-ubuntu${UBUNTU_VERSION}"
-          app_version="$(./linux/version.sh)"
+          app_version="$(sh ./linux/version.sh)"
           appimage_name="JPEGView-Linux-${app_version}-x86_64.AppImage"
           mkdir -p "$output_dir" "$artifact_dir"
 
