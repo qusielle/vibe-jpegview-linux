@@ -36,6 +36,13 @@ are independent of the JPEGView_L comparison below. The current behavior documen
   item and activate that command when its letter is pressed while the menu is open. For example,
   underline `O` in “Open file” so pressing `O` opens the file dialog.
 
+## Navigation and file-history candidates
+
+- **Recently opened files dialog (major feature):** show recent files in a dedicated dialog with
+  the path left-aligned and filename right-aligned. Reuse the open-file dialog's layout and preview
+  pane, showing a preview for the focused entry. Remember each file's zoom and viewing mode and
+  restore them when that file is opened again.
+
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
 - **Transparency background setting:** persist a choice of black, white, or checkerboard behind
