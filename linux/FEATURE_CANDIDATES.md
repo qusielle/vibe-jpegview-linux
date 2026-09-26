@@ -106,6 +106,52 @@ feature is absent from Linux.
   transparent title-bar panel. The Windows implementation uses DWM frame integration, so this is
   not a direct API port; Linux already supports hiding the window title bar.
 
+## Candidates from [Masir01/jpegview_up](https://github.com/Masir01/jpegview_up)
+
+Reviewed the repository's default [`dev-hw`](https://github.com/Masir01/jpegview_up/tree/dev-hw)
+branch at `79a18f9` and also checked [`dev-up`](https://github.com/Masir01/jpegview_up/tree/dev-up)
+at `93efb7a`, which was 24 commits ahead and contains newer decoder work. The bullets below are
+gaps against Linux, not a recommendation to port Windows-specific code or dependencies verbatim.
+
+- **Asynchronous directory scanning:** enumerate large folders off the event thread so opening a
+  folder, refreshing it, or changing navigation scope remains responsive. Cancel obsolete scans and
+  reject stale results so a slower previous-directory scan cannot replace the current list or
+  resurrect removed files. Linux currently scans synchronously in `FileList::ScanDirectory`; the
+  fork's [file-list implementation](https://github.com/Masir01/jpegview_up/blob/dev-hw/src/JPEGView/FileList.cpp)
+  is a reference for the worker/result pattern.
+- **Oversized JPEG viewing:** Linux currently rejects images above its 100-megapixel limit. Add a
+  bounded reduced-resolution JPEG decode option for larger sources, clearly identify when the
+  displayed pixels are only a reduced preview, and do not save that preview as though it were the
+  full-resolution original. The fork's [`dev-up` JPEG decoder](https://github.com/Masir01/jpegview_up/blob/dev-up/src/JPEGView/TJPEGWrapper.cpp)
+  chooses a capped downsampling factor when the normal image limits would be exceeded.
+- **Viewport-sized WebP decode:** the fork's `dev-up` fast-fit path asks the decoder for a
+  screen-sized result for lossy WebP as well as JPEG. Linux already uses reduced-DCT decoding for
+  fitted JPEGs, so the distinct candidate is to add a reduced WebP display path while preserving
+  full-resolution access when zooming to actual size or saving; validate animated WebP separately.
+  See its [WebP wrapper](https://github.com/Masir01/jpegview_up/blob/dev-up/src/JPEGView/WEBPWrapper.cpp).
+- **Optional half-size RAW preview:** add an opt-in fast RAW viewing path that develops at half
+  width and height (one quarter of the pixels), with a full-resolution path still available for
+  detailed inspection and output. Linux currently develops RAW images at full resolution; the fork's
+  [RAW wrapper](https://github.com/Masir01/jpegview_up/blob/dev-hw/src/JPEGView/RAWWrapper.cpp)
+  shows the LibRaw setting and its configuration option.
+- **Large Photoshop documents (`.psb`):** extend the existing PSD reader to PSB's large-document
+  variant and dimensions. Linux currently accepts `.psd` only and caps decoded images at 100
+  megapixels. The fork's [PSD wrapper](https://github.com/Masir01/jpegview_up/blob/dev-hw/src/JPEGView/PSDWrapper.cpp)
+  is a format-behavior reference, not a dependency to copy.
+- **DDS texture images:** add optional `.dds` decoding, including common BCn/DXTC compressed
+  textures, using a Linux-compatible decoder rather than the fork's Windows DirectXTex library. This
+  is a specialized format candidate, lower priority for a photo viewer. See its
+  [DDS reader](https://github.com/Masir01/jpegview_up/blob/dev-hw/src/JPEGView/DDSWrapper.cpp).
+- **Direct zoom after selection:** add a setting to choose whether releasing a newly drawn selection
+  zooms directly to that region or opens the crop-action menu. Linux already supports Shift-drag to
+  zoom a selection, but its normal selection release opens the crop menu. See the fork's
+  [`SelectionZoomMode` change](https://github.com/Masir01/jpegview_up/commit/4c47c927f81d9db3f0509f425c338c50cee32f89).
+
+The fork also has linear-light resampling and per-folder single-instance behavior on `dev-up`; both
+ideas are already tracked above under the JPEGView_L comparison and are not duplicated here. Its
+reduced-DCT JPEG display path also overlaps Linux's existing fitted-JPEG path, so the separate
+viewport-decode candidate is limited to WebP.
+
 ## Existing Windows-parity gaps
 
 These user-facing gaps are also listed in the [Linux README](README.md#known-windows-parity-gaps)
@@ -140,8 +186,9 @@ and remain possible candidates:
 
 - [KrokusPokus/JPEGView_L's release notes](https://github.com/KrokusPokus/JPEGView_L/releases)
   report a fix for very large JPEGs that failed to load. Linux has memory-mapped input and
-  reduced-DCT display decoding, but also has an explicit 100-megapixel image limit; compare with a
-  reproducible file before treating this as a regression.
+  reduced-DCT display decoding, but also has an explicit 100-megapixel image limit. Masir01's
+  `dev-up` branch adds a bounded downsample path for oversized JPEGs (see above); compare the limits
+  and output using a reproducible file before treating the existing cap as a regression.
 - [KrokusPokus/JPEGView_L's release notes](https://github.com/KrokusPokus/JPEGView_L/releases)
   report JPEG XL animation and archive-contained image fixes. Linux advertises animated JPEG XL
   support, while archive browsing is not implemented; verify a concrete failing fixture before
