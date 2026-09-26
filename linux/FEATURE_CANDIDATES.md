@@ -84,7 +84,9 @@ feature is absent from Linux.
 - **Fit-relative zoom mode:** optionally define the window-fitted image as 100%, so zoom presets,
   steps, snap points, and pause points have the same relative effect for differently sized images.
   Retain the current source-pixel scale in the zoom readout as well. Linux currently preserves the
-  chosen zoom mode across navigation, but its 100% zoom still means original-pixel scale. See
+  chosen zoom mode across navigation, but its 100% zoom still means original-pixel scale. A related,
+  distinct request is to preserve the manually chosen on-screen width, height, or area while moving
+  between images ([upstream issue #285](https://github.com/sylikc/jpegview/issues/285)). See
   [zoom calculations](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/ZoomMath.cpp).
 - **Shared cross-fade for playback modes:** extend Linux's existing slideshow transitions with an
   optional cross-fade between files during movie playback and the proposed scroll mode, using one
@@ -116,8 +118,10 @@ gaps against Linux, not a recommendation to port Windows-specific code or depend
 - **Asynchronous directory scanning:** enumerate large folders off the event thread so opening a
   folder, refreshing it, or changing navigation scope remains responsive. Cancel obsolete scans and
   reject stale results so a slower previous-directory scan cannot replace the current list or
-  resurrect removed files. Linux currently scans synchronously in `FileList::ScanDirectory`; the
-  fork's [file-list implementation](https://github.com/Masir01/jpegview_up/blob/dev-hw/src/JPEGView/FileList.cpp)
+  resurrect removed files. Linux currently scans synchronously in `FileList::ScanDirectory`; reports
+  about large-folder startup ([upstream issue #194](https://github.com/sylikc/jpegview/issues/194)
+  and [#263](https://github.com/sylikc/jpegview/issues/263)) reinforce this need. The fork's
+  [file-list implementation](https://github.com/Masir01/jpegview_up/blob/dev-hw/src/JPEGView/FileList.cpp)
   is a reference for the worker/result pattern.
 - **Oversized JPEG viewing:** Linux currently rejects images above its 100-megapixel limit. Add a
   bounded reduced-resolution JPEG decode option for larger sources, clearly identify when the
@@ -152,20 +156,119 @@ ideas are already tracked above under the JPEGView_L comparison and are not dupl
 reduced-DCT JPEG display path also overlaps Linux's existing fitted-JPEG path, so the separate
 viewport-decode candidate is limited to WebP.
 
+## Candidates from upstream JPEGView issues
+
+Reviewed the [open issue list](https://github.com/sylikc/jpegview/issues) and the closed
+[`wontfix` issues](https://github.com/sylikc/jpegview/issues?q=is%3Aissue+state%3Aclosed+label%3Awontfix)
+on 2026-09-26. An upstream `wontfix` label records that project's decision; it does not by itself
+rule out a useful native Linux feature. That query returned four issues at review time; their
+disposition is recorded below. Duplicate requests and behavior already present in Linux are not
+repeated as new candidates below.
+
+- **Sort by pixel dimensions:** add a file ordering by pixel area (with a deterministic tie-breaker),
+  alongside the existing filename/date/size choices. Cache or lazily obtain dimensions so sorting a
+  large folder does not synchronously decode every image. This was independently requested in
+  [issues #388](https://github.com/sylikc/jpegview/issues/388) and
+  [#359](https://github.com/sylikc/jpegview/issues/359).
+- **Sort by capture date:** add EXIF capture-time ordering, with a documented fallback for missing
+  dates and stable tie-breaking. Metadata lookup should not put a full-folder scan on the event
+  thread. See [issue #224](https://github.com/sylikc/jpegview/issues/224).
+- **More resilient capture metadata:** read common shooting fields from the available TIFF/EXIF
+  directories, including a safe IFD0 fallback when the ExifIFD is absent, and extend beyond JPEG
+  where a supported format exposes equivalent metadata. This addresses the DNG/JPEG metadata layout
+  described in [issue #393](https://github.com/sylikc/jpegview/issues/393); it should have fixtures
+  for both layouts before changing the reader.
+- **Show the embedded profile name in image information:** Linux already applies embedded ICC
+  profiles, but does not identify the profile in its information overlay. Add a concise profile
+  description when available; pixel dimensions are already shown, so a megapixel count from
+  [issue #363](https://github.com/sylikc/jpegview/issues/363) is optional rather than essential.
+- **Go to image number:** provide a small command to jump directly to an index in the current
+  ordered file list, complementing the existing `[current/total]` indicator in the F2 information
+  overlay. See
+  [issue #26](https://github.com/sylikc/jpegview/issues/26).
+- **Show position in the window title:** add `[current/total]` to the SDL window title; Linux
+  currently shows that count in the F2 information overlay, but its title only shows the filename,
+  dimensions, and file size. See [issue #260](https://github.com/sylikc/jpegview/issues/260).
+- **Skip hidden images:** add an optional setting to omit hidden image files from navigation. On
+  Linux, define this in terms of dotfiles (and decide explicitly whether `.hidden` directory
+  metadata should also count), rather than copying Windows hidden-attribute behavior. See
+  [issue #114](https://github.com/sylikc/jpegview/issues/114).
+- **Quick rename of the current image:** add a one-file rename command and shortcut, initially
+  selecting the basename but not the extension, with collision-safe behavior. This complements the
+  existing batch rename/copy dialog; see [issue #280](https://github.com/sylikc/jpegview/issues/280).
+- **Deletion confirmation preview:** show a small thumbnail and filename in the move-to-trash
+  confirmation so the user can verify the target before confirming. Reuse an already available
+  thumbnail when possible rather than decoding synchronously; see
+  [issue #337](https://github.com/sylikc/jpegview/issues/337).
+- **Pixel color sampler:** show the color under the pointer in a small readout and optionally copy
+  it in a common notation such as hexadecimal RGBA. Define whether sampling reflects the source or
+  the currently processed display. See [issue #278](https://github.com/sylikc/jpegview/issues/278).
+- **Selection convenience actions:** optionally copy selected pixels to the clipboard immediately
+  after a selection is made, then clear the selection, without changing the existing explicit crop
+  and copy actions. The interaction should be configurable to avoid surprising current users. See
+  [issue #193](https://github.com/sylikc/jpegview/issues/193).
+- **Fast view-only color commands:** provide a direct invert-colors toggle and a separate quick
+  grayscale/desaturate command; both should be reversible display operations, not destructive edits.
+  See [issue #273](https://github.com/sylikc/jpegview/issues/273) and
+  [#238](https://github.com/sylikc/jpegview/issues/238).
+- **Krita documents (`.kra`):** optionally display the flattened `mergedimage.png` embedded in a
+  Krita archive, without implying support for its editable layers. Bound archive extraction and
+  validate paths and sizes. See [issue #385](https://github.com/sylikc/jpegview/issues/385).
+- **HDR still-image viewing:** investigate a controlled tone-mapping path for HDR AVIF/JXR content
+  on ordinary SDR displays, preserving the source and avoiding clipped or unexpectedly dark output.
+  Treat this as exploratory until representative HDR fixtures and a defined output policy exist.
+  The request appears in open [issue #239](https://github.com/sylikc/jpegview/issues/239) and in
+  upstream-closed-wontfix [issue #183](https://github.com/sylikc/jpegview/issues/183).
+- **Motion Photos:** explore presenting the embedded video portion of a phone Motion Photo as an
+  optional action while retaining the JPEG still as the normal image and navigation item. This may
+  require a new video demux dependency and is lower priority. See
+  [issue #275](https://github.com/sylikc/jpegview/issues/275).
+- **GPS map action:** when GPS coordinates exist in EXIF, offer an explicit action to open them in a
+  user-configurable map URL. Keep it opt-in per click so coordinates are not sent anywhere
+  automatically. See [issue #59](https://github.com/sylikc/jpegview/issues/59).
+
+Some issue ideas are already represented elsewhere in this file or implemented in Linux:
+
+- Recent-file history ([#397](https://github.com/sylikc/jpegview/issues/397)), comic/archive reading
+  ([#293](https://github.com/sylikc/jpegview/issues/293) and
+  [#301](https://github.com/sylikc/jpegview/issues/301)), transparency backgrounds
+  ([#43](https://github.com/sylikc/jpegview/issues/43),
+  [#287](https://github.com/sylikc/jpegview/issues/287),
+  [#339](https://github.com/sylikc/jpegview/issues/339)), oversized images
+  ([#141](https://github.com/sylikc/jpegview/issues/141) and
+  [#371](https://github.com/sylikc/jpegview/issues/371)), and custom commands
+  ([#383](https://github.com/sylikc/jpegview/issues/383)) overlap candidates above.
+- The F2 information overlay already shows `[current/total]`, though adding it to the window title
+  remains a candidate ([#260](https://github.com/sylikc/jpegview/issues/260)); the Linux thumbnail
+  pipeline supports PNG, AVIF, and JPEG XL as well as JPEG
+  ([#387](https://github.com/sylikc/jpegview/issues/387)); crop mode is off by default
+  ([#401](https://github.com/sylikc/jpegview/issues/401)); and choosing the processed image for
+  wallpaper is already supported ([#400](https://github.com/sylikc/jpegview/issues/400)). The
+  requested Linux port itself ([#69](https://github.com/sylikc/jpegview/issues/69)) is the purpose
+  of this repository.
+- The upstream `wontfix` request for single-instance behavior ([#155](https://github.com/sylikc/jpegview/issues/155))
+  overlaps the per-folder single-instance candidate listed under KrokusPokus/JPEGView_L; decide
+  whether Linux should forward later launches globally or per folder. Duplicate HEIC enumeration
+  ([#147](https://github.com/sylikc/jpegview/issues/147)) is a platform-specific bug report to
+  reproduce independently on Linux, not a feature to port as described.
+
 ## Existing Windows-parity gaps
 
 These user-facing gaps are also listed in the [Linux README](README.md#known-windows-parity-gaps)
 and remain possible candidates:
 
 - **Free rotation and perspective correction:** interactive rotation and perspective/tilt-correction
-  panels beyond the existing quarter-turn and mirror operations.
+  panels beyond the existing quarter-turn and mirror operations. An optional auto-level angle
+  suggestion from line/horizon detection could complement this work; see
+  [issue #252](https://github.com/sylikc/jpegview/issues/252).
 - **Processing-parameter set exchange:** exchange a second parameter set for image comparison; this
   is distinct from the already implemented marked-image/toggle-back workflow.
 - **Windows settings administration:** edit global/user Windows configuration files or update a
   user configuration from the global template. Any Linux version would need a suitable native
   settings design.
 - **Open-With management and custom commands:** manually manage the Open With menu and add
-  Windows-style user command definitions.
+  Windows-style user command definitions or Linux-native user scripts; see
+  [issue #383](https://github.com/sylikc/jpegview/issues/383).
 - **Per-extension desktop associations:** provide finer-grained default-viewer selection than the
   existing common-MIME registration.
 - **Windows-compatible parameter database administration:** support interoperability with the
