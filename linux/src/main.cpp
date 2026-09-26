@@ -5691,7 +5691,8 @@ private:
 		DrawRect(panel, 160, 190, 225);
 		DrawText("JPEGVIEW LINUX", panel.x + 18, panel.y + 16, kUiTextScale, 255, 255, 255);
 		DrawText("NATIVE SDL2 VIEWER", panel.x + 18, panel.y + 48, kUiTextScale, 210, 225, 250);
-		DrawText("PORT OF JPEGVIEW 1.3.46", panel.x + 18, panel.y + 80, kUiTextScale, 210, 225, 250);
+		DrawText(std::string("VERSION ") + JPEGVIEW_APP_VERSION,
+			panel.x + 18, panel.y + 80, kUiTextScale, 210, 225, 250);
 		DrawText("FOLDER NAVIGATION AND IMAGE VIEWING", panel.x + 18, panel.y + 112, kUiTextScale, 185, 205, 220);
 		DrawText("PRESS ESC TO CLOSE", panel.x + 18, panel.y + 156, kUiTextScale, 180, 180, 180);
 	}
@@ -6383,6 +6384,7 @@ void PrintUsage(const char* program) {
 		<< "  --slideshow N      Advance every N seconds\n"
 		<< "  --decode-check     Decode inputs and exit (useful for CI)\n"
 		<< "  --export-app-icon FILE  Export the embedded JPEGView icon as PNG\n"
+		<< "  --version          Show the build version\n"
 		<< "  --help             Show this help\n\n"
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel up/down navigates previous/next, Ctrl+mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
@@ -6403,6 +6405,10 @@ int main(int argc, char** argv) {
 	std::vector<std::string> inputs;
 	for (int argument = 1; argument < argc; ++argument) {
 		const std::string value = argv[argument];
+		if (value == "--version") {
+			std::cout << "JPEGView Linux " << JPEGVIEW_APP_VERSION << '\n';
+			return 0;
+		}
 		if (value == "--help" || value == "-h") {
 			PrintUsage(argv[0]);
 			return 0;

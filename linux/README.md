@@ -220,13 +220,15 @@ DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-bu
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu22 -t jpegview-linux-build:ubuntu22 .
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu24 -t jpegview-linux-build:ubuntu24 .
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu26 -t jpegview-linux-build:ubuntu26 .
-docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 appimage
+APP_VERSION=$(./linux/version.sh)
+docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 appimage "$APP_VERSION"
+docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 binary "$APP_VERSION"
 ```
 
-This creates `out/JPEGView-Linux-1.3.46-linux.1-x86_64.AppImage`. To export only the binary,
-run `docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 binary`; substitute the
-Ubuntu 22.04, 24.04, or 26.04 image tag to use another build environment. To select another release label,
-pass it as the second argument. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
+The AppImage is named `out/JPEGView-Linux-${APP_VERSION}-x86_64.AppImage`; the native executable
+is `out/jpegview-linux`. Substitute the Ubuntu 22.04, 24.04, or 26.04 image tag to use another build
+environment. The Docker build context excludes Git metadata, so pass the version resolved on the host
+as the second argument. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
 dependency chains in parallel with BuildKit. Ubuntu 22.04 builds Highway/JPEG XL; Ubuntu 24.04 and
 26.04 need no codec source builds. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded
 AppImage tool. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
@@ -237,13 +239,14 @@ tools and runtime libraries. Ubuntu 20.04 and 22.04 do not produce a `.deb`.
 
 ```sh
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.deb.ubuntu24 -t jpegview-linux-deb-build:ubuntu24 .
-docker run --rm -v "$PWD/out:/out" jpegview-linux-deb-build:ubuntu24 deb 1.3.46-linux.1 24
+APP_VERSION=$(./linux/version.sh)
+docker run --rm -v "$PWD/out:/out" jpegview-linux-deb-build:ubuntu24 deb "$APP_VERSION" 24
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.deb.ubuntu26 -t jpegview-linux-deb-build:ubuntu26 .
-docker run --rm -v "$PWD/out:/out" jpegview-linux-deb-build:ubuntu26 deb 1.3.46-linux.1 26
+docker run --rm -v "$PWD/out:/out" jpegview-linux-deb-build:ubuntu26 deb "$APP_VERSION" 26
 ```
 
-These create `jpegview-linux_1.3.46-linux.1_ubuntu24_amd64.deb` and
-`jpegview-linux_1.3.46-linux.1_ubuntu26_amd64.deb` in `out/`. Install the matching package with APT;
+These create `jpegview-linux_${APP_VERSION}_ubuntu24_amd64.deb` and
+`jpegview-linux_${APP_VERSION}_ubuntu26_amd64.deb` in `out/`. Install the matching package with APT;
 its shared-library dependencies are resolved from the corresponding Ubuntu repositories.
 
 GitHub Actions builds and tests all four AppImage Dockerfiles on branch pushes and pull requests.
@@ -301,6 +304,23 @@ Unicode fallback.
 The default window title follows the Windows-style image title format:
 `filename (widthxheight, file size) - JPEGView`.
 
+## Application version
+
+The build takes its version from the nearest reachable semantic-version Git tag. A clean build at
+the tag uses that version (with an optional leading `v` removed); commits after it add `+devN`, where
+`N` is the number of commits since the tag. Local changes add `.dirty` to the build metadata. For
+example, five commits beyond `1.3.46-linux.3` produce `1.3.46-linux.3+dev5`. A Git checkout with no
+reachable semantic-version tag uses `0.0.0+dev.g<commit>`, and a source snapshot without Git metadata
+uses `0.0.0+unknown`.
+
+The resolved version is embedded in the executable and shown by `jpegview-linux --version` and the
+About panel. AppImage names and its `X-AppImage-Version` desktop metadata, plus Debian package
+filenames/control metadata, use the same value. Direct Makefile or packaging-script builds resolve it
+automatically; set `VERSION=...` for Make or pass a version argument to a packaging script to
+override it. Docker builds do not include `.git`, so derive the value on the host and pass it to the
+container as shown above. The `+devN` suffix is SemVer build metadata and identifies the build
+without changing semantic-version precedence; release tags remain the release-version authority.
+
 ## AppImage
 
 The packaging script creates an AppDir, bundles the SDL2 shared library, and invokes
@@ -308,12 +328,13 @@ The packaging script creates an AppDir, bundles the SDL2 shared library, and inv
 
 ```sh
 mkdir -p out
+VERSION=$(./linux/version.sh)
 APPIMAGETOOL=/path/to/appimagetool \
 APPIMAGETOOL_ARGS=--appimage-extract-and-run \
 BUILD_DIR="$PWD/out/build" \
 APPDIR="$PWD/out/JPEGView-Linux.AppDir" \
-OUTPUT="$PWD/out/JPEGView-Linux-1.3.46-linux.1-x86_64.AppImage" \
-make -C linux appimage VERSION=1.3.46-linux.1
+OUTPUT="$PWD/out/JPEGView-Linux-${VERSION}-x86_64.AppImage" \
+make -C linux appimage VERSION="$VERSION"
 ```
 
 The resulting AppImage still relies on the host kernel, glibc-compatible userspace, and a

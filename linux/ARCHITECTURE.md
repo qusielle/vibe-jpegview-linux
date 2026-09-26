@@ -130,3 +130,14 @@ and drawing; `zoom_navigator_model` owns only the geometry and pointer-to-pan ma
 the current image texture, so it does not schedule another decode, resize, or cache entry. Click and
 drag pans are clamped by `Viewport::ClampToView` so they cannot expose empty space beyond the image.
 The user-visible toggle is persisted through `settings`.
+
+## Build version metadata
+
+`version.sh` resolves the nearest reachable semantic-version Git tag and adds commit-distance and
+working-tree metadata for development builds. Make generates a small forced-include header from the
+resolved or explicitly overridden `VERSION`; the executable uses that single value for `--version`
+and the About panel. AppImage and Debian packaging scripts receive the same version; the AppImage
+desktop entry's `X-AppImage-Version` and Debian control metadata use it as well. GitHub Actions
+fetches tag history before resolving the value. Docker build contexts omit `.git`, so workflows and
+documented Docker invocations resolve the version on the host and pass it into the container. Avoid
+independent version literals in build, package, and executable metadata.

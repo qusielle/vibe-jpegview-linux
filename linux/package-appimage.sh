@@ -4,12 +4,15 @@ set -eu
 CDPATH=
 export CDPATH
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
-VERSION=${1:-1.3.46-linux.1}
+VERSION=${1:-}
+if [ -z "$VERSION" ]; then
+	VERSION=$(cd -- "$SCRIPT_DIR/.." && sh "$SCRIPT_DIR/version.sh")
+fi
 BUILD_DIR=${BUILD_DIR:-$SCRIPT_DIR/build}
 APPDIR=${APPDIR:-$BUILD_DIR/JPEGView-Linux.AppDir}
 OUTPUT=${OUTPUT:-$BUILD_DIR/JPEGView-Linux-${VERSION}-x86_64.AppImage}
 
-make -C "$SCRIPT_DIR" BUILD_DIR="$BUILD_DIR" all
+make -C "$SCRIPT_DIR" BUILD_DIR="$BUILD_DIR" VERSION="$VERSION" all
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" \
 	"$APPDIR/usr/share/icons/hicolor/64x64/apps" "$APPDIR/usr/share/jpegview"
@@ -20,6 +23,10 @@ cp "$SCRIPT_DIR/jpegview.desktop" "$APPDIR/jpegview-linux.desktop"
 "$BUILD_DIR/jpegview-linux" --export-app-icon "$APPDIR/jpegview-linux.png"
 cp "$APPDIR/jpegview-linux.png" "$APPDIR/usr/share/icons/hicolor/64x64/apps/jpegview-linux.png"
 cp "$SCRIPT_DIR/../src/JPEGView/res/JPEGView.ico" "$APPDIR/usr/share/jpegview/JPEGView.ico"
+for desktop_file in "$APPDIR/jpegview-linux.desktop" \
+	"$APPDIR/usr/share/applications/jpegview-linux.desktop"; do
+	printf 'X-AppImage-Version=%s\n' "$VERSION" >> "$desktop_file"
+done
 chmod +x "$APPDIR/AppRun"
 
 copy_runtime_dependencies() {

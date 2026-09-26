@@ -58,6 +58,8 @@ STATIC_RUNTIME ?= -static-libstdc++ -static-libgcc
 BUILD_DIR ?= build
 SANITIZER_BUILD_DIR ?= build-sanitize
 SANITIZER_CXXFLAGS ?= -O1 -g -std=c++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -fsanitize=address,undefined
+VERSION ?= $(shell sh ./version.sh)
+BUILD_INFO_HEADER := $(BUILD_DIR)/build-info-$(VERSION).h
 TARGET := $(BUILD_DIR)/jpegview-linux
 TEST_TARGET := $(BUILD_DIR)/jpegview-tests
 SOURCES := src/main.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/cache_budget.cpp src/cache_budget.h src/image_cache.cpp src/image_cache.h src/display_image_cache.cpp src/display_image_cache.h src/image.cpp src/image.h src/image_processing.cpp src/image_processing.h src/image_processing_store.cpp src/image_processing_store.h src/clipboard.cpp src/clipboard.h src/settings.cpp src/settings.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/external_commands.cpp src/external_commands.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h src/overlay_layout.cpp src/overlay_layout.h src/viewer_chrome.cpp src/viewer_chrome.h src/thumbnail_panel_model.cpp src/thumbnail_panel_model.h src/thumbnail_resampler.cpp src/thumbnail_resampler.h src/image_info_model.cpp src/image_info_model.h src/spectrum_model.cpp src/spectrum_model.h src/file_dialog_model.cpp src/file_dialog_model.h src/playback_scheduler.cpp src/playback_scheduler.h src/system_font.cpp src/system_font.h src/bitmap_font.cpp src/bitmap_font.h src/bitmap_font_data.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
@@ -74,8 +76,9 @@ ICON_SOURCE := ../src/JPEGView/res/JPEGView.ico
 GENERATED_ICON_HEADER := $(BUILD_DIR)/jpegview_icon_data.h
 SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
 TEST_SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
+SOURCES += $(BUILD_INFO_HEADER)
 
-.PHONY: all clean run test test-ui test-shell test-sanitize check appimage
+.PHONY: all clean run test test-ui test-shell test-sanitize test-version check appimage
 
 all: $(TARGET)
 
@@ -83,9 +86,16 @@ $(GENERATED_ICON_HEADER): $(ICON_SOURCE) embed-icon.sh
 	@mkdir -p $(BUILD_DIR)
 	./embed-icon.sh $(ICON_SOURCE) $@
 
+$(BUILD_INFO_HEADER): version.sh write-build-info.sh
+	sh ./write-build-info.sh "$@" "$(VERSION)"
+
 $(TARGET): $(SOURCES)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(CODEC_DEFINES) $(SDL2_CFLAGS) $(PANGO_CFLAGS) $(CODEC_CFLAGS) -I$(BUILD_DIR) -Isrc -Ithird_party src/main.cpp src/file_list.cpp src/crop_selection_model.cpp src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp src/image.cpp src/image_processing.cpp src/image_processing_store.cpp src/clipboard.cpp src/settings.cpp src/sort_mode.cpp src/desktop_applications.cpp src/desktop_association.cpp src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_resampler.cpp src/image_info_model.cpp src/spectrum_model.cpp src/file_dialog_model.cpp src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp src/app_icon.cpp -o $@ $(LDFLAGS) $(STATIC_RUNTIME) $(SDL2_LIBS) $(PANGO_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+	$(CXX) $(CXXFLAGS) -include $(BUILD_INFO_HEADER) $(CODEC_DEFINES) $(SDL2_CFLAGS) $(PANGO_CFLAGS) $(CODEC_CFLAGS) -I$(BUILD_DIR) -Isrc -Ithird_party src/main.cpp src/file_list.cpp src/crop_selection_model.cpp src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp src/image.cpp src/image_processing.cpp src/image_processing_store.cpp src/clipboard.cpp src/settings.cpp src/sort_mode.cpp src/desktop_applications.cpp src/desktop_association.cpp src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_resampler.cpp src/image_info_model.cpp src/spectrum_model.cpp src/file_dialog_model.cpp src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp src/app_icon.cpp -o $@ $(LDFLAGS) $(STATIC_RUNTIME) $(SDL2_LIBS) $(PANGO_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+	@for stale_header in "$(BUILD_DIR)"/build-info-*.h; do \
+		[ -f "$$stale_header" ] || continue; \
+		[ "$$stale_header" = "$(BUILD_INFO_HEADER)" ] || rm -f "$$stale_header"; \
+	done
 
 run: $(TARGET)
 	$(TARGET) $(ARGS)
@@ -98,13 +108,23 @@ test: $(TEST_TARGET)
 	$(TEST_TARGET)
 
 test-ui: $(TARGET)
+	@version_output=$$($(TARGET) --version); \
+	expected_version="JPEGView Linux $(VERSION)"; \
+	if [ "$$version_output" != "$$expected_version" ]; then \
+		echo "Version metadata mismatch: expected '$$expected_version', got '$$version_output'" >&2; \
+		exit 1; \
+	fi
 	./tests/ui_smoke.sh $(TARGET)
 
+test-version:
+	sh tests/version_test.sh
+
 test-shell:
-	sh -n tests/ui_smoke.sh package-appimage.sh package-deb.sh embed-icon.sh docker-build.sh ../set_env.sh
+	sh -n tests/ui_smoke.sh tests/version_test.sh package-appimage.sh package-deb.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh ../set_env.sh
+	$(MAKE) test-version
 	bash -n release-assets.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck tests/ui_smoke.sh package-appimage.sh package-deb.sh embed-icon.sh docker-build.sh release-assets.sh ../set_env.sh; \
+		shellcheck tests/ui_smoke.sh tests/version_test.sh package-appimage.sh package-deb.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh release-assets.sh ../set_env.sh; \
 	else \
 		echo "ShellCheck: SKIP (shellcheck not installed)"; \
 	fi

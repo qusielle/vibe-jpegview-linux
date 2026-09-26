@@ -2,14 +2,14 @@
 set -eu
 
 MODE=${1:-appimage}
-VERSION=${2:-1.3.46-linux.1}
+VERSION=${2:-${JPEGVIEW_VERSION:-0.0.0+unknown}}
 OUTPUT_DIR=${OUTPUT_DIR:-/out}
 
 mkdir -p "$OUTPUT_DIR"
 
 case "$MODE" in
 	binary)
-		make -C /src/linux BUILD_DIR="$OUTPUT_DIR" all
+		make -C /src/linux BUILD_DIR="$OUTPUT_DIR" VERSION="$VERSION" all
 		printf 'Binary: %s/jpegview-linux\n' "$OUTPUT_DIR"
 		;;
 	appimage)

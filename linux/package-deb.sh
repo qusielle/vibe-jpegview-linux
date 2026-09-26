@@ -3,7 +3,10 @@ set -eu
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 REPO_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd)
-VERSION=${1:-1.3.46-linux.1}
+VERSION=${1:-}
+if [ -z "$VERSION" ]; then
+	VERSION=$(cd -- "$REPO_DIR" && sh "$SCRIPT_DIR/version.sh")
+fi
 UBUNTU_VERSION=${2:-}
 OUTPUT_DIR=${OUTPUT_DIR:-/out}
 
@@ -38,7 +41,7 @@ PACKAGE_ROOT="$WORK_DIR/package"
 BINARY="$BUILD_DIR/jpegview-linux"
 OUTPUT=${OUTPUT:-$OUTPUT_DIR/jpegview-linux_${VERSION}_ubuntu${UBUNTU_VERSION}_amd64.deb}
 
-make -C "$SCRIPT_DIR" BUILD_DIR="$BUILD_DIR" all
+make -C "$SCRIPT_DIR" BUILD_DIR="$BUILD_DIR" VERSION="$VERSION" all
 
 if command -v patchelf >/dev/null 2>&1; then
 	patchelf --remove-rpath "$BINARY"
