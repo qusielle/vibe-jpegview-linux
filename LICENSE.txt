@@ -1,4 +1,4 @@
-JPEGView <https://github.com/sylikc/jpegview/> 
+JPEGView <https://github.com/qusielle/vibe-jpegview-linux>
 Lean and fast image viewer with minimal GUI
 
 Copyright (C) 2020-2023 Kevin M (sylikc) <https://github.com/sylikc>
