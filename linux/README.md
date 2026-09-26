@@ -593,7 +593,8 @@ Windows-only commands are shown disabled rather than being silently ignored.
 Platform-independent behavior is split into small modules under `src/` and exercised by the core
 suite; `main.cpp` is the SDL window, rendering, and event-dispatch composition layer. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for module ownership, the completed Viewer extractions, and the
-ordered refactoring backlog.
+ordered refactoring backlog. Possible future user-facing work is tracked separately in
+[`FEATURE_CANDIDATES.md`](FEATURE_CANDIDATES.md); those ideas are not commitments or a release plan.
 
 ## Screenshots
 
