@@ -30,6 +30,7 @@
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "file_dialog_model.h"
+#include "recent_files.h"
 #include "system_font.h"
 #include "spectrum_model.h"
 #include "desktop_association.h"
@@ -387,6 +388,10 @@ public:
 		PresentStartupFrame();
 		SDL_PumpEvents();
 
+		recentFilesPath_ = jpegview_linux::RecentFilesDatabasePath();
+		recentFilesLoaded_ = recentFilesPath_.empty() ||
+			jpegview_linux::LoadRecentFiles(recentFilesPath_, recentFiles_);
+
 		const jpegview_linux::FileList::SortMode initialSortMode = fileList_.GetSorting();
 		const bool initialSortAscending = fileList_.IsSortedAscending();
 		fileList_ = jpegview_linux::FileList(startupInputs_, initialSortMode,
@@ -488,8 +493,36 @@ private:
 		PreviewDivider,
 	};
 
+	enum class FileDialogTab {
+		Browse,
+		Recents,
+	};
+
+	jpegview_linux::FileDialogModel& ActiveFileDialogModel() {
+		return fileDialogTab_ == FileDialogTab::Recents ? recentFileDialogModel_ : fileDialogModel_;
+	}
+
+	const jpegview_linux::FileDialogModel& ActiveFileDialogModel() const {
+		return fileDialogTab_ == FileDialogTab::Recents ? recentFileDialogModel_ : fileDialogModel_;
+	}
+
+	bool FileDialogHasTabs() const {
+		return fileDialogOpen_ && !fileDialogSave_ && !fileDialogParameterRestore_;
+	}
+
 	void Cleanup() {
 		SaveSettings();
+		if (recentFilesLoaded_) {
+			if (!clipboardMode_ && !loadedFilePath_.empty() && !fileList_.Empty() &&
+				AbsoluteNormalized(fileList_.Current()) == loadedFilePath_) {
+				recentFiles_.RememberViewport(loadedFilePath_,
+					clipboardReturnViewport_.value_or(viewport_.Snapshot()));
+			}
+			if (!recentFilesPath_.empty() &&
+				!jpegview_linux::SaveRecentFiles(recentFilesPath_, recentFiles_)) {
+				std::cerr << "Could not save recent-file history to " << recentFilesPath_ << '\n';
+			}
+		}
 		ClearFileDialogPreview();
 		if (clipboardMode_) {
 			std::error_code removeError;
@@ -726,9 +759,30 @@ private:
 		if (fileList_.Empty()) {
 			return false;
 		}
+		const fs::path targetPath = AbsoluteNormalized(fileList_.Current());
+		const bool pathChanged = loadedFilePath_.empty() || targetPath != loadedFilePath_;
+		if (!clipboardMode_ && !loadedFilePath_.empty() && pathChanged) {
+			recentFiles_.RememberViewport(loadedFilePath_,
+				clipboardReturnViewport_.value_or(viewport_.Snapshot()));
+		}
+		jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.NavigationSnapshot();
+		if (!clipboardMode_) {
+			if (clipboardReturnViewport_.has_value() && targetPath == loadedFilePath_) {
+				viewportSnapshot = *clipboardReturnViewport_;
+			} else if (pathChanged) {
+				const std::optional<jpegview_linux::ViewportSnapshot> savedViewport =
+					recentFiles_.FindViewport(targetPath);
+				if (savedViewport.has_value()) viewportSnapshot = *savedViewport;
+			} else {
+				viewportSnapshot = viewport_.Snapshot();
+			}
+		}
+		const auto failedLoad = [this] {
+			if (!clipboardMode_) loadedFilePath_.clear();
+			return false;
+		};
 		ClearCropSelection();
 		SelectPictureLevelsForCurrentFile();
-		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.NavigationSnapshot();
 		metadata_ = {};
 		jpegComment_.clear();
 		ClearTransition();
@@ -791,7 +845,7 @@ private:
 					SetTitle(fileList_.Current().filename().string() +
 						" — decode failed: " + errorMessage);
 					std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
-					return false;
+					return failedLoad();
 				}
 				imageCache_.Store(fileList_.Current(), loaded);
 				decoded = std::move(loaded);
@@ -819,9 +873,9 @@ private:
 				}
 			}
 			if (!cachedDisplay || decoded->frames.size() > 1) {
-				if (!MaterializeCurrentPixels()) return false;
+				if (!MaterializeCurrentPixels()) return failedLoad();
 			}
-			if (!cachedDisplay && !UpdateTexture()) return false;
+			if (!cachedDisplay && !UpdateTexture()) return failedLoad();
 			playback_.ConfigureImage(std::move(animationFrameDelaysMs), decoded->loopCount,
 				decoded->animation, now);
 		} else {
@@ -831,6 +885,11 @@ private:
 		SetTitle();
 		PrepareThumbnailPreload();
 		PrepareImagePrefetch(prefetchDirection);
+		if (!clipboardMode_) {
+			recentFiles_.Add(targetPath);
+			loadedFilePath_ = targetPath;
+			clipboardReturnViewport_.reset();
+		}
 		return true;
 	}
 
@@ -1464,6 +1523,8 @@ private:
 		fileDialogLosslessCropRect_ = {};
 		fileDialogFilename_.clear();
 		fileDialogModel_.Clear();
+		recentFileDialogModel_.Clear();
+		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogDirectorySummaries_.clear();
 	}
 
@@ -2206,6 +2267,12 @@ private:
 			return;
 		}
 
+		if (!clipboardMode_) {
+			clipboardReturnViewport_ = viewport_.Snapshot();
+			if (!loadedFilePath_.empty()) {
+				recentFiles_.RememberViewport(loadedFilePath_, *clipboardReturnViewport_);
+			}
+		}
 		RestoreClipboardImage();
 		fileListBeforeClipboard_ = std::make_unique<jpegview_linux::FileList>(std::move(fileList_));
 		fileList_ = jpegview_linux::FileList({temporaryFile.string()});
@@ -4398,6 +4465,13 @@ private:
 		return FileDialogRect().y + 112;
 	}
 
+	SDL_Rect FileDialogTabRect(FileDialogTab tab) const {
+		const SDL_Rect dialog = FileDialogRect();
+		const int width = tab == FileDialogTab::Browse ? 62 : 70;
+		const int x = dialog.x + dialog.w - (tab == FileDialogTab::Browse ? 150 : 82);
+		return SDL_Rect{x, dialog.y + 8, width, 28};
+	}
+
 	int FileDialogVisibleRows() const {
 		return std::max(1, (FileDialogRect().h - 168) / 26);
 	}
@@ -4417,7 +4491,8 @@ private:
 	}
 
 	bool FileDialogCanSort() const {
-		return !fileDialogSave_ && !fileDialogParameterRestore_;
+		return !fileDialogSave_ && !fileDialogParameterRestore_ &&
+			fileDialogTab_ == FileDialogTab::Browse;
 	}
 
 	SDL_Rect FileDialogListRect() const {
@@ -4467,8 +4542,9 @@ private:
 	}
 
 	void KeepFileDialogSelectionVisible() {
-		const int selected = fileDialogModel_.SelectedIndex();
-		if (selected >= 0) fileDialogModel_.Select(selected, FileDialogVisibleRows());
+		jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
+		const int selected = model.SelectedIndex();
+		if (selected >= 0) model.Select(selected, FileDialogVisibleRows());
 	}
 
 	void ResizeFileDialog(int x, int y) {
@@ -4566,12 +4642,13 @@ private:
 		const SDL_Rect previewRect = FileDialogPreviewRect();
 		const jpegview_linux::FileDialogPreviewSize previewSize =
 			jpegview_linux::FileDialogPreviewImageSize(previewRect.w, previewRect.h);
-		const FileDialogEntry* selected = fileDialogModel_.SelectedEntry();
+		jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
+		const FileDialogEntry* selected = model.SelectedEntry();
 		std::string contentKey;
 		std::string requestKey;
 		if (selected != nullptr) {
 			contentKey = selected->path.string() + (selected->directory ? "\nD\n" : "\nF\n") +
-				(fileDialogModel_.SortMode() == jpegview_linux::FileDialogSortMode::Name ? "N" : "M") +
+				(model.SortMode() == jpegview_linux::FileDialogSortMode::Name ? "N" : "M") +
 				"\n";
 			requestKey = contentKey + std::to_string(previewSize.width) + "x" +
 				std::to_string(previewSize.height);
@@ -4595,7 +4672,7 @@ private:
 				fileDialogPreviewGeneration_ = 0;
 			} else {
 				fileDialogPreviewGeneration_ = fileDialogPreviewLoader_.Request(selected->path,
-					selected->directory, fileDialogModel_.SortMode(), previewSize.width,
+					selected->directory, model.SortMode(), previewSize.width,
 					previewSize.height);
 				if (!sameContent || fileDialogPreviewTexture_ == nullptr) {
 					fileDialogPreviewMessage_ = "Loading preview...";
@@ -4720,10 +4797,19 @@ private:
 		fileDialogSave_ = false;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = false;
+		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogSaveFullSize_ = true;
 		PositionFileDialogGeometry();
 		fileDialogFilename_.clear();
 		fileDialogModel_.Begin(false);
+		recentFileDialogModel_.Begin(false);
+		std::vector<FileDialogEntry> recentEntries;
+		recentEntries.reserve(recentFiles_.Files().size());
+		for (const fs::path& path : recentFiles_.Files()) {
+			recentEntries.push_back(FileDialogEntry{path, false, false});
+		}
+		recentFileDialogModel_.SetEntriesInOrder(std::move(recentEntries), true);
+		recentFileDialogModel_.SelectFirst(FileDialogVisibleRows());
 		fileDialogMessage_.clear();
 		fileDialogOpen_ = true;
 		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
@@ -4736,12 +4822,19 @@ private:
 		SDL_StartTextInput();
 	}
 
+	void SwitchFileDialogTab(FileDialogTab tab) {
+		if (!FileDialogHasTabs() || fileDialogTab_ == tab) return;
+		fileDialogTab_ = tab;
+		InvalidateFileDialogPreview();
+	}
+
 	void OpenSaveFileDialog(bool fullSize) {
 		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
 		fs::path directory = fileList_.Current().parent_path();
 		if (directory.empty()) directory = fs::current_path();
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = true;
+		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = false;
 		fileDialogLosslessCrop_ = false;
@@ -4769,6 +4862,7 @@ private:
 		}
 		fileDialogDirectory_ = database.parent_path();
 		fileDialogSave_ = true;
+		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogParameterBackup_ = true;
 		fileDialogParameterRestore_ = false;
 		fileDialogSaveFullSize_ = true;
@@ -4794,6 +4888,7 @@ private:
 		}
 		fileDialogDirectory_ = database.parent_path();
 		fileDialogSave_ = false;
+		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = true;
 		fileDialogSaveFullSize_ = true;
@@ -4820,8 +4915,9 @@ private:
 		const SDL_Rect listRect = FileDialogListRect();
 		if (!PointInRect(x, y, listRect)) return -1;
 		const int row = (y - listRect.y) / 26;
-		const int item = fileDialogModel_.Scroll() + row;
-		return item >= 0 && item < static_cast<int>(fileDialogModel_.Entries().size()) ? item : -1;
+		const jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
+		const int item = model.Scroll() + row;
+		return item >= 0 && item < static_cast<int>(model.Entries().size()) ? item : -1;
 	}
 
 	void NavigateFileDialogDirectory(const fs::path& directory, bool returningToParent) {
@@ -4838,17 +4934,22 @@ private:
 	}
 
 	void ActivateFileDialogSelection(bool openDirectoryImmediately = false) {
+		jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
 		if (fileDialogSave_ && fileDialogOverwriteConfirmed_ && !fileDialogFilename_.empty()) {
 			SaveImageFromDialog();
 			return;
 		}
-		if (fileDialogSave_ && fileDialogModel_.SelectedIndex() < 0) {
+		if (fileDialogSave_ && model.SelectedIndex() < 0) {
 			SaveImageFromDialog();
 			return;
 		}
-		const FileDialogEntry* selected = fileDialogModel_.SelectedEntry();
+		const FileDialogEntry* selected = model.SelectedEntry();
 		if (selected == nullptr) return;
 		const FileDialogEntry entry = *selected;
+		if (fileDialogTab_ == FileDialogTab::Recents) {
+			OpenDroppedFiles({entry.path.string()});
+			return;
+		}
 		if (entry.directory) {
 			if (openDirectoryImmediately && !fileDialogSave_ && !fileDialogParameterRestore_) {
 				OpenDroppedFiles({entry.path.string()});
@@ -4874,6 +4975,7 @@ private:
 			running = false;
 			break;
 		case SDL_KEYDOWN: {
+			jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
 			const bool repeatableSelectionKey = event.key.keysym.sym == SDLK_UP ||
 				event.key.keysym.sym == SDLK_DOWN || event.key.keysym.sym == SDLK_PAGEUP ||
 				event.key.keysym.sym == SDLK_PAGEDOWN || event.key.keysym.sym == SDLK_HOME ||
@@ -4882,30 +4984,31 @@ private:
 			if (event.key.keysym.sym == SDLK_ESCAPE) {
 				CloseFileDialog();
 			} else if (event.key.keysym.sym == SDLK_UP) {
-				fileDialogModel_.MoveSelection(-1, FileDialogVisibleRows());
+				model.MoveSelection(-1, FileDialogVisibleRows());
 			} else if (event.key.keysym.sym == SDLK_DOWN) {
-				fileDialogModel_.MoveSelection(1, FileDialogVisibleRows());
+				model.MoveSelection(1, FileDialogVisibleRows());
 			} else if (event.key.keysym.sym == SDLK_PAGEUP) {
-				fileDialogModel_.MoveSelectionByPage(-1, FileDialogVisibleRows());
+				model.MoveSelectionByPage(-1, FileDialogVisibleRows());
 			} else if (event.key.keysym.sym == SDLK_PAGEDOWN) {
-				fileDialogModel_.MoveSelectionByPage(1, FileDialogVisibleRows());
+				model.MoveSelectionByPage(1, FileDialogVisibleRows());
 			} else if (event.key.keysym.sym == SDLK_HOME) {
-				fileDialogModel_.SelectFirst(FileDialogVisibleRows());
+				model.SelectFirst(FileDialogVisibleRows());
 			} else if (event.key.keysym.sym == SDLK_END) {
-				fileDialogModel_.SelectLast(FileDialogVisibleRows());
+				model.SelectLast(FileDialogVisibleRows());
 			} else if (event.key.keysym.sym == SDLK_RETURN) {
 				const bool ctrl = (event.key.keysym.mod & 0x00C0u) != 0;
 				ActivateFileDialogSelection(ctrl);
 			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
-				if (fileDialogSave_ && fileDialogModel_.SelectedIndex() < 0 &&
+				if (fileDialogSave_ && model.SelectedIndex() < 0 &&
 					jpegview_linux::EraseLastUtf8CodePoint(fileDialogFilename_)) {
 					fileDialogMessage_.clear();
 					fileDialogOverwriteConfirmed_ = false;
 					break;
 				}
-				if (!fileDialogSave_ && fileDialogModel_.BackspaceFilter()) {
+				if (!fileDialogSave_ && model.BackspaceFilter()) {
 					break;
 				}
+				if (fileDialogTab_ == FileDialogTab::Recents) break;
 				const fs::path parent = fileDialogDirectory_.parent_path();
 				if (!parent.empty() && parent != fileDialogDirectory_) {
 					NavigateFileDialogDirectory(parent, true);
@@ -4916,11 +5019,11 @@ private:
 		case SDL_TEXTINPUT:
 			if (fileDialogSave_) {
 				fileDialogFilename_ += event.text.text;
-				fileDialogModel_.ClearSelection();
+				ActiveFileDialogModel().ClearSelection();
 				fileDialogMessage_.clear();
 				fileDialogOverwriteConfirmed_ = false;
 			} else {
-				fileDialogModel_.AppendFilter(event.text.text);
+				ActiveFileDialogModel().AppendFilter(event.text.text);
 			}
 			break;
 		case SDL_MOUSEWHEEL: {
@@ -4930,9 +5033,9 @@ private:
 			int wheelTicks = std::clamp(event.wheel.y, -100, 100);
 			if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) wheelTicks = -wheelTicks;
 			if (wheelTicks == 0) break;
-			fileDialogModel_.ScrollBy(-wheelTicks * 3, FileDialogVisibleRows());
+			ActiveFileDialogModel().ScrollBy(-wheelTicks * 3, FileDialogVisibleRows());
 			const int item = FileDialogItemAt(lastMouseX_, lastMouseY_);
-			if (item >= 0) fileDialogModel_.Select(item, FileDialogVisibleRows());
+			if (item >= 0) ActiveFileDialogModel().Select(item, FileDialogVisibleRows());
 			break;
 		}
 		case SDL_MOUSEMOTION: {
@@ -4945,7 +5048,7 @@ private:
 			}
 			const int item = FileDialogItemAt(event.motion.x, event.motion.y);
 			if (item >= 0) {
-				fileDialogModel_.Select(item, FileDialogVisibleRows());
+				ActiveFileDialogModel().Select(item, FileDialogVisibleRows());
 			}
 			UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
 			break;
@@ -4957,6 +5060,10 @@ private:
 			if (event.button.button == SDL_BUTTON_LEFT &&
 				BeginFileDialogPreviewResize(lastMouseX_, lastMouseY_)) break;
 			const int item = FileDialogItemAt(event.button.x, event.button.y);
+			const bool browseTabClicked = FileDialogHasTabs() && PointInRect(event.button.x,
+				event.button.y, FileDialogTabRect(FileDialogTab::Browse));
+			const bool recentsTabClicked = FileDialogHasTabs() && PointInRect(event.button.x,
+				event.button.y, FileDialogTabRect(FileDialogTab::Recents));
 			const bool inputClicked = PointInRect(event.button.x, event.button.y, FileDialogInputRect());
 			const bool sortClicked = FileDialogCanSort() &&
 				PointInRect(event.button.x, event.button.y, FileDialogSortRect());
@@ -4964,17 +5071,22 @@ private:
 				PointInRect(event.button.x, event.button.y, FileDialogPreviewRect());
 			if (event.button.button == SDL_BUTTON_RIGHT ||
 				(event.button.button == SDL_BUTTON_LEFT && item < 0 && !inputClicked && !sortClicked &&
-					!previewClicked)) {
+					!previewClicked && !browseTabClicked && !recentsTabClicked)) {
 				CloseFileDialog();
+			} else if (event.button.button == SDL_BUTTON_LEFT && browseTabClicked) {
+				SwitchFileDialogTab(FileDialogTab::Browse);
+			} else if (event.button.button == SDL_BUTTON_LEFT && recentsTabClicked) {
+				SwitchFileDialogTab(FileDialogTab::Recents);
 			} else if (event.button.button == SDL_BUTTON_LEFT && sortClicked) {
 				fileDialogModel_.ToggleSortMode(FileDialogVisibleRows());
 			} else if (event.button.button == SDL_BUTTON_LEFT && inputClicked) {
-				if (fileDialogSave_) fileDialogModel_.ClearSelection();
+				if (fileDialogSave_) ActiveFileDialogModel().ClearSelection();
 			} else if (event.button.button == SDL_BUTTON_LEFT && previewClicked) {
 				// The preview is informational; clicking it leaves the selection alone.
 			} else if (event.button.button == SDL_BUTTON_LEFT) {
-				fileDialogModel_.Select(item, FileDialogVisibleRows());
-				const FileDialogEntry* selected = fileDialogModel_.SelectedEntry();
+				jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
+				model.Select(item, FileDialogVisibleRows());
+				const FileDialogEntry* selected = model.SelectedEntry();
 				if (fileDialogSave_ && selected != nullptr && !selected->directory) {
 					fileDialogFilename_ = selected->path.filename().string();
 				}
@@ -5002,9 +5114,26 @@ private:
 		DrawText(fileDialogLosslessCrop_ ? "Save lossless JPEG crop" :
 			(fileDialogParameterBackup_ ? "Back up picture-level database" :
 			(fileDialogParameterRestore_ ? "Restore picture-level database" :
-				(fileDialogSave_ ? "Save processed image" : "Open image"))),
+			(fileDialogSave_ ? "Save processed image" : "Open image"))),
 			dialog.x + 18, dialog.y + 14, kUiTextScale);
-		DrawText(fileDialogDirectory_.string(), dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
+		if (FileDialogHasTabs()) {
+			for (const FileDialogTab tab : {FileDialogTab::Browse, FileDialogTab::Recents}) {
+				const SDL_Rect tabRect = FileDialogTabRect(tab);
+				const bool active = fileDialogTab_ == tab;
+				SDL_SetRenderDrawColor(renderer_, active ? 45 : 30, active ? 72 : 30,
+					active ? 104 : 30, 230);
+				SDL_RenderFillRect(renderer_, &tabRect);
+				DrawRect(tabRect, active ? 100 : 75, active ? 130 : 75, active ? 165 : 75);
+				const std::string label = tab == FileDialogTab::Browse ? "Browse" : "Recents";
+				const int labelX = tabRect.x + std::max(4,
+					(tabRect.w - TextWidth(label, kUiTextScale)) / 2);
+				DrawText(label, labelX, tabRect.y + 7, kUiTextScale,
+					active ? 235 : 175, active ? 240 : 185, active ? 250 : 195);
+			}
+		}
+		DrawText(fileDialogTab_ == FileDialogTab::Recents ?
+			"One recent image per folder" : fileDialogDirectory_.string(),
+			dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
 		DrawText(fileDialogSave_ ? "File name" :
 			(fileDialogParameterRestore_ ? "Backup filter" : "Filter"),
 			dialog.x + 18, dialog.y + 68,
@@ -5014,7 +5143,7 @@ private:
 			SDL_SetRenderDrawColor(renderer_, 36, 36, 36, 230);
 			SDL_RenderFillRect(renderer_, &sortRect);
 			DrawRect(sortRect, 100, 130, 165);
-			const std::string sortLabel = fileDialogModel_.SortMode() == jpegview_linux::FileDialogSortMode::Name ?
+			const std::string sortLabel = ActiveFileDialogModel().SortMode() == jpegview_linux::FileDialogSortMode::Name ?
 				"Sort: Name" : "Sort: Mod.date";
 			const int labelX = sortRect.x + std::max(6, (sortRect.w - TextWidth(sortLabel, kUiTextScale)) / 2);
 			DrawText(sortLabel, labelX, sortRect.y + 3, kUiTextScale, 210, 220, 230);
@@ -5023,41 +5152,60 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
 		SDL_RenderFillRect(renderer_, &inputRect);
 		DrawRect(inputRect, 100, 130, 165);
-		const std::string& inputText = fileDialogSave_ ? fileDialogFilename_ : fileDialogModel_.Filter();
+		const std::string& inputText = fileDialogSave_ ? fileDialogFilename_ : ActiveFileDialogModel().Filter();
 		DrawText(ClipInputText(inputText, inputRect.w - 20), inputRect.x + 10, inputRect.y + 6, kUiTextScale);
 
 		const int listTop = FileDialogListTop();
 		const int rows = FileDialogVisibleRows();
 		const SDL_Rect listRect = FileDialogListRect();
+		const jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
 		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 210);
 		SDL_RenderFillRect(renderer_, &listRect);
 		DrawRect(listRect, 75, 75, 75);
 		for (int row = 0; row < rows; ++row) {
-			const int item = fileDialogModel_.Scroll() + row;
-			if (item >= static_cast<int>(fileDialogModel_.Entries().size())) break;
-			const FileDialogEntry& entry = fileDialogModel_.Entries()[item];
+			const int item = model.Scroll() + row;
+			if (item >= static_cast<int>(model.Entries().size())) break;
+			const FileDialogEntry& entry = model.Entries()[item];
 			const int rowTop = listTop + row * 26;
-			if (item == fileDialogModel_.SelectedIndex()) {
+			if (item == model.SelectedIndex()) {
 				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
 				SDL_Rect selection{listRect.x + 2, rowTop + 1, listRect.w - 4, 24};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
-			std::string summaryText;
-			if (FileDialogCanSort() && entry.directory && !entry.parent) {
-				const auto summary = fileDialogDirectorySummaries_.find(entry.path.string());
-				summaryText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
-					jpegview_linux::FormatDirectorySummary(summary->second);
-				summaryText = ClipText(summaryText, std::max(1, listRect.w / 2 - 20));
+			if (fileDialogTab_ == FileDialogTab::Recents) {
+				const int leftX = listRect.x + 10;
+				const int pathWidth = std::max(1, (listRect.w - 30) / 2);
+				const int filenameWidth = std::max(1, listRect.w - 30 - pathWidth);
+				const std::string parent = ClipText(entry.path.parent_path().string(), pathWidth);
+				const std::string filename = ClipText(entry.path.filename().string(), filenameWidth);
+				const int filenameX = listRect.x + listRect.w - 10 - TextWidth(filename, kUiTextScale);
+				DrawText(parent, leftX, rowTop + 5, kUiTextScale, 165, 175, 190);
+				DrawText(filename, filenameX, rowTop + 5, kUiTextScale, 235, 235, 235);
+			} else {
+				std::string summaryText;
+				if (FileDialogCanSort() && entry.directory && !entry.parent) {
+					const auto summary = fileDialogDirectorySummaries_.find(entry.path.string());
+					summaryText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
+						jpegview_linux::FormatDirectorySummary(summary->second);
+					summaryText = ClipText(summaryText, std::max(1, listRect.w / 2 - 20));
+				}
+				const int summaryWidth = TextWidth(summaryText, kUiTextScale);
+				const int summaryX = listRect.x + listRect.w - 10 - summaryWidth;
+				const int labelWidth = summaryText.empty() ? listRect.w - 20 :
+					std::max(1, summaryX - (listRect.x + 10) - 12);
+				DrawText(ClipText(FileDialogEntryLabel(entry), labelWidth), listRect.x + 10,
+					rowTop + 5, kUiTextScale,
+					entry.directory ? 185 : 235, entry.directory ? 205 : 235, entry.directory ? 235 : 235);
+				if (!summaryText.empty()) {
+					DrawText(summaryText, summaryX, rowTop + 5, kUiTextScale, 155, 175, 195);
+				}
 			}
-			const int summaryWidth = TextWidth(summaryText, kUiTextScale);
-			const int summaryX = listRect.x + listRect.w - 10 - summaryWidth;
-			const int labelWidth = summaryText.empty() ? listRect.w - 20 :
-				std::max(1, summaryX - (listRect.x + 10) - 12);
-			DrawText(ClipText(FileDialogEntryLabel(entry), labelWidth), listRect.x + 10, rowTop + 5, kUiTextScale,
-				entry.directory ? 185 : 235, entry.directory ? 205 : 235, entry.directory ? 235 : 235);
-			if (!summaryText.empty()) {
-				DrawText(summaryText, summaryX, rowTop + 5, kUiTextScale, 155, 175, 195);
-			}
+		}
+		if (model.Entries().empty() && fileDialogTab_ == FileDialogTab::Recents) {
+			const std::string emptyMessage = model.Filter().empty() ?
+				"No recent files" : "No recent files match this filter";
+			DrawText(emptyMessage, listRect.x + 12, listRect.y + 10, kUiTextScale,
+				165, 175, 190);
 		}
 		if (FileDialogHasPreviewColumn()) {
 			RenderFileDialogPreview(FileDialogPreviewRect());
@@ -5076,7 +5224,9 @@ private:
 		DrawText(fileDialogSave_ ? "Enter: Save   Backspace: Edit/parent   Esc: Cancel" :
 			(fileDialogParameterRestore_ ?
 				"Type: Filter   Enter: Restore backup   Backspace: Parent   Esc: Cancel" :
-				"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel"),
+				(fileDialogTab_ == FileDialogTab::Recents ?
+					"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open recent   Esc: Cancel" :
+					"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel")),
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 		const SDL_Rect resizeHandle = FileDialogResizeHandleRect();
 		for (int offset = 5; offset <= 13; offset += 4) {
@@ -6306,6 +6456,11 @@ private:
 
 	jpegview_linux::FileList fileList_;
 	std::vector<std::string> startupInputs_;
+	jpegview_linux::RecentFiles recentFiles_;
+	fs::path recentFilesPath_;
+	fs::path loadedFilePath_;
+	std::optional<jpegview_linux::ViewportSnapshot> clipboardReturnViewport_;
+	bool recentFilesLoaded_ = false;
 	std::shared_ptr<jpegview_linux::SharedCacheBudget> cacheBudget_ =
 		std::make_shared<jpegview_linux::SharedCacheBudget>(
 			jpegview_linux::CacheBytesFromMiB(jpegview_linux::kDefaultCacheSizeMiB));
@@ -6443,6 +6598,7 @@ private:
 	int fileDialogHeight_ = jpegview_linux::kDefaultFileDialogHeight;
 	double fileDialogPreviewRatio_ = 0.0;
 	FileDialogDragMode fileDialogDragMode_ = FileDialogDragMode::None;
+	FileDialogTab fileDialogTab_ = FileDialogTab::Browse;
 	int fileDialogDragStartX_ = 0;
 	int fileDialogDragStartY_ = 0;
 	int fileDialogDragStartPreviewWidth_ = 0;
@@ -6455,6 +6611,7 @@ private:
 	std::string fileDialogFilename_;
 	std::string fileDialogMessage_;
 	jpegview_linux::FileDialogModel fileDialogModel_;
+	jpegview_linux::FileDialogModel recentFileDialogModel_;
 	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;
 	jpegview_linux::FileDialogPreviewLoader fileDialogPreviewLoader_;
 	std::unordered_map<std::string, jpegview_linux::DirectorySummary> fileDialogDirectorySummaries_;

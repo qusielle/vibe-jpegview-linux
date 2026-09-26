@@ -106,13 +106,15 @@ bool EraseLastUtf8CodePoint(std::string& text) {
 }
 
 std::vector<FileDialogEntry> FilterFileDialogEntries(
-	const std::vector<FileDialogEntry>& entries, std::string_view filter) {
+	const std::vector<FileDialogEntry>& entries, std::string_view filter, bool matchFullPath) {
 	if (filter.empty()) return entries;
 	const std::string loweredFilter = Lower(std::string(filter));
 	std::vector<FileDialogEntry> filtered;
 	filtered.reserve(entries.size());
 	for (const FileDialogEntry& entry : entries) {
-		if (entry.parent || Lower(entry.path.filename().string()).find(loweredFilter) != std::string::npos) {
+		const std::string candidate = matchFullPath ? entry.path.string() :
+			entry.path.filename().string();
+		if (entry.parent || Lower(candidate).find(loweredFilter) != std::string::npos) {
 			filtered.push_back(entry);
 		}
 	}
@@ -149,6 +151,7 @@ void FileDialogModel::Begin(bool saveDialog) {
 	entries_.clear();
 	selected_ = -1;
 	scroll_ = 0;
+	matchFullPath_ = false;
 }
 
 void FileDialogModel::Clear() {
@@ -157,7 +160,14 @@ void FileDialogModel::Clear() {
 
 void FileDialogModel::SetEntries(std::vector<FileDialogEntry> entries) {
 	allEntries_ = std::move(entries);
+	matchFullPath_ = false;
 	SortFileDialogEntries(allEntries_, saveDialog_ ? FileDialogSortMode::Name : sortMode_);
+	ApplyFilter();
+}
+
+void FileDialogModel::SetEntriesInOrder(std::vector<FileDialogEntry> entries, bool matchFullPath) {
+	allEntries_ = std::move(entries);
+	matchFullPath_ = matchFullPath;
 	ApplyFilter();
 }
 
@@ -239,7 +249,8 @@ const FileDialogEntry* FileDialogModel::SelectedEntry() const {
 }
 
 void FileDialogModel::ApplyFilter() {
-	entries_ = FilterFileDialogEntries(allEntries_, saveDialog_ ? std::string_view{} : std::string_view(filter_));
+	entries_ = FilterFileDialogEntries(allEntries_,
+		saveDialog_ ? std::string_view{} : std::string_view(filter_), matchFullPath_);
 	scroll_ = 0;
 	if (entries_.empty()) {
 		selected_ = -1;

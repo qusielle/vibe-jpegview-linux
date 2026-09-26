@@ -105,7 +105,15 @@ they support.
    and the mouse wheel scrolls an overflowing file list. Dialog dimensions and the preview/list
    proportion are preserved between runs. The preview image is resampled to the pane's usable area
    after resizing, using the thumbnail panel's source-area antialiasing. Preview decoding runs in
-   the background; its temporary pixels stay outside the viewer caches. It also provides move-to-trash
+   the background; its temporary pixels stay outside the viewer caches. Open dialogs also have a
+   **Recents** tab with the same preview pane. It lists the most recently opened image from each
+   parent folder, with the folder path on the left and filename on the right; its filter matches
+   both path and filename. Browse and Recents keep their own selection and filter while switching.
+   A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode when it
+   is opened again; files without a saved view inherit the shared navigation mode. The recent-file
+   list and view snapshots are stored separately from settings at
+   `${XDG_STATE_HOME:-$HOME/.local/state}/jpegview-linux/recent-files.db` and are written on
+   normal shutdown. The browser also provides move-to-trash
    confirmation, original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
    modification-date updates from now or EXIF, wallpaper integration, folder exploration, and
    lossless JPEG rotation through `jpegtran`. The **Open image with** submenu discovers freedesktop
@@ -174,14 +182,15 @@ they support.
 15. **Regression tests, modularization, and faster builds.** A dependency-light core suite and X11
     UI smoke suite now cover codecs, mutable image transforms/resampling, file ordering, browser
     state, settings, keyboard mappings, viewport geometry, overlays, context-menu columns and
-    repainting, thumbnail layout/persistence, transparency-pattern settings and alpha metadata,
-    resize and batch models, application discovery,
-    metadata, startup maximization, and held-key behavior. Viewer logic was extracted into focused
-    modules for image pixels, settings, sorting, input commands, viewport, open-dialog state,
-    overlays, thumbnails, fonts, image information, context menus, resize, batch operations, and
-    desktop applications. Shell and sanitizer targets supplement the regular suites. Docker builds
-    use distro codec packages where available and build only codecs missing from that Ubuntu
-    release; independent codec stages and the viewer/tests compile in parallel.
+    repainting, thumbnail layout/persistence, per-folder recent-file MRU and per-file viewport
+    persistence, Recents-tab filtering/preview/open interaction, transparency-pattern settings,
+    alpha metadata, resize and batch models, application discovery, startup maximization, and
+    held-key behavior. Viewer logic was extracted into focused modules for image pixels, settings,
+    sorting, input commands, viewport, recent-file history, open-dialog state, overlays, thumbnails,
+    fonts, image information, context menus, resize, batch operations, and desktop applications.
+    Shell and sanitizer targets supplement the regular suites. Docker builds use distro codec
+    packages where available and build only codecs missing from that Ubuntu release; independent
+    codec stages and the viewer/tests compile in parallel.
 
 ## Build
 
@@ -403,8 +412,13 @@ image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`â€
 slideshow at that interval. At actual size, Shift+Arrow pans the image in 48-pixel steps. F2
 toggles the top-left picture information panel; Shift+N or Ctrl+F2
 toggles the filename overlay, while N/M/C/Z select filename, modification-date, creation-date,
-or random sorting. Ctrl+O opens the native in-app file browser; type any part of a name to filter
-its files and folders case-insensitively, then press Enter to open the selected match. Ctrl+Return
+or random sorting. Ctrl+O opens the native in-app file browser with **Browse** and **Recents** tabs.
+Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
+The Recents tab contains one MRU image per parent folder, keeps its own selection
+and filter while switching tabs, and previews and opens the focused image with Enter or a
+double-click. The history also remembers each file's last zoom and fit/fill/actual-size mode for
+later opens. Type any part of a filename to filter the Browse listing, then press Enter to
+open the selected match. Ctrl+Return
 opens a selected folder immediately at its first compatible image without entering the folder in
 the dialog. The sorting control switches the listing between case-insensitive filename order and
 newest-first modification-date order. Backspace removes one complete UTF-8 character from the
@@ -450,14 +464,21 @@ commands, without saving that choice. The compact menu keeps common navigation, 
 fullscreen, and fit-window-to-image commands available. The menu also supports keyboard selection
 with Up/Down and Return; if it spans multiple
 columns to fit the window height, Left/Right moves between columns. Hovering over a lower
-navigation-panel button displays its Windows-style action hint. The selected fit/fill/actual-size or manual zoom mode is retained when navigating to the
-next or previous image and is saved between application runs, as is the last maximized or
+navigation-panel button displays its Windows-style action hint. Unseen files inherit the shared
+fit/fill/actual-size or manual mode as navigation proceeds; a previously visited file restores its
+own last view when opened again. The shared scale mode remains saved between application runs, as
+does the last maximized or
 normal window mode, the lower navigation panel's show/hide selection, and the F2/Ctrl+F2 overlay
 visibility choices. The navigation panel hover preference and current file-order mode/direction are
 also saved, together with the thumbnail-panel visibility and zoom-navigator preference. These
 settings are stored in
 `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. Esc stops an active slideshow first,
 matching the Windows default escape command, and otherwise quits.
+
+Recent paths and per-file view snapshots are kept in
+`${XDG_STATE_HOME:-$HOME/.local/state}/jpegview-linux/recent-files.db`, separately from settings.
+The recent-folder list is capped at 100 entries and the independent viewport history at 256 files.
+Only successfully loaded image paths enter history; clipboard-pasted temporary images are excluded.
 
 The zoom navigator is enabled by default. Set `show_zoom_navigator=0` in the settings file to hide
 it; the context-menu toggle updates this preference immediately.

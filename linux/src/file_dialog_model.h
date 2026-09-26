@@ -31,10 +31,12 @@ void SortFileDialogEntries(std::vector<FileDialogEntry>& entries, FileDialogSort
 // sequences are still removed without touching preceding valid text.
 bool EraseLastUtf8CodePoint(std::string& text);
 
-// Applies a case-insensitive filename substring filter. The parent-directory
-// entry is always retained so filtering never traps the user in a directory.
+// Applies a case-insensitive filename substring filter, or a full-path
+// substring filter when requested. The parent-directory entry is always
+// retained so filtering never traps the user in a directory.
 std::vector<FileDialogEntry> FilterFileDialogEntries(
-	const std::vector<FileDialogEntry>& entries, std::string_view filter);
+	const std::vector<FileDialogEntry>& entries, std::string_view filter,
+	bool matchFullPath = false);
 
 struct DirectorySummary {
 	std::size_t imageCount = 0;
@@ -65,6 +67,7 @@ public:
 	void Begin(bool saveDialog);
 	void Clear();
 	void SetEntries(std::vector<FileDialogEntry> entries);
+	void SetEntriesInOrder(std::vector<FileDialogEntry> entries, bool matchFullPath = false);
 
 	void AppendFilter(std::string_view text);
 	bool BackspaceFilter();
@@ -100,6 +103,7 @@ private:
 	int selected_ = -1;
 	int scroll_ = 0;
 	bool saveDialog_ = false;
+	bool matchFullPath_ = false;
 };
 
 struct DirectorySummaryResult {

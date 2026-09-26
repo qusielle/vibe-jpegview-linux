@@ -30,6 +30,7 @@
 #include "image_info_model.h"
 #include "spectrum_model.h"
 #include "file_dialog_model.h"
+#include "recent_files.h"
 #include "system_font.h"
 #include "bitmap_font.h"
 #include "playback_scheduler.h"
@@ -4159,6 +4160,151 @@ void TestFileDialogFiltering() {
 		jpegview_linux::FilterFileDialogEntries(entries, "missing");
 	Expect(unmatched.size() == 1 && unmatched[0].parent,
 		"open-dialog filter did not retain only the parent entry when nothing matched");
+	const std::vector<jpegview_linux::FileDialogEntry> pathMatch =
+		jpegview_linux::FilterFileDialogEntries({
+			{fs::path("/archive/summer-trip/photo.jpg"), false, false}}, "summer", true);
+	Expect(pathMatch.size() == 1,
+		"open-dialog filter did not match a directory in the full file path");
+	const std::vector<jpegview_linux::FileDialogEntry> browsePathDoesNotMatch =
+		jpegview_linux::FilterFileDialogEntries({
+			{fs::path("/archive/summer-trip/photo.jpg"), false, false}}, "summer");
+	Expect(browsePathDoesNotMatch.empty(),
+		"Browse filename filtering unexpectedly matched a folder path");
+}
+
+void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
+	TemporaryDirectory temporary;
+	const fs::path folderA = temporary.path() / "album-a";
+	const fs::path folderB = temporary.path() / "album-b";
+	const fs::path firstA = folderA / "first.jpg";
+	const fs::path secondA = folderA / "second.jpg";
+	const fs::path onlyB = folderB / "only.jpg";
+	jpegview_linux::RecentFiles recent;
+	recent.Add(firstA);
+	recent.Add(onlyB);
+	recent.Add(folderA / "nested" / ".." / "second.jpg");
+	const fs::path normalizedSecondA = fs::absolute(secondA).lexically_normal();
+	const fs::path normalizedOnlyB = fs::absolute(onlyB).lexically_normal();
+	Expect(recent.Files().size() == 2 && recent.Files()[0] == normalizedSecondA &&
+		recent.Files()[1] == normalizedOnlyB,
+		"recent files did not retain one normalized MRU image per parent folder");
+	recent.Add(secondA);
+	Expect(recent.Files().size() == 2 && recent.Files()[0] == normalizedSecondA,
+		"reopening a recent image duplicated its folder row instead of moving it to the front");
+
+	jpegview_linux::ViewportSnapshot snapshot{false, false, false, 2.75};
+	recent.RememberViewport(secondA, snapshot);
+	const auto restored = recent.FindViewport(normalizedSecondA);
+	Expect(restored.has_value() && !restored->fitToWindow &&
+		!restored->fillWithCrop && !restored->noEnlarge,
+		"recent viewport snapshot did not preserve its manual view mode");
+	ExpectNear(restored->zoom, 2.75, 0.0000001,
+		"recent viewport snapshot did not preserve its manual zoom");
+	recent.RememberViewport(firstA, {true, true, false, 1000.0});
+	const auto clamped = recent.FindViewport(firstA);
+	Expect(clamped.has_value() && clamped->fitToWindow && clamped->fillWithCrop &&
+		!clamped->noEnlarge && clamped->zoom == jpegview_linux::kMaximumZoom,
+		"recent viewport snapshot did not clamp a finite zoom to the supported range");
+	recent.RememberViewport(folderB / "invalid.jpg",
+		{false, false, false, std::numeric_limits<double>::infinity()});
+	Expect(!recent.FindViewport(folderB / "invalid.jpg").has_value(),
+		"recent viewport snapshot accepted a non-finite zoom");
+
+	const fs::path unusualPath = folderB / "line\nbreak.jpg";
+	recent.Add(unusualPath);
+	recent.RememberViewport(unusualPath, {false, false, false, 0.125});
+	const fs::path database = temporary.path() / "state" / "recent-files.db";
+	Expect(jpegview_linux::SaveRecentFiles(database, recent),
+		"recent-file database could not be saved atomically");
+	Expect(!fs::exists(database.string() + ".tmp." + std::to_string(static_cast<long long>(::getpid()))),
+		"recent-file database left its temporary file behind");
+	jpegview_linux::RecentFiles loaded;
+	Expect(jpegview_linux::LoadRecentFiles(database, loaded),
+		"recent-file database could not be loaded");
+	Expect(loaded.Files() == recent.Files(),
+		"recent-file rows did not round-trip in MRU order, including a newline in a filename");
+	const auto unusualViewport = loaded.FindViewport(unusualPath);
+	Expect(unusualViewport.has_value() && !unusualViewport->fitToWindow,
+		"per-file viewport snapshot did not round-trip independently from the folder list");
+	ExpectNear(unusualViewport->zoom, 0.125, 0.0000001,
+		"persisted per-file zoom did not round-trip");
+
+	std::string duplicateRecentRow;
+	{
+		std::ifstream input(database);
+		std::string line;
+		while (std::getline(input, line)) {
+			if (line.rfind("R ", 0) == 0) {
+				duplicateRecentRow = line;
+				break;
+			}
+		}
+	}
+	Expect(!duplicateRecentRow.empty(), "saved recent-file database had no valid recent row");
+	const fs::path aliasPath = folderB / "nested" / ".." / "line\nbreak.jpg";
+	std::string encodedAliasPath;
+	constexpr char hexDigits[] = "0123456789abcdef";
+	for (const unsigned char byte : aliasPath.string()) {
+		encodedAliasPath.push_back(hexDigits[byte >> 4]);
+		encodedAliasPath.push_back(hexDigits[byte & 0x0f]);
+	}
+	{
+		std::ofstream malformed(database, std::ios::app);
+		malformed << duplicateRecentRow << "\nR " << encodedAliasPath <<
+			"\nR not-hex\nV 616263 1 0 1 nan\n"
+			"V 2f616263 1 0 1 999\n";
+	}
+	jpegview_linux::RecentFiles tolerant;
+	Expect(jpegview_linux::LoadRecentFiles(database, tolerant),
+		"recent-file loader rejected a database containing malformed records");
+	Expect(tolerant.Files() == recent.Files(),
+		"malformed recent rows changed valid MRU entries");
+	const auto clampedPersisted = tolerant.FindViewport(fs::path("/abc"));
+	Expect(clampedPersisted.has_value() &&
+		clampedPersisted->zoom == jpegview_linux::kMaximumZoom,
+		"finite out-of-range zoom in a malformed-tolerant database was not clamped");
+
+	const fs::path missingDatabase = temporary.path() / "first-run" / "recent-files.db";
+	jpegview_linux::RecentFiles firstRun;
+	Expect(jpegview_linux::LoadRecentFiles(missingDatabase, firstRun) && firstRun.Files().empty(),
+		"a missing first-run recent database was not treated as an empty successful load");
+	firstRun.Add(onlyB);
+	Expect(jpegview_linux::SaveRecentFiles(missingDatabase, firstRun) &&
+		fs::exists(missingDatabase),
+		"history loaded from a missing first-run database could not be saved later");
+	jpegview_linux::RecentFiles firstRunReloaded;
+	Expect(jpegview_linux::LoadRecentFiles(missingDatabase, firstRunReloaded) &&
+		firstRunReloaded.Files() == firstRun.Files(),
+		"first-run history did not persist after a missing database was loaded");
+
+	jpegview_linux::RecentFiles unchangedOnError;
+	unchangedOnError.Add(onlyB);
+	const fs::path directoryInsteadOfDatabase = temporary.path() / "not-a-database";
+	fs::create_directories(directoryInsteadOfDatabase);
+	Expect(!jpegview_linux::LoadRecentFiles(directoryInsteadOfDatabase, unchangedOnError) &&
+		unchangedOnError.Files() == firstRun.Files(),
+		"an unreadable database path was accepted or cleared existing in-memory history");
+
+	jpegview_linux::RecentFiles capped;
+	const std::size_t capCount = std::max(jpegview_linux::kMaximumRecentFolders,
+		jpegview_linux::kMaximumRecentViewportSnapshots) + 3;
+	for (std::size_t index = 0; index < capCount; ++index) {
+		const fs::path filename = temporary.path() / ("folder-" + std::to_string(index)) / "image.jpg";
+		capped.Add(filename);
+		capped.RememberViewport(filename, {false, false, false, 1.0 + index});
+	}
+	Expect(capped.Files().size() == jpegview_linux::kMaximumRecentFolders &&
+		capped.ViewportSnapshotCount() == jpegview_linux::kMaximumRecentViewportSnapshots,
+		"recent folder rows or per-image viewport snapshots exceeded their independent bounds");
+	Expect(!capped.FindViewport(temporary.path() / "folder-0" / "image.jpg").has_value() &&
+		capped.FindViewport(temporary.path() /
+			("folder-" + std::to_string(capCount - 1)) / "image.jpg").has_value(),
+		"per-image viewport snapshot retention did not evict the least recently used entry");
+
+	ScopedEnvironment stateHome("XDG_STATE_HOME", (temporary.path() / "xdg-state").string());
+	Expect(jpegview_linux::RecentFilesDatabasePath() ==
+		temporary.path() / "xdg-state" / "jpegview-linux" / "recent-files.db",
+		"recent-file database path did not follow XDG_STATE_HOME");
 }
 
 void TestFileDialogSorting() {
@@ -4215,6 +4361,21 @@ void TestFileDialogModelStateAndNavigation() {
 	Expect(model.Entries().size() == entries.size() && model.Entries()[0].parent &&
 		model.Entries()[1].path.filename() == "a-folder" && model.SelectedIndex() == 1,
 		"open-dialog model did not sort by name or select the first child");
+	model.SetEntriesInOrder({
+		{fs::path("/recent/z/photo.jpg"), false, false},
+		{fs::path("/recent/a/other.jpg"), false, false},
+	}, true);
+	Expect(model.Entries().size() == 2 &&
+		model.Entries()[0].path.filename() == "photo.jpg" &&
+		model.Entries()[1].path.filename() == "other.jpg" &&
+		model.SelectedIndex() == 0,
+		"open-dialog model did not preserve caller-provided recent MRU order");
+	model.AppendFilter("/recent/a");
+	Expect(model.Entries().size() == 1 &&
+		model.Entries()[0].path.filename() == "other.jpg",
+		"recent-dialog model did not filter against the full path in MRU order");
+	model.ClearFilter();
+	model.SetEntries(entries);
 	model.ScrollBy(2, 2);
 	Expect(model.Scroll() == 2 && model.SelectedIndex() == 1,
 		"open-dialog wheel scrolling changed selection or ignored its scroll offset");
@@ -4530,6 +4691,8 @@ int main() {
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
 	RunTest("playback-scheduler-timing-and-modes", TestPlaybackSchedulerTimingAndModes, failures);
+	RunTest("recent-files-mru-uniqueness-persistence-and-viewports",
+		TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
 	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
 	RunTest("file-dialog-model-state-and-navigation", TestFileDialogModelStateAndNavigation, failures);

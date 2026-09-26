@@ -25,6 +25,8 @@ for command in import compare convert identify xprop; do
 done
 
 temporary=$(mktemp -d)
+XDG_STATE_HOME="$temporary/state"
+export XDG_STATE_HOME
 xvfb_pid=''
 window_manager_pid=''
 viewer_pid=''
@@ -111,6 +113,7 @@ sleep 0.5
 
 launch_viewer() {
 	DISPLAY=":$display_number" HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/config" \
+		XDG_STATE_HOME="$XDG_STATE_HOME" \
 		PATH="$temporary/bin:$PATH" JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
 		"$BINARY" "$temporary/images" >"$temporary/viewer.log" 2>&1 &
 	viewer_pid=$!
@@ -203,6 +206,27 @@ click_file_dialog_sort() {
 	sort_x=$(((dialog_window_width - dialog_width) / 2 + dialog_width - 88))
 	sort_y=$(((dialog_window_height - dialog_height) / 2 + 72))
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$sort_x" "$sort_y" click 1
+}
+
+click_file_dialog_tab() {
+	tab=$1
+	requested_width=${2:-900}
+	requested_height=${3:-650}
+	window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+	window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	dialog_width=$requested_width
+	if [ "$dialog_width" -gt $((window_width - 40)) ]; then dialog_width=$((window_width - 40)); fi
+	dialog_height=$requested_height
+	if [ "$dialog_height" -gt $((window_height - 40)) ]; then dialog_height=$((window_height - 40)); fi
+	dialog_x=$(((window_width - dialog_width) / 2))
+	dialog_y=$(((window_height - dialog_height) / 2))
+	if [ "$tab" = browse ]; then
+		tab_x=$((dialog_x + dialog_width - 150 + 31))
+	else
+		tab_x=$((dialog_x + dialog_width - 82 + 35))
+	fi
+	tab_y=$((dialog_y + 22))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$tab_x" "$tab_y" click 1
 }
 
 launch_viewer
@@ -348,6 +372,8 @@ if [ "$visual_assertions" -eq 1 ]; then
 		exit 1
 	fi
 fi
+click_file_dialog_tab recents
+click_file_dialog_tab browse
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.4
 filtered_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
@@ -861,8 +887,66 @@ if [ "$visual_assertions" -eq 1 ]; then
 		exit 1
 	fi
 fi
+click_file_dialog_tab recents 960 685
+DISPLAY=":$display_number" xdotool type --delay 20 'inside-first'
+sleep 0.5
+recent_database="$temporary/state/jpegview-linux/recent-files.db"
+if [ ! -s "$recent_database" ]; then
+	echo "UI smoke test: recent-file history was not persisted after the first viewer session" >&2
+	exit 1
+fi
+if [ "$visual_assertions" -eq 1 ]; then
+	preview_width=$(awk -F= '$1 == "file_dialog_preview_ratio" { printf "%d", ($2 * 924 + 0.5) }' "$settings")
+	preview_left=$((reopened_dialog_x + 960 - 12 - preview_width))
+	preview_rows=$(((685 - 168) / 26))
+	preview_image_width=$((preview_width - 16))
+	preview_image_height=$((preview_rows * 26 - 82))
+	preview_pixel_x=$((preview_left + 8 + (preview_image_width - 2) / 2))
+	preview_pixel_y=$((reopened_dialog_y + 112 + 28 + (preview_image_height - 2) / 2))
+	# The existing shell fixture writes textual backslash-octal bytes after its P6 header.
+	expected_preview_pixel='srgb(92,49,48)'
+	preview_pixel=''
+	for _ in $(seq 1 20); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/recent-dialog-preview.png"
+		preview_pixel=$(convert "$temporary/recent-dialog-preview.png" \
+			-format "%[pixel:p{$preview_pixel_x,$preview_pixel_y}]" info:)
+		[ "$preview_pixel" = "$expected_preview_pixel" ] && break
+		sleep 0.1
+	done
+	if [ "$preview_pixel" != "$expected_preview_pixel" ]; then
+		echo "UI smoke test: Recents did not show the focused image preview at ${preview_pixel_x},${preview_pixel_y} ($preview_pixel)" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+recent_open_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$recent_open_title" in
+	inside-first.ppm\ *) ;;
+	*) echo "UI smoke test: Enter did not open the focused recent image ($recent_open_title)" >&2; exit 1 ;;
+esac
+DISPLAY=":$display_number" xdotool key ctrl+o
+click_file_dialog_tab recents 960 685
+DISPLAY=":$display_number" xdotool key BackSpace
+click_file_dialog_tab browse 960 685
+DISPLAY=":$display_number" xdotool type --delay 20 'inside-first'
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+# The empty-filter Backspace in Recents must not have moved the hidden Browse
+# directory. A single Enter should therefore open the image and close the dialog.
 DISPLAY=":$display_number" xdotool key Escape
-stop_viewer
+for _ in $(seq 1 20); do
+	if ! DISPLAY=":$display_number" xdotool search --onlyvisible --class jpegview-linux \
+		>/dev/null 2>&1; then break; fi
+	sleep 0.05
+done
+if DISPLAY=":$display_number" xdotool search --onlyvisible --class jpegview-linux \
+	>/dev/null 2>&1; then
+	echo "UI smoke test: empty-filter Backspace navigated the hidden Browse directory" >&2
+	exit 1
+fi
+wait "$viewer_pid" || true
+viewer_pid=''
 
 if [ "$visual_assertions" -eq 1 ]; then
 	# A narrower portrait image must repaint the side margins after a wide image

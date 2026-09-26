@@ -28,6 +28,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   choice, default picture-level values,
   fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
   default), and zoom-navigator visibility), plus stable sort-mode values.
+- `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
+  bounded per-file `ViewportSnapshot` LRU, and tolerant atomic persistence in the XDG state
+  directory. The recent database is independent from viewer settings and performs no image or
+  directory scans while loading.
 - `viewport`: fit/fill/manual zoom modes, pan state, destination geometry, and panning bounds that
   keep the viewport inside the image.
 - `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,
@@ -37,10 +41,11 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `context_menu_model`: the complete menu catalog, state-derived enablement/checkmarks,
   compact/advanced filtering, and actionable-item keyboard navigation.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
-- `file_dialog_model`: filtering, name/date sorting, UTF-8 editing, selection, paging, independently
+- `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
+  sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, focus restoration, pane-aware preview image sizing, cancellable
-  background directory summaries, and replaceable previews for a focused image or a directory's
-  first image.
+  background directory summaries, caller-preserved row order for recent MRU entries, and replaceable
+  previews for a focused image or a directory's first image.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, dynamic labels, and tooltip placement.
@@ -67,7 +72,20 @@ on the modules above rather than duplicate their state.
 At startup the composition root creates, paints, and maps the final SDL window before constructing
 the initial `FileList` or loading its current image. Directory enumeration and the existing
 decode/display-cache path then run unchanged while the visible dark startup frame provides feedback;
-renderer resources remain confined to the main thread.
+renderer resources remain confined to the main thread. Recent history is read after that startup
+frame is shown and written once during normal cleanup, keeping history I/O out of the initial window
+presentation and rapid navigation path. `LoadCurrent` captures the outgoing file's exact viewport
+snapshot when the path changes, restores that file's saved snapshot before sizing a new display
+request, and records the path only after decoding and presentation setup succeed. New paths use the
+shared navigation snapshot. Clipboard temporary paths never become recent entries, while the
+ordinary file dialog's Recents tab shows one MRU image per parent folder and reuses the cancellable
+preview worker; separate Browse and Recents dialog models preserve each tab's filter and selection.
+
+The recent-files database stores normalized absolute paths with byte-safe record encoding, so legal
+newlines and non-UTF-8 filename bytes do not break its line-based format. Loading skips malformed
+records, accepts only finite zoom values, and clamps finite values to the viewport's supported zoom
+range. Recent-folder retention is capped at 100 rows and viewport snapshots at 256 paths; these
+bounds are independent so files from older folder rows can still restore their last view.
 
 ## Refactoring status
 
