@@ -156,6 +156,167 @@ ideas are already tracked above under the JPEGView_L comparison and are not dupl
 reduced-DCT JPEG display path also overlaps Linux's existing fitted-JPEG path, so the separate
 viewport-decode candidate is limited to WebP.
 
+## Candidates from other recently updated forks
+
+Reviewed on 2026-09-26. I used the
+[active-forks index](https://techgaun.github.io/active-forks/index.html#sylikc/jpegview) to find
+repositories, ordered them by GitHub's last-push metadata, and started with the newest. I checked
+default and non-default branch histories rather than treating a recent push timestamp as proof of
+new feature work. Repositories already covered above—KrokusPokus/JPEGView_L,
+andrewvladved/jpegview, and Masir01/jpegview_up—were skipped. These are feature ideas, not a
+recommendation to port Windows-only code or dependencies verbatim.
+
+### Workflow and curation ideas from [famomatic/jpegview](https://github.com/famomatic/jpegview)
+
+Its `master` branch had recent feature commits through 2026-09-01. The fork's
+[changelog](https://github.com/famomatic/jpegview/blob/master/CHANGELOG.txt) and feature commits
+describe the following ideas:
+
+- **Persistent thumbnail cache:** store generated thumbnails in a bounded on-disk cache, keyed by
+  source identity and freshness, so reopening a directory can show thumbnails immediately. Linux
+  currently retains thumbnails in memory for the active file list but regenerates them between
+  runs. Keep cache reads/writes off the event thread and invalidate stale entries. See the fork's
+  [thumbnail-cache changelog](https://github.com/famomatic/jpegview/blob/master/CHANGELOG.txt).
+- **Batch image conversion:** select multiple files and convert them to a chosen format, quality,
+  and optional dimensions with progress and per-file errors. Linux currently has single-image
+  saving and separate batch rename/copy tools. See the fork's
+  [batch-conversion and metadata commit](https://github.com/famomatic/jpegview/commit/9cb44210ee8fa876e9de2cd19ef9a6974fb6ebf0).
+- **Perceptual duplicate finder:** scan a chosen scope, group likely visual duplicates using a
+  perceptual hash, and let the user review each group before taking action; never delete files
+  automatically. See the fork's [duplicate-finder commit](https://github.com/famomatic/jpegview/commit/5d3c7a8b8932ad4d2212a7190eaaf9db5958e86a).
+- **XMP ratings and culling:** read/write a 0–5 image rating (including a clear/unrated state),
+  show it in the UI, and filter navigation by a minimum rating. Decide how JPEG-embedded XMP and
+  sidecar files interact with saves and backups. See the fork's
+  [rating commit](https://github.com/famomatic/jpegview/commit/654b22db28f1600e99df4b8e06a102b2158f59f1).
+- **In-view type-to-jump search:** while the viewer has focus, accept an incremental filename
+  query and cycle through prefix/substring matches without opening the file dialog. This differs
+  from the existing open-dialog filter and the go-to-index candidate above. See the fork's
+  [navigation feature commit](https://github.com/famomatic/jpegview/commit/654b22db28f1600e99df4b8e06a102b2158f59f1).
+- **Favorite and recent folders:** add a quick-open list for pinned folders and recently visited
+  directories. This complements, rather than replaces, the already-listed recently opened files
+  dialog. See the fork's
+  [workflow feature commit](https://github.com/famomatic/jpegview/commit/9cb44210ee8fa876e9de2cd19ef9a6974fb6ebf0).
+- **View bookmarks:** let the user save and recall named zoom-plus-pan positions, useful for
+  returning to details in a large image. Keep these separate from the existing marked-image
+  navigation feature. See the fork's
+  [bookmark implementation](https://github.com/famomatic/jpegview/blob/master/src/JPEGView/MainDlg.cpp)
+  and [feature commit](https://github.com/famomatic/jpegview/commit/654b22db28f1600e99df4b8e06a102b2158f59f1).
+- **Zoom/pan history:** add Back/Forward traversal through recent zoom/pan states, independently
+  of bookmarks and file navigation, with clear rules for whether changing images creates a history
+  entry. See the fork's
+  [history feature commit](https://github.com/famomatic/jpegview/commit/9cb44210ee8fa876e9de2cd19ef9a6974fb6ebf0).
+- **A/B comparison and difference overlay:** pin a second image, compare it with the current one,
+  and optionally show an amplified heat-map of pixel differences. This extends the existing mark/
+  toggle-back behavior without changing its quick-navigation semantics. See the fork's
+  [A/B compare commit](https://github.com/famomatic/jpegview/commit/9cb44210ee8fa876e9de2cd19ef9a6974fb6ebf0)
+  and [difference-overlay commit](https://github.com/famomatic/jpegview/commit/5d3c7a8b8932ad4d2212a7190eaaf9db5958e86a).
+- **Smart crop suggestion:** detect likely uniform borders and propose a crop rectangle, leaving
+  confirmation and final adjustment to the user so legitimate borders are not silently removed.
+  See the fork's [smart-crop commit](https://github.com/famomatic/jpegview/commit/9cb44210ee8fa876e9de2cd19ef9a6974fb6ebf0).
+- **Portable processing recipes:** import/export named picture-processing parameter sets as JSON
+  for backup or transfer, separately from Linux's per-image parameter database and its whole-DB
+  backup/restore. See the fork's
+  [recipe commit](https://github.com/famomatic/jpegview/commit/5d3c7a8b8932ad4d2212a7190eaaf9db5958e86a).
+- **Animated-frame extraction:** export every frame of a supported animated image as individual
+  still files, with an explicit format and naming pattern. Linux can play the listed animations but
+  currently saves a still image rather than offering a frame-export workflow. See the fork's
+  [frame-extraction commit](https://github.com/famomatic/jpegview/commit/5d3c7a8b8932ad4d2212a7190eaaf9db5958e86a).
+- **Copy and edit image metadata:** copy EXIF information to the clipboard and offer deliberate
+  operations such as correcting orientation or removing GPS metadata. Preserve source files unless
+  the user confirms a metadata write, and define whether unrelated metadata is retained. See the
+  fork's [metadata commit](https://github.com/famomatic/jpegview/commit/9cb44210ee8fa876e9de2cd19ef9a6974fb6ebf0).
+- **Dominant-color palette extraction:** calculate a small representative palette for the current
+  image and let the user copy individual color values. This is a whole-image summary, distinct from
+  the cursor pixel sampler already listed above. See the fork's
+  [palette-extraction commit](https://github.com/famomatic/jpegview/commit/5d3c7a8b8932ad4d2212a7190eaaf9db5958e86a).
+- **Histogram clipping warnings:** extend Linux's existing histogram overlay with clear shadow and
+  highlight clipping indicators, without changing the image or its correction settings. See the
+  fork's [histogram commit](https://github.com/famomatic/jpegview/commit/654b22db28f1600e99df4b8e06a102b2158f59f1).
+
+### Format, file-list, and display ideas from [sdneon/jpegview](https://github.com/sdneon/jpegview)
+
+The repository's main branch was pushed on 2026-08-21; I also inspected its non-default
+`feature/encrypted-zip` branch. Its README notes that several behaviors are experimental.
+
+- **SVG and SVGZ images:** rasterize vector files to the current view size, rather than always
+  decoding at a fixed intrinsic size. SVG support is also present in
+  [aviscaerulea/jpegview-nt](https://github.com/aviscaerulea/jpegview-nt), another recently
+  updated fork. See [famomatic's supported-format list](https://github.com/famomatic/jpegview/blob/master/README.md).
+- **PDF page browsing:** open a PDF as a multi-page document with page navigation, distinct from
+  treating it as a folder image or comic archive. Keep rendering optional if the required PDF
+  library is unavailable. See the
+  [PDF support commit](https://github.com/sdneon/jpegview/commit/5d79cad3cc98d502576a8c357bffaea540ac67d6).
+- **Password-protected archives:** extend the separately listed ZIP/7z/RAR candidates to request a
+  password and browse encrypted contents. Prefer a dedicated prompt and short-lived in-memory
+  password handling; do not copy the fork's command-line password approach, which can expose secrets
+  in process listings. See its explicitly experimental
+  [encrypted-archive branch](https://github.com/sdneon/jpegview/commit/3eb40d477099cf5cbbb754553e2f2e968f3f88e4).
+- **Minimum-file-size filter:** optionally skip tiny images such as embedded contact sheets or
+  comic-folder cover thumbnails during navigation. Define the threshold and make it easy to disable
+  for a directly opened image. See the fork's
+  [file-filter documentation](https://github.com/sdneon/jpegview/blob/master/README.md).
+- **Same-stem duplicate filtering:** optionally show only one file when multiple supported
+  extensions share a basename, such as `photo.jpg` and `photo.png`. Keep this separate from
+  perceptual duplicate detection, and leave it off by default because those files may be different
+  edits. See the fork's [HideSameName setting](https://github.com/sdneon/jpegview/blob/master/README.md).
+- **Animated-image frame controls:** step backward/forward through frames, freeze/resume, and adjust
+  frame delay while viewing an animation. This is separate from the existing movie-mode FPS
+  candidate, which advances between files. See the fork's
+  [multi-frame navigation documentation](https://github.com/sdneon/jpegview/blob/master/README.md).
+
+### Platform and performance ideas from other recently pushed branches
+
+- **User-editable keymap:** load command-to-shortcut mappings from an XDG user configuration file,
+  validate conflicts and unknown commands, and fall back safely to today's defaults. Linux currently
+  hard-codes its main-viewer bindings. The [sdneon keymap notes](https://github.com/sdneon/jpegview/blob/master/README.md)
+  and [TetraTheta's removal of hard-coded slideshow keys](https://github.com/TetraTheta/jpegview/commit/01afe3057ec763df359593e0d61877ec1da70697)
+  show the user-customizable Windows behavior to adapt.
+- **Inherit source JPEG quality on save:** offer an explicit `Auto`/inherit choice that estimates
+  the source encoding quality and subsampling when re-saving JPEG, while preserving the normal manual
+  quality control. Do not claim exact recovery where the source quantization cannot be mapped
+  reliably. See [GlenXie920's JPEG-save change](https://github.com/GlenXie920/jpegview/commit/9a19d36e9680a2a3e275faef219932fe3490d26b).
+- **Viewport/region decoding for very large TIFFs:** extend the oversized-JPEG candidate with lazy
+  tile or region loading for huge TIFF/BigTIFF images, decoding newly exposed regions as the user
+  pans instead of requiring a full-resolution bitmap. Keep cancellation/generation checks and
+  preserve full-source semantics for edits and saving. See
+  [famomatic's ultra-large TIFF work](https://github.com/famomatic/jpegview/commit/0a236812dc5c42e4fdeb4a9967c98c8810bcd7de)
+  and its [general ROI-decoding commit](https://github.com/famomatic/jpegview/commit/5d3c7a8b8932ad4d2212a7190eaaf9db5958e86a).
+- **Parallel progressive-JPEG decoding:** benchmark whether decoding independent color components
+  and conversion work in parallel improves time-to-first-pixel on Linux's large progressive JPEGs.
+  Treat the other fork's reported 40% as its result, not a Linux expectation; retain bit-exact output,
+  cancellation, and the existing low-latency navigation path. See
+  [Prit36's progressive JPEG commit](https://github.com/Prit36/jpegview/commit/3b290a8b25b41ecd97e92077e9ce4d02532cacd7).
+- **Optional GPU image-processing backend:** benchmark GPU acceleration for expensive scaling and
+  correction passes using a Linux-compatible API, while retaining the CPU implementation as the
+  default/fallback. Include upload and synchronization costs in measurements; the other fork's
+  optional D3D11 implementation is not a portable design to copy. See its
+  [processing-backend overview](https://github.com/famomatic/jpegview/blob/master/README.md).
+- **AArch64 Linux builds:** add an ARM64 build/test and packaging lane if the Ubuntu codec packages
+  and AppImage path are available for the supported releases. This is an adaptation idea, not a
+  direct port: [NK8998's branch](https://github.com/NK8998/jpegview/commit/7fde9ee450a61b4b461b2df7906d8714e37fea60)
+  adds Windows ARM64 builds.
+- **Per-monitor ICC output profile:** investigate applying the selected display's ICC profile after
+  the existing embedded-image-to-sRGB transform, while keeping saved/clipboard pixels in a defined
+  color space. The fork documents an opt-in monitor-profile transform in its
+  [color-management commit](https://github.com/famomatic/jpegview/commit/654b22db28f1600e99df4b8e06a102b2158f59f1).
+- **HDR monitor output:** separately explore rendering HDR sources to HDR-capable Linux displays,
+  rather than only tone-mapping to SDR as in the existing AVIF/JXR candidate. This depends on the
+  Linux window-system and renderer path and should remain optional with a tested SDR fallback. See
+  the fork's [HDR display commit](https://github.com/famomatic/jpegview/commit/654b22db28f1600e99df4b8e06a102b2158f59f1).
+- **OpenEXR/Radiance HDR images:** add optional decoding of `.exr`, `.hdr`, and `.pic` sources, with
+  a documented SDR tone-mapping default and full-resolution save semantics. The same fork includes
+  these as distinct formats in its [format documentation](https://github.com/famomatic/jpegview/blob/master/README.md).
+- **32-bit PSD support:** the Linux PSD reader currently accepts 1-, 8-, and 16-bit inputs; add
+  32-bit-per-channel PSD decoding if a compatible, bounded conversion path can preserve useful
+  precision for viewing and saving. See the fork's
+  [PSD format documentation](https://github.com/famomatic/jpegview/blob/master/README.md).
+
+Recent-fork ideas already represented above were not duplicated here: PSB, KRA, ZIP/7z/CBZ/CB7
+browsing, recent-file history, go-to-image-number, color sampling, negative/inverted colors,
+asynchronous file-list scanning, and common resampling changes. For example, SupaYoshi's recent
+[HEIC-to-JPEG context action](https://github.com/SupaYoshi/jpegview/commit/48ee0020cdacf3e3a98db3e8ada8dddd4c5d809b)
+is covered functionally by Linux's existing Save As conversion path.
+
 ## Candidates from upstream JPEGView issues
 
 Reviewed the [open issue list](https://github.com/sylikc/jpegview/issues) and the closed
