@@ -18,6 +18,18 @@ are independent of the JPEGView_L comparison below. The current behavior documen
 - **CB7 comic archives:** browse images in comic 7z files. Comic-page bookmarks and remembered
   reading positions are explicitly out of scope for this candidate.
 
+## Comic-reading interaction candidates
+
+- **Magnifying glass:** add a pointer-following rectangular lens that shows the image region under
+  it magnified. In [YACReader](https://github.com/YACReader/yacreader) 9.6.2.0 the option is named
+  “Magnifying glass”; press `Z` to toggle the lens and use the mouse wheel in this mode to increase
+  or decrease the rectangle's size. Prefer a direct port of that implementation if feasible;
+  otherwise adapt it rather than starting from scratch.
+- **Reverse reading order in double page mode:** allow the two pages in a spread to swap sides for
+  right-to-left reading. This matches the [YACReader](https://github.com/YACReader/yacreader) menu
+  option; prefer porting or adapting its implementation if feasible rather than reimplementing the
+  behavior independently.
+
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
 - **Transparency background setting:** persist a choice of black, white, or checkerboard behind
