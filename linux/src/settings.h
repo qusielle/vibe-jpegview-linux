@@ -2,6 +2,7 @@
 
 #include "cache_budget.h"
 #include "image_processing.h"
+#include "transparency_pattern.h"
 
 #include <filesystem>
 #include <string>
@@ -38,6 +39,7 @@ struct ViewerSettings {
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
 	bool showZoomNavigator = true;
+	TransparencyPattern transparencyPattern = TransparencyPattern::Black;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	int fileDialogWidth = kDefaultFileDialogWidth;
 	int fileDialogHeight = kDefaultFileDialogHeight;

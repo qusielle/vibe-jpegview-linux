@@ -439,6 +439,7 @@ private:
 		SDL_Texture* texture = nullptr;
 		int width = 0;
 		int height = 0;
+		bool hasTransparency = false;
 	};
 
 	struct DisplayTextureCacheEntry {
@@ -549,6 +550,7 @@ private:
 		jpegview_linux::ViewerSettings settings;
 		if (!jpegview_linux::LoadViewerSettings(settingsPath, settings)) return;
 		copyRenamePattern_ = settings.copyRenamePattern;
+		transparencyPattern_ = settings.transparencyPattern;
 		defaultAutoContrastEnabled_ = settings.autoContrast;
 		defaultImageProcessing_ = settings.defaultImageProcessing;
 		autoContrastEnabled_ = settings.autoContrast;
@@ -599,6 +601,7 @@ private:
 		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
 		settings.thumbnailPanelVisible = thumbnailPanelVisible_;
 		settings.showZoomNavigator = showZoomNavigator_;
+		settings.transparencyPattern = transparencyPattern_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.fileDialogWidth = fileDialogWidth_;
 		settings.fileDialogHeight = fileDialogHeight_;
@@ -677,7 +680,8 @@ private:
 		if (currentDecoded_->frames.size() > 1) decodedFrames.reserve(currentDecoded_->frames.size());
 		for (const jpegview_linux::DecodedFrame& decodedFrame : currentDecoded_->frames) {
 			Image frame;
-			if (!frame.StoreBGRA(decodedFrame.bgra.data(), decodedFrame.width, decodedFrame.height)) {
+			if (!frame.StoreBGRA(decodedFrame.bgra.data(), decodedFrame.width, decodedFrame.height,
+				decodedFrame.hasTransparency)) {
 				SetTitle(fileList_.Current().filename().string() + " — image is too large");
 				return false;
 			}
@@ -799,6 +803,7 @@ private:
 			const jpegview_linux::DecodedFrame& firstFrame = decoded->frames.front();
 			image_.width = image_.originalWidth = firstFrame.width;
 			image_.height = image_.originalHeight = firstFrame.height;
+			image_.hasTransparency = firstFrame.hasTransparency;
 			RestoreScaleMode(viewportSnapshot);
 			const jpegview_linux::ViewportRect destination = viewport_.Destination(
 				image_.width, image_.height, imageArea.w, imageArea.h);
@@ -929,10 +934,11 @@ private:
 	}
 
 	SDL_Texture* CreateTexture(const Image& source) {
-		return CreateTexture(source.bgra, source.width, source.height);
+		return CreateTexture(source.bgra, source.width, source.height, source.hasTransparency);
 	}
 
-	SDL_Texture* CreateTexture(const std::vector<std::uint8_t>& bgra, int width, int height) {
+	SDL_Texture* CreateTexture(const std::vector<std::uint8_t>& bgra, int width, int height,
+		bool hasTransparency = false) {
 		if (width <= 0 || height <= 0 || bgra.size() !=
 			static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4) return nullptr;
 		// Viewer textures are uploaded once and then sampled repeatedly. Static
@@ -943,6 +949,12 @@ private:
 		if (result == nullptr) return nullptr;
 		if (SDL_UpdateTexture(result, nullptr, bgra.data(), width * 4) != 0) {
 			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
+			SDL_DestroyTexture(result);
+			return nullptr;
+		}
+		if (SDL_SetTextureBlendMode(result,
+			hasTransparency ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE) != 0) {
+			std::cerr << "SDL_SetTextureBlendMode failed: " << SDL_GetError() << '\n';
 			SDL_DestroyTexture(result);
 			return nullptr;
 		}
@@ -1020,7 +1032,8 @@ private:
 			displayImageCache_.Retire(prepared);
 			return false;
 		}
-		SDL_Texture* texture = CreateTexture(prepared->bgra, prepared->width, prepared->height);
+		SDL_Texture* texture = CreateTexture(prepared->bgra, prepared->width,
+			prepared->height, prepared->hasTransparency);
 		if (texture == nullptr) {
 			cacheBudget_->Release(bytes);
 			displayImageCache_.Retire(prepared);
@@ -1195,9 +1208,11 @@ private:
 				[&prepared](const fs::path& path) { return path.string() == prepared->key; });
 			if (active == fileList_.Files().end()) continue;
 			ThumbnailCacheEntry cached;
-			cached.texture = CreateTexture(prepared->bgra, prepared->width, prepared->height);
+			cached.texture = CreateTexture(prepared->bgra, prepared->width,
+				prepared->height, prepared->hasTransparency);
 			cached.width = prepared->width;
 			cached.height = prepared->height;
+			cached.hasTransparency = prepared->hasTransparency;
 			thumbnailCache_.emplace(prepared->key, std::move(cached));
 			EvictThumbnails(thumbnailScheduler_.Store(prepared->key));
 		}
@@ -1249,10 +1264,12 @@ private:
 			if (size.width > 0 && size.height > 0 &&
 				jpegview_linux::DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
 					size.width, size.height, thumbnailPixels) &&
-				thumbnail.StoreBGRA(thumbnailPixels.data(), size.width, size.height)) {
+				thumbnail.StoreBGRA(thumbnailPixels.data(), size.width, size.height,
+					frame.hasTransparency)) {
 				cached.texture = CreateTexture(thumbnail);
 				cached.width = size.width;
 				cached.height = size.height;
+				cached.hasTransparency = frame.hasTransparency;
 			}
 		}
 		thumbnailCache_.emplace(request->key, std::move(cached));
@@ -4494,6 +4511,7 @@ private:
 		fileDialogPreviewTexture_ = nullptr;
 		fileDialogPreviewWidth_ = 0;
 		fileDialogPreviewHeight_ = 0;
+		fileDialogPreviewHasTransparency_ = false;
 		fileDialogPreviewRequestKey_.clear();
 		fileDialogPreviewContentKey_.clear();
 		fileDialogPreviewSource_.clear();
@@ -4532,6 +4550,7 @@ private:
 				fileDialogPreviewTexture_ = nullptr;
 				fileDialogPreviewWidth_ = 0;
 				fileDialogPreviewHeight_ = 0;
+				fileDialogPreviewHasTransparency_ = false;
 				fileDialogPreviewSource_.clear();
 				fileDialogPreviewMessage_.clear();
 				fileDialogPreviewContentKey_ = contentKey;
@@ -4555,17 +4574,18 @@ private:
 			fileDialogPreviewSource_ = result.source;
 			fileDialogPreviewMessage_ = result.error;
 			if (!result.bgra.empty()) {
-				SDL_Texture* previewTexture = CreateTexture(result.bgra, result.width, result.height);
+				SDL_Texture* previewTexture = CreateTexture(result.bgra, result.width,
+					result.height, result.hasTransparency);
 				if (previewTexture == nullptr) {
 					fileDialogPreviewMessage_ = "Cannot create preview";
 				} else {
-					SDL_SetTextureBlendMode(previewTexture, SDL_BLENDMODE_BLEND);
 					if (fileDialogPreviewTexture_ != nullptr) {
 						SDL_DestroyTexture(fileDialogPreviewTexture_);
 					}
 					fileDialogPreviewTexture_ = previewTexture;
 					fileDialogPreviewWidth_ = result.width;
 					fileDialogPreviewHeight_ = result.height;
+					fileDialogPreviewHasTransparency_ = result.hasTransparency;
 				}
 			}
 		}
@@ -4588,6 +4608,9 @@ private:
 			const int height = std::max(1, static_cast<int>(fileDialogPreviewHeight_ * scale));
 			const SDL_Rect destination{imageRect.x + (imageRect.w - width) / 2,
 				imageRect.y + (imageRect.h - height) / 2, width, height};
+			if (fileDialogPreviewHasTransparency_) {
+				RenderTransparencyBackground(destination, imageRect);
+			}
 			SDL_RenderCopy(renderer_, fileDialogPreviewTexture_, nullptr, &destination);
 		} else if (!fileDialogPreviewMessage_.empty()) {
 			const int textWidth = TextWidth(fileDialogPreviewMessage_, kUiTextScale);
@@ -5211,6 +5234,43 @@ private:
 		return SDL_Rect{layout.imageX, 0, layout.imageWidth, layout.imageHeight};
 	}
 
+	void RenderTransparencyBackground(const SDL_Rect& imageRect, const SDL_Rect& clipRect) {
+		const int visibleLeft = std::max(imageRect.x, clipRect.x);
+		const int visibleTop = std::max(imageRect.y, clipRect.y);
+		const int visibleRight = std::min(imageRect.x + imageRect.w, clipRect.x + clipRect.w);
+		const int visibleBottom = std::min(imageRect.y + imageRect.h, clipRect.y + clipRect.h);
+		if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return;
+
+		if (transparencyPattern_ != jpegview_linux::TransparencyPattern::Checkerboard) {
+			const jpegview_linux::TransparencyPatternColor color =
+				jpegview_linux::TransparencyPatternTileColor(transparencyPattern_, 0, 0);
+			SDL_SetRenderDrawColor(renderer_, color.red, color.green, color.blue, 255);
+			const SDL_Rect visible{visibleLeft, visibleTop,
+				visibleRight - visibleLeft, visibleBottom - visibleTop};
+			SDL_RenderFillRect(renderer_, &visible);
+			return;
+		}
+
+		const int cellSize = jpegview_linux::kTransparencyCheckerCellSize;
+		const int firstTileX = std::max(0, (visibleLeft - imageRect.x) / cellSize);
+		const int firstTileY = std::max(0, (visibleTop - imageRect.y) / cellSize);
+		for (int tileY = firstTileY; imageRect.y + tileY * cellSize < visibleBottom; ++tileY) {
+			const int tileTop = imageRect.y + tileY * cellSize;
+			const int top = std::max(visibleTop, tileTop);
+			const int bottom = std::min(visibleBottom, tileTop + cellSize);
+			for (int tileX = firstTileX; imageRect.x + tileX * cellSize < visibleRight; ++tileX) {
+				const int tileLeft = imageRect.x + tileX * cellSize;
+				const int left = std::max(visibleLeft, tileLeft);
+				const int right = std::min(visibleRight, tileLeft + cellSize);
+				const jpegview_linux::TransparencyPatternColor color =
+					jpegview_linux::TransparencyPatternTileColor(transparencyPattern_, tileX, tileY);
+				SDL_SetRenderDrawColor(renderer_, color.red, color.green, color.blue, 255);
+				const SDL_Rect tile{left, top, right - left, bottom - top};
+				SDL_RenderFillRect(renderer_, &tile);
+			}
+		}
+	}
+
 	jpegview_linux::ZoomNavigatorLayout CurrentZoomNavigatorLayout() const {
 		const SDL_Rect area = ImageAreaRect();
 		return jpegview_linux::CalculateZoomNavigatorLayout(image_.width, image_.height,
@@ -5578,6 +5638,9 @@ private:
 					thumbnail.width,
 					thumbnail.height
 				};
+				if (cached->second.hasTransparency) {
+					RenderTransparencyBackground(imageRect, panel);
+				}
 				SDL_RenderCopy(renderer_, cached->second.texture, nullptr, &imageRect);
 				if (!slot.current) {
 					SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 125);
@@ -6163,6 +6226,10 @@ private:
 		// letterbox margins are overwritten when navigation changes image size.
 		SDL_RenderFillRect(renderer_, &imageArea);
 		SDL_RenderSetClipRect(renderer_, &imageArea);
+		if (image_.hasTransparency ||
+			(transitionTexture_ != nullptr && transitionImage_.hasTransparency)) {
+			RenderTransparencyBackground(destination, imageArea);
+		}
 		RenderImageTransition(destination, imageArea, renderTexture);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderCropSelection();
@@ -6285,6 +6352,8 @@ private:
 	bool navigationPanelAutoReveal_ = true;
 	bool thumbnailPanelVisible_ = false;
 	bool showZoomNavigator_ = true;
+	jpegview_linux::TransparencyPattern transparencyPattern_ =
+		jpegview_linux::TransparencyPattern::Black;
 	int thumbnailPanelWidth_ = jpegview_linux::kDefaultThumbnailPanelWidth;
 	bool thumbnailPanelResizing_ = false;
 	bool thumbnailPanelResizeChanged_ = false;
@@ -6357,6 +6426,7 @@ private:
 	SDL_Texture* fileDialogPreviewTexture_ = nullptr;
 	int fileDialogPreviewWidth_ = 0;
 	int fileDialogPreviewHeight_ = 0;
+	bool fileDialogPreviewHasTransparency_ = false;
 	std::uint64_t fileDialogPreviewGeneration_ = 0;
 	std::string fileDialogPreviewRequestKey_;
 	std::string fileDialogPreviewContentKey_;

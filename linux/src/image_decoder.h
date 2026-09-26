@@ -14,6 +14,7 @@ struct DecodedFrame {
 	int width = 0;
 	int height = 0;
 	std::vector<std::uint8_t> bgra;
+	bool hasTransparency = false;
 	int delayMs = 0;
 };
 

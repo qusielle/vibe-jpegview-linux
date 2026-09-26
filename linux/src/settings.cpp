@@ -125,6 +125,8 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		} else if (key == "show_zoom_navigator") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.showZoomNavigator = parsed;
+		} else if (key == "transparency_pattern") {
+			(void)ParseTransparencyPattern(value, loaded.transparencyPattern);
 		} else if (key == "thumbnail_panel_width") {
 			try {
 				std::size_t parsedCharacters = 0;
@@ -265,6 +267,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "navigation_panel_auto_reveal=" << (settings.navigationPanelAutoReveal ? 1 : 0) << '\n'
 		       << "thumbnail_panel_visible=" << (settings.thumbnailPanelVisible ? 1 : 0) << '\n'
 		       << "show_zoom_navigator=" << (settings.showZoomNavigator ? 1 : 0) << '\n'
+		       << "transparency_pattern=" << TransparencyPatternSettingName(settings.transparencyPattern) << '\n'
 		       << "thumbnail_panel_width=" << settings.thumbnailPanelWidth << '\n'
 		       << "file_dialog_width=" << std::clamp(settings.fileDialogWidth,
 			kMinimumFileDialogWidth, kMaximumFileDialogDimension) << '\n'

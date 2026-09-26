@@ -118,6 +118,7 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 	prepared->key = request.key;
 	prepared->width = size.width;
 	prepared->height = size.height;
+	prepared->hasTransparency = request.source->hasTransparency;
 	if (!DownsampleThumbnailBgra(request.source->bgra, request.source->width,
 		request.source->height, size.width, size.height, prepared->bgra)) return {};
 	return prepared;

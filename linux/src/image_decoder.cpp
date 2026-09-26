@@ -114,7 +114,7 @@ bool ValidDimensions(int width, int height, std::string& errorMessage) {
 }
 
 bool AppendBGRA(DecodedImage& image, int width, int height, const std::uint8_t* pixels,
-	int delayMs, std::string& errorMessage) {
+	int delayMs, std::string& errorMessage, bool hasAlphaChannel = true) {
 	if (!ValidDimensions(width, height, errorMessage) || pixels == nullptr) return false;
 	const std::size_t byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4;
 	std::uint64_t currentBytes = 0;
@@ -129,6 +129,14 @@ bool AppendBGRA(DecodedImage& image, int width, int height, const std::uint8_t* 
 		frame.height = height;
 		frame.delayMs = std::max(0, delayMs);
 		frame.bgra.assign(pixels, pixels + byteCount);
+		if (hasAlphaChannel) {
+			for (std::size_t offset = 3; offset < byteCount; offset += 4) {
+				if (frame.bgra[offset] != 255) {
+					frame.hasTransparency = true;
+					break;
+				}
+			}
+		}
 		image.frames.push_back(std::move(frame));
 	} catch (const std::exception&) {
 		errorMessage = "out of memory";
@@ -138,7 +146,7 @@ bool AppendBGRA(DecodedImage& image, int width, int height, const std::uint8_t* 
 }
 
 bool AppendRGBA(DecodedImage& image, int width, int height, const std::uint8_t* pixels,
-	int delayMs, std::string& errorMessage) {
+	int delayMs, std::string& errorMessage, bool hasAlphaChannel = true) {
 	if (!ValidDimensions(width, height, errorMessage) || pixels == nullptr) return false;
 	const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
 	std::vector<std::uint8_t> bgra;
@@ -148,11 +156,13 @@ bool AppendRGBA(DecodedImage& image, int width, int height, const std::uint8_t* 
 		errorMessage = "out of memory";
 		return false;
 	}
+	bool hasTransparency = false;
 	for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
 		bgra[pixel * 4] = pixels[pixel * 4 + 2];
 		bgra[pixel * 4 + 1] = pixels[pixel * 4 + 1];
 		bgra[pixel * 4 + 2] = pixels[pixel * 4];
 		bgra[pixel * 4 + 3] = pixels[pixel * 4 + 3];
+		if (hasAlphaChannel && pixels[pixel * 4 + 3] != 255) hasTransparency = true;
 	}
 	try {
 		DecodedFrame frame;
@@ -160,6 +170,7 @@ bool AppendRGBA(DecodedImage& image, int width, int height, const std::uint8_t* 
 		frame.height = height;
 		frame.delayMs = std::max(0, delayMs);
 		frame.bgra = std::move(bgra);
+		frame.hasTransparency = hasTransparency;
 		std::uint64_t currentBytes = 0;
 		for (const DecodedFrame& existing : image.frames) currentBytes += existing.bgra.size();
 		if (frame.bgra.size() > kMaxAnimationBytes || currentBytes > kMaxAnimationBytes - frame.bgra.size()) {
@@ -242,7 +253,11 @@ bool DecodeStb(const std::filesystem::path& filename, DecodedImage& image,
 		errorMessage = stbi_failure_reason() == nullptr ? "unknown decoder error" : stbi_failure_reason();
 		return false;
 	}
-	const bool result = AppendRGBA(image, width, height, rgba, 0, errorMessage);
+	const std::string extension = Lower(filename.extension().string());
+	// PNG tRNS color-key transparency adds alpha to the forced RGBA output while
+	// stbi_load still reports the original three color channels.
+	const bool hasAlphaChannel = channels == 2 || channels == 4 || extension == ".png";
+	const bool result = AppendRGBA(image, width, height, rgba, 0, errorMessage, hasAlphaChannel);
 	stbi_image_free(rgba);
 	return result;
 }
@@ -1012,7 +1027,9 @@ bool DecodePsd(const std::filesystem::path& filename, DecodedImage& image,
 			bgra[pixelIndex * 4 + 3] = alpha;
 		}
 	}
-	return AppendBGRA(image, width, height, bgra.data(), 0, errorMessage);
+	const bool hasAlphaChannel = (colorMode == 1 || colorMode == 2) ? channels > 1 :
+		colorMode == 3 ? channels > 3 : colorMode == 4 && channels > 4;
+	return AppendBGRA(image, width, height, bgra.data(), 0, errorMessage, hasAlphaChannel);
 }
 
 bool ReadPnmToken(const std::vector<std::uint8_t>& data, std::size_t& position, std::string& token) {
@@ -1202,7 +1219,8 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 			}
 		}
 	}
-	return AppendBGRA(image, width, height, bgra.data(), 0, errorMessage);
+	const bool hasAlphaChannel = depth == 2 || depth >= 4;
+	return AppendBGRA(image, width, height, bgra.data(), 0, errorMessage, hasAlphaChannel);
 }
 
 #if JPEGVIEW_HAVE_GIF
@@ -1743,7 +1761,7 @@ bool DecodeJxr(const std::filesystem::path& filename, DecodedImage& image,
 		bgra[pixel * 4 + 2] = pixels[pixel * 3 + 2];
 		bgra[pixel * 4 + 3] = 255;
 	}
-	return AppendBGRA(image, width, height, bgra.data(), 0, errorMessage);
+	return AppendBGRA(image, width, height, bgra.data(), 0, errorMessage, false);
 }
 #endif
 
@@ -1786,7 +1804,7 @@ bool DecodeRaw(const std::filesystem::path& filename, DecodedImage& image,
 			target[3] = colors == 4 ? source[3] : 255;
 		}
 	}
-	return AppendBGRA(image, width, height, bgra.data(), 0, errorMessage);
+	return AppendBGRA(image, width, height, bgra.data(), 0, errorMessage, colors == 4);
 }
 #endif
 

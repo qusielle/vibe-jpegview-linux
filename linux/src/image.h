@@ -16,9 +16,11 @@ public:
 	int height = 0;
 	int originalWidth = 0;
 	int originalHeight = 0;
+	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
 
-	bool StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageHeight);
+	bool StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageHeight,
+		bool containsTransparency = false);
 	// Copies a half-open source rectangle into a separate image without first
 	// duplicating the full source buffer. The output retains the original source size.
 	bool CopyCrop(int left, int top, int right, int bottom, Image& output) const;

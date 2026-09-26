@@ -37,6 +37,7 @@ struct PreparedDisplayImage {
 	std::string key;
 	int width = 0;
 	int height = 0;
+	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
 	std::size_t priority = 0;
 };

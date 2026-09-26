@@ -1233,4 +1233,48 @@ if command -v convert >/dev/null 2>&1; then
 	fi
 fi
 
+if [ "$visual_assertions" -eq 1 ]; then
+	transparency_image="$temporary/transparent.png"
+	transparency_config="$temporary/transparency-config"
+	mkdir -p "$transparency_config/jpegview-linux"
+	convert -size 256x256 xc:none "$transparency_image"
+	printf '%s\n' 'transparency_pattern=white' \
+		>"$transparency_config/jpegview-linux/settings.conf"
+	env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \
+		HOME="$temporary/home" XDG_CONFIG_HOME="$transparency_config" "$BINARY" \
+		"$transparency_image" >"$temporary/transparency-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then
+			transparency_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+			case "$transparency_title" in
+				transparent.png\ *) break ;;
+				*) window_id='' ;;
+			esac
+		fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: transparent PNG viewer did not appear" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	sleep 0.3
+	transparency_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+	transparency_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/transparency-white.png"
+	white_sample=$(convert "$temporary/transparency-white.png" -format \
+		"%[fx:p{$((transparency_width / 2)),$((transparency_height / 2))}.r > 0.98 && p{$((transparency_width / 2)),$((transparency_height / 2))}.g > 0.98 && p{$((transparency_width / 2)),$((transparency_height / 2))}.b > 0.98]" info:)
+	if [ "$white_sample" != "1" ]; then
+		echo "UI smoke test: transparent PNG did not composite over the configured white background ($white_sample)" >&2
+		exit 1
+	fi
+	stop_viewer
+	grep -q '^transparency_pattern=white$' \
+		"$transparency_config/jpegview-linux/settings.conf"
+fi
+
 echo "UI smoke tests passed"

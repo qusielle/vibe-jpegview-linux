@@ -390,6 +390,7 @@ struct FileDialogPreviewLoader::Impl {
 						}
 						if (success && !decoded.frames.empty()) {
 							DecodedFrame frame = std::move(decoded.frames.front());
+							result.hasTransparency = frame.hasTransparency;
 							const double scale = std::min({1.0,
 								static_cast<double>(task.maximumWidth) / frame.width,
 								static_cast<double>(task.maximumHeight) / frame.height});

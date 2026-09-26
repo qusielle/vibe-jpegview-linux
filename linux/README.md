@@ -21,7 +21,9 @@ they support.
    color profiles are transformed through LCMS2. The save dialog writes JPEG, PNG, BMP, TGA, WebP,
    GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images. Codec detection and fixtures
    were made portable across Ubuntu 20.04 and newer distributions, including giflib installations
-   without pkg-config metadata and HEIF encoders with different supported profiles.
+   without pkg-config metadata and HEIF encoders with different supported profiles. Transparent PNG
+   and other alpha-bearing images display over a configurable black, white, or checkerboard
+   background without flattening or changing their source pixels.
 
 3. **High-quality viewing, fitting, zooming, and panning.** JPEGView's high-quality downsampling and
    sharpening path was ported, with bicubic enlargement and a shared 1 GiB image-cache budget.
@@ -172,7 +174,8 @@ they support.
 15. **Regression tests, modularization, and faster builds.** A dependency-light core suite and X11
     UI smoke suite now cover codecs, mutable image transforms/resampling, file ordering, browser
     state, settings, keyboard mappings, viewport geometry, overlays, context-menu columns and
-    repainting, thumbnail layout/persistence, resize and batch models, application discovery,
+    repainting, thumbnail layout/persistence, transparency-pattern settings and alpha metadata,
+    resize and batch models, application discovery,
     metadata, startup maximization, and held-key behavior. Viewer logic was extracted into focused
     modules for image pixels, settings, sorting, input commands, viewport, open-dialog state,
     overlays, thumbnails, fonts, image information, context menus, resize, batch operations, and
@@ -458,6 +461,13 @@ matching the Windows default escape command, and otherwise quits.
 
 The zoom navigator is enabled by default. Set `show_zoom_navigator=0` in the settings file to hide
 it; the context-menu toggle updates this preference immediately.
+
+Transparent image pixels use a black background by default, matching the Windows configuration.
+Set `transparency_pattern=white` or `transparency_pattern=checkerboard` in
+`${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf` to choose another display
+background; `black`, `white`, and `checkerboard` are the accepted values. This setting has no GUI
+control yet. It applies to the main viewer, thumbnail panel, and open-dialog preview; it only changes
+how alpha is composited on screen and does not flatten or alter saved image pixels.
 
 The same settings file accepts `cache_size_mb=1024` to control the aggregate memory retained for
 decoded images, worker-prepared display frames, and renderer-ready textures. The value is in MiB,

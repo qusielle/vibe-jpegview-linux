@@ -200,7 +200,8 @@ bool ApplyUnsharpMask(Image& image, const ImageProcessingParams& params) {
 
 } // namespace
 
-bool Image::StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageHeight) {
+bool Image::StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageHeight,
+	bool containsTransparency) {
 	if (bgraPixels == nullptr || imageWidth <= 0 || imageHeight <= 0 ||
 		imageWidth > kMaxImageDimension || imageHeight > kMaxImageDimension) return false;
 	const std::size_t pixelCount = static_cast<std::size_t>(imageWidth) *
@@ -215,6 +216,7 @@ bool Image::StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageH
 	height = imageHeight;
 	originalWidth = imageWidth;
 	originalHeight = imageHeight;
+	hasTransparency = containsTransparency;
 	return true;
 }
 
@@ -240,6 +242,7 @@ bool Image::CopyCrop(int left, int top, int right, int bottom, Image& output) co
 	result.height = croppedHeight;
 	result.originalWidth = originalWidth;
 	result.originalHeight = originalHeight;
+	result.hasTransparency = hasTransparency;
 	result.bgra = std::move(cropped);
 	output = std::move(result);
 	return true;

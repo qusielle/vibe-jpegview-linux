@@ -45,8 +45,6 @@ are independent of the JPEGView_L comparison below. The current behavior documen
 
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
-- **Transparency background setting:** persist a choice of black, white, or checkerboard behind
-  transparent image pixels, extending the checkerboard option found in JPEGView_L.
 - **Book Mode:** add a book-oriented viewing mode with page size configurable as a percentage of
   the window height.
 - **Linear-light resampling:** perform display scaling in linear light to reduce darkened edges and
@@ -438,6 +436,11 @@ and remain possible candidates:
   content and localization.
 
 ## Already covered or not a direct port candidate
+
+- **Transparency background setting (implemented):** the existing XDG settings file selects a
+  black, white, or checkerboard display background for alpha-bearing images. See the user-facing
+  [`README.md`](README.md) configuration note. This extends the checkerboard option found in
+  [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L).
 
 - **Catmull–Rom enlargement is already implemented.** The Linux display-resize path uses
   endpoint-preserving Catmull–Rom bicubic interpolation for enlargement. The possible filter work

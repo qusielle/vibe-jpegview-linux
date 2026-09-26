@@ -131,6 +131,7 @@ struct FileDialogPreviewResult {
 	std::filesystem::path source;
 	int width = 0;
 	int height = 0;
+	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
 	std::string error;
 };

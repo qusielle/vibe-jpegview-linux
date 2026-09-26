@@ -183,6 +183,24 @@ void AppendPngChunk(std::vector<std::uint8_t>& output, const std::string& type,
 	AppendBigEndian32(output, static_cast<std::uint32_t>(crc));
 }
 
+std::vector<std::uint8_t> MakeTransparentColorKeyPng() {
+	std::vector<std::uint8_t> result = {
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+	AppendPngChunk(result, "IHDR", {0, 0, 0, 2, 0, 0, 0, 2, 8, 2, 0, 0, 0});
+	AppendPngChunk(result, "tRNS", {0, 255, 0, 0, 0, 0});
+	const std::vector<std::uint8_t> scanline = {
+		0, 255, 0, 0, 0, 255, 0,
+		0, 0, 255, 0, 255, 0, 0};
+	uLongf compressedSize = compressBound(scanline.size());
+	std::vector<std::uint8_t> compressed(compressedSize);
+	Expect(compress2(compressed.data(), &compressedSize, scanline.data(), scanline.size(),
+		Z_BEST_COMPRESSION) == Z_OK, "could not compress test PNG scanline");
+	compressed.resize(compressedSize);
+	AppendPngChunk(result, "IDAT", compressed);
+	AppendPngChunk(result, "IEND", {});
+	return result;
+}
+
 std::vector<std::vector<std::uint8_t>> PngChunks(const std::vector<std::uint8_t>& png,
 	const std::string& requestedType) {
 	static constexpr std::array<std::uint8_t, 8> signature = {
@@ -667,7 +685,7 @@ void TestFileListMultipleInputs() {
 }
 
 void ExpectDecoded(const fs::path& filename, const std::vector<std::uint8_t>& expected,
-	bool exactRgb, bool exactAlpha) {
+	bool exactRgb, bool exactAlpha, bool expectedTransparency = false) {
 	DecodedImage decoded;
 	std::string error;
 	Expect(jpegview_linux::DecodeImage(filename, decoded, error),
@@ -676,6 +694,8 @@ void ExpectDecoded(const fs::path& filename, const std::vector<std::uint8_t>& ex
 	Expect(!decoded.animation, "static output was incorrectly marked animated");
 	Expect(decoded.frames.front().width == 2 && decoded.frames.front().height == 2,
 		"decoded dimensions are incorrect for " + filename.extension().string());
+	Expect(decoded.frames.front().hasTransparency == expectedTransparency,
+		"transparency metadata is incorrect for " + filename.extension().string());
 	const std::vector<std::uint8_t>& actual = decoded.frames.front().bgra;
 	Expect(actual.size() == expected.size(), "decoded pixel buffer has the wrong size");
 	for (std::size_t pixel = 0; pixel < expected.size() / 4; ++pixel) {
@@ -703,22 +723,24 @@ void TestImageWriterDecoderRoundTrips() {
 		const char* extension;
 		bool exactRgb;
 		bool exactAlpha;
+		bool hasTransparency;
 	};
 	const std::vector<FormatCase> formats = {
-		{".png", true, true},
-		{".bmp", true, false},
-		{".tga", true, true},
-		{".ppm", true, false},
-		{".qoi", true, true},
-		{".psd", true, false},
-		{".jpg", false, false},
+		{".png", true, true, true},
+		{".bmp", true, false, true},
+		{".tga", true, true, true},
+		{".ppm", true, false, false},
+		{".qoi", true, true, true},
+		{".psd", true, false, false},
+		{".jpg", false, false, false},
 	};
 	for (const FormatCase& format : formats) {
 		const fs::path filename = temporary.path() / ("roundtrip" + std::string(format.extension));
 		std::string error;
 		Expect(jpegview_linux::WriteImage(filename, pixels.data(), 2, 2, options, error),
 			"cannot write " + filename.extension().string() + ": " + error);
-		ExpectDecoded(filename, pixels, format.exactRgb, format.exactAlpha);
+		ExpectDecoded(filename, pixels, format.exactRgb, format.exactAlpha,
+			format.hasTransparency);
 		if (std::string(format.extension) == ".jpg") {
 			int mcuWidth = 0;
 			int mcuHeight = 0;
@@ -733,12 +755,24 @@ void TestImageWriterDecoderRoundTrips() {
 				"JPEG MCU reader accepted a malformed file");
 		}
 	}
+	std::vector<std::uint8_t> opaquePixels = pixels;
+	for (std::size_t alpha = 3; alpha < opaquePixels.size(); alpha += 4) opaquePixels[alpha] = 255;
+	const fs::path opaquePng = temporary.path() / "opaque.png";
+	std::string opaqueError;
+	Expect(jpegview_linux::WriteImage(opaquePng, opaquePixels.data(), 2, 2, options, opaqueError),
+		"cannot write opaque PNG: " + opaqueError);
+	ExpectDecoded(opaquePng, opaquePixels, true, true, false);
+	const fs::path colorKeyPng = temporary.path() / "color-key.png";
+	WriteBytes(colorKeyPng, MakeTransparentColorKeyPng());
+	ExpectDecoded(colorKeyPng,
+		{0, 0, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 0, 255, 0},
+		true, true, true);
 
 	const fs::path uppercase = temporary.path() / "uppercase.PNG";
 	std::string error;
 	Expect(jpegview_linux::WriteImage(uppercase, pixels.data(), 2, 2, options, error),
 		"uppercase extension was not accepted by the writer: " + error);
-	ExpectDecoded(uppercase, pixels, true, true);
+	ExpectDecoded(uppercase, pixels, true, true, true);
 
 	struct OptionalFormatCase {
 		const char* extension;
@@ -1296,6 +1330,17 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	Expect(prepared && prepared->width == 2 && prepared->height == 2 &&
 		prepared->bgra.size() == 16,
 		"display image worker did not produce exact target-size pixels");
+	Expect(prepared && !prepared->hasTransparency,
+		"display image worker invented transparency for an opaque frame");
+	auto transparentDecoded = DisplayCacheTestImage(4, 4);
+	transparentDecoded->frames.front().bgra[3] = 0;
+	transparentDecoded->frames.front().hasTransparency = true;
+	const auto transparentRequest = jpegview_linux::MakeDisplayImageRequest(
+		thirdFile, transparentDecoded, 0, 2, 2, false);
+	jpegview_linux::DisplayImageCache transparencyProcessor(64, 1);
+	const auto transparentPrepared = transparencyProcessor.RequestAndWait(transparentRequest);
+	Expect(transparentPrepared && transparentPrepared->hasTransparency,
+		"display image preparation lost source transparency metadata");
 	Expect(realProcessor.TakeCompleted(1).size() == 1 && realProcessor.TakeCompleted(1).empty(),
 		"display image completion queue did not drain exactly once");
 	realProcessor.Prefetch({});
@@ -1498,6 +1543,12 @@ void TestImageStorageTransformsAndValidation() {
 	const std::uint8_t onePixel[4] = {1, 2, 3, 4};
 	Expect(!empty.StoreBGRA(onePixel, 65535, 65535),
 		"image storage accepted dimensions above the pixel safety limit");
+	jpegview_linux::Image transparent;
+	Expect(transparent.StoreBGRA(onePixel, 1, 1, true) && transparent.hasTransparency,
+		"image storage discarded its transparency metadata");
+	jpegview_linux::Image transparentCrop;
+	Expect(transparent.CopyCrop(0, 0, 1, 1, transparentCrop) && transparentCrop.hasTransparency,
+		"cropping discarded its transparency metadata");
 
 	const jpegview_linux::Image source = MakeIndexedImage(2, 3);
 	jpegview_linux::Image transformed = source;
@@ -2015,6 +2066,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.navigationPanelAutoReveal = false;
 	expected.thumbnailPanelVisible = true;
 	expected.showZoomNavigator = false;
+	expected.transparencyPattern = jpegview_linux::TransparencyPattern::Checkerboard;
 	expected.thumbnailPanelWidth = 287;
 	expected.fileDialogWidth = 1040;
 	expected.fileDialogHeight = 735;
@@ -2065,6 +2117,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"thumbnail panel visibility did not round-trip");
 	Expect(loaded.showZoomNavigator == expected.showZoomNavigator,
 		"zoom navigator visibility did not round-trip");
+	Expect(loaded.transparencyPattern == expected.transparencyPattern,
+		"transparent-image pattern did not round-trip");
 	Expect(loaded.thumbnailPanelWidth == expected.thumbnailPanelWidth,
 		"thumbnail panel width did not round-trip");
 	Expect(loaded.fileDialogWidth == expected.fileDialogWidth &&
@@ -2109,6 +2163,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=1\n"
 		"selection_mode_enabled=maybe\n"
 		"show_zoom_navigator=maybe\n"
+		"transparency_pattern=diagonal\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
 	loaded = {};
@@ -2122,6 +2177,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"settings without a histogram choice did not retain the hidden default");
 	Expect(loaded.showZoomNavigator,
 		"malformed zoom navigator visibility did not retain its enabled default");
+	Expect(loaded.transparencyPattern == jpegview_linux::TransparencyPattern::Black,
+		"malformed transparency pattern did not retain the default black background");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
 		"malformed thumbnail width did not retain its default");
 	Expect(loaded.fileDialogWidth == jpegview_linux::kDefaultFileDialogWidth &&
@@ -2141,6 +2198,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	const fs::path clamped = temporary.path() / "clamped.conf";
 	WriteText(clamped, "manual_zoom=1000\nthumbnail_panel_width=2\n"
 		"file_dialog_width=1\nfile_dialog_height=999999\nfile_dialog_preview_ratio=4\n"
+		"transparency_pattern=white\n"
 		"fixed_crop_width=999999\nfixed_crop_height=-10\n"
 		"user_crop_aspect_width=999999\nuser_crop_aspect_height=5\n"
 		"cache_size_mb=999999999\n");
@@ -2151,6 +2209,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.fileDialogWidth == jpegview_linux::kMinimumFileDialogWidth &&
 		loaded.fileDialogHeight == jpegview_linux::kMaximumFileDialogDimension &&
 		loaded.fileDialogPreviewRatio == 0.8 &&
+		loaded.transparencyPattern == jpegview_linux::TransparencyPattern::White &&
 		loaded.fixedCropWidth == jpegview_linux::kMaximumFixedCropDimension &&
 		loaded.fixedCropHeight == jpegview_linux::kMinimumFixedCropDimension &&
 		loaded.userCropAspectWidth == jpegview_linux::kMaximumFixedCropDimension &&
@@ -2163,6 +2222,34 @@ void TestSettingsRoundTripAndMalformedValues() {
 	Expect(!jpegview_linux::LoadViewerSettings(temporary.path() / "missing.conf", unchanged) &&
 		unchanged.scaleMode == "sentinel",
 		"missing settings file modified the caller's existing settings");
+}
+
+void TestTransparencyPatternValuesAndTileColors() {
+	using jpegview_linux::TransparencyPattern;
+	TransparencyPattern pattern = TransparencyPattern::Black;
+	Expect(jpegview_linux::ParseTransparencyPattern("black", pattern) &&
+		pattern == TransparencyPattern::Black,
+		"black transparency pattern could not be parsed");
+	Expect(jpegview_linux::ParseTransparencyPattern("white", pattern) &&
+		pattern == TransparencyPattern::White,
+		"white transparency pattern could not be parsed");
+	Expect(jpegview_linux::ParseTransparencyPattern("checkerboard", pattern) &&
+		pattern == TransparencyPattern::Checkerboard,
+		"checkerboard transparency pattern could not be parsed");
+	Expect(!jpegview_linux::ParseTransparencyPattern("stripe", pattern) &&
+		pattern == TransparencyPattern::Checkerboard,
+		"invalid transparency pattern changed the active value");
+	const auto black = jpegview_linux::TransparencyPatternTileColor(TransparencyPattern::Black, 1, 0);
+	const auto white = jpegview_linux::TransparencyPatternTileColor(TransparencyPattern::White, 1, 0);
+	const auto light = jpegview_linux::TransparencyPatternTileColor(TransparencyPattern::Checkerboard, 0, 0);
+	const auto dark = jpegview_linux::TransparencyPatternTileColor(TransparencyPattern::Checkerboard, 1, 0);
+	Expect(black.red == 0 && black.green == 0 && black.blue == 0 &&
+		white.red == 255 && white.green == 255 && white.blue == 255,
+		"solid transparency patterns returned incorrect colors");
+	Expect(light.red == 208 && light.green == 208 && light.blue == 208 &&
+		dark.red == 144 && dark.green == 144 && dark.blue == 144 &&
+		jpegview_linux::kTransparencyCheckerCellSize > 0,
+		"checkerboard pattern colors or tile geometry were invalid");
 }
 
 void TestSettingsPathSelection() {
@@ -3702,6 +3789,8 @@ void TestThumbnailBackgroundPreparation() {
 	source->width = 4;
 	source->height = 4;
 	source->bgra = MakeIndexedImage(4, 4).bgra;
+	source->bgra[3] = 0;
+	source->hasTransparency = true;
 	jpegview_linux::ThumbnailPreparationWorker realWorker;
 	Expect(realWorker.Request({"scaled", source, 2, 2, 0}),
 		"thumbnail worker rejected valid display-ready pixels");
@@ -3709,7 +3798,8 @@ void TestThumbnailBackgroundPreparation() {
 		"thumbnail worker did not finish source-area downsampling");
 	const auto scaled = realWorker.TakeCompleted(1);
 	Expect(scaled.size() == 1 && scaled[0]->key == "scaled" &&
-		scaled[0]->width == 2 && scaled[0]->height == 2 && scaled[0]->bgra.size() == 16,
+		scaled[0]->width == 2 && scaled[0]->height == 2 && scaled[0]->bgra.size() == 16 &&
+		scaled[0]->hasTransparency,
 		"thumbnail worker returned incorrect derived pixels");
 
 	std::mutex orderMutex;
@@ -4301,6 +4391,23 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 			128, 128, 128, 255, 128, 128, 128, 255,
 			128, 128, 128, 255, 128, 128, 128, 255}),
 		"background image preview did not area-filter high-frequency detail");
+	const fs::path transparentPng = imageDirectory / "transparent.png";
+	const std::vector<std::uint8_t> transparentPixels = TestPixels();
+	ImageWriteOptions pngOptions;
+	std::string pngError;
+	Expect(jpegview_linux::WriteImage(transparentPng, transparentPixels.data(), 2, 2,
+		pngOptions, pngError), "could not create transparent preview PNG: " + pngError);
+	const std::uint64_t transparentGeneration = loader.Request(transparentPng, false,
+		jpegview_linux::FileDialogSortMode::Name, 2, 2);
+	results.clear();
+	const auto transparentDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < transparentDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		results = loader.TakeReady();
+	}
+	Expect(results.size() == 1 && results[0].generation == transparentGeneration &&
+		results[0].hasTransparency && results[0].error.empty(),
+		"file-dialog preview lost transparent PNG metadata");
 
 	const std::uint64_t resizedGeneration = loader.Request(ppm, false,
 		jpegview_linux::FileDialogSortMode::Name, widerPreviewSize.width, widerPreviewSize.height);
@@ -4384,6 +4491,8 @@ int main() {
 	RunTest("picture-levels-model-and-processing", TestPictureLevelsModelAndProcessing, failures);
 	RunTest("picture-levels-store-round-trip", TestPictureLevelsStoreRoundTrip, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
+	RunTest("transparency-pattern-values-and-tile-colors",
+		TestTransparencyPatternValuesAndTileColors, failures);
 	RunTest("settings-path-selection", TestSettingsPathSelection, failures);
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);
 	RunTest("batch-copy-pattern-expansion-and-preview", TestBatchCopyPatternExpansionAndPreview, failures);

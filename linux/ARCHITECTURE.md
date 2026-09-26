@@ -14,7 +14,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `crop_size_dialog_model`: fixed-crop dimension text, focus/unit transitions, and validation.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
   pixel processing, the atomic native per-image levels database, and its portable backup/restore.
-- `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
+- `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy. Decoded
+  frames carry alpha-presence metadata so opaque-image textures can keep blending disabled.
 - `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
   processing/scaling of renderer-ready frames. Display keys capture every active processing value
@@ -22,7 +23,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   before exact scaling, without requiring a retained full-resolution source frame.
 - `input_commands`: SDL key chords to shared JPEGView command IDs.
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
-- `settings` and `sort_mode`: persisted configuration (including default picture-level values,
+- `transparency_pattern`: accepted background setting values and checkerboard tile colors.
+- `settings` and `sort_mode`: persisted configuration (including the transparent-image background
+  choice, default picture-level values,
   fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
   default), and zoom-navigator visibility), plus stable sort-mode values.
 - `viewport`: fit/fill/manual zoom modes, pan state, destination geometry, and panning bounds that
@@ -43,8 +46,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   primitives, hit regions, dynamic labels, and tooltip placement.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
   nearest-first cache scheduling,
-  cancellation/LRU policy, memory sizing, antialiased source-area reduction, and low-priority
-  derivation from completed neighbor display frames.
+  cancellation/LRU policy, memory sizing, alpha-preserving antialiased source-area reduction, and
+  low-priority derivation from completed neighbor display frames.
 - `image_info_model`: stable dimensions/date/file-size presentation.
 - `system_font`: desktop-font discovery, UTF-8 shaping, measurement, and rasterization.
 - `app_icon`: extraction of the application icon embedded from the upstream ICO resource.
@@ -55,8 +58,11 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `exif_reader`: JPEG metadata parsing.
 
 `main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
-and invoking desktop integrations. It should translate SDL events into operations on the modules
-above rather than duplicate their state.
+and invoking desktop integrations. It reads the persisted transparency pattern and, for frames
+marked as containing alpha, paints the matching background beneath the image before alpha-blended
+texture rendering. The same renderer-thread helper backs transparent thumbnails and open-dialog
+previews; opaque textures retain the non-blended path. It should translate SDL events into operations
+on the modules above rather than duplicate their state.
 
 At startup the composition root creates, paints, and maps the final SDL window before constructing
 the initial `FileList` or loading its current image. Directory enumeration and the existing
