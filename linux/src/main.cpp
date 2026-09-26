@@ -115,6 +115,7 @@ constexpr int kResizeCancel = 1;
 constexpr int kCropSizeApply = 0;
 constexpr int kCropSizeCancel = 1;
 constexpr int kConfirmRestoreParameterDb = -8;
+constexpr char kRepositoryUrl[] = "https://github.com/qusielle/vibe-jpegview-linux";
 
 jpegview_linux::SystemFont& UiFont() {
 	static jpegview_linux::SystemFont font;
@@ -2099,6 +2100,31 @@ private:
 		SetTitle("About JPEGView Linux");
 	}
 
+	SDL_Rect AboutPanelRect(int windowWidth, int windowHeight) const {
+		const int width = std::min(620, std::max(360, windowWidth - 40));
+		const int height = 196;
+		return SDL_Rect{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+	}
+
+	SDL_Rect AboutRepositoryLinkRect(int windowWidth, int windowHeight) const {
+		const SDL_Rect panel = AboutPanelRect(windowWidth, windowHeight);
+		const std::string label = ClipText(kRepositoryUrl, panel.w - 36);
+		return SDL_Rect{panel.x + 18, panel.y + 112,
+			std::min(panel.w - 36, TextWidth(label, kUiTextScale)), TextLineHeight()};
+	}
+
+	void OpenRepositoryPage() {
+		std::string errorMessage;
+		for (const jpegview_linux::ExternalCommand& command :
+			jpegview_linux::OpenUrlCommands(kRepositoryUrl)) {
+			if (StartDetachedProcess(command, errorMessage)) {
+				SetTitle("About JPEGView Linux");
+				return;
+			}
+		}
+		SetTitle("Cannot open project page: " + errorMessage);
+	}
+
 	void HandleAboutEvents(const SDL_Event& event) {
 		if (event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
 			(event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_RETURN ||
@@ -2106,6 +2132,14 @@ private:
 			aboutOpen_ = false;
 			SetTitle();
 		} else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+			int windowWidth = 0;
+			int windowHeight = 0;
+			SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+			if (PointInRect(event.button.x, event.button.y,
+				AboutRepositoryLinkRect(windowWidth, windowHeight))) {
+				OpenRepositoryPage();
+				return;
+			}
 			aboutOpen_ = false;
 			SetTitle();
 		}
@@ -5746,17 +5780,19 @@ private:
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const int width = std::min(620, std::max(360, windowWidth - 40));
-		const int height = 196;
-		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+		const SDL_Rect panel = AboutPanelRect(windowWidth, windowHeight);
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 220);
 		SDL_RenderFillRect(renderer_, &panel);
 		DrawRect(panel, 160, 190, 225);
 		DrawText("JPEGVIEW LINUX", panel.x + 18, panel.y + 16, kUiTextScale, 255, 255, 255);
-		DrawText("NATIVE SDL2 VIEWER", panel.x + 18, panel.y + 48, kUiTextScale, 210, 225, 250);
+		DrawText("A PORT OF JPEGVIEW FOR LINUX", panel.x + 18, panel.y + 48, kUiTextScale, 210, 225, 250);
 		DrawText(std::string("VERSION ") + JPEGVIEW_APP_VERSION,
 			panel.x + 18, panel.y + 80, kUiTextScale, 210, 225, 250);
-		DrawText("FOLDER NAVIGATION AND IMAGE VIEWING", panel.x + 18, panel.y + 112, kUiTextScale, 185, 205, 220);
+		const SDL_Rect link = AboutRepositoryLinkRect(windowWidth, windowHeight);
+		const std::string linkLabel = ClipText(kRepositoryUrl, panel.w - 36);
+		DrawText(linkLabel, link.x, link.y, kUiTextScale, 125, 185, 255);
+		if (link.w > 0) DrawLine(link.x, link.y + link.h - 2, link.x + link.w - 1,
+			link.y + link.h - 2, 125, 185, 255);
 		DrawText("PRESS ESC TO CLOSE", panel.x + 18, panel.y + 156, kUiTextScale, 180, 180, 180);
 	}
 

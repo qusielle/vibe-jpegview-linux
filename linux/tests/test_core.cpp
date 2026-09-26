@@ -2547,6 +2547,14 @@ void TestExternalCommandPlanning() {
 	Expect(jpegview_linux::PrintCommand(output).executable == "lp" &&
 		jpegview_linux::PrintCommand(output).arguments == std::vector<std::string>({output.string()}),
 		"print command plan is incorrect");
+	const std::string projectUrl = "https://github.com/qusielle/vibe-jpegview-linux?ref=about&source=app";
+	const auto openUrl = jpegview_linux::OpenUrlCommands(projectUrl);
+	Expect(openUrl.size() == 2 && openUrl[0].executable == "xdg-open" &&
+		openUrl[0].arguments == std::vector<std::string>({projectUrl}) &&
+		openUrl[1].executable == "gio" &&
+		openUrl[1].arguments == std::vector<std::string>({"open", projectUrl}) &&
+		jpegview_linux::OpenUrlCommands("").empty(),
+		"URL opener fallback plans are incorrect");
 
 	const auto openFolder = jpegview_linux::OpenContainingFolderCommands(fs::path("/tmp/my folder"));
 	Expect(openFolder.size() == 2 && openFolder[0].executable == "xdg-open" &&

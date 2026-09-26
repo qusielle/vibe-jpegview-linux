@@ -38,6 +38,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "$temporary/images"
+mkdir -p "$temporary/bin"
+cat >"$temporary/bin/xdg-open" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$JPEGVIEW_TEST_URL_LOG"
+EOF
+chmod 755 "$temporary/bin/xdg-open"
 
 write_ppm() {
 	filename=$1
@@ -105,6 +111,7 @@ sleep 0.5
 
 launch_viewer() {
 	DISPLAY=":$display_number" HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/config" \
+		PATH="$temporary/bin:$PATH" JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
 		"$BINARY" "$temporary/images" >"$temporary/viewer.log" 2>&1 &
 	viewer_pid=$!
 	window_id=''
@@ -234,6 +241,46 @@ if [ "$help_closed_title" != "$help_previous_title" ]; then
 	echo "UI smoke test: Escape did not close quick help and restore the image title" >&2
 	exit 1
 fi
+
+# The About dialog should describe the project as a port and expose a working
+# link through the desktop URL opener rather than listing generic features.
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
+sleep 0.1
+DISPLAY=":$display_number" xdotool key Up
+DISPLAY=":$display_number" xdotool key Up
+DISPLAY=":$display_number" xdotool key Return
+assert_title_prefix "About JPEGView Linux" "context-menu navigation did not open About"
+about_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+about_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+about_panel_width=$((about_window_width - 40))
+if [ "$about_panel_width" -gt 620 ]; then about_panel_width=620; fi
+if [ "$about_panel_width" -lt 360 ]; then about_panel_width=360; fi
+about_link_x=$(((about_window_width - about_panel_width) / 2 + 30))
+about_link_y=$(((about_window_height - 196) / 2 + 120))
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/about-open.png"
+	about_link_color=$(convert "$temporary/about-open.png" \
+		-crop "$((about_panel_width - 36))x32+$((about_link_x - 12))+$((about_link_y - 12))" \
+		+repage -format %c histogram:info:- | grep -c 'srgb(125,185,255)' || true)
+	if [ "$about_link_color" -eq 0 ]; then
+		echo "UI smoke test: About did not render the repository URL as a blue underlined link" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$about_link_x" "$about_link_y" click 1
+for _ in $(seq 1 30); do
+	[ -s "$temporary/opened-url" ] && break
+	sleep 0.1
+done
+opened_url=$(sed -n '1p' "$temporary/opened-url" 2>/dev/null || true)
+if [ "$opened_url" != "https://github.com/qusielle/vibe-jpegview-linux" ]; then
+	echo "UI smoke test: clicking the About repository link did not open the project URL ($opened_url)" >&2
+	exit 1
+fi
+assert_title_prefix "About JPEGView Linux" "opening the project link unexpectedly closed About"
+DISPLAY=":$display_number" xdotool key Escape
+assert_title_prefix "01-red.ppm" "Escape did not close About and restore the image title"
 
 # Ctrl+M marks one image. Ctrl+Left/Right then alternate between it and the
 # image that was current at the first toggle.

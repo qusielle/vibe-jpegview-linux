@@ -34,6 +34,7 @@ ExternalCommand LosslessJpegCommand(LosslessJpegOperation operation,
 ExternalCommand LosslessJpegCropCommand(const std::filesystem::path& source,
 	const std::filesystem::path& output, int x, int y, int width, int height);
 ExternalCommand PrintCommand(const std::filesystem::path& image);
+std::vector<ExternalCommand> OpenUrlCommands(const std::string& url);
 std::vector<ExternalCommand> OpenContainingFolderCommands(const std::filesystem::path& directory);
 std::optional<ExternalCommand> OpenWithCommand(const OpenWithApplication& application,
 	const std::filesystem::path& image, bool terminalAvailable);

@@ -42,6 +42,11 @@ ExternalCommand PrintCommand(const std::filesystem::path& image) {
 	return {"lp", {image.string()}};
 }
 
+std::vector<ExternalCommand> OpenUrlCommands(const std::string& url) {
+	if (url.empty()) return {};
+	return {{"xdg-open", {url}}, {"gio", {"open", url}}};
+}
+
 std::vector<ExternalCommand> OpenContainingFolderCommands(
 	const std::filesystem::path& directory) {
 	return {{"xdg-open", {directory.string()}}, {"gio", {"open", directory.string()}}};
