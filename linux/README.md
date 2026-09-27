@@ -685,13 +685,44 @@ ordered refactoring backlog. Possible future user-facing work is tracked separat
 
 ## Screenshots
 
-The main viewer with its neighboring-image thumbnail strip and lower navigation panel:
+The main viewer with the neighboring-image strip, lower navigation controls, and the gold outline
+on a marked image:
 
-<p><img src="screenshots/main-window-panels.png" width="720" alt="JPEGView Linux main window with thumbnail and navigation panels"></p>
+<p><img src="screenshots/main-window-panels.png" width="720" alt="JPEGView Linux main window with thumbnail and navigation panels, including a marked-image outline"></p>
 
-The open dialog with a selected image and its live preview:
+The resizable Browse dialog with folder counts, a selected image, and its live preview:
 
-<p><img src="screenshots/open-dialog-preview.png" width="720" alt="JPEGView Linux open dialog with a selected-image preview"></p>
+<p><img src="screenshots/open-dialog-preview.png" width="720" alt="JPEGView Linux Browse dialog with a selected-image preview and adjustable preview pane"></p>
+
+The Recents tab keeps one image per folder and shows the focused image in the same preview pane:
+
+<p><img src="screenshots/recent-files-preview.png" width="720" alt="JPEGView Linux Recents tab showing folder paths, filenames, and the focused image preview"></p>
+
+Crop selection mode provides a movable, resizable source-area selection and a crop-action menu:
+
+<p><img src="screenshots/crop-selection.png" width="720" alt="JPEGView Linux crop selection over a landscape with crop actions open"></p>
+
+Picture levels are adjusted live in the bottom panel:
+
+<p><img src="screenshots/picture-levels.png" width="720" alt="JPEGView Linux picture-level adjustment panel with live contrast adjustment"></p>
+
+The magnifying glass follows the pointer and shows a magnified area of the image:
+
+<p><img src="screenshots/magnifying-glass.png" width="720" alt="JPEGView Linux magnifying glass lens over a mountain lake"></p>
+
+When zoomed beyond the viewport, the upper-right navigator shows the whole image and the current
+view area:
+
+<p><img src="screenshots/zoom-region-navigator.png" width="720" alt="JPEGView Linux zoom-region navigator showing the visible viewport on a mountain lake"></p>
+
+The compact context menu exposes the newer viewing controls and underlined keyboard mnemonics:
+
+<p><img src="screenshots/context-menu-mnemonics.png" width="720" alt="JPEGView Linux context menu with crop, magnifying glass, picture levels, and mnemonic hints"></p>
+
+Choosing **Show Advanced Options** expands the full context menu into columns. It includes sibling-
+folder navigation with Alt+Left/Right; click the image to view the full-resolution capture:
+
+<p><a href="screenshots/context-menu-advanced.png"><img src="screenshots/context-menu-advanced.png" width="720" alt="JPEGView Linux full advanced context menu with sibling-folder navigation and keyboard shortcuts"></a></p>
 
 The sample photos shown are CC0 images from Wikimedia Commons: [Lake Mountain Landscape](https://commons.wikimedia.org/wiki/File:Lake_Mountain_Landscape.jpg),
 [Waterfall in forest](https://commons.wikimedia.org/wiki/File:Waterfall_in_forest.jpg),
