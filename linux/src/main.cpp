@@ -5088,6 +5088,7 @@ private:
 			if (event.button.button == SDL_BUTTON_LEFT && BeginFileDialogResize(lastMouseX_, lastMouseY_)) break;
 			if (event.button.button == SDL_BUTTON_LEFT &&
 				BeginFileDialogPreviewResize(lastMouseX_, lastMouseY_)) break;
+			const bool dialogClicked = PointInRect(event.button.x, event.button.y, FileDialogRect());
 			const int item = FileDialogItemAt(event.button.x, event.button.y);
 			const bool browseTabClicked = FileDialogHasTabs() && PointInRect(event.button.x,
 				event.button.y, FileDialogTabRect(FileDialogTab::Browse));
@@ -5098,9 +5099,8 @@ private:
 				PointInRect(event.button.x, event.button.y, FileDialogSortRect());
 			const bool previewClicked = FileDialogHasPreviewColumn() &&
 				PointInRect(event.button.x, event.button.y, FileDialogPreviewRect());
-			if (event.button.button == SDL_BUTTON_RIGHT ||
-				(event.button.button == SDL_BUTTON_LEFT && item < 0 && !inputClicked && !sortClicked &&
-					!previewClicked && !browseTabClicked && !recentsTabClicked)) {
+			if ((event.button.button == SDL_BUTTON_LEFT || event.button.button == SDL_BUTTON_RIGHT) &&
+				!dialogClicked) {
 				CloseFileDialog();
 			} else if (event.button.button == SDL_BUTTON_LEFT && browseTabClicked) {
 				SwitchFileDialogTab(FileDialogTab::Browse);
@@ -5112,7 +5112,7 @@ private:
 				if (fileDialogSave_) ActiveFileDialogModel().ClearSelection();
 			} else if (event.button.button == SDL_BUTTON_LEFT && previewClicked) {
 				// The preview is informational; clicking it leaves the selection alone.
-			} else if (event.button.button == SDL_BUTTON_LEFT) {
+			} else if (event.button.button == SDL_BUTTON_LEFT && item >= 0) {
 				jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
 				model.Select(item, FileDialogVisibleRows());
 				const FileDialogEntry* selected = model.SelectedEntry();

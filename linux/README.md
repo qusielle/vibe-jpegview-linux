@@ -446,6 +446,7 @@ lens when an image is open. Move it over the image and use wheel down/up to enla
 Ctrl+wheel changes lens height, Alt+wheel width, and Shift+wheel magnification. The lens is
 transient and its size/magnification reset between runs. Ctrl+O opens the native in-app file browser
 with **Browse** and **Recents** tabs.
+Clicking blank space inside the dialog leaves it open; press Escape to cancel.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
 The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while
 switching tabs; Ctrl+Tab switches between Browse and Recents. It previews and opens the focused

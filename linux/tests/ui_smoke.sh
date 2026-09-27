@@ -212,6 +212,22 @@ click_file_dialog_sort() {
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$sort_x" "$sort_y" click 1
 }
 
+click_file_dialog_blank_space() {
+	window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+	window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+	dialog_width=$((window_width - 40))
+	if [ "$dialog_width" -gt 900 ]; then dialog_width=900; fi
+	if [ "$dialog_width" -lt 320 ]; then dialog_width=320; fi
+	dialog_height=$((window_height - 40))
+	if [ "$dialog_height" -gt 650 ]; then dialog_height=650; fi
+	if [ "$dialog_height" -lt 260 ]; then dialog_height=260; fi
+	dialog_x=$(((window_width - dialog_width) / 2))
+	dialog_y=$(((window_height - dialog_height) / 2))
+	blank_x=$((dialog_x + dialog_width / 2))
+	blank_y=$((dialog_y + 22))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$blank_x" "$blank_y" click 1
+}
+
 click_file_dialog_tab() {
 	tab=$1
 	requested_width=${2:-900}
@@ -395,6 +411,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 fi
 click_file_dialog_tab recents
 click_file_dialog_tab browse
+click_file_dialog_blank_space
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.4
 filtered_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
