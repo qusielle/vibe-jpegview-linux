@@ -13,8 +13,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   are keyed by device/inode/size/mtime and retain no extracted image payloads. Workers use independent
   libzip/libarchive handles, validate the selected member's identity, and stream at most 128 MiB of
   uncompressed data into an anonymous memory file for existing path-based decoders. Unsafe paths,
-  archive links/devices, and encrypted members are omitted where identifiable; catalogs over 100,000 entries are
-  rejected. New archive formats should extend this backend dispatch while keeping viewer consumers
+  archive links/devices; encrypted ZIP members retain their names and locked state, while the current
+  libarchive path omits encrypted members it cannot decode. Catalogs over 100,000 entries are rejected.
+  New archive formats should extend this backend dispatch while keeping viewer consumers
   on the generic source operations.
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality resizing, and the automatic/manual picture-level processing pipeline.
@@ -105,10 +106,15 @@ streams are sequential, and solid 7z/RAR5 blocks can require decompressing earli
 later member. RAR4 solid archives and multi-volume RAR sets are not supported. In either backend, only
 the selected member is copied, bounded to 128 MiB, into a short-lived
 anonymous memory file. That output cap does not bound the codec's internal memory or CPU use. The
-source archive is never modified and no persistent extraction directory is created. ZIP encryption,
-encrypted 7z entries, RAR encryption, and archive links/devices are unsupported; unsafe paths are
-omitted. Filesystem-only actions are disabled or guarded for archive members, while image edits and
-saves still use the ordinary in-memory image path. Future containers should add extension recognition
+source archive is never modified and no persistent extraction directory is created. ZIP member
+encryption is handled through libzip: the Open dialog owns password entry, while
+`ArchivePasswordDialogModel` masks UTF-8 input and `archive_source` checks credentials and keeps
+accepted credentials in a process-only cache keyed by backing-file identity. Credentials are never
+stored in settings or recent-file state. Previews use only an already cached credential and report a locked
+preview instead of opening UI. Encrypted 7z/RAR entries remain unsupported by the current reader;
+TAR/TGZ have no native password encryption. Archive links/devices and unsafe paths are omitted.
+Filesystem-only actions are disabled or guarded for archive members, while image edits and saves
+still use the ordinary in-memory image path. Future containers should add extension recognition
 and list/read operations here rather than branching in the SDL viewer, recents, caches, or codecs.
 
 The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct

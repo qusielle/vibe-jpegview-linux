@@ -18,11 +18,21 @@ struct ArchiveEntryInfo {
 	bool directory = false;
 	std::uint64_t size = 0;
 	std::int64_t modificationTime = 0;
+	bool encrypted = false;
 };
 
 struct ArchiveMemberInfo {
 	std::uint64_t size = 0;
 	std::int64_t modificationTime = 0;
+	bool encrypted = false;
+};
+
+enum class ArchiveErrorKind {
+	None,
+	PasswordRequired,
+	InvalidPassword,
+	UnsupportedEncryption,
+	Other,
 };
 
 inline constexpr std::uint64_t kMaximumArchiveMemberBytes = 128ull * 1024ull * 1024ull;
@@ -58,16 +68,28 @@ bool ListArchiveDirectory(const std::filesystem::path& directory,
 // stop between input blocks, including while a gzip stream is being skipped.
 bool ListArchiveDirectoryCancellable(const std::filesystem::path& directory,
 	std::vector<ArchiveEntryInfo>& entries, const std::function<bool()>& shouldContinue,
-	std::string& errorMessage);
+	std::string& errorMessage, ArchiveErrorKind* errorKind = nullptr,
+	bool* containsEncryptedEntries = nullptr);
 bool GetArchiveMemberInfo(const std::filesystem::path& path,
 	ArchiveMemberInfo& info, std::string& errorMessage);
+
+// Passwords are keyed to the current backing-file identity and retained only
+// in process memory. They are never read from or written to viewer settings.
+bool HasSessionArchivePassword(const std::filesystem::path& path);
+bool SetSessionArchivePassword(const std::filesystem::path& path,
+	const std::string& password);
+void ForgetSessionArchivePassword(const std::filesystem::path& path);
+void ClearSessionArchivePasswords();
+bool ValidateArchivePassword(const std::filesystem::path& path,
+	const std::string& password, std::string& errorMessage,
+	ArchiveErrorKind* errorKind = nullptr);
 
 // Reads one selected member into a private anonymous memory file exposed to
 // existing path-based codecs for the duration of the callback. The callback
 // must not retain the temporary path.
 bool WithArchiveMemberFile(const std::filesystem::path& path,
 	const std::function<bool(const std::filesystem::path&, std::string&)>& callback,
-	std::string& errorMessage);
+	std::string& errorMessage, ArchiveErrorKind* errorKind = nullptr);
 
 // Identity for worker-cache validation. It includes the archive's filesystem
 // identity for members, while the cache key continues to include their full

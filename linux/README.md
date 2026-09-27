@@ -139,7 +139,12 @@ they support.
    RAR4 solid archives and multi-volume RAR sets are not supported. The selected image is streamed on
    demand through a short-lived anonymous memory file. Opening a cold TGZ, 7z, or RAR directly as a
    command-line argument also needs an initial index; the Open dialog remains responsive while it
-   builds that index. Password-protected ZIPs and encrypted 7z or RAR entries are not supported.
+   builds that index. Encrypted ZIP entries are supported: entering an encrypted ZIP in Browse
+   opens a password prompt, filenames remain visible, and passwords accepted by the archive's check
+   are cached in memory for the current app run and backing archive only. Passwords are not written to settings or recent
+   files. A locked image preview shows a password-needed label but never opens the prompt; opening
+   the archive or selecting an encrypted image is the explicit unlock action. Encrypted 7z and RAR
+   entries are not supported yet. TAR and TGZ do not have native password encryption.
    Unsafe absolute or traversal paths, archive links, and devices are omitted;
    indexes are capped at 100,000 entries, and individual images are limited to 128 MiB uncompressed.
    That output-size cap does not limit a codec's own decompression workspace. The archive itself is
@@ -341,6 +346,8 @@ QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including anima
 formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, TAR, `.tar.gz`, `.tgz`, `.7z`, and `.rar`
 archives can contain any supported image format above; they are browsed read-only as virtual folders.
 RAR input uses libarchive's built-in reader; the Ubuntu 20.04 package supports both RAR4 and RAR5.
+ZIP encryption uses libzip's per-entry encrypted read API and the session-only archive credential
+cache; encrypted 7z and RAR remain unavailable in the current backend.
 The save dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and
 JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is view-only.
 JPEG uses the linked libjpeg implementation (libjpeg-turbo in the supported builds), common
@@ -440,11 +447,13 @@ mapping, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
 trips across static and animated formats, ZIP/TAR/TGZ/7z/RAR4/RAR5 listing and member decoding, path-traversal
-rejection, nested archive navigation and archive-backed recent previews, cancellable archive indexing,
-all PNM variants, malformed input, batch-copy planning,
+rejection, nested archive navigation and archive-backed recent previews, encrypted ZIP member
+listing, wrong/correct password validation, in-memory credential reuse/clearing, and locked previews,
+cancellable archive indexing, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ/7z/RAR browsing and recent
-reopening, focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and
+reopening, encrypted-ZIP prompt/retry/session reuse, focus restoration, paging, Home/End, held-key
+movement, wheel and scrollbar scrolling/dragging, and
 dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;

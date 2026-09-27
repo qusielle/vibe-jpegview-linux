@@ -19,6 +19,7 @@ struct FileDialogEntry {
 	std::filesystem::file_time_type modificationTime{};
 	bool archiveContainer = false;
 	bool archiveMember = false;
+	bool encrypted = false;
 };
 
 enum class FileDialogSortMode {
@@ -143,6 +144,9 @@ struct ArchiveDirectoryResult {
 	std::uint64_t generation = 0;
 	std::vector<ArchiveEntryInfo> entries;
 	std::string error;
+	ArchiveErrorKind errorKind = ArchiveErrorKind::None;
+	bool containsEncryptedEntries = false;
+	bool passwordValidation = false;
 };
 
 // Cold archive indexes, especially gzip TAR streams, are built away from the
@@ -155,6 +159,8 @@ public:
 	ArchiveDirectoryLoader& operator=(const ArchiveDirectoryLoader&) = delete;
 
 	void Request(const std::filesystem::path& directory, std::uint64_t generation);
+	void RequestPasswordValidation(const std::filesystem::path& archive,
+		const std::string& password, std::uint64_t generation);
 	void Clear(std::uint64_t generation);
 	std::vector<ArchiveDirectoryResult> TakeReady();
 

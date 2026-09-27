@@ -364,6 +364,8 @@ struct ArchiveDirectoryLoader::Impl {
 	struct Task {
 		std::filesystem::path directory;
 		std::uint64_t generation = 0;
+		std::string password;
+		bool validatePassword = false;
 	};
 
 	Impl() : worker([this] { Run(); }) {}
@@ -389,11 +391,22 @@ struct ArchiveDirectoryLoader::Impl {
 			ArchiveDirectoryResult result;
 			result.directory = task.directory;
 			result.generation = task.generation;
+			result.passwordValidation = task.validatePassword;
+			if (task.validatePassword) {
+				(void)ValidateArchivePassword(task.directory, task.password, result.error,
+					&result.errorKind);
+				std::fill(task.password.begin(), task.password.end(), '\0');
+			} else {
+				const auto isCurrent = [this, generation = task.generation] {
+					return !stopping.load() && currentGeneration.load() == generation;
+				};
+				(void)ListArchiveDirectoryCancellable(task.directory, result.entries,
+					isCurrent, result.error, &result.errorKind,
+					&result.containsEncryptedEntries);
+			}
 			const auto isCurrent = [this, generation = task.generation] {
 				return !stopping.load() && currentGeneration.load() == generation;
 			};
-			(void)ListArchiveDirectoryCancellable(task.directory, result.entries,
-				isCurrent, result.error);
 			if (!isCurrent()) continue;
 
 			std::lock_guard<std::mutex> lock(mutex);
@@ -420,7 +433,19 @@ void ArchiveDirectoryLoader::Request(const std::filesystem::path& directory,
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		impl_->pending.clear();
 		impl_->ready.clear();
-		impl_->pending.push_back(Impl::Task{directory, generation});
+		impl_->pending.push_back(Impl::Task{directory, generation, {}, false});
+	}
+	impl_->condition.notify_one();
+}
+
+void ArchiveDirectoryLoader::RequestPasswordValidation(const std::filesystem::path& archive,
+	const std::string& password, std::uint64_t generation) {
+	impl_->currentGeneration.store(generation);
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->pending.clear();
+		impl_->ready.clear();
+		impl_->pending.push_back(Impl::Task{archive, generation, password, true});
 	}
 	impl_->condition.notify_one();
 }

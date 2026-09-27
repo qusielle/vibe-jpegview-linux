@@ -55,6 +55,21 @@ struct BackingIdentity {
 	bool valid = false;
 };
 
+struct SessionPassword {
+	BackingIdentity identity;
+	std::string value;
+};
+
+struct SessionPasswordCache {
+	std::mutex mutex;
+	std::unordered_map<std::string, SessionPassword> values;
+};
+
+SessionPasswordCache& GlobalSessionPasswordCache() {
+	static SessionPasswordCache cache;
+	return cache;
+}
+
 bool operator==(const BackingIdentity& left, const BackingIdentity& right) {
 	return left.valid && right.valid && left.device == right.device &&
 		left.inode == right.inode && left.size == right.size &&
@@ -211,12 +226,69 @@ std::string ZipOpenError(int errorCode) {
 	return result;
 }
 
+ArchiveErrorKind ZipErrorKind(const zip_error_t* error) {
+	if (error == nullptr) return ArchiveErrorKind::Other;
+	switch (zip_error_code_zip(error)) {
+	case ZIP_ER_NOPASSWD: return ArchiveErrorKind::PasswordRequired;
+	case ZIP_ER_WRONGPASSWD: return ArchiveErrorKind::InvalidPassword;
+	default: return ArchiveErrorKind::Other;
+	}
+}
+
+void ClearPasswordString(std::string& password) {
+	volatile char* bytes = password.empty() ? nullptr : &password[0];
+	for (std::size_t index = 0; index < password.size(); ++index) bytes[index] = '\0';
+	password.clear();
+}
+
+fs::path PasswordBackingPath(const fs::path& path) {
+	ArchiveLocation location;
+	return ParseArchiveLocation(path, location) ? location.archive : path;
+}
+
+bool PasswordCacheKey(const fs::path& path, std::string& key,
+	BackingIdentity& identity) {
+	const fs::path backing = PasswordBackingPath(path);
+	if (!StatIdentity(backing, identity)) return false;
+	std::error_code absoluteError;
+	const fs::path absolute = fs::absolute(backing, absoluteError);
+	key = (absoluteError ? backing : absolute).lexically_normal().string();
+	return !key.empty();
+}
+
+bool ReadSessionPassword(const fs::path& path, std::string& password) {
+	std::string key;
+	BackingIdentity identity;
+	if (!PasswordCacheKey(path, key, identity)) return false;
+	SessionPasswordCache& cache = GlobalSessionPasswordCache();
+	std::lock_guard<std::mutex> lock(cache.mutex);
+	const auto found = cache.values.find(key);
+	if (found == cache.values.end()) return false;
+	if (!(found->second.identity == identity)) {
+		ClearPasswordString(found->second.value);
+		cache.values.erase(found);
+		return false;
+	}
+	password = found->second.value;
+	return true;
+}
+
+void EraseSessionPassword(const std::string& key) {
+	SessionPasswordCache& cache = GlobalSessionPasswordCache();
+	std::lock_guard<std::mutex> lock(cache.mutex);
+	const auto found = cache.values.find(key);
+	if (found == cache.values.end()) return;
+	ClearPasswordString(found->second.value);
+	cache.values.erase(found);
+}
+
 struct CatalogChild {
 	std::string name;
 	std::string fullName;
 	bool directory = false;
 	std::uint64_t size = 0;
 	std::int64_t modificationTime = 0;
+	bool encrypted = false;
 };
 
 enum class ArchiveBackend {
@@ -230,6 +302,7 @@ struct ArchiveMemberRecord {
 	std::uint32_t crc = 0;
 	std::uint64_t index = 0;
 	std::int64_t modificationTime = 0;
+	bool encrypted = false;
 	ArchiveBackend backend = ArchiveBackend::Zip;
 };
 
@@ -237,6 +310,7 @@ struct ArchiveCatalog {
 	fs::path archive;
 	BackingIdentity identity;
 	ArchiveFormat format = ArchiveFormat::Zip;
+	bool containsEncryptedEntries = false;
 	std::unordered_map<std::string, ArchiveMemberRecord> members;
 	std::unordered_map<std::string, std::vector<CatalogChild>> directories;
 	std::unordered_map<std::string,
@@ -274,6 +348,7 @@ bool AddCatalogChild(ArchiveCatalog& catalog, const std::string& parent,
 	const auto found = indices.find(child.name);
 	if (found != indices.end()) {
 		CatalogChild& current = catalog.directories[parent][found->second];
+		current.encrypted = current.encrypted || child.encrypted;
 		if (current.directory == child.directory && current.modificationTime == 0 &&
 			child.modificationTime != 0) {
 			current.modificationTime = child.modificationTime;
@@ -374,14 +449,18 @@ bool LoadZipCatalog(const fs::path& archivePath, const BackingIdentity& expected
 			}
 			if ((status.valid & ZIP_STAT_SIZE) == 0 || (status.valid & ZIP_STAT_INDEX) == 0) continue;
 			const std::string fullName = parent.empty() ? basename : parent + "/" + basename;
+			const bool encrypted = (status.valid & ZIP_STAT_ENCRYPTION_METHOD) != 0 &&
+				status.encryption_method != ZIP_EM_NONE;
 			ArchiveMemberRecord info;
 			info.size = status.size;
 			info.compressedSize = (status.valid & ZIP_STAT_COMP_SIZE) != 0 ? status.comp_size : 0;
 			info.crc = (status.valid & ZIP_STAT_CRC) != 0 ? status.crc : 0;
 			info.index = status.index;
 			info.modificationTime = modificationTime;
+			info.encrypted = encrypted;
+			catalog->containsEncryptedEntries = catalog->containsEncryptedEntries || encrypted;
 			if (AddCatalogChild(*catalog, parent,
-				CatalogChild{basename, fullName, false, info.size, modificationTime})) {
+				CatalogChild{basename, fullName, false, info.size, modificationTime, encrypted})) {
 				catalog->members.emplace(fullName, info);
 			}
 		}
@@ -1035,14 +1114,25 @@ bool ListArchiveDirectory(const fs::path& directory, std::vector<ArchiveEntryInf
 
 bool ListArchiveDirectoryCancellable(const fs::path& directory,
 	std::vector<ArchiveEntryInfo>& entries, const std::function<bool()>& shouldContinue,
-	std::string& errorMessage) {
+	std::string& errorMessage, ArchiveErrorKind* errorKind,
+	bool* containsEncryptedEntries) {
 	entries.clear();
 	errorMessage.clear();
+	if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
+	if (containsEncryptedEntries != nullptr) *containsEncryptedEntries = false;
 	ArchiveLocation location;
 	if (!ParseArchiveLocation(directory, location)) return false;
 	const std::shared_ptr<const ArchiveCatalog> catalog =
 		GetCatalog(location.archive, shouldContinue, errorMessage);
-	if (!catalog) return false;
+	if (!catalog) {
+		if (errorKind != nullptr && errorMessage.find("password") != std::string::npos) {
+			*errorKind = ArchiveErrorKind::PasswordRequired;
+		}
+		return false;
+	}
+	if (containsEncryptedEntries != nullptr) {
+		*containsEncryptedEntries = catalog->containsEncryptedEntries;
+	}
 	if (!ShouldContinue(shouldContinue)) {
 		errorMessage = "archive listing was cancelled";
 		return false;
@@ -1055,7 +1145,7 @@ bool ListArchiveDirectoryCancellable(const fs::path& directory,
 			location.memberDirectory + "/" + child.name;
 		entries.push_back(ArchiveEntryInfo{
 			location.archive / fs::path(member), child.directory, child.size,
-			child.modificationTime});
+			child.modificationTime, child.encrypted});
 	}
 	return true;
 }
@@ -1079,51 +1169,157 @@ bool GetArchiveMemberInfo(const fs::path& path, ArchiveMemberInfo& info,
 	}
 	info.size = found->second.size;
 	info.modificationTime = found->second.modificationTime;
+	info.encrypted = found->second.encrypted;
+	return true;
+}
+
+bool HasSessionArchivePassword(const fs::path& path) {
+	std::string password;
+	const bool found = ReadSessionPassword(path, password);
+	ClearPasswordString(password);
+	return found;
+}
+
+bool SetSessionArchivePassword(const fs::path& path, const std::string& password) {
+	std::string key;
+	BackingIdentity identity;
+	if (!PasswordCacheKey(path, key, identity)) return false;
+	SessionPasswordCache& cache = GlobalSessionPasswordCache();
+	std::lock_guard<std::mutex> lock(cache.mutex);
+	const auto existing = cache.values.find(key);
+	if (existing != cache.values.end()) ClearPasswordString(existing->second.value);
+	cache.values[key] = SessionPassword{identity, password};
+	return true;
+}
+
+void ForgetSessionArchivePassword(const fs::path& path) {
+	std::string key;
+	BackingIdentity identity;
+	if (PasswordCacheKey(path, key, identity)) EraseSessionPassword(key);
+}
+
+void ClearSessionArchivePasswords() {
+	SessionPasswordCache& cache = GlobalSessionPasswordCache();
+	std::lock_guard<std::mutex> lock(cache.mutex);
+	for (auto& item : cache.values) ClearPasswordString(item.second.value);
+	cache.values.clear();
+}
+
+bool ValidateArchivePassword(const fs::path& path, const std::string& password,
+	std::string& errorMessage, ArchiveErrorKind* errorKind) {
+	errorMessage.clear();
+	if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
+	ArchiveLocation location;
+	if (!ParseArchiveLocation(path, location)) {
+		errorMessage = "not an archive container";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	const std::shared_ptr<const ArchiveCatalog> catalog =
+		GetCatalog(location.archive, AlwaysContinue(), errorMessage);
+	if (!catalog) {
+		if (errorKind != nullptr && errorMessage.find("password") != std::string::npos) {
+			*errorKind = ArchiveErrorKind::PasswordRequired;
+		}
+		return false;
+	}
+	if (!catalog->containsEncryptedEntries) return true;
+	if (location.format != ArchiveFormat::Zip) {
+		errorMessage = "password-protected archive format is not supported";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::UnsupportedEncryption;
+		return false;
+	}
+	const auto encrypted = std::find_if(catalog->members.begin(), catalog->members.end(),
+		[](const auto& item) { return item.second.encrypted && item.second.size != 0; });
+	if (encrypted == catalog->members.end()) return true;
+	int zipError = 0;
+	zip_t* archive = zip_open(location.archive.c_str(), ZIP_RDONLY, &zipError);
+	if (archive == nullptr) {
+		errorMessage = ZipOpenError(zipError);
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	std::unique_ptr<zip_t, decltype(&zip_discard)> archiveOwner(archive, &zip_discard);
+	zip_file_t* file = zip_fopen_index_encrypted(archive, encrypted->second.index,
+		ZIP_FL_UNCHANGED, password.c_str());
+	if (file == nullptr) {
+		zip_error_t* archiveError = zip_get_error(archive);
+		const ArchiveErrorKind kind = ZipErrorKind(archiveError);
+		errorMessage = kind == ArchiveErrorKind::PasswordRequired ?
+			"password is required for this archive" :
+			kind == ArchiveErrorKind::InvalidPassword ? "incorrect archive password" : ZipError(archive);
+		if (errorKind != nullptr) *errorKind = kind;
+		return false;
+	}
+	std::unique_ptr<zip_file_t, decltype(&zip_fclose)> fileOwner(file, &zip_fclose);
+	std::uint8_t probe = 0;
+	if (zip_fread(file, &probe, 1) < 0) {
+		const ArchiveErrorKind kind = ZipErrorKind(zip_file_get_error(file));
+		errorMessage = kind == ArchiveErrorKind::InvalidPassword ?
+			"incorrect archive password" : ZipError(archive);
+		if (errorKind != nullptr) *errorKind = kind;
+		return false;
+	}
 	return true;
 }
 
 bool WithArchiveMemberFile(const fs::path& path,
 	const std::function<bool(const fs::path&, std::string&)>& callback,
-	std::string& errorMessage) {
+	std::string& errorMessage, ArchiveErrorKind* errorKind) {
 	errorMessage.clear();
-	if (!callback) {
-		errorMessage = "archive member decoder callback is missing";
+	if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
+	const auto fail = [&errorMessage, errorKind](const std::string& message,
+		ArchiveErrorKind kind = ArchiveErrorKind::Other) {
+		errorMessage = message;
+		if (errorKind != nullptr) *errorKind = kind;
 		return false;
+	};
+	if (!callback) {
+		return fail("archive member decoder callback is missing");
 	}
 	ArchiveLocation location;
 	if (!ParseArchiveLocation(path, location) || location.memberDirectory.empty()) {
-		errorMessage = "not an archive image member";
-		return false;
+		return fail("not an archive image member");
 	}
 	const std::shared_ptr<const ArchiveCatalog> catalog =
 		GetCatalog(location.archive, AlwaysContinue(), errorMessage);
-	if (!catalog) return false;
+	if (!catalog) {
+		if (errorKind != nullptr && errorMessage.find("password") != std::string::npos) {
+			*errorKind = ArchiveErrorKind::PasswordRequired;
+		}
+		return false;
+	}
 	const auto member = catalog->members.find(location.memberDirectory);
 	if (member == catalog->members.end()) {
-		errorMessage = "archive member no longer exists";
-		return false;
+		return fail("archive member no longer exists");
 	}
 	if (member->second.size > kMaximumArchiveMemberBytes) {
-		errorMessage = "archive image exceeds the 128 MiB member limit";
-		return false;
+		return fail("archive image exceeds the 128 MiB member limit");
 	}
 	if (member->second.backend == ArchiveBackend::Libarchive) {
+		if (member->second.encrypted) {
+			return fail("encrypted archive format is not supported", ArchiveErrorKind::UnsupportedEncryption);
+		}
 		BackingIdentity currentIdentity;
 		if (!StatIdentity(location.archive, currentIdentity) || !(currentIdentity == catalog->identity)) {
-			errorMessage = "archive changed before the image could be read";
-			return false;
+			return fail("archive changed before the image could be read");
 		}
 		return WithLibarchiveMemberFile(path, location, *catalog, member->second, callback, errorMessage);
 	}
+	std::string password;
+	if (member->second.encrypted && !ReadSessionPassword(location.archive, password)) {
+		return fail("password required for encrypted archive image", ArchiveErrorKind::PasswordRequired);
+	}
 	BackingIdentity currentIdentity;
 	if (!StatIdentity(location.archive, currentIdentity) || !(currentIdentity == catalog->identity)) {
-		errorMessage = "ZIP archive changed before the image could be read";
-		return false;
+		ClearPasswordString(password);
+		return fail("ZIP archive changed before the image could be read");
 	}
 	int zipError = 0;
 	zip_t* archive = zip_open(location.archive.c_str(), ZIP_RDONLY, &zipError);
 	if (archive == nullptr) {
 		errorMessage = ZipOpenError(zipError);
+		ClearPasswordString(password);
 		return false;
 	}
 	std::unique_ptr<zip_t, decltype(&zip_discard)> archiveOwner(archive, &zip_discard);
@@ -1134,58 +1330,74 @@ bool WithArchiveMemberFile(const fs::path& path,
 		location.memberDirectory != status.name ||
 		(status.valid & ZIP_STAT_SIZE) == 0 || status.size != member->second.size ||
 		((status.valid & ZIP_STAT_CRC) != 0 && status.crc != member->second.crc)) {
-		errorMessage = "ZIP member changed since it was listed";
-		return false;
+		ClearPasswordString(password);
+		return fail("ZIP member changed since it was listed");
 	}
-	zip_file_t* zipFile = zip_fopen_index(archive, member->second.index, ZIP_FL_UNCHANGED);
+	zip_file_t* zipFile = member->second.encrypted ?
+		zip_fopen_index_encrypted(archive, member->second.index, ZIP_FL_UNCHANGED,
+			password.c_str()) :
+		zip_fopen_index(archive, member->second.index, ZIP_FL_UNCHANGED);
 	if (zipFile == nullptr) {
-		errorMessage = ZipError(archive);
+		const ArchiveErrorKind kind = ZipErrorKind(zip_get_error(archive));
+		errorMessage = kind == ArchiveErrorKind::PasswordRequired ?
+			"password required for encrypted archive image" :
+			kind == ArchiveErrorKind::InvalidPassword ? "incorrect archive password" : ZipError(archive);
+		if (errorKind != nullptr) *errorKind = kind;
+		ClearPasswordString(password);
 		return false;
 	}
+	ClearPasswordString(password);
 	std::unique_ptr<zip_file_t, decltype(&zip_fclose)> zipFileOwner(zipFile, &zip_fclose);
 	PrivateMemberFile temporary;
-	if (!MakePrivateMemberFile(path, temporary, errorMessage)) return false;
+	if (!MakePrivateMemberFile(path, temporary, errorMessage)) {
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
 	std::vector<std::uint8_t> buffer(64 * 1024);
 	std::uint64_t total = 0;
 	for (;;) {
 		const zip_int64_t count = zip_fread(zipFile, buffer.data(), buffer.size());
 		if (count < 0) {
-			errorMessage = ZipError(archive);
+			const ArchiveErrorKind kind = ZipErrorKind(zip_file_get_error(zipFile));
+			errorMessage = kind == ArchiveErrorKind::InvalidPassword ?
+				"incorrect archive password" : ZipError(archive);
+			if (errorKind != nullptr) *errorKind = kind;
 			return false;
 		}
 		if (count == 0) break;
 		const std::uint64_t chunk = static_cast<std::uint64_t>(count);
 		if (total > member->second.size || chunk > kMaximumArchiveMemberBytes - total ||
 			chunk > member->second.size - total) {
-			errorMessage = "archive member expanded beyond its declared size or the 128 MiB limit";
-			return false;
+			return fail("archive member expanded beyond its declared size or the 128 MiB limit");
 		}
 		if (!WriteAll(temporary.descriptor, buffer.data(), static_cast<std::size_t>(count),
-			errorMessage)) return false;
+			errorMessage)) {
+			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+			return false;
+		}
 		total += chunk;
 	}
 	if (total != member->second.size) {
-		errorMessage = "archive member ended before its declared size";
-		return false;
+		return fail("archive member ended before its declared size");
 	}
 	if (zip_fclose(zipFileOwner.release()) != 0) {
-		errorMessage = ZipError(archive);
+		const ArchiveErrorKind kind = ZipErrorKind(zip_get_error(archive));
+		errorMessage = kind == ArchiveErrorKind::InvalidPassword ?
+			"incorrect archive password" : ZipError(archive);
+		if (errorKind != nullptr) *errorKind = kind;
 		return false;
 	}
 	BackingIdentity afterRead;
 	if (!StatIdentity(location.archive, afterRead) || !(afterRead == catalog->identity)) {
-		errorMessage = "ZIP archive changed while the image was being read";
-		return false;
+		return fail("ZIP archive changed while the image was being read");
 	}
 	if (::lseek(temporary.descriptor, 0, SEEK_SET) < 0) {
-		errorMessage = "cannot rewind the archive image memory file";
-		return false;
+		return fail("cannot rewind the archive image memory file");
 	}
 	try {
 		return callback(temporary.link, errorMessage);
 	} catch (const std::exception& error) {
-		errorMessage = error.what();
-		return false;
+		return fail(error.what());
 	}
 }
 

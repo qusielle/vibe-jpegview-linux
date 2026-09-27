@@ -36,6 +36,7 @@
 #include "bitmap_font.h"
 #include "playback_scheduler.h"
 #include "archive_source.h"
+#include "archive_password_dialog_model.h"
 #include "rar_test_fixtures.h"
 
 #include "../../src/JPEGView/resource.h"
@@ -326,6 +327,37 @@ void WriteZipArchive(const fs::path& archivePath,
 		const std::string message = zip_strerror(archive);
 		zip_discard(archive);
 		throw TestFailure("cannot finish ZIP fixture: " + message);
+	}
+}
+
+void WriteEncryptedZipArchive(const fs::path& archivePath,
+	const std::vector<std::pair<std::string, fs::path>>& members,
+	const std::string& password) {
+	int errorCode = 0;
+	zip_t* archive = zip_open(archivePath.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &errorCode);
+	if (archive == nullptr) throw TestFailure("cannot create encrypted ZIP archive: " +
+		std::to_string(errorCode));
+	for (const auto& member : members) {
+		zip_source_t* source = zip_source_file(archive, member.second.c_str(), 0, -1);
+		if (source == nullptr) {
+			const std::string message = zip_strerror(archive);
+			zip_discard(archive);
+			throw TestFailure("cannot add encrypted ZIP fixture source: " + message);
+		}
+		const zip_int64_t index = zip_file_add(archive, member.first.c_str(), source,
+			ZIP_FL_ENC_UTF_8);
+		if (index < 0 || zip_file_set_encryption(archive,
+			static_cast<zip_uint64_t>(index), ZIP_EM_TRAD_PKWARE, password.c_str()) != 0) {
+			const std::string message = zip_strerror(archive);
+			if (index < 0) zip_source_free(source);
+			zip_discard(archive);
+			throw TestFailure("cannot encrypt ZIP fixture member: " + message);
+		}
+	}
+	if (zip_close(archive) != 0) {
+		const std::string message = zip_strerror(archive);
+		zip_discard(archive);
+		throw TestFailure("cannot finish encrypted ZIP fixture: " + message);
 	}
 }
 
@@ -620,6 +652,96 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 	entries.clear();
 	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
 		"malformed ZIP input did not fail with a useful error");
+}
+
+void TestEncryptedZipBrowsingAndSessionPasswords() {
+	TemporaryDirectory temporary;
+	const fs::path sourceDirectory = temporary.path() / "source";
+	fs::create_directories(sourceDirectory);
+	const fs::path image = sourceDirectory / "encrypted.png";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	ImageWriteOptions options;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(image, pixels.data(), 2, 2, options, error),
+		"cannot create encrypted ZIP image fixture: " + error);
+	const fs::path archive = temporary.path() / "encrypted.zip";
+	WriteEncryptedZipArchive(archive, {{"inside/encrypted.png", image}}, "correct horse");
+	const fs::path member = archive / "inside" / "encrypted.png";
+
+	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+	bool containsEncryptedEntries = false;
+	jpegview_linux::ArchiveErrorKind errorKind = jpegview_linux::ArchiveErrorKind::None;
+	Expect(jpegview_linux::ListArchiveDirectoryCancellable(archive, entries,
+		[] { return true; }, error, &errorKind, &containsEncryptedEntries),
+		"encrypted ZIP central directory could not be listed: " + error);
+	Expect(containsEncryptedEntries && entries.size() == 1 && entries.front().directory &&
+		!entries.front().encrypted,
+		"encrypted ZIP listing did not expose names or report archive encryption");
+	entries.clear();
+	Expect(jpegview_linux::ListArchiveDirectory(archive / "inside", entries, error) &&
+		entries.size() == 1 && entries.front().path == member && entries.front().encrypted,
+		"encrypted ZIP member was not marked in the virtual directory listing");
+	jpegview_linux::ArchiveMemberInfo info;
+	Expect(jpegview_linux::GetArchiveMemberInfo(member, info, error) && info.encrypted,
+		"encrypted ZIP member metadata lost its encryption state");
+
+	bool callbackCalled = false;
+	Expect(!jpegview_linux::WithArchiveMemberFile(member,
+		[&callbackCalled](const fs::path&, std::string&) {
+			callbackCalled = true;
+			return true;
+		}, error, &errorKind) && !callbackCalled &&
+		errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired,
+		"encrypted ZIP image was read without requesting a password");
+
+	Expect(!jpegview_linux::ValidateArchivePassword(archive, "incorrect", error, &errorKind) &&
+		errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword,
+		"incorrect ZIP password was not rejected deterministically");
+	jpegview_linux::ArchiveDirectoryLoader validationLoader;
+	constexpr std::uint64_t validationGeneration = 73;
+	validationLoader.RequestPasswordValidation(archive, "incorrect", validationGeneration);
+	std::vector<jpegview_linux::ArchiveDirectoryResult> validationResults;
+	const auto validationDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (validationResults.empty() && std::chrono::steady_clock::now() < validationDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		validationResults = validationLoader.TakeReady();
+	}
+	Expect(validationResults.size() == 1 && validationResults.front().passwordValidation &&
+		validationResults.front().generation == validationGeneration &&
+		validationResults.front().errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword,
+		"background password validation did not publish a bounded, generation-tagged rejection");
+	Expect(jpegview_linux::ValidateArchivePassword(archive, "correct horse", error, &errorKind),
+		"correct ZIP password failed validation: " + error);
+	Expect(jpegview_linux::SetSessionArchivePassword(archive, "correct horse") &&
+		jpegview_linux::HasSessionArchivePassword(member),
+		"validated ZIP password was not cached against its backing archive for this run");
+
+	DecodedImage decoded;
+	Expect(jpegview_linux::DecodeImage(member, decoded, error),
+		"cached ZIP password could not decode the encrypted image: " + error);
+	Expect(decoded.frames.size() == 1 && decoded.frames.front().bgra == pixels,
+		"encrypted ZIP image decoding changed its pixels");
+	jpegview_linux::ClearSessionArchivePasswords();
+	Expect(!jpegview_linux::HasSessionArchivePassword(archive),
+		"clearing the in-memory password cache retained a ZIP password");
+	Expect(!jpegview_linux::WithArchiveMemberFile(member,
+		[](const fs::path&, std::string&) { return true; }, error, &errorKind) &&
+		errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired,
+		"ZIP password cache clearing did not require a new password");
+
+	jpegview_linux::FileDialogPreviewLoader previewLoader;
+	const std::uint64_t generation = previewLoader.Request(member, false,
+		jpegview_linux::FileDialogSortMode::Name, 16, 16);
+	std::vector<jpegview_linux::FileDialogPreviewResult> previews;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (previews.empty() && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		previews = previewLoader.TakeReady();
+	}
+	Expect(previews.size() == 1 && previews.front().generation == generation &&
+		previews.front().bgra.empty() && previews.front().error.find("password required") !=
+		std::string::npos,
+		"encrypted preview did not report a locked state without a password prompt");
 }
 
 void TestTarAndTgzBrowsingDecodingAndSafety() {
@@ -3976,6 +4098,74 @@ void TestCropSizeDialogController() {
 		"fixed crop-size dialog did not clear transient state on close");
 }
 
+void TestArchivePasswordDialogModel() {
+	using jpegview_linux::ArchivePasswordDialogModel;
+	ArchivePasswordDialogModel dialog;
+	Expect(!dialog.IsOpen() && dialog.ArchivePath().empty() && dialog.DisplayText().empty(),
+		"archive password dialog did not start closed and empty");
+
+	dialog.Begin("/images/private.zip");
+	Expect(dialog.IsOpen() && dialog.ArchivePath() == "/images/private.zip" &&
+		dialog.Error().empty(), "archive password dialog did not begin for its archive");
+	Expect(dialog.AppendText("p"), "archive password dialog rejected ASCII text");
+	Expect(dialog.AppendText("\xc3\xa9"), "archive password dialog rejected valid multibyte UTF-8");
+	Expect(dialog.AppendText("\xf0\x9f\x94\x90"), "archive password dialog rejected a four-byte UTF-8 character");
+	const std::string bullet = "\xe2\x80\xa2";
+	Expect(dialog.DisplayText() == bullet + bullet + bullet,
+		"archive password display did not mask one bullet per UTF-8 code point");
+	Expect(dialog.DisplayText().find('p') == std::string::npos &&
+		dialog.DisplayText().find("\xc3\xa9") == std::string::npos,
+		"archive password display exposed entered characters");
+
+	const std::string incompleteUtf8("\xc3", 1);
+	Expect(!dialog.AppendText(incompleteUtf8), "archive password dialog accepted incomplete UTF-8");
+	Expect(dialog.DisplayText() == bullet + bullet + bullet,
+		"malformed UTF-8 partially changed the entered password");
+	const std::string embeddedNul("x\0y", 3);
+	Expect(!dialog.AppendText(embeddedNul), "archive password dialog accepted embedded NUL bytes");
+	Expect(dialog.DisplayText() == bullet + bullet + bullet,
+		"embedded NUL input partially changed the entered password");
+
+	Expect(dialog.Backspace() && dialog.DisplayText() == bullet + bullet,
+		"archive password backspace did not remove a full multibyte code point");
+	Expect(dialog.Backspace() && dialog.DisplayText() == bullet,
+		"archive password backspace did not remove the preceding multibyte code point");
+	Expect(dialog.Backspace() && dialog.DisplayText().empty(),
+		"archive password backspace did not remove the final ASCII character");
+	Expect(!dialog.Backspace(), "archive password backspace reported a change for an empty field");
+
+	Expect(dialog.AppendText("first"), "archive password dialog rejected retry text");
+	std::optional<std::string> submitted = dialog.Submit();
+	Expect(submitted.has_value() && *submitted == "first",
+		"archive password submit did not transfer the entered password");
+	Expect(!dialog.IsOpen() && dialog.ArchivePath().empty() && dialog.Error().empty() &&
+		dialog.DisplayText().empty(), "archive password submit did not close and reset dialog state");
+	Expect(!dialog.Submit().has_value(), "closed archive password dialog submitted a second time");
+	Expect(!dialog.AppendText("late"), "closed archive password dialog accepted text");
+
+	dialog.Begin("/images/private.7z", "The password was incorrect");
+	Expect(dialog.IsOpen() && dialog.ArchivePath() == "/images/private.7z" &&
+		dialog.Error() == "The password was incorrect" && dialog.DisplayText().empty(),
+		"archive password retry did not show its error with a fresh empty entry");
+	Expect(dialog.AppendText("retry") && dialog.Error().empty(),
+		"archive password retry did not clear stale error feedback when edited");
+	submitted = dialog.Submit();
+	Expect(submitted.has_value() && *submitted == "retry",
+		"archive password retry did not submit the newly entered password");
+
+	dialog.Begin("/images/private.rar");
+	Expect(dialog.AppendText("cancel-me"), "archive password dialog rejected cancel-test text");
+	dialog.Cancel();
+	Expect(!dialog.IsOpen() && dialog.ArchivePath().empty() && dialog.Error().empty() &&
+		dialog.DisplayText().empty() && !dialog.Submit().has_value(),
+		"archive password cancel did not clear and close the dialog");
+
+	dialog.Begin("/images/empty-password.zip");
+	submitted = dialog.Submit();
+	Expect(submitted.has_value() && submitted->empty() && !dialog.IsOpen(),
+		"archive password dialog could not submit an intentionally empty password");
+}
+
 void TestContextMenuCompactionAndSelection() {
 	using jpegview_linux::MenuItem;
 	const std::vector<jpegview_linux::MenuItem> complete = {
@@ -5590,6 +5780,8 @@ int main() {
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
 	RunTest("archive-browsing-decoding-and-recent-preview",
 		TestArchiveBrowsingDecodingAndRecentPreview, failures);
+	RunTest("encrypted-zip-browsing-and-session-passwords",
+		TestEncryptedZipBrowsingAndSessionPasswords, failures);
 	RunTest("tar-and-tgz-browsing-decoding-and-safety",
 		TestTarAndTgzBrowsingDecodingAndSafety, failures);
 	RunTest("7z-browsing-decoding-and-preview", TestSevenZipBrowsingDecodingAndPreview, failures);
@@ -5642,6 +5834,7 @@ int main() {
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("resize-dialog-controller", TestResizeDialogController, failures);
 	RunTest("crop-size-dialog-controller", TestCropSizeDialogController, failures);
+	RunTest("archive-password-dialog-model", TestArchivePasswordDialogModel, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
 	RunTest("context-menu-catalog-and-state", TestContextMenuCatalogAndState, failures);
 	RunTest("context-menu-letter-mnemonics", TestContextMenuMnemonics, failures);

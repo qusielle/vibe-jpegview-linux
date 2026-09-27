@@ -32,6 +32,7 @@
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "file_dialog_model.h"
+#include "archive_password_dialog_model.h"
 #include "recent_files.h"
 #include "system_font.h"
 #include "bitmap_font.h"
@@ -895,6 +896,19 @@ private:
 				auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
 				if (!jpegview_linux::DecodeImage(fileList_.Current(), *loaded, errorMessage) ||
 					loaded->frames.empty()) {
+					const bool passwordFailure =
+						jpegview_linux::IsArchiveMemberLocation(fileList_.Current()) &&
+						(errorMessage.find("password required") != std::string::npos ||
+							errorMessage.find("incorrect archive password") != std::string::npos);
+					if (passwordFailure) {
+						if (errorMessage.find("incorrect archive password") != std::string::npos) {
+							jpegview_linux::ForgetSessionArchivePassword(fileList_.Current());
+						}
+						failedLoad();
+						SetTitle("JPEGView — Open image");
+						OpenFileDialog(fileList_.Current().parent_path());
+						return true;
+					}
 					SetTitle(fileList_.Current().filename().string() +
 						" — decode failed: " + errorMessage);
 					std::cerr << fileList_.Current() << ": " << errorMessage << '\n';
@@ -1570,6 +1584,11 @@ private:
 
 	void CloseFileDialog() {
 		if (fileDialogOpen_) SDL_StopTextInput();
+		archivePasswordDialog_.Cancel();
+		archivePasswordValidationPending_ = false;
+		std::fill(archivePasswordPendingValue_.begin(),
+			archivePasswordPendingValue_.end(), '\0');
+		archivePasswordPendingValue_.clear();
 		if (fileDialogDragMode_ != FileDialogDragMode::None) SDL_CaptureMouse(SDL_FALSE);
 		fileDialogDragMode_ = FileDialogDragMode::None;
 		SDL_SetCursor(SDL_GetDefaultCursor());
@@ -4832,6 +4851,11 @@ private:
 			if (selected == nullptr) {
 				fileDialogPreviewLoader_.Clear();
 				fileDialogPreviewGeneration_ = 0;
+			} else if (selected->encrypted &&
+				!jpegview_linux::HasSessionArchivePassword(selected->path)) {
+				fileDialogPreviewLoader_.Clear();
+				fileDialogPreviewGeneration_ = 0;
+				fileDialogPreviewMessage_ = "Encrypted image — open to enter password";
 			} else {
 				fileDialogPreviewGeneration_ = fileDialogPreviewLoader_.Request(selected->path,
 					selected->directory, model.SortMode(), previewSize.width,
@@ -4846,6 +4870,13 @@ private:
 			if (result.generation != fileDialogPreviewGeneration_) continue;
 			fileDialogPreviewSource_ = result.source;
 			fileDialogPreviewMessage_ = result.error;
+			if (result.error.find("incorrect archive password") != std::string::npos) {
+				jpegview_linux::ForgetSessionArchivePassword(result.source);
+				fileDialogPreviewMessage_ = "Saved password is incorrect — reopen archive to retry";
+			}
+			if (result.error.find("password required") != std::string::npos) {
+				fileDialogPreviewMessage_ = "Encrypted image — open to enter password";
+			}
 			if (!result.bgra.empty()) {
 				SDL_Texture* previewTexture = CreateTexture(result.bgra, result.width,
 					result.height, result.hasTransparency);
@@ -4905,7 +4936,9 @@ private:
 		std::vector<fs::path> directories;
 		if (!fileDialogSave_ && !fileDialogParameterRestore_) {
 			for (const FileDialogEntry& entry : fileDialogModel_.AllEntries()) {
-				if (entry.directory && !entry.parent) directories.push_back(entry.path);
+				if (entry.directory && !entry.parent && !entry.encrypted) {
+					directories.push_back(entry.path);
+				}
 			}
 		}
 		fileDialogSummaryLoader_.Request(directories, fileDialogSummaryGeneration_);
@@ -4925,6 +4958,28 @@ private:
 			if (!fileDialogOpen_ || fileDialogSave_ || fileDialogParameterRestore_ ||
 				result.generation != fileDialogArchiveGeneration_ ||
 				result.directory != fileDialogDirectory_) continue;
+			if (result.passwordValidation) {
+				archivePasswordValidationPending_ = false;
+				if (result.error.empty()) {
+					if (!jpegview_linux::SetSessionArchivePassword(result.directory,
+						archivePasswordPendingValue_)) {
+						archivePasswordDialog_.Begin(result.directory.string(),
+							"Could not cache the password for this archive");
+					} else {
+						archivePasswordDialog_.Cancel();
+						fileDialogMessage_.clear();
+						RefreshFileDialog();
+					}
+				} else {
+					archivePasswordDialog_.Begin(result.directory.string(),
+						result.errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword ?
+						"Incorrect password; please try again" : result.error);
+				}
+				std::fill(archivePasswordPendingValue_.begin(),
+					archivePasswordPendingValue_.end(), '\0');
+				archivePasswordPendingValue_.clear();
+				continue;
+			}
 			std::vector<FileDialogEntry> entries;
 			const fs::path parent = fileDialogDirectory_.parent_path();
 			if (!parent.empty() && parent != fileDialogDirectory_) {
@@ -4932,15 +4987,29 @@ private:
 			}
 			if (!result.error.empty()) {
 				fileDialogMessage_ = "Cannot read archive: " + result.error;
+				if (result.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired) {
+					const fs::path backing = jpegview_linux::ArchiveBackingFile(result.directory);
+					encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
+					entries.push_back(FileDialogEntry{result.directory, true, false, {}, true,
+						false, true});
+					fileDialogMessage_ = "Archive contents are encrypted";
+					if (!jpegview_linux::HasSessionArchivePassword(result.directory)) {
+						BeginArchivePasswordDialog(result.directory);
+					}
+				}
 			} else {
 				fileDialogMessage_.clear();
+				if (result.containsEncryptedEntries) {
+					const fs::path backing = jpegview_linux::ArchiveBackingFile(result.directory);
+					encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
+				}
 				for (const jpegview_linux::ArchiveEntryInfo& archiveEntry : result.entries) {
 					if (!archiveEntry.directory && (fileDialogSave_ ||
 						!jpegview_linux::IsSupportedImagePath(archiveEntry.path))) continue;
 					const fs::file_time_type modificationTime =
 						jpegview_linux::ArchiveFileModificationTime(archiveEntry.modificationTime);
 					entries.push_back(FileDialogEntry{archiveEntry.path, archiveEntry.directory,
-						false, modificationTime, false, true});
+						false, modificationTime, false, true, archiveEntry.encrypted});
 				}
 			}
 			fileDialogModel_.SetEntries(std::move(entries));
@@ -4950,6 +5019,54 @@ private:
 					FileDialogVisibleRows());
 			}
 			RequestFileDialogDirectorySummaries();
+			if (result.error.empty() && result.containsEncryptedEntries &&
+				!jpegview_linux::HasSessionArchivePassword(result.directory)) {
+				BeginArchivePasswordDialog(result.directory);
+			}
+		}
+	}
+
+	void BeginArchivePasswordDialog(const fs::path& directory, std::string error = {}) {
+		archivePasswordDialogTarget_ = directory;
+		archivePasswordDialog_.Begin(directory.string(), std::move(error));
+		archivePasswordValidationPending_ = false;
+		archivePasswordPendingValue_.clear();
+		fileDialogMessage_.clear();
+	}
+
+	void HandleArchivePasswordEvents(const SDL_Event& event, bool& running) {
+		if (event.type == SDL_QUIT) {
+			running = false;
+			return;
+		}
+		if (archivePasswordValidationPending_) {
+			if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
+				fileDialogArchiveLoader_.Clear(++fileDialogArchiveGeneration_);
+				archivePasswordValidationPending_ = false;
+				std::fill(archivePasswordPendingValue_.begin(),
+					archivePasswordPendingValue_.end(), '\0');
+				archivePasswordPendingValue_.clear();
+				archivePasswordDialog_.Cancel();
+			}
+			return;
+		}
+		if (event.type == SDL_KEYDOWN) {
+			if (event.key.keysym.sym == SDLK_ESCAPE) {
+				archivePasswordDialog_.Cancel();
+			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
+				archivePasswordDialog_.Backspace();
+			} else if (event.key.keysym.sym == SDLK_RETURN) {
+				std::optional<std::string> password = archivePasswordDialog_.Submit();
+				if (!password) return;
+				archivePasswordPendingValue_ = *password;
+				std::fill(password->begin(), password->end(), '\0');
+				fileDialogArchiveLoader_.RequestPasswordValidation(
+					archivePasswordDialogTarget_, archivePasswordPendingValue_,
+					++fileDialogArchiveGeneration_);
+				archivePasswordValidationPending_ = true;
+			}
+		} else if (event.type == SDL_TEXTINPUT) {
+			archivePasswordDialog_.AppendText(event.text.text);
 		}
 	}
 
@@ -4987,9 +5104,11 @@ private:
 				fileDialogParameterRestore_)) continue;
 			std::error_code modificationError;
 			const fs::file_time_type modificationTime = entry.last_write_time(modificationError);
-			entries.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory || archive,
+			const fs::path normalizedPath = AbsoluteNormalized(entry.path());
+			const bool encrypted = archive && encryptedArchivePaths_.count(normalizedPath.string()) != 0;
+			entries.push_back(FileDialogEntry{normalizedPath, directory || archive,
 				false, modificationError ? fs::file_time_type{} : modificationTime,
-				archive, false});
+				archive, false, encrypted});
 		}
 
 		fileDialogModel_.SetEntries(std::move(entries));
@@ -5126,7 +5245,9 @@ private:
 	std::string FileDialogEntryLabel(const FileDialogEntry& entry) const {
 		if (entry.parent) return "[..]";
 		if (entry.archiveContainer) return "[" +
-			jpegview_linux::ArchiveFormatName(entry.path) + "] " + entry.path.filename().string();
+			jpegview_linux::ArchiveFormatName(entry.path) + "] " +
+			(entry.encrypted ? "[Encrypted] " : "") + entry.path.filename().string();
+		if (entry.encrypted) return "[Encrypted] " + entry.path.filename().string();
 		return entry.directory ? std::string("[Dir] ") + entry.path.filename().string() : entry.path.filename().string();
 	}
 
@@ -5167,6 +5288,11 @@ private:
 		const FileDialogEntry entry = *selected;
 		if (fileDialogTab_ == FileDialogTab::Recents) {
 			OpenDroppedFiles({entry.path.string()});
+			return;
+		}
+		if (!fileDialogSave_ && !fileDialogParameterRestore_ && entry.encrypted &&
+			!jpegview_linux::HasSessionArchivePassword(entry.path)) {
+			BeginArchivePasswordDialog(fileDialogDirectory_);
 			return;
 		}
 		if (entry.directory) {
@@ -5416,7 +5542,7 @@ private:
 					fromArchive ? 255 : 235, fromArchive ? 205 : 235, fromArchive ? 125 : 235);
 			} else {
 				std::string summaryText;
-				if (FileDialogCanSort() && entry.directory && !entry.parent) {
+				if (FileDialogCanSort() && entry.directory && !entry.parent && !entry.encrypted) {
 					const auto summary = fileDialogDirectorySummaries_.find(entry.path.string());
 					summaryText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
 						jpegview_linux::FormatDirectorySummary(summary->second);
@@ -5485,6 +5611,45 @@ private:
 				resizeHandle.x + resizeHandle.w - 2, resizeHandle.y + offset,
 				135, 145, 155);
 		}
+	}
+
+	void RenderArchivePasswordDialog() {
+		if (!archivePasswordDialog_.IsOpen() && !archivePasswordValidationPending_) return;
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 145);
+		const SDL_Rect shade{0, 0, windowWidth, windowHeight};
+		SDL_RenderFillRect(renderer_, &shade);
+		const int width = std::min(480, std::max(320, windowWidth - 32));
+		const int height = 178;
+		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2,
+			width, height};
+		SDL_SetRenderDrawColor(renderer_, 18, 20, 24, 250);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 190, 170, 120);
+		DrawText("ARCHIVE PASSWORD", panel.x + 16, panel.y + 12, kUiTextScale,
+			255, 225, 160);
+		const fs::path archive(archivePasswordDialogTarget_);
+		DrawText(ClipText(archive.filename().string(), width - 32), panel.x + 16,
+			panel.y + 38, kUiTextScale, 210, 215, 220);
+		const SDL_Rect input{panel.x + 16, panel.y + 64, panel.w - 32, 30};
+		SDL_SetRenderDrawColor(renderer_, 30, 32, 36, 255);
+		SDL_RenderFillRect(renderer_, &input);
+		DrawRect(input, 100, 120, 145);
+		const std::string masked = archivePasswordDialog_.DisplayText();
+		DrawText(ClipText(masked, input.w - 16), input.x + 8, input.y + 8,
+			kUiTextScale, 240, 240, 240);
+		const std::string status = archivePasswordValidationPending_ ?
+			"Checking password...  (Esc cancels)" :
+			(archivePasswordDialog_.Error().empty() ?
+				"Enter: Unlock    Esc: Cancel" : archivePasswordDialog_.Error());
+		DrawText(ClipText(status, width - 32), panel.x + 16, panel.y + 111,
+			kUiTextScale, archivePasswordDialog_.Error().empty() ? 175 : 245,
+			archivePasswordDialog_.Error().empty() ? 185 : 150,
+			archivePasswordDialog_.Error().empty() ? 200 : 130);
+		DrawText("Password is kept only until the app closes", panel.x + 16,
+			panel.y + 145, kUiTextScale, 145, 150, 160);
 	}
 
 	void ClearTextTextureCache() {
@@ -6620,6 +6785,10 @@ private:
 					if (matchingTextInput) continue;
 				}
 			}
+			if (archivePasswordDialog_.IsOpen() || archivePasswordValidationPending_) {
+				HandleArchivePasswordEvents(event, running);
+				continue;
+			}
 			if (confirmationOpen_) {
 				if (event.type == SDL_QUIT) running = false;
 				else HandleConfirmationEvents(event);
@@ -6978,6 +7147,7 @@ private:
 		RenderConfirmation();
 		RenderAbout();
 		RenderHelp();
+		RenderArchivePasswordDialog();
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_RenderPresent(renderer_);
 	}
@@ -7164,10 +7334,15 @@ private:
 	std::string fileDialogMessage_;
 	jpegview_linux::FileDialogModel fileDialogModel_;
 	jpegview_linux::FileDialogModel recentFileDialogModel_;
+	jpegview_linux::ArchivePasswordDialogModel archivePasswordDialog_;
+	fs::path archivePasswordDialogTarget_;
+	std::string archivePasswordPendingValue_;
+	bool archivePasswordValidationPending_ = false;
 	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;
 	jpegview_linux::ArchiveDirectoryLoader fileDialogArchiveLoader_;
 	jpegview_linux::FileDialogPreviewLoader fileDialogPreviewLoader_;
 	std::unordered_map<std::string, jpegview_linux::DirectorySummary> fileDialogDirectorySummaries_;
+	std::unordered_set<std::string> encryptedArchivePaths_;
 	std::uint64_t fileDialogSummaryGeneration_ = 0;
 	std::uint64_t fileDialogArchiveGeneration_ = 0;
 	SDL_Texture* fileDialogPreviewTexture_ = nullptr;

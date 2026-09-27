@@ -7,6 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 BINARY=${1:-./build/jpegview-linux}
 ARCHIVE_FIXTURE_WRITER=${2:-}
 RAR_FIXTURE_WRITER=${3:-}
+ENCRYPTED_ZIP_FIXTURE_WRITER=${4:-}
 if [ ! -x "$BINARY" ]; then
 	echo "UI smoke test: binary not found: $BINARY" >&2
 	exit 2
@@ -92,6 +93,10 @@ if [ -x "$RAR_FIXTURE_WRITER" ]; then
 	"$RAR_FIXTURE_WRITER" "$temporary/images/10-archive.rar" rar5-solid
 	touch -t 201801010000.00 "$temporary/images/10-archive.rar"
 fi
+if [ -x "$ENCRYPTED_ZIP_FIXTURE_WRITER" ]; then
+	"$ENCRYPTED_ZIP_FIXTURE_WRITER" "$temporary/images/11-password.zip"
+	touch -t 201801010000.00 "$temporary/images/11-password.zip"
+fi
 mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
 write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
@@ -144,10 +149,11 @@ window_manager_pid=$!
 sleep 0.5
 
 launch_viewer() {
+	viewer_input=${1:-$temporary/images}
 	DISPLAY=":$display_number" HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/config" \
 		XDG_STATE_HOME="$XDG_STATE_HOME" \
 		PATH="$temporary/bin:$PATH" JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
-		"$BINARY" "$temporary/images" >"$temporary/viewer.log" 2>&1 &
+		"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
 	viewer_pid=$!
 	window_id=''
 	for _ in $(seq 1 50); do
@@ -305,6 +311,49 @@ click_file_dialog_tab() {
 	tab_y=$((dialog_y + 22))
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$tab_x" "$tab_y" click 1
 }
+
+if [ -f "$temporary/images/11-password.zip" ]; then
+	# A directly opened encrypted archive should fall back to Browse instead of
+	# exiting on its first locked image. Exercise wrong-password retry and ensure
+	# the accepted credential is reused for another open in the same run.
+	XDG_STATE_HOME="$temporary/direct-password-state"
+	export XDG_STATE_HOME
+	launch_viewer "$temporary/images/11-password.zip"
+	assert_title_prefix "JPEGView — Open image" "encrypted archive startup did not open Browse"
+	sleep 0.3
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/password-dialog.png"
+		password_border=$(convert "$temporary/password-dialog.png" \
+			-format "%[hex:p{400,311}]" info:)
+		case "$password_border" in
+			BEAA78*|beaa78*) ;;
+			*) echo "UI smoke test: encrypted archive startup did not show the password prompt" >&2; exit 1 ;;
+		esac
+	fi
+	DISPLAY=":$display_number" xdotool type --delay 20 'wrong-password'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.3
+	DISPLAY=":$display_number" xdotool type --delay 20 'jpegview-test-password'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-password.ppm" "correct ZIP password did not open the encrypted image"
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	sleep 0.3
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/password-reopen.png"
+		password_reopen_border=$(convert "$temporary/password-reopen.png" \
+			-format "%[hex:p{400,311}]" info:)
+		case "$password_reopen_border" in
+			BEAA78*|beaa78*) echo "UI smoke test: cached ZIP password was requested again" >&2; exit 1 ;;
+		esac
+	fi
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-password.ppm" "reopening an encrypted ZIP asked again for its session password"
+	stop_viewer
+	XDG_STATE_HOME="$temporary/state"
+	export XDG_STATE_HOME
+fi
 
 # Exercise the mnemonic in an isolated viewer session so the rest of this
 # smoke suite starts from the original first image and an empty recent history.
