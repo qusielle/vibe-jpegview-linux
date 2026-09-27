@@ -1,4 +1,5 @@
 #include "file_dialog_model.h"
+#include "archive_source.h"
 #include "image_formats.h"
 #include "image_decoder.h"
 #include "thumbnail_resampler.h"
@@ -30,6 +31,17 @@ template<typename Continue>
 DirectorySummary CountImmediateDirectoryContentsWhile(
 	const std::filesystem::path& directory, Continue shouldContinue) {
 	DirectorySummary summary;
+	if (IsArchiveLocation(directory)) {
+		std::vector<ArchiveEntryInfo> entries;
+		std::string errorMessage;
+		if (!ListArchiveDirectory(directory, entries, errorMessage)) return summary;
+		for (const ArchiveEntryInfo& entry : entries) {
+			if (!shouldContinue()) break;
+			if (entry.directory) ++summary.subdirectoryCount;
+			else if (IsSupportedImagePath(entry.path)) ++summary.imageCount;
+		}
+		return summary;
+	}
 	std::error_code iteratorError;
 	std::filesystem::directory_iterator iterator(directory, iteratorError);
 	const std::filesystem::directory_iterator end;
@@ -50,6 +62,24 @@ std::filesystem::path FirstImageInDirectoryWhile(
 	const std::filesystem::path& directory, FileDialogSortMode mode,
 	const std::function<bool()>& shouldContinue) {
 	std::vector<FileDialogEntry> images;
+	if (IsArchiveLocation(directory)) {
+		std::vector<ArchiveEntryInfo> archiveEntries;
+		std::string errorMessage;
+		if (!ListArchiveDirectory(directory, archiveEntries, errorMessage)) return {};
+		for (const ArchiveEntryInfo& entry : archiveEntries) {
+			if (!shouldContinue()) return {};
+			if (!entry.directory && IsSupportedImagePath(entry.path)) {
+				std::error_code modificationError;
+				const std::filesystem::file_time_type modificationTime =
+					ImageSourceModificationTime(entry.path, modificationError);
+				images.push_back({entry.path, false, false,
+					modificationError ? std::filesystem::file_time_type{} : modificationTime,
+					false, true});
+			}
+		}
+		SortFileDialogEntries(images, mode);
+		return images.empty() ? std::filesystem::path{} : images.front().path;
+	}
 	std::error_code iteratorError;
 	std::filesystem::directory_iterator iterator(directory, iteratorError);
 	const std::filesystem::directory_iterator end;

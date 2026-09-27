@@ -39,6 +39,9 @@ public:
 	std::size_t CurrentIndex() const { return currentIndex_; }
 	const std::filesystem::path& Current() const;
 	const std::vector<std::filesystem::path>& Files() const { return paths_; }
+	bool IsArchiveMember(std::size_t index) const {
+		return index < entries_.size() && entries_[index].archiveMember;
+	}
 
 	bool Next();
 	bool Previous();
@@ -69,6 +72,7 @@ private:
 		std::int64_t creationTime = 0;
 		std::uintmax_t fileSize = 0;
 		std::size_t randomOrder = 0;
+		bool archiveMember = false;
 	};
 
 	struct FolderState {

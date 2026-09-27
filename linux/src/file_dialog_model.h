@@ -15,6 +15,8 @@ struct FileDialogEntry {
 	bool directory = false;
 	bool parent = false;
 	std::filesystem::file_time_type modificationTime{};
+	bool archiveContainer = false;
+	bool archiveMember = false;
 };
 
 enum class FileDialogSortMode {

@@ -66,6 +66,15 @@ write_ppm "$temporary/images/02-green.ppm" 0 255 0
 write_ppm "$temporary/images/03-blue.ppm" 0 0 255
 write_ppm "$temporary/images/04-yellow.ppm" 255 255 0
 write_ppm "$temporary/images/05-cyan.ppm" 0 255 255
+if command -v zip >/dev/null 2>&1; then
+	mkdir -p "$temporary/archive-source"
+	write_ppm "$temporary/archive-source/inside-archive.ppm" 48 96 144
+	(
+		cd "$temporary/archive-source"
+		zip -q "$temporary/images/06-archive.zip" inside-archive.ppm
+	)
+	touch -t 201801010000.00 "$temporary/images/06-archive.zip"
+fi
 mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
 write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
@@ -419,6 +428,27 @@ case "$filtered_title" in
 	03-blue.ppm*) ;;
 	*) echo "UI smoke test: Ctrl+O filename filter did not open the matching image" >&2; exit 1 ;;
 esac
+
+if [ -f "$temporary/images/06-archive.zip" ]; then
+	# ZIP containers behave like directories in Browse and archive members remain
+	# openable from the Recents tab after they become the current image.
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool type --delay 20 '06-archive.zip'
+	DISPLAY=":$display_number" xdotool key Return
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-archive.ppm" "open dialog did not enter a ZIP and open its image member"
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool key ctrl+Tab
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-archive.ppm" "Recents did not reopen an image stored inside a ZIP"
+	# Return the smoke suite to its normal filesystem directory before its
+	# existing sorting and directory-entry assertions.
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool key BackSpace
+	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "03-blue.ppm" "open dialog could not leave the archive and return to a filesystem image"
+fi
 
 DISPLAY=":$display_number" xdotool key ctrl+o
 click_file_dialog_sort

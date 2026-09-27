@@ -1,4 +1,5 @@
 #include "image_decoder.h"
+#include "archive_source.h"
 
 #include <algorithm>
 #include <array>
@@ -1824,6 +1825,12 @@ bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& 
 		errorMessage = "invalid JPEG header";
 		return false;
 	}
+	if (IsArchiveMemberLocation(filename)) {
+		return WithArchiveMemberFile(filename, [&width, &height](const std::filesystem::path& temporary,
+			std::string& decodeError) {
+			return ReadJpegDimensions(temporary, width, height, decodeError);
+		}, errorMessage);
+	}
 	return ReadJpegSize(filename, width, height, errorMessage);
 }
 
@@ -1835,6 +1842,12 @@ bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& hei
 	if (!IsJpegPath(filename)) {
 		errorMessage = "invalid JPEG header";
 		return false;
+	}
+	if (IsArchiveMemberLocation(filename)) {
+		return WithArchiveMemberFile(filename, [&width, &height](const std::filesystem::path& temporary,
+			std::string& decodeError) {
+			return ReadJpegMcuSize(temporary, width, height, decodeError);
+		}, errorMessage);
 	}
 	MappedInput input;
 	if (!MapInput(filename, input, false, errorMessage)) return false;
@@ -1876,6 +1889,14 @@ bool DecodeJpegForDisplay(const std::filesystem::path& filename,
 		errorMessage = "invalid JPEG display request";
 		return false;
 	}
+	if (IsArchiveMemberLocation(filename)) {
+		return WithArchiveMemberFile(filename,
+			[minimumWidth, minimumHeight, &image, &sourceWidth, &sourceHeight](
+				const std::filesystem::path& temporary, std::string& decodeError) {
+				return DecodeJpegForDisplay(temporary, minimumWidth, minimumHeight, image,
+					sourceWidth, sourceHeight, decodeError);
+			}, errorMessage);
+	}
 	return DecodeJpeg(filename, image, errorMessage, minimumWidth, minimumHeight,
 		&sourceWidth, &sourceHeight);
 }
@@ -1884,6 +1905,12 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
 	image = {};
 	errorMessage.clear();
+	if (IsArchiveMemberLocation(filename)) {
+		return WithArchiveMemberFile(filename,
+			[&image](const std::filesystem::path& temporary, std::string& decodeError) {
+				return DecodeImage(temporary, image, decodeError);
+			}, errorMessage);
+	}
 	const std::string extension = Lower(filename.extension().string());
 	if (IsJpegPath(filename)) {
 		return DecodeJpeg(filename, image, errorMessage);

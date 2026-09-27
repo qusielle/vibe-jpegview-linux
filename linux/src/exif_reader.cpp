@@ -1,4 +1,5 @@
 #include "exif_reader.h"
+#include "archive_source.h"
 
 #include <algorithm>
 #include <array>
@@ -325,6 +326,13 @@ std::string TrimAscii(const std::uint8_t* data, std::size_t length) {
 bool ReadJpegMetadata(const fs::path& filename, ExifInfo& info, std::string& jpegComment) {
 	info = {};
 	jpegComment.clear();
+	if (IsArchiveMemberLocation(filename)) {
+		std::string errorMessage;
+		return WithArchiveMemberFile(filename,
+			[&info, &jpegComment](const fs::path& temporary, std::string&) {
+				return ReadJpegMetadata(temporary, info, jpegComment);
+			}, errorMessage);
+	}
 	std::ifstream input(filename, std::ios::binary);
 	if (!input) return false;
 	const int first = input.get();

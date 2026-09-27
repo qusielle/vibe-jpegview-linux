@@ -1,4 +1,5 @@
 #include "image_cache.h"
+#include "archive_source.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -37,19 +38,9 @@ bool operator==(const FileIdentity& left, const FileIdentity& right) {
 }
 
 FileIdentity Identify(const fs::path& filename) {
-	struct stat status{};
-	if (::stat(filename.c_str(), &status) != 0 || status.st_size < 0) return {};
 	FileIdentity result;
-	result.device = static_cast<std::uint64_t>(status.st_dev);
-	result.inode = static_cast<std::uint64_t>(status.st_ino);
-	result.size = static_cast<std::uint64_t>(status.st_size);
-#if defined(__linux__)
-	result.modifiedSeconds = status.st_mtim.tv_sec;
-	result.modifiedNanoseconds = status.st_mtim.tv_nsec;
-#else
-	result.modifiedSeconds = status.st_mtime;
-#endif
-	result.valid = true;
+	result.valid = IdentifyImageSourceBackingFile(filename, result.device, result.inode,
+		result.size, result.modifiedSeconds, result.modifiedNanoseconds);
 	return result;
 }
 

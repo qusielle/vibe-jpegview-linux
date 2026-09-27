@@ -35,6 +35,7 @@
 #include "system_font.h"
 #include "bitmap_font.h"
 #include "playback_scheduler.h"
+#include "archive_source.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -69,6 +70,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <zip.h>
 
 namespace fs = std::filesystem;
 using jpegview_linux::DecodedImage;
@@ -298,6 +300,32 @@ void WriteTinyImage(const fs::path& filename) {
 		"cannot create test image " + filename.string() + ": " + error);
 }
 
+void WriteZipArchive(const fs::path& archivePath,
+	const std::vector<std::pair<std::string, fs::path>>& members) {
+	int errorCode = 0;
+	zip_t* archive = zip_open(archivePath.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &errorCode);
+	if (archive == nullptr) throw TestFailure("cannot create ZIP archive: " + std::to_string(errorCode));
+	for (const auto& member : members) {
+		zip_source_t* source = zip_source_file(archive, member.second.c_str(), 0, -1);
+		if (source == nullptr) {
+			const std::string message = zip_strerror(archive);
+			zip_discard(archive);
+			throw TestFailure("cannot add ZIP fixture source: " + message);
+		}
+		if (zip_file_add(archive, member.first.c_str(), source, ZIP_FL_ENC_UTF_8) < 0) {
+			const std::string message = zip_strerror(archive);
+			zip_source_free(source);
+			zip_discard(archive);
+			throw TestFailure("cannot add ZIP fixture member: " + message);
+		}
+	}
+	if (zip_close(archive) != 0) {
+		const std::string message = zip_strerror(archive);
+		zip_discard(archive);
+		throw TestFailure("cannot finish ZIP fixture: " + message);
+	}
+}
+
 std::vector<std::string> FileNames(const FileList& files) {
 	std::vector<std::string> names;
 	for (const fs::path& path : files.Files()) names.push_back(path.filename().string());
@@ -337,6 +365,123 @@ void TestFileListFilteringAndLogicalSorting() {
 	FileList descending({directory.string()}, FileList::SortMode::FileName, false, false);
 	Expect(FileNames(descending) == std::vector<std::string>({"photo10.png", "photo2.png", "photo1.png"}),
 		"descending logical filename ordering is incorrect");
+}
+
+void TestArchiveBrowsingDecodingAndRecentPreview() {
+	TemporaryDirectory temporary;
+	const fs::path imageDirectory = temporary.path() / "source";
+	fs::create_directories(imageDirectory);
+	const fs::path image = imageDirectory / "fixture.png";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	ImageWriteOptions options;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(image, pixels.data(), 2, 2, options, error),
+		"cannot create archive image fixture: " + error);
+	const fs::path notes = imageDirectory / "notes.txt";
+	WriteText(notes, "not an image");
+	const fs::path archive = temporary.path() / "album.ZIP";
+	WriteZipArchive(archive, {
+		{"01-root.png", image},
+		{"nested/02-child.png", image},
+		{"../escape.png", image},
+		{"notes.txt", notes},
+	});
+	const fs::path rootImage = archive / "01-root.png";
+	const fs::path nestedDirectory = archive / "nested";
+	const fs::path nestedImage = nestedDirectory / "02-child.png";
+
+	Expect(jpegview_linux::IsArchiveContainerName(archive) &&
+		jpegview_linux::IsArchiveContainerFile(archive) &&
+		jpegview_linux::IsArchiveLocation(archive) &&
+		jpegview_linux::IsArchiveLocation(nestedDirectory) &&
+		jpegview_linux::IsArchiveMemberLocation(rootImage) &&
+		!jpegview_linux::IsArchiveMemberLocation(archive),
+		"archive path recognition did not distinguish a container, virtual directory, and member");
+	Expect(jpegview_linux::ArchiveFormatName(nestedImage) == "ZIP" &&
+		jpegview_linux::ArchiveBackingFile(nestedImage) == archive &&
+		jpegview_linux::ArchiveLocationDisplayName(nestedDirectory) == archive.string() + "!/nested",
+		"archive display or physical-container mapping is incorrect");
+	Expect(jpegview_linux::ArchiveTimestampNanoseconds(std::numeric_limits<std::int64_t>::max()) ==
+			std::numeric_limits<std::int64_t>::max() &&
+		jpegview_linux::ArchiveTimestampNanoseconds(std::numeric_limits<std::int64_t>::min()) ==
+			std::numeric_limits<std::int64_t>::min(),
+		"archive timestamp conversion overflowed at extreme values");
+	std::error_code archiveTimeError;
+	const fs::file_time_type memberModificationTime =
+		jpegview_linux::ImageSourceModificationTime(rootImage, archiveTimeError);
+	const fs::file_time_type sourceModificationTime = fs::last_write_time(image);
+	Expect(!archiveTimeError && std::chrono::duration_cast<std::chrono::seconds>(
+		memberModificationTime - sourceModificationTime).count() >= -2 &&
+		std::chrono::duration_cast<std::chrono::seconds>(
+			memberModificationTime - sourceModificationTime).count() <= 2,
+		"archive member timestamps were not converted to the filesystem clock domain");
+
+	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+	Expect(jpegview_linux::ListArchiveDirectory(archive, entries, error),
+		"cannot list ZIP central-directory entries: " + error);
+	Expect(entries.size() == 3 &&
+		std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
+			return entry.directory && entry.path.filename() == "nested";
+		}) &&
+		std::none_of(entries.begin(), entries.end(), [](const auto& entry) {
+			return entry.path.filename() == "escape.png";
+		}),
+		"archive listing omitted an implicit directory or accepted a traversal member");
+	jpegview_linux::ArchiveMemberInfo memberInfo;
+	Expect(jpegview_linux::GetArchiveMemberInfo(rootImage, memberInfo, error) &&
+		memberInfo.size == fs::file_size(image),
+		"archive member metadata did not preserve the uncompressed size");
+
+	FileList files({archive.string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.Current() == rootImage && files.IsArchiveMember(0),
+		"opening a ZIP container did not initialize its image list or archive identity");
+	Expect(files.MarkCurrentForToggle(), "archive image could not be marked for A/B toggling");
+	files.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
+	Expect(files.Next() && files.Current() == nestedImage && files.IsArchiveMember(0),
+		"recursive file-list navigation did not enter an archive subdirectory");
+	Expect(files.Previous() && files.Current() == rootImage && files.Next() &&
+		files.Current() == nestedImage && files.ToggleBetweenMarkedAndCurrent() &&
+		files.Current() == rootImage && files.ToggleBetweenMarkedAndCurrent() &&
+		files.Current() == nestedImage,
+		"archive file-list direction changes or marked-image toggling selected the wrong member");
+	FileList directMember({nestedImage.string()}, FileList::SortMode::FileName, true, false);
+	Expect(directMember.Size() == 1 && directMember.Current() == nestedImage,
+		"opening an archive member directly did not select it in its virtual parent directory");
+
+	DecodedImage decoded;
+	Expect(jpegview_linux::DecodeImage(rootImage, decoded, error),
+		"image decoder could not read an archive member: " + error);
+	Expect(decoded.frames.size() == 1 && decoded.frames.front().width == 2 &&
+		decoded.frames.front().height == 2 && decoded.frames.front().bgra == pixels,
+		"archive member decoding changed dimensions or pixels");
+
+	const jpegview_linux::DirectorySummary summary =
+		jpegview_linux::CountImmediateDirectoryContents(archive);
+	Expect(summary.imageCount == 1 && summary.subdirectoryCount == 1 &&
+		jpegview_linux::FirstImageInDirectory(archive,
+			jpegview_linux::FileDialogSortMode::Name) == rootImage &&
+		jpegview_linux::FirstImageInDirectory(nestedDirectory,
+			jpegview_linux::FileDialogSortMode::Name) == nestedImage,
+		"open-dialog summaries or folder preview resolution did not browse archive contents");
+	jpegview_linux::FileDialogPreviewLoader previewLoader;
+	const std::uint64_t generation = previewLoader.Request(rootImage, false,
+		jpegview_linux::FileDialogSortMode::Name, 16, 16);
+	std::vector<jpegview_linux::FileDialogPreviewResult> previews;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (previews.empty() && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		previews = previewLoader.TakeReady();
+	}
+	Expect(previews.size() == 1 && previews.front().generation == generation &&
+		previews.front().source == rootImage && previews.front().error.empty() &&
+		previews.front().width == 2 && previews.front().height == 2,
+		"recent-image preview did not decode a virtual archive member");
+
+	const fs::path malformed = temporary.path() / "broken.zip";
+	WriteText(malformed, "not a ZIP archive");
+	entries.clear();
+	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
+		"malformed ZIP input did not fail with a useful error");
 }
 
 void TestFileListMarkedImageToggle() {
@@ -3596,6 +3741,18 @@ void TestContextMenuCatalogAndState() {
 		"image-dependent commands were enabled without an image");
 	Expect(findLabel(disabled, "  (no configured applications)") != nullptr,
 		"empty Open with state omitted its disabled placeholder");
+	ContextMenuState archiveImage;
+	archiveImage.archiveMember = true;
+	archiveImage.imageAvailable = true;
+	archiveImage.openWithApplicationNames.clear();
+	const std::vector<MenuItem> archiveMenu = jpegview_linux::BuildContextMenu(archiveImage, true);
+	Expect(!findCommand(archiveMenu, IDM_PRINT)->enabled &&
+		!findCommand(archiveMenu, IDM_BATCH_COPY)->enabled &&
+		!findCommand(archiveMenu, IDM_TOUCH_IMAGE)->enabled &&
+		!findCommand(archiveMenu, IDM_TOUCH_IMAGE_EXIF_FOLDER)->enabled &&
+		!findCommand(archiveMenu, IDM_SET_WALLPAPER_ORIG)->enabled &&
+		findCommand(archiveMenu, IDM_SET_WALLPAPER_DISPLAY)->enabled,
+		"filesystem-only actions were not disabled for an archive image");
 }
 
 void TestContextMenuMnemonics() {
@@ -4951,6 +5108,8 @@ void RunTest(const char* name, void (*test)(), int& failures) {
 int main() {
 	int failures = 0;
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
+	RunTest("archive-browsing-decoding-and-recent-preview",
+		TestArchiveBrowsingDecodingAndRecentPreview, failures);
 	RunTest("file-list-marked-image-toggle", TestFileListMarkedImageToggle, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);

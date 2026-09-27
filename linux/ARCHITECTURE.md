@@ -6,6 +6,14 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, current-file
   preservation, and the transient marked-image toggle pair used for A/B comparison. The marked
   path's index in the active ordered list is cached for constant-time thumbnail rendering.
+- `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
+  and on-demand member access. The current backend is ZIP: it caches immutable central-directory
+  metadata for at most four containers, keyed by device/inode/size/mtime, and retains no decoded or
+  extracted image payloads. Workers open independent libzip handles, validate the selected member,
+  and stream at most 128 MiB of uncompressed data into an anonymous memory file for existing
+  path-based decoders. Unsafe absolute/traversal names are ignored and catalogs over 100,000 entries
+  are rejected. New archive formats should extend this backend dispatch while keeping viewer
+  consumers on the generic source operations.
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality resizing, and the automatic/manual picture-level processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
@@ -14,8 +22,10 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `crop_size_dialog_model`: fixed-crop dimension text, focus/unit transitions, and validation.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
   pixel processing, the atomic native per-image levels database, and its portable backup/restore.
-- `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy. Decoded
-  frames carry alpha-presence metadata so opaque-image textures can keep blending disabled.
+- `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy. Image
+  decoders resolve archive-member paths through `archive_source` before invoking the existing codec
+  path, retaining ordinary-file and reduced-DCT JPEG behavior. Decoded frames carry alpha-presence
+  metadata so opaque-image textures can keep blending disabled.
 - `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
   processing/scaling of renderer-ready frames. Display keys capture every active processing value
@@ -30,8 +40,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   default), zoom-navigator visibility, and magnifying-glass size/zoom), plus stable sort-mode values.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
   bounded per-file `ViewportSnapshot` LRU, and tolerant atomic persistence in the XDG state
-  directory. The recent database is independent from viewer settings and performs no image or
-  directory scans while loading.
+  directory. Virtual archive-member paths remain logical recent identities while source validation
+  and cache freshness use the backing container. The recent database is independent from viewer
+  settings and performs no image or directory scans while loading.
 - `viewport`: fit/fill/manual zoom modes, pan state, destination geometry, and panning bounds that
   keep the viewport inside the image.
 - `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,
@@ -75,6 +86,18 @@ marked as containing alpha, paints the matching background beneath the image bef
 texture rendering. The same renderer-thread helper backs transparent thumbnails and open-dialog
 previews; opaque textures retain the non-blended path. It should translate SDL events into operations
 on the modules above rather than duplicate their state.
+
+Archive members use the existing filesystem-shaped path contract (`container.zip/member.ext`) so
+navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The
+browser labels and color-marks ZIP containers and archive images without reading image payloads;
+Recents uses the same cancellable preview worker. The four-entry catalog cache retains central
+directory metadata only. A member is decompressed only when a decoder requests it, bounded to
+128 MiB, into a short-lived anonymous memory file; the source archive is never modified and no
+persistent extraction directory is created. The ZIP backend rejects unsafe member paths and encrypted
+entries. Filesystem-only actions are disabled or guarded for archive members, while image edits and
+saves still use the ordinary in-memory image path. Supporting 7z, RAR, TAR, or other containers
+should add extension recognition and list/read operations here rather than branching in the SDL
+viewer, recents, caches, or codecs.
 
 The magnifying-glass lens is a temporary viewer interaction; its enablement resets each run while
 its size and magnification are stored by `settings`. Its pure model owns those values, wheel

@@ -60,6 +60,7 @@ struct ContextMenuState {
 	FileList::SortMode sortMode = FileList::SortMode::FileName;
 	bool sortAscending = true;
 	bool imageAvailable = false;
+	bool archiveMember = false;
 	bool losslessJpegAvailable = false;
 	bool cropContextMenu = false;
 	bool cropSelectionAvailable = false;

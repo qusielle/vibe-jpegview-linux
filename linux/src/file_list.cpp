@@ -1,4 +1,5 @@
 #include "file_list.h"
+#include "archive_source.h"
 #include "image_formats.h"
 
 #include <algorithm>
@@ -77,6 +78,17 @@ FileList::Entry FileList::DescribeFile(const fs::path& path) {
 	Entry result;
 	result.path = Normalize(path);
 	result.randomOrder = std::hash<std::string>{}(result.path.string());
+	if (IsArchiveMemberLocation(result.path)) {
+		ArchiveMemberInfo archiveInfo;
+		std::string errorMessage;
+		if (GetArchiveMemberInfo(result.path, archiveInfo, errorMessage)) {
+			result.lastModificationTime = ArchiveTimestampNanoseconds(archiveInfo.modificationTime);
+			result.creationTime = result.lastModificationTime;
+			result.fileSize = archiveInfo.size;
+			result.archiveMember = true;
+		}
+		return result;
+	}
 	std::error_code error;
 	const fs::file_time_type fallbackModificationTime = fs::last_write_time(result.path, error);
 	if (!error) {
@@ -107,6 +119,24 @@ FileList::Entry FileList::DescribeFile(const fs::path& path) {
 
 std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory) {
 	std::vector<Entry> result;
+	if (IsArchiveLocation(directory)) {
+		std::vector<ArchiveEntryInfo> archiveEntries;
+		std::string errorMessage;
+		if (!ListArchiveDirectory(directory, archiveEntries, errorMessage)) return result;
+		for (const ArchiveEntryInfo& archiveEntry : archiveEntries) {
+			if (!archiveEntry.directory && IsSupportedImagePath(archiveEntry.path)) {
+				Entry entry;
+				entry.path = Normalize(archiveEntry.path);
+				entry.lastModificationTime = ArchiveTimestampNanoseconds(archiveEntry.modificationTime);
+				entry.creationTime = entry.lastModificationTime;
+				entry.fileSize = archiveEntry.size;
+				entry.randomOrder = std::hash<std::string>{}(entry.path.string());
+				entry.archiveMember = true;
+				result.push_back(std::move(entry));
+			}
+		}
+		return result;
+	}
 	std::error_code error;
 	fs::directory_iterator iterator(directory, error);
 	const fs::directory_iterator end;
@@ -123,6 +153,20 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory) 
 
 std::vector<fs::path> FileList::ChildDirectories(const fs::path& directory) {
 	std::vector<fs::path> result;
+	if (IsArchiveLocation(directory)) {
+		std::vector<ArchiveEntryInfo> archiveEntries;
+		std::string errorMessage;
+		if (ListArchiveDirectory(directory, archiveEntries, errorMessage)) {
+			for (const ArchiveEntryInfo& entry : archiveEntries) {
+				if (entry.directory) result.push_back(Normalize(entry.path));
+			}
+		}
+		std::sort(result.begin(), result.end(), [](const fs::path& left, const fs::path& right) {
+			const int nameComparison = CompareLogicalNames(left.filename().string(), right.filename().string());
+			return nameComparison == 0 ? left.string() < right.string() : nameComparison < 0;
+		});
+		return result;
+	}
 	std::error_code error;
 	fs::directory_iterator iterator(directory, error);
 	const fs::directory_iterator end;
@@ -173,6 +217,24 @@ void FileList::Initialize(const std::vector<std::string>& inputs) {
 	if (inputs.size() == 1) {
 		const fs::path input = Normalize(inputs.front());
 		std::error_code error;
+		if (IsArchiveContainerFile(input)) {
+			rootDirectory_ = input;
+			currentDirectory_ = input;
+			entries_ = ScanDirectory(input);
+			SortEntries();
+			currentIndex_ = 0;
+			RebuildPaths();
+			return;
+		}
+		if (IsArchiveMemberLocation(input) && IsSupportedImagePath(input)) {
+			rootDirectory_ = input.parent_path();
+			currentDirectory_ = input.parent_path();
+			entries_ = ScanDirectory(currentDirectory_);
+			SortEntries();
+			currentIndex_ = FindEntry(input);
+			RebuildPaths();
+			return;
+		}
 		if (fs::is_directory(input, error)) {
 			rootDirectory_ = input;
 			currentDirectory_ = input;
@@ -201,7 +263,12 @@ void FileList::Initialize(const std::vector<std::string>& inputs) {
 	for (const std::string& inputString : inputs) {
 		const fs::path input = Normalize(inputString);
 		std::error_code error;
-		if (fs::is_directory(input, error)) {
+		if (IsArchiveContainerFile(input)) {
+			const std::vector<Entry> archiveEntries = ScanDirectory(input);
+			entries_.insert(entries_.end(), archiveEntries.begin(), archiveEntries.end());
+		} else if (IsArchiveMemberLocation(input) && IsSupportedImagePath(input)) {
+			entries_.push_back(DescribeFile(input));
+		} else if (fs::is_directory(input, error)) {
 			const std::vector<Entry> directoryEntries = ScanDirectory(input);
 			entries_.insert(entries_.end(), directoryEntries.begin(), directoryEntries.end());
 		} else if (fs::is_regular_file(input, error) && IsSupportedImagePath(input)) {
@@ -281,8 +348,14 @@ std::size_t FileList::FindEntry(const fs::path& path) const {
 bool FileList::SelectPath(const fs::path& path) {
 	const fs::path normalized = Normalize(path);
 	if (!IsSupportedImagePath(normalized)) return false;
-	std::error_code error;
-	if (!fs::is_regular_file(normalized, error) || error) return false;
+	if (IsArchiveMemberLocation(normalized)) {
+		ArchiveMemberInfo info;
+		std::string errorMessage;
+		if (!GetArchiveMemberInfo(normalized, info, errorMessage)) return false;
+	} else {
+		std::error_code error;
+		if (!fs::is_regular_file(normalized, error) || error) return false;
+	}
 
 	const auto existing = std::find(paths_.begin(), paths_.end(), normalized);
 	if (existing != paths_.end()) {
@@ -466,8 +539,14 @@ bool FileList::Select(std::size_t index) {
 
 bool FileList::MarkCurrentForToggle() {
 	if (Empty() || Current().empty()) return false;
-	std::error_code error;
-	if (!fs::is_regular_file(Current(), error) || error) return false;
+	if (IsArchiveMemberLocation(Current())) {
+		ArchiveMemberInfo info;
+		std::string errorMessage;
+		if (!GetArchiveMemberInfo(Current(), info, errorMessage)) return false;
+	} else {
+		std::error_code error;
+		if (!fs::is_regular_file(Current(), error) || error) return false;
+	}
 	markedFile_ = Current();
 	markedFileCurrent_.clear();
 	markedIndex_ = currentIndex_;

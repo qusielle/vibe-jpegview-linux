@@ -18,8 +18,9 @@ they support.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
    PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, and LibRaw camera formats. Embedded
-   color profiles are transformed through LCMS2. The save dialog writes JPEG, PNG, BMP, TGA, WebP,
-   GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images. Codec detection and fixtures
+   color profiles are transformed through LCMS2. Supported images inside ZIP containers can also be
+   browsed and viewed. The save dialog writes JPEG, PNG, BMP, TGA, WebP, GIF, TIFF, PSD, PNM, QOI,
+   HEIF/HEIC, AVIF, and JPEG XL still images. Codec detection and fixtures
    were made portable across Ubuntu 20.04 and newer distributions, including giflib installations
    without pkg-config metadata and HEIF encoders with different supported profiles. Transparent PNG
    and other alpha-bearing images display over a configurable black, white, or checkerboard
@@ -120,7 +121,17 @@ they support.
    parent folder, with the folder path on the left and filename on the right; its filter matches
    both path and filename. Browse and Recents keep their own selection and filter while switching.
    A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode when it
-   is opened again; files without a saved view inherit the shared navigation mode. The recent-file
+   is opened again; files without a saved view inherit the shared navigation mode. ZIP files appear
+   as gold `[ZIP]` directory rows in Browse; entering one lists supported images and subfolders, and
+   opening an archive directly starts at its root image list. Archive-member rows use the same gold
+   cue in Browse, Recents, and the thumbnail strip, and Recents reuses the normal background preview
+   path. Browsing indexes only the ZIP central directory; image data is decompressed on demand, not
+   extracted to a persistent folder. Password-protected ZIPs are not supported. Unsafe absolute or
+   `..` member paths are omitted, indexes are capped at 100,000 entries, and individual images are
+   limited to 128 MiB uncompressed. The archive itself is never modified: image edits happen in
+   memory and can be saved as ordinary files. Printing, Open With, date changes, trash, batch
+   rename/copy, original-file wallpaper, and lossless JPEG transforms are unavailable for members.
+   The recent-file
    list and view snapshots are stored separately from settings at
    `${XDG_STATE_HOME:-$HOME/.local/state}/jpegview-linux/recent-files.db` and are written on
    normal shutdown. The browser also provides move-to-trash
@@ -200,14 +211,15 @@ they support.
     alpha metadata, resize and batch models, application discovery, startup maximization, and
     held-key behavior. Viewer logic was extracted into focused modules for image pixels, settings,
     sorting, input commands, viewport, recent-file history, open-dialog state, overlays, thumbnails,
-    fonts, image information, context menus, resize, batch operations, and desktop applications.
+    fonts, image information, context menus, resize, batch operations, archive sources, and desktop applications.
     Shell and sanitizer targets supplement the regular suites. Docker builds use distro codec
     packages where available and build only codecs missing from that Ubuntu release; independent
     codec stages and the viewer/tests compile in parallel.
 
 ## Build
 
-The runtime framework dependencies are SDL2 and Pango/FreeType. SDL2 development headers are not
+The runtime framework dependencies are SDL2, Pango/FreeType, and libzip for ZIP archive browsing.
+SDL2 development headers are not
 required because the frontend uses the small ABI declared in `src/sdl_abi.h`; Pango development
 headers and codec development packages are needed at compile time. The font stack is loaded only
 when text outside the embedded printable-ASCII bitmap is used, so normal startup and ASCII UI do not
@@ -218,7 +230,7 @@ On Ubuntu 20.04, install the compiler, make, and SDL2 runtime first:
 
 ```sh
 sudo apt install g++ make libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev \
-  libjpeg-dev libpng-dev libjpeg-turbo-progs xclip wl-clipboard
+  libjpeg-dev libpng-dev libjpeg-turbo-progs libzip-dev xclip wl-clipboard
 ```
 
 ```sh
@@ -232,8 +244,8 @@ toolchain does not provide those static runtime archives.
 
 ## Isolated Docker build
 
-The Ubuntu 20.04, 22.04, 24.04, and 26.04 Dockerfiles contain the compiler, SDL2, and optional codec
-development libraries for their respective releases. Ubuntu 20.04 builds JPEG XL and AVIF from
+The Ubuntu 20.04, 22.04, 24.04, and 26.04 Dockerfiles contain the compiler, SDL2, libzip, and optional
+codec development libraries for their respective releases. Ubuntu 20.04 builds JPEG XL and AVIF from
 pinned sources; Ubuntu 22.04 uses its AVIF package and builds JPEG XL from source; Ubuntu 24.04 and
 26.04 use distro codec packages and explicitly install libheif's HEVC decoder/encoder plugins because
 their images omit recommended packages. The host only needs Docker; build outputs are written to a host
@@ -310,7 +322,8 @@ make -C linux SDL2_LIBS='-L/path/to/lib -lSDL2'
 
 Supported input formats are JPEG, PNG/APNG (including animation), GIF (including animation), BMP, TGA, PSD, PNM-family files,
 QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
-formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. The save dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF,
+formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP archives can contain any supported image format above;
+they are browsed read-only as virtual folders. The save dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF,
 PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is view-only.
 JPEG uses the linked libjpeg implementation (libjpeg-turbo in the supported builds), common
 single-frame formats use the vendored public-domain/MIT `stb_image` single-header library, and the
@@ -407,9 +420,11 @@ panning, open/save browser state, preview
 downsampling, resize- and crop-size-dialog editing/validation, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
-trips across static and animated formats, all PNM variants, malformed input, batch-copy planning,
+trips across static and animated formats, archive listing and member decoding, path-traversal rejection,
+nested archive navigation and archive-backed recent previews, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
-open browser's filtering, folder counts, sorting, direct-folder opening, focus restoration, paging,
+open browser's filtering, folder counts, sorting, direct-folder opening, ZIP browsing/recent reopening,
+focus restoration, paging,
 Home/End, held-key movement, wheel scrolling, and dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;

@@ -1,5 +1,6 @@
 #include "sdl_abi.h"
 #include "file_list.h"
+#include "archive_source.h"
 #include "exif_reader.h"
 #include "clipboard.h"
 #include "image_writer.h"
@@ -228,10 +229,19 @@ std::string InfoText(const std::string& value) {
 }
 
 std::string FormatFileTime(const fs::path& filename) {
-	struct stat status{};
-	if (stat(filename.c_str(), &status) != 0) return {};
+	std::time_t timestamp = 0;
+	if (jpegview_linux::IsArchiveMemberLocation(filename)) {
+		jpegview_linux::ArchiveMemberInfo info;
+		std::string errorMessage;
+		if (!jpegview_linux::GetArchiveMemberInfo(filename, info, errorMessage)) return {};
+		timestamp = static_cast<std::time_t>(info.modificationTime);
+	} else {
+		struct stat status{};
+		if (stat(filename.c_str(), &status) != 0) return {};
+		timestamp = status.st_mtime;
+	}
 	std::tm localTime{};
-	if (localtime_r(&status.st_mtime, &localTime) == nullptr) return {};
+	if (localtime_r(&timestamp, &localTime) == nullptr) return {};
 	char formatted[32]{};
 	if (std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S", &localTime) == 0) return {};
 	return formatted;
@@ -684,10 +694,10 @@ private:
 	bool JpegDimensions(const fs::path& filename, int& width, int& height,
 		std::string& errorMessage) {
 		std::error_code error;
-		const std::uintmax_t fileSize = fs::file_size(filename, error);
+		const std::uintmax_t fileSize = jpegview_linux::ImageSourceFileSize(filename, error);
 		if (error) return jpegview_linux::ReadJpegDimensions(
 			filename, width, height, errorMessage);
-		const fs::file_time_type modified = fs::last_write_time(filename, error);
+		const fs::file_time_type modified = jpegview_linux::ImageSourceModificationTime(filename, error);
 		if (error) return jpegview_linux::ReadJpegDimensions(
 			filename, width, height, errorMessage);
 		const std::string key = filename.string();
@@ -1423,6 +1433,10 @@ private:
 
 	void ApplyLosslessJpegTransform(int command) {
 		if (fileList_.Empty() || clipboardMode_) return;
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
+			SetTitle("Lossless transforms are unavailable for images inside ZIP archives");
+			return;
+		}
 		const std::string extension = Lower(fileList_.Current().extension().string());
 		if (extension != ".jpg" && extension != ".jpeg" && extension != ".jpe") {
 			SetTitle("Lossless JPEG transformation requires a JPEG image");
@@ -1495,7 +1509,7 @@ private:
 			return;
 		}
 		std::error_code fileError;
-		const std::uintmax_t fileSize = fs::file_size(fileList_.Current(), fileError);
+		const std::uintmax_t fileSize = jpegview_linux::ImageSourceFileSize(fileList_.Current(), fileError);
 		std::ostringstream title;
 		title << fileList_.Current().filename().string()
 			<< " (" << image_.originalWidth << 'x' << image_.originalHeight;
@@ -1557,6 +1571,10 @@ private:
 		if (fileList_.Empty() || clipboardMode_ || imageModified_ ||
 			!jpegview_linux::IsJpegPath(fileList_.Current()) || !cropSelection_.HasSelection()) {
 			SetTitle("Lossless crop requires an untransformed JPEG selection");
+			return;
+		}
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
+			SetTitle("Lossless crop is unavailable for images inside ZIP archives");
 			return;
 		}
 		int mcuWidth = 0;
@@ -1904,7 +1922,9 @@ private:
 
 	void OpenContainingFolder() {
 		if (fileList_.Empty() || clipboardMode_) return;
-		const fs::path directory = fileList_.Current().parent_path();
+		const fs::path current = fileList_.Current();
+		const fs::path directory = jpegview_linux::IsArchiveMemberLocation(current) ?
+			jpegview_linux::ArchiveBackingFile(current).parent_path() : current.parent_path();
 		std::string errorMessage;
 		bool started = false;
 		for (const jpegview_linux::ExternalCommand& command :
@@ -1923,6 +1943,10 @@ private:
 
 	void OpenCurrentWith(std::size_t applicationIndex) {
 		if (fileList_.Empty() || clipboardMode_ || applicationIndex >= openWithApplications_.size()) return;
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
+			SetTitle("Open With is unavailable for images inside ZIP archives");
+			return;
+		}
 		const jpegview_linux::OpenWithApplication& application = openWithApplications_[applicationIndex];
 		const std::optional<jpegview_linux::ExternalCommand> command =
 			jpegview_linux::OpenWithCommand(application, fileList_.Current(),
@@ -1969,6 +1993,10 @@ private:
 
 	void PrintCurrentImage() {
 		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
+			SetTitle("Printing images inside archives is unavailable");
+			return;
+		}
 		if (!MaterializeCurrentPixels()) return;
 		char temporaryDirectoryName[] = "/tmp/jpegview-print-XXXXXX";
 		if (mkdtemp(temporaryDirectoryName) == nullptr) {
@@ -2030,6 +2058,10 @@ private:
 
 	void TouchCurrentImage(bool useExifDate) {
 		if (fileList_.Empty() || clipboardMode_) return;
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
+			SetTitle("Cannot change file dates inside a ZIP archive");
+			return;
+		}
 		std::time_t timestamp = std::time(nullptr);
 		if (useExifDate) {
 			const std::string& exifDate = !metadata_.acquisitionDate.empty() ? metadata_.acquisitionDate : metadata_.dateTime;
@@ -2048,6 +2080,10 @@ private:
 
 	void TouchFolderImagesToExifDate() {
 		if (fileList_.Empty() || clipboardMode_) return;
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
+			SetTitle("Cannot change file dates inside a ZIP archive");
+			return;
+		}
 		const fs::path directory = fileList_.Current().parent_path();
 		int updated = 0;
 		std::error_code iteratorError;
@@ -2071,6 +2107,10 @@ private:
 
 	void SetWallpaper(bool processed) {
 		if (fileList_.Empty()) return;
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current()) && !processed) {
+			SetTitle("Extract or save the image before setting it as wallpaper");
+			return;
+		}
 		fs::path wallpaperFile = fileList_.Current();
 		std::error_code error;
 		if (processed) {
@@ -2127,6 +2167,10 @@ private:
 
 	void MoveCurrentToTrash() {
 		if (fileList_.Empty() || clipboardMode_) return;
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
+			SetTitle("Cannot delete an image directly from a ZIP archive");
+			return;
+		}
 		const fs::path filename = fileList_.Current();
 		std::string errorMessage;
 		bool moved = false;
@@ -2559,7 +2603,7 @@ private:
 		lines.push_back(title.str());
 
 		std::error_code fileError;
-		const std::uintmax_t fileSize = fs::file_size(fileList_.Current(), fileError);
+		const std::uintmax_t fileSize = jpegview_linux::ImageSourceFileSize(fileList_.Current(), fileError);
 		lines.push_back(jpegview_linux::FormatImageDimensionsAndSize(
 			image_.originalWidth, image_.originalHeight,
 			fileError ? std::string() : jpegview_linux::FormatFileSize(fileSize)));
@@ -3535,7 +3579,10 @@ private:
 	std::vector<MenuItem> ContextMenuItems(bool advancedOptions) {
 		const std::string extension = fileList_.Empty() ? std::string() :
 			Lower(fileList_.Current().extension().string());
+		const bool archiveMember = !fileList_.Empty() &&
+			jpegview_linux::IsArchiveMemberLocation(fileList_.Current());
 		if (contextMenuCropOnly_) openWithApplications_.clear();
+		else if (archiveMember) openWithApplications_.clear();
 		else openWithApplications_ = jpegview_linux::DiscoverOpenWithApplications(extension);
 
 		jpegview_linux::ContextMenuState state;
@@ -3555,7 +3602,8 @@ private:
 		state.sortMode = fileList_.GetSorting();
 		state.sortAscending = fileList_.IsSortedAscending();
 		state.imageAvailable = image_.width > 0;
-		state.losslessJpegAvailable = !clipboardMode_ && HasExecutable("jpegtran") &&
+		state.archiveMember = archiveMember;
+		state.losslessJpegAvailable = !clipboardMode_ && !archiveMember && HasExecutable("jpegtran") &&
 			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
 		state.cropContextMenu = contextMenuCropOnly_;
 		state.cropSelectionAvailable = cropSelection_.HasSelection();
@@ -3941,6 +3989,10 @@ private:
 
 	void OpenBatchCopyDialog() {
 		if (fileList_.Empty() || clipboardMode_) return;
+		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
+			SetTitle("Batch rename/copy is unavailable for images inside archives");
+			return;
+		}
 		batchCopyDialog_.Open(CollectBatchCopyEntries(), fileList_.CurrentIndex(),
 			copyRenamePattern_, BatchCopyVisibleRows());
 		contextMenuOpen_ = false;
@@ -4792,25 +4844,52 @@ private:
 	void RefreshFileDialog() {
 		InvalidateFileDialogPreview();
 		std::vector<FileDialogEntry> entries;
-		std::error_code error;
 		const fs::path parent = fileDialogDirectory_.parent_path();
 		if (!parent.empty() && parent != fileDialogDirectory_) {
 			entries.push_back(FileDialogEntry{parent, true, true});
 		}
+		if (jpegview_linux::IsArchiveLocation(fileDialogDirectory_)) {
+			std::vector<jpegview_linux::ArchiveEntryInfo> archiveEntries;
+			std::string archiveError;
+			if (!jpegview_linux::ListArchiveDirectory(fileDialogDirectory_, archiveEntries, archiveError)) {
+				fileDialogMessage_ = "Cannot read ZIP: " + archiveError;
+			} else {
+				fileDialogMessage_.clear();
+				for (const jpegview_linux::ArchiveEntryInfo& archiveEntry : archiveEntries) {
+					if (!archiveEntry.directory && (fileDialogSave_ ||
+						!jpegview_linux::IsSupportedImagePath(archiveEntry.path))) continue;
+					const fs::file_time_type modificationTime =
+						jpegview_linux::ArchiveFileModificationTime(archiveEntry.modificationTime);
+					entries.push_back(FileDialogEntry{archiveEntry.path, archiveEntry.directory,
+						false, modificationTime, false, true});
+				}
+			}
+			fileDialogModel_.SetEntries(std::move(entries));
+			RequestFileDialogDirectorySummaries();
+			return;
+		}
+		fileDialogMessage_.clear();
+		std::error_code error;
 
 		for (const fs::directory_entry& entry : fs::directory_iterator(fileDialogDirectory_, error)) {
 			if (error) break;
 			std::error_code statusError;
 			const bool directory = entry.is_directory(statusError);
-			if (statusError || (!directory && (!entry.is_regular_file(statusError) ||
+			const bool archive = !statusError && !directory &&
+				entry.is_regular_file(statusError) && !statusError &&
+				jpegview_linux::IsArchiveContainerName(entry.path());
+			if (statusError || (!directory && !archive && (!entry.is_regular_file(statusError) ||
 				(!(fileDialogParameterBackup_ || fileDialogParameterRestore_) &&
 					!jpegview_linux::IsSupportedImagePath(entry.path()))))) {
 				continue;
 			}
+			if (archive && (fileDialogSave_ || fileDialogParameterBackup_ ||
+				fileDialogParameterRestore_)) continue;
 			std::error_code modificationError;
 			const fs::file_time_type modificationTime = entry.last_write_time(modificationError);
-			entries.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory, false,
-				modificationError ? fs::file_time_type{} : modificationTime});
+			entries.push_back(FileDialogEntry{AbsoluteNormalized(entry.path()), directory || archive,
+				false, modificationError ? fs::file_time_type{} : modificationTime,
+				archive, false});
 		}
 
 		fileDialogModel_.SetEntries(std::move(entries));
@@ -4838,7 +4917,8 @@ private:
 		std::vector<FileDialogEntry> recentEntries;
 		recentEntries.reserve(recentFiles_.Files().size());
 		for (const fs::path& path : recentFiles_.Files()) {
-			recentEntries.push_back(FileDialogEntry{path, false, false});
+			recentEntries.push_back(FileDialogEntry{path, false, false, {}, false,
+				jpegview_linux::IsArchiveMemberLocation(path)});
 		}
 		recentFileDialogModel_.SetEntriesInOrder(std::move(recentEntries), true);
 		recentFileDialogModel_.SelectFirst(FileDialogVisibleRows());
@@ -4862,7 +4942,9 @@ private:
 
 	void OpenSaveFileDialog(bool fullSize) {
 		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
-		fs::path directory = fileList_.Current().parent_path();
+		const fs::path currentSource = fileList_.Current();
+		fs::path directory = jpegview_linux::IsArchiveMemberLocation(currentSource) ?
+			jpegview_linux::ArchiveBackingFile(currentSource).parent_path() : currentSource.parent_path();
 		if (directory.empty()) directory = fs::current_path();
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = true;
@@ -4940,6 +5022,8 @@ private:
 
 	std::string FileDialogEntryLabel(const FileDialogEntry& entry) const {
 		if (entry.parent) return "[..]";
+		if (entry.archiveContainer) return "[" +
+			jpegview_linux::ArchiveFormatName(entry.path) + "] " + entry.path.filename().string();
 		return entry.directory ? std::string("[Dir] ") + entry.path.filename().string() : entry.path.filename().string();
 	}
 
@@ -5168,7 +5252,8 @@ private:
 			}
 		}
 		DrawText(fileDialogTab_ == FileDialogTab::Recents ?
-			"One recent image per folder" : fileDialogDirectory_.string(),
+			"One recent image per folder" :
+			jpegview_linux::ArchiveLocationDisplayName(fileDialogDirectory_),
 			dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
 		DrawText(fileDialogSave_ ? "File name" :
 			(fileDialogParameterRestore_ ? "Backup filter" : "Filter"),
@@ -5212,11 +5297,15 @@ private:
 				const int leftX = listRect.x + 10;
 				const int pathWidth = std::max(1, (listRect.w - 30) / 2);
 				const int filenameWidth = std::max(1, listRect.w - 30 - pathWidth);
-				const std::string parent = ClipText(entry.path.parent_path().string(), pathWidth);
+				const std::string parent = ClipText(
+					jpegview_linux::ArchiveLocationDisplayName(entry.path.parent_path()), pathWidth);
 				const std::string filename = ClipText(entry.path.filename().string(), filenameWidth);
 				const int filenameX = listRect.x + listRect.w - 10 - TextWidth(filename, kUiTextScale);
-				DrawText(parent, leftX, rowTop + 5, kUiTextScale, 165, 175, 190);
-				DrawText(filename, filenameX, rowTop + 5, kUiTextScale, 235, 235, 235);
+				const bool fromArchive = entry.archiveMember;
+				DrawText(parent, leftX, rowTop + 5, kUiTextScale,
+					fromArchive ? 210 : 165, fromArchive ? 170 : 175, fromArchive ? 105 : 190);
+				DrawText(filename, filenameX, rowTop + 5, kUiTextScale,
+					fromArchive ? 255 : 235, fromArchive ? 205 : 235, fromArchive ? 125 : 235);
 			} else {
 				std::string summaryText;
 				if (FileDialogCanSort() && entry.directory && !entry.parent) {
@@ -5229,9 +5318,12 @@ private:
 				const int summaryX = listRect.x + listRect.w - 10 - summaryWidth;
 				const int labelWidth = summaryText.empty() ? listRect.w - 20 :
 					std::max(1, summaryX - (listRect.x + 10) - 12);
+				const bool archiveEntry = entry.archiveContainer || entry.archiveMember;
+				const Uint8 red = archiveEntry ? 255 : entry.directory ? 185 : 235;
+				const Uint8 green = archiveEntry ? 205 : entry.directory ? 205 : 235;
+				const Uint8 blue = archiveEntry ? 125 : 235;
 				DrawText(ClipText(FileDialogEntryLabel(entry), labelWidth), listRect.x + 10,
-					rowTop + 5, kUiTextScale,
-					entry.directory ? 185 : 235, entry.directory ? 205 : 235, entry.directory ? 235 : 235);
+					rowTop + 5, kUiTextScale, red, green, blue);
 				if (!summaryText.empty()) {
 					DrawText(summaryText, summaryX, rowTop + 5, kUiTextScale, 155, 175, 195);
 				}
@@ -6079,6 +6171,10 @@ private:
 			}
 			DrawLine(panel.x, row.y + row.h - 1, std::max(panel.x, panel.x + panel.w - 2),
 				row.y + row.h - 1, 48, 48, 48);
+			if (fileList_.IsArchiveMember(slot.fileIndex)) {
+				DrawLine(panel.x + 1, row.y + 2, panel.x + 1,
+					std::max(row.y + 2, row.y + row.h - 3), 255, 195, 95);
+			}
 			if (slot.marked) {
 				const SDL_Rect markedFrame{row.x + 1, row.y + 1, row.w - 2, row.h - 2};
 				DrawRect(markedFrame, 255, 195, 65);

@@ -1,14 +1,13 @@
 # Linux feature candidates
 
 This is an unprioritized list of possible future work, not a promise or release plan. Items are
-kept separate where they can be implemented and reviewed independently. Archive formats remain
-separate candidates even if an implementation later shares a backend. Archive-format candidates
-are independent of the JPEGView_L comparison below. The current behavior documented in
+kept separate where they can be implemented and reviewed independently. Unimplemented archive
+formats remain separate candidates even if an implementation later shares a backend. Archive-format
+candidates are independent of the JPEGView_L comparison below. The current behavior documented in
 [`README.md`](README.md) is authoritative; candidate sources are identified by name.
 
 ## Archive input candidates
 
-- **ZIP image archives:** browse supported images stored in ZIP files.
 - **7z image archives:** browse supported images stored in 7z files.
 - **RAR image archives:** browse supported images stored in RAR files.
 - **TAR image archives:** browse supported images stored in uncompressed TAR files.
@@ -17,6 +16,13 @@ are independent of the JPEGView_L comparison below. The current behavior documen
   reading positions are explicitly out of scope for this candidate.
 - **CB7 comic archives:** browse images in comic 7z files. Comic-page bookmarks and remembered
   reading positions are explicitly out of scope for this candidate.
+
+## Implemented archive input
+
+- **ZIP image archives:** implemented in the Linux branch. ZIPs browse as virtual folders, list
+  supported images and nested folders without extracting payloads, and support archive navigation
+  and Recents previews. See current limits and controls in the
+  [Linux README](README.md#linux-branch-changes-in-order-of-importance).
 
 ## Comic-reading interaction candidates
 
@@ -226,7 +232,7 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   treating it as a folder image or comic archive. Keep rendering optional if the required PDF
   library is unavailable. See the
   [PDF support commit](https://github.com/sdneon/jpegview/commit/5d79cad3cc98d502576a8c357bffaea540ac67d6).
-- **Password-protected archives:** extend the separately listed ZIP/7z/RAR candidates to request a
+- **Password-protected archives:** extend ZIP and the remaining 7z/RAR candidates to request a
   password and browse encrypted contents. Prefer a dedicated prompt and short-lived in-memory
   password handling; do not copy the fork's command-line password approach, which can expose secrets
   in process listings. See its explicitly experimental
@@ -291,9 +297,10 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   precision for viewing and saving. See the fork's
   [PSD format documentation](https://github.com/famomatic/jpegview/blob/master/README.md).
 
-Recent-fork ideas already represented above were not duplicated here: PSB, KRA, ZIP/7z/CBZ/CB7
-browsing, recent-file history, go-to-image-number, color sampling, negative/inverted colors,
-asynchronous file-list scanning, and common resampling changes. For example, SupaYoshi's recent
+Recent-fork ideas already represented above were not duplicated here: PSB, KRA, ZIP browsing (now
+implemented), 7z/CBZ/CB7 browsing, recent-file history, go-to-image-number, color sampling,
+negative/inverted colors, asynchronous file-list scanning, and common resampling changes. For
+example, SupaYoshi's recent
 [HEIC-to-JPEG context action](https://github.com/SupaYoshi/jpegview/commit/48ee0020cdacf3e3a98db3e8ada8dddd4c5d809b)
 is covered functionally by Linux's existing Save As conversion path.
 
@@ -440,5 +447,5 @@ and remain possible candidates:
   and output using a reproducible file before treating the existing cap as a regression.
 - [KrokusPokus/JPEGView_L's release notes](https://github.com/KrokusPokus/JPEGView_L/releases)
   report JPEG XL animation and archive-contained image fixes. Linux advertises animated JPEG XL
-  support, while archive browsing is not implemented; verify a concrete failing fixture before
-  adding a separate bug-fix item.
+  and supports ZIP-contained images; other archive formats remain candidates. Verify a concrete
+  failing fixture before adding a separate bug-fix item.
