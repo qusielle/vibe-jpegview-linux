@@ -237,10 +237,23 @@ docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 appimage "$APP_
 docker run --rm -v "$PWD/out:/out" jpegview-linux-build:ubuntu20 binary "$APP_VERSION"
 ```
 
+The host-resolved version argument is preferred and is what CI and release builds use. For a
+convenient local build, the wrapper can instead resolve the version inside the container if Git
+metadata is mounted read-only:
+
+```sh
+docker run --rm -v "$PWD/.git:/src/.git:ro" -v "$PWD/out:/out" \
+  jpegview-linux-build:ubuntu20 appimage
+```
+
+This requires a normal `.git` directory (rather than a worktree's `.git` pointer file) with the
+relevant tags present. If no usable Git metadata is available and no version is passed, the build
+continues to use `0.0.0+unknown`.
+
 The AppImage is named `out/JPEGView-Linux-${APP_VERSION}-x86_64.AppImage`; the native executable
 is `out/jpegview-linux`. Substitute the Ubuntu 22.04, 24.04, or 26.04 image tag to use another build
-environment. The Docker build context excludes Git metadata, so pass the version resolved on the host
-as the second argument. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
+environment. Passing the version resolved on the host is the simplest option; the read-only `.git`
+mount above is an alternative. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
 dependency chains in parallel with BuildKit. Ubuntu 22.04 builds Highway/JPEG XL; Ubuntu 24.04 and
 26.04 need no codec source builds. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded
 AppImage tool. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
@@ -329,9 +342,11 @@ The resolved version is embedded in the executable and shown by `jpegview-linux 
 About panel. AppImage names and its `X-AppImage-Version` desktop metadata, plus Debian package
 filenames/control metadata, use the same value. Direct Makefile or packaging-script builds resolve it
 automatically; set `VERSION=...` for Make or pass a version argument to a packaging script to
-override it. Docker builds do not include `.git`, so derive the value on the host and pass it to the
-container as shown above. The `+devN` suffix is SemVer build metadata and identifies the build
-without changing semantic-version precedence; release tags remain the release-version authority.
+override it. Docker builds do not include `.git`: pass the host-resolved version, or mount `.git`
+read-only when running the container to let its wrapper resolve the version. The wrapper honors a
+positional version first, then `JPEGVIEW_VERSION`, before attempting Git discovery. The `+devN`
+suffix is SemVer build metadata and identifies the build without changing semantic-version
+precedence; release tags remain the release-version authority.
 
 ## AppImage
 
