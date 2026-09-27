@@ -18,10 +18,9 @@ they support.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
    PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, and LibRaw camera formats. Embedded
-   color profiles are transformed through LCMS2. Supported images inside ZIP, TAR, and gzip-compressed
-   TAR containers can also be browsed and viewed. The save dialog writes JPEG, PNG, BMP, TGA, WebP,
-   GIF, TIFF, PSD, PNM, QOI,
-   HEIF/HEIC, AVIF, and JPEG XL still images. Codec detection and fixtures
+   color profiles are transformed through LCMS2. Supported images inside ZIP, TAR, gzip-compressed
+   TAR, and 7z containers can also be browsed and viewed. The save dialog writes JPEG, PNG, BMP, TGA,
+   WebP, GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images. Codec detection and fixtures
    were made portable across Ubuntu 20.04 and newer distributions, including giflib installations
    without pkg-config metadata and HEIF encoders with different supported profiles. Transparent PNG
    and other alpha-bearing images display over a configurable black, white, or checkerboard
@@ -127,19 +126,22 @@ they support.
    both path and filename. Browse and Recents keep their own selection and filter while switching.
    A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode when it
    is opened again; files without a saved view inherit the shared navigation mode. ZIP, TAR,
-   `.tar.gz`, and `.tgz` files appear as gold `[ZIP]`, `[TAR]`, or `[TGZ]` directory rows in Browse;
-   entering one lists supported images and subfolders, and opening an archive directly starts at its
-   root image list. Archive-member rows use the same gold cue in Browse, Recents, and the thumbnail
+   `.tar.gz`, `.tgz`, and `.7z` files appear as gold `[ZIP]`, `[TAR]`, `[TGZ]`, or `[.7Z]` directory
+   rows in Browse. Entering one lists supported images and subfolders. Opening an archive directly
+   starts at its root image list. Archive-member rows use the same gold cue in Browse, Recents, and the thumbnail
    strip, and Recents reuses the normal background preview path. ZIP browsing reads its central
-   directory; TAR browsing indexes headers without extracting or retaining image payloads. Cold
-   archive listings run in the background and obsolete scans are cancelled on navigation. Gzip TAR
-   streams are sequential, so indexing one or reaching a later member can take longer than for ZIP;
-   the selected image is streamed on demand through a short-lived anonymous memory file. Opening a
-   cold TGZ directly as a command-line argument also needs an initial sequential index; the Open
-   dialog remains responsive while it builds that index. Password-
-   protected ZIPs are not supported. Unsafe absolute or traversal paths and TAR links/devices are
-   omitted, indexes are capped at 100,000 entries, and individual images are limited to 128 MiB
-   uncompressed. The archive itself is never modified: image edits happen in
+   directory; TAR browsing indexes headers without extracting or retaining image payloads. 7z
+   browsing uses libarchive's seekable reader and likewise retains only member metadata. Cold archive
+   listings run in the background and obsolete scans are cancelled on navigation. Gzip TAR streams
+   are sequential. 7z solid archives may require decoding earlier members to reach later ones, so
+   indexing and navigation cost can vary with archive layout and compression settings. The selected
+   image is streamed on demand through a short-lived anonymous memory file. Opening a cold TGZ or 7z
+   directly as a command-line argument also needs an initial index; the Open dialog remains responsive
+   while it builds that index. Password-protected ZIPs and encrypted 7z entries
+   are not supported. Unsafe absolute or traversal paths, archive links, and devices are omitted;
+   indexes are capped at 100,000 entries, and individual images are limited to 128 MiB uncompressed.
+   That output-size cap does not limit a codec's own decompression workspace. The archive itself is
+   never modified: image edits happen in
    memory and can be saved as ordinary files. Printing, Open With, date changes, trash, batch
    rename/copy, original-file wallpaper, and lossless JPEG transforms are unavailable for members.
    The recent-file
@@ -231,7 +233,7 @@ they support.
 ## Build
 
 The runtime framework dependencies are SDL2, Pango/FreeType, libzip for ZIP browsing, and libarchive
-for TAR/TGZ browsing. SDL2 development headers are not required because the frontend uses the small
+for TAR/TGZ/7z browsing. SDL2 development headers are not required because the frontend uses the small
 ABI declared in `src/sdl_abi.h`; Pango development
 headers and codec development packages are needed at compile time. The font stack is loaded only
 when text outside the embedded printable-ASCII bitmap is used, so normal startup and ASCII UI do not
@@ -334,10 +336,10 @@ make -C linux SDL2_LIBS='-L/path/to/lib -lSDL2'
 
 Supported input formats are JPEG, PNG/APNG (including animation), GIF (including animation), BMP, TGA, PSD, PNM-family files,
 QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
-formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, TAR, `.tar.gz`, and `.tgz` archives can
-contain any supported image format above; they are browsed read-only as virtual folders. The save
-dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF,
-PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is view-only.
+formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, TAR, `.tar.gz`, `.tgz`, and `.7z` archives
+can contain any supported image format above; they are browsed read-only as virtual folders. The save
+dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL
+still images; RAW and JPEG XR are decode-only, and animated input is view-only.
 JPEG uses the linked libjpeg implementation (libjpeg-turbo in the supported builds), common
 single-frame formats use the vendored public-domain/MIT `stb_image` single-header library, and the
 additional formats use their native codec libraries.
@@ -434,12 +436,12 @@ downsampling, resize- and crop-size-dialog editing/validation, scrollbar geometr
 mapping, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
-trips across static and animated formats, ZIP/TAR/TGZ listing and member decoding, path-traversal
+trips across static and animated formats, ZIP/TAR/TGZ/7z listing and member decoding, path-traversal
 rejection, nested archive navigation and archive-backed recent previews, cancellable archive indexing,
 all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
-open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ browsing and recent reopening,
-focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and
+open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ/7z browsing and recent
+reopening, focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and
 dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;

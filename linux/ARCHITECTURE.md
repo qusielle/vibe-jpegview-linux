@@ -8,12 +8,13 @@ should normally be added to one of these focused modules and covered by `tests/t
   path's index in the active ordered list is cached for constant-time thumbnail rendering.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
   and on-demand member access. ZIP catalogs use central-directory metadata; TAR/TGZ catalogs stream
-  header metadata. Immutable catalogs for at most four containers are keyed by device/inode/size/mtime
-  and retain no decoded or extracted image payloads. Workers use independent libzip/libarchive handles,
-  validate the selected member's identity, and stream at most 128 MiB of uncompressed data into an
-  anonymous memory file for existing path-based decoders. Unsafe paths and TAR links/devices are
-  omitted and catalogs over 100,000 entries are rejected. New archive formats should extend this
-  backend dispatch while keeping viewer consumers on the generic source operations.
+  header metadata; 7z uses libarchive's seekable reader. Immutable catalogs for at most four containers
+  are keyed by device/inode/size/mtime and retain no extracted image payloads. Workers use independent
+  libzip/libarchive handles, validate the selected member's identity, and stream at most 128 MiB of
+  uncompressed data into an anonymous memory file for existing path-based decoders. Unsafe paths,
+  archive links/devices, and encrypted 7z members are omitted; catalogs over 100,000 entries are
+  rejected. New archive formats should extend this backend dispatch while keeping viewer consumers
+  on the generic source operations.
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality resizing, and the automatic/manual picture-level processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
@@ -91,25 +92,27 @@ on the modules above rather than duplicate their state.
 
 Archive members use the existing filesystem-shaped path contract (`container.ext/member.ext`) so
 navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The
-browser labels and color-marks ZIP/TAR/TGZ containers and archive images without reading image
+browser labels and color-marks ZIP/TAR/TGZ/7z containers and archive images without retaining image
 payloads; Recents uses the same cancellable preview worker. ZIP catalogs retain central-directory
-metadata only. TAR/TGZ catalogs stream member headers and skip payloads, retaining the member ordinal,
-name, size, and modification time needed to re-open a selected member. Cold archive-directory listing
-runs in `ArchiveDirectoryLoader`; a newer request cancels obsolete libarchive input at read-block
-boundaries and generation-checks returned results. A selected ZIP member is read by index; TAR/TGZ
-members are found by rescanning from the start, which is especially costly for later entries in a
-gzip stream. In either case, only the selected member is copied, bounded to 128 MiB, into a short-lived
-anonymous memory file. The source archive is never modified and no persistent extraction directory
-is created. ZIP encryption and TAR links/devices are unsupported; unsafe paths are omitted. Filesystem-
+metadata only. TAR/TGZ catalogs stream member headers and skip payloads. 7z catalogs use seekable
+libarchive input to reach the encoded header, retaining member ordinal, normalized name, size, and
+modification time. Cold archive-directory listing runs in `ArchiveDirectoryLoader`; a newer request
+cancels obsolete libarchive input at read/seek boundaries and generation-checks returned results. A
+selected ZIP member is read by index; TAR/TGZ/7z members are found by rescanning archive order. Gzip
+streams are sequential, and solid 7z blocks can require decoding earlier entries to reach a later
+member. In either backend, only the selected member is copied, bounded to 128 MiB, into a short-lived
+anonymous memory file. That output cap does not bound the codec's internal memory or CPU use. The
+source archive is never modified and no persistent extraction directory is created. ZIP encryption,
+encrypted 7z entries, and archive links/devices are unsupported; unsafe paths are omitted. Filesystem-
 only actions are disabled or guarded for archive members, while image edits and saves still use the
-ordinary in-memory image path. Supporting 7z, RAR, or other containers should add extension
-recognition and list/read operations here rather than branching in the SDL viewer, recents, caches,
-or codecs.
+ordinary in-memory image path. Supporting RAR or other containers should add extension recognition
+and list/read operations here rather than branching in the SDL viewer, recents, caches, or codecs.
 
 The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct
 command-line archive startup still builds the initial `FileList` through the synchronous source API.
-Consequently, a cold TGZ passed directly at startup can wait for its sequential catalog scan before
-the viewer is ready, while browsing into that same archive from the Open dialog stays responsive.
+Consequently, a cold TGZ passed directly at startup can wait for its sequential catalog scan and a 7z
+can wait for its seekable catalog scan before the viewer is ready, while browsing into those archives
+from the Open dialog stays responsive.
 
 The magnifying-glass lens is a temporary viewer interaction; its enablement resets each run while
 its size and magnification are stored by `settings`. Its pure model owns those values, wheel

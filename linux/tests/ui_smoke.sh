@@ -5,6 +5,7 @@ CDPATH=
 export CDPATH
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 BINARY=${1:-./build/jpegview-linux}
+ARCHIVE_FIXTURE_WRITER=${2:-}
 if [ ! -x "$BINARY" ]; then
 	echo "UI smoke test: binary not found: $BINARY" >&2
 	exit 2
@@ -81,6 +82,10 @@ if command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
 	tar -cf "$temporary/images/07-archive.tar" -C "$temporary/tar-source" inside-tar.ppm
 	tar -czf "$temporary/images/08-archive.tar.gz" -C "$temporary/tar-source" inside-tar.ppm
 	touch -t 201801010000.00 "$temporary/images/07-archive.tar" "$temporary/images/08-archive.tar.gz"
+fi
+if [ -x "$ARCHIVE_FIXTURE_WRITER" ]; then
+	"$ARCHIVE_FIXTURE_WRITER" "$temporary/images/09-archive.7z"
+	touch -t 201801010000.00 "$temporary/images/09-archive.7z"
 fi
 mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
@@ -503,6 +508,26 @@ if [ -f "$temporary/images/08-archive.tar.gz" ]; then
 	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
 	DISPLAY=":$display_number" xdotool key Return
 	assert_title_prefix "03-blue.ppm" "open dialog could not leave a TGZ and return to a filesystem image"
+fi
+
+if [ -f "$temporary/images/09-archive.7z" ]; then
+	# 7z catalogs use seekable libarchive input but still publish through the
+	# same cancellable Open-dialog worker and archive-member preview path.
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool type --delay 20 '09-archive.7z'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-7z.ppm" "open dialog did not browse and open a 7z image member"
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool key ctrl+Tab
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-7z.ppm" "Recents did not reopen an image stored inside 7z"
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool key BackSpace
+	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "03-blue.ppm" "open dialog could not leave 7z and return to a filesystem image"
 fi
 
 DISPLAY=":$display_number" xdotool key ctrl+o

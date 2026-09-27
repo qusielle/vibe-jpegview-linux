@@ -36,6 +36,7 @@ enum class ArchiveFormat {
 	Zip,
 	Tar,
 	Tgz,
+	SevenZip,
 };
 
 struct ArchiveLocation {
@@ -95,6 +96,9 @@ ArchiveFormat FormatForContainerName(const fs::path& path) {
 	if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".tgz") == 0) {
 		return ArchiveFormat::Tgz;
 	}
+	if (Lower(path.extension().string()) == ".7z") {
+		return ArchiveFormat::SevenZip;
+	}
 	if (Lower(path.extension().string()) == ".zip") {
 		return ArchiveFormat::Zip;
 	}
@@ -104,8 +108,10 @@ ArchiveFormat FormatForContainerName(const fs::path& path) {
 
 bool HasArchiveExtension(const fs::path& path) {
 	const std::string name = Lower(path.filename().string());
-	return FormatForContainerName(path) != ArchiveFormat::Zip ||
-		(name.size() >= 4 && name.compare(name.size() - 4, 4, ".zip") == 0);
+	const std::string extension = Lower(path.extension().string());
+	return extension == ".zip" || extension == ".tar" || extension == ".7z" ||
+		(name.size() >= 7 && name.compare(name.size() - 7, 7, ".tar.gz") == 0) ||
+		(name.size() >= 4 && name.compare(name.size() - 4, 4, ".tgz") == 0);
 }
 
 bool SafeMemberPath(std::string_view name, bool directory, std::string& normalized) {
@@ -128,7 +134,7 @@ bool SafeMemberPath(std::string_view name, bool directory, std::string& normaliz
 	return !normalized.empty();
 }
 
-bool SafeTarMemberPath(std::string_view name, bool directory, std::string& normalized) {
+bool SafeLibarchiveMemberPath(std::string_view name, bool directory, std::string& normalized) {
 	normalized.clear();
 	if (name.empty() || name.front() == '/' || name.find('\0') != std::string_view::npos) return false;
 	if (directory && name.back() == '/') name.remove_suffix(1);
@@ -168,8 +174,8 @@ bool ParseArchiveLocation(const fs::path& path, ArchiveLocation& location) {
 					const std::string_view remainder(text.data() + componentEnd + 1,
 						text.size() - componentEnd - 1);
 					if (!remainder.empty()) {
-						const bool safe = format == ArchiveFormat::Tar || format == ArchiveFormat::Tgz ?
-							SafeTarMemberPath(remainder, true, member) :
+						const bool safe = format != ArchiveFormat::Zip ?
+							SafeLibarchiveMemberPath(remainder, true, member) :
 							SafeMemberPath(remainder, true, member);
 						if (!safe) return false;
 					}
@@ -210,7 +216,7 @@ struct CatalogChild {
 
 enum class ArchiveBackend {
 	Zip,
-	Tar,
+	Libarchive,
 };
 
 struct ArchiveMemberRecord {
@@ -387,7 +393,7 @@ bool LoadZipCatalog(const fs::path& archivePath, const BackingIdentity& expected
 	return true;
 }
 
-struct TarReaderContext {
+struct LibarchiveReaderContext {
 	fs::path path;
 	int descriptor = -1;
 	std::array<std::uint8_t, 64 * 1024> buffer{};
@@ -395,16 +401,16 @@ struct TarReaderContext {
 	bool cancelled = false;
 };
 
-int OpenTarInput(struct archive* reader, void* clientData) {
-	TarReaderContext& context = *static_cast<TarReaderContext*>(clientData);
+int OpenArchiveInput(struct archive* reader, void* clientData) {
+	LibarchiveReaderContext& context = *static_cast<LibarchiveReaderContext*>(clientData);
 	context.descriptor = ::open(context.path.c_str(), O_RDONLY | O_CLOEXEC);
 	if (context.descriptor >= 0) return ARCHIVE_OK;
 	archive_set_error(reader, errno, "cannot open archive input");
 	return ARCHIVE_FATAL;
 }
 
-la_ssize_t ReadTarInput(struct archive* reader, void* clientData, const void** buffer) {
-	TarReaderContext& context = *static_cast<TarReaderContext*>(clientData);
+la_ssize_t ReadArchiveInput(struct archive* reader, void* clientData, const void** buffer) {
+	LibarchiveReaderContext& context = *static_cast<LibarchiveReaderContext*>(clientData);
 	if (context.shouldContinue != nullptr && !ShouldContinue(*context.shouldContinue)) {
 		context.cancelled = true;
 		archive_set_error(reader, ECANCELED, "archive input was cancelled");
@@ -422,8 +428,8 @@ la_ssize_t ReadTarInput(struct archive* reader, void* clientData, const void** b
 	}
 }
 
-la_int64_t SkipTarInput(struct archive*, void* clientData, la_int64_t request) {
-	TarReaderContext& context = *static_cast<TarReaderContext*>(clientData);
+la_int64_t SkipArchiveInput(struct archive*, void* clientData, la_int64_t request) {
+	LibarchiveReaderContext& context = *static_cast<LibarchiveReaderContext*>(clientData);
 	if (request <= 0 || (context.shouldContinue != nullptr && !ShouldContinue(*context.shouldContinue)) ||
 		static_cast<std::uint64_t>(request) >
 			static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) return 0;
@@ -433,8 +439,29 @@ la_int64_t SkipTarInput(struct archive*, void* clientData, la_int64_t request) {
 	return end < start ? 0 : static_cast<la_int64_t>(end - start);
 }
 
-int CloseTarInput(struct archive*, void* clientData) {
-	TarReaderContext& context = *static_cast<TarReaderContext*>(clientData);
+la_int64_t SeekArchiveInput(struct archive* reader, void* clientData,
+	la_int64_t offset, int whence) {
+	LibarchiveReaderContext& context = *static_cast<LibarchiveReaderContext*>(clientData);
+	if (context.shouldContinue != nullptr && !ShouldContinue(*context.shouldContinue)) {
+		context.cancelled = true;
+		archive_set_error(reader, ECANCELED, "archive input was cancelled");
+		return ARCHIVE_FATAL;
+	}
+	const off_t convertedOffset = static_cast<off_t>(offset);
+	if (static_cast<la_int64_t>(convertedOffset) != offset) {
+		archive_set_error(reader, EOVERFLOW, "archive seek offset is out of range");
+		return ARCHIVE_FATAL;
+	}
+	const off_t position = ::lseek(context.descriptor, convertedOffset, whence);
+	if (position < 0) {
+		archive_set_error(reader, errno, "cannot seek archive input");
+		return ARCHIVE_FATAL;
+	}
+	return static_cast<la_int64_t>(position);
+}
+
+int CloseArchiveInput(struct archive*, void* clientData) {
+	LibarchiveReaderContext& context = *static_cast<LibarchiveReaderContext*>(clientData);
 	if (context.descriptor >= 0) {
 		(void)::close(context.descriptor);
 		context.descriptor = -1;
@@ -442,11 +469,11 @@ int CloseTarInput(struct archive*, void* clientData) {
 	return ARCHIVE_OK;
 }
 
-struct TarArchiveReader {
-	TarReaderContext context;
+struct LibarchiveArchiveReader {
+	LibarchiveReaderContext context;
 	struct archive* reader = nullptr;
 
-	~TarArchiveReader() {
+	~LibarchiveArchiveReader() {
 		if (reader != nullptr) {
 			(void)archive_read_close(reader);
 			(void)archive_read_free(reader);
@@ -455,61 +482,71 @@ struct TarArchiveReader {
 	}
 };
 
-bool OpenTarReader(const fs::path& path, ArchiveFormat format,
-	const std::function<bool()>& shouldContinue, TarArchiveReader& owner,
+bool OpenArchiveReader(const fs::path& path, ArchiveFormat format,
+	const std::function<bool()>& shouldContinue, LibarchiveArchiveReader& owner,
 	std::string& errorMessage) {
 	owner.context.path = path;
 	owner.context.shouldContinue = &shouldContinue;
 	owner.reader = archive_read_new();
 	if (owner.reader == nullptr) {
-		errorMessage = "not enough memory to open TAR archive";
+		errorMessage = "not enough memory to open archive";
 		return false;
 	}
-	if (archive_read_support_format_tar(owner.reader) != ARCHIVE_OK ||
+	const bool sevenZip = format == ArchiveFormat::SevenZip;
+	const int formatResult = sevenZip ?
+		archive_read_support_format_7zip(owner.reader) :
+		archive_read_support_format_tar(owner.reader);
+	if (formatResult != ARCHIVE_OK ||
 		archive_read_support_filter_none(owner.reader) != ARCHIVE_OK ||
 		(format == ArchiveFormat::Tgz &&
 			archive_read_support_filter_gzip(owner.reader) != ARCHIVE_OK)) {
 		errorMessage = archive_error_string(owner.reader) == nullptr ?
-			"TAR support is unavailable" : archive_error_string(owner.reader);
+			"archive format support is unavailable" : archive_error_string(owner.reader);
 		return false;
 	}
-	const archive_skip_callback* skip = format == ArchiveFormat::Tar ? SkipTarInput : nullptr;
-	if (archive_read_open2(owner.reader, &owner.context, OpenTarInput, ReadTarInput,
-		skip, CloseTarInput) != ARCHIVE_OK) {
+	if (sevenZip && archive_read_set_seek_callback(owner.reader, SeekArchiveInput) != ARCHIVE_OK) {
+		errorMessage = archive_error_string(owner.reader) == nullptr ?
+			"seekable archive input is unavailable" : archive_error_string(owner.reader);
+		return false;
+	}
+	const archive_skip_callback* skip = format == ArchiveFormat::Tar ? SkipArchiveInput : nullptr;
+	if (archive_read_open2(owner.reader, &owner.context, OpenArchiveInput, ReadArchiveInput,
+		skip, CloseArchiveInput) != ARCHIVE_OK) {
 		errorMessage = owner.context.cancelled ? "archive indexing was cancelled" :
-			archive_error_string(owner.reader) == nullptr ? "cannot open TAR archive" :
+			archive_error_string(owner.reader) == nullptr ? "cannot open archive" :
 			archive_error_string(owner.reader);
 		return false;
 	}
 	return true;
 }
 
-const char* TarEntryPathname(struct archive_entry* entry) {
+const char* LibarchiveEntryPathname(struct archive_entry* entry) {
 	const char* pathname = archive_entry_pathname_utf8(entry);
 	return pathname == nullptr ? archive_entry_pathname(entry) : pathname;
 }
 
-bool TarEntryPath(struct archive_entry* entry, std::string& normalized,
+bool LibarchiveEntryPath(struct archive_entry* entry, std::string& normalized,
 	bool& directory) {
-	const char* rawName = TarEntryPathname(entry);
+	const char* rawName = LibarchiveEntryPathname(entry);
 	if (rawName == nullptr) return false;
 	const std::size_t rawLength = std::strlen(rawName);
 	const bool pathDirectory = rawLength > 0 && rawName[rawLength - 1] == '/';
 	const mode_t type = archive_entry_filetype(entry);
-	if (archive_entry_symlink(entry) != nullptr || archive_entry_hardlink(entry) != nullptr) {
+	if (archive_entry_symlink(entry) != nullptr || archive_entry_hardlink(entry) != nullptr ||
+		archive_entry_is_encrypted(entry) > 0) {
 		return false;
 	}
 	if (type == AE_IFDIR) directory = true;
 	else if (type == AE_IFREG) directory = pathDirectory;
 	else return false;
-	return SafeTarMemberPath(std::string_view(rawName, rawLength), directory, normalized);
+	return SafeLibarchiveMemberPath(std::string_view(rawName, rawLength), directory, normalized);
 }
 
-bool LoadTarCatalog(const fs::path& archivePath, ArchiveFormat format,
+bool LoadLibarchiveCatalog(const fs::path& archivePath, ArchiveFormat format,
 	const BackingIdentity& expectedIdentity, std::shared_ptr<const ArchiveCatalog>& result,
 	const std::function<bool()>& shouldContinue, std::string& errorMessage) {
-	TarArchiveReader archive;
-	if (!OpenTarReader(archivePath, format, shouldContinue, archive, errorMessage)) return false;
+	LibarchiveArchiveReader archive;
+	if (!OpenArchiveReader(archivePath, format, shouldContinue, archive, errorMessage)) return false;
 	std::shared_ptr<ArchiveCatalog> catalog;
 	try {
 		catalog = std::make_shared<ArchiveCatalog>();
@@ -528,7 +565,7 @@ bool LoadTarCatalog(const fs::path& archivePath, ArchiveFormat format,
 			if (resultCode == ARCHIVE_EOF) break;
 			if (resultCode != ARCHIVE_OK || entry == nullptr) {
 				errorMessage = archive.context.cancelled ? "archive indexing was cancelled" :
-					archive_error_string(archive.reader) == nullptr ? "invalid TAR archive" :
+					archive_error_string(archive.reader) == nullptr ? "invalid archive" :
 					archive_error_string(archive.reader);
 				return false;
 			}
@@ -539,7 +576,7 @@ bool LoadTarCatalog(const fs::path& archivePath, ArchiveFormat format,
 			const std::uint64_t currentOrdinal = ordinal++;
 			std::string name;
 			bool directory = false;
-			if (TarEntryPath(entry, name, directory)) {
+			if (LibarchiveEntryPath(entry, name, directory)) {
 				std::vector<std::string> components;
 				std::size_t start = 0;
 				while (start < name.size()) {
@@ -571,7 +608,7 @@ bool LoadTarCatalog(const fs::path& archivePath, ArchiveFormat format,
 						info.size = static_cast<std::uint64_t>(archive_entry_size(entry));
 						info.index = currentOrdinal;
 						info.modificationTime = modificationTime;
-						info.backend = ArchiveBackend::Tar;
+						info.backend = ArchiveBackend::Libarchive;
 						if (AddCatalogChild(*catalog, parent,
 							CatalogChild{basename, fullName, false, info.size, modificationTime})) {
 							catalog->members.emplace(fullName, info);
@@ -581,18 +618,18 @@ bool LoadTarCatalog(const fs::path& archivePath, ArchiveFormat format,
 			}
 			if (archive_read_data_skip(archive.reader) != ARCHIVE_OK) {
 				errorMessage = archive.context.cancelled ? "archive indexing was cancelled" :
-					archive_error_string(archive.reader) == nullptr ? "cannot skip TAR member data" :
+					archive_error_string(archive.reader) == nullptr ? "cannot skip archive member data" :
 					archive_error_string(archive.reader);
 				return false;
 			}
 		}
 	} catch (const std::bad_alloc&) {
-		errorMessage = "not enough memory to index TAR directory";
+		errorMessage = "not enough memory to index archive directory";
 		return false;
 	}
 	BackingIdentity afterLoad;
 	if (!StatIdentity(archivePath, afterLoad) || !(afterLoad == expectedIdentity)) {
-		errorMessage = "TAR archive changed while it was being indexed";
+		errorMessage = "archive changed while it was being indexed";
 		return false;
 	}
 	result = std::move(catalog);
@@ -653,7 +690,7 @@ std::shared_ptr<const ArchiveCatalog> GetCatalog(const fs::path& archivePath,
 	if (location.format == ArchiveFormat::Zip) {
 		loadedSuccessfully = LoadZipCatalog(archivePath, identity, loaded,
 			shouldContinue, errorMessage);
-	} else if (!LoadTarCatalog(archivePath, location.format, identity, loaded,
+	} else if (!LoadLibarchiveCatalog(archivePath, location.format, identity, loaded,
 		shouldContinue, errorMessage)) {
 		loadedSuccessfully = false;
 	} else {
@@ -762,12 +799,12 @@ bool MakePrivateMemberFile(const std::filesystem::path& memberPath,
 #endif
 }
 
-bool WithTarMemberFile(const fs::path& path, const ArchiveLocation& location,
+bool WithLibarchiveMemberFile(const fs::path& path, const ArchiveLocation& location,
 	const ArchiveCatalog& catalog, const ArchiveMemberRecord& member,
 	const std::function<bool(const fs::path&, std::string&)>& callback,
 	std::string& errorMessage) {
-	TarArchiveReader archive;
-	if (!OpenTarReader(location.archive, location.format, AlwaysContinue(), archive, errorMessage)) {
+	LibarchiveArchiveReader archive;
+	if (!OpenArchiveReader(location.archive, location.format, AlwaysContinue(), archive, errorMessage)) {
 		return false;
 	}
 	for (std::uint64_t ordinal = 0; ordinal <= member.index; ++ordinal) {
@@ -775,21 +812,21 @@ bool WithTarMemberFile(const fs::path& path, const ArchiveLocation& location,
 		const int resultCode = archive_read_next_header(archive.reader, &entry);
 		if (resultCode != ARCHIVE_OK || entry == nullptr) {
 			errorMessage = resultCode == ARCHIVE_EOF ? "archive member no longer exists" :
-				archive_error_string(archive.reader) == nullptr ? "cannot read TAR member header" :
+				archive_error_string(archive.reader) == nullptr ? "cannot read archive member header" :
 				archive_error_string(archive.reader);
 			return false;
 		}
 		if (ordinal != member.index) {
 			if (archive_read_data_skip(archive.reader) != ARCHIVE_OK) {
 				errorMessage = archive_error_string(archive.reader) == nullptr ?
-					"cannot skip TAR member data" : archive_error_string(archive.reader);
+					"cannot skip archive member data" : archive_error_string(archive.reader);
 				return false;
 			}
 			continue;
 		}
 		std::string currentName;
 		bool directory = false;
-		const bool hasSafePath = TarEntryPath(entry, currentName, directory);
+		const bool hasSafePath = LibarchiveEntryPath(entry, currentName, directory);
 		const la_int64_t rawModificationTime = archive_entry_mtime(entry);
 		const std::int64_t modificationTime = archive_entry_mtime_is_set(entry) ?
 			static_cast<std::int64_t>(rawModificationTime) : 0;
@@ -797,7 +834,7 @@ bool WithTarMemberFile(const fs::path& path, const ArchiveLocation& location,
 			!archive_entry_size_is_set(entry) || archive_entry_size(entry) < 0 ||
 			static_cast<std::uint64_t>(archive_entry_size(entry)) != member.size ||
 			modificationTime != member.modificationTime) {
-			errorMessage = "TAR member changed since it was listed";
+			errorMessage = "archive member changed since it was listed";
 			return false;
 		}
 
@@ -809,7 +846,7 @@ bool WithTarMemberFile(const fs::path& path, const ArchiveLocation& location,
 			const la_ssize_t count = archive_read_data(archive.reader, buffer.data(), buffer.size());
 			if (count < 0) {
 				errorMessage = archive.context.cancelled ? "archive member read was cancelled" :
-					archive_error_string(archive.reader) == nullptr ? "cannot read TAR member data" :
+					archive_error_string(archive.reader) == nullptr ? "cannot read archive member data" :
 					archive_error_string(archive.reader);
 				return false;
 			}
@@ -830,7 +867,7 @@ bool WithTarMemberFile(const fs::path& path, const ArchiveLocation& location,
 		}
 		BackingIdentity afterRead;
 		if (!StatIdentity(location.archive, afterRead) || !(afterRead == catalog.identity)) {
-			errorMessage = "TAR archive changed while the image was being read";
+			errorMessage = "archive changed while the image was being read";
 			return false;
 		}
 		if (::lseek(temporary.descriptor, 0, SEEK_SET) < 0) {
@@ -877,6 +914,7 @@ std::string ArchiveFormatName(const fs::path& path) {
 	case ArchiveFormat::Zip: return "ZIP";
 	case ArchiveFormat::Tar: return "TAR";
 	case ArchiveFormat::Tgz: return "TGZ";
+	case ArchiveFormat::SevenZip: return ".7Z";
 	}
 	return {};
 }
@@ -1055,13 +1093,13 @@ bool WithArchiveMemberFile(const fs::path& path,
 		errorMessage = "archive image exceeds the 128 MiB member limit";
 		return false;
 	}
-	if (member->second.backend == ArchiveBackend::Tar) {
+	if (member->second.backend == ArchiveBackend::Libarchive) {
 		BackingIdentity currentIdentity;
 		if (!StatIdentity(location.archive, currentIdentity) || !(currentIdentity == catalog->identity)) {
-			errorMessage = "TAR archive changed before the image could be read";
+			errorMessage = "archive changed before the image could be read";
 			return false;
 		}
-		return WithTarMemberFile(path, location, *catalog, member->second, callback, errorMessage);
+		return WithLibarchiveMemberFile(path, location, *catalog, member->second, callback, errorMessage);
 	}
 	BackingIdentity currentIdentity;
 	if (!StatIdentity(location.archive, currentIdentity) || !(currentIdentity == catalog->identity)) {

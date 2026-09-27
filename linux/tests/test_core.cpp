@@ -409,6 +409,60 @@ void WriteTarArchive(const fs::path& archivePath,
 	archive_write_free(writer);
 }
 
+void Write7zArchive(const fs::path& archivePath,
+	const std::vector<std::pair<std::string, fs::path>>& members) {
+	struct archive* writer = archive_write_new();
+	if (writer == nullptr) throw TestFailure("cannot allocate 7z fixture writer");
+	if (archive_write_set_format_7zip(writer) != ARCHIVE_OK ||
+		archive_write_open_filename(writer, archivePath.c_str()) != ARCHIVE_OK) {
+		const std::string message = archive_error_string(writer) == nullptr ?
+			"cannot open 7z fixture" : archive_error_string(writer);
+		archive_write_free(writer);
+		throw TestFailure(message);
+	}
+	for (const auto& member : members) {
+		const std::vector<std::uint8_t> bytes = ReadBytes(member.second);
+		struct archive_entry* entry = archive_entry_new();
+		if (entry == nullptr) {
+			archive_write_free(writer);
+			throw TestFailure("cannot allocate 7z fixture entry");
+		}
+		archive_entry_set_pathname(entry, member.first.c_str());
+		archive_entry_set_filetype(entry, AE_IFREG);
+		archive_entry_set_perm(entry, 0644);
+		archive_entry_set_size(entry, static_cast<la_int64_t>(bytes.size()));
+		archive_entry_set_mtime(entry, 1700000000, 0);
+		const int headerResult = archive_write_header(writer, entry);
+		archive_entry_free(entry);
+		if (headerResult != ARCHIVE_OK) {
+			const std::string message = archive_error_string(writer) == nullptr ?
+				"cannot write 7z fixture header" : archive_error_string(writer);
+			archive_write_free(writer);
+			throw TestFailure(message);
+		}
+		if (!bytes.empty() && archive_write_data(writer, bytes.data(), bytes.size()) !=
+			static_cast<la_ssize_t>(bytes.size())) {
+			const std::string message = archive_error_string(writer) == nullptr ?
+				"cannot write 7z fixture data" : archive_error_string(writer);
+			archive_write_free(writer);
+			throw TestFailure(message);
+		}
+		if (archive_write_finish_entry(writer) != ARCHIVE_OK) {
+			const std::string message = archive_error_string(writer) == nullptr ?
+				"cannot finish 7z fixture entry" : archive_error_string(writer);
+			archive_write_free(writer);
+			throw TestFailure(message);
+		}
+	}
+	if (archive_write_close(writer) != ARCHIVE_OK) {
+		const std::string message = archive_error_string(writer) == nullptr ?
+			"cannot finish 7z fixture" : archive_error_string(writer);
+		archive_write_free(writer);
+		throw TestFailure(message);
+	}
+	archive_write_free(writer);
+}
+
 std::vector<std::string> FileNames(const FileList& files) {
 	std::vector<std::string> names;
 	for (const fs::path& path : files.Files()) names.push_back(path.filename().string());
@@ -690,6 +744,115 @@ void TestTarAndTgzBrowsingDecodingAndSafety() {
 	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
 	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
 		"malformed TAR input did not fail with a useful error");
+}
+
+void TestSevenZipBrowsingDecodingAndPreview() {
+	TemporaryDirectory temporary;
+	const fs::path sourceDirectory = temporary.path() / "source";
+	fs::create_directories(sourceDirectory);
+	const fs::path image = sourceDirectory / "fixture.png";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	ImageWriteOptions options;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(image, pixels.data(), 2, 2, options, error),
+		"cannot create 7z image fixture: " + error);
+	const fs::path notes = sourceDirectory / "notes.txt";
+	WriteText(notes, "not an image");
+	const fs::path archive = temporary.path() / "album.7Z";
+	Write7zArchive(archive, {
+		{"01-root.png", image}, {"nested/02-child.png", image},
+		{"notes.txt", notes}, {"../escape.png", image}, {"/absolute.png", image},
+	});
+	const fs::path rootImage = archive / "01-root.png";
+	const fs::path nestedDirectory = archive / "nested";
+	const fs::path nestedImage = nestedDirectory / "02-child.png";
+
+	Expect(jpegview_linux::IsArchiveContainerName(archive) &&
+		jpegview_linux::IsArchiveContainerFile(archive) &&
+		jpegview_linux::IsArchiveLocation(archive) &&
+		jpegview_linux::IsArchiveLocation(nestedDirectory) &&
+		jpegview_linux::IsArchiveMemberLocation(rootImage) &&
+		jpegview_linux::ArchiveFormatName(nestedImage) == ".7Z" &&
+		jpegview_linux::ArchiveBackingFile(nestedImage) == archive,
+		"7z path recognition did not preserve the virtual archive-member contract");
+
+	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+	Expect(jpegview_linux::ListArchiveDirectory(archive, entries, error),
+		"cannot list 7z archive headers: " + error);
+	Expect(entries.size() == 3 &&
+		std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
+			return entry.directory && entry.path.filename() == "nested";
+		}) &&
+		std::none_of(entries.begin(), entries.end(), [](const auto& entry) {
+			const std::string name = entry.path.filename().string();
+			return name == "escape.png" || name == "absolute.png";
+		}),
+		"7z listing omitted its implied folder or exposed an unsafe member path");
+	entries.clear();
+	Expect(jpegview_linux::ListArchiveDirectory(nestedDirectory, entries, error) &&
+		entries.size() == 1 && entries.front().path == nestedImage && !entries.front().directory,
+		"7z virtual-directory listing did not return its nested image");
+	jpegview_linux::ArchiveMemberInfo memberInfo;
+	Expect(jpegview_linux::GetArchiveMemberInfo(rootImage, memberInfo, error) &&
+		memberInfo.size == fs::file_size(image) && memberInfo.modificationTime == 1700000000,
+		"7z member metadata did not preserve size and timestamp");
+
+	FileList files({archive.string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.Current() == rootImage && files.IsArchiveMember(0),
+		"opening a 7z container did not initialize its root image list");
+	files.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
+	Expect(files.Next() && files.Current() == nestedImage && files.IsArchiveMember(0),
+		"recursive file-list navigation did not enter a 7z subdirectory");
+	DecodedImage decoded;
+	Expect(jpegview_linux::DecodeImage(rootImage, decoded, error),
+		"image decoder could not read a 7z member: " + error);
+	Expect(decoded.frames.size() == 1 && decoded.frames.front().width == 2 &&
+		decoded.frames.front().height == 2 && decoded.frames.front().bgra == pixels,
+		"7z member decoding changed dimensions or pixels");
+	DecodedImage nestedDecoded;
+	Expect(jpegview_linux::DecodeImage(nestedImage, nestedDecoded, error) &&
+		nestedDecoded.frames.size() == 1 && nestedDecoded.frames.front().bgra == pixels,
+		"seekable 7z reader could not reopen and decode a later member: " + error);
+
+	jpegview_linux::FileDialogPreviewLoader previewLoader;
+	const std::uint64_t previewGeneration = previewLoader.Request(rootImage, false,
+		jpegview_linux::FileDialogSortMode::Name, 16, 16);
+	std::vector<jpegview_linux::FileDialogPreviewResult> previews;
+	const auto previewDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (previews.empty() && std::chrono::steady_clock::now() < previewDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		previews = previewLoader.TakeReady();
+	}
+	Expect(previews.size() == 1 && previews.front().generation == previewGeneration &&
+		previews.front().source == rootImage && previews.front().error.empty() &&
+		previews.front().width == 2 && previews.front().height == 2,
+		"open-dialog preview could not decode a 7z member");
+
+	jpegview_linux::ArchiveDirectoryLoader directoryLoader;
+	directoryLoader.Request(archive, 40);
+	directoryLoader.Request(nestedDirectory, 41);
+	std::vector<jpegview_linux::ArchiveDirectoryResult> results;
+	const auto listingDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < listingDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		results = directoryLoader.TakeReady();
+	}
+	Expect(results.size() == 1 && results.front().generation == 41 &&
+		results.front().directory == nestedDirectory && results.front().error.empty() &&
+		results.front().entries.size() == 1 && results.front().entries.front().path == nestedImage,
+		"7z directory worker published a stale or incomplete listing");
+
+	const fs::path cancelled = temporary.path() / "cancelled.7z";
+	Write7zArchive(cancelled, {{"image.png", image}});
+	std::vector<jpegview_linux::ArchiveEntryInfo> cancelledEntries;
+	Expect(!jpegview_linux::ListArchiveDirectoryCancellable(cancelled, cancelledEntries,
+		[] { return false; }, error) && error.find("cancel") != std::string::npos,
+		"7z catalog cancellation did not stop a cold seekable scan");
+	const fs::path malformed = temporary.path() / "broken.7z";
+	WriteText(malformed, "not a 7z archive");
+	entries.clear();
+	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
+		"malformed 7z input did not fail with a useful error");
 }
 
 void TestFileListMarkedImageToggle() {
@@ -5353,6 +5516,7 @@ int main() {
 		TestArchiveBrowsingDecodingAndRecentPreview, failures);
 	RunTest("tar-and-tgz-browsing-decoding-and-safety",
 		TestTarAndTgzBrowsingDecodingAndSafety, failures);
+	RunTest("7z-browsing-decoding-and-preview", TestSevenZipBrowsingDecodingAndPreview, failures);
 	RunTest("file-list-marked-image-toggle", TestFileListMarkedImageToggle, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);

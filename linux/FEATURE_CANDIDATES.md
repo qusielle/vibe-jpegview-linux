@@ -8,7 +8,6 @@ candidates are independent of the JPEGView_L comparison below. The current behav
 
 ## Archive input candidates
 
-- **7z image archives:** browse supported images stored in 7z files.
 - **RAR image archives:** browse supported images stored in RAR files.
 - **CBZ comic archives:** browse images in comic ZIP files. Comic-page bookmarks and remembered
   reading positions are explicitly out of scope for this candidate.
@@ -17,11 +16,11 @@ candidates are independent of the JPEGView_L comparison below. The current behav
 
 ## Implemented archive input
 
-- **ZIP, TAR, and TGZ image archives:** implemented in the Linux branch. `.zip`, `.tar`, `.tar.gz`,
-  and `.tgz` browse as virtual folders, list supported images and nested folders without extracting
-  or retaining image payloads, and support archive navigation and Recents previews. Gzip TAR
-  indexing and member access are sequential; cold directory listing runs in a cancellable worker.
-  See current limits and controls in the
+- **ZIP, TAR, TGZ, and 7z image archives:** implemented in the Linux branch. `.zip`, `.tar`, `.tar.gz`,
+  `.tgz`, and `.7z` browse as virtual folders, list supported images and nested folders without
+  extracting or retaining image payloads, and support archive navigation and Recents previews. Gzip
+  TAR access is sequential; solid 7z archives may need prior members decoded to reach later entries.
+  Cold directory listing runs in a cancellable worker. See current limits and controls in the
   [Linux README](README.md#linux-branch-changes-in-order-of-importance).
 
 ## Comic-reading interaction candidates
@@ -297,10 +296,10 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   precision for viewing and saving. See the fork's
   [PSD format documentation](https://github.com/famomatic/jpegview/blob/master/README.md).
 
-Recent-fork ideas already represented above were not duplicated here: PSB, KRA, ZIP browsing (now
-implemented), 7z/CBZ/CB7 browsing, recent-file history, go-to-image-number, color sampling,
-negative/inverted colors, asynchronous file-list scanning, and common resampling changes. For
-example, SupaYoshi's recent
+Recent-fork ideas already represented above were not duplicated here: PSB, KRA, ZIP/7z browsing
+(now implemented), CBZ/CB7 browsing, recent-file history, go-to-image-number, color sampling,
+negative/inverted colors, asynchronous file-list scanning, and common resampling changes. For example,
+SupaYoshi's recent
 [HEIC-to-JPEG context action](https://github.com/SupaYoshi/jpegview/commit/48ee0020cdacf3e3a98db3e8ada8dddd4c5d809b)
 is covered functionally by Linux's existing Save As conversion path.
 
@@ -447,5 +446,5 @@ and remain possible candidates:
   and output using a reproducible file before treating the existing cap as a regression.
 - [KrokusPokus/JPEGView_L's release notes](https://github.com/KrokusPokus/JPEGView_L/releases)
   report JPEG XL animation and archive-contained image fixes. Linux advertises animated JPEG XL
-  and supports ZIP/TAR/TGZ-contained images; 7z/RAR archive support remains a candidate. Verify a
+  and supports ZIP/TAR/TGZ/7z-contained images; RAR archive support remains a candidate. Verify a
   concrete failing fixture before adding a separate bug-fix item.

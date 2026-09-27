@@ -84,6 +84,7 @@ SOURCES += src/magnifying_glass_model.cpp src/magnifying_glass_model.h
 TEST_SOURCES += src/magnifying_glass_model.cpp src/magnifying_glass_model.h
 ICON_SOURCE := ../src/JPEGView/res/JPEGView.ico
 GENERATED_ICON_HEADER := $(BUILD_DIR)/jpegview_icon_data.h
+ARCHIVE_FIXTURE_WRITER := $(BUILD_DIR)/write-7z-fixture
 SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
 TEST_SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
 SOURCES += $(BUILD_INFO_HEADER)
@@ -117,14 +118,18 @@ $(TEST_TARGET): $(TEST_SOURCES)
 test: $(TEST_TARGET)
 	$(TEST_TARGET)
 
-test-ui: $(TARGET)
+$(ARCHIVE_FIXTURE_WRITER): tests/write_7z_fixture.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(ARCHIVE_CFLAGS) $< -o $@ $(ARCHIVE_LIBS)
+
+test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER)
 	@version_output=$$($(TARGET) --version); \
 	expected_version="JPEGView Linux $(VERSION)"; \
 	if [ "$$version_output" != "$$expected_version" ]; then \
 		echo "Version metadata mismatch: expected '$$expected_version', got '$$version_output'" >&2; \
 		exit 1; \
 	fi
-	./tests/ui_smoke.sh $(TARGET)
+	./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER)
 
 test-version:
 	sh tests/version_test.sh
