@@ -102,6 +102,9 @@ constexpr int kFileDialogDividerWidth = 12;
 constexpr int kFileDialogResizeHandleSize = 18;
 constexpr int kFileDialogMinimumListWidth = 180;
 constexpr int kFileDialogMinimumPreviewWidth = 120;
+constexpr int kSdlCursorQuery = -1;
+constexpr int kSdlCursorDisabled = 0;
+constexpr int kSdlCursorEnabled = 1;
 constexpr std::size_t kMagnifyingGlassDisplayPriority = 1000000;
 constexpr std::size_t kDecodedImagePrefetchCount = 32;
 constexpr std::size_t kDisplayTextureUploadsPerTick = 1;
@@ -372,11 +375,6 @@ public:
 		cropVerticalCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENS);
 		cropDiagonalDownCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
 		cropDiagonalUpCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENESW);
-		const Uint8 transparentCursorData[] = {0x80};
-		const Uint8 transparentCursorMask[] = {0x00};
-		magnifyingGlassCursor_ = SDL_CreateCursor(transparentCursorData,
-			transparentCursorMask, 1, 1, 0, 0);
-
 		if (startFullscreen_) {
 			fullscreen_ = true;
 			SDL_SetWindowFullscreen(window_, SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -524,6 +522,10 @@ private:
 
 	void Cleanup() {
 		SaveSettings();
+		if (magnifyingGlassCursorActive_) {
+			SDL_ShowCursor(magnifyingGlassPreviousCursorVisibility_);
+			magnifyingGlassCursorActive_ = false;
+		}
 		if (recentFilesLoaded_) {
 			if (!clipboardMode_ && !loadedFilePath_.empty() && !fileList_.Empty() &&
 				AbsoluteNormalized(fileList_.Current()) == loadedFilePath_) {
@@ -561,8 +563,7 @@ private:
 		if (thumbnailResizeCursor_ != nullptr || fileDialogResizeCursor_ != nullptr ||
 			cropCrosshairCursor_ != nullptr || cropMoveCursor_ != nullptr ||
 			cropHorizontalCursor_ != nullptr || cropVerticalCursor_ != nullptr ||
-			cropDiagonalDownCursor_ != nullptr || cropDiagonalUpCursor_ != nullptr ||
-			magnifyingGlassCursor_ != nullptr) {
+			cropDiagonalDownCursor_ != nullptr || cropDiagonalUpCursor_ != nullptr) {
 			SDL_SetCursor(SDL_GetDefaultCursor());
 		}
 		if (thumbnailResizeCursor_ != nullptr) {
@@ -585,7 +586,6 @@ private:
 		freeCursor(cropVerticalCursor_);
 		freeCursor(cropDiagonalDownCursor_);
 		freeCursor(cropDiagonalUpCursor_);
-		freeCursor(magnifyingGlassCursor_);
 		SDL_Quit();
 	}
 
@@ -5602,8 +5602,11 @@ private:
 
 	void UpdateMagnifyingGlassCursor(int screenX, int screenY) {
 		if (IsMagnifyingGlassVisibleAt(screenX, screenY)) {
-			if (magnifyingGlassCursor_ != nullptr) {
-				SDL_SetCursor(magnifyingGlassCursor_);
+			if (!magnifyingGlassCursorActive_) {
+				const int previousVisibility = SDL_ShowCursor(kSdlCursorQuery);
+				magnifyingGlassPreviousCursorVisibility_ = previousVisibility < 0 ?
+					kSdlCursorEnabled : previousVisibility;
+				SDL_ShowCursor(kSdlCursorDisabled);
 				magnifyingGlassCursorActive_ = true;
 			}
 			return;
@@ -5611,6 +5614,7 @@ private:
 		if (!magnifyingGlassCursorActive_) return;
 		magnifyingGlassCursorActive_ = false;
 		RestoreCursorForPoint(screenX, screenY);
+		SDL_ShowCursor(magnifyingGlassPreviousCursorVisibility_);
 	}
 
 	void DiscardMagnifyingGlassRequest(const std::string& key) {
@@ -6866,8 +6870,8 @@ private:
 	SDL_Cursor* cropVerticalCursor_ = nullptr;
 	SDL_Cursor* cropDiagonalDownCursor_ = nullptr;
 	SDL_Cursor* cropDiagonalUpCursor_ = nullptr;
-	SDL_Cursor* magnifyingGlassCursor_ = nullptr;
 	bool magnifyingGlassCursorActive_ = false;
+	int magnifyingGlassPreviousCursorVisibility_ = kSdlCursorEnabled;
 	jpegview_linux::CropSelectionHandle cropDragHandle_ = jpegview_linux::CropSelectionHandle::None;
 	bool infoVisible_ = false;
 	bool showHistogram_ = false;

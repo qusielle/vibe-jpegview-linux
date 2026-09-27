@@ -1179,7 +1179,8 @@ if command -v convert >/dev/null 2>&1; then
 	stop_viewer
 
 	mkdir -p "$temporary/magnifier-images" "$temporary/magnifier-config"
-	convert -size 1600x1200 xc:red -fill blue -draw 'rectangle 800,0 1599,1199' \
+	# Keep the centered lens pixel inside a solid region so dark center artifacts stand out.
+	convert -size 1600x1200 xc:red -fill blue -draw 'rectangle 1100,0 1599,1199' \
 		"$temporary/magnifier-images/01-magnifier.png"
 	convert -size 1600x1200 xc:lime "$temporary/magnifier-images/02-next.png"
 	env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \
@@ -1219,6 +1220,12 @@ if command -v convert >/dev/null 2>&1; then
 			"%[pixel:p{$((magnifier_center_x - 175)),$magnifier_center_y}]" info:)
 		if [ "$magnifier_default_border" != "srgb(245,245,245)" ]; then
 			echo "UI smoke test: Z did not draw the centered magnifying-glass lens ($magnifier_default_border)" >&2
+			exit 1
+		fi
+		magnifier_center_pixel=$(convert "$temporary/magnifier-default.png" -format \
+			"%[pixel:p{$magnifier_center_x,$magnifier_center_y}]" info:)
+		if [ "$magnifier_center_pixel" != "srgb(255,0,0)" ]; then
+			echo "UI smoke test: magnifying-glass center has an unexpected pixel ($magnifier_center_pixel)" >&2
 			exit 1
 		fi
 	fi

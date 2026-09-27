@@ -250,6 +250,7 @@ SDL_Cursor* SDL_CreateCursor(const Uint8* data, const Uint8* mask,
 	int width, int height, int hotX, int hotY);
 SDL_Cursor* SDL_GetDefaultCursor();
 void SDL_SetCursor(SDL_Cursor* cursor);
+int SDL_ShowCursor(int toggle);
 void SDL_FreeCursor(SDL_Cursor* cursor);
 int SDL_CaptureMouse(int enabled);
 int SDL_SetClipboardText(const char* text);

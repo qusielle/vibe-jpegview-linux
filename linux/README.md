@@ -442,7 +442,8 @@ slideshow at that interval. At actual size, Shift+Arrow pans the image in 48-pix
 toggles the top-left picture information panel; Shift+N or Ctrl+F2
 toggles the filename overlay, while N/M/C select filename, modification-date, or creation-date
 sorting; random sorting remains available from the context menu. `Z` toggles the magnifying-glass
-lens when an image is open. Move it over the image and use wheel down/up to enlarge/shrink the lens;
+lens when an image is open. It follows the pointer and hides it while over the image to keep the
+center of the lens unobstructed. Use wheel down/up to enlarge/shrink the lens;
 Ctrl+wheel changes lens height, Alt+wheel width, and Shift+wheel magnification. The lens is
 transient and its size/magnification reset between runs. Ctrl+O opens the native in-app file browser
 with **Browse** and **Recents** tabs.
