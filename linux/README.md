@@ -50,9 +50,9 @@ they support.
    2× and hides the pointer beneath it. Wheel down/up grows/shrinks the lens; Ctrl+wheel changes
    its height, Alt+wheel its width, and Shift+wheel its magnification. Higher-resolution lens
    pixels are prepared asynchronously at low priority while the ordinary image remains responsive.
-   Lens size and magnification are temporary and reset between runs. The Windows crop/selection
-   workflow is also ported: source-pixel selections can be moved and resized independently of zoom,
-   then cropped, copied, losslessly cropped from JPEG, or used to zoom the view.
+   Lens size and magnification persist between runs; the lens itself starts disabled each time. The
+   Windows crop/selection workflow is also ported: source-pixel selections can be moved and resized
+   independently of zoom, then cropped, copied, losslessly cropped from JPEG, or used to zoom the view.
    Crop selection mode is off by default and can be enabled from the new navigation-panel button,
    either context menu, or with Ctrl+E; the explicit mode choice is saved between runs.
 
@@ -177,7 +177,8 @@ they support.
 13. **Reliable startup and saved session state.** Scale mode, default picture levels, ordering
     mode/direction, maximized or normal state, navigation-panel choices,
     filename/EXIF/histogram visibility, automatic correction,
-    batch pattern, thumbnail visibility/width, open-dialog dimensions and preview proportion, and the
+    batch pattern, thumbnail visibility/width, open-dialog dimensions and preview proportion,
+    magnifying-glass dimensions and magnification, and the
     image-cache budget are stored under XDG configuration paths. A previously
     maximized window is created maximized before it is shown, avoiding the visible delayed maximize.
     The real viewer window is painted and shown before the initial directory scan and image decode,
@@ -445,8 +446,8 @@ sorting; random sorting remains available from the context menu. `Z` toggles the
 lens when an image is open. It follows the pointer and hides it while over the image to keep the
 center of the lens unobstructed. Use wheel down/up to enlarge/shrink the lens;
 Ctrl+wheel changes lens height, Alt+wheel width, and Shift+wheel magnification. The lens is
-transient and its size/magnification reset between runs. Ctrl+O opens the native in-app file browser
-with **Browse** and **Recents** tabs.
+disabled when the app starts, but its size and magnification persist between runs. Ctrl+O opens the
+native in-app file browser with **Browse** and **Recents** tabs.
 Clicking blank space inside the dialog leaves it open; press Escape to cancel.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
 The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while
@@ -503,7 +504,9 @@ If the menu spans multiple
 columns to fit the window height, Left/Right moves between columns. Hovering over a lower
 navigation-panel button displays its Windows-style action hint. Unseen files inherit the shared
 fit/fill/actual-size or manual mode as navigation proceeds; a previously visited file restores its
-own last view when opened again. The shared scale mode remains saved between application runs, as
+own last view when opened again. Magnifier size and zoom use `magnifying_glass_width` (default 350),
+`magnifying_glass_height` (default 175), and `magnifying_glass_zoom_level` (default 0.5); the lens
+itself remains disabled at startup. The shared scale mode remains saved between application runs, as
 does the last maximized or
 normal window mode, the lower navigation panel's show/hide selection, and the F2/Ctrl+F2 overlay
 visibility choices. The navigation panel hover preference and current file-order mode/direction are

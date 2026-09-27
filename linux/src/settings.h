@@ -2,6 +2,7 @@
 
 #include "cache_budget.h"
 #include "image_processing.h"
+#include "magnifying_glass_model.h"
 #include "transparency_pattern.h"
 
 #include <filesystem>
@@ -46,6 +47,9 @@ struct ViewerSettings {
 	// Zero keeps the responsive default preview width; non-zero stores the
 	// preview's fraction of the dialog's available list/preview width.
 	double fileDialogPreviewRatio = 0.0;
+	int magnifyingGlassWidth = MagnifyingGlassModel::kDefaultWidth;
+	int magnifyingGlassHeight = MagnifyingGlassModel::kDefaultHeight;
+	double magnifyingGlassZoomLevel = MagnifyingGlassModel::kDefaultZoomLevel;
 	int fixedCropWidth = kDefaultFixedCropWidth;
 	int fixedCropHeight = kDefaultFixedCropHeight;
 	bool fixedCropScreenPixels = true;

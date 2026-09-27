@@ -2164,6 +2164,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.fileDialogWidth = 1040;
 	expected.fileDialogHeight = 735;
 	expected.fileDialogPreviewRatio = 0.375;
+	expected.magnifyingGlassWidth = 425;
+	expected.magnifyingGlassHeight = 215;
+	expected.magnifyingGlassZoomLevel = 0.725;
 	expected.fixedCropWidth = 512;
 	expected.fixedCropHeight = 288;
 	expected.fixedCropScreenPixels = false;
@@ -2219,6 +2222,11 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"file-dialog dimensions did not round-trip");
 	ExpectNear(loaded.fileDialogPreviewRatio, expected.fileDialogPreviewRatio, 0.0000001,
 		"file-dialog preview proportion did not round-trip");
+	Expect(loaded.magnifyingGlassWidth == expected.magnifyingGlassWidth &&
+		loaded.magnifyingGlassHeight == expected.magnifyingGlassHeight,
+		"magnifying-glass size did not round-trip");
+	ExpectNear(loaded.magnifyingGlassZoomLevel, expected.magnifyingGlassZoomLevel, 0.0000001,
+		"magnifying-glass zoom level did not round-trip");
 	Expect(loaded.fixedCropWidth == expected.fixedCropWidth &&
 		loaded.fixedCropHeight == expected.fixedCropHeight &&
 		loaded.fixedCropScreenPixels == expected.fixedCropScreenPixels,
@@ -2251,6 +2259,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\ndefault_gamma=not-a-number\n"
 		"thumbnail_panel_width=not-a-number\nfile_dialog_width=not-a-number\n"
 		"file_dialog_height=not-a-number\nfile_dialog_preview_ratio=nan\n"
+		"magnifying_glass_width=not-a-number\nmagnifying_glass_height=not-a-number\n"
+		"magnifying_glass_zoom_level=nan\n"
 		"fixed_crop_width=not-a-number\nfixed_crop_height=0\n"
 		"user_crop_aspect_width=0\nuser_crop_aspect_height=nan\n"
 		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=1\n"
@@ -2278,6 +2288,11 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.fileDialogHeight == jpegview_linux::kDefaultFileDialogHeight &&
 		loaded.fileDialogPreviewRatio == 0.0,
 		"malformed file-dialog geometry did not retain its defaults");
+	Expect(loaded.magnifyingGlassWidth == jpegview_linux::MagnifyingGlassModel::kDefaultWidth &&
+		loaded.magnifyingGlassHeight == jpegview_linux::MagnifyingGlassModel::kDefaultHeight &&
+		loaded.magnifyingGlassZoomLevel ==
+			jpegview_linux::MagnifyingGlassModel::kDefaultZoomLevel,
+		"malformed magnifying-glass settings did not retain their defaults");
 	Expect(loaded.fixedCropWidth == jpegview_linux::kDefaultFixedCropWidth &&
 		loaded.fixedCropHeight == jpegview_linux::kMinimumFixedCropDimension &&
 		loaded.fixedCropScreenPixels &&
@@ -2291,6 +2306,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	const fs::path clamped = temporary.path() / "clamped.conf";
 	WriteText(clamped, "manual_zoom=1000\nthumbnail_panel_width=2\n"
 		"file_dialog_width=1\nfile_dialog_height=999999\nfile_dialog_preview_ratio=4\n"
+		"magnifying_glass_width=1\nmagnifying_glass_height=999999\n"
+		"magnifying_glass_zoom_level=4\n"
 		"transparency_pattern=white\n"
 		"fixed_crop_width=999999\nfixed_crop_height=-10\n"
 		"user_crop_aspect_width=999999\nuser_crop_aspect_height=5\n"
@@ -2302,6 +2319,10 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.fileDialogWidth == jpegview_linux::kMinimumFileDialogWidth &&
 		loaded.fileDialogHeight == jpegview_linux::kMaximumFileDialogDimension &&
 		loaded.fileDialogPreviewRatio == 0.8 &&
+		loaded.magnifyingGlassWidth == jpegview_linux::MagnifyingGlassModel::kMinimumWidth &&
+		loaded.magnifyingGlassHeight == jpegview_linux::MagnifyingGlassModel::kMaximumDimension &&
+		loaded.magnifyingGlassZoomLevel ==
+			jpegview_linux::MagnifyingGlassModel::kMaximumZoomLevel &&
 		loaded.transparencyPattern == jpegview_linux::TransparencyPattern::White &&
 		loaded.fixedCropWidth == jpegview_linux::kMaximumFixedCropDimension &&
 		loaded.fixedCropHeight == jpegview_linux::kMinimumFixedCropDimension &&
@@ -3059,6 +3080,15 @@ void TestMagnifyingGlassModelDefaultsBoundsAndWheelDirections() {
 		model.Height() == MagnifyingGlassModel::kDefaultHeight &&
 		model.ZoomLevel() == MagnifyingGlassModel::kDefaultZoomLevel,
 		"magnifying glass did not start with its transient defaults");
+	MagnifyingGlassModel restored;
+	restored.SetParameters(425, 215, 0.725, 1200, 800);
+	Expect(!restored.Enabled() && restored.Width() == 425 && restored.Height() == 215 &&
+		std::abs(restored.ZoomLevel() - 0.725) < 1e-12,
+		"magnifying-glass parameters did not restore independently of enabled state");
+	restored.SetParameters(1, 99999, std::numeric_limits<double>::quiet_NaN(), 400, 200);
+	Expect(restored.Width() == MagnifyingGlassModel::kMinimumWidth && restored.Height() == 180 &&
+		restored.ZoomLevel() == MagnifyingGlassModel::kDefaultZoomLevel,
+		"restored magnifying-glass parameters were not validated and constrained to the view");
 	model.Toggle();
 	Expect(model.Enabled(), "magnifying glass toggle did not enable the lens");
 	model.SetEnabled(false);

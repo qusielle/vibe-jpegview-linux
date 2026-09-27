@@ -1183,23 +1183,26 @@ if command -v convert >/dev/null 2>&1; then
 	convert -size 1600x1200 xc:red -fill blue -draw 'rectangle 1100,0 1599,1199' \
 		"$temporary/magnifier-images/01-magnifier.png"
 	convert -size 1600x1200 xc:lime "$temporary/magnifier-images/02-next.png"
-	env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \
-		HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/magnifier-config" \
-		"$BINARY" "$temporary/magnifier-images" >"$temporary/magnifier-viewer.log" 2>&1 &
-	viewer_pid=$!
-	window_id=''
-	for _ in $(seq 1 50); do
-		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
-			--class jpegview-linux 2>/dev/null | head -1 || true)
-		if [ -n "$window_id" ]; then break; fi
-		sleep 0.1
-	done
-	if [ -z "$window_id" ]; then
-		echo "UI smoke test: magnifying-glass viewer did not appear" >&2
-		exit 1
-	fi
-	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
-	sleep 0.3
+	launch_magnifier_viewer() {
+		env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \
+			HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/magnifier-config" \
+			"$BINARY" "$temporary/magnifier-images" >"$temporary/magnifier-viewer.log" 2>&1 &
+		viewer_pid=$!
+		window_id=''
+		for _ in $(seq 1 50); do
+			window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+				--class jpegview-linux 2>/dev/null | head -1 || true)
+			if [ -n "$window_id" ]; then break; fi
+			sleep 0.1
+		done
+		if [ -z "$window_id" ]; then
+			echo "UI smoke test: magnifying-glass viewer did not appear" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+		sleep 0.3
+	}
+	launch_magnifier_viewer
 	magnifier_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell \
 		"$window_id" | sed -n 's/^WIDTH=//p')
 	magnifier_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell \
@@ -1248,9 +1251,33 @@ if command -v convert >/dev/null 2>&1; then
 			exit 1
 		fi
 	fi
+	DISPLAY=":$display_number" xdotool keydown shift click 5 keyup shift
 	DISPLAY=":$display_number" xdotool key z
 	DISPLAY=":$display_number" xdotool click 5
 	assert_title_prefix "02-next.png" "wheel did not resume normal navigation after disabling the magnifier"
+	stop_viewer
+	magnifier_settings="$temporary/magnifier-config/jpegview-linux/settings.conf"
+	grep -q '^magnifying_glass_width=380$' "$magnifier_settings"
+	grep -q '^magnifying_glass_height=190$' "$magnifier_settings"
+	awk -F= '$1 == "magnifying_glass_zoom_level" && $2 > 0.5249 && $2 < 0.5251 { found = 1 } END { exit !found }' \
+		"$magnifier_settings"
+
+	# On the next run, one wheel-up step should return the restored lens to its defaults.
+	launch_magnifier_viewer
+	magnifier_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell \
+		"$window_id" | sed -n 's/^WIDTH=//p')
+	magnifier_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell \
+		"$window_id" | sed -n 's/^HEIGHT=//p')
+	magnifier_center_x=$((magnifier_window_width / 2))
+	magnifier_center_y=$((magnifier_window_height / 2))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$magnifier_center_x" "$magnifier_center_y" key z
+	DISPLAY=":$display_number" xdotool click 4
+	DISPLAY=":$display_number" xdotool keydown shift click 4 keyup shift
+	grep -q '^magnifying_glass_width=350$' "$magnifier_settings"
+	grep -q '^magnifying_glass_height=175$' "$magnifier_settings"
+	awk -F= '$1 == "magnifying_glass_zoom_level" && $2 > 0.4999 && $2 < 0.5001 { found = 1 } END { exit !found }' \
+		"$magnifier_settings"
 	stop_viewer
 
 	mkdir -p "$temporary/crop-images" "$temporary/crop-config"

@@ -620,6 +620,10 @@ private:
 		fileDialogWidth_ = settings.fileDialogWidth;
 		fileDialogHeight_ = settings.fileDialogHeight;
 		fileDialogPreviewRatio_ = settings.fileDialogPreviewRatio;
+		const SDL_Rect magnifyingGlassArea = ImageAreaRect();
+		magnifyingGlass_.SetParameters(settings.magnifyingGlassWidth,
+			settings.magnifyingGlassHeight, settings.magnifyingGlassZoomLevel,
+			magnifyingGlassArea.w, magnifyingGlassArea.h);
 		cropSelection_.SetFixedSize(settings.fixedCropWidth, settings.fixedCropHeight,
 			settings.fixedCropScreenPixels);
 		cropSelection_.SetMode(jpegview_linux::CropSelectionMode::Free);
@@ -654,6 +658,9 @@ private:
 		settings.fileDialogWidth = fileDialogWidth_;
 		settings.fileDialogHeight = fileDialogHeight_;
 		settings.fileDialogPreviewRatio = fileDialogPreviewRatio_;
+		settings.magnifyingGlassWidth = magnifyingGlass_.Width();
+		settings.magnifyingGlassHeight = magnifyingGlass_.Height();
+		settings.magnifyingGlassZoomLevel = magnifyingGlass_.ZoomLevel();
 		settings.fixedCropWidth = cropSelection_.FixedWidth();
 		settings.fixedCropHeight = cropSelection_.FixedHeight();
 		settings.fixedCropScreenPixels = cropSelection_.FixedSizeUsesScreenPixels();
@@ -6659,11 +6666,19 @@ private:
 						(modifiers & 0x00C0u) != 0, (modifiers & 0x0300u) != 0,
 						(modifiers & 0x0003u) != 0};
 					const SDL_Rect area = ImageAreaRect();
+					const int oldWidth = magnifyingGlass_.Width();
+					const int oldHeight = magnifyingGlass_.Height();
+					const double oldZoomLevel = magnifyingGlass_.ZoomLevel();
 					for (int tick = 0; tick < std::abs(wheelTicks); ++tick) {
 						magnifyingGlass_.HandleWheel(wheelTicks > 0 ?
 							jpegview_linux::MagnifyingGlassWheelDirection::Up :
 							jpegview_linux::MagnifyingGlassWheelDirection::Down,
 							wheelModifiers, area.w, area.h);
+					}
+					if (oldWidth != magnifyingGlass_.Width() ||
+						oldHeight != magnifyingGlass_.Height() ||
+						oldZoomLevel != magnifyingGlass_.ZoomLevel()) {
+						SaveSettings();
 					}
 					playback_.NotifyInteraction(SDL_GetTicks());
 					UpdateMagnifyingGlassCursor(lastMouseX_, lastMouseY_);

@@ -62,14 +62,23 @@ AxisCrop CalculateAxisCrop(double sourceCenter, double requestedExtent, int text
 } // namespace
 
 int MagnifyingGlassModel::MaximumDimension(int parentDimension, int minimum) {
-	if (parentDimension <= 0) return std::numeric_limits<int>::max();
+	if (parentDimension <= 0) return kMaximumDimension;
 	const int ninetyPercent = static_cast<int>(std::floor(parentDimension * 0.9));
-	return std::max(minimum, ninetyPercent);
+	return std::min(kMaximumDimension, std::max(minimum, ninetyPercent));
 }
 
 void MagnifyingGlassModel::ConstrainSize(int parentWidth, int parentHeight) {
 	width_ = std::clamp(width_, kMinimumWidth, MaximumDimension(parentWidth, kMinimumWidth));
 	height_ = std::clamp(height_, kMinimumHeight, MaximumDimension(parentHeight, kMinimumHeight));
+}
+
+void MagnifyingGlassModel::SetParameters(int width, int height, double zoomLevel,
+	int parentWidth, int parentHeight) {
+	width_ = std::clamp(width, kMinimumWidth, kMaximumDimension);
+	height_ = std::clamp(height, kMinimumHeight, kMaximumDimension);
+	zoomLevel_ = std::isfinite(zoomLevel) ? std::clamp(zoomLevel,
+		kMinimumZoomLevel, kMaximumZoomLevel) : kDefaultZoomLevel;
+	ConstrainSize(parentWidth, parentHeight);
 }
 
 void MagnifyingGlassModel::HandleWheel(MagnifyingGlassWheelDirection direction,

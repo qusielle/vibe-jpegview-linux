@@ -27,7 +27,7 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `settings` and `sort_mode`: persisted configuration (including the transparent-image background
   choice, default picture-level values,
   fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
-  default), and zoom-navigator visibility), plus stable sort-mode values.
+  default), zoom-navigator visibility, and magnifying-glass size/zoom), plus stable sort-mode values.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
   bounded per-file `ViewportSnapshot` LRU, and tolerant atomic persistence in the XDG state
   directory. The recent database is independent from viewer settings and performs no image or
@@ -36,7 +36,7 @@ should normally be added to one of these focused modules and covered by `tests/t
   keep the viewport inside the image.
 - `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,
   and click/drag pan calculations for the transient zoom navigator.
-- `magnifying_glass_model`: transient lens enable/size/zoom state, wheel-modifier transitions,
+- `magnifying_glass_model`: lens enable/size/zoom state and bounds, wheel-modifier transitions,
   and pointer-centered mapping from a clipped image source crop into lens content geometry.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, filter selection, and pure
   focus/text-editing transitions.
@@ -76,9 +76,10 @@ texture rendering. The same renderer-thread helper backs transparent thumbnails 
 previews; opaque textures retain the non-blended path. It should translate SDL events into operations
 on the modules above rather than duplicate their state.
 
-The magnifying-glass lens is a temporary viewer interaction. Its pure model owns size, magnification,
-wheel modifiers, and clipping math; the SDL adapter owns cursor visibility, image-area hit testing,
-and lens painting. When an unmodified image has a lower-resolution renderer texture, Viewer asks the
+The magnifying-glass lens is a temporary viewer interaction; its enablement resets each run while
+its size and magnification are stored by `settings`. Its pure model owns those values, wheel
+modifiers, and clipping math; the SDL adapter owns cursor visibility, image-area hit testing, and lens
+painting. When an unmodified image has a lower-resolution renderer texture, Viewer asks the
 display-image worker cache for a source-capped higher-resolution frame only while the lens is visible.
 That optional request is ordered behind foreground and neighbor work, shares the existing byte
 budget, and is canceled/released when no longer needed. The current renderer texture is always the

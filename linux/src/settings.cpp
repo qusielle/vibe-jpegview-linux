@@ -163,6 +163,29 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			} catch (const std::exception&) {
 				// Ignore malformed settings and retain the built-in default.
 			}
+		} else if (key == "magnifying_glass_width" || key == "magnifying_glass_height") {
+			int parsedDimension = 0;
+			if (ParseInt(value, parsedDimension)) {
+				const bool width = key == "magnifying_glass_width";
+				const int minimum = width ? MagnifyingGlassModel::kMinimumWidth :
+					MagnifyingGlassModel::kMinimumHeight;
+				const int dimension = std::clamp(parsedDimension, minimum,
+					MagnifyingGlassModel::kMaximumDimension);
+				if (width) loaded.magnifyingGlassWidth = dimension;
+				else loaded.magnifyingGlassHeight = dimension;
+			}
+		} else if (key == "magnifying_glass_zoom_level") {
+			try {
+				std::size_t parsedCharacters = 0;
+				const double parsedZoom = std::stod(value, &parsedCharacters);
+				if (parsedCharacters == value.size() && std::isfinite(parsedZoom)) {
+					loaded.magnifyingGlassZoomLevel = std::clamp(parsedZoom,
+						MagnifyingGlassModel::kMinimumZoomLevel,
+						MagnifyingGlassModel::kMaximumZoomLevel);
+				}
+			} catch (const std::exception&) {
+				// Ignore malformed settings and retain the built-in default.
+			}
 		} else if (key == "fixed_crop_width" || key == "fixed_crop_height") {
 			int parsed = 0;
 			if (ParseInt(value, parsed)) {
@@ -245,6 +268,9 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 	if (filename.empty()) return false;
 	const double fileDialogPreviewRatio = std::isfinite(settings.fileDialogPreviewRatio) ?
 		std::clamp(settings.fileDialogPreviewRatio, 0.0, 0.8) : 0.0;
+	const double magnifyingGlassZoomLevel = std::isfinite(settings.magnifyingGlassZoomLevel) ?
+		std::clamp(settings.magnifyingGlassZoomLevel, MagnifyingGlassModel::kMinimumZoomLevel,
+			MagnifyingGlassModel::kMaximumZoomLevel) : MagnifyingGlassModel::kDefaultZoomLevel;
 
 	std::error_code error;
 	if (!filename.parent_path().empty()) {
@@ -257,7 +283,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 	{
 		std::ofstream output(temporary, std::ios::trunc);
 		if (!output) return false;
-		output << "# JPEGView Linux display, dialog, and batch-operation settings\n"
+		output << "# JPEGView Linux display, dialog, magnifier, and batch-operation settings\n"
 		       << "scale_mode=" << settings.scaleMode << '\n'
 		       << "sort_mode=" << settings.sortMode << '\n'
 		       << "sort_ascending=" << (settings.sortAscending ? 1 : 0) << '\n'
@@ -274,6 +300,11 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "file_dialog_height=" << std::clamp(settings.fileDialogHeight,
 			kMinimumFileDialogHeight, kMaximumFileDialogDimension) << '\n'
 		       << "file_dialog_preview_ratio=" << fileDialogPreviewRatio << '\n'
+		       << "magnifying_glass_width=" << std::clamp(settings.magnifyingGlassWidth,
+			MagnifyingGlassModel::kMinimumWidth, MagnifyingGlassModel::kMaximumDimension) << '\n'
+		       << "magnifying_glass_height=" << std::clamp(settings.magnifyingGlassHeight,
+			MagnifyingGlassModel::kMinimumHeight, MagnifyingGlassModel::kMaximumDimension) << '\n'
+		       << "magnifying_glass_zoom_level=" << magnifyingGlassZoomLevel << '\n'
 		       << "fixed_crop_width=" << std::clamp(settings.fixedCropWidth,
 			kMinimumFixedCropDimension, kMaximumFixedCropDimension) << '\n'
 		       << "fixed_crop_height=" << std::clamp(settings.fixedCropHeight,

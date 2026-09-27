@@ -26,6 +26,7 @@ public:
 	static constexpr int kDefaultHeight = 175;
 	static constexpr int kMinimumWidth = 175;
 	static constexpr int kMinimumHeight = 80;
+	static constexpr int kMaximumDimension = 16384;
 	static constexpr double kDefaultZoomLevel = 0.5;
 	static constexpr double kMinimumZoomLevel = 0.2;
 	static constexpr double kMaximumZoomLevel = 0.9;
@@ -37,6 +38,8 @@ public:
 	int Width() const { return width_; }
 	int Height() const { return height_; }
 	double ZoomLevel() const { return zoomLevel_; }
+	void SetParameters(int width, int height, double zoomLevel,
+		int parentWidth, int parentHeight);
 
 	void HandleWheel(MagnifyingGlassWheelDirection direction,
 		const MagnifyingGlassWheelModifiers& modifiers, int parentWidth, int parentHeight);
