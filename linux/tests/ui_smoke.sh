@@ -79,6 +79,8 @@ mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/s
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
 write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
 touch -t 202001010000.00 "$temporary/images/00-album/first.ppm" "$temporary/images/00-album/second.ppm"
+mkdir -p "$temporary/images/00-empty-startup"
+touch -t 201701010000.00 "$temporary/images/00-empty-startup"
 mkdir -p "$temporary/images/00-entry-test"
 write_ppm "$temporary/images/00-entry-test/inside-first.ppm" 64 128 32
 mkdir -p "$temporary/images/00-wheel-test"
@@ -164,6 +166,35 @@ assert_title_prefix() {
 	echo "UI smoke test: $failure_message ($current_title)" >&2
 	exit 1
 }
+
+# Starting with a directory that has no direct images should leave the viewer
+# open in Browse at that directory, rather than exiting or falling back to cwd.
+DISPLAY=":$display_number" HOME="$temporary/empty-startup-home" \
+	XDG_CONFIG_HOME="$temporary/empty-startup-config" \
+	XDG_STATE_HOME="$temporary/empty-startup-state" \
+	"$BINARY" "$temporary/images/00-empty-startup" \
+	>"$temporary/empty-startup-viewer.log" 2>&1 &
+viewer_pid=$!
+window_id=''
+for _ in $(seq 1 50); do
+	window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible --class jpegview-linux 2>/dev/null | head -1 || true)
+	if [ -n "$window_id" ]; then break; fi
+	sleep 0.1
+done
+if [ -z "$window_id" ]; then
+	echo "UI smoke test: empty-directory startup did not leave a visible viewer window" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+assert_title_prefix "JPEGView" "empty-directory startup did not open the viewer's Browse dialog"
+DISPLAY=":$display_number" xdotool key BackSpace
+DISPLAY=":$display_number" xdotool type --delay 20 '00-empty-startup'
+DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool key BackSpace
+DISPLAY=":$display_number" xdotool type --delay 20 '01-RED'
+DISPLAY=":$display_number" xdotool key Return
+assert_title_prefix "01-red.ppm" "empty-directory startup did not browse from the invoked directory"
+stop_viewer
 
 if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	# Delay the decoder's memory map of a known JPEG. The final viewer window

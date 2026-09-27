@@ -123,6 +123,9 @@ request, and records the path only after decoding and presentation setup succeed
 shared navigation snapshot. Clipboard temporary paths never become recent entries, while the
 ordinary file dialog's Recents tab shows one MRU image per parent folder and reuses the cancellable
 preview worker; separate Browse and Recents dialog models preserve each tab's filter and selection.
+If the sole explicit startup argument is a directory with no directly supported images, the viewer
+keeps the event loop alive and opens Browse at that directory; other empty startup cases retain the
+no-images exit behavior.
 
 The recent-files database stores normalized absolute paths with byte-safe record encoding, so legal
 newlines and non-UTF-8 filename bytes do not break its line-based format. Loading skips malformed

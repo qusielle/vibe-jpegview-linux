@@ -413,17 +413,29 @@ public:
 		recentFilesLoaded_ = recentFilesPath_.empty() ||
 			jpegview_linux::LoadRecentFiles(recentFilesPath_, recentFiles_);
 
+		fs::path emptyStartupDirectory;
+		if (startupInputs_.size() == 1) {
+			std::error_code directoryError;
+			const fs::path startupInput(startupInputs_.front());
+			if (fs::is_directory(startupInput, directoryError) && !directoryError) {
+				emptyStartupDirectory = AbsoluteNormalized(startupInput);
+			}
+		}
 		const jpegview_linux::FileList::SortMode initialSortMode = fileList_.GetSorting();
 		const bool initialSortAscending = fileList_.IsSortedAscending();
 		fileList_ = jpegview_linux::FileList(startupInputs_, initialSortMode,
 			initialSortAscending);
 		startupInputs_.clear();
 		if (fileList_.Empty()) {
-			std::cerr << "No supported images found.\n";
-			Cleanup();
-			return 2;
-		}
-		if (!LoadCurrent()) {
+			if (!emptyStartupDirectory.empty()) {
+				SetTitle();
+				OpenFileDialog(emptyStartupDirectory);
+			} else {
+				std::cerr << "No supported images found.\n";
+				Cleanup();
+				return 2;
+			}
+		} else if (!LoadCurrent()) {
 			Cleanup();
 			return 1;
 		}
@@ -4960,12 +4972,15 @@ private:
 		RequestFileDialogDirectorySummaries();
 	}
 
-	void OpenFileDialog() {
+	void OpenFileDialog(const fs::path& preferredDirectory = fs::path()) {
 		std::error_code error;
-		fs::path directory = fs::current_path(error);
-		if (!fileList_.Empty()) {
-			const fs::path currentDirectory = fileList_.Current().parent_path();
-			if (!currentDirectory.empty()) directory = currentDirectory;
+		fs::path directory = preferredDirectory;
+		if (directory.empty()) {
+			directory = fs::current_path(error);
+			if (!fileList_.Empty()) {
+				const fs::path currentDirectory = fileList_.Current().parent_path();
+				if (!currentDirectory.empty()) directory = currentDirectory;
+			}
 		}
 		if (error || directory.empty()) directory = fs::path(".");
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
