@@ -828,6 +828,17 @@ if [ "$visual_assertions" -eq 1 ]; then
 		echo "UI smoke test: menu mnemonic underline did not follow the glyph ink bounds (ink=$mnemonic_ink_pixel trailing=$mnemonic_trailing_pixel)" >&2
 		exit 1
 	fi
+	# The final `s` in Show Advanced Options has ink through column 4 of its
+	# six-pixel cell. Column 5 must remain empty even with best-quality image
+	# texture filtering selected globally.
+	menu_terminal_ink=$(convert "$temporary/context-compact.png" -crop 1x1+776+29 +repage \
+		-colorspace Gray -threshold 50% -format "%[fx:mean]" info:)
+	menu_terminal_trailing=$(convert "$temporary/context-compact.png" -crop 1x1+777+29 +repage \
+		-colorspace Gray -threshold 50% -format "%[fx:mean]" info:)
+	if [ "$menu_terminal_ink" != "1" ] || [ "$menu_terminal_trailing" != "0" ]; then
+		echo "UI smoke test: context-menu text gained a pixel beyond its final glyph (ink=$menu_terminal_ink trailing=$menu_terminal_trailing)" >&2
+		exit 1
+	fi
 	DISPLAY=":$display_number" xdotool key Down
 	DISPLAY=":$display_number" xdotool key Down
 	DISPLAY=":$display_number" xdotool key Return
@@ -952,6 +963,31 @@ if [ "$visual_assertions" -eq 1 ]; then
 	done
 	if [ "$preview_pixel" != "$expected_preview_pixel" ]; then
 		echo "UI smoke test: Recents did not show the focused image preview at ${preview_pixel_x},${preview_pixel_y} ($preview_pixel)" >&2
+		exit 1
+	fi
+	recent_help='Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Enter: Open recent   Backspace: Edit filter   Esc: Cancel'
+	help_length=${#recent_help}
+	help_last_cell_x=$((reopened_dialog_x + 18 + help_length * 6 - 6))
+	help_last_row_y=$((reopened_dialog_y + 685 - 34 + 9))
+	help_ink_pixel=$(convert "$temporary/recent-dialog-preview.png" \
+		-format "%[pixel:p{$((help_last_cell_x + 3)),$help_last_row_y}]" info:)
+	help_trailing_pixel=$(convert "$temporary/recent-dialog-preview.png" \
+		-format "%[pixel:p{$((help_last_cell_x + 4)),$help_last_row_y}]" info:)
+	if [ "$help_ink_pixel" != 'srgb(170,170,170)' ] || \
+		[ "$help_trailing_pixel" = 'srgb(170,170,170)' ]; then
+		echo "UI smoke test: open-dialog help text has a stray pixel after its final glyph (ink=$help_ink_pixel trailing=$help_trailing_pixel)" >&2
+		exit 1
+	fi
+	dialog_rows=$(((685 - 168) / 26))
+	divider_grip_x=$((reopened_dialog_x + 942 - preview_width))
+	divider_grip_y=$((reopened_dialog_y + 112 + dialog_rows * 26 / 2))
+	divider_grip_end=$(convert "$temporary/recent-dialog-preview.png" \
+		-format "%[pixel:p{$((divider_grip_x + 2)),$divider_grip_y}]" info:)
+	divider_grip_extra=$(convert "$temporary/recent-dialog-preview.png" \
+		-format "%[pixel:p{$((divider_grip_x + 3)),$divider_grip_y}]" info:)
+	if [ "$divider_grip_end" != 'srgb(145,160,178)' ] || \
+		[ "$divider_grip_extra" = 'srgb(145,160,178)' ]; then
+		echo "UI smoke test: the dialog divider grip draws beyond its intended five-pixel span (end=$divider_grip_end extra=$divider_grip_extra)" >&2
 		exit 1
 	fi
 fi

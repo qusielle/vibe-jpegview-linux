@@ -85,6 +85,9 @@ namespace {
 constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr int kUiTextScale = 1;
+constexpr const char* kRenderScaleQualityHint = "SDL_RENDER_SCALE_QUALITY";
+constexpr const char* kImageTextureScaleQuality = "2";
+constexpr const char* kBitmapTextScaleQuality = "0";
 constexpr int kContextMenuSeparatorHeight = 7;
 constexpr int kContextMenuVerticalPadding = 3;
 constexpr int kContextMenuWindowInset = 4;
@@ -348,7 +351,7 @@ public:
 				SDL_FreeSurface(iconSurface);
 			}
 		}
-		SDL_SetHint("SDL_RENDER_SCALE_QUALITY", "2");
+		SDL_SetHint(kRenderScaleQualityHint, kImageTextureScaleQuality);
 		renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 		if (renderer_ == nullptr) {
 			// This is useful for software-only systems and also makes the viewer
@@ -5280,8 +5283,14 @@ private:
 
 		const jpegview_linux::RasterizedText raster = UiFont().Rasterize(text, scale);
 		if (raster.width <= 0 || raster.height <= 0 || raster.argb.empty()) return nullptr;
+		// The viewer keeps best-quality sampling for image textures. Bitmap text
+		// uses one-bit ink and transparent white padding, so linear sampling at a
+		// scaled renderer edge can leak a faint pixel beyond the final glyph.
+		const bool bitmapText = jpegview_linux::Terminus9CanRender(text);
+		if (bitmapText) SDL_SetHint(kRenderScaleQualityHint, kBitmapTextScaleQuality);
 		SDL_Texture* texture = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888,
 			SDL_TEXTUREACCESS_STATIC, raster.width, raster.height);
+		if (bitmapText) SDL_SetHint(kRenderScaleQualityHint, kImageTextureScaleQuality);
 		if (texture == nullptr) return nullptr;
 		if (SDL_UpdateTexture(texture, nullptr, raster.argb.data(), raster.width * 4) != 0) {
 			SDL_DestroyTexture(texture);

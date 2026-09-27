@@ -58,7 +58,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   low-priority derivation from completed neighbor display frames.
 - `image_info_model`: stable dimensions/date/file-size presentation.
 - `system_font` and `bitmap_font`: desktop-font discovery, UTF-8 shaping, measurement, rasterization,
-  and exact embedded-glyph ink bounds for crisp renderer overlays such as menu mnemonics.
+  and exact embedded-glyph ink bounds for crisp renderer overlays such as menu mnemonics. The SDL
+  adapter creates printable-ASCII bitmap-font textures with nearest-neighbor sampling while keeping
+  best-quality sampling for image textures, preventing filtering from adding pixels to blank glyph
+  cells.
 - `app_icon`: extraction of the application icon embedded from the upstream ICO resource.
 - `batch_copy`: pattern expansion, previews, and pure dialog focus/selection/scroll transitions.
 - `desktop_applications`: non-UI discovery and planning for Open with commands.

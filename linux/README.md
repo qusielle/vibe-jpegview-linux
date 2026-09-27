@@ -170,7 +170,9 @@ they support.
     preserving lowercase letters as drawn and using crisp one-bit pixels without antialiased edges. Strings
     containing other characters use the desktop's configured UI font through Pango, retaining Unicode
     shaping and automatic installed-font fallback; translucent surfaces provide a consistent visual
-    treatment.
+    treatment. Bitmap-font text textures use nearest-neighbor sampling so the globally selected
+    best-quality image filter cannot interpolate faint pixels into the blank edge of a glyph cell;
+    image textures retain the best-quality filter.
 
 13. **Reliable startup and saved session state.** Scale mode, default picture levels, ordering
     mode/direction, maximized or normal state, navigation-panel choices,
