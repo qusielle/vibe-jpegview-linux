@@ -100,6 +100,8 @@ constexpr int kThumbnailResizeHandleHalfWidth = 3;
 constexpr int kFileDialogMinimumWidth = jpegview_linux::kMinimumFileDialogWidth;
 constexpr int kFileDialogMinimumHeight = jpegview_linux::kMinimumFileDialogHeight;
 constexpr int kFileDialogDividerWidth = 12;
+constexpr int kFileDialogScrollbarWidth = 16;
+constexpr int kFileDialogScrollbarMinimumThumbHeight = 26;
 constexpr int kFileDialogResizeHandleSize = 18;
 constexpr int kFileDialogMinimumListWidth = 180;
 constexpr int kFileDialogMinimumPreviewWidth = 120;
@@ -379,6 +381,7 @@ public:
 		}
 		thumbnailResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
 		fileDialogResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
+		fileDialogScrollbarCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND);
 		cropCrosshairCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
 		cropMoveCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEALL);
 		cropHorizontalCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
@@ -511,6 +514,7 @@ private:
 		None,
 		Resize,
 		PreviewDivider,
+		Scrollbar,
 	};
 
 	enum class FileDialogTab {
@@ -571,6 +575,7 @@ private:
 			window_ = nullptr;
 		}
 		if (thumbnailResizeCursor_ != nullptr || fileDialogResizeCursor_ != nullptr ||
+			fileDialogScrollbarCursor_ != nullptr ||
 			cropCrosshairCursor_ != nullptr || cropMoveCursor_ != nullptr ||
 			cropHorizontalCursor_ != nullptr || cropVerticalCursor_ != nullptr ||
 			cropDiagonalDownCursor_ != nullptr || cropDiagonalUpCursor_ != nullptr) {
@@ -583,6 +588,10 @@ private:
 		if (fileDialogResizeCursor_ != nullptr) {
 			SDL_FreeCursor(fileDialogResizeCursor_);
 			fileDialogResizeCursor_ = nullptr;
+		}
+		if (fileDialogScrollbarCursor_ != nullptr) {
+			SDL_FreeCursor(fileDialogScrollbarCursor_);
+			fileDialogScrollbarCursor_ = nullptr;
 		}
 		const auto freeCursor = [](SDL_Cursor*& cursor) {
 			if (cursor != nullptr) {
@@ -4588,6 +4597,33 @@ private:
 			FileDialogVisibleRows() * 26};
 	}
 
+	SDL_Rect FileDialogListContentRect() const {
+		SDL_Rect content = FileDialogListRect();
+		content.w = std::max(1, content.w - kFileDialogScrollbarWidth);
+		return content;
+	}
+
+	SDL_Rect FileDialogScrollbarRect() const {
+		const SDL_Rect list = FileDialogListRect();
+		return SDL_Rect{list.x + list.w - kFileDialogScrollbarWidth + 1, list.y + 2,
+			kFileDialogScrollbarWidth - 2, std::max(1, list.h - 4)};
+	}
+
+	jpegview_linux::FileDialogScrollbarGeometry FileDialogScrollGeometry() const {
+		const SDL_Rect track = FileDialogScrollbarRect();
+		const jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
+		return jpegview_linux::CalculateFileDialogScrollbarGeometry(
+			static_cast<int>(model.Entries().size()), FileDialogVisibleRows(), model.Scroll(),
+			track.y, track.h, kFileDialogScrollbarMinimumThumbHeight);
+	}
+
+	SDL_Rect FileDialogScrollbarThumbRect() const {
+		const SDL_Rect track = FileDialogScrollbarRect();
+		const jpegview_linux::FileDialogScrollbarGeometry geometry = FileDialogScrollGeometry();
+		return SDL_Rect{track.x + 2, geometry.thumbY, std::max(1, track.w - 4),
+			geometry.thumbHeight};
+	}
+
 	int FileDialogPreviewWidth() const {
 		const SDL_Rect dialog = FileDialogRect();
 		const int availableWidth = dialog.w - 24 - kFileDialogDividerWidth;
@@ -4655,6 +4691,12 @@ private:
 			const int previewWidth = std::clamp(fileDialogDragStartPreviewWidth_ +
 				fileDialogDragStartX_ - x, kFileDialogMinimumPreviewWidth, maximumWidth);
 			fileDialogPreviewRatio_ = static_cast<double>(previewWidth) / availableWidth;
+		} else if (fileDialogDragMode_ == FileDialogDragMode::Scrollbar) {
+			const jpegview_linux::FileDialogScrollbarGeometry geometry = FileDialogScrollGeometry();
+			const int thumbY = y - fileDialogScrollbarGrabOffset_;
+			ActiveFileDialogModel().ScrollTo(
+				jpegview_linux::FileDialogScrollForThumbPosition(geometry, thumbY),
+				FileDialogVisibleRows());
 		}
 	}
 
@@ -4679,18 +4721,40 @@ private:
 		return true;
 	}
 
+	bool BeginFileDialogScrollbarInteraction(int x, int y) {
+		if (!PointInRect(x, y, FileDialogScrollbarRect())) return false;
+		const jpegview_linux::FileDialogScrollbarGeometry geometry = FileDialogScrollGeometry();
+		if (!geometry.scrollable) return true;
+		const SDL_Rect thumb = FileDialogScrollbarThumbRect();
+		if (PointInRect(x, y, thumb)) {
+			fileDialogDragMode_ = FileDialogDragMode::Scrollbar;
+			fileDialogScrollbarGrabOffset_ = y - geometry.thumbY;
+			SDL_CaptureMouse(SDL_TRUE);
+		} else {
+			const int direction = y < geometry.thumbY + geometry.thumbHeight / 2 ? -1 : 1;
+			ActiveFileDialogModel().ScrollBy(direction * FileDialogVisibleRows(),
+				FileDialogVisibleRows());
+		}
+		return true;
+	}
+
 	void EndFileDialogResize(int x, int y) {
 		if (fileDialogDragMode_ == FileDialogDragMode::None) return;
+		const bool savePersistentSettings = fileDialogDragMode_ != FileDialogDragMode::Scrollbar;
 		fileDialogDragMode_ = FileDialogDragMode::None;
 		SDL_CaptureMouse(SDL_FALSE);
 		UpdateFileDialogCursor(x, y);
-		SaveSettings();
+		if (savePersistentSettings) SaveSettings();
 	}
 
 	void UpdateFileDialogCursor(int x, int y) const {
 		if (fileDialogDragMode_ == FileDialogDragMode::Resize ||
 			PointInRect(x, y, FileDialogResizeHandleRect())) {
 			if (fileDialogResizeCursor_ != nullptr) SDL_SetCursor(fileDialogResizeCursor_);
+		} else if (fileDialogDragMode_ == FileDialogDragMode::Scrollbar ||
+			(FileDialogScrollGeometry().scrollable &&
+				PointInRect(x, y, FileDialogScrollbarRect()))) {
+			if (fileDialogScrollbarCursor_ != nullptr) SDL_SetCursor(fileDialogScrollbarCursor_);
 		} else if (fileDialogDragMode_ == FileDialogDragMode::PreviewDivider ||
 			(FileDialogHasPreviewColumn() && PointInRect(x, y, FileDialogDividerRect()))) {
 			if (thumbnailResizeCursor_ != nullptr) SDL_SetCursor(thumbnailResizeCursor_);
@@ -5028,9 +5092,9 @@ private:
 	}
 
 	int FileDialogItemAt(int x, int y) const {
-		const SDL_Rect listRect = FileDialogListRect();
-		if (!PointInRect(x, y, listRect)) return -1;
-		const int row = (y - listRect.y) / 26;
+		const SDL_Rect contentRect = FileDialogListContentRect();
+		if (!PointInRect(x, y, contentRect)) return -1;
+		const int row = (y - contentRect.y) / 26;
 		const jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
 		const int item = model.Scroll() + row;
 		return item >= 0 && item < static_cast<int>(model.Entries().size()) ? item : -1;
@@ -5179,6 +5243,8 @@ private:
 			if (event.button.button == SDL_BUTTON_LEFT && BeginFileDialogResize(lastMouseX_, lastMouseY_)) break;
 			if (event.button.button == SDL_BUTTON_LEFT &&
 				BeginFileDialogPreviewResize(lastMouseX_, lastMouseY_)) break;
+			if (event.button.button == SDL_BUTTON_LEFT &&
+				BeginFileDialogScrollbarInteraction(lastMouseX_, lastMouseY_)) break;
 			const bool dialogClicked = PointInRect(event.button.x, event.button.y, FileDialogRect());
 			const int item = FileDialogItemAt(event.button.x, event.button.y);
 			const bool browseTabClicked = FileDialogHasTabs() && PointInRect(event.button.x,
@@ -5279,6 +5345,7 @@ private:
 		const int listTop = FileDialogListTop();
 		const int rows = FileDialogVisibleRows();
 		const SDL_Rect listRect = FileDialogListRect();
+		const SDL_Rect listContentRect = FileDialogListContentRect();
 		const jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
 		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 210);
 		SDL_RenderFillRect(renderer_, &listRect);
@@ -5290,17 +5357,19 @@ private:
 			const int rowTop = listTop + row * 26;
 			if (item == model.SelectedIndex()) {
 				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
-				SDL_Rect selection{listRect.x + 2, rowTop + 1, listRect.w - 4, 24};
+				SDL_Rect selection{listContentRect.x + 2, rowTop + 1,
+					listContentRect.w - 4, 24};
 				SDL_RenderFillRect(renderer_, &selection);
 			}
 			if (fileDialogTab_ == FileDialogTab::Recents) {
-				const int leftX = listRect.x + 10;
-				const int pathWidth = std::max(1, (listRect.w - 30) / 2);
-				const int filenameWidth = std::max(1, listRect.w - 30 - pathWidth);
+				const int leftX = listContentRect.x + 10;
+				const int pathWidth = std::max(1, (listContentRect.w - 30) / 2);
+				const int filenameWidth = std::max(1, listContentRect.w - 30 - pathWidth);
 				const std::string parent = ClipText(
 					jpegview_linux::ArchiveLocationDisplayName(entry.path.parent_path()), pathWidth);
 				const std::string filename = ClipText(entry.path.filename().string(), filenameWidth);
-				const int filenameX = listRect.x + listRect.w - 10 - TextWidth(filename, kUiTextScale);
+				const int filenameX = listContentRect.x + listContentRect.w - 10 -
+					TextWidth(filename, kUiTextScale);
 				const bool fromArchive = entry.archiveMember;
 				DrawText(parent, leftX, rowTop + 5, kUiTextScale,
 					fromArchive ? 210 : 165, fromArchive ? 170 : 175, fromArchive ? 105 : 190);
@@ -5312,17 +5381,17 @@ private:
 					const auto summary = fileDialogDirectorySummaries_.find(entry.path.string());
 					summaryText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
 						jpegview_linux::FormatDirectorySummary(summary->second);
-					summaryText = ClipText(summaryText, std::max(1, listRect.w / 2 - 20));
+					summaryText = ClipText(summaryText, std::max(1, listContentRect.w / 2 - 20));
 				}
 				const int summaryWidth = TextWidth(summaryText, kUiTextScale);
-				const int summaryX = listRect.x + listRect.w - 10 - summaryWidth;
-				const int labelWidth = summaryText.empty() ? listRect.w - 20 :
-					std::max(1, summaryX - (listRect.x + 10) - 12);
+				const int summaryX = listContentRect.x + listContentRect.w - 10 - summaryWidth;
+				const int labelWidth = summaryText.empty() ? listContentRect.w - 20 :
+					std::max(1, summaryX - (listContentRect.x + 10) - 12);
 				const bool archiveEntry = entry.archiveContainer || entry.archiveMember;
 				const Uint8 red = archiveEntry ? 255 : entry.directory ? 185 : 235;
 				const Uint8 green = archiveEntry ? 205 : entry.directory ? 205 : 235;
 				const Uint8 blue = archiveEntry ? 125 : 235;
-				DrawText(ClipText(FileDialogEntryLabel(entry), labelWidth), listRect.x + 10,
+				DrawText(ClipText(FileDialogEntryLabel(entry), labelWidth), listContentRect.x + 10,
 					rowTop + 5, kUiTextScale, red, green, blue);
 				if (!summaryText.empty()) {
 					DrawText(summaryText, summaryX, rowTop + 5, kUiTextScale, 155, 175, 195);
@@ -5332,9 +5401,24 @@ private:
 		if (model.Entries().empty() && fileDialogTab_ == FileDialogTab::Recents) {
 			const std::string emptyMessage = model.Filter().empty() ?
 				"No recent files" : "No recent files match this filter";
-			DrawText(emptyMessage, listRect.x + 12, listRect.y + 10, kUiTextScale,
+			DrawText(emptyMessage, listContentRect.x + 12, listRect.y + 10, kUiTextScale,
 				165, 175, 190);
 		}
+		const SDL_Rect scrollbarTrack = FileDialogScrollbarRect();
+		const jpegview_linux::FileDialogScrollbarGeometry scrollbar = FileDialogScrollGeometry();
+		SDL_SetRenderDrawColor(renderer_, 34, 34, 34, 230);
+		SDL_RenderFillRect(renderer_, &scrollbarTrack);
+		DrawRect(scrollbarTrack, 63, 63, 63);
+		const SDL_Rect scrollbarThumb = FileDialogScrollbarThumbRect();
+		const bool scrollbarHovered = PointInRect(lastMouseX_, lastMouseY_, scrollbarTrack);
+		const Uint8 thumbShade = !scrollbar.scrollable ? 82 :
+			(fileDialogDragMode_ == FileDialogDragMode::Scrollbar ? 185 :
+				(scrollbarHovered ? 158 : 128));
+		SDL_SetRenderDrawColor(renderer_, thumbShade, thumbShade, thumbShade, 255);
+		SDL_RenderFillRect(renderer_, &scrollbarThumb);
+		const Uint8 thumbBorder = static_cast<Uint8>(std::min(220,
+			static_cast<int>(thumbShade) + 35));
+		DrawRect(scrollbarThumb, thumbBorder, thumbBorder, thumbBorder);
 		if (FileDialogHasPreviewColumn()) {
 			RenderFileDialogPreview(FileDialogPreviewRect());
 			const SDL_Rect divider = FileDialogDividerRect();
@@ -6975,6 +7059,7 @@ private:
 	int thumbnailResizeOffset_ = 0;
 	SDL_Cursor* thumbnailResizeCursor_ = nullptr;
 	SDL_Cursor* fileDialogResizeCursor_ = nullptr;
+	SDL_Cursor* fileDialogScrollbarCursor_ = nullptr;
 	SDL_Cursor* cropCrosshairCursor_ = nullptr;
 	SDL_Cursor* cropMoveCursor_ = nullptr;
 	SDL_Cursor* cropHorizontalCursor_ = nullptr;
@@ -7030,6 +7115,7 @@ private:
 	int fileDialogDragStartY_ = 0;
 	int fileDialogDragStartPreviewWidth_ = 0;
 	SDL_Rect fileDialogDragStartRect_{};
+	int fileDialogScrollbarGrabOffset_ = 0;
 	bool fileDialogSaveFullSize_ = true;
 	bool fileDialogOverwriteConfirmed_ = false;
 	bool fileDialogLosslessCrop_ = false;

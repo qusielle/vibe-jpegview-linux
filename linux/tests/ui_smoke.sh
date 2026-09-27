@@ -570,6 +570,65 @@ case "$wheel_dialog_title" in
 	wheel-04.ppm*) ;;
 	*) echo "UI smoke test: mouse wheel did not scroll and select through the open-dialog file list" >&2; exit 1 ;;
 esac
+
+# Clicking the scrollbar track pages one viewport; dragging its proportional
+# thumb to the end exposes and opens the final entry without changing the
+# selected row until the pointer moves back into the list.
+wheel_preview_width=$((wheel_dialog_width / 3))
+if [ "$wheel_preview_width" -lt 200 ]; then wheel_preview_width=200; fi
+if [ "$wheel_preview_width" -gt 260 ]; then wheel_preview_width=260; fi
+wheel_list_width=$((wheel_dialog_width - 24 - wheel_preview_width - 12))
+wheel_visible_rows=$(((wheel_dialog_height - 168) / 26))
+if [ "$wheel_visible_rows" -lt 1 ]; then wheel_visible_rows=1; fi
+wheel_track_x=$((wheel_dialog_x + 12 + wheel_list_width - 8))
+wheel_track_y=$((wheel_dialog_y + 112 + 2))
+wheel_track_height=$((wheel_visible_rows * 26 - 4))
+wheel_thumb_height=$((wheel_track_height * wheel_visible_rows / 41))
+if [ "$wheel_thumb_height" -lt 26 ]; then wheel_thumb_height=26; fi
+wheel_last_row_y=$((wheel_dialog_y + 112 + (wheel_visible_rows - 1) * 26 + 13))
+wheel_content_x=$((wheel_dialog_x + 30))
+
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool type --delay 10 'wheel-'
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/open-dialog-scrollbar.png"
+	scrollbar_thumb_pixel=$(convert "$temporary/open-dialog-scrollbar.png" \
+		-format "%[pixel:p{$wheel_track_x,$((wheel_track_y + wheel_thumb_height / 2))}]" info:)
+	case "$scrollbar_thumb_pixel" in
+		srgb\(128,128,128\)|srgb\(158,158,158\)|srgb\(185,185,185\)) ;;
+		*) echo "UI smoke test: scrollbar thumb was not visibly rendered ($scrollbar_thumb_pixel)" >&2; exit 1 ;;
+	esac
+fi
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$wheel_track_x" "$((wheel_track_y + wheel_track_height - 1))" click 1
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$wheel_content_x" "$wheel_last_row_y" click 1
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+scrollbar_page_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$scrollbar_page_title" in
+	wheel-34.ppm*) ;;
+	*) echo "UI smoke test: clicking below the scrollbar thumb did not page the file list" >&2; exit 1 ;;
+esac
+
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool type --delay 10 'wheel-'
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$wheel_track_x" "$((wheel_track_y + wheel_thumb_height / 2))"
+DISPLAY=":$display_number" xdotool mousedown 1
+DISPLAY=":$display_number" xdotool mousemove --sync --window "$window_id" \
+	"$wheel_track_x" "$((wheel_track_y + wheel_track_height - wheel_thumb_height / 2))"
+DISPLAY=":$display_number" xdotool mouseup 1
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$wheel_content_x" "$wheel_last_row_y" click 1
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+scrollbar_drag_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+case "$scrollbar_drag_title" in
+	wheel-39.ppm*) ;;
+	*) echo "UI smoke test: dragging the scrollbar thumb to its end did not reveal the final file" >&2; exit 1 ;;
+esac
+
 DISPLAY=":$display_number" xdotool key ctrl+o
 DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool type --delay 10 '01-RED'

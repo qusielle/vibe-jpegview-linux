@@ -174,6 +174,49 @@ FileDialogPreviewSize FileDialogPreviewImageSize(int paneWidth, int paneHeight) 
 	};
 }
 
+FileDialogScrollbarGeometry CalculateFileDialogScrollbarGeometry(
+	int entryCount, int visibleRows, int scroll, int trackY, int trackHeight,
+	int minimumThumbHeight) {
+	FileDialogScrollbarGeometry geometry;
+	geometry.trackY = trackY;
+	geometry.trackHeight = std::max(0, trackHeight);
+	visibleRows = std::max(1, visibleRows);
+	entryCount = std::max(0, entryCount);
+	geometry.maximumScroll = std::max(0, entryCount - visibleRows);
+	geometry.scrollable = geometry.maximumScroll > 0;
+	if (geometry.trackHeight == 0) {
+		geometry.thumbY = trackY;
+		return geometry;
+	}
+	if (!geometry.scrollable) {
+		geometry.thumbHeight = geometry.trackHeight;
+		geometry.thumbY = trackY;
+		return geometry;
+	}
+	const std::int64_t proportionalHeight =
+		static_cast<std::int64_t>(geometry.trackHeight) * visibleRows / entryCount;
+	const int minimum = std::clamp(minimumThumbHeight, 1, geometry.trackHeight);
+	geometry.thumbHeight = static_cast<int>(std::clamp<std::int64_t>(
+		std::max<std::int64_t>(minimum, proportionalHeight), 1, geometry.trackHeight));
+	const int scrollRange = geometry.trackHeight - geometry.thumbHeight;
+	const int clampedScroll = std::clamp(scroll, 0, geometry.maximumScroll);
+	const std::int64_t thumbOffset = (static_cast<std::int64_t>(clampedScroll) * scrollRange +
+		geometry.maximumScroll / 2) / geometry.maximumScroll;
+	geometry.thumbY = trackY + static_cast<int>(thumbOffset);
+	return geometry;
+}
+
+int FileDialogScrollForThumbPosition(const FileDialogScrollbarGeometry& geometry,
+	int requestedThumbY) {
+	if (!geometry.scrollable || geometry.maximumScroll <= 0) return 0;
+	const int scrollRange = geometry.trackHeight - geometry.thumbHeight;
+	if (scrollRange <= 0) return 0;
+	const int thumbOffset = std::clamp(requestedThumbY - geometry.trackY, 0, scrollRange);
+	const std::int64_t scaledOffset = static_cast<std::int64_t>(thumbOffset) *
+		geometry.maximumScroll + scrollRange / 2;
+	return static_cast<int>(scaledOffset / scrollRange);
+}
+
 void FileDialogModel::Begin(bool saveDialog) {
 	saveDialog_ = saveDialog;
 	filter_.clear();
@@ -245,6 +288,12 @@ void FileDialogModel::ScrollBy(int rows, int visibleRows) {
 	const int maximumScroll = std::max(0, static_cast<int>(entries_.size()) - visibleRows);
 	const std::int64_t nextScroll = static_cast<std::int64_t>(scroll_) + rows;
 	scroll_ = static_cast<int>(std::clamp<std::int64_t>(nextScroll, 0, maximumScroll));
+}
+
+void FileDialogModel::ScrollTo(int rows, int visibleRows) {
+	visibleRows = std::max(1, visibleRows);
+	const int maximumScroll = std::max(0, static_cast<int>(entries_.size()) - visibleRows);
+	scroll_ = std::clamp(rows, 0, maximumScroll);
 }
 
 void FileDialogModel::SelectFirst(int visibleRows) {

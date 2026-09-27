@@ -4828,6 +4828,32 @@ void TestFileDialogModelStateAndNavigation() {
 	};
 
 	jpegview_linux::FileDialogModel model;
+	const jpegview_linux::FileDialogScrollbarGeometry disabledScrollbar =
+		jpegview_linux::CalculateFileDialogScrollbarGeometry(5, 5, 2, 20, 100, 24);
+	Expect(!disabledScrollbar.scrollable && disabledScrollbar.maximumScroll == 0 &&
+		disabledScrollbar.thumbY == 20 && disabledScrollbar.thumbHeight == 100 &&
+		jpegview_linux::FileDialogScrollForThumbPosition(disabledScrollbar, 60) == 0,
+		"open-dialog scrollbar did not fill and disable its thumb when all rows fit");
+	const jpegview_linux::FileDialogScrollbarGeometry scrollbarAtStart =
+		jpegview_linux::CalculateFileDialogScrollbarGeometry(100, 10, 0, 20, 200, 24);
+	const jpegview_linux::FileDialogScrollbarGeometry scrollbarAtMiddle =
+		jpegview_linux::CalculateFileDialogScrollbarGeometry(100, 10, 45, 20, 200, 24);
+	const jpegview_linux::FileDialogScrollbarGeometry scrollbarAtEnd =
+		jpegview_linux::CalculateFileDialogScrollbarGeometry(100, 10, 90, 20, 200, 24);
+	Expect(scrollbarAtStart.scrollable && scrollbarAtStart.thumbHeight == 24 &&
+		scrollbarAtStart.thumbY == 20 && scrollbarAtMiddle.thumbY > scrollbarAtStart.thumbY &&
+		scrollbarAtEnd.thumbY + scrollbarAtEnd.thumbHeight == 220 &&
+		jpegview_linux::FileDialogScrollForThumbPosition(scrollbarAtStart, 20) == 0 &&
+		jpegview_linux::FileDialogScrollForThumbPosition(scrollbarAtEnd, 196) == 90 &&
+		std::abs(jpegview_linux::FileDialogScrollForThumbPosition(scrollbarAtMiddle,
+			scrollbarAtMiddle.thumbY) - 45) <= 1,
+		"open-dialog scrollbar thumb was not proportional or could not map to row offsets");
+	const jpegview_linux::FileDialogScrollbarGeometry minimumThumbScrollbar =
+		jpegview_linux::CalculateFileDialogScrollbarGeometry(10000, 1, 0, 4, 80, 22);
+	Expect(minimumThumbScrollbar.thumbHeight == 22 &&
+		jpegview_linux::FileDialogScrollForThumbPosition(minimumThumbScrollbar, -100) == 0 &&
+		jpegview_linux::FileDialogScrollForThumbPosition(minimumThumbScrollbar, 10000) == 9999,
+		"open-dialog scrollbar minimum thumb size or drag clamping was incorrect");
 	model.Begin(false);
 	model.SetEntries({});
 	Expect(model.Entries().empty() && model.SelectedIndex() == -1,
@@ -4860,6 +4886,12 @@ void TestFileDialogModelStateAndNavigation() {
 	model.ScrollBy(-100, 2);
 	Expect(model.Scroll() == 0,
 		"open-dialog wheel scrolling did not clamp at the first row");
+	model.ScrollTo(100, 2);
+	Expect(model.Scroll() == 4 && model.SelectedIndex() == 1,
+		"open-dialog thumb scrolling did not clamp without changing selection");
+	model.ScrollTo(-100, 2);
+	Expect(model.Scroll() == 0 && model.SelectedIndex() == 1,
+		"open-dialog thumb scrolling did not clamp back to the first row");
 
 	model.MoveSelectionByPage(1, 2);
 	Expect(model.SelectedIndex() == 3 && model.Scroll() == 2,

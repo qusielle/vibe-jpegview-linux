@@ -113,8 +113,11 @@ they support.
    non-blocking direct image/subdirectory counts for folder rows, plus a focused-item preview that
    shows the selected image or the first image in a selected folder. The dialog can be resized from
    its lower-right corner, its preview width can be adjusted by dragging the list/preview divider,
-   and the mouse wheel scrolls an overflowing file list. Dialog dimensions and the preview/list
-   proportion are preserved between runs. The preview image is resampled to the pane's usable area
+   and the mouse wheel scrolls an overflowing file list. A visible proportional scrollbar supports
+   thumb dragging and track clicks that page by one viewport, synchronized with wheel and keyboard
+   scrolling.
+   Dialog dimensions and the preview/list proportion are preserved between runs. The preview image
+   is resampled to the pane's usable area
    after resizing, using the thumbnail panel's source-area antialiasing. Preview decoding runs in
    the background; its temporary pixels stay outside the viewer caches. Open dialogs also have a
    **Recents** tab with the same preview pane. It lists the most recently opened image from each
@@ -417,15 +420,16 @@ aspect/fixed-size geometry, manipulation/hit-testing, MCU alignment and image cr
 filters and automatic correction invariants, sort and settings persistence mappings, the complete supported
 keyboard-command mapping, viewport fit/fill/zoom/pan and zoom-navigator geometry, bounded navigator
 panning, open/save browser state, preview
-downsampling, resize- and crop-size-dialog editing/validation, content-sized overlay layout, compact/advanced menu filtering and
+downsampling, resize- and crop-size-dialog editing/validation, scrollbar geometry and row-offset
+mapping, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
 trips across static and animated formats, archive listing and member decoding, path-traversal rejection,
 nested archive navigation and archive-backed recent previews, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, ZIP browsing/recent reopening,
-focus restoration, paging,
-Home/End, held-key movement, wheel scrolling, and dialog/preview resizing; thumbnail
+focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and
+dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;
 mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; crop-mode dialog, selection
@@ -478,8 +482,9 @@ PageUp/PageDown move one visible page, and Home/End select the first/last row; a
 while held. Entering a folder selects its first child rather than the `[..]` parent row; returning
 to the parent selects the folder that was just exited. Folder rows show
 right-aligned counts of compatible images and subdirectories at their immediate level; these are
-calculated in the background. The mouse wheel scrolls the visible file list; drag the dialog's
-lower-right corner to resize it, or drag the vertical separator to adjust the preview width. A
+calculated in the background. The mouse wheel scrolls the visible file list; its vertical scrollbar
+can be dragged or paged by clicking the track. Drag the dialog's lower-right corner to resize it, or
+drag the vertical separator to adjust the preview width. A
 preview alongside the list follows the focused file, or the first image in a focused folder using
 the current listing order. Ctrl+R reloads, and
 Ctrl+N toggles the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the

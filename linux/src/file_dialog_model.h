@@ -60,6 +60,26 @@ struct FileDialogPreviewSize {
 	int height = 0;
 };
 
+struct FileDialogScrollbarGeometry {
+	int trackY = 0;
+	int trackHeight = 0;
+	int thumbY = 0;
+	int thumbHeight = 0;
+	int maximumScroll = 0;
+	bool scrollable = false;
+};
+
+// Calculates a proportional scrollbar thumb while enforcing a usable minimum
+// size. The supplied track coordinates and scroll offset are clamped safely.
+FileDialogScrollbarGeometry CalculateFileDialogScrollbarGeometry(
+	int entryCount, int visibleRows, int scroll, int trackY, int trackHeight,
+	int minimumThumbHeight);
+
+// Maps a requested thumb position back to a clamped row offset. Track clicks
+// can then page the model while thumb drags use this exact inverse mapping.
+int FileDialogScrollForThumbPosition(const FileDialogScrollbarGeometry& geometry,
+	int requestedThumbY);
+
 // Returns the preview image area inside a pane, accounting for its label,
 // frame inset, and reserved filename footer.
 FileDialogPreviewSize FileDialogPreviewImageSize(int paneWidth, int paneHeight);
@@ -79,6 +99,7 @@ public:
 	void MoveSelection(int direction, int visibleRows);
 	void MoveSelectionByPage(int direction, int visibleRows);
 	void ScrollBy(int rows, int visibleRows);
+	void ScrollTo(int rows, int visibleRows);
 	void SelectFirst(int visibleRows);
 	void SelectLast(int visibleRows);
 	void Select(int index, int visibleRows);
