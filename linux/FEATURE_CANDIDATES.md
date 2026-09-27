@@ -30,6 +30,12 @@ candidates are independent of the JPEGView_L comparison below. The current behav
   report the member's uncompressed image size rather than the size of its containing archive. Keep
   any dimension lookup for large images off the event thread.
 
+## Configuration candidates
+
+- **Advanced configuration window:** expose persisted config-file options that are not already
+  available as context-menu items. Group them by topic and edit the existing settings source of
+  truth rather than introducing a parallel settings layer.
+
 ## Comic-reading interaction candidates
 
 - **Reverse reading order in double page mode:** allow the two pages in a spread to swap sides for
