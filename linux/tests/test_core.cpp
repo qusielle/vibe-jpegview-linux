@@ -41,6 +41,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -3331,6 +3332,51 @@ void TestContextMenuCatalogAndState() {
 		"empty Open with state omitted its disabled placeholder");
 }
 
+void TestContextMenuMnemonics() {
+	using jpegview_linux::ContextMenuState;
+	using jpegview_linux::MenuItem;
+	ContextMenuState state;
+	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
+	const auto open = std::find_if(compact.begin(), compact.end(), [](const MenuItem& item) {
+		return item.command == IDM_OPEN;
+	});
+	Expect(open != compact.end() && open->mnemonic == 'o' && open->mnemonicOffset == 0,
+		"Open image did not receive the expected O mnemonic");
+	const int openIndex = static_cast<int>(std::distance(compact.begin(), open));
+	Expect(jpegview_linux::MenuMnemonicMatches(compact, 'O') == std::vector<int>({openIndex}),
+		"mnemonic matching was not case-insensitive or included ambiguous compact entries");
+	for (const MenuItem& item : compact) {
+		const bool actionable = !item.separator && item.command != 0 && item.enabled;
+		if (!actionable) {
+			Expect(item.mnemonic == '\0' && item.mnemonicOffset == -1,
+				"separator, heading, or disabled item received a mnemonic");
+			continue;
+		}
+		Expect(item.mnemonic >= 'a' && item.mnemonic <= 'z' && item.mnemonicOffset >= 0 &&
+			static_cast<std::size_t>(item.mnemonicOffset) < item.label.size() &&
+			std::tolower(static_cast<unsigned char>(item.label[
+				static_cast<std::size_t>(item.mnemonicOffset)])) == item.mnemonic,
+			"actionable item did not retain the exact character position used by its underline");
+	}
+
+	std::vector<MenuItem> repeated;
+	for (int command = 1; command <= 6; ++command) {
+		repeated.emplace_back("Item", command);
+	}
+	jpegview_linux::AssignMenuMnemonics(repeated);
+	const char repeatedLetter = repeated.front().mnemonic;
+	const std::vector<int> matches = jpegview_linux::MenuMnemonicMatches(repeated, repeatedLetter);
+	Expect(matches.size() == 2 && matches.front() == 0,
+		"mnemonic assignment did not share a letter after the candidate alphabet was exhausted");
+	Expect(jpegview_linux::NextMenuMnemonicSelection(repeated, repeatedLetter, -1) == matches[0] &&
+		jpegview_linux::NextMenuMnemonicSelection(repeated, repeatedLetter, matches[0]) == matches[1] &&
+		jpegview_linux::NextMenuMnemonicSelection(repeated, repeatedLetter, matches[1]) == matches[0],
+		"ambiguous mnemonic presses did not cycle matching commands in menu order");
+	Expect(jpegview_linux::MenuMnemonicMatches(repeated, '!').empty() &&
+		jpegview_linux::NextMenuMnemonicSelection(repeated, '!', -1) == -1,
+		"non-letter mnemonic returned a selectable menu item");
+}
+
 void TestCropContextMenuCommandsAndModes() {
 	using jpegview_linux::ContextMenuState;
 	using jpegview_linux::CropSelectionMode;
@@ -4679,6 +4725,7 @@ int main() {
 	RunTest("crop-size-dialog-controller", TestCropSizeDialogController, failures);
 	RunTest("context-menu-compaction-and-selection", TestContextMenuCompactionAndSelection, failures);
 	RunTest("context-menu-catalog-and-state", TestContextMenuCatalogAndState, failures);
+	RunTest("context-menu-letter-mnemonics", TestContextMenuMnemonics, failures);
 	RunTest("crop-context-menu-commands-and-modes", TestCropContextMenuCommandsAndModes, failures);
 	RunTest("context-menu-column-layout-and-navigation", TestContextMenuColumnLayoutAndNavigation, failures);
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);

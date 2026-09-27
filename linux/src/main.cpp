@@ -6108,6 +6108,19 @@ private:
 				const int textY = itemTop + (ContextMenuRowHeight() - TextLineHeight()) / 2;
 				DrawText(label, columnX + 12, textY, kUiTextScale,
 					textColor, textColor, textColor);
+				if (item.mnemonicOffset >= 0) {
+					const std::size_t visibleOffset = static_cast<std::size_t>(item.mnemonicOffset) +
+						(item.checked ? 4u : 0u);
+					if (visibleOffset < label.size()) {
+						const int underlineX = columnX + 12 + TextWidth(
+							label.substr(0, visibleOffset), kUiTextScale);
+						const int underlineWidth = std::max(1, TextWidth(
+							label.substr(visibleOffset, 1), kUiTextScale));
+						const int underlineY = textY + std::max(0, TextLineHeight() - 2);
+						DrawLine(underlineX, underlineY, underlineX + underlineWidth - 1,
+							underlineY, textColor, textColor, textColor);
+					}
+				}
 				if (!shortcut.empty()) {
 					const int shortcutWidth = TextWidth(shortcut, kUiTextScale);
 					const Uint8 shortcutColor = item.enabled ? 175 : 90;
@@ -6128,6 +6141,21 @@ private:
 		SDL_Event event{};
 		while (SDL_PollEvent(&event) != 0) {
 			playback_.NotifyInteraction(SDL_GetTicks());
+			if (pendingMenuMnemonicTextInput_ != '\0') {
+				if (event.type == SDL_KEYDOWN) {
+					pendingMenuMnemonicTextInput_ = '\0';
+				} else if (event.type == SDL_TEXTINPUT) {
+					const char textCharacter = event.text.text[0];
+					const char uppercaseMnemonic = pendingMenuMnemonicTextInput_ >= 'a' &&
+						pendingMenuMnemonicTextInput_ <= 'z' ?
+						pendingMenuMnemonicTextInput_ - 'a' + 'A' : pendingMenuMnemonicTextInput_;
+					const bool matchingTextInput = event.text.text[1] == '\0' &&
+						(textCharacter == pendingMenuMnemonicTextInput_ ||
+							textCharacter == uppercaseMnemonic);
+					pendingMenuMnemonicTextInput_ = '\0';
+					if (matchingTextInput) continue;
+				}
+			}
 			if (confirmationOpen_) {
 				if (event.type == SDL_QUIT) running = false;
 				else HandleConfirmationEvents(event);
@@ -6181,6 +6209,22 @@ private:
 						MoveContextMenuSelectionAcrossColumns(-1);
 					} else if (event.key.keysym.sym == SDLK_RIGHT) {
 						MoveContextMenuSelectionAcrossColumns(1);
+					} else if (event.key.repeat == 0 &&
+						(event.key.keysym.mod & 0x0FC0u) == 0 &&
+						((event.key.keysym.sym >= 'a' && event.key.keysym.sym <= 'z') ||
+							(event.key.keysym.sym >= 'A' && event.key.keysym.sym <= 'Z'))) {
+						const char letter = static_cast<char>(event.key.keysym.sym);
+						const std::vector<int> matches =
+							jpegview_linux::MenuMnemonicMatches(contextMenuItems_, letter);
+						if (matches.size() == 1) {
+							menuSelected_ = matches.front();
+							pendingMenuMnemonicTextInput_ = letter >= 'A' && letter <= 'Z' ?
+								letter - 'A' + 'a' : letter;
+							ActivateContextMenuSelection(running);
+						} else if (!matches.empty()) {
+							menuSelected_ = jpegview_linux::NextMenuMnemonicSelection(
+								contextMenuItems_, letter, menuSelected_);
+						}
 					} else if (event.key.repeat == 0 && event.key.keysym.sym == SDLK_ESCAPE) {
 						CloseContextMenu();
 					} else if (event.key.repeat == 0 &&
@@ -6578,6 +6622,7 @@ private:
 	bool contextMenuCropOnly_ = false;
 	bool contextMenuPositionLocked_ = false;
 	bool contextMenuNeedsCleanFrame_ = false;
+	char pendingMenuMnemonicTextInput_ = '\0';
 	int contextMenuX_ = 0;
 	int contextMenuY_ = 0;
 	int menuSelected_ = -1;

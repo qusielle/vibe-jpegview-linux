@@ -95,6 +95,8 @@ they support.
    Windows-only administration entries without persisting the expanded state. Long menus split into
    columns, support Left/Right column movement and repeating Up/Down movement, remain inside the
    window when expanded, open at the current pointer, and can be opened from the keyboard menu key.
+   Enabled command items with a Latin letter show an underlined mnemonic; pressing a unique letter
+   activates it, while duplicate letters cycle matching entries for Enter.
 
 9. **Portable file and desktop operations.** The branch adds a native open/save browser, processed
    full-size and screen-size saving with overwrite confirmation, live case-insensitive filename
@@ -398,7 +400,8 @@ trips across static and animated formats, all PNM variants, malformed input, bat
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, focus restoration, paging,
 Home/End, held-key movement, wheel scrolling, and dialog/preview resizing; thumbnail
-display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu expansion and repainting; startup controls;
+display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
+and repainting; startup controls;
 mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; crop-mode dialog, selection
 overlay, crop, and lossless JPEG output; zoom-navigator visibility, click-to-pan, and drag-to-pan;
 maximize restoration; and persisted settings:
@@ -478,7 +481,9 @@ transforms and correction, extra zoom and window controls, slideshow controls, a
 administration, including the user-local default-viewer registration and disabled Windows-only
 commands, without saving that choice. The compact menu keeps common navigation, fit/actual-size,
 fullscreen, and fit-window-to-image commands available. The menu also supports keyboard selection
-with Up/Down and Return; if it spans multiple
+with Up/Down and Return. Underlined letters activate uniquely matching enabled commands; if a letter
+is shared, press it repeatedly to cycle the matching rows and press Enter to activate the selection.
+If the menu spans multiple
 columns to fit the window height, Left/Right moves between columns. Hovering over a lower
 navigation-panel button displays its Windows-style action hint. Unseen files inherit the shared
 fit/fill/actual-size or manual mode as navigation proceeds; a previously visited file restores its

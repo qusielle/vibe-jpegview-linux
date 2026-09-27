@@ -24,14 +24,17 @@ struct MenuItem {
 	bool enabled = true;
 	std::string shortcut;
 	bool advanced = false;
+	char mnemonic = '\0';
+	int mnemonicOffset = -1;
 
 	MenuItem(const char* itemLabel = nullptr, int itemCommand = 0,
 		bool itemSeparator = false, bool itemChecked = false,
 		bool itemEnabled = true, const char* itemShortcut = nullptr,
-		bool itemAdvanced = false)
+		bool itemAdvanced = false, char itemMnemonic = '\0', int itemMnemonicOffset = -1)
 		: label(itemLabel == nullptr ? "" : itemLabel), command(itemCommand),
 		  separator(itemSeparator), checked(itemChecked), enabled(itemEnabled),
-		  shortcut(itemShortcut == nullptr ? "" : itemShortcut), advanced(itemAdvanced) {}
+		  shortcut(itemShortcut == nullptr ? "" : itemShortcut), advanced(itemAdvanced),
+		  mnemonic(itemMnemonic), mnemonicOffset(itemMnemonicOffset) {}
 };
 
 struct MenuColumn {
@@ -85,6 +88,14 @@ struct ContextMenuState {
 
 std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 	bool advancedOptions);
+
+// Assigns case-insensitive ASCII letter hints to enabled command items. Unique
+// letters are preferred; items beyond the available alphabet share the least
+// used candidate so their hints remain discoverable and can be cycled.
+void AssignMenuMnemonics(std::vector<MenuItem>& items);
+
+std::vector<int> MenuMnemonicMatches(const std::vector<MenuItem>& items, char letter);
+int NextMenuMnemonicSelection(const std::vector<MenuItem>& items, char letter, int current);
 
 std::vector<MenuItem> CompactMenuItems(const std::vector<MenuItem>& items,
 	int showAdvancedCommand, const char* showAdvancedLabel);

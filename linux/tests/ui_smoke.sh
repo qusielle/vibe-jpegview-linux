@@ -229,6 +229,23 @@ click_file_dialog_tab() {
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$tab_x" "$tab_y" click 1
 }
 
+# Exercise the mnemonic in an isolated viewer session so the rest of this
+# smoke suite starts from the original first image and an empty recent history.
+XDG_STATE_HOME="$temporary/mnemonic-state"
+export XDG_STATE_HOME
+launch_viewer
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
+DISPLAY=":$display_number" xdotool key --clearmodifiers o
+sleep 0.15
+DISPLAY=":$display_number" xdotool type --delay 20 '00-entry-test'
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.15
+DISPLAY=":$display_number" xdotool key Return
+assert_title_prefix "inside-first.ppm" "context-menu O mnemonic did not open the matching image"
+stop_viewer
+XDG_STATE_HOME="$temporary/state"
+export XDG_STATE_HOME
+
 launch_viewer
 help_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 DISPLAY=":$display_number" xdotool windowfocus --sync "$window_id"

@@ -39,7 +39,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, filter selection, and pure
   focus/text-editing transitions.
 - `context_menu_model`: the complete menu catalog, state-derived enablement/checkmarks,
-  compact/advanced filtering, and actionable-item keyboard navigation.
+  compact/advanced filtering, actionable-item keyboard navigation, and deterministic letter
+  mnemonic assignment with duplicate-letter matching/cycling.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently

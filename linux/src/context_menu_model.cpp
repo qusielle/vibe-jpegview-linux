@@ -6,6 +6,7 @@
 #include "../../src/JPEGView/resource.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -16,6 +17,31 @@ namespace {
 
 bool IsSelectable(const MenuItem& item) {
 	return !item.separator && item.command != 0 && item.enabled;
+}
+
+bool IsAsciiLetter(unsigned char character) {
+	return (character >= 'A' && character <= 'Z') ||
+		(character >= 'a' && character <= 'z');
+}
+
+char LowerAscii(char character) {
+	if (character >= 'A' && character <= 'Z') {
+		return static_cast<char>(character - 'A' + 'a');
+	}
+	return character;
+}
+
+std::vector<int> FindMenuMnemonicMatches(const std::vector<MenuItem>& items, char letter) {
+	std::vector<int> matches;
+	letter = LowerAscii(letter);
+	if (letter < 'a' || letter > 'z') return matches;
+	for (std::size_t index = 0; index < items.size(); ++index) {
+		const MenuItem& item = items[index];
+		if (IsSelectable(item) && LowerAscii(item.mnemonic) == letter) {
+			matches.push_back(static_cast<int>(index));
+		}
+	}
+	return matches;
 }
 
 int ItemHeight(const MenuItem& item, int itemHeight, int separatorHeight) {
@@ -82,6 +108,7 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 				break;
 			}
 		}
+		AssignMenuMnemonics(cropItems);
 		return cropItems;
 	}
 	const std::string sortingLabel = "Current order: " +
@@ -292,7 +319,63 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 	if (!advancedOptions) {
 		items = CompactMenuItems(items, kContextMenuShowAdvanced, "Show Advanced Options");
 	}
+	AssignMenuMnemonics(items);
 	return items;
+}
+
+void AssignMenuMnemonics(std::vector<MenuItem>& items) {
+	std::array<unsigned int, 26> usage{};
+	for (MenuItem& item : items) {
+		item.mnemonic = '\0';
+		item.mnemonicOffset = -1;
+		if (!IsSelectable(item)) continue;
+
+		std::vector<std::size_t> candidates;
+		bool inWord = false;
+		for (std::size_t offset = 0; offset < item.label.size(); ++offset) {
+			const bool letter = IsAsciiLetter(static_cast<unsigned char>(item.label[offset]));
+			if (letter && !inWord) candidates.push_back(offset);
+			inWord = letter;
+		}
+		for (std::size_t offset = 0; offset < item.label.size(); ++offset) {
+			if (IsAsciiLetter(static_cast<unsigned char>(item.label[offset]))) {
+				candidates.push_back(offset);
+			}
+		}
+		if (candidates.empty()) continue;
+
+		std::size_t selectedOffset = candidates.front();
+		unsigned int minimumUse = std::numeric_limits<unsigned int>::max();
+		for (const std::size_t offset : candidates) {
+			const char candidate = LowerAscii(item.label[offset]);
+			const unsigned int count = usage[static_cast<std::size_t>(candidate - 'a')];
+			if (count == 0) {
+				selectedOffset = offset;
+				minimumUse = 0;
+				break;
+			}
+			if (count < minimumUse) {
+				selectedOffset = offset;
+				minimumUse = count;
+			}
+		}
+		item.mnemonic = LowerAscii(item.label[selectedOffset]);
+		item.mnemonicOffset = static_cast<int>(selectedOffset);
+		++usage[static_cast<std::size_t>(item.mnemonic - 'a')];
+	}
+}
+
+std::vector<int> MenuMnemonicMatches(const std::vector<MenuItem>& items, char letter) {
+	return FindMenuMnemonicMatches(items, letter);
+}
+
+int NextMenuMnemonicSelection(const std::vector<MenuItem>& items, char letter, int current) {
+	const std::vector<int> matches = MenuMnemonicMatches(items, letter);
+	if (matches.empty()) return -1;
+	const auto currentMatch = std::find(matches.begin(), matches.end(), current);
+	if (currentMatch == matches.end()) return matches.front();
+	const auto nextMatch = currentMatch + 1;
+	return nextMatch == matches.end() ? matches.front() : *nextMatch;
 }
 
 
