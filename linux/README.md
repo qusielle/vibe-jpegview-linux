@@ -110,7 +110,8 @@ they support.
 9. **Portable file and desktop operations.** The branch adds a native open/save browser, processed
    full-size and screen-size saving with overwrite confirmation, live case-insensitive filename
    filtering, name/newest-modification-date listing order, Ctrl+Return direct folder opening, and
-   non-blocking direct image/subdirectory counts for folder rows, plus a focused-item preview that
+   non-blocking direct image/directory counts for folder rows (supported archive containers count as
+   directories), plus a focused-item preview that
    shows the selected image or the first image in a selected folder. The dialog can be resized from
    its lower-right corner, its preview width can be adjusted by dragging the list/preview divider,
    and the mouse wheel scrolls an overflowing file list. A visible proportional scrollbar supports
@@ -481,8 +482,9 @@ filter and navigates to the parent folder once the filter is empty. Up/Down move
 PageUp/PageDown move one visible page, and Home/End select the first/last row; all six keys repeat
 while held. Entering a folder selects its first child rather than the `[..]` parent row; returning
 to the parent selects the folder that was just exited. Folder rows show
-right-aligned counts of compatible images and subdirectories at their immediate level; these are
-calculated in the background. The mouse wheel scrolls the visible file list; its vertical scrollbar
+right-aligned counts of compatible images and directories at their immediate level; supported
+archive containers count as directories, and the counts are calculated in the background. The mouse
+wheel scrolls the visible file list; its vertical scrollbar
 can be dragged or paged by clicking the track. Drag the dialog's lower-right corner to resize it, or
 drag the vertical separator to adjust the preview width. A
 preview alongside the list follows the focused file, or the first image in a focused folder using

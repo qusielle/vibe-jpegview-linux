@@ -4968,12 +4968,13 @@ void TestFileDialogDirectorySummaries() {
 	WriteText(album / "scan.ppm", "image fixture");
 	WriteText(album / "notes.txt", "not an image");
 	WriteText(album / "first-subdir" / "recursive.png", "must not be counted");
+	WriteZipArchive(album / "archive.ZIP", {{"contained-photo.jpg", album / "photo.JPG"}});
 
 	const jpegview_linux::DirectorySummary summary =
 		jpegview_linux::CountImmediateDirectoryContents(album);
-	Expect(summary.imageCount == 2 && summary.subdirectoryCount == 2,
-		"directory summary did not count only immediate compatible images and subdirectories");
-	Expect(jpegview_linux::FormatDirectorySummary(summary) == "2 images, 2 dirs",
+	Expect(summary.imageCount == 2 && summary.subdirectoryCount == 3,
+		"directory summary did not count immediate compatible images, subdirectories, and archive folders");
+	Expect(jpegview_linux::FormatDirectorySummary(summary) == "2 images, 3 dirs",
 		"directory summary plural formatting is incorrect");
 	Expect(jpegview_linux::FormatDirectorySummary({1, 1}) == "1 image, 1 dir",
 		"directory summary singular formatting is incorrect");
@@ -4988,7 +4989,7 @@ void TestFileDialogDirectorySummaries() {
 	}
 	Expect(results.size() == 1 && results[0].generation == 17 &&
 		results[0].directory == album && results[0].summary.imageCount == 2 &&
-		results[0].summary.subdirectoryCount == 2,
+		results[0].summary.subdirectoryCount == 3,
 		"background directory summary loader did not publish the requested result");
 
 	const fs::path empty = temporary.path() / "empty";

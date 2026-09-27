@@ -49,9 +49,12 @@ DirectorySummary CountImmediateDirectoryContentsWhile(
 		std::error_code statusError;
 		if (iterator->is_directory(statusError)) {
 			if (!statusError) ++summary.subdirectoryCount;
-		} else if (!statusError && iterator->is_regular_file(statusError) && !statusError &&
-			IsSupportedImagePath(iterator->path())) {
-			++summary.imageCount;
+		} else if (!statusError && iterator->is_regular_file(statusError) && !statusError) {
+			if (IsArchiveContainerName(iterator->path())) {
+				++summary.subdirectoryCount;
+			} else if (IsSupportedImagePath(iterator->path())) {
+				++summary.imageCount;
+			}
 		}
 		iterator.increment(iteratorError);
 	}

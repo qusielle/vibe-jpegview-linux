@@ -45,8 +45,9 @@ struct DirectorySummary {
 	std::size_t subdirectoryCount = 0;
 };
 
-// Counts only direct children. Files in subdirectories are deliberately not
-// visited, matching what the open dialog will show after entering the folder.
+// Counts only direct children. Supported archive containers count as
+// subdirectories because the open dialog browses them like folders. Files in
+// subdirectories are deliberately not visited.
 DirectorySummary CountImmediateDirectoryContents(const std::filesystem::path& directory);
 std::string FormatDirectorySummary(const DirectorySummary& summary);
 

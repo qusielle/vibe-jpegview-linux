@@ -59,7 +59,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
   restoration, pane-aware preview image sizing, cancellable
-  background directory summaries, caller-preserved row order for recent MRU entries, and replaceable
+  background directory summaries (including supported archive containers in the directory count),
+  caller-preserved row order for recent MRU entries, and replaceable
   previews for a focused image or a directory's first image.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
