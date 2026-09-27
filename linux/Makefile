@@ -72,6 +72,7 @@ SOURCES := src/main.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp 
 TEST_SOURCES := tests/test_core.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/cache_budget.cpp src/cache_budget.h src/image_cache.cpp src/image_cache.h src/display_image_cache.cpp src/display_image_cache.h src/image.cpp src/image.h src/image_processing.cpp src/image_processing.h src/image_processing_store.cpp src/image_processing_store.h src/recent_files.cpp src/recent_files.h src/settings.cpp src/settings.h src/transparency_pattern.cpp src/transparency_pattern.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/external_commands.cpp src/external_commands.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h src/overlay_layout.cpp src/overlay_layout.h src/viewer_chrome.cpp src/viewer_chrome.h src/thumbnail_panel_model.cpp src/thumbnail_panel_model.h src/thumbnail_resampler.cpp src/thumbnail_resampler.h src/image_info_model.cpp src/image_info_model.h src/spectrum_model.cpp src/spectrum_model.h src/file_dialog_model.cpp src/file_dialog_model.h src/playback_scheduler.cpp src/playback_scheduler.h src/system_font.cpp src/system_font.h src/bitmap_font.cpp src/bitmap_font.h src/bitmap_font_data.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
 SOURCES += src/archive_source.cpp src/archive_source.h
 TEST_SOURCES += src/archive_source.cpp src/archive_source.h
+TEST_SOURCES += tests/rar_test_fixtures.h
 SOURCES += src/crop_selection_model.cpp src/crop_selection_model.h
 TEST_SOURCES += src/crop_selection_model.cpp src/crop_selection_model.h
 SOURCES += src/crop_size_dialog_model.cpp src/crop_size_dialog_model.h
@@ -85,6 +86,7 @@ TEST_SOURCES += src/magnifying_glass_model.cpp src/magnifying_glass_model.h
 ICON_SOURCE := ../src/JPEGView/res/JPEGView.ico
 GENERATED_ICON_HEADER := $(BUILD_DIR)/jpegview_icon_data.h
 ARCHIVE_FIXTURE_WRITER := $(BUILD_DIR)/write-7z-fixture
+RAR_FIXTURE_WRITER := $(BUILD_DIR)/write-rar-fixture
 SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
 TEST_SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
 SOURCES += $(BUILD_INFO_HEADER)
@@ -122,14 +124,18 @@ $(ARCHIVE_FIXTURE_WRITER): tests/write_7z_fixture.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(ARCHIVE_CFLAGS) $< -o $@ $(ARCHIVE_LIBS)
 
-test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER)
+$(RAR_FIXTURE_WRITER): tests/write_rar_fixture.cpp tests/rar_test_fixtures.h
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -Itests $< -o $@
+
+test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER)
 	@version_output=$$($(TARGET) --version); \
 	expected_version="JPEGView Linux $(VERSION)"; \
 	if [ "$$version_output" != "$$expected_version" ]; then \
 		echo "Version metadata mismatch: expected '$$expected_version', got '$$version_output'" >&2; \
 		exit 1; \
 	fi
-	./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER)
+	./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER)
 
 test-version:
 	sh tests/version_test.sh

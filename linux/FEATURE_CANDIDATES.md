@@ -8,7 +8,6 @@ candidates are independent of the JPEGView_L comparison below. The current behav
 
 ## Archive input candidates
 
-- **RAR image archives:** browse supported images stored in RAR files.
 - **CBZ comic archives:** browse images in comic ZIP files. Comic-page bookmarks and remembered
   reading positions are explicitly out of scope for this candidate.
 - **CB7 comic archives:** browse images in comic 7z files. Comic-page bookmarks and remembered
@@ -16,11 +15,13 @@ candidates are independent of the JPEGView_L comparison below. The current behav
 
 ## Implemented archive input
 
-- **ZIP, TAR, TGZ, and 7z image archives:** implemented in the Linux branch. `.zip`, `.tar`, `.tar.gz`,
-  `.tgz`, and `.7z` browse as virtual folders, list supported images and nested folders without
-  extracting or retaining image payloads, and support archive navigation and Recents previews. Gzip
-  TAR access is sequential; solid 7z archives may need prior members decoded to reach later entries.
-  Cold directory listing runs in a cancellable worker. See current limits and controls in the
+- **ZIP, TAR, TGZ, 7z, and RAR image archives:** implemented in the Linux branch. `.zip`, `.tar`,
+  `.tar.gz`, `.tgz`, `.7z`, and `.rar` browse as virtual folders, list supported images and nested
+  folders without extracting or retaining image payloads, and support archive navigation and Recents
+  previews. RAR4 and RAR5 are supported through libarchive; encrypted and multi-volume RAR archives
+  are not, and solid RAR4 archives are unsupported. Gzip TAR access is sequential; solid 7z and RAR5
+  archives may need earlier members decompressed to reach later entries. Cold directory listing runs
+  in a cancellable worker. See current limits and controls in the
   [Linux README](README.md#linux-branch-changes-in-order-of-importance).
 
 ## Open-dialog display candidates
@@ -244,7 +245,7 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   treating it as a folder image or comic archive. Keep rendering optional if the required PDF
   library is unavailable. See the
   [PDF support commit](https://github.com/sdneon/jpegview/commit/5d79cad3cc98d502576a8c357bffaea540ac67d6).
-- **Password-protected archives:** extend ZIP and the remaining 7z/RAR candidates to request a
+- **Password-protected archives:** extend ZIP, 7z, and RAR support to request a
   password and browse encrypted contents. Prefer a dedicated prompt and short-lived in-memory
   password handling; do not copy the fork's command-line password approach, which can expose secrets
   in process listings. See its explicitly experimental
@@ -309,7 +310,7 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   precision for viewing and saving. See the fork's
   [PSD format documentation](https://github.com/famomatic/jpegview/blob/master/README.md).
 
-Recent-fork ideas already represented above were not duplicated here: PSB, KRA, ZIP/7z browsing
+Recent-fork ideas already represented above were not duplicated here: PSB, KRA, ZIP/7z/RAR browsing
 (now implemented), CBZ/CB7 browsing, recent-file history, go-to-image-number, color sampling,
 negative/inverted colors, asynchronous file-list scanning, and common resampling changes. For example,
 SupaYoshi's recent
@@ -459,5 +460,5 @@ and remain possible candidates:
   and output using a reproducible file before treating the existing cap as a regression.
 - [KrokusPokus/JPEGView_L's release notes](https://github.com/KrokusPokus/JPEGView_L/releases)
   report JPEG XL animation and archive-contained image fixes. Linux advertises animated JPEG XL
-  and supports ZIP/TAR/TGZ/7z-contained images; RAR archive support remains a candidate. Verify a
+  and supports ZIP/TAR/TGZ/7z/RAR-contained images. Verify a
   concrete failing fixture before adding a separate bug-fix item.

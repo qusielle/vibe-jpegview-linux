@@ -36,6 +36,7 @@
 #include "bitmap_font.h"
 #include "playback_scheduler.h"
 #include "archive_source.h"
+#include "rar_test_fixtures.h"
 
 #include "../../src/JPEGView/resource.h"
 
@@ -853,6 +854,81 @@ void TestSevenZipBrowsingDecodingAndPreview() {
 	entries.clear();
 	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
 		"malformed 7z input did not fail with a useful error");
+}
+
+void TestRarBrowsingDecodingAndPreview() {
+	TemporaryDirectory temporary;
+	std::string error;
+	const fs::path rar4 = temporary.path() / "classic.RAR";
+	const std::vector<std::uint8_t> rar4Bytes = rar_test_fixtures::Rar4ImageArchive();
+	Expect(rar4Bytes.size() > 100, "embedded RAR4 fixture did not decode from base64");
+	WriteBytes(rar4, rar4Bytes);
+	Expect(jpegview_linux::IsArchiveContainerName(rar4) &&
+		jpegview_linux::IsArchiveContainerFile(rar4) &&
+		jpegview_linux::ArchiveFormatName(rar4 / "testfile.jpg") == "RAR" &&
+		jpegview_linux::ArchiveBackingFile(rar4 / "testfile.jpg") == rar4,
+		"case-insensitive RAR recognition did not preserve the virtual-member contract");
+
+	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+	Expect(jpegview_linux::ListArchiveDirectory(rar4, entries, error),
+		"cannot list RAR4 image archive: " + error);
+	const fs::path rar4Jpeg = rar4 / "testfile.jpg";
+	Expect(entries.size() == 2 &&
+		std::any_of(entries.begin(), entries.end(), [&](const auto& entry) {
+			return !entry.directory && entry.path == rar4Jpeg && entry.size > 0;
+		}) &&
+		std::any_of(entries.begin(), entries.end(), [&](const auto& entry) {
+			return !entry.directory && entry.path == rar4 / "testfile.png" && entry.size > 0;
+		}),
+		"RAR4 listing did not expose its JPEG and PNG members with sizes");
+	DecodedImage rar4Decoded;
+	Expect(jpegview_linux::DecodeImage(rar4Jpeg, rar4Decoded, error) &&
+		!rar4Decoded.frames.empty() && rar4Decoded.frames.front().width > 0 &&
+		rar4Decoded.frames.front().height > 0,
+		"image decoder could not read a RAR4 member: " + error);
+
+	const fs::path rar5 = temporary.path() / "solid.rar";
+	const std::vector<std::uint8_t> rar5Bytes = rar_test_fixtures::Rar5SolidImageArchive();
+	Expect(rar5Bytes.size() > 100, "embedded solid RAR5 fixture did not decode from base64");
+	WriteBytes(rar5, rar5Bytes);
+	entries.clear();
+	Expect(jpegview_linux::ListArchiveDirectory(rar5, entries, error),
+		"cannot list solid RAR5 image archive: " + error);
+	const fs::path rar5Png = rar5 / "testfile.png";
+	Expect(entries.size() == 2 &&
+		std::any_of(entries.begin(), entries.end(), [&](const auto& entry) {
+			return !entry.directory && entry.path == rar5Png && entry.size > 0;
+		}),
+		"solid RAR5 listing did not expose the later PNG member");
+	FileList files({rar5.string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 2 && files.IsArchiveMember(0) &&
+		std::find(files.Files().begin(), files.Files().end(), rar5Png) != files.Files().end(),
+		"opening a RAR5 container did not initialize its image-member list");
+	DecodedImage rar5Decoded;
+	Expect(jpegview_linux::DecodeImage(rar5Png, rar5Decoded, error) &&
+		!rar5Decoded.frames.empty() && rar5Decoded.frames.front().width > 0 &&
+		rar5Decoded.frames.front().height > 0,
+		"image decoder could not read a later member from a solid RAR5 archive: " + error);
+
+	jpegview_linux::FileDialogPreviewLoader previewLoader;
+	const std::uint64_t previewGeneration = previewLoader.Request(rar5Png, false,
+		jpegview_linux::FileDialogSortMode::Name, 64, 64);
+	std::vector<jpegview_linux::FileDialogPreviewResult> previews;
+	const auto previewDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (previews.empty() && std::chrono::steady_clock::now() < previewDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		previews = previewLoader.TakeReady();
+	}
+	Expect(previews.size() == 1 && previews.front().generation == previewGeneration &&
+		previews.front().source == rar5Png && previews.front().error.empty() &&
+		previews.front().width > 0 && previews.front().height > 0,
+		"open-dialog preview could not decode a solid RAR5 image member");
+
+	const fs::path malformed = temporary.path() / "broken.rar";
+	WriteText(malformed, "not a RAR archive");
+	entries.clear();
+	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
+		"malformed RAR input did not fail with a useful error");
 }
 
 void TestFileListMarkedImageToggle() {
@@ -5517,6 +5593,7 @@ int main() {
 	RunTest("tar-and-tgz-browsing-decoding-and-safety",
 		TestTarAndTgzBrowsingDecodingAndSafety, failures);
 	RunTest("7z-browsing-decoding-and-preview", TestSevenZipBrowsingDecodingAndPreview, failures);
+	RunTest("rar-browsing-decoding-and-preview", TestRarBrowsingDecodingAndPreview, failures);
 	RunTest("file-list-marked-image-toggle", TestFileListMarkedImageToggle, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);

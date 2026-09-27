@@ -37,6 +37,7 @@ enum class ArchiveFormat {
 	Tar,
 	Tgz,
 	SevenZip,
+	Rar,
 };
 
 struct ArchiveLocation {
@@ -99,6 +100,9 @@ ArchiveFormat FormatForContainerName(const fs::path& path) {
 	if (Lower(path.extension().string()) == ".7z") {
 		return ArchiveFormat::SevenZip;
 	}
+	if (Lower(path.extension().string()) == ".rar") {
+		return ArchiveFormat::Rar;
+	}
 	if (Lower(path.extension().string()) == ".zip") {
 		return ArchiveFormat::Zip;
 	}
@@ -110,6 +114,7 @@ bool HasArchiveExtension(const fs::path& path) {
 	const std::string name = Lower(path.filename().string());
 	const std::string extension = Lower(path.extension().string());
 	return extension == ".zip" || extension == ".tar" || extension == ".7z" ||
+		extension == ".rar" ||
 		(name.size() >= 7 && name.compare(name.size() - 7, 7, ".tar.gz") == 0) ||
 		(name.size() >= 4 && name.compare(name.size() - 4, 4, ".tgz") == 0);
 }
@@ -493,9 +498,17 @@ bool OpenArchiveReader(const fs::path& path, ArchiveFormat format,
 		return false;
 	}
 	const bool sevenZip = format == ArchiveFormat::SevenZip;
-	const int formatResult = sevenZip ?
-		archive_read_support_format_7zip(owner.reader) :
-		archive_read_support_format_tar(owner.reader);
+	int formatResult = ARCHIVE_OK;
+	if (sevenZip) {
+		formatResult = archive_read_support_format_7zip(owner.reader);
+	} else if (format == ArchiveFormat::Rar) {
+		formatResult = archive_read_support_format_rar(owner.reader);
+		if (formatResult == ARCHIVE_OK) {
+			formatResult = archive_read_support_format_rar5(owner.reader);
+		}
+	} else {
+		formatResult = archive_read_support_format_tar(owner.reader);
+	}
 	if (formatResult != ARCHIVE_OK ||
 		archive_read_support_filter_none(owner.reader) != ARCHIVE_OK ||
 		(format == ArchiveFormat::Tgz &&
@@ -915,6 +928,7 @@ std::string ArchiveFormatName(const fs::path& path) {
 	case ArchiveFormat::Tar: return "TAR";
 	case ArchiveFormat::Tgz: return "TGZ";
 	case ArchiveFormat::SevenZip: return ".7Z";
+	case ArchiveFormat::Rar: return "RAR";
 	}
 	return {};
 }
