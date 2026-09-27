@@ -247,8 +247,9 @@ docker run --rm -v "$PWD/.git:/src/.git:ro" -v "$PWD/out:/out" \
 ```
 
 This requires a normal `.git` directory (rather than a worktree's `.git` pointer file) with the
-relevant tags present. If no usable Git metadata is available and no version is passed, the build
-continues to use `0.0.0+unknown`.
+relevant tags present. The wrapper marks `/src` as a safe Git directory only for version lookup, so
+the read-only metadata mount works without changing global Git configuration. If no usable Git
+metadata is available and no version is passed, the build continues to use `0.0.0+unknown`.
 
 The AppImage is named `out/JPEGView-Linux-${APP_VERSION}-x86_64.AppImage`; the native executable
 is `out/jpegview-linux`. Substitute the Ubuntu 22.04, 24.04, or 26.04 image tag to use another build

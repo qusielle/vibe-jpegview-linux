@@ -6,7 +6,12 @@ SOURCE_DIR=${JPEGVIEW_SOURCE_DIR:-/src}
 VERSION=${2:-${JPEGVIEW_VERSION:-}}
 if [ -z "$VERSION" ]; then
 	if [ -f "$SOURCE_DIR/linux/version.sh" ]; then
-		VERSION=$(cd "$SOURCE_DIR" && GIT_OPTIONAL_LOCKS=0 sh ./linux/version.sh)
+		VERSION=$(cd "$SOURCE_DIR" && \
+			GIT_OPTIONAL_LOCKS=0 \
+			GIT_CONFIG_COUNT=1 \
+			GIT_CONFIG_KEY_0=safe.directory \
+			GIT_CONFIG_VALUE_0="$SOURCE_DIR" \
+			sh ./linux/version.sh)
 	else
 		VERSION=0.0.0+unknown
 	fi

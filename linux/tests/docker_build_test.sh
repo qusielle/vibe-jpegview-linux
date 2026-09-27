@@ -44,4 +44,19 @@ mkdir -p "$SOURCE_SNAPSHOT/linux"
 cp "$REPO_DIR/linux/version.sh" "$SOURCE_SNAPSHOT/linux/version.sh"
 run_binary_and_expect_version "$SOURCE_SNAPSHOT" 0.0.0+unknown ''
 
+CONFIG_SNAPSHOT="$TEMP_DIR/config-snapshot"
+mkdir -p "$CONFIG_SNAPSHOT/linux"
+cat > "$CONFIG_SNAPSHOT/linux/version.sh" <<'EOF'
+#!/bin/sh
+if [ "${GIT_OPTIONAL_LOCKS:-}" = 0 ] &&
+	[ "${GIT_CONFIG_COUNT:-}" = 1 ] &&
+	[ "${GIT_CONFIG_KEY_0:-}" = safe.directory ] &&
+	[ "${GIT_CONFIG_VALUE_0:-}" = "$PWD" ]; then
+	printf '%s\n' process-scoped-safe-directory
+else
+	exit 1
+fi
+EOF
+run_binary_and_expect_version "$CONFIG_SNAPSHOT" process-scoped-safe-directory ''
+
 echo 'Docker build version tests passed.'
