@@ -23,6 +23,13 @@ candidates are independent of the JPEGView_L comparison below. The current behav
   Cold directory listing runs in a cancellable worker. See current limits and controls in the
   [Linux README](README.md#linux-branch-changes-in-order-of-importance).
 
+## Open-dialog display candidates
+
+- **Image details in the open dialog:** show the focused image's pixel resolution and file size in
+  the preview pane, and show each file's size in the Browse and Recents lists. For archive members,
+  report the member's uncompressed image size rather than the size of its containing archive. Keep
+  any dimension lookup for large images off the event thread.
+
 ## Comic-reading interaction candidates
 
 - **Reverse reading order in double page mode:** allow the two pages in a spread to swap sides for
