@@ -33,6 +33,7 @@
 #include "file_dialog_model.h"
 #include "recent_files.h"
 #include "system_font.h"
+#include "bitmap_font.h"
 #include "spectrum_model.h"
 #include "desktop_association.h"
 
@@ -6326,13 +6327,23 @@ private:
 					const std::size_t visibleOffset = static_cast<std::size_t>(item.mnemonicOffset) +
 						(item.checked ? 4u : 0u);
 					if (visibleOffset < label.size()) {
-						const int underlineX = columnX + 12 + TextWidth(
+						int underlineX = columnX + 12 + TextWidth(
 							label.substr(0, visibleOffset), kUiTextScale);
-						const int underlineWidth = std::max(1, TextWidth(
+						int underlineWidth = std::max(1, TextWidth(
 							label.substr(visibleOffset, 1), kUiTextScale));
+						if (jpegview_linux::Terminus9CanRender(label)) {
+							const jpegview_linux::BitmapGlyphInkBounds ink =
+								jpegview_linux::Terminus9GlyphInkBounds(
+									static_cast<unsigned char>(label[visibleOffset]));
+							if (ink.width > 0) {
+								underlineX += ink.left * kUiTextScale;
+								underlineWidth = ink.width * kUiTextScale;
+							}
+						}
 						const int underlineY = textY + std::max(0, TextLineHeight() - 2);
-						DrawLine(underlineX, underlineY, underlineX + underlineWidth - 1,
-							underlineY, textColor, textColor, textColor);
+						SDL_SetRenderDrawColor(renderer_, textColor, textColor, textColor, 255);
+						const SDL_Rect underline{underlineX, underlineY, underlineWidth, 1};
+						SDL_RenderFillRect(renderer_, &underline);
 					}
 				}
 				if (!shortcut.empty()) {

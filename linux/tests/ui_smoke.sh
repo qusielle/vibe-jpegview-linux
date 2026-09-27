@@ -811,9 +811,23 @@ if [ "$visual_assertions" -eq 1 ]; then
 		echo "UI smoke test: context-menu close damaged the revealed navigation panel ($context_panel_difference)" >&2
 		exit 1
 	fi
+	# Anchor the compact menu near the top so the mnemonic pixel assertion has
+	# stable coordinates independent of menu-edge repositioning.
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 20
 	DISPLAY=":$display_number" xdotool click 3
 	sleep 0.2
 	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-compact.png"
+	# “Show Advanced Options” gets the `S` mnemonic. The five-pixel glyph ink
+	# ends at x=656; x=657 is blank cell space and must not get an underline
+	# endpoint. The menu is opened at (640,20), and this underline is at y=36.
+	mnemonic_ink_pixel=$(convert "$temporary/context-compact.png" -crop 1x1+656+36 +repage \
+		-colorspace Gray -threshold 50% -format "%[fx:mean]" info:)
+	mnemonic_trailing_pixel=$(convert "$temporary/context-compact.png" -crop 1x1+657+36 +repage \
+		-colorspace Gray -threshold 50% -format "%[fx:mean]" info:)
+	if [ "$mnemonic_ink_pixel" != "1" ] || [ "$mnemonic_trailing_pixel" != "0" ]; then
+		echo "UI smoke test: menu mnemonic underline did not follow the glyph ink bounds (ink=$mnemonic_ink_pixel trailing=$mnemonic_trailing_pixel)" >&2
+		exit 1
+	fi
 	DISPLAY=":$display_number" xdotool key Down
 	DISPLAY=":$display_number" xdotool key Down
 	DISPLAY=":$display_number" xdotool key Return

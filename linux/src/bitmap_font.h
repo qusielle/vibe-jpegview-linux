@@ -14,8 +14,14 @@ struct BitmapFontGlyph {
 	std::uint8_t advance = 0;
 };
 
+struct BitmapGlyphInkBounds {
+	int left = 0;
+	int width = 0;
+};
+
 const BitmapFontGlyph& Terminus9Glyph(unsigned char character);
 const std::uint8_t* Terminus9GlyphPixels(const BitmapFontGlyph& glyph);
+BitmapGlyphInkBounds Terminus9GlyphInkBounds(unsigned char character);
 bool Terminus9CanRender(std::string_view text);
 int Terminus9TextWidth(std::string_view text, int scale = 1);
 int Terminus9Ascent();

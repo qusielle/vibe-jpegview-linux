@@ -57,7 +57,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   cancellation/LRU policy, memory sizing, alpha-preserving antialiased source-area reduction, and
   low-priority derivation from completed neighbor display frames.
 - `image_info_model`: stable dimensions/date/file-size presentation.
-- `system_font`: desktop-font discovery, UTF-8 shaping, measurement, and rasterization.
+- `system_font` and `bitmap_font`: desktop-font discovery, UTF-8 shaping, measurement, rasterization,
+  and exact embedded-glyph ink bounds for crisp renderer overlays such as menu mnemonics.
 - `app_icon`: extraction of the application icon embedded from the upstream ICO resource.
 - `batch_copy`: pattern expansion, previews, and pure dialog focus/selection/scroll transitions.
 - `desktop_applications`: non-UI discovery and planning for Open with commands.

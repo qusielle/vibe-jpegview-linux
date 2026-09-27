@@ -102,7 +102,9 @@ they support.
    columns, support Left/Right column movement and repeating Up/Down movement, remain inside the
    window when expanded, open at the current pointer, and can be opened from the keyboard menu key.
    Enabled command items with a Latin letter show an underlined mnemonic; pressing a unique letter
-   activates it, while duplicate letters cycle matching entries for Enter.
+   activates it, while duplicate letters cycle matching entries for Enter. Printable-ASCII
+   underlines follow visible bitmap-glyph bounds, avoiding stray pixels in the blank part of a
+   character cell.
 
 9. **Portable file and desktop operations.** The branch adds a native open/save browser, processed
    full-size and screen-size saving with overwrite confirmation, live case-insensitive filename

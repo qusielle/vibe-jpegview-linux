@@ -4323,9 +4323,15 @@ void TestSystemFontResolutionAndUnicodeRendering() {
 		"bitmap-font coverage did not distinguish printable ASCII from Unicode");
 	const jpegview_linux::BitmapFontGlyph& uppercase = jpegview_linux::Terminus9Glyph('A');
 	const jpegview_linux::BitmapFontGlyph& lowercase = jpegview_linux::Terminus9Glyph('a');
+	const jpegview_linux::BitmapGlyphInkBounds narrowGlyph =
+		jpegview_linux::Terminus9GlyphInkBounds('i');
 	Expect(jpegview_linux::Terminus9LineHeight() == 13 && uppercase.advance == 6 &&
 		uppercase.width == 6 && uppercase.height == 12,
 		"9-point font did not use the embedded 12-pixel monochrome bitmap strike");
+	Expect(narrowGlyph.width > 0 && narrowGlyph.width <
+		jpegview_linux::Terminus9Glyph('i').advance && narrowGlyph.left >= 0 &&
+		narrowGlyph.left + narrowGlyph.width <= jpegview_linux::Terminus9Glyph('i').width,
+		"bitmap glyph ink bounds included blank advance-cell pixels");
 	Expect(uppercase.pixelOffset != lowercase.pixelOffset,
 		"9-point bitmap font mapped lowercase letters to uppercase glyphs");
 	const std::uint8_t expectedAdvance = uppercase.advance;

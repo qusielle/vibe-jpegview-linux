@@ -18,6 +18,22 @@ const std::uint8_t* Terminus9GlyphPixels(const BitmapFontGlyph& glyph) {
 	return kEmbeddedBitmapFontPixels.data() + glyph.pixelOffset;
 }
 
+BitmapGlyphInkBounds Terminus9GlyphInkBounds(unsigned char character) {
+	const BitmapFontGlyph& glyph = Terminus9Glyph(character);
+	const std::uint8_t* pixels = Terminus9GlyphPixels(glyph);
+	int left = glyph.width;
+	int right = -1;
+	for (int row = 0; row < glyph.height; ++row) {
+		for (int column = 0; column < glyph.width; ++column) {
+			if (pixels[row * glyph.width + column] == 0) continue;
+			left = std::min(left, column);
+			right = std::max(right, column);
+		}
+	}
+	if (right < left) return {};
+	return {glyph.bearingLeft + left, right - left + 1};
+}
+
 bool Terminus9CanRender(std::string_view text) {
 	return std::all_of(text.begin(), text.end(), [](unsigned char character) {
 		return character >= 32 && character <= 126;
