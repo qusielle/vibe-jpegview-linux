@@ -21,6 +21,7 @@
 #include "crop_selection_model.h"
 #include "crop_size_dialog_model.h"
 #include "zoom_navigator_model.h"
+#include "magnifying_glass_model.h"
 #include "context_menu_model.h"
 #include "overlay_layout.h"
 #include "viewer_chrome.h"
@@ -97,6 +98,7 @@ constexpr int kFileDialogDividerWidth = 12;
 constexpr int kFileDialogResizeHandleSize = 18;
 constexpr int kFileDialogMinimumListWidth = 180;
 constexpr int kFileDialogMinimumPreviewWidth = 120;
+constexpr std::size_t kMagnifyingGlassDisplayPriority = 1000000;
 constexpr std::size_t kDecodedImagePrefetchCount = 32;
 constexpr std::size_t kDisplayTextureUploadsPerTick = 1;
 constexpr std::size_t kMaximumThumbnailSourcePixels = 4u * 1024u * 1024u;
@@ -366,6 +368,10 @@ public:
 		cropVerticalCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENS);
 		cropDiagonalDownCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
 		cropDiagonalUpCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENESW);
+		const Uint8 transparentCursorData[] = {0x80};
+		const Uint8 transparentCursorMask[] = {0x00};
+		magnifyingGlassCursor_ = SDL_CreateCursor(transparentCursorData,
+			transparentCursorMask, 1, 1, 0, 0);
 
 		if (startFullscreen_) {
 			fullscreen_ = true;
@@ -451,6 +457,8 @@ private:
 	struct DisplayTextureCacheEntry {
 		SDL_Texture* texture = nullptr;
 		std::size_t bytes = 0;
+		int width = 0;
+		int height = 0;
 		std::uint64_t lastUsed = 0;
 	};
 
@@ -549,7 +557,8 @@ private:
 		if (thumbnailResizeCursor_ != nullptr || fileDialogResizeCursor_ != nullptr ||
 			cropCrosshairCursor_ != nullptr || cropMoveCursor_ != nullptr ||
 			cropHorizontalCursor_ != nullptr || cropVerticalCursor_ != nullptr ||
-			cropDiagonalDownCursor_ != nullptr || cropDiagonalUpCursor_ != nullptr) {
+			cropDiagonalDownCursor_ != nullptr || cropDiagonalUpCursor_ != nullptr ||
+			magnifyingGlassCursor_ != nullptr) {
 			SDL_SetCursor(SDL_GetDefaultCursor());
 		}
 		if (thumbnailResizeCursor_ != nullptr) {
@@ -572,6 +581,7 @@ private:
 		freeCursor(cropVerticalCursor_);
 		freeCursor(cropDiagonalDownCursor_);
 		freeCursor(cropDiagonalUpCursor_);
+		freeCursor(magnifyingGlassCursor_);
 		SDL_Quit();
 	}
 
@@ -894,6 +904,9 @@ private:
 	}
 
 	void PrepareImagePrefetch(int preferredDirection = 0) {
+		// Prefetch replaces its neighbor set, so let an active lens reassert its
+		// optional request on the next renderer tick if this call cancels it.
+		magnifyingGlassBackgroundRequestedKey_.clear();
 		if (fileList_.Empty() || clipboardMode_) return;
 		displayImageCache_.Prefetch({});
 		const SDL_Rect imageArea = ImageAreaRect();
@@ -1100,7 +1113,8 @@ private:
 			return false;
 		}
 		displayTextureCache_.emplace(prepared->key,
-			DisplayTextureCacheEntry{texture, bytes, ++displayTextureUseCounter_});
+			DisplayTextureCacheEntry{texture, bytes, prepared->width, prepared->height,
+				++displayTextureUseCounter_});
 		displayTextureCacheBytes_ += bytes;
 		displayImageCache_.Retire(prepared);
 		return true;
@@ -3277,6 +3291,12 @@ private:
 			UpdateCropCursor(lastMouseX_, lastMouseY_);
 			UpdateZoomNavigatorCursor(lastMouseX_, lastMouseY_);
 			break;
+		case jpegview_linux::kCommandToggleMagnifyingGlass:
+			if (image_.width > 0 && image_.height > 0 &&
+				(!fileList_.Empty() || clipboardMode_)) {
+				SetMagnifyingGlassEnabled(!magnifyingGlass_.Enabled());
+			}
+			break;
 		case jpegview_linux::kCommandToggleSelectionMode:
 			SetSelectionModeEnabled(!selectionModeEnabled_);
 			break;
@@ -3518,6 +3538,7 @@ private:
 		state.navigationPanelAutoReveal = navigationPanelAutoReveal_;
 		state.thumbnailPanelVisible = thumbnailPanelVisible_;
 		state.showZoomNavigator = showZoomNavigator_;
+		state.magnifyingGlassEnabled = magnifyingGlass_.Enabled();
 		state.selectionModeEnabled = selectionModeEnabled_;
 		state.navigationMode = fileList_.GetNavigationMode();
 		state.sortMode = fileList_.GetSorting();
@@ -5546,6 +5567,199 @@ private:
 		}
 	}
 
+	bool IsMagnifyingGlassVisibleAt(int screenX, int screenY) const {
+		if (!magnifyingGlass_.Enabled() || image_.width <= 0 || image_.height <= 0 ||
+			dragging_ || cropMouseDragging_ ||
+			zoomNavigatorDragging_ || thumbnailPanelResizing_ || transitionTexture_ != nullptr ||
+			pictureLevelsPanelOpen_ || unsharpDialogOpen_ || contextMenuOpen_ || fileDialogOpen_ ||
+			confirmationOpen_ || aboutOpen_ || helpOpen_ || resizeDialog_.IsOpen() ||
+			cropSizeDialog_.IsOpen() || batchCopyDialog_.IsOpen()) return false;
+		const SDL_Rect area = ImageAreaRect();
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			image_.width, image_.height, area.w, area.h);
+		const SDL_Rect imageRect{destination.x + area.x, destination.y + area.y,
+			destination.width, destination.height};
+		if (!PointInRect(screenX, screenY, imageRect)) return false;
+		// Let the transient zoom navigator retain its own hot area and cursor.
+		return !IsZoomNavigatorVisibleAt(screenX, screenY);
+	}
+
+	void RestoreCursorForPoint(int screenX, int screenY) const {
+		UpdateThumbnailPanelCursor(screenX, screenY);
+		UpdateCropCursor(screenX, screenY);
+		UpdateZoomNavigatorCursor(screenX, screenY);
+	}
+
+	void UpdateMagnifyingGlassCursor(int screenX, int screenY) {
+		if (IsMagnifyingGlassVisibleAt(screenX, screenY)) {
+			if (magnifyingGlassCursor_ != nullptr) {
+				SDL_SetCursor(magnifyingGlassCursor_);
+				magnifyingGlassCursorActive_ = true;
+			}
+			return;
+		}
+		if (!magnifyingGlassCursorActive_) return;
+		magnifyingGlassCursorActive_ = false;
+		RestoreCursorForPoint(screenX, screenY);
+	}
+
+	void DiscardMagnifyingGlassRequest(const std::string& key) {
+		if (key.empty() || (currentDisplayRequest_.has_value() &&
+			currentDisplayRequest_->key == key)) return;
+		displayTextureProtectedKeys_.erase(key);
+		displayImageCache_.CancelBackground(key);
+		displayImageCache_.Release(key);
+		const auto texture = displayTextureCache_.find(key);
+		if (texture == displayTextureCache_.end()) return;
+		if (texture->second.texture != nullptr) SDL_DestroyTexture(texture->second.texture);
+		displayTextureCacheBytes_ -= texture->second.bytes;
+		cacheBudget_->Release(texture->second.bytes);
+		displayTextureCache_.erase(texture);
+	}
+
+	void ClearMagnifyingGlassRequest() {
+		DiscardMagnifyingGlassRequest(magnifyingGlassRequestKey_);
+		magnifyingGlassRequestKey_.clear();
+		magnifyingGlassRequestBaseKey_.clear();
+		magnifyingGlassBackgroundRequestedKey_.clear();
+		magnifyingGlassRequest_.reset();
+	}
+
+	void SetMagnifyingGlassEnabled(bool enabled) {
+		magnifyingGlass_.SetEnabled(enabled);
+		if (!enabled) ClearMagnifyingGlassRequest();
+		UpdateMagnifyingGlassCursor(lastMouseX_, lastMouseY_);
+		playback_.NotifyInteraction(SDL_GetTicks());
+	}
+
+	std::optional<jpegview_linux::DisplayImageRequest> MagnifyingGlassDisplayRequest() {
+		if (!magnifyingGlass_.Enabled() || imageModified_ || !currentDisplayRequest_.has_value() ||
+			currentDisplayRequest_->sourceWidth <= 0 ||
+			currentDisplayRequest_->sourceHeight <= 0) return std::nullopt;
+		const jpegview_linux::DisplayImageRequest& base = *currentDisplayRequest_;
+		if (base.sourceWidth <= 0 || base.sourceHeight <= 0 ||
+			base.targetWidth <= 0 || base.targetHeight <= 0) return std::nullopt;
+		const double sourceScale = std::min(
+			static_cast<double>(base.sourceWidth) / base.targetWidth,
+			static_cast<double>(base.sourceHeight) / base.targetHeight);
+		const double scale = std::min(1.0 / magnifyingGlass_.ZoomLevel(), sourceScale);
+		const int targetWidth = std::min(base.sourceWidth,
+			static_cast<int>(std::ceil(base.targetWidth * scale)));
+		const int targetHeight = std::min(base.sourceHeight,
+			static_cast<int>(std::ceil(base.targetHeight * scale)));
+		if (targetWidth <= 0 || targetHeight <= 0) return std::nullopt;
+		if (targetWidth == base.targetWidth && targetHeight == base.targetHeight) return base;
+		if (magnifyingGlassRequest_.has_value() &&
+			magnifyingGlassRequestBaseKey_ == base.key &&
+			magnifyingGlassRequest_->decoded == base.decoded &&
+			magnifyingGlassRequest_->frameIndex == base.frameIndex &&
+			magnifyingGlassRequest_->targetWidth == targetWidth &&
+			magnifyingGlassRequest_->targetHeight == targetHeight &&
+			magnifyingGlassRequest_->autoContrast == base.autoContrast &&
+			jpegview_linux::EqualImageProcessing(magnifyingGlassRequest_->processing,
+				base.processing)) return magnifyingGlassRequest_;
+
+		if (magnifyingGlassRequestBaseKey_ != base.key) {
+			DiscardMagnifyingGlassRequest(magnifyingGlassRequestKey_);
+			magnifyingGlassRequestKey_.clear();
+			magnifyingGlassBackgroundRequestedKey_.clear();
+			magnifyingGlassRequestBaseKey_.clear();
+		}
+		if (base.decoded) {
+			magnifyingGlassRequest_ = jpegview_linux::MakeDisplayImageRequest(base.filename,
+				base.decoded, base.frameIndex, targetWidth, targetHeight, base.autoContrast,
+				kMagnifyingGlassDisplayPriority, base.processing);
+		} else {
+			magnifyingGlassRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(base.filename,
+				base.sourceWidth, base.sourceHeight, targetWidth, targetHeight,
+				base.autoContrast, kMagnifyingGlassDisplayPriority, base.processing);
+		}
+		magnifyingGlassRequestBaseKey_ = base.key;
+		return magnifyingGlassRequest_;
+	}
+
+	void RenderMagnifyingGlass(SDL_Texture* fallbackTexture) {
+		if (!magnifyingGlass_.Enabled()) {
+			if (!magnifyingGlassRequestKey_.empty() || magnifyingGlassRequest_.has_value() ||
+				!magnifyingGlassBackgroundRequestedKey_.empty()) ClearMagnifyingGlassRequest();
+			return;
+		}
+		if (!IsMagnifyingGlassVisibleAt(lastMouseX_, lastMouseY_)) {
+			ClearMagnifyingGlassRequest();
+			return;
+		}
+		const SDL_Rect area = ImageAreaRect();
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			image_.width, image_.height, area.w, area.h);
+		const SDL_Rect displayed{destination.x + area.x, destination.y + area.y,
+			destination.width, destination.height};
+		SDL_Texture* lensTexture = fallbackTexture;
+		int textureWidth = image_.width;
+		int textureHeight = image_.height;
+		if (fallbackTexture == displayTexture_) {
+			textureWidth = displayTextureWidth_;
+			textureHeight = displayTextureHeight_;
+		} else if (fallbackTexture != texture_) {
+			for (auto& cached : displayTextureCache_) {
+				if (cached.second.texture == fallbackTexture) {
+					textureWidth = cached.second.width;
+					textureHeight = cached.second.height;
+					break;
+				}
+			}
+		}
+
+		if (const auto request = MagnifyingGlassDisplayRequest(); request.has_value() &&
+			request->key != (currentDisplayRequest_.has_value() ?
+				currentDisplayRequest_->key : std::string())) {
+			if (magnifyingGlassRequestKey_ != request->key) {
+				DiscardMagnifyingGlassRequest(magnifyingGlassRequestKey_);
+				magnifyingGlassRequestKey_ = request->key;
+				magnifyingGlassBackgroundRequestedKey_.clear();
+			}
+			displayTextureProtectedKeys_.insert(request->key);
+			if (SDL_Texture* cached = FindDisplayTexture(request->key)) {
+				lensTexture = cached;
+				const auto dimensions = displayTextureCache_.find(request->key);
+				if (dimensions != displayTextureCache_.end()) {
+					textureWidth = dimensions->second.width;
+					textureHeight = dimensions->second.height;
+				}
+			} else {
+				if (magnifyingGlassBackgroundRequestedKey_ != request->key &&
+					request->targetHeight > 0 &&
+					cacheBudget_->Capacity() / 4 /
+						static_cast<std::size_t>(request->targetHeight) >=
+						static_cast<std::size_t>(request->targetWidth)) {
+					displayImageCache_.RequestBackground(*request);
+					magnifyingGlassBackgroundRequestedKey_ = request->key;
+				}
+			}
+		} else {
+			ClearMagnifyingGlassRequest();
+		}
+
+		if (lensTexture == nullptr || textureWidth <= 0 || textureHeight <= 0) return;
+		const jpegview_linux::MagnifyingGlassGeometry geometry =
+			jpegview_linux::CalculateMagnifyingGlassGeometry(lastMouseX_, lastMouseY_,
+				{displayed.x, displayed.y, displayed.w, displayed.h}, textureWidth, textureHeight,
+				magnifyingGlass_.Width(), magnifyingGlass_.Height(), magnifyingGlass_.ZoomLevel());
+		if (!geometry.valid) return;
+		const SDL_Rect lens{geometry.lensRect.x, geometry.lensRect.y,
+			geometry.lensRect.width, geometry.lensRect.height};
+		const SDL_Rect content{geometry.contentDestinationRect.x,
+			geometry.contentDestinationRect.y, geometry.contentDestinationRect.width,
+			geometry.contentDestinationRect.height};
+		const SDL_Rect source{geometry.sourceRect.x, geometry.sourceRect.y,
+			geometry.sourceRect.width, geometry.sourceRect.height};
+		SDL_SetRenderDrawColor(renderer_, 6, 6, 6, 255);
+		SDL_RenderFillRect(renderer_, &lens);
+		if (image_.hasTransparency) RenderTransparencyBackground(lens, lens);
+		SDL_RenderCopy(renderer_, lensTexture, &source, &content);
+		DrawRect({lens.x - 2, lens.y - 2, lens.w + 4, lens.h + 4}, 8, 8, 8, 255);
+		DrawRect(lens, 245, 245, 245, 255);
+	}
+
 	void RenderZoomNavigator(SDL_Texture* imageTexture) {
 		if (imageTexture == nullptr || !IsZoomNavigatorVisibleAt(lastMouseX_, lastMouseY_)) return;
 		const SDL_Rect area = ImageAreaRect();
@@ -5965,7 +6179,7 @@ private:
 			kUiTextScale, 255, 255, 255);
 		static const std::array<const char*, 10> lines = {
 			"Navigate: arrows/wheel; Home/End; Ctrl+M mark; Ctrl+Left/Right toggle; Alt+arrows siblings",
-			"Zoom and pan: Ctrl+wheel or Ctrl+Up/Down; drag to pan; Shift+Arrow pans at actual size",
+			"Zoom/pan: Ctrl+wheel or Ctrl+Up/Down; drag; Shift+Arrow; Z lens; wheel resizes it",
 			"Navigator: hover upper-right when magnified; click or drag its map to reposition",
 			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom",
 			"Panels: F2 info; Shift+N filename; Ctrl+N nav; Ctrl+T thumbs; Ctrl+E crop mode",
@@ -6411,6 +6625,26 @@ private:
 				lastMouseY_ = event.motion.y;
 				break;
 			case SDL_MOUSEWHEEL:
+				SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+				if (event.wheel.y != 0 &&
+					IsMagnifyingGlassVisibleAt(lastMouseX_, lastMouseY_)) {
+					int wheelTicks = std::clamp(event.wheel.y, -10, 10);
+					if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) wheelTicks = -wheelTicks;
+					const Uint16 modifiers = static_cast<Uint16>(SDL_GetModState());
+					const jpegview_linux::MagnifyingGlassWheelModifiers wheelModifiers{
+						(modifiers & 0x00C0u) != 0, (modifiers & 0x0300u) != 0,
+						(modifiers & 0x0003u) != 0};
+					const SDL_Rect area = ImageAreaRect();
+					for (int tick = 0; tick < std::abs(wheelTicks); ++tick) {
+						magnifyingGlass_.HandleWheel(wheelTicks > 0 ?
+							jpegview_linux::MagnifyingGlassWheelDirection::Up :
+							jpegview_linux::MagnifyingGlassWheelDirection::Down,
+							wheelModifiers, area.w, area.h);
+					}
+					playback_.NotifyInteraction(SDL_GetTicks());
+					UpdateMagnifyingGlassCursor(lastMouseX_, lastMouseY_);
+					break;
+				}
 				if ((SDL_GetModState() & 0x00C0u) != 0) {
 					if (event.wheel.y > 0) {
 						ZoomAt(1.2, lastMouseX_, lastMouseY_);
@@ -6468,6 +6702,8 @@ private:
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderCropSelection();
 		RenderZoomNavigator(renderTexture);
+		UpdateMagnifyingGlassCursor(lastMouseX_, lastMouseY_);
+		RenderMagnifyingGlass(renderTexture);
 		SDL_RenderSetClipRect(renderer_, nullptr);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderThumbnailPanel();
@@ -6556,6 +6792,11 @@ private:
 	SDL_Texture* transitionTexture_ = nullptr;
 	jpegview_linux::Viewport viewport_;
 	jpegview_linux::CropSelectionModel cropSelection_;
+	jpegview_linux::MagnifyingGlassModel magnifyingGlass_;
+	std::string magnifyingGlassRequestKey_;
+	std::string magnifyingGlassRequestBaseKey_;
+	std::string magnifyingGlassBackgroundRequestedKey_;
+	std::optional<jpegview_linux::DisplayImageRequest> magnifyingGlassRequest_;
 	bool selectionModeEnabled_ = false;
 	bool cropMouseDragging_ = false;
 	bool zoomNavigatorDragging_ = false;
@@ -6605,6 +6846,8 @@ private:
 	SDL_Cursor* cropVerticalCursor_ = nullptr;
 	SDL_Cursor* cropDiagonalDownCursor_ = nullptr;
 	SDL_Cursor* cropDiagonalUpCursor_ = nullptr;
+	SDL_Cursor* magnifyingGlassCursor_ = nullptr;
+	bool magnifyingGlassCursorActive_ = false;
 	jpegview_linux::CropSelectionHandle cropDragHandle_ = jpegview_linux::CropSelectionHandle::None;
 	bool infoVisible_ = false;
 	bool showHistogram_ = false;
@@ -6702,7 +6945,7 @@ void PrintUsage(const char* program) {
 		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, Alt+Left/Right open the first image in adjacent sibling folders,\n"
 		<< "          Ctrl+M marks an image; Ctrl+Left/Right toggles between it and the paired image,\n"
-		<< "          N/M/C/Z select display order,\n"
+		<< "          N/M/C select display order, Z toggles the magnifying glass,\n"
 		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails, Ctrl+E toggles crop selection mode,\n"
 		<< "          right-click or the Context Menu key opens the context menu, Esc or Q quits.\n";
 }

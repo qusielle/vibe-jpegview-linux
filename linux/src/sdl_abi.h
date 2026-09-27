@@ -246,6 +246,8 @@ void SDL_SetWindowBordered(SDL_Window* window, int bordered);
 Uint32 SDL_GetMouseState(int* x, int* y);
 int SDL_GetModState();
 SDL_Cursor* SDL_CreateSystemCursor(int id);
+SDL_Cursor* SDL_CreateCursor(const Uint8* data, const Uint8* mask,
+	int width, int height, int hotX, int hotY);
 SDL_Cursor* SDL_GetDefaultCursor();
 void SDL_SetCursor(SDL_Cursor* cursor);
 void SDL_FreeCursor(SDL_Cursor* cursor);

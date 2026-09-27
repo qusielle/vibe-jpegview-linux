@@ -92,6 +92,10 @@ case "$help_text" in
 	*"Ctrl+M marks an image"*"Ctrl+Left/Right toggles"*) ;;
 	*) echo "UI smoke test: --help does not describe marked-image toggling" >&2; exit 1 ;;
 esac
+case "$help_text" in
+	*"N/M/C select display order"*"Z toggles the magnifying glass"*) ;;
+	*) echo "UI smoke test: --help does not describe the magnifying-glass shortcut" >&2; exit 1 ;;
+esac
 
 Xvfb -displayfd 1 -screen 0 1280x800x24 >"$temporary/display" 2>"$temporary/xvfb.log" &
 xvfb_pid=$!
@@ -1105,6 +1109,74 @@ if command -v convert >/dev/null 2>&1; then
 			exit 1
 		fi
 	fi
+	stop_viewer
+
+	mkdir -p "$temporary/magnifier-images" "$temporary/magnifier-config"
+	convert -size 1600x1200 xc:red -fill blue -draw 'rectangle 800,0 1599,1199' \
+		"$temporary/magnifier-images/01-magnifier.png"
+	convert -size 1600x1200 xc:lime "$temporary/magnifier-images/02-next.png"
+	env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \
+		HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/magnifier-config" \
+		"$BINARY" "$temporary/magnifier-images" >"$temporary/magnifier-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: magnifying-glass viewer did not appear" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	sleep 0.3
+	magnifier_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell \
+		"$window_id" | sed -n 's/^WIDTH=//p')
+	magnifier_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell \
+		"$window_id" | sed -n 's/^HEIGHT=//p')
+	magnifier_center_x=$((magnifier_window_width / 2))
+	magnifier_center_y=$((magnifier_window_height / 2))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$magnifier_center_x" "$magnifier_center_y" key z
+	sleep 0.4
+	magnifier_title_before=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	case "$magnifier_title_before" in
+		01-magnifier.png\ *) ;;
+		*) echo "UI smoke test: magnifying-glass fixture did not open its first image ($magnifier_title_before)" >&2; exit 1 ;;
+	esac
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/magnifier-default.png"
+		magnifier_default_border=$(convert "$temporary/magnifier-default.png" -format \
+			"%[pixel:p{$((magnifier_center_x - 175)),$magnifier_center_y}]" info:)
+		if [ "$magnifier_default_border" != "srgb(245,245,245)" ]; then
+			echo "UI smoke test: Z did not draw the centered magnifying-glass lens ($magnifier_default_border)" >&2
+			exit 1
+		fi
+	fi
+	DISPLAY=":$display_number" xdotool click 5
+	sleep 0.2
+	magnifier_title_after=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	if [ "$magnifier_title_before" != "$magnifier_title_after" ]; then
+		echo "UI smoke test: wheel resizing the magnifier navigated to another image" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/magnifier-expanded.png"
+		magnifier_expanded_border=$(convert "$temporary/magnifier-expanded.png" -format \
+			"%[pixel:p{$((magnifier_center_x - 190)),$magnifier_center_y}]" info:)
+		magnifier_old_border=$(convert "$temporary/magnifier-expanded.png" -format \
+			"%[pixel:p{$((magnifier_center_x - 175)),$magnifier_center_y}]" info:)
+		if [ "$magnifier_expanded_border" != "srgb(245,245,245)" ] ||
+			[ "$magnifier_old_border" = "srgb(245,245,245)" ]; then
+			echo "UI smoke test: wheel did not enlarge the lens as expected ($magnifier_expanded_border / $magnifier_old_border)" >&2
+			exit 1
+		fi
+	fi
+	DISPLAY=":$display_number" xdotool key z
+	DISPLAY=":$display_number" xdotool click 5
+	assert_title_prefix "02-next.png" "wheel did not resume normal navigation after disabling the magnifier"
 	stop_viewer
 
 	mkdir -p "$temporary/crop-images" "$temporary/crop-config"

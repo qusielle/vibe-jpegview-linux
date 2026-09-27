@@ -10,6 +10,7 @@ constexpr int kCommandToggleThumbnailPanel = -4;
 constexpr int kCommandPreviousSiblingFolder = -5;
 constexpr int kCommandNextSiblingFolder = -6;
 constexpr int kCommandToggleSelectionMode = -10;
+constexpr int kCommandToggleMagnifyingGlass = -11;
 
 // Returns the original Windows command ID for a supported SDL key event.
 // Escape depends on whether playback is active: it stops playback first and

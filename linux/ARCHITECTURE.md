@@ -36,6 +36,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   keep the viewport inside the image.
 - `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,
   and click/drag pan calculations for the transient zoom navigator.
+- `magnifying_glass_model`: transient lens enable/size/zoom state, wheel-modifier transitions,
+  and pointer-centered mapping from a clipped image source crop into lens content geometry.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, filter selection, and pure
   focus/text-editing transitions.
 - `context_menu_model`: the complete menu catalog, state-derived enablement/checkmarks,
@@ -69,6 +71,16 @@ marked as containing alpha, paints the matching background beneath the image bef
 texture rendering. The same renderer-thread helper backs transparent thumbnails and open-dialog
 previews; opaque textures retain the non-blended path. It should translate SDL events into operations
 on the modules above rather than duplicate their state.
+
+The magnifying-glass lens is a temporary viewer interaction. Its pure model owns size, magnification,
+wheel modifiers, and clipping math; the SDL adapter owns cursor visibility, image-area hit testing,
+and lens painting. When an unmodified image has a lower-resolution renderer texture, Viewer asks the
+display-image worker cache for a source-capped higher-resolution frame only while the lens is visible.
+That optional request is ordered behind foreground and neighbor work, shares the existing byte
+budget, and is canceled/released when no longer needed. The current renderer texture is always the
+immediate fallback, and the higher-resolution SDL texture is uploaded, protected, evicted, and
+destroyed on the renderer thread. Thus enabling the lens adds no decoding or resampling to ordinary
+navigation and does not introduce a second cache budget.
 
 At startup the composition root creates, paints, and maps the final SDL window before constructing
 the initial `FileList` or loading its current image. Directory enumeration and the existing

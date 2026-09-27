@@ -44,7 +44,13 @@ they support.
    the pointer, mouse dragging pans, and repeatable Shift+Arrow commands pan an actual-size image in
    the original 48-pixel steps. When magnified beyond the viewport, a transient upper-right zoom
    navigator shows the whole image and the visible area; click or drag it to pan. Its visibility
-   can be toggled from the context menu and persists between runs. The Windows crop/selection
+   can be toggled from the context menu and persists between runs. A transient
+   pointer-following magnifying-glass lens is also available: press
+   `Z` or choose **Magnifying glass** in the context menu, then move over the image. It starts at
+   2× and hides the pointer beneath it. Wheel down/up grows/shrinks the lens; Ctrl+wheel changes
+   its height, Alt+wheel its width, and Shift+wheel its magnification. Higher-resolution lens
+   pixels are prepared asynchronously at low priority while the ordinary image remains responsive.
+   Lens size and magnification are temporary and reset between runs. The Windows crop/selection
    workflow is also ported: source-pixel selections can be moved and resized independently of zoom,
    then cropped, copied, losslessly cropped from JPEG, or used to zoom the view.
    Crop selection mode is off by default and can be enabled from the new navigation-panel button,
@@ -430,8 +436,12 @@ Up/Down rotate 90 degrees. Space toggles fit/actual, Return/0 fits, Ctrl+Return 
 image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`–`9` start a
 slideshow at that interval. At actual size, Shift+Arrow pans the image in 48-pixel steps. F2
 toggles the top-left picture information panel; Shift+N or Ctrl+F2
-toggles the filename overlay, while N/M/C/Z select filename, modification-date, creation-date,
-or random sorting. Ctrl+O opens the native in-app file browser with **Browse** and **Recents** tabs.
+toggles the filename overlay, while N/M/C select filename, modification-date, or creation-date
+sorting; random sorting remains available from the context menu. `Z` toggles the magnifying-glass
+lens when an image is open. Move it over the image and use wheel down/up to enlarge/shrink the lens;
+Ctrl+wheel changes lens height, Alt+wheel width, and Shift+wheel magnification. The lens is
+transient and its size/magnification reset between runs. Ctrl+O opens the native in-app file browser
+with **Browse** and **Recents** tabs.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
 The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while
 switching tabs; Ctrl+Tab switches between Browse and Recents. It previews and opens the focused

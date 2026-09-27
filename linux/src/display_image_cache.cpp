@@ -475,6 +475,102 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	if (hasQueuedWork) impl_->workAvailable.notify_one();
 }
 
+void DisplayImageCache::RequestBackground(const DisplayImageRequest& request) {
+	if (!request.Valid()) return;
+	bool queuedWork = false;
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		const std::size_t priority = std::max<std::size_t>(1, request.priority);
+		impl_->desiredPrefetchKeys.insert(request.key);
+		auto desiredPriority = impl_->desiredPrefetchPriorities.emplace(request.key, priority);
+		if (!desiredPriority.second) desiredPriority.first->second =
+			std::min(desiredPriority.first->second, priority);
+
+		const auto cached = impl_->entries.find(request.key);
+		if (cached != impl_->entries.end()) {
+			cached->second.lastUsed = ++impl_->useCounter;
+			const auto completion = std::find_if(impl_->completed.begin(), impl_->completed.end(),
+				[&request](const Impl::Completion& candidate) {
+					return candidate.image && candidate.image->key == request.key;
+				});
+			if (completion == impl_->completed.end()) {
+				impl_->completed.push_back({cached->second.image, priority});
+			} else {
+				completion->priority = std::min(completion->priority, priority);
+			}
+			return;
+		}
+
+		const auto completion = std::find_if(impl_->completed.begin(), impl_->completed.end(),
+			[&request](const Impl::Completion& candidate) {
+				return candidate.image && candidate.image->key == request.key;
+			});
+		if (completion != impl_->completed.end()) {
+			completion->priority = std::min(completion->priority, priority);
+			return;
+		}
+
+		const auto inFlight = impl_->inFlightPriorities.find(request.key);
+		if (inFlight != impl_->inFlightPriorities.end()) {
+			inFlight->second = std::min(inFlight->second, priority);
+			return;
+		}
+
+		const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
+			[&request](const Impl::Work& work) { return work.request.key == request.key; });
+		if (queued != impl_->queue.end()) {
+			if (queued->foreground) return;
+			Impl::Work work = std::move(*queued);
+			impl_->queue.erase(queued);
+			work.request.priority = std::min(work.request.priority, priority);
+			auto insertion = std::find_if(impl_->queue.begin(), impl_->queue.end(),
+				[&work](const Impl::Work& candidate) {
+					return !candidate.foreground &&
+						candidate.request.priority > work.request.priority;
+				});
+			impl_->queue.insert(insertion, std::move(work));
+			return;
+		}
+
+		Impl::Work work{request, impl_->generation, impl_->epoch, false};
+		work.request.priority = priority;
+		auto insertion = std::find_if(impl_->queue.begin(), impl_->queue.end(),
+			[&work](const Impl::Work& candidate) {
+				return !candidate.foreground &&
+					candidate.request.priority > work.request.priority;
+			});
+		impl_->queue.insert(insertion, std::move(work));
+		impl_->queuedKeys.insert(request.key);
+		queuedWork = true;
+	}
+	if (queuedWork) impl_->workAvailable.notify_one();
+}
+
+void DisplayImageCache::CancelBackground(const std::string& key) {
+	if (key.empty()) return;
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	impl_->desiredPrefetchKeys.erase(key);
+	impl_->desiredPrefetchPriorities.erase(key);
+	for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
+		if (!queued->foreground && queued->request.key == key) {
+			impl_->queuedKeys.erase(key);
+			queued = impl_->queue.erase(queued);
+		} else {
+			++queued;
+		}
+	}
+	for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
+		if (completed->priority != 0 && completed->image && completed->image->key == key) {
+			impl_->retired.push_back(std::move(completed->image));
+			completed = impl_->completed.erase(completed);
+		} else {
+			++completed;
+		}
+	}
+	if (!impl_->retired.empty()) impl_->retirementAvailable.notify_one();
+	impl_->idle.notify_all();
+}
+
 DisplayImageCache::ImagePtr DisplayImageCache::RequestAndWait(
 	const DisplayImageRequest& request) {
 	if (!request.Valid()) return {};

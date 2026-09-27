@@ -17,6 +17,7 @@
 #include "crop_selection_model.h"
 #include "crop_size_dialog_model.h"
 #include "zoom_navigator_model.h"
+#include "magnifying_glass_model.h"
 #include "image_formats.h"
 #include "input_commands.h"
 #include "viewport.h"
@@ -456,7 +457,7 @@ void TestKeyboardCommandMappings() {
 		{'c', 0, IDM_SORT_CREATION_DATE},
 		{'n', 0, IDM_SORT_NAME},
 		{'m', 0, IDM_SORT_MOD_DATE},
-		{'z', 0, IDM_SORT_RANDOM},
+		{'z', 0, jpegview_linux::kCommandToggleMagnifyingGlass},
 		{SDLK_F7, 0, IDM_LOOP_FOLDER},
 		{SDLK_F8, 0, IDM_LOOP_RECURSIVELY},
 		{SDLK_F9, 0, IDM_LOOP_SIBLINGS},
@@ -1388,6 +1389,96 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	Expect(ordered.CachedImages() == 2 && ordered.CachedBytes() == 32,
 		"display image cache did not enforce its pixel-memory budget");
 	ordered.TakeCompleted(10);
+
+	std::mutex backgroundMutex;
+	std::condition_variable backgroundChanged;
+	bool foregroundStarted = false;
+	bool releaseForeground = false;
+	std::vector<int> backgroundOrder;
+	const auto prepareWithPriority = [&](const jpegview_linux::DisplayImageRequest& request) {
+		{
+			std::unique_lock<std::mutex> lock(backgroundMutex);
+			backgroundOrder.push_back(request.targetWidth);
+			if (request.targetWidth == 2) {
+				foregroundStarted = true;
+				backgroundChanged.notify_all();
+				backgroundChanged.wait(lock, [&] { return releaseForeground; });
+			}
+		}
+		auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+		result->key = request.key;
+		result->width = request.targetWidth;
+		result->height = 1;
+		result->bgra.assign(static_cast<std::size_t>(request.targetWidth) * 4, 255);
+		return result;
+	};
+	jpegview_linux::DisplayImageCache backgroundCache(64, 1, prepareWithPriority);
+	const auto neighborRequest = jpegview_linux::MakeDisplayImageRequest(
+		secondFile, decoded, 0, 3, 1, false, 1);
+	const auto lensRequest = jpegview_linux::MakeDisplayImageRequest(
+		thirdFile, decoded, 0, 4, 1, false, 1000000);
+	backgroundCache.Request(scaled);
+	{
+		std::unique_lock<std::mutex> lock(backgroundMutex);
+		Expect(backgroundChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return foregroundStarted; }),
+			"foreground display request did not start before the optional background request");
+	}
+	backgroundCache.Prefetch({neighborRequest});
+	backgroundCache.RequestBackground(lensRequest);
+	{
+		std::lock_guard<std::mutex> lock(backgroundMutex);
+		releaseForeground = true;
+	}
+	backgroundChanged.notify_all();
+	Expect(backgroundCache.WaitUntilIdle(std::chrono::seconds(2)) &&
+		backgroundOrder == std::vector<int>({2, 3, 4}),
+		"optional magnifier preparation displaced the foreground or nearest neighbor work");
+
+	std::mutex cancelMutex;
+	std::condition_variable cancelChanged;
+	bool cancelForegroundStarted = false;
+	bool releaseCancelForeground = false;
+	std::vector<int> canceledOrder;
+	jpegview_linux::DisplayImageCache cancelBackground(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			{
+				std::unique_lock<std::mutex> lock(cancelMutex);
+				canceledOrder.push_back(request.targetWidth);
+				if (request.targetWidth == 2) {
+					cancelForegroundStarted = true;
+					cancelChanged.notify_all();
+					cancelChanged.wait(lock, [&] { return releaseCancelForeground; });
+				}
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = request.targetWidth;
+			result->height = 1;
+			result->bgra.assign(static_cast<std::size_t>(request.targetWidth) * 4, 255);
+			return result;
+		});
+	const auto canceledLensRequest = jpegview_linux::MakeDisplayImageRequest(
+		thirdFile, decoded, 0, 4, 1, false, 1000000);
+	cancelBackground.Request(scaled);
+	{
+		std::unique_lock<std::mutex> lock(cancelMutex);
+		Expect(cancelChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return cancelForegroundStarted; }),
+			"foreground display request did not start before background cancellation");
+	}
+	cancelBackground.RequestBackground(canceledLensRequest);
+	cancelBackground.CancelBackground(canceledLensRequest.key);
+	{
+		std::lock_guard<std::mutex> lock(cancelMutex);
+		releaseCancelForeground = true;
+	}
+	cancelChanged.notify_all();
+	Expect(cancelBackground.WaitUntilIdle(std::chrono::seconds(2)) &&
+		canceledOrder == std::vector<int>({2}) &&
+		cancelBackground.Find(canceledLensRequest) == nullptr,
+		"canceled optional background work still ran or entered the display cache");
+
 	ordered.Request(requests[0]);
 	Expect(ordered.WaitUntilIdle(std::chrono::seconds(2)) && ordered.Find(requests[0]) != nullptr &&
 		ordered.CachedImages() == 2 && ordered.CachedBytes() == 32,
@@ -2961,6 +3052,141 @@ void TestZoomNavigatorGeometryAndPanning() {
 		"navigator geometry accepted invalid or fully off-screen input");
 }
 
+void TestMagnifyingGlassModelDefaultsBoundsAndWheelDirections() {
+	using namespace jpegview_linux;
+	MagnifyingGlassModel model;
+	Expect(!model.Enabled() && model.Width() == MagnifyingGlassModel::kDefaultWidth &&
+		model.Height() == MagnifyingGlassModel::kDefaultHeight &&
+		model.ZoomLevel() == MagnifyingGlassModel::kDefaultZoomLevel,
+		"magnifying glass did not start with its transient defaults");
+	model.Toggle();
+	Expect(model.Enabled(), "magnifying glass toggle did not enable the lens");
+	model.SetEnabled(false);
+	Expect(!model.Enabled(), "magnifying glass enabled state could not be cleared");
+
+	const MagnifyingGlassWheelModifiers plain;
+	model.HandleWheel(MagnifyingGlassWheelDirection::Down, plain, 1200, 800);
+	Expect(model.Width() == 380 && model.Height() == 190,
+		"plain wheel down did not grow both lens dimensions");
+	model.HandleWheel(MagnifyingGlassWheelDirection::Up, plain, 1200, 800);
+	Expect(model.Width() == 350 && model.Height() == 175,
+		"plain wheel up did not shrink both lens dimensions");
+
+	MagnifyingGlassWheelModifiers control;
+	control.control = true;
+	model.HandleWheel(MagnifyingGlassWheelDirection::Down, control, 1200, 800);
+	Expect(model.Width() == 350 && model.Height() == 190,
+		"Ctrl+wheel changed a dimension other than lens height");
+	model.HandleWheel(MagnifyingGlassWheelDirection::Up, control, 1200, 800);
+	MagnifyingGlassWheelModifiers alt;
+	alt.alt = true;
+	model.HandleWheel(MagnifyingGlassWheelDirection::Down, alt, 1200, 800);
+	Expect(model.Width() == 380 && model.Height() == 175,
+		"Alt+wheel changed a dimension other than lens width");
+	model.HandleWheel(MagnifyingGlassWheelDirection::Up, alt, 1200, 800);
+
+	MagnifyingGlassWheelModifiers shift;
+	shift.shift = true;
+	model.HandleWheel(MagnifyingGlassWheelDirection::Down, shift, 1200, 800);
+	ExpectNear(model.ZoomLevel(), 0.525, 0.000001,
+		"Shift+wheel down did not increase the zoom-level value");
+	model.HandleWheel(MagnifyingGlassWheelDirection::Up, shift, 1200, 800);
+	ExpectNear(model.ZoomLevel(), MagnifyingGlassModel::kDefaultZoomLevel, 0.000001,
+		"Shift+wheel up did not decrease the zoom-level value");
+	for (int i = 0; i < 40; ++i) {
+		model.HandleWheel(MagnifyingGlassWheelDirection::Down, shift, 1200, 800);
+	}
+	ExpectNear(model.ZoomLevel(), MagnifyingGlassModel::kMaximumZoomLevel, 0.000001,
+		"zoom level exceeded its upper bound");
+	for (int i = 0; i < 40; ++i) {
+		model.HandleWheel(MagnifyingGlassWheelDirection::Up, shift, 1200, 800);
+	}
+	ExpectNear(model.ZoomLevel(), MagnifyingGlassModel::kMinimumZoomLevel, 0.000001,
+		"zoom level exceeded its lower bound");
+
+	MagnifyingGlassModel bounded;
+	for (int i = 0; i < 40; ++i) {
+		bounded.HandleWheel(MagnifyingGlassWheelDirection::Down, plain, 400, 200);
+	}
+	Expect(bounded.Width() == 360 && bounded.Height() == 180,
+		"lens dimensions exceeded 90 percent of feasible parent dimensions");
+	for (int i = 0; i < 40; ++i) {
+		bounded.HandleWheel(MagnifyingGlassWheelDirection::Up, plain, 400, 200);
+	}
+	Expect(bounded.Width() == MagnifyingGlassModel::kMinimumWidth &&
+		bounded.Height() == MagnifyingGlassModel::kMinimumHeight,
+		"lens dimensions fell below their minimums");
+	for (int i = 0; i < 40; ++i) {
+		bounded.HandleWheel(MagnifyingGlassWheelDirection::Down, plain, 100, 50);
+	}
+	Expect(bounded.Width() == MagnifyingGlassModel::kMinimumWidth &&
+		bounded.Height() == MagnifyingGlassModel::kMinimumHeight,
+		"small parent dimensions incorrectly forced the lens below its minimum size");
+}
+
+void TestMagnifyingGlassGeometryMapsNativeTextureAndPadsEdges() {
+	using namespace jpegview_linux;
+	const MagnifyingGlassRect displayedImage{100, 50, 500, 250};
+	const MagnifyingGlassGeometry centered = CalculateMagnifyingGlassGeometry(
+		350.0, 175.0, displayedImage, 1000, 500, 350, 175,
+		MagnifyingGlassModel::kDefaultZoomLevel);
+	Expect(centered.valid, "magnifying glass rejected a pointer inside the displayed image");
+	Expect(centered.lensRect.x == 175 && centered.lensRect.y == 88 &&
+		centered.lensRect.width == 350 && centered.lensRect.height == 175,
+		"magnifying glass lens was not centered on the pointer");
+	Expect(centered.sourceRect.x == 325 && centered.sourceRect.y == 162 &&
+		centered.sourceRect.width == 350 && centered.sourceRect.height == 176,
+		"2x default lens crop did not map through the displayed-image scale");
+	Expect(centered.contentDestinationRect.x == centered.lensRect.x &&
+		centered.contentDestinationRect.y == centered.lensRect.y &&
+		centered.contentDestinationRect.width == centered.lensRect.width &&
+		centered.contentDestinationRect.height == centered.lensRect.height,
+		"unclipped source crop did not fill the lens content area");
+
+	const MagnifyingGlassGeometry scaledTexture = CalculateMagnifyingGlassGeometry(
+		350.0, 175.0, displayedImage, 2000, 1000, 350, 175,
+		MagnifyingGlassModel::kDefaultZoomLevel);
+	Expect(scaledTexture.valid && scaledTexture.sourceRect.x == 650 &&
+		scaledTexture.sourceRect.y == 325 && scaledTexture.sourceRect.width == 700 &&
+		scaledTexture.sourceRect.height == 350,
+		"native source crop did not account for texture-to-destination scaling");
+
+	const MagnifyingGlassRect fullImage{0, 0, 1000, 500};
+	const MagnifyingGlassGeometry left = CalculateMagnifyingGlassGeometry(
+		0.0, 250.0, fullImage, 1000, 500, 350, 175, 0.5);
+	const MagnifyingGlassGeometry right = CalculateMagnifyingGlassGeometry(
+		999.0, 250.0, fullImage, 1000, 500, 350, 175, 0.5);
+	const MagnifyingGlassGeometry top = CalculateMagnifyingGlassGeometry(
+		500.0, 0.0, fullImage, 1000, 500, 350, 175, 0.5);
+	const MagnifyingGlassGeometry bottom = CalculateMagnifyingGlassGeometry(
+		500.0, 499.0, fullImage, 1000, 500, 350, 175, 0.5);
+	Expect(left.valid && left.sourceRect.x == 0 && left.sourceRect.width < 350 &&
+		left.contentDestinationRect.x > left.lensRect.x &&
+		left.contentDestinationRect.x + left.contentDestinationRect.width <=
+		left.lensRect.x + left.lensRect.width,
+		"left source edge was not clipped and padded inside the lens");
+	Expect(right.valid && right.sourceRect.x + right.sourceRect.width == 1000 &&
+		right.contentDestinationRect.x == right.lensRect.x &&
+		right.contentDestinationRect.x + right.contentDestinationRect.width <
+		right.lensRect.x + right.lensRect.width,
+		"right source edge was not clipped and padded inside the lens");
+	Expect(top.valid && top.sourceRect.y == 0 && top.sourceRect.height < 176 &&
+		top.contentDestinationRect.y > top.lensRect.y &&
+		top.contentDestinationRect.y + top.contentDestinationRect.height <=
+		top.lensRect.y + top.lensRect.height,
+		"top source edge was not clipped and padded inside the lens");
+	Expect(bottom.valid && bottom.sourceRect.y + bottom.sourceRect.height == 500 &&
+		bottom.contentDestinationRect.y == bottom.lensRect.y &&
+		bottom.contentDestinationRect.y + bottom.contentDestinationRect.height <
+		bottom.lensRect.y + bottom.lensRect.height,
+		"bottom source edge was not clipped and padded inside the lens");
+	Expect(!CalculateMagnifyingGlassGeometry(1000.0, 100.0, fullImage, 1000, 500,
+		350, 175, 0.5).valid &&
+		!CalculateMagnifyingGlassGeometry(0.0, 250.0, fullImage, 1000, 500,
+		350, 175, 0.1).valid,
+		"magnifying glass geometry accepted an outside pointer or invalid zoom level");
+}
+
 void TestViewportNavigationResetsTransientZoom() {
 	jpegview_linux::Viewport viewport;
 	viewport.Fit(1000, 600, 500, 300, false, true);
@@ -3221,6 +3447,12 @@ void TestContextMenuCatalogAndState() {
 	Expect(compactSelectionMode != nullptr && compactSelectionMode->label == "Crop selection mode" &&
 		!compactSelectionMode->checked && compactSelectionMode->shortcut == "Ctrl+E",
 		"compact context menu did not expose the disabled-by-default crop selection mode");
+	const MenuItem* magnifyingGlass = findCommand(compact,
+		jpegview_linux::kCommandToggleMagnifyingGlass);
+	Expect(magnifyingGlass != nullptr && magnifyingGlass->label == "Magnifying glass" &&
+		magnifyingGlass->shortcut == "Z" && !magnifyingGlass->checked &&
+		!magnifyingGlass->enabled,
+		"context menu did not expose the image-dependent magnifying-glass toggle");
 	Expect(findCommand(compact, jpegview_linux::kCommandPreviousSiblingFolder) == nullptr &&
 		findCommand(compact, jpegview_linux::kCommandNextSiblingFolder) == nullptr,
 		"compact context menu exposed advanced sibling-folder navigation commands");
@@ -3237,6 +3469,7 @@ void TestContextMenuCatalogAndState() {
 	state.sortMode = FileList::SortMode::LastModificationTime;
 	state.sortAscending = false;
 	state.imageAvailable = true;
+	state.magnifyingGlassEnabled = true;
 	state.losslessJpegAvailable = true;
 	state.autoCorrectionEnabled = true;
 	state.pictureLevelsAvailable = true;
@@ -3273,6 +3506,9 @@ void TestContextMenuCatalogAndState() {
 		findCommand(advanced, jpegview_linux::kCommandToggleThumbnailPanel)->checked &&
 		findCommand(advanced, jpegview_linux::kCommandToggleZoomNavigator)->checked,
 		"context menu did not reflect panel visibility state");
+	Expect(findCommand(advanced, jpegview_linux::kCommandToggleMagnifyingGlass)->enabled &&
+		findCommand(advanced, jpegview_linux::kCommandToggleMagnifyingGlass)->checked,
+		"context menu did not reflect the active magnifying-glass state");
 	Expect(findCommand(advanced, jpegview_linux::kCommandToggleSelectionMode)->checked,
 		"context menu did not reflect enabled crop selection mode");
 	state.showZoomNavigator = false;
@@ -4719,6 +4955,10 @@ int main() {
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
 	RunTest("zoom-navigator-geometry-and-panning", TestZoomNavigatorGeometryAndPanning, failures);
+	RunTest("magnifying-glass-model-defaults-bounds-and-wheel-directions",
+		TestMagnifyingGlassModelDefaultsBoundsAndWheelDirections, failures);
+	RunTest("magnifying-glass-geometry-native-scaling-and-edge-padding",
+		TestMagnifyingGlassGeometryMapsNativeTextureAndPadsEdges, failures);
 	RunTest("viewport-navigation-resets-transient-zoom", TestViewportNavigationResetsTransientZoom, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("resize-dialog-controller", TestResizeDialogController, failures);

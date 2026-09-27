@@ -80,6 +80,12 @@ public:
 
 	ImagePtr Find(const DisplayImageRequest& request);
 	void Request(const DisplayImageRequest& request);
+	// Adds optional work without replacing the foreground request or the current
+	// neighbor-prefetch set. Lower-priority work is scheduled after nearer items.
+	void RequestBackground(const DisplayImageRequest& request);
+	// Removes queued/completed background work for a key. In-flight work is
+	// allowed to finish but its result is discarded unless another request needs it.
+	void CancelBackground(const std::string& key);
 	ImagePtr RequestAndWait(const DisplayImageRequest& request);
 	void Prefetch(const std::vector<DisplayImageRequest>& requests);
 	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount);
