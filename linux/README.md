@@ -247,8 +247,8 @@ docker run --rm -v "$PWD/.git:/src/.git:ro" -v "$PWD/out:/out" \
 ```
 
 This requires a normal `.git` directory (rather than a worktree's `.git` pointer file) with the
-relevant tags present. The wrapper marks `/src` as a safe Git directory only for version lookup, so
-the read-only metadata mount works without changing global Git configuration. If no usable Git
+relevant tags present. The wrapper adds `/src` to the container's Git safe-directory list for the
+version lookup; with `--rm`, this does not change your host's Git configuration. If no usable Git
 metadata is available and no version is passed, the build continues to use `0.0.0+unknown`.
 
 The AppImage is named `out/JPEGView-Linux-${APP_VERSION}-x86_64.AppImage`; the native executable
