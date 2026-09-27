@@ -10,8 +10,6 @@ candidates are independent of the JPEGView_L comparison below. The current behav
 
 - **7z image archives:** browse supported images stored in 7z files.
 - **RAR image archives:** browse supported images stored in RAR files.
-- **TAR image archives:** browse supported images stored in uncompressed TAR files.
-- **TGZ image archives:** browse supported images stored in `.tar.gz` files.
 - **CBZ comic archives:** browse images in comic ZIP files. Comic-page bookmarks and remembered
   reading positions are explicitly out of scope for this candidate.
 - **CB7 comic archives:** browse images in comic 7z files. Comic-page bookmarks and remembered
@@ -19,9 +17,11 @@ candidates are independent of the JPEGView_L comparison below. The current behav
 
 ## Implemented archive input
 
-- **ZIP image archives:** implemented in the Linux branch. ZIPs browse as virtual folders, list
-  supported images and nested folders without extracting payloads, and support archive navigation
-  and Recents previews. See current limits and controls in the
+- **ZIP, TAR, and TGZ image archives:** implemented in the Linux branch. `.zip`, `.tar`, `.tar.gz`,
+  and `.tgz` browse as virtual folders, list supported images and nested folders without extracting
+  or retaining image payloads, and support archive navigation and Recents previews. Gzip TAR
+  indexing and member access are sequential; cold directory listing runs in a cancellable worker.
+  See current limits and controls in the
   [Linux README](README.md#linux-branch-changes-in-order-of-importance).
 
 ## Comic-reading interaction candidates
@@ -447,5 +447,5 @@ and remain possible candidates:
   and output using a reproducible file before treating the existing cap as a regression.
 - [KrokusPokus/JPEGView_L's release notes](https://github.com/KrokusPokus/JPEGView_L/releases)
   report JPEG XL animation and archive-contained image fixes. Linux advertises animated JPEG XL
-  and supports ZIP-contained images; other archive formats remain candidates. Verify a concrete
-  failing fixture before adding a separate bug-fix item.
+  and supports ZIP/TAR/TGZ-contained images; 7z/RAR archive support remains a candidate. Verify a
+  concrete failing fixture before adding a separate bug-fix item.

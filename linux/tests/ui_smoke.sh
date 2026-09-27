@@ -75,6 +75,13 @@ if command -v zip >/dev/null 2>&1; then
 	)
 	touch -t 201801010000.00 "$temporary/images/06-archive.zip"
 fi
+if command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
+	mkdir -p "$temporary/tar-source"
+	write_ppm "$temporary/tar-source/inside-tar.ppm" 48 96 144
+	tar -cf "$temporary/images/07-archive.tar" -C "$temporary/tar-source" inside-tar.ppm
+	tar -czf "$temporary/images/08-archive.tar.gz" -C "$temporary/tar-source" inside-tar.ppm
+	touch -t 201801010000.00 "$temporary/images/07-archive.tar" "$temporary/images/08-archive.tar.gz"
+fi
 mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
 write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
@@ -466,6 +473,7 @@ if [ -f "$temporary/images/06-archive.zip" ]; then
 	DISPLAY=":$display_number" xdotool key ctrl+o
 	DISPLAY=":$display_number" xdotool type --delay 20 '06-archive.zip'
 	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
 	DISPLAY=":$display_number" xdotool key Return
 	assert_title_prefix "inside-archive.ppm" "open dialog did not enter a ZIP and open its image member"
 	DISPLAY=":$display_number" xdotool key ctrl+o
@@ -479,6 +487,22 @@ if [ -f "$temporary/images/06-archive.zip" ]; then
 	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
 	DISPLAY=":$display_number" xdotool key Return
 	assert_title_prefix "03-blue.ppm" "open dialog could not leave the archive and return to a filesystem image"
+fi
+
+if [ -f "$temporary/images/08-archive.tar.gz" ]; then
+	# Compressed TAR catalogs are prepared in the background; wait for the
+	# virtual directory result before opening its first image.
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool type --delay 20 '08-archive.tar.gz'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-tar.ppm" "open dialog did not browse and open a TGZ image member"
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool key BackSpace
+	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "03-blue.ppm" "open dialog could not leave a TGZ and return to a filesystem image"
 fi
 
 DISPLAY=":$display_number" xdotool key ctrl+o

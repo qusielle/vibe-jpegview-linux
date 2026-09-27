@@ -67,6 +67,8 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <archive.h>
+#include <archive_entry.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -326,6 +328,87 @@ void WriteZipArchive(const fs::path& archivePath,
 	}
 }
 
+void WriteTarArchive(const fs::path& archivePath,
+	const std::vector<std::pair<std::string, fs::path>>& members, bool gzip,
+	const std::vector<std::pair<std::string, std::string>>& symbolicLinks = {},
+	const std::vector<std::pair<std::string, std::string>>& hardLinks = {}) {
+	struct archive* writer = archive_write_new();
+	if (writer == nullptr) throw TestFailure("cannot allocate TAR fixture writer");
+	if (archive_write_set_format_pax_restricted(writer) != ARCHIVE_OK ||
+		(gzip && archive_write_add_filter_gzip(writer) != ARCHIVE_OK) ||
+		archive_write_open_filename(writer, archivePath.c_str()) != ARCHIVE_OK) {
+		const std::string message = archive_error_string(writer) == nullptr ?
+			"cannot open TAR fixture" : archive_error_string(writer);
+		archive_write_free(writer);
+		throw TestFailure(message);
+	}
+	for (const auto& member : members) {
+		const std::vector<std::uint8_t> bytes = ReadBytes(member.second);
+		struct archive_entry* entry = archive_entry_new();
+		if (entry == nullptr) {
+			archive_write_free(writer);
+			throw TestFailure("cannot allocate TAR fixture entry");
+		}
+		archive_entry_set_pathname(entry, member.first.c_str());
+		archive_entry_set_filetype(entry, AE_IFREG);
+		archive_entry_set_perm(entry, 0644);
+		archive_entry_set_size(entry, static_cast<la_int64_t>(bytes.size()));
+		archive_entry_set_mtime(entry, 1700000000, 0);
+		const int headerResult = archive_write_header(writer, entry);
+		archive_entry_free(entry);
+		if (headerResult != ARCHIVE_OK) {
+			const std::string message = archive_error_string(writer) == nullptr ?
+				"cannot write TAR fixture header" : archive_error_string(writer);
+			archive_write_free(writer);
+			throw TestFailure(message);
+		}
+		if (!bytes.empty() && archive_write_data(writer, bytes.data(), bytes.size()) !=
+			static_cast<la_ssize_t>(bytes.size())) {
+			const std::string message = archive_error_string(writer) == nullptr ?
+				"cannot write TAR fixture data" : archive_error_string(writer);
+			archive_write_free(writer);
+			throw TestFailure(message);
+		}
+		if (archive_write_finish_entry(writer) != ARCHIVE_OK) {
+			const std::string message = archive_error_string(writer) == nullptr ?
+				"cannot finish TAR fixture entry" : archive_error_string(writer);
+			archive_write_free(writer);
+			throw TestFailure(message);
+		}
+	}
+	const auto writeLink = [writer](const std::pair<std::string, std::string>& link,
+		bool hardLink) {
+		struct archive_entry* entry = archive_entry_new();
+		if (entry == nullptr) throw TestFailure("cannot allocate TAR link fixture entry");
+		archive_entry_set_pathname(entry, link.first.c_str());
+		archive_entry_set_filetype(entry, AE_IFREG);
+		archive_entry_set_perm(entry, 0644);
+		archive_entry_set_size(entry, 0);
+		if (hardLink) archive_entry_set_hardlink(entry, link.second.c_str());
+		else {
+			archive_entry_set_filetype(entry, AE_IFLNK);
+			archive_entry_set_symlink(entry, link.second.c_str());
+		}
+		const int headerResult = archive_write_header(writer, entry);
+		archive_entry_free(entry);
+		if (headerResult != ARCHIVE_OK || archive_write_finish_entry(writer) != ARCHIVE_OK) {
+			const std::string message = archive_error_string(writer) == nullptr ?
+				"cannot write TAR link fixture" : archive_error_string(writer);
+			archive_write_free(writer);
+			throw TestFailure(message);
+		}
+	};
+	for (const auto& link : symbolicLinks) writeLink(link, false);
+	for (const auto& link : hardLinks) writeLink(link, true);
+	if (archive_write_close(writer) != ARCHIVE_OK) {
+		const std::string message = archive_error_string(writer) == nullptr ?
+			"cannot finish TAR fixture" : archive_error_string(writer);
+		archive_write_free(writer);
+		throw TestFailure(message);
+	}
+	archive_write_free(writer);
+}
+
 std::vector<std::string> FileNames(const FileList& files) {
 	std::vector<std::string> names;
 	for (const fs::path& path : files.Files()) names.push_back(path.filename().string());
@@ -482,6 +565,131 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 	entries.clear();
 	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
 		"malformed ZIP input did not fail with a useful error");
+}
+
+void TestTarAndTgzBrowsingDecodingAndSafety() {
+	TemporaryDirectory temporary;
+	const fs::path sourceDirectory = temporary.path() / "source";
+	fs::create_directories(sourceDirectory);
+	const fs::path image = sourceDirectory / "fixture.png";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	ImageWriteOptions options;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(image, pixels.data(), 2, 2, options, error),
+		"cannot create TAR image fixture: " + error);
+	const fs::path notes = sourceDirectory / "notes.txt";
+	WriteText(notes, "not an image");
+	const std::vector<std::pair<std::string, fs::path>> members = {
+		{"01-root.png", image}, {"./nested/02-child.png", image},
+		{"../escape.png", image}, {"/absolute.png", image}, {"notes.txt", notes},
+	};
+	const std::vector<std::pair<std::string, bool>> formats = {
+		{"album.TAR", false}, {"album.tar.gz", true}, {"album.TGZ", true},
+	};
+	for (const auto& [archiveName, gzip] : formats) {
+		const fs::path archive = temporary.path() / archiveName;
+		WriteTarArchive(archive, members, gzip,
+			{{"symbolic-link.png", "01-root.png"}},
+			{{"hard-link.png", "01-root.png"}});
+		const std::string expectedFormat = gzip ? "TGZ" : "TAR";
+		const fs::path rootImage = archive / "01-root.png";
+		const fs::path nestedDirectory = archive / "nested";
+		const fs::path nestedImage = nestedDirectory / "02-child.png";
+
+		Expect(jpegview_linux::IsArchiveContainerName(archive) &&
+			jpegview_linux::IsArchiveContainerFile(archive) &&
+			jpegview_linux::IsArchiveLocation(archive) &&
+			jpegview_linux::IsArchiveLocation(nestedDirectory) &&
+			jpegview_linux::IsArchiveMemberLocation(rootImage) &&
+			!jpegview_linux::IsArchiveMemberLocation(archive),
+			"TAR path recognition did not distinguish a container, virtual directory, and member");
+		Expect(jpegview_linux::ArchiveFormatName(nestedImage) == expectedFormat &&
+			jpegview_linux::ArchiveBackingFile(nestedImage) == archive &&
+			jpegview_linux::ArchiveLocationDisplayName(nestedDirectory) ==
+				archive.string() + "!/nested",
+			"TAR display or physical-container mapping is incorrect");
+
+		std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+		Expect(jpegview_linux::ListArchiveDirectory(archive, entries, error),
+			"cannot list TAR headers: " + error);
+		Expect(entries.size() == 3 &&
+			std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
+				return entry.directory && entry.path.filename() == "nested";
+			}) &&
+			std::none_of(entries.begin(), entries.end(), [](const auto& entry) {
+				const std::string name = entry.path.filename().string();
+				return name == "escape.png" || name == "absolute.png" ||
+					name == "symbolic-link.png" || name == "hard-link.png";
+			}),
+			"TAR listing omitted an implied directory or accepted an unsafe/link member");
+		entries.clear();
+		Expect(jpegview_linux::ListArchiveDirectory(nestedDirectory, entries, error) &&
+			entries.size() == 1 && entries.front().path == nestedImage && !entries.front().directory,
+			"TAR ./ path normalization did not preserve its nested image");
+		jpegview_linux::ArchiveMemberInfo memberInfo;
+		Expect(jpegview_linux::GetArchiveMemberInfo(rootImage, memberInfo, error) &&
+			memberInfo.size == fs::file_size(image) && memberInfo.modificationTime == 1700000000,
+			"TAR member metadata did not preserve size and timestamp");
+
+		FileList files({archive.string()}, FileList::SortMode::FileName, true, false);
+		Expect(files.Size() == 1 && files.Current() == rootImage && files.IsArchiveMember(0),
+			"opening a TAR container did not initialize its root image list");
+		files.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
+		Expect(files.Next() && files.Current() == nestedImage && files.IsArchiveMember(0),
+			"recursive file-list navigation did not enter a TAR subdirectory");
+		DecodedImage decoded;
+		Expect(jpegview_linux::DecodeImage(rootImage, decoded, error),
+			"image decoder could not read a TAR member: " + error);
+		Expect(decoded.frames.size() == 1 && decoded.frames.front().width == 2 &&
+			decoded.frames.front().height == 2 && decoded.frames.front().bgra == pixels,
+			"TAR member decoding changed dimensions or pixels");
+		DecodedImage nestedDecoded;
+		Expect(jpegview_linux::DecodeImage(nestedImage, nestedDecoded, error) &&
+			nestedDecoded.frames.size() == 1 && nestedDecoded.frames.front().bgra == pixels,
+			"TAR lookup by header ordinal did not find a later nested member: " + error);
+		if (archiveName == "album.tar.gz") {
+			jpegview_linux::FileDialogPreviewLoader previewLoader;
+			const std::uint64_t previewGeneration = previewLoader.Request(rootImage, false,
+				jpegview_linux::FileDialogSortMode::Name, 16, 16);
+			std::vector<jpegview_linux::FileDialogPreviewResult> previews;
+			const auto previewDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+			while (previews.empty() && std::chrono::steady_clock::now() < previewDeadline) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				previews = previewLoader.TakeReady();
+			}
+			Expect(previews.size() == 1 && previews.front().generation == previewGeneration &&
+				previews.front().source == rootImage && previews.front().error.empty() &&
+				previews.front().width == 2 && previews.front().height == 2,
+				"open-dialog preview could not decode a TGZ member");
+
+			jpegview_linux::ArchiveDirectoryLoader loader;
+			loader.Request(archive, 20);
+			loader.Request(nestedDirectory, 21);
+			std::vector<jpegview_linux::ArchiveDirectoryResult> results;
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+			while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				results = loader.TakeReady();
+			}
+			Expect(results.size() == 1 && results.front().generation == 21 &&
+				results.front().directory == nestedDirectory && results.front().error.empty() &&
+				results.front().entries.size() == 1 &&
+				results.front().entries.front().path == nestedImage,
+				"archive directory worker published a stale or incomplete result");
+		}
+	}
+
+	const fs::path cancelled = temporary.path() / "cancelled.tgz";
+	WriteTarArchive(cancelled, members, true);
+	std::vector<jpegview_linux::ArchiveEntryInfo> cancelledEntries;
+	Expect(!jpegview_linux::ListArchiveDirectoryCancellable(cancelled, cancelledEntries,
+		[] { return false; }, error) && error.find("cancel") != std::string::npos,
+		"TAR catalog cancellation did not interrupt a cold gzip stream");
+	const fs::path malformed = temporary.path() / "broken.tar.gz";
+	WriteText(malformed, "not a TAR or gzip archive");
+	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
+		"malformed TAR input did not fail with a useful error");
 }
 
 void TestFileListMarkedImageToggle() {
@@ -5143,6 +5351,8 @@ int main() {
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
 	RunTest("archive-browsing-decoding-and-recent-preview",
 		TestArchiveBrowsingDecodingAndRecentPreview, failures);
+	RunTest("tar-and-tgz-browsing-decoding-and-safety",
+		TestTarAndTgzBrowsingDecodingAndSafety, failures);
 	RunTest("file-list-marked-image-toggle", TestFileListMarkedImageToggle, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);

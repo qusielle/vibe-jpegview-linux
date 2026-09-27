@@ -28,16 +28,15 @@ struct ArchiveMemberInfo {
 inline constexpr std::uint64_t kMaximumArchiveMemberBytes = 128ull * 1024ull * 1024ull;
 inline constexpr std::uint64_t kMaximumArchiveEntries = 100000;
 
-// These generic source operations currently dispatch to the ZIP backend.
-// Keep format recognition and member I/O here so later archive backends do not
-// leak format-specific checks into file lists, dialogs, caches, or decoders.
+// Keep format recognition and member I/O here so archive-specific checks do
+// not leak into file lists, dialogs, caches, or decoders.
 bool IsArchiveContainerName(const std::filesystem::path& path);
 bool IsArchiveContainerFile(const std::filesystem::path& path);
 bool IsArchiveLocation(const std::filesystem::path& path);
 bool IsArchiveMemberLocation(const std::filesystem::path& path);
 std::string ArchiveFormatName(const std::filesystem::path& path);
-// ZIP timestamps are Unix seconds; return their equivalent in the filesystem
-// clock's nanosecond domain for consistent sorting with ordinary files.
+// Archive timestamps are Unix seconds; return their equivalent in the
+// filesystem clock's nanosecond domain for consistent sorting with files.
 std::int64_t ArchiveTimestampNanoseconds(std::int64_t seconds);
 std::filesystem::file_time_type ArchiveFileModificationTime(std::int64_t seconds);
 
@@ -50,10 +49,16 @@ std::uintmax_t ImageSourceFileSize(const std::filesystem::path& path,
 std::filesystem::file_time_type ImageSourceModificationTime(
 	const std::filesystem::path& path, std::error_code& error);
 
-// Lists immediate children from central-directory metadata only. No image
-// payload is decompressed. Directories implied by nested members are included.
+// Lists immediate children from archive metadata. ZIP catalogs use their
+// central directory; TAR catalogs stream headers and skip payloads. Directories
+// implied by nested members are included.
 bool ListArchiveDirectory(const std::filesystem::path& directory,
 	std::vector<ArchiveEntryInfo>& entries, std::string& errorMessage);
+// Background users can supply a generation/cancellation check. Archive reads
+// stop between input blocks, including while a gzip stream is being skipped.
+bool ListArchiveDirectoryCancellable(const std::filesystem::path& directory,
+	std::vector<ArchiveEntryInfo>& entries, const std::function<bool()>& shouldContinue,
+	std::string& errorMessage);
 bool GetArchiveMemberInfo(const std::filesystem::path& path,
 	ArchiveMemberInfo& info, std::string& errorMessage);
 

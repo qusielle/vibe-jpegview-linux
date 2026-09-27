@@ -6,7 +6,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     g++ make pkg-config dpkg-dev patchelf git \
     libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev fonts-dejavu-core \
-    libjpeg-dev libpng-dev libzip-dev \
+    libjpeg-dev libpng-dev libzip-dev libarchive-dev \
     libgif-dev libtiff-dev libwebp-dev libheif-dev libraw-dev libjxr-dev \
     libheif-plugin-libde265 libheif-plugin-x265 \
     libavif-dev libjxl-dev libaom-dev libde265-dev libx265-dev \

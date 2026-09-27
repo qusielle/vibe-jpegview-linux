@@ -449,6 +449,7 @@ public:
 			HandleEvents(running);
 			if (quitRequested_) running = false;
 			TickPlayback();
+			TickFileDialogArchiveDirectory();
 			TickFileDialogDirectorySummaries();
 			Render();
 			// Present the current image before doing renderer-thread cache uploads.
@@ -1455,7 +1456,7 @@ private:
 	void ApplyLosslessJpegTransform(int command) {
 		if (fileList_.Empty() || clipboardMode_) return;
 		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
-			SetTitle("Lossless transforms are unavailable for images inside ZIP archives");
+			SetTitle("Lossless transforms are unavailable for archive images");
 			return;
 		}
 		const std::string extension = Lower(fileList_.Current().extension().string());
@@ -1573,6 +1574,7 @@ private:
 		fileDialogDragMode_ = FileDialogDragMode::None;
 		SDL_SetCursor(SDL_GetDefaultCursor());
 		ClearFileDialogPreview();
+		fileDialogArchiveLoader_.Clear(++fileDialogArchiveGeneration_);
 		++fileDialogSummaryGeneration_;
 		fileDialogSummaryLoader_.Request({}, fileDialogSummaryGeneration_);
 		fileDialogOpen_ = false;
@@ -1595,7 +1597,7 @@ private:
 			return;
 		}
 		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
-			SetTitle("Lossless crop is unavailable for images inside ZIP archives");
+			SetTitle("Lossless crop is unavailable for archive images");
 			return;
 		}
 		int mcuWidth = 0;
@@ -1965,7 +1967,7 @@ private:
 	void OpenCurrentWith(std::size_t applicationIndex) {
 		if (fileList_.Empty() || clipboardMode_ || applicationIndex >= openWithApplications_.size()) return;
 		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
-			SetTitle("Open With is unavailable for images inside ZIP archives");
+			SetTitle("Open With is unavailable for archive images");
 			return;
 		}
 		const jpegview_linux::OpenWithApplication& application = openWithApplications_[applicationIndex];
@@ -2080,7 +2082,7 @@ private:
 	void TouchCurrentImage(bool useExifDate) {
 		if (fileList_.Empty() || clipboardMode_) return;
 		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
-			SetTitle("Cannot change file dates inside a ZIP archive");
+			SetTitle("Cannot change file dates inside an archive");
 			return;
 		}
 		std::time_t timestamp = std::time(nullptr);
@@ -2102,7 +2104,7 @@ private:
 	void TouchFolderImagesToExifDate() {
 		if (fileList_.Empty() || clipboardMode_) return;
 		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
-			SetTitle("Cannot change file dates inside a ZIP archive");
+			SetTitle("Cannot change file dates inside an archive");
 			return;
 		}
 		const fs::path directory = fileList_.Current().parent_path();
@@ -2189,7 +2191,7 @@ private:
 	void MoveCurrentToTrash() {
 		if (fileList_.Empty() || clipboardMode_) return;
 		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
-			SetTitle("Cannot delete an image directly from a ZIP archive");
+			SetTitle("Cannot delete an image directly from an archive");
 			return;
 		}
 		const fs::path filename = fileList_.Current();
@@ -4917,21 +4919,22 @@ private:
 		}
 	}
 
-	void RefreshFileDialog() {
-		InvalidateFileDialogPreview();
-		std::vector<FileDialogEntry> entries;
-		const fs::path parent = fileDialogDirectory_.parent_path();
-		if (!parent.empty() && parent != fileDialogDirectory_) {
-			entries.push_back(FileDialogEntry{parent, true, true});
-		}
-		if (jpegview_linux::IsArchiveLocation(fileDialogDirectory_)) {
-			std::vector<jpegview_linux::ArchiveEntryInfo> archiveEntries;
-			std::string archiveError;
-			if (!jpegview_linux::ListArchiveDirectory(fileDialogDirectory_, archiveEntries, archiveError)) {
-				fileDialogMessage_ = "Cannot read ZIP: " + archiveError;
+	void TickFileDialogArchiveDirectory() {
+		for (jpegview_linux::ArchiveDirectoryResult& result :
+			fileDialogArchiveLoader_.TakeReady()) {
+			if (!fileDialogOpen_ || fileDialogSave_ || fileDialogParameterRestore_ ||
+				result.generation != fileDialogArchiveGeneration_ ||
+				result.directory != fileDialogDirectory_) continue;
+			std::vector<FileDialogEntry> entries;
+			const fs::path parent = fileDialogDirectory_.parent_path();
+			if (!parent.empty() && parent != fileDialogDirectory_) {
+				entries.push_back(FileDialogEntry{parent, true, true});
+			}
+			if (!result.error.empty()) {
+				fileDialogMessage_ = "Cannot read archive: " + result.error;
 			} else {
 				fileDialogMessage_.clear();
-				for (const jpegview_linux::ArchiveEntryInfo& archiveEntry : archiveEntries) {
+				for (const jpegview_linux::ArchiveEntryInfo& archiveEntry : result.entries) {
 					if (!archiveEntry.directory && (fileDialogSave_ ||
 						!jpegview_linux::IsSupportedImagePath(archiveEntry.path))) continue;
 					const fs::file_time_type modificationTime =
@@ -4941,7 +4944,28 @@ private:
 				}
 			}
 			fileDialogModel_.SetEntries(std::move(entries));
+			if (!fileList_.Empty() &&
+				fileList_.Current().parent_path() == fileDialogDirectory_) {
+				fileDialogModel_.Focus(AbsoluteNormalized(fileList_.Current()),
+					FileDialogVisibleRows());
+			}
 			RequestFileDialogDirectorySummaries();
+		}
+	}
+
+	void RefreshFileDialog() {
+		InvalidateFileDialogPreview();
+		fileDialogArchiveLoader_.Clear(++fileDialogArchiveGeneration_);
+		std::vector<FileDialogEntry> entries;
+		const fs::path parent = fileDialogDirectory_.parent_path();
+		if (!parent.empty() && parent != fileDialogDirectory_) {
+			entries.push_back(FileDialogEntry{parent, true, true});
+		}
+		if (jpegview_linux::IsArchiveLocation(fileDialogDirectory_)) {
+			fileDialogMessage_ = "Reading archive contents…";
+			fileDialogModel_.SetEntries(std::move(entries));
+			RequestFileDialogDirectorySummaries();
+			fileDialogArchiveLoader_.Request(fileDialogDirectory_, fileDialogArchiveGeneration_);
 			return;
 		}
 		fileDialogMessage_.clear();
@@ -7141,9 +7165,11 @@ private:
 	jpegview_linux::FileDialogModel fileDialogModel_;
 	jpegview_linux::FileDialogModel recentFileDialogModel_;
 	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;
+	jpegview_linux::ArchiveDirectoryLoader fileDialogArchiveLoader_;
 	jpegview_linux::FileDialogPreviewLoader fileDialogPreviewLoader_;
 	std::unordered_map<std::string, jpegview_linux::DirectorySummary> fileDialogDirectorySummaries_;
 	std::uint64_t fileDialogSummaryGeneration_ = 0;
+	std::uint64_t fileDialogArchiveGeneration_ = 0;
 	SDL_Texture* fileDialogPreviewTexture_ = nullptr;
 	int fileDialogPreviewWidth_ = 0;
 	int fileDialogPreviewHeight_ = 0;

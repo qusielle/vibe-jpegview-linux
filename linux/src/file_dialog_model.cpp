@@ -34,7 +34,8 @@ DirectorySummary CountImmediateDirectoryContentsWhile(
 	if (IsArchiveLocation(directory)) {
 		std::vector<ArchiveEntryInfo> entries;
 		std::string errorMessage;
-		if (!ListArchiveDirectory(directory, entries, errorMessage)) return summary;
+		if (!ListArchiveDirectoryCancellable(directory, entries,
+			[&shouldContinue] { return shouldContinue(); }, errorMessage)) return summary;
 		for (const ArchiveEntryInfo& entry : entries) {
 			if (!shouldContinue()) break;
 			if (entry.directory) ++summary.subdirectoryCount;
@@ -68,7 +69,8 @@ std::filesystem::path FirstImageInDirectoryWhile(
 	if (IsArchiveLocation(directory)) {
 		std::vector<ArchiveEntryInfo> archiveEntries;
 		std::string errorMessage;
-		if (!ListArchiveDirectory(directory, archiveEntries, errorMessage)) return {};
+		if (!ListArchiveDirectoryCancellable(directory, archiveEntries,
+			shouldContinue, errorMessage)) return {};
 		for (const ArchiveEntryInfo& entry : archiveEntries) {
 			if (!shouldContinue()) return {};
 			if (!entry.directory && IsSupportedImagePath(entry.path)) {
@@ -356,6 +358,85 @@ void FileDialogModel::EnsureSelectionVisible(int visibleRows) {
 	if (selected_ >= scroll_ + visibleRows) scroll_ = selected_ - visibleRows + 1;
 	const int maximumScroll = std::max(0, static_cast<int>(entries_.size()) - visibleRows);
 	scroll_ = std::clamp(scroll_, 0, maximumScroll);
+}
+
+struct ArchiveDirectoryLoader::Impl {
+	struct Task {
+		std::filesystem::path directory;
+		std::uint64_t generation = 0;
+	};
+
+	Impl() : worker([this] { Run(); }) {}
+
+	~Impl() {
+		stopping.store(true);
+		currentGeneration.fetch_add(1);
+		condition.notify_one();
+		if (worker.joinable()) worker.join();
+	}
+
+	void Run() {
+		while (!stopping.load()) {
+			Task task;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				condition.wait(lock, [this] { return stopping.load() || !pending.empty(); });
+				if (stopping.load()) return;
+				task = std::move(pending.front());
+				pending.pop_front();
+			}
+
+			ArchiveDirectoryResult result;
+			result.directory = task.directory;
+			result.generation = task.generation;
+			const auto isCurrent = [this, generation = task.generation] {
+				return !stopping.load() && currentGeneration.load() == generation;
+			};
+			(void)ListArchiveDirectoryCancellable(task.directory, result.entries,
+				isCurrent, result.error);
+			if (!isCurrent()) continue;
+
+			std::lock_guard<std::mutex> lock(mutex);
+			if (isCurrent()) ready.push_back(std::move(result));
+		}
+	}
+
+	std::mutex mutex;
+	std::condition_variable condition;
+	std::deque<Task> pending;
+	std::vector<ArchiveDirectoryResult> ready;
+	std::atomic<std::uint64_t> currentGeneration{0};
+	std::atomic<bool> stopping{false};
+	std::thread worker;
+};
+
+ArchiveDirectoryLoader::ArchiveDirectoryLoader() : impl_(std::make_unique<Impl>()) {}
+ArchiveDirectoryLoader::~ArchiveDirectoryLoader() = default;
+
+void ArchiveDirectoryLoader::Request(const std::filesystem::path& directory,
+	std::uint64_t generation) {
+	impl_->currentGeneration.store(generation);
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->pending.clear();
+		impl_->ready.clear();
+		impl_->pending.push_back(Impl::Task{directory, generation});
+	}
+	impl_->condition.notify_one();
+}
+
+void ArchiveDirectoryLoader::Clear(std::uint64_t generation) {
+	impl_->currentGeneration.store(generation);
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	impl_->pending.clear();
+	impl_->ready.clear();
+}
+
+std::vector<ArchiveDirectoryResult> ArchiveDirectoryLoader::TakeReady() {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	std::vector<ArchiveDirectoryResult> results;
+	results.swap(impl_->ready);
+	return results;
 }
 
 struct DirectorySummaryLoader::Impl {

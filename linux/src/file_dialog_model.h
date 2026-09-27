@@ -1,5 +1,7 @@
 #pragma once
 
+#include "archive_source.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -134,6 +136,31 @@ struct DirectorySummaryResult {
 	std::filesystem::path directory;
 	std::uint64_t generation = 0;
 	DirectorySummary summary;
+};
+
+struct ArchiveDirectoryResult {
+	std::filesystem::path directory;
+	std::uint64_t generation = 0;
+	std::vector<ArchiveEntryInfo> entries;
+	std::string error;
+};
+
+// Cold archive indexes, especially gzip TAR streams, are built away from the
+// event thread. New directory requests cancel obsolete scans and results.
+class ArchiveDirectoryLoader {
+public:
+	ArchiveDirectoryLoader();
+	~ArchiveDirectoryLoader();
+	ArchiveDirectoryLoader(const ArchiveDirectoryLoader&) = delete;
+	ArchiveDirectoryLoader& operator=(const ArchiveDirectoryLoader&) = delete;
+
+	void Request(const std::filesystem::path& directory, std::uint64_t generation);
+	void Clear(std::uint64_t generation);
+	std::vector<ArchiveDirectoryResult> TakeReady();
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> impl_;
 };
 
 // Serial background scanner used by the file dialog. A new request replaces

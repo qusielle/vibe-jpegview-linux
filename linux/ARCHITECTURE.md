@@ -7,13 +7,13 @@ should normally be added to one of these focused modules and covered by `tests/t
   preservation, and the transient marked-image toggle pair used for A/B comparison. The marked
   path's index in the active ordered list is cached for constant-time thumbnail rendering.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
-  and on-demand member access. The current backend is ZIP: it caches immutable central-directory
-  metadata for at most four containers, keyed by device/inode/size/mtime, and retains no decoded or
-  extracted image payloads. Workers open independent libzip handles, validate the selected member,
-  and stream at most 128 MiB of uncompressed data into an anonymous memory file for existing
-  path-based decoders. Unsafe absolute/traversal names are ignored and catalogs over 100,000 entries
-  are rejected. New archive formats should extend this backend dispatch while keeping viewer
-  consumers on the generic source operations.
+  and on-demand member access. ZIP catalogs use central-directory metadata; TAR/TGZ catalogs stream
+  header metadata. Immutable catalogs for at most four containers are keyed by device/inode/size/mtime
+  and retain no decoded or extracted image payloads. Workers use independent libzip/libarchive handles,
+  validate the selected member's identity, and stream at most 128 MiB of uncompressed data into an
+  anonymous memory file for existing path-based decoders. Unsafe paths and TAR links/devices are
+  omitted and catalogs over 100,000 entries are rejected. New archive formats should extend this
+  backend dispatch while keeping viewer consumers on the generic source operations.
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality resizing, and the automatic/manual picture-level processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
@@ -58,8 +58,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
-  restoration, pane-aware preview image sizing, cancellable
-  background directory summaries (including supported archive containers in the directory count),
+  restoration, pane-aware preview image sizing, cancellable background archive listings and directory
+  summaries (including supported archive containers in the directory count),
   caller-preserved row order for recent MRU entries, and replaceable
   previews for a focused image or a directory's first image.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
@@ -89,17 +89,27 @@ texture rendering. The same renderer-thread helper backs transparent thumbnails 
 previews; opaque textures retain the non-blended path. It should translate SDL events into operations
 on the modules above rather than duplicate their state.
 
-Archive members use the existing filesystem-shaped path contract (`container.zip/member.ext`) so
+Archive members use the existing filesystem-shaped path contract (`container.ext/member.ext`) so
 navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The
-browser labels and color-marks ZIP containers and archive images without reading image payloads;
-Recents uses the same cancellable preview worker. The four-entry catalog cache retains central
-directory metadata only. A member is decompressed only when a decoder requests it, bounded to
-128 MiB, into a short-lived anonymous memory file; the source archive is never modified and no
-persistent extraction directory is created. The ZIP backend rejects unsafe member paths and encrypted
-entries. Filesystem-only actions are disabled or guarded for archive members, while image edits and
-saves still use the ordinary in-memory image path. Supporting 7z, RAR, TAR, or other containers
-should add extension recognition and list/read operations here rather than branching in the SDL
-viewer, recents, caches, or codecs.
+browser labels and color-marks ZIP/TAR/TGZ containers and archive images without reading image
+payloads; Recents uses the same cancellable preview worker. ZIP catalogs retain central-directory
+metadata only. TAR/TGZ catalogs stream member headers and skip payloads, retaining the member ordinal,
+name, size, and modification time needed to re-open a selected member. Cold archive-directory listing
+runs in `ArchiveDirectoryLoader`; a newer request cancels obsolete libarchive input at read-block
+boundaries and generation-checks returned results. A selected ZIP member is read by index; TAR/TGZ
+members are found by rescanning from the start, which is especially costly for later entries in a
+gzip stream. In either case, only the selected member is copied, bounded to 128 MiB, into a short-lived
+anonymous memory file. The source archive is never modified and no persistent extraction directory
+is created. ZIP encryption and TAR links/devices are unsupported; unsafe paths are omitted. Filesystem-
+only actions are disabled or guarded for archive members, while image edits and saves still use the
+ordinary in-memory image path. Supporting 7z, RAR, or other containers should add extension
+recognition and list/read operations here rather than branching in the SDL viewer, recents, caches,
+or codecs.
+
+The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct
+command-line archive startup still builds the initial `FileList` through the synchronous source API.
+Consequently, a cold TGZ passed directly at startup can wait for its sequential catalog scan before
+the viewer is ready, while browsing into that same archive from the Open dialog stays responsive.
 
 The magnifying-glass lens is a temporary viewer interaction; its enablement resets each run while
 its size and magnification are stored by `settings`. Its pure model owns those values, wheel

@@ -37,13 +37,16 @@ LCMS2_CFLAGS ?= $(shell pkg-config --cflags lcms2 2>/dev/null)
 LCMS2_LIBS ?= $(shell pkg-config --libs lcms2 2>/dev/null)
 ZIP_CFLAGS ?= $(shell pkg-config --cflags libzip 2>/dev/null)
 ZIP_LIBS ?= $(shell pkg-config --libs libzip 2>/dev/null || echo -lzip)
+ARCHIVE_CFLAGS ?= $(shell pkg-config --cflags libarchive 2>/dev/null)
+ARCHIVE_LIBS ?= $(shell pkg-config --libs libarchive 2>/dev/null || echo -larchive)
 # libraw's pkg-config file redundantly adds its C++ runtime. Let the compiler's
 # static-runtime switches control that dependency instead of forcing an
 # additional shared libstdc++ link on the executable.
 RAW_LIBS := $(filter-out -lstdc++,$(RAW_LIBS))
 
 CODEC_CFLAGS := $(GIF_CFLAGS) $(TIFF_CFLAGS) $(WEBP_CFLAGS) $(HEIF_CFLAGS) \
-	$(AVIF_CFLAGS) $(JXL_CFLAGS) $(JXR_CFLAGS) $(RAW_CFLAGS) $(LCMS2_CFLAGS) $(ZIP_CFLAGS)
+	$(AVIF_CFLAGS) $(JXL_CFLAGS) $(JXR_CFLAGS) $(RAW_CFLAGS) $(LCMS2_CFLAGS) \
+	$(ZIP_CFLAGS) $(ARCHIVE_CFLAGS)
 CODEC_DEFINES := $(if $(strip $(GIF_LIBS)),-DJPEGVIEW_HAVE_GIF=1,) \
 	$(if $(strip $(TIFF_LIBS)),-DJPEGVIEW_HAVE_TIFF=1,) \
 	$(if $(strip $(WEBP_LIBS)),-DJPEGVIEW_HAVE_WEBP=1,) \
@@ -54,7 +57,8 @@ CODEC_DEFINES := $(if $(strip $(GIF_LIBS)),-DJPEGVIEW_HAVE_GIF=1,) \
 	$(if $(strip $(RAW_LIBS)),-DJPEGVIEW_HAVE_RAW=1,) \
 	$(if $(strip $(LCMS2_LIBS)),-DJPEGVIEW_HAVE_LCMS2=1,)
 CODEC_LIBS := $(GIF_LIBS) $(TIFF_LIBS) $(WEBP_LIBS) $(HEIF_LIBS) \
-	$(AVIF_LIBS) $(JXL_LIBS) $(JXR_LIBS) $(RAW_LIBS) $(LCMS2_LIBS) $(ZIP_LIBS)
+	$(AVIF_LIBS) $(JXL_LIBS) $(JXR_LIBS) $(RAW_LIBS) $(LCMS2_LIBS) \
+	$(ZIP_LIBS) $(ARCHIVE_LIBS)
 STATIC_RUNTIME ?= -static-libstdc++ -static-libgcc
 
 BUILD_DIR ?= build
