@@ -430,11 +430,11 @@ toggles the top-left picture information panel; Shift+N or Ctrl+F2
 toggles the filename overlay, while N/M/C/Z select filename, modification-date, creation-date,
 or random sorting. Ctrl+O opens the native in-app file browser with **Browse** and **Recents** tabs.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
-The Recents tab contains one MRU image per parent folder, keeps its own selection
-and filter while switching tabs, and previews and opens the focused image with Enter or a
-double-click. The history also remembers each file's last zoom and fit/fill/actual-size mode for
-later opens. Type any part of a filename to filter the Browse listing, then press Enter to
-open the selected match. Ctrl+Return
+The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while
+switching tabs; Ctrl+Tab switches between Browse and Recents. It previews and opens the focused
+image with Enter or a double-click. The history also remembers each file's last zoom and
+fit/fill/actual-size mode for later opens. Type any part of a filename to filter the Browse listing,
+then press Enter to open the selected match. Ctrl+Return
 opens a selected folder immediately at its first compatible image without entering the folder in
 the dialog. The sorting control switches the listing between case-insensitive filename order and
 newest-first modification-date order. Backspace removes one complete UTF-8 character from the

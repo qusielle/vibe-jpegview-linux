@@ -887,8 +887,10 @@ if [ "$visual_assertions" -eq 1 ]; then
 		exit 1
 	fi
 fi
-click_file_dialog_tab recents 960 685
-DISPLAY=":$display_number" xdotool type --delay 20 'inside-first'
+# Ctrl+Tab must switch from Browse to Recents: this path-only filter cannot
+# match the Browse tab's filename list.
+DISPLAY=":$display_number" xdotool key ctrl+Tab
+DISPLAY=":$display_number" xdotool type --delay 20 '00-entry-test'
 sleep 0.5
 recent_database="$temporary/state/jpegview-linux/recent-files.db"
 if [ ! -s "$recent_database" ]; then
@@ -926,9 +928,9 @@ case "$recent_open_title" in
 	*) echo "UI smoke test: Enter did not open the focused recent image ($recent_open_title)" >&2; exit 1 ;;
 esac
 DISPLAY=":$display_number" xdotool key ctrl+o
-click_file_dialog_tab recents 960 685
+DISPLAY=":$display_number" xdotool key ctrl+Tab
 DISPLAY=":$display_number" xdotool key BackSpace
-click_file_dialog_tab browse 960 685
+DISPLAY=":$display_number" xdotool key ctrl+Tab
 DISPLAY=":$display_number" xdotool type --delay 20 'inside-first'
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3

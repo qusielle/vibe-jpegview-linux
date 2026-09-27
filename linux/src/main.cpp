@@ -4983,6 +4983,10 @@ private:
 			if (event.key.repeat != 0 && !repeatableSelectionKey) break;
 			if (event.key.keysym.sym == SDLK_ESCAPE) {
 				CloseFileDialog();
+			} else if (event.key.keysym.sym == SDLK_TAB &&
+				(event.key.keysym.mod & 0x00C0u) != 0 && FileDialogHasTabs()) {
+				SwitchFileDialogTab(fileDialogTab_ == FileDialogTab::Browse ?
+					FileDialogTab::Recents : FileDialogTab::Browse);
 			} else if (event.key.keysym.sym == SDLK_UP) {
 				model.MoveSelection(-1, FileDialogVisibleRows());
 			} else if (event.key.keysym.sym == SDLK_DOWN) {
@@ -5225,8 +5229,8 @@ private:
 			(fileDialogParameterRestore_ ?
 				"Type: Filter   Enter: Restore backup   Backspace: Parent   Esc: Cancel" :
 				(fileDialogTab_ == FileDialogTab::Recents ?
-					"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open recent   Esc: Cancel" :
-					"Type: Filter   Home/End: First/last   PgUp/PgDn: Page   Enter: Open   Ctrl+Return: Open folder   Backspace: Edit/parent   Esc: Cancel")),
+					"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Enter: Open recent   Backspace: Edit filter   Esc: Cancel" :
+					"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Enter: Open   Ctrl+Return: Folder   Backspace: Filter/parent   Esc: Cancel")),
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 		const SDL_Rect resizeHandle = FileDialogResizeHandleRect();
 		for (int offset = 5; offset <= 13; offset += 4) {
@@ -5969,7 +5973,7 @@ private:
 			"Clipboard: Ctrl+C copy image; Ctrl+Shift+C copy path; Ctrl+V paste PNG",
 			"Adjustments: Up/Down rotate; F5 auto correction; F6 local density; Ctrl+Shift+R resize",
 			"Window: F11 fullscreen; Shift+F11 title bar; Shift+F12 always on top",
-			"Dialogs: type to filter; arrows/pages select; wheel scrolls; drag corner or preview divider to resize"};
+			"Dialogs: Ctrl+Tab switches Browse/Recents; type to filter; arrows/pages select; wheel scrolls; drag to resize"};
 		for (std::size_t index = 0; index < lines.size(); ++index) {
 			DrawText(ClipText(lines[index], width - 36), panel.x + 18,
 				panel.y + 48 + static_cast<int>(index) * 27, kUiTextScale, 220, 225, 235);
