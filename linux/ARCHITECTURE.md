@@ -7,8 +7,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   preservation, and the transient marked-image toggle pair used for A/B comparison. The marked
   path's index in the active ordered list is cached for constant-time thumbnail rendering.
 - `double_page_model`: portrait-pair eligibility, cover handling, aspect-preserving shared-height
-  spread geometry, page-step navigation, and physical-key direction in manga reading order. It owns
-  no image pixels, filesystem work, or SDL resources.
+  spread geometry, page-step navigation, and configurable physical-key direction in manga reading
+  order. It owns no image pixels, filesystem work, or SDL resources.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
   and on-demand member access. ZIP catalogs use central-directory metadata; TAR/TGZ catalogs stream
   header metadata; unencrypted 7z uses libarchive's seekable reader; encrypted 7z uses the focused
@@ -66,8 +66,9 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `settings` and `sort_mode`: persisted configuration (including the transparent-image background
   choice, default picture-level values,
   fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
-  default), zoom-navigator visibility, magnifying-glass size/zoom, and global double-page/manga-mode
-  defaults), plus stable sort-mode values.
+  default), zoom-navigator visibility, magnifying-glass size/zoom, global double-page/manga-mode
+  defaults, and the default-enabled `manga_mode_inverts_left_right` preference), plus stable
+  sort-mode values.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
   bounded per-file `ViewportSnapshot` LRU and independent bounded double-page/manga-mode snapshots,
   ordered row removal/restoration for the Recents dialog, plus tolerant atomic persistence in the

@@ -702,6 +702,7 @@ private:
 		showZoomNavigator_ = settings.showZoomNavigator;
 		doublePageModeDefault_ = settings.doublePageModeEnabled;
 		mangaReadingOrderDefault_ = settings.mangaReadingOrderEnabled;
+		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
 		doublePageModeEnabled_ = doublePageModeDefault_;
 		mangaReadingOrderEnabled_ = mangaReadingOrderDefault_;
 		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
@@ -743,6 +744,7 @@ private:
 		settings.showZoomNavigator = showZoomNavigator_;
 		settings.doublePageModeEnabled = doublePageModeDefault_;
 		settings.mangaReadingOrderEnabled = mangaReadingOrderDefault_;
+		settings.mangaModeInvertsLeftRight = mangaModeInvertsLeftRight_;
 		settings.transparencyPattern = transparencyPattern_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.fileDialogWidth = fileDialogWidth_;
@@ -7569,14 +7571,14 @@ private:
 				if (plainNavigationKey && event.key.repeat != 0) {
 					const int physicalDirection = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
 					const int direction = jpegview_linux::LogicalDirectionForPhysicalKey(
-						physicalDirection, mangaReadingOrderEnabled_);
+						physicalDirection, mangaReadingOrderEnabled_, mangaModeInvertsLeftRight_);
 					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, true);
 					break;
 				}
 				if (plainNavigationKey) {
 					const int physicalDirection = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
 					const int direction = jpegview_linux::LogicalDirectionForPhysicalKey(
-						physicalDirection, mangaReadingOrderEnabled_);
+						physicalDirection, mangaReadingOrderEnabled_, mangaModeInvertsLeftRight_);
 					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, false);
 				}
 				if (event.key.keysym.sym == SDLK_MENU) {
@@ -7598,7 +7600,7 @@ private:
 				}
 				int command = jpegview_linux::CommandForKey(event.key,
 					playback_.Mode() != PlaybackMode::None || playback_.AnimationPlaying());
-				if (plainNavigationKey && mangaReadingOrderEnabled_) {
+				if (plainNavigationKey && mangaReadingOrderEnabled_ && mangaModeInvertsLeftRight_) {
 					if (command == IDM_NEXT) command = IDM_PREV;
 					else if (command == IDM_PREV) command = IDM_NEXT;
 				}
@@ -7886,6 +7888,7 @@ private:
 	bool selectionModeEnabled_ = false;
 	bool doublePageModeEnabled_ = false;
 	bool mangaReadingOrderEnabled_ = false;
+	bool mangaModeInvertsLeftRight_ = true;
 	bool doublePageModeDefault_ = false;
 	bool mangaReadingOrderDefault_ = false;
 	std::optional<ActiveDoublePageRender> activeDoublePageRender_;

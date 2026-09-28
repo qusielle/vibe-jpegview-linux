@@ -338,6 +338,19 @@ assert_title_prefix "03-last.ppm" "Recents did not restore double-page and manga
 DISPLAY=":$display_number" xdotool key Right
 assert_title_prefix "01-first.ppm" "restored manga mode did not persist while navigating after opening from Recents"
 stop_viewer
+
+# The config option disables manga-mode key inversion while leaving page
+# placement and spread navigation in manga order.
+printf 'scale_mode=fit\ndouble_page_mode_enabled=1\nmanga_reading_order_enabled=1\nmanga_mode_inverts_left_right=0\n' \
+	> "$double_settings"
+VIEWER_TEST_HOME="$temporary/manga-no-key-inversion-home" \
+	VIEWER_TEST_CONFIG_HOME="$temporary/double-page-config" \
+	launch_viewer "$temporary/double-page-fixtures/01-first.ppm"
+DISPLAY=":$display_number" xdotool key Left
+assert_title_prefix "00-cover.ppm" "configured manga mode still inverted the Left key"
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "01-first.ppm" "configured manga mode still inverted the Right key"
+stop_viewer
 XDG_STATE_HOME="$temporary/state"
 export XDG_STATE_HOME
 

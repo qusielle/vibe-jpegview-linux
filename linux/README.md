@@ -58,12 +58,14 @@ they support.
    Crop selection mode is off by default and can be enabled from the new navigation-panel button,
    either context menu, or with Ctrl+E; the explicit mode choice is saved between runs. Double-page
    mode (`D`) shows adjacent portrait pages together at a shared display height, leaving the first
-   cover page on its own. Double-page manga mode (`J`) swaps their left/right placement and reverses
-   physical Left/Right navigation; PageUp/PageDown remain logical previous/next. The two checkable
-   controls appear in the navigation panel and context menu. Page pairs follow
+   cover page on its own. Double-page manga mode (`J`) swaps their left/right placement.
+   PageUp/PageDown remain logical previous/next. The two checkable controls appear in the navigation
+   panel and context menu. Page pairs follow
    [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
    The filename and F2 information overlays show both active spread positions (for example `1-2/123`);
-   single-page display retains the `1/123` form.
+   single-page display retains the `1/123` form. Manga mode reverses physical Left/Right navigation
+   by default; set `manga_mode_inverts_left_right=0` in `settings.conf` to keep the normal key direction
+   while retaining manga page placement.
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
@@ -74,8 +76,9 @@ they support.
    Ordering supports logical filename,
    filesystem modification date, creation date, file size, and random modes in either direction.
    The active filename/date ordering is visible and switchable from both the navigation panel and
-   context menu, and the selected mode is preserved between runs. In manga mode, physical Left/Right
-   reverse direction while the navigation-panel and context-menu actions remain logical previous/next.
+   context menu, and the selected mode is preserved between runs. By default, manga mode reverses
+   physical Left/Right navigation; `manga_mode_inverts_left_right=0` disables that inversion while
+   navigation-panel and context-menu actions remain logical previous/next.
 
 5. **Responsive keyboard and mouse navigation.** Left/Right image navigation and menu/browser
    selection repeat while held. The open browser supports repeating Up/Down, PageUp/PageDown, and
@@ -667,6 +670,8 @@ Recent paths and per-file view snapshots are kept in
 The recent-folder list is capped at 100 entries and the independent viewport history at 256 files.
 Per-image double-page and manga-order overrides have a separate 256-file retention bound; the global
 defaults are stored as `double_page_mode_enabled` and `manga_reading_order_enabled` in `settings.conf`.
+Physical Left/Right inversion in manga mode is enabled by default and can be disabled with
+`manga_mode_inverts_left_right=0`.
 Only successfully loaded image paths enter history; clipboard-pasted temporary images are excluded.
 
 The zoom navigator is enabled by default. Set `show_zoom_navigator=0` in the settings file to hide

@@ -54,8 +54,10 @@ int DoublePageNavigationStep(int direction, std::size_t currentIndex,
 	const std::optional<PageDimensions>& previousSpreadSecond,
 	bool coverSingle = true);
 
-// Physical left/right keys reverse direction in manga reading mode, whether
-// or not two-page display is currently enabled.
-int LogicalDirectionForPhysicalKey(int physicalDirection, bool mangaReadingOrder);
+// Physical left/right keys can reverse direction in manga reading mode, whether
+// or not two-page display is currently enabled. The inversion preference defaults
+// to the existing behavior and can be disabled through viewer settings.
+int LogicalDirectionForPhysicalKey(int physicalDirection, bool mangaReadingOrder,
+	bool invertLeftRightInMangaMode);
 
 } // namespace jpegview_linux

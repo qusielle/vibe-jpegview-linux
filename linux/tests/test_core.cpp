@@ -1551,11 +1551,13 @@ void TestDoublePagePairingNavigationAndReadingOrder() {
 		jpegview_linux::DoublePageNavigationStep(1, 1, 4, false,
 			current, next, std::nullopt, std::nullopt) == 1,
 		"navigation skipped pages when a cover or single-page mode requires a one-page step");
-	Expect(jpegview_linux::LogicalDirectionForPhysicalKey(-1, false) == -1 &&
-		jpegview_linux::LogicalDirectionForPhysicalKey(-1, true) == 1 &&
-		jpegview_linux::LogicalDirectionForPhysicalKey(1, true) == -1 &&
-		jpegview_linux::LogicalDirectionForPhysicalKey(0, true) == 0,
-		"physical left/right navigation did not reverse only in manga reading order");
+	Expect(jpegview_linux::LogicalDirectionForPhysicalKey(-1, false, true) == -1 &&
+		jpegview_linux::LogicalDirectionForPhysicalKey(-1, true, true) == 1 &&
+		jpegview_linux::LogicalDirectionForPhysicalKey(1, true, true) == -1 &&
+		jpegview_linux::LogicalDirectionForPhysicalKey(-1, true, false) == -1 &&
+		jpegview_linux::LogicalDirectionForPhysicalKey(1, true, false) == 1 &&
+		jpegview_linux::LogicalDirectionForPhysicalKey(0, true, false) == 0,
+		"physical left/right navigation did not honor the manga inversion preference");
 }
 
 void TestHeldNavigationCoalescesKeyRepeats() {
@@ -3194,6 +3196,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.showZoomNavigator = false;
 	expected.doublePageModeEnabled = true;
 	expected.mangaReadingOrderEnabled = true;
+	expected.mangaModeInvertsLeftRight = false;
 	expected.transparencyPattern = jpegview_linux::TransparencyPattern::Checkerboard;
 	expected.thumbnailPanelWidth = 287;
 	expected.fileDialogWidth = 1040;
@@ -3249,7 +3252,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	Expect(loaded.showZoomNavigator == expected.showZoomNavigator,
 		"zoom navigator visibility did not round-trip");
 	Expect(loaded.doublePageModeEnabled == expected.doublePageModeEnabled &&
-		loaded.mangaReadingOrderEnabled == expected.mangaReadingOrderEnabled,
+		loaded.mangaReadingOrderEnabled == expected.mangaReadingOrderEnabled &&
+		loaded.mangaModeInvertsLeftRight == expected.mangaModeInvertsLeftRight,
 		"double-page mode settings did not round-trip");
 	Expect(loaded.transparencyPattern == expected.transparencyPattern,
 		"transparent-image pattern did not round-trip");
@@ -3303,7 +3307,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"user_crop_aspect_width=0\nuser_crop_aspect_height=nan\n"
 		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=1\n"
 		"selection_mode_enabled=maybe\n"
-		"show_zoom_navigator=maybe\n"
+		"show_zoom_navigator=maybe\nmanga_mode_inverts_left_right=maybe\n"
 		"transparency_pattern=diagonal\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
@@ -3320,6 +3324,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"malformed zoom navigator visibility did not retain its enabled default");
 	Expect(!loaded.doublePageModeEnabled && !loaded.mangaReadingOrderEnabled,
 		"missing double-page settings did not retain their disabled defaults");
+	Expect(loaded.mangaModeInvertsLeftRight,
+		"missing or malformed manga inversion setting did not preserve its enabled default");
 	Expect(loaded.transparencyPattern == jpegview_linux::TransparencyPattern::Black,
 		"malformed transparency pattern did not retain the default black background");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,

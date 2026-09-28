@@ -76,9 +76,11 @@ int DoublePageNavigationStep(int direction, std::size_t currentIndex,
 	return 1;
 }
 
-int LogicalDirectionForPhysicalKey(int physicalDirection, bool mangaReadingOrder) {
+int LogicalDirectionForPhysicalKey(int physicalDirection, bool mangaReadingOrder,
+	bool invertLeftRightInMangaMode) {
 	if (physicalDirection != -1 && physicalDirection != 1) return 0;
-	return mangaReadingOrder ? -physicalDirection : physicalDirection;
+	return mangaReadingOrder && invertLeftRightInMangaMode ?
+		-physicalDirection : physicalDirection;
 }
 
 } // namespace jpegview_linux
