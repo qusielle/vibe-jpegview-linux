@@ -1,0 +1,15 @@
+JPEGView Linux encrypted RAR reader
+
+Encrypted RAR4/RAR5 support is provided by the private librar_backend.so plugin.
+The plugin wrapper source is distributed as jpegview-rar-backend-source.tar.gz.
+The wrapper is licensed under GPL-2.0-or-later; its license text is included as
+jpegview-rar-backend-GPL-2.0.txt.
+It depends on bitplane/rars at exact revision
+afc60e4c669ba1fe6a18748b16b08164e69c5e44; the corresponding source archive and
+Apache License 2.0 text are distributed as rars-afc60e4-source.tar.gz and
+rars-Apache-2.0.txt. The archive's root COPYING file is the upstream license.
+
+The application requests that plugin through a narrow C ABI and preserves the
+user's existing in-process password policy. Passwords are not passed through
+process arguments. The plugin and wrapper are separate dynamic/source units so
+their licenses and provenance remain explicit.

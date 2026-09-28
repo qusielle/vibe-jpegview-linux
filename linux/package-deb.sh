@@ -11,6 +11,9 @@ UBUNTU_VERSION=${2:-}
 OUTPUT_DIR=${OUTPUT_DIR:-/out}
 SEVENZIP_SOURCE_ROOT=${SEVENZIP_SOURCE_ROOT:-}
 SEVENZIP_SOURCE_ARCHIVE=${SEVENZIP_SOURCE_ARCHIVE:-}
+RAR_BACKEND_ROOT=${RAR_BACKEND_ROOT:-}
+RAR_SOURCE_ARCHIVE=${RAR_SOURCE_ARCHIVE:-}
+RAR_LICENSE_FILE=${RAR_LICENSE_FILE:-}
 
 case "$VERSION" in
 	''|*[!A-Za-z0-9.+:~-]*)
@@ -44,7 +47,7 @@ BINARY="$BUILD_DIR/jpegview-linux"
 OUTPUT=${OUTPUT:-$OUTPUT_DIR/jpegview-linux_${VERSION}_ubuntu${UBUNTU_VERSION}_amd64.deb}
 
 make -C "$SCRIPT_DIR" BUILD_DIR="$BUILD_DIR" VERSION="$VERSION" \
-	SEVENZIP_SOURCE_ROOT="$SEVENZIP_SOURCE_ROOT" all
+	SEVENZIP_SOURCE_ROOT="$SEVENZIP_SOURCE_ROOT" RAR_BACKEND_ROOT="$RAR_BACKEND_ROOT" all
 
 SEVENZIP_PLUGIN=
 if [ -n "$SEVENZIP_SOURCE_ROOT" ]; then
@@ -63,6 +66,21 @@ if [ -n "$SEVENZIP_SOURCE_ROOT" ]; then
 	fi
 else
 	echo "warning: building .deb without SEVENZIP_SOURCE_ROOT; encrypted 7z support is unavailable" >&2
+fi
+
+RAR_PLUGIN=
+if [ -n "$RAR_BACKEND_ROOT" ]; then
+	RAR_PLUGIN="$BUILD_DIR/lib/jpegview-linux/librar_backend.so"
+	if [ ! -f "$RAR_PLUGIN" ]; then
+		echo "RAR support was requested but the private reader plugin is missing: $RAR_PLUGIN" >&2
+		exit 1
+	fi
+	if [ -z "$RAR_SOURCE_ARCHIVE" ] || [ -z "$RAR_LICENSE_FILE" ]; then
+		echo "RAR release packaging requires RAR_SOURCE_ARCHIVE and RAR_LICENSE_FILE" >&2
+		exit 1
+	fi
+else
+	echo "warning: building .deb without RAR_BACKEND_ROOT; encrypted RAR support is unavailable" >&2
 fi
 
 if command -v patchelf >/dev/null 2>&1; then
@@ -86,11 +104,16 @@ Description: Fast, minimal native Linux image viewer
  JPEGView image viewing and processing on Linux.
 EOF
 
+SHLIBS_FILES="-e $BINARY"
 if [ -n "$SEVENZIP_PLUGIN" ]; then
-	SHLIBS_OUTPUT=$(cd "$WORK_DIR/meta" && dpkg-shlibdeps -O -e "$BINARY" -e "$SEVENZIP_PLUGIN")
-else
-	SHLIBS_OUTPUT=$(cd "$WORK_DIR/meta" && dpkg-shlibdeps -O -e "$BINARY")
+	SHLIBS_FILES="$SHLIBS_FILES -e $SEVENZIP_PLUGIN"
 fi
+if [ -n "$RAR_PLUGIN" ]; then
+	SHLIBS_FILES="$SHLIBS_FILES -e $RAR_PLUGIN"
+fi
+# The paths originate from the script and build directory, not from user input.
+# shellcheck disable=SC2086
+SHLIBS_OUTPUT=$(cd "$WORK_DIR/meta" && dpkg-shlibdeps -O $SHLIBS_FILES)
 case "$SHLIBS_OUTPUT" in
 	shlibs:Depends=*) DEPENDS=${SHLIBS_OUTPUT#shlibs:Depends=} ;;
 	*)
@@ -123,6 +146,14 @@ if [ -n "$SEVENZIP_PLUGIN" ]; then
 		"$PACKAGE_ROOT/usr/share/doc/jpegview-linux/7zip-24.09-LGPL-2.1.txt"
 	install -D -m 0644 "$SEVENZIP_SOURCE_ARCHIVE" \
 		"$PACKAGE_ROOT/usr/share/doc/jpegview-linux/7zip-24.09-source.tar.gz"
+fi
+
+if [ -n "$RAR_PLUGIN" ]; then
+	install -D -m 0644 "$RAR_PLUGIN" \
+		"$PACKAGE_ROOT/usr/lib/jpegview-linux/librar_backend.so"
+	sh "$SCRIPT_DIR/package-rar-backend-source.sh" "$RAR_BACKEND_ROOT" \
+		"$RAR_SOURCE_ARCHIVE" "$RAR_LICENSE_FILE" \
+		"$PACKAGE_ROOT/usr/share/doc/jpegview-linux"
 fi
 
 ICON="$WORK_DIR/jpegview-linux.png"

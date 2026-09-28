@@ -1,0 +1,20 @@
+[package]
+name = "jpegview-rar-backend"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+publish = false
+
+[lib]
+name = "rar_backend"
+crate-type = ["cdylib"]
+
+[dependencies]
+rars = { git = "https://github.com/bitplane/rars.git", rev = "afc60e4c669ba1fe6a18748b16b08164e69c5e44" }
+zeroize = "1.8"
+
+[profile.release]
+panic = "unwind"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

@@ -68,7 +68,8 @@ std::filesystem::path FirstImageInDirectoryWhile(
 	ArchiveErrorKind* errorKind = nullptr, bool* containsEncryptedEntries = nullptr) {
 	std::vector<FileDialogEntry> images;
 	if (IsArchiveLocation(directory)) {
-		const bool sevenZip = ArchiveFormatName(directory) == ".7Z";
+		const std::string archiveFormat = ArchiveFormatName(directory);
+		const bool promptsForArchivePassword = archiveFormat == ".7Z" || archiveFormat == "RAR";
 		std::vector<ArchiveEntryInfo> archiveEntries;
 		std::string localErrorMessage;
 		ArchiveErrorKind localErrorKind = ArchiveErrorKind::None;
@@ -79,12 +80,12 @@ std::filesystem::path FirstImageInDirectoryWhile(
 			if (errorMessage != nullptr) *errorMessage = std::move(localErrorMessage);
 			if (errorKind != nullptr) *errorKind = localErrorKind;
 			if (containsEncryptedEntries != nullptr) {
-				*containsEncryptedEntries = sevenZip && localContainsEncryptedEntries;
+				*containsEncryptedEntries = promptsForArchivePassword && localContainsEncryptedEntries;
 			}
 			return {};
 		}
 		if (containsEncryptedEntries != nullptr) {
-			*containsEncryptedEntries = sevenZip && localContainsEncryptedEntries;
+			*containsEncryptedEntries = promptsForArchivePassword && localContainsEncryptedEntries;
 		}
 		for (const ArchiveEntryInfo& entry : archiveEntries) {
 			if (!shouldContinue()) return {};
@@ -100,10 +101,10 @@ std::filesystem::path FirstImageInDirectoryWhile(
 		SortFileDialogEntries(images, mode);
 		if (errorMessage != nullptr) errorMessage->clear();
 		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
-		if (sevenZip && !images.empty() && images.front().encrypted &&
+		if (promptsForArchivePassword && !images.empty() && images.front().encrypted &&
 			!HasSessionArchivePassword(directory)) {
 			if (errorMessage != nullptr) {
-				*errorMessage = "password required for encrypted 7z image";
+				*errorMessage = "password required for encrypted archive image";
 			}
 			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::PasswordRequired;
 			return {};

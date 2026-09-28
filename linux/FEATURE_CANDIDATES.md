@@ -18,12 +18,12 @@ candidates are independent of the JPEGView_L comparison below. The current behav
 - **ZIP, TAR, TGZ, 7z, and RAR image archives:** implemented in the Linux branch. `.zip`, `.tar`,
   `.tar.gz`, `.tgz`, `.7z`, and `.rar` browse as virtual folders, list supported images and nested
   folders without extracting or retaining image payloads, and support archive navigation and Recents
-  previews. Encrypted ZIP image members and encrypted 7z data/header encryption are supported with a
-  shared per-run password prompt/cache. Encrypted RAR remains unsupported. TAR/TGZ do not have native
-  password encryption. RAR4
-  and RAR5 are supported through libarchive; multi-volume RAR archives are not, and solid RAR4
-  archives are unsupported. Gzip TAR access is sequential; solid 7z and RAR5 archives may need
-  earlier members decompressed to reach later entries. Cold directory listing runs in a cancellable
+  previews. Encrypted ZIP and 7z plus encrypted RAR4/RAR5 data/header formats use the shared per-run
+  password prompt/cache; header-encrypted catalogs keep names hidden while locked, and previews
+  never prompt. Ordinary unencrypted RAR remains on libarchive. TAR/TGZ do not have native password
+  encryption. Multi-volume RAR sets and split members are unsupported, and RAR7 is not yet covered
+  by application fixtures. Gzip TAR access is sequential; solid 7z and RAR5 archives may need earlier
+  members decompressed to reach later entries. Cold directory listing runs in a cancellable
   worker. See current limits and controls in the
   [Linux README](README.md#linux-branch-changes-in-order-of-importance).
 
@@ -248,13 +248,6 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   treating it as a folder image or comic archive. Keep rendering optional if the required PDF
   library is unavailable. See the
   [PDF support commit](https://github.com/sdneon/jpegview/commit/5d79cad3cc98d502576a8c357bffaea540ac67d6).
-- **Encrypted RAR archives:** add password entry and browsing for encrypted data and header-encrypted
-  RAR archives. Reuse the shared password prompt and process-only credential policy; evaluate a
-  backend that avoids exposing secrets in process arguments and is compatible with Ubuntu 20 and
-  AppImage packaging. Encrypted 7z is implemented with a private in-process Format7zF plugin; RAR
-  remains a separate future unit. TAR/TGZ are not listed because they have no native encryption. The reviewed
-  ZIP/7z/RAR proposal originated in the fork's explicitly experimental
-  [encrypted-archive branch](https://github.com/sdneon/jpegview/commit/3eb40d477099cf5cbbb754553e2f2e968f3f88e4).
 - **Minimum-file-size filter:** optionally skip tiny images such as embedded contact sheets or
   comic-folder cover thumbnails during navigation. Define the threshold and make it easy to disable
   for a directly opened image. See the fork's

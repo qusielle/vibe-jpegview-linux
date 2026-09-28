@@ -98,10 +98,18 @@ if [ -x "$ENCRYPTED_ZIP_FIXTURE_WRITER" ]; then
 	touch -t 201801010000.00 "$temporary/images/11-password.zip"
 fi
 sevenzip_plugin="$(dirname -- "$BINARY")/lib/jpegview-linux/7z.so"
-if [ -f "$sevenzip_plugin" ] && [ -f "$SCRIPT_DIR/fixtures/header-encrypted.7z" ]; then
+if [ "${JPEGVIEW_TEST_HAS_7Z_PLUGIN:-0}" = 1 ] && [ -f "$sevenzip_plugin" ] &&
+	[ -f "$SCRIPT_DIR/fixtures/header-encrypted.7z" ]; then
 	cp "$SCRIPT_DIR/fixtures/header-encrypted.7z" \
 		"$temporary/images/12-header-password.7z"
 	touch -t 201801010000.00 "$temporary/images/12-header-password.7z"
+fi
+rar_plugin="$(dirname -- "$BINARY")/lib/jpegview-linux/librar_backend.so"
+if [ "${JPEGVIEW_TEST_HAS_RAR_PLUGIN:-0}" = 1 ] && [ -f "$rar_plugin" ] &&
+	[ -f "$SCRIPT_DIR/fixtures/encrypted_rar/rar4-header-encrypted.rar" ]; then
+	cp "$SCRIPT_DIR/fixtures/encrypted_rar/rar4-header-encrypted.rar" \
+		"$temporary/images/13-rar-header-password.rar"
+	touch -t 201801010000.00 "$temporary/images/13-rar-header-password.rar"
 fi
 mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
@@ -436,6 +444,38 @@ if [ -f "$temporary/images/12-header-password.7z" ]; then
 	sleep 0.3
 	assert_title_prefix "visible.png" \
 		"reselecting a canceled encrypted 7z prompt used the parent-folder path"
+	stop_viewer
+	XDG_STATE_HOME="$temporary/state"
+	export XDG_STATE_HOME
+fi
+
+if [ -f "$temporary/images/13-rar-header-password.rar" ]; then
+	# Header-encrypted RAR uses the same explicit-unlock flow as 7z. The wrong
+	# legacy-header password must remain retryable, then reveal the image.
+	XDG_STATE_HOME="$temporary/rar-header-password-state"
+	export XDG_STATE_HOME
+	launch_viewer "$temporary/images/13-rar-header-password.rar"
+	assert_title_prefix "JPEGView" "header-encrypted RAR startup did not open Browse"
+	sleep 0.3
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/rar-header-password-dialog.png"
+		password_border=$(convert "$temporary/rar-header-password-dialog.png" \
+			-format "%[hex:p{400,311}]" info:)
+		case "$password_border" in
+			BEAA78*|beaa78*) ;;
+			*) echo "UI smoke test: header-encrypted RAR did not show the password prompt" >&2; exit 1 ;;
+		esac
+	fi
+	DISPLAY=":$display_number" xdotool type --delay 20 'wrong-password'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.3
+	DISPLAY=":$display_number" xdotool type --delay 20 'test-secret'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "private.png" \
+		"header-encrypted RAR did not reveal/open its image after password entry"
 	stop_viewer
 	XDG_STATE_HOME="$temporary/state"
 	export XDG_STATE_HOME

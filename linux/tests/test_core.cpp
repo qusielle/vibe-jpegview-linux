@@ -36,6 +36,7 @@
 #include "bitmap_font.h"
 #include "playback_scheduler.h"
 #include "archive_source.h"
+#include "rar_backend.h"
 #include "seven_zip_backend.h"
 #include "archive_password_dialog_model.h"
 #include "rar_test_fixtures.h"
@@ -1187,6 +1188,172 @@ void TestRarBrowsingDecodingAndPreview() {
 	entries.clear();
 	Expect(!jpegview_linux::ListArchiveDirectory(malformed, entries, error) && !error.empty(),
 		"malformed RAR input did not fail with a useful error");
+}
+
+void TestEncryptedRarBrowsingAndSessionPasswords() {
+	struct PasswordCacheGuard {
+		PasswordCacheGuard() { jpegview_linux::ClearSessionArchivePasswords(); }
+		~PasswordCacheGuard() { jpegview_linux::ClearSessionArchivePasswords(); }
+	} passwordCacheGuard;
+	struct Fixture {
+		const char* filename;
+		bool headerEncrypted;
+	};
+	constexpr Fixture fixtures[] = {
+		{"rar4-data-encrypted.rar", false},
+		{"rar4-header-encrypted.rar", true},
+		{"rar5-data-encrypted.rar", false},
+		{"rar5-header-encrypted.rar", true},
+	};
+	TemporaryDirectory temporary;
+	const fs::path fixtureDirectory = fs::path(__FILE__).parent_path() /
+		"fixtures" / "encrypted_rar";
+	const std::vector<std::uint8_t> expectedPng = ReadBytes(fixtureDirectory / "private.png");
+	Expect(expectedPng.size() > 32 && expectedPng[0] == 0x89 &&
+		expectedPng[1] == 'P' && expectedPng[2] == 'N' && expectedPng[3] == 'G',
+		"encrypted RAR test image fixture is not a PNG");
+	std::string error;
+	jpegview_linux::ArchiveErrorKind errorKind = jpegview_linux::ArchiveErrorKind::None;
+	if (!jpegview_linux::RarBackendAvailable()) {
+		const fs::path archive = temporary.path() / fixtures[0].filename;
+		Expect(fs::copy_file(fixtureDirectory / fixtures[0].filename, archive),
+			"could not copy encrypted RAR fallback fixture");
+		Expect(!jpegview_linux::ValidateArchivePassword(archive, "test-secret", error,
+			&errorKind) && errorKind == jpegview_linux::ArchiveErrorKind::UnsupportedEncryption,
+			"local unavailable RAR backend did not report encrypted RAR as unsupported");
+		return;
+	}
+
+	const auto awaitPreview = [](jpegview_linux::FileDialogPreviewLoader& loader,
+		const fs::path& archive) {
+		const std::uint64_t generation = loader.Request(archive, true,
+			jpegview_linux::FileDialogSortMode::Name, 32, 32);
+		std::vector<jpegview_linux::FileDialogPreviewResult> results;
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+		while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			results = loader.TakeReady();
+		}
+		Expect(results.size() == 1 && results.front().generation == generation,
+			"encrypted RAR preview did not finish before its bounded deadline");
+		return results.front();
+	};
+
+	std::vector<fs::path> archivePaths;
+	for (const Fixture& fixture : fixtures) {
+		const fs::path archive = temporary.path() / fixture.filename;
+		Expect(fs::copy_file(fixtureDirectory / fixture.filename, archive),
+			std::string("could not copy encrypted RAR fixture ") + fixture.filename);
+		archivePaths.push_back(archive);
+		const fs::path member = archive / "private.png";
+		std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+		bool containsEncryptedEntries = false;
+		if (fixture.headerEncrypted) {
+			Expect(!jpegview_linux::ListArchiveDirectoryCancellable(archive, entries,
+				[] { return true; }, error, &errorKind, &containsEncryptedEntries) &&
+				errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired && entries.empty(),
+				std::string(fixture.filename) + " exposed hidden member names without a password");
+		} else {
+			Expect(jpegview_linux::ListArchiveDirectoryCancellable(archive, entries,
+				[] { return true; }, error, &errorKind, &containsEncryptedEntries) &&
+				containsEncryptedEntries && entries.size() == 1 &&
+				entries.front().path == member && entries.front().encrypted,
+				std::string(fixture.filename) +
+				" did not keep encrypted-data member names visible: " + error);
+		}
+
+		jpegview_linux::FileDialogPreviewLoader previewLoader;
+		const auto lockedPreview = awaitPreview(previewLoader, archive);
+		Expect(lockedPreview.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired &&
+			lockedPreview.bgra.empty(),
+			std::string(fixture.filename) + " preview did not stay locked without prompting (kind=" +
+			std::to_string(static_cast<int>(lockedPreview.errorKind)) + ", error=" +
+			lockedPreview.error + ", source=" + lockedPreview.source.string() + ", encrypted=" +
+			(lockedPreview.encryptedArchive ? "true" : "false") + ")");
+
+		const bool wrongPasswordAccepted = jpegview_linux::ValidateArchivePassword(archive,
+			"wrong-password", error, &errorKind);
+		Expect(!wrongPasswordAccepted &&
+			errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword,
+			std::string(fixture.filename) + " accepted or misclassified an incorrect password (accepted=" +
+			(wrongPasswordAccepted ? "true" : "false") + ", kind=" +
+			std::to_string(static_cast<int>(errorKind)) + ", error=" + error + ")");
+		Expect(!jpegview_linux::HasSessionArchivePassword(archive),
+			"failed encrypted RAR password validation cached a credential");
+		Expect(jpegview_linux::ValidateArchivePassword(archive, "test-secret", error,
+			&errorKind), std::string(fixture.filename) +
+			" rejected its correct password: " + error);
+		Expect(jpegview_linux::SetSessionArchivePassword(archive, "test-secret") &&
+			jpegview_linux::HasSessionArchivePassword(member),
+			std::string(fixture.filename) + " password was not reused by archive member paths");
+
+		entries.clear();
+		containsEncryptedEntries = false;
+		Expect(jpegview_linux::ListArchiveDirectoryCancellable(archive, entries,
+			[] { return true; }, error, &errorKind, &containsEncryptedEntries) &&
+			containsEncryptedEntries && entries.size() == 1 &&
+			entries.front().path == member && entries.front().encrypted,
+			std::string(fixture.filename) + " did not list encrypted member metadata after unlock: " +
+			error);
+
+		bool extracted = false;
+		Expect(jpegview_linux::WithArchiveMemberFile(member,
+			[&](const fs::path& temporaryImage, std::string&) {
+				extracted = ReadBytes(temporaryImage) == expectedPng;
+				return extracted;
+			}, error, &errorKind) && extracted,
+			std::string(fixture.filename) + " did not extract the expected image bytes: " + error);
+		jpegview_linux::DecodedImage decoded;
+		Expect(jpegview_linux::DecodeImage(member, decoded, error) &&
+			decoded.frames.size() == 1 && decoded.frames.front().width == 1 &&
+			decoded.frames.front().height == 1,
+			std::string(fixture.filename) + " did not decode its encrypted image: " + error);
+		const auto unlockedPreview = awaitPreview(previewLoader, archive);
+		Expect(unlockedPreview.error.empty() && !unlockedPreview.bgra.empty() &&
+			unlockedPreview.width == 1 && unlockedPreview.height == 1,
+			std::string(fixture.filename) + " did not reuse the cached password in its preview");
+	}
+
+	const fs::path cancelArchive = temporary.path() / "cancelled.rar";
+	Expect(fs::copy_file(fixtureDirectory / fixtures[0].filename, cancelArchive),
+		"could not copy cancellation fixture");
+	std::vector<jpegview_linux::ArchiveEntryInfo> cancelledEntries;
+	Expect(!jpegview_linux::ListArchiveDirectoryCancellable(cancelArchive, cancelledEntries,
+		[] { return false; }, error, &errorKind) && error.find("cancel") != std::string::npos &&
+		cancelledEntries.empty(), "encrypted RAR listing did not stop on cancellation");
+	const jpegview_linux::RarDataWriter rejectingWriter = [](
+		const std::uint8_t*, std::size_t, std::string& sinkError) {
+		sinkError = "fixture sink rejected output";
+		return false;
+	};
+	Expect(!jpegview_linux::ExtractRarMember(archivePaths.front(), 0, "private.png",
+		std::optional<std::string>("test-secret"), [] { return true; }, rejectingWriter,
+		error, &errorKind) && error.find("fixture sink rejected output") != std::string::npos,
+		"encrypted RAR output callback failure was lost or treated as successful extraction");
+	Expect(!jpegview_linux::ExtractRarMember(archivePaths.front(), 0, "private.png",
+		std::optional<std::string>("test-secret"), [] { return false; },
+		[](const std::uint8_t*, std::size_t, std::string&) { return true; },
+		error, &errorKind) && error.find("cancel") != std::string::npos,
+		"encrypted RAR extraction did not report cancellation safely");
+
+	jpegview_linux::ClearSessionArchivePasswords();
+	for (std::size_t index = 0; index < std::size(fixtures); ++index) {
+		std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+		if (fixtures[index].headerEncrypted) {
+			Expect(!jpegview_linux::ListArchiveDirectoryCancellable(archivePaths[index], entries,
+				[] { return true; }, error, &errorKind) &&
+				errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired && entries.empty(),
+				"clearing RAR credentials retained a decrypted header catalog");
+		} else {
+			Expect(jpegview_linux::ListArchiveDirectory(archivePaths[index], entries, error) &&
+				entries.size() == 1 && entries.front().encrypted,
+				"clearing RAR credentials hid visible data-encrypted names");
+			Expect(!jpegview_linux::WithArchiveMemberFile(archivePaths[index] / "private.png",
+				[](const fs::path&, std::string&) { return true; }, error, &errorKind) &&
+				errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired,
+				"clearing RAR credentials did not relock an encrypted image");
+		}
+	}
 }
 
 void TestFileListMarkedImageToggle() {
@@ -5943,6 +6110,8 @@ int main() {
 		TestTarAndTgzBrowsingDecodingAndSafety, failures);
 	RunTest("7z-browsing-decoding-and-preview", TestSevenZipBrowsingDecodingAndPreview, failures);
 	RunTest("rar-browsing-decoding-and-preview", TestRarBrowsingDecodingAndPreview, failures);
+	RunTest("encrypted-rar-browsing-and-session-passwords",
+		TestEncryptedRarBrowsingAndSessionPasswords, failures);
 	RunTest("file-list-marked-image-toggle", TestFileListMarkedImageToggle, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);

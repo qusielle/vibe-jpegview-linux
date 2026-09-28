@@ -1,4 +1,5 @@
 #include "archive_source.h"
+#include "rar_backend.h"
 #include "seven_zip_backend.h"
 
 #include <algorithm>
@@ -296,6 +297,7 @@ enum class ArchiveBackend {
 	Zip,
 	Libarchive,
 	SevenZip,
+	Rar,
 };
 
 struct ArchiveMemberRecord {
@@ -840,6 +842,88 @@ bool LoadSevenZipCatalog(const fs::path& archivePath,
 	return true;
 }
 
+bool LoadRarCatalog(const fs::path& archivePath, const BackingIdentity& expectedIdentity,
+	const std::optional<std::string>& password,
+	std::shared_ptr<const ArchiveCatalog>& result,
+	const std::function<bool()>& shouldContinue, std::string& errorMessage,
+	ArchiveErrorKind* errorKind) {
+	std::vector<RarEntry> entries;
+	bool headerEncrypted = false;
+	if (!ReadRarCatalog(archivePath, password, shouldContinue, entries,
+		headerEncrypted, errorMessage, errorKind)) return false;
+	std::shared_ptr<ArchiveCatalog> catalog;
+	try {
+		catalog = std::make_shared<ArchiveCatalog>();
+		catalog->archive = archivePath;
+		catalog->identity = expectedIdentity;
+		catalog->format = ArchiveFormat::Rar;
+		catalog->containsEncryptedEntries = headerEncrypted;
+		catalog->headerEncrypted = headerEncrypted;
+		catalog->directories.try_emplace("");
+		for (const RarEntry& entry : entries) {
+			if (!ShouldContinue(shouldContinue)) {
+				errorMessage = "archive indexing was cancelled";
+				if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+				return false;
+			}
+			if (entry.specialFile || entry.split) continue;
+			std::string name;
+			if (!SafeLibarchiveMemberPath(entry.rawPath, entry.directory, name)) continue;
+			std::vector<std::string> components;
+			std::size_t start = 0;
+			while (start < name.size()) {
+				const std::size_t slash = name.find('/', start);
+				const std::size_t end = slash == std::string::npos ? name.size() : slash;
+				components.push_back(name.substr(start, end - start));
+				if (slash == std::string::npos) break;
+				start = slash + 1;
+			}
+			if (components.empty() || !AddDirectoryChain(*catalog, components,
+				components.size() - 1)) continue;
+			std::string parent;
+			for (std::size_t index = 0; index + 1 < components.size(); ++index) {
+				if (!parent.empty()) parent.push_back('/');
+				parent += components[index];
+			}
+			const std::string& basename = components.back();
+			const std::string fullName = parent.empty() ? basename : parent + "/" + basename;
+			if (entry.directory) {
+				if (AddCatalogChild(*catalog, parent,
+					CatalogChild{basename, fullName, true, 0, entry.modificationTime})) {
+					catalog->directories.try_emplace(fullName);
+				}
+				continue;
+			}
+			ArchiveMemberRecord member;
+			member.size = entry.size;
+			member.index = entry.index;
+			member.modificationTime = entry.modificationTime;
+			member.rawPath = entry.rawPath;
+			member.encrypted = entry.encrypted;
+			member.backend = ArchiveBackend::Rar;
+			catalog->containsEncryptedEntries = catalog->containsEncryptedEntries || member.encrypted;
+			if (AddCatalogChild(*catalog, parent,
+				CatalogChild{basename, fullName, false, member.size,
+					member.modificationTime, member.encrypted})) {
+				catalog->members.emplace(fullName, std::move(member));
+			}
+		}
+	} catch (const std::bad_alloc&) {
+		errorMessage = "not enough memory to index RAR archive";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	BackingIdentity afterLoad;
+	if (!StatIdentity(archivePath, afterLoad) || !(afterLoad == expectedIdentity)) {
+		errorMessage = "RAR archive changed while it was being indexed";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	result = std::move(catalog);
+	if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
+	return true;
+}
+
 
 std::shared_ptr<const ArchiveCatalog> GetCatalog(const fs::path& archivePath,
 	const std::function<bool()>& shouldContinue, std::string& errorMessage,
@@ -923,6 +1007,52 @@ std::shared_ptr<const ArchiveCatalog> GetCatalog(const fs::path& archivePath,
 			if (!loadedSuccessfully && errorMessage.empty()) {
 				errorMessage = std::move(ignoredLibarchiveError);
 			}
+		}
+	} else if (location.format == ArchiveFormat::Rar) {
+		std::shared_ptr<const ArchiveCatalog> libarchiveCatalog;
+		std::string libarchiveError;
+		const bool libarchiveLoaded = LoadLibarchiveCatalog(archivePath, location.format,
+			identity, libarchiveCatalog, shouldContinue, libarchiveError);
+		if (!ShouldContinue(shouldContinue)) {
+			loadedSuccessfully = false;
+			errorMessage = "archive indexing was cancelled";
+		} else if (!RarBackendAvailable() && libarchiveLoaded) {
+			loaded = std::move(libarchiveCatalog);
+			loadedSuccessfully = true;
+			loadErrorKind = ArchiveErrorKind::None;
+		} else if (RarBackendAvailable()) {
+			std::string password;
+			std::optional<std::string> suppliedPassword;
+			if (ReadSessionPassword(archivePath, password)) suppliedPassword = password;
+			std::shared_ptr<const ArchiveCatalog> rarCatalog;
+			loadedSuccessfully = LoadRarCatalog(archivePath, identity, suppliedPassword,
+				rarCatalog, shouldContinue, errorMessage, &loadErrorKind);
+			ClearPasswordString(password);
+			if (loadedSuccessfully &&
+				(rarCatalog->containsEncryptedEntries || !libarchiveLoaded)) {
+				loaded = std::move(rarCatalog);
+				loadErrorKind = ArchiveErrorKind::None;
+			} else if (loadedSuccessfully) {
+				loaded = std::move(libarchiveCatalog);
+				loadErrorKind = ArchiveErrorKind::None;
+			} else if (libarchiveLoaded &&
+				loadErrorKind == ArchiveErrorKind::UnsupportedEncryption) {
+				loaded = std::move(libarchiveCatalog);
+				loadedSuccessfully = true;
+				loadErrorKind = ArchiveErrorKind::None;
+			} else {
+				loadedSuccessfully = false;
+				if (errorMessage.empty()) errorMessage = std::move(libarchiveError);
+			}
+		} else if (libarchiveLoaded) {
+			loaded = std::move(libarchiveCatalog);
+			loadedSuccessfully = true;
+			loadErrorKind = ArchiveErrorKind::None;
+		} else {
+			loadedSuccessfully = false;
+			errorMessage = libarchiveError.empty() ?
+				"RAR archive support is unavailable in this build" : libarchiveError;
+			loadErrorKind = ArchiveErrorKind::UnsupportedEncryption;
 		}
 	} else if (!LoadLibarchiveCatalog(archivePath, location.format, identity, loaded,
 		shouldContinue, errorMessage)) {
@@ -1177,6 +1307,81 @@ bool WithSevenZipMemberFile(const fs::path& path, const ArchiveLocation& locatio
 	BackingIdentity afterRead;
 	if (!StatIdentity(location.archive, afterRead) || !(afterRead == catalog.identity)) {
 		errorMessage = "7z archive changed while the image was being read";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	if (::lseek(temporary.descriptor, 0, SEEK_SET) < 0) {
+		errorMessage = "cannot rewind the archive image memory file";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	try {
+		return callback(temporary.link, errorMessage);
+	} catch (const std::exception& error) {
+		errorMessage = error.what();
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+}
+
+bool WithRarMemberFile(const fs::path& path, const ArchiveLocation& location,
+	const ArchiveCatalog& catalog, const ArchiveMemberRecord& member,
+	const std::function<bool(const fs::path&, std::string&)>& callback,
+	std::string& errorMessage, ArchiveErrorKind* errorKind) {
+	std::string password;
+	std::optional<std::string> suppliedPassword;
+	if (catalog.headerEncrypted || member.encrypted) {
+		if (!ReadSessionPassword(location.archive, password)) {
+			errorMessage = "password required for encrypted RAR image";
+			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::PasswordRequired;
+			return false;
+		}
+		suppliedPassword = password;
+	}
+	if (!RarBackendAvailable()) {
+		ClearPasswordString(password);
+		errorMessage = "encrypted RAR support is unavailable in this build";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::UnsupportedEncryption;
+		return false;
+	}
+	BackingIdentity currentIdentity;
+	if (!StatIdentity(location.archive, currentIdentity) || !(currentIdentity == catalog.identity)) {
+		ClearPasswordString(password);
+		errorMessage = "RAR archive changed before the image could be read";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	PrivateMemberFile temporary;
+	if (!MakePrivateMemberFile(path, temporary, errorMessage)) {
+		ClearPasswordString(password);
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	std::uint64_t total = 0;
+	const RarDataWriter writer = [&temporary, &member, &total](
+		const std::uint8_t* data, std::size_t size, std::string& sinkError) {
+		const std::uint64_t chunk = static_cast<std::uint64_t>(size);
+		if (total > member.size || chunk > kMaximumArchiveMemberBytes - total ||
+			chunk > member.size - total) {
+			sinkError = "RAR member expanded beyond its declared size or the 128 MiB limit";
+			return false;
+		}
+		if (!WriteAll(temporary.descriptor, data, size, sinkError)) return false;
+		total += chunk;
+		return true;
+	};
+	const bool extracted = ExtractRarMember(location.archive, member.index, member.rawPath,
+		suppliedPassword, {}, writer, errorMessage, errorKind);
+	ClearPasswordString(password);
+	if (!extracted) return false;
+	if (total != member.size) {
+		errorMessage = "RAR member ended before its declared size";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	BackingIdentity afterRead;
+	if (!StatIdentity(location.archive, afterRead) || !(afterRead == catalog.identity)) {
+		errorMessage = "RAR archive changed while the image was being read";
 		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
 		return false;
 	}
@@ -1475,6 +1680,51 @@ bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 		}
 		return true;
 	}
+	if (location.format == ArchiveFormat::Rar) {
+		if (!RarBackendAvailable()) {
+			errorMessage = "encrypted RAR support is unavailable in this build";
+			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::UnsupportedEncryption;
+			return false;
+		}
+		std::vector<RarEntry> entries;
+		bool headerEncrypted = false;
+		if (!ReadRarCatalog(location.archive, password, {}, entries,
+			headerEncrypted, errorMessage, errorKind)) return false;
+		const auto encrypted = std::find_if(entries.begin(), entries.end(),
+			[](const RarEntry& entry) {
+			return entry.encrypted && !entry.directory && !entry.specialFile &&
+				!entry.split && entry.size != 0 && entry.size <= kMaximumArchiveMemberBytes;
+		});
+		if (encrypted == entries.end()) {
+			if (headerEncrypted) return true;
+			const bool containsEncrypted = std::any_of(entries.begin(), entries.end(),
+				[](const RarEntry& entry) { return entry.encrypted; });
+			if (!containsEncrypted) return true;
+			errorMessage = "cannot validate the password: encrypted RAR members exceed the 128 MiB limit";
+			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::UnsupportedEncryption;
+			return false;
+		}
+		std::uint64_t total = 0;
+		const RarDataWriter discard = [&total, &encrypted](
+			const std::uint8_t*, std::size_t size, std::string& sinkError) {
+			const std::uint64_t chunk = static_cast<std::uint64_t>(size);
+			if (total > encrypted->size || chunk > kMaximumArchiveMemberBytes - total ||
+				chunk > encrypted->size - total) {
+				sinkError = "encrypted RAR member expanded beyond its declared size or the 128 MiB limit";
+				return false;
+			}
+			total += chunk;
+			return true;
+		};
+		if (!ExtractRarMember(location.archive, encrypted->index, encrypted->rawPath,
+			password, {}, discard, errorMessage, errorKind)) return false;
+		if (total != encrypted->size) {
+			errorMessage = "encrypted RAR member ended before its declared size";
+			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::InvalidPassword;
+			return false;
+		}
+		return true;
+	}
 	const std::shared_ptr<const ArchiveCatalog> catalog =
 		GetCatalog(location.archive, AlwaysContinue(), errorMessage, errorKind);
 	if (!catalog) return false;
@@ -1558,6 +1808,10 @@ bool WithArchiveMemberFile(const fs::path& path,
 	}
 	if (member->second.backend == ArchiveBackend::SevenZip) {
 		return WithSevenZipMemberFile(path, location, *catalog, member->second,
+			callback, errorMessage, errorKind);
+	}
+	if (member->second.backend == ArchiveBackend::Rar) {
+		return WithRarMemberFile(path, location, *catalog, member->second,
 			callback, errorMessage, errorKind);
 	}
 	std::string password;

@@ -40,6 +40,8 @@ ZIP_LIBS ?= $(shell pkg-config --libs libzip 2>/dev/null || echo -lzip)
 ARCHIVE_CFLAGS ?= $(shell pkg-config --cflags libarchive 2>/dev/null)
 ARCHIVE_LIBS ?= $(shell pkg-config --libs libarchive 2>/dev/null || echo -larchive)
 SEVENZIP_SOURCE_ROOT ?=
+RAR_BACKEND_ROOT ?=
+CARGO ?= cargo
 # libraw's pkg-config file redundantly adds its C++ runtime. Let the compiler's
 # static-runtime switches control that dependency instead of forcing an
 # additional shared libstdc++ link on the executable.
@@ -80,13 +82,29 @@ SEVENZIP_CPPFLAGS :=
 SEVENZIP_BACKEND_SOURCE := src/seven_zip_backend_unavailable.cpp
 SEVENZIP_PLUGIN_DEPENDENCY :=
 endif
+ifneq ($(strip $(RAR_BACKEND_ROOT)),)
+RAR_BACKEND_SOURCE := src/rar_backend_ffi.cpp
+RAR_BACKEND_PLUGIN := $(BUILD_DIR)/lib/jpegview-linux/librar_backend.so
+RAR_BACKEND_PLUGIN_DEPENDENCY := $(RAR_BACKEND_PLUGIN)
+RAR_CARGO_TARGET_DIR := $(BUILD_DIR)/rar-cargo
+else
+RAR_BACKEND_SOURCE := src/rar_backend_unavailable.cpp
+RAR_BACKEND_PLUGIN_DEPENDENCY :=
+endif
 SOURCES := src/main.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/cache_budget.cpp src/cache_budget.h src/image_cache.cpp src/image_cache.h src/display_image_cache.cpp src/display_image_cache.h src/image.cpp src/image.h src/image_processing.cpp src/image_processing.h src/image_processing_store.cpp src/image_processing_store.h src/recent_files.cpp src/recent_files.h src/settings.cpp src/settings.h src/transparency_pattern.cpp src/transparency_pattern.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/external_commands.cpp src/external_commands.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h src/overlay_layout.cpp src/overlay_layout.h src/viewer_chrome.cpp src/viewer_chrome.h src/thumbnail_panel_model.cpp src/thumbnail_panel_model.h src/thumbnail_resampler.cpp src/thumbnail_resampler.h src/image_info_model.cpp src/image_info_model.h src/spectrum_model.cpp src/spectrum_model.h src/file_dialog_model.cpp src/file_dialog_model.h src/playback_scheduler.cpp src/playback_scheduler.h src/system_font.cpp src/system_font.h src/bitmap_font.cpp src/bitmap_font.h src/bitmap_font_data.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
 TEST_SOURCES := tests/test_core.cpp src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/cache_budget.cpp src/cache_budget.h src/image_cache.cpp src/image_cache.h src/display_image_cache.cpp src/display_image_cache.h src/image.cpp src/image.h src/image_processing.cpp src/image_processing.h src/image_processing_store.cpp src/image_processing_store.h src/recent_files.cpp src/recent_files.h src/settings.cpp src/settings.h src/transparency_pattern.cpp src/transparency_pattern.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/external_commands.cpp src/external_commands.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h src/overlay_layout.cpp src/overlay_layout.h src/viewer_chrome.cpp src/viewer_chrome.h src/thumbnail_panel_model.cpp src/thumbnail_panel_model.h src/thumbnail_resampler.cpp src/thumbnail_resampler.h src/image_info_model.cpp src/image_info_model.h src/spectrum_model.cpp src/spectrum_model.h src/file_dialog_model.cpp src/file_dialog_model.h src/playback_scheduler.cpp src/playback_scheduler.h src/system_font.cpp src/system_font.h src/bitmap_font.cpp src/bitmap_font.h src/bitmap_font_data.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
 SOURCES += src/archive_source.cpp src/archive_source.h
 TEST_SOURCES += src/archive_source.cpp src/archive_source.h
 TEST_SOURCES += tests/fixtures/data-encrypted.7z tests/fixtures/header-encrypted.7z
+TEST_SOURCES += tests/fixtures/encrypted_rar/private.png \
+	tests/fixtures/encrypted_rar/rar4-data-encrypted.rar \
+	tests/fixtures/encrypted_rar/rar4-header-encrypted.rar \
+	tests/fixtures/encrypted_rar/rar5-data-encrypted.rar \
+	tests/fixtures/encrypted_rar/rar5-header-encrypted.rar
 SOURCES += $(SEVENZIP_BACKEND_SOURCE) src/seven_zip_backend.h
 TEST_SOURCES += $(SEVENZIP_BACKEND_SOURCE) src/seven_zip_backend.h
+SOURCES += $(RAR_BACKEND_SOURCE) src/rar_backend.h
+TEST_SOURCES += $(RAR_BACKEND_SOURCE) src/rar_backend.h
 SOURCES += src/archive_password_dialog_model.cpp src/archive_password_dialog_model.h
 TEST_SOURCES += src/archive_password_dialog_model.cpp src/archive_password_dialog_model.h
 TEST_SOURCES += tests/rar_test_fixtures.h
@@ -111,13 +129,23 @@ SOURCES += $(BUILD_INFO_HEADER)
 
 .PHONY: all clean run test test-ui test-shell test-sanitize test-version check appimage
 
-all: $(TARGET) $(SEVENZIP_PLUGIN_DEPENDENCY)
+all: $(TARGET) $(SEVENZIP_PLUGIN_DEPENDENCY) $(RAR_BACKEND_PLUGIN_DEPENDENCY)
 
 ifneq ($(strip $(SEVENZIP_SOURCE_ROOT)),)
 $(SEVENZIP_PLUGIN): $(SEVENZIP_BUNDLE_DIR)/makefile.gcc
 	$(MAKE) -C "$(SEVENZIP_BUNDLE_DIR)" -f makefile.gcc DISABLE_RAR=1
 	@mkdir -p "$(dir $@)"
 	cp "$(SEVENZIP_BUNDLE_DIR)/_o/7z.so" "$@"
+endif
+
+ifneq ($(strip $(RAR_BACKEND_ROOT)),)
+$(RAR_BACKEND_PLUGIN): $(RAR_BACKEND_ROOT)/Cargo.toml $(RAR_BACKEND_ROOT)/Cargo.lock \
+	$(RAR_BACKEND_ROOT)/rust-toolchain.toml $(wildcard $(RAR_BACKEND_ROOT)/src/*.rs)
+	CARGO_HOME="$${CARGO_HOME:-$$HOME/.cargo}" RUSTUP_HOME="$${RUSTUP_HOME:-$$HOME/.rustup}" \
+	CARGO_TARGET_DIR="$(abspath $(RAR_CARGO_TARGET_DIR))" \
+	$(CARGO) build --manifest-path "$(RAR_BACKEND_ROOT)/Cargo.toml" --release --locked
+	@mkdir -p "$(dir $@)"
+	cp "$(abspath $(RAR_CARGO_TARGET_DIR))/release/librar_backend.so" "$@"
 endif
 
 $(GENERATED_ICON_HEADER): $(ICON_SOURCE) embed-icon.sh
@@ -127,9 +155,9 @@ $(GENERATED_ICON_HEADER): $(ICON_SOURCE) embed-icon.sh
 $(BUILD_INFO_HEADER): version.sh write-build-info.sh
 	sh ./write-build-info.sh "$@" "$(VERSION)"
 
-$(TARGET): $(SOURCES) $(SEVENZIP_PLUGIN_DEPENDENCY)
+$(TARGET): $(SOURCES) $(SEVENZIP_PLUGIN_DEPENDENCY) $(RAR_BACKEND_PLUGIN_DEPENDENCY)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -include $(BUILD_INFO_HEADER) $(CODEC_DEFINES) $(SDL2_CFLAGS) $(PANGO_CFLAGS) $(CODEC_CFLAGS) $(SEVENZIP_CPPFLAGS) -I$(BUILD_DIR) -Isrc -Ithird_party src/main.cpp src/file_list.cpp src/archive_source.cpp $(SEVENZIP_BACKEND_SOURCE) src/archive_password_dialog_model.cpp src/crop_selection_model.cpp src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp src/magnifying_glass_model.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp src/image.cpp src/image_processing.cpp src/image_processing_store.cpp src/recent_files.cpp src/clipboard.cpp src/settings.cpp src/transparency_pattern.cpp src/sort_mode.cpp src/desktop_applications.cpp src/desktop_association.cpp src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_resampler.cpp src/image_info_model.cpp src/spectrum_model.cpp src/file_dialog_model.cpp src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp src/app_icon.cpp -o $@ $(LDFLAGS) $(STATIC_RUNTIME) $(SDL2_LIBS) $(PANGO_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+	$(CXX) $(CXXFLAGS) -include $(BUILD_INFO_HEADER) $(CODEC_DEFINES) $(SDL2_CFLAGS) $(PANGO_CFLAGS) $(CODEC_CFLAGS) $(SEVENZIP_CPPFLAGS) -I$(BUILD_DIR) -Isrc -Ithird_party src/main.cpp src/file_list.cpp src/archive_source.cpp $(SEVENZIP_BACKEND_SOURCE) $(RAR_BACKEND_SOURCE) src/archive_password_dialog_model.cpp src/crop_selection_model.cpp src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp src/magnifying_glass_model.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp src/image.cpp src/image_processing.cpp src/image_processing_store.cpp src/recent_files.cpp src/clipboard.cpp src/settings.cpp src/transparency_pattern.cpp src/sort_mode.cpp src/desktop_applications.cpp src/desktop_association.cpp src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_resampler.cpp src/image_info_model.cpp src/spectrum_model.cpp src/file_dialog_model.cpp src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp src/app_icon.cpp -o $@ $(LDFLAGS) $(STATIC_RUNTIME) $(SDL2_LIBS) $(PANGO_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
 	@for stale_header in "$(BUILD_DIR)"/build-info-*.h; do \
 		[ -f "$$stale_header" ] || continue; \
 		[ "$$stale_header" = "$(BUILD_INFO_HEADER)" ] || rm -f "$$stale_header"; \
@@ -138,9 +166,9 @@ $(TARGET): $(SOURCES) $(SEVENZIP_PLUGIN_DEPENDENCY)
 run: $(TARGET)
 	$(TARGET) $(ARGS)
 
-$(TEST_TARGET): $(TEST_SOURCES) $(SEVENZIP_PLUGIN_DEPENDENCY)
+$(TEST_TARGET): $(TEST_SOURCES) $(SEVENZIP_PLUGIN_DEPENDENCY) $(RAR_BACKEND_PLUGIN_DEPENDENCY)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(CODEC_DEFINES) $(PANGO_CFLAGS) $(CODEC_CFLAGS) $(SEVENZIP_CPPFLAGS) -I$(BUILD_DIR) -Isrc -Ithird_party tests/test_core.cpp src/file_list.cpp src/archive_source.cpp $(SEVENZIP_BACKEND_SOURCE) src/archive_password_dialog_model.cpp src/crop_selection_model.cpp src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp src/magnifying_glass_model.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp src/image.cpp src/image_processing.cpp src/image_processing_store.cpp src/recent_files.cpp src/settings.cpp src/transparency_pattern.cpp src/sort_mode.cpp src/desktop_applications.cpp src/desktop_association.cpp src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_resampler.cpp src/image_info_model.cpp src/spectrum_model.cpp src/file_dialog_model.cpp src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp src/app_icon.cpp -o $@ $(PANGO_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+	$(CXX) $(CXXFLAGS) $(CODEC_DEFINES) $(PANGO_CFLAGS) $(CODEC_CFLAGS) $(SEVENZIP_CPPFLAGS) -I$(BUILD_DIR) -Isrc -Ithird_party tests/test_core.cpp src/file_list.cpp src/archive_source.cpp $(SEVENZIP_BACKEND_SOURCE) $(RAR_BACKEND_SOURCE) src/archive_password_dialog_model.cpp src/crop_selection_model.cpp src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp src/magnifying_glass_model.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp src/image_decoder.cpp src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp src/image.cpp src/image_processing.cpp src/image_processing_store.cpp src/recent_files.cpp src/settings.cpp src/transparency_pattern.cpp src/sort_mode.cpp src/desktop_applications.cpp src/desktop_association.cpp src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_resampler.cpp src/image_info_model.cpp src/spectrum_model.cpp src/file_dialog_model.cpp src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp src/app_icon.cpp -o $@ $(PANGO_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
 
 test: $(TEST_TARGET)
 	$(TEST_TARGET)
@@ -164,18 +192,20 @@ test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(ENCRYPTED_Z
 		echo "Version metadata mismatch: expected '$$expected_version', got '$$version_output'" >&2; \
 		exit 1; \
 	fi
-	./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(ENCRYPTED_ZIP_FIXTURE_WRITER)
+	JPEGVIEW_TEST_HAS_7Z_PLUGIN=$(if $(strip $(SEVENZIP_SOURCE_ROOT)),1,0) \
+		JPEGVIEW_TEST_HAS_RAR_PLUGIN=$(if $(strip $(RAR_BACKEND_ROOT)),1,0) \
+		./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(ENCRYPTED_ZIP_FIXTURE_WRITER)
 
 test-version:
 	sh tests/version_test.sh
 
 test-shell:
-	sh -n tests/ui_smoke.sh tests/version_test.sh tests/docker_build_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh ../set_env.sh
+	sh -n tests/ui_smoke.sh tests/version_test.sh tests/docker_build_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh ../set_env.sh
 	$(MAKE) test-version
 	sh tests/docker_build_test.sh
 	bash -n release-assets.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck tests/ui_smoke.sh tests/version_test.sh tests/docker_build_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh release-assets.sh ../set_env.sh; \
+		shellcheck tests/ui_smoke.sh tests/version_test.sh tests/docker_build_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh release-assets.sh ../set_env.sh; \
 	else \
 		echo "ShellCheck: SKIP (shellcheck not installed)"; \
 	fi

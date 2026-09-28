@@ -9,13 +9,16 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
   and on-demand member access. ZIP catalogs use central-directory metadata; TAR/TGZ catalogs stream
   header metadata; unencrypted 7z uses libarchive's seekable reader; encrypted 7z uses the focused
-  `seven_zip_backend` adapter described below; RAR registers both RAR4 and RAR5 readers.
+  `seven_zip_backend` adapter described below. Ordinary unencrypted RAR catalogs and extraction
+  remain on libarchive; when present, the optional `rar_backend` probes RAR metadata and handles
+  encrypted RAR4/RAR5 catalogs and extraction.
   Immutable catalogs for at most four containers
   are keyed by device/inode/size/mtime and retain no extracted image payloads. Workers use independent
   libzip/libarchive handles, validate the selected member's identity, and stream at most 128 MiB of
   uncompressed data into an anonymous memory file for existing path-based decoders. Unsafe paths,
-  archive links/devices are omitted; encrypted ZIP and data-encrypted 7z retain their names and locked
-  state. Header-encrypted 7z returns a password-needed catalog result without exposing hidden names.
+  archive links/devices are omitted; encrypted ZIP, data-encrypted 7z, and data-encrypted RAR retain
+  their names and locked state. Header-encrypted 7z/RAR return a password-needed catalog result
+  without exposing hidden names.
   Catalogs over 100,000 entries are rejected.
   New archive formats should extend this backend dispatch while keeping viewer consumers
   on the generic source operations.
@@ -29,6 +32,13 @@ should normally be added to one of these focused modules and covered by `tests/t
   128 MiB limits still apply. Without `SEVENZIP_SOURCE_ROOT`, Make selects
   `seven_zip_backend_unavailable.cpp`: unencrypted 7z remains available through libarchive, while
   encrypted 7z reports an explicit unsupported-encryption result.
+- `rar_backend.h` and its selected implementation: `rar_backend_ffi.cpp` loads the separately
+  packaged `librar_backend.so` through a narrow C ABI with opaque handles, fixed-width fields,
+  explicit status codes, and bounded callbacks; `rar_backend_unavailable.cpp` preserves an explicit
+  encrypted-RAR fallback for ordinary local builds. The Rust wrapper is pinned to Rust 1.89.0 and
+  Apache-2.0 `bitplane/rars` at exact revision `afc60e4c669ba1fe6a18748b16b08164e69c5e44`.
+  Cancellation, member-count/header limits, password copying/zeroization, and streaming output
+  bounds are enforced across the ABI. Passwords are never passed through argv or a subprocess.
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality resizing, and the automatic/manual picture-level processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
@@ -111,13 +121,16 @@ payloads; Recents uses the same cancellable preview worker. ZIP catalogs retain 
 metadata only. TAR/TGZ catalogs stream member headers and skip payloads. Unencrypted 7z catalogs use
 seekable libarchive input; encrypted 7z catalogs use the optional SDK adapter and retain member
 ordinal, normalized name, size, modification time, and per-entry encryption state. Header encryption
-is recorded separately from encrypted data entries because it hides the entire catalog. RAR catalogs
-retain member ordinals and use the streaming readers. Cold
+is recorded separately from encrypted data entries because it hides the entire catalog. Ordinary
+unencrypted RAR catalogs remain on libarchive; the optional RAR backend inspects RAR metadata and is
+used for encrypted RAR4/RAR5 catalogs and extraction. Cold
 archive-directory listing runs in `ArchiveDirectoryLoader`; a newer request
-cancels obsolete libarchive or 7-Zip callback work at read/seek boundaries and generation-checks returned results. A
+cancels obsolete libarchive, 7-Zip, or RAR callback work at read/seek boundaries and generation-checks returned results. A
 selected ZIP member is read by index; TAR/TGZ/7z/RAR members are found by rescanning archive order. Gzip
 streams are sequential, and solid 7z/RAR5 blocks can require decompressing earlier entries to reach a
-later member. RAR4 solid archives and multi-volume RAR sets are not supported. In either backend, only
+later member. The libarchive path does not support solid RAR4 archives. The encrypted backend uses
+sequential extraction for solid predecessors, but its application fixtures currently cover only
+single-member encrypted archives. Multi-volume RAR sets and split members are not supported. In either backend, only
 the selected member is copied, bounded to 128 MiB, into a short-lived
 anonymous memory file. That output cap does not bound the codec's internal memory or CPU use. The
 source archive is never modified and no persistent extraction directory is created. ZIP member
@@ -126,23 +139,27 @@ encryption is handled through libzip: the Open dialog owns password entry, while
 accepted credentials in a process-only cache keyed by backing-file identity. Credentials are never
 stored in settings or recent-file state. The 7z adapter supplies passwords through SDK callbacks and
 extracts only through the same bounded memory-file path; it never invokes an external `7z` process.
-The Open dialog marks a hidden-header `.7z` row as encrypted after a locked result and prompts only
-when the user enters/unlocks it. Previews use only an already cached credential and report a locked
-preview instead of opening UI. Password validation tests the submitted candidate directly; successful
-header-encrypted catalogs are invalidated when credentials are forgotten or cleared, so hidden names
-are not retained after cache clearing. Encrypted RAR remains unsupported; TAR/TGZ have no native
-password encryption. Archive links/devices and unsafe paths are omitted.
+The Rust RAR plugin exposes a fixed-width C ABI, catches panics before they can cross that
+boundary, copies and zeroizes password buffers, and streams each extraction chunk directly into the
+same bounded memory-file path. It never invokes a subprocess. The Open dialog marks hidden-header
+`.7z`/`.rar` rows as encrypted after a locked result and prompts only when the user enters/unlocks
+them. Previews use only an already cached credential and report a locked preview instead of opening
+UI. Password validation tests the submitted candidate directly; successful header-encrypted catalogs
+are invalidated when credentials are forgotten or cleared, so hidden names are not retained after
+cache clearing. This integration covers encrypted RAR4/RAR5 data and header encryption. Multi-volume
+sets and split members are unsupported; RAR7 is not yet covered by this application's fixture suite.
+TAR/TGZ have no native password encryption. Archive links/devices and unsafe paths are omitted.
 Filesystem-only actions are disabled or guarded for archive members, while image edits and saves
 still use the ordinary in-memory image path. Future containers should add extension recognition
 and list/read operations here rather than branching in the SDL viewer, recents, caches, or codecs.
 
 Release Docker builds download the pinned 7-Zip 24.09 source archive and verify its SHA-256 before
-building only `Format7zF` with `DISABLE_RAR=1`. AppImage and Ubuntu 24/26 `.deb` packages carry
-`7z.so`, upstream license/copying notices, and the corresponding source archive. Binary release
-bundles use the same `lib/jpegview-linux/7z.so` layout next to the executable and include the same
-notices/source. The plugin is dynamically replaceable under LGPL terms. Ordinary local builds do not
-download extra source and select the explicit unavailable-backend fallback unless
-`SEVENZIP_SOURCE_ROOT` is set.
+building only `Format7zF` with `DISABLE_RAR=1`; they also install Rust 1.89.0 using a checksum-pinned
+rustup-init and fetch the exact RAR source revision. AppImage and Ubuntu 24/26 `.deb` packages carry
+both plugins, their license notices, wrapper source, and upstream source archives. Binary release
+bundles use the same `lib/jpegview-linux/` layout next to the executable and include those notices
+and sources. Ordinary local builds select explicit unavailable-backend fallbacks unless
+`SEVENZIP_SOURCE_ROOT` and/or `RAR_BACKEND_ROOT` are set.
 
 The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct
 command-line archive startup still builds the initial `FileList` through the synchronous source API.

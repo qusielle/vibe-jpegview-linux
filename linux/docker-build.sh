@@ -48,6 +48,18 @@ case "$MODE" in
 		else
 			echo "warning: building binary without SEVENZIP_SOURCE_ROOT; encrypted 7z support is unavailable" >&2
 		fi
+		if [ -n "${RAR_BACKEND_ROOT:-}" ]; then
+			rar_plugin="$OUTPUT_DIR/lib/jpegview-linux/librar_backend.so"
+			if [ ! -f "$rar_plugin" ]; then
+				echo "RAR support was requested but the private reader plugin is missing: $rar_plugin" >&2
+				exit 1
+			fi
+			rar_docs="$OUTPUT_DIR/share/doc/jpegview-linux"
+			sh "$SOURCE_DIR/linux/package-rar-backend-source.sh" "$RAR_BACKEND_ROOT" \
+				"${RAR_SOURCE_ARCHIVE:-}" "${RAR_LICENSE_FILE:-}" "$rar_docs"
+		else
+			echo "warning: building binary without RAR_BACKEND_ROOT; encrypted RAR support is unavailable" >&2
+		fi
 		printf 'Binary: %s/jpegview-linux\n' "$OUTPUT_DIR"
 		;;
 	appimage)

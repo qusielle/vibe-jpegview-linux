@@ -138,24 +138,33 @@ they support.
    appears only when entering or explicitly unlocking the archive; launching a locked 7z directly
    opens Browse at that archive so it can prompt rather than exiting. A locked preview never prompts.
    Correct passwords are cached only in memory for the current run and backing-file identity, and are
-   neither written to settings nor passed through process arguments. RAR4 and
-   RAR5 use libarchive's streaming readers, including solid RAR5 archives. Cold archive
+   neither written to settings nor passed through process arguments. Unencrypted RAR4 and
+   RAR5 use libarchive's streaming readers, including solid RAR5 archives; the optional reader
+   handles encrypted RAR4/RAR5 catalogs and extraction. Cold archive
    listings run in the background and obsolete scans are cancelled on navigation. Gzip TAR streams
    are sequential. Solid 7z and RAR5 archives may require decompressing earlier members to reach later
    ones, so indexing and navigation cost can vary with archive layout and compression settings.
-   RAR4 solid archives and multi-volume RAR sets are not supported. The selected image is streamed on
+   Unencrypted solid RAR4 archives and multi-volume RAR sets are not supported. The selected image is streamed on
    demand through a short-lived anonymous memory file. Opening a cold TGZ, 7z, or RAR directly as a
    command-line argument also needs an initial index; the Open dialog remains responsive while it
    builds that index. Encrypted ZIP entries are supported: entering an encrypted ZIP in Browse
    opens a password prompt, filenames remain visible, and passwords accepted by the archive's check
    are cached in memory for the current app run and backing archive only. Passwords are not written to settings or recent
    files. A locked image preview shows a password-needed label but never opens the prompt; opening
-   the archive or selecting an encrypted image is the explicit unlock action. Encrypted RAR is not
-   supported. TAR and TGZ do not have native password encryption. Normal local Makefile builds use an
-   explicit unavailable 7z-encryption fallback unless `SEVENZIP_SOURCE_ROOT` points at the pinned
-   7-Zip 24.09 source tree; Docker release builds fetch and verify that source automatically with a
-   SHA-256 pin. The bundled Format7zF plugin is built with RAR disabled. AppImage and `.deb` packages
-   include the 7-Zip license notices and corresponding source archive.
+   the archive or selecting an encrypted image is the explicit unlock action. Encrypted RAR4 and
+   RAR5 data and headers are supported by the optional private reader: data-encrypted archives keep
+   member names visible, while header-encrypted archives show a gold `[RAR] [Encrypted]` row with
+   names hidden until unlock. Previews never prompt. Accepted passwords are cached only in memory
+   for the current run and backing-file identity, and clearing the session credentials relocks
+   header-encrypted catalogs. TAR and TGZ do not have native password encryption. Normal local
+   Makefile builds use explicit unavailable-backend fallbacks for encrypted 7z and RAR unless
+   `SEVENZIP_SOURCE_ROOT` and `RAR_BACKEND_ROOT` are supplied. Release Docker builds fetch the
+   checksum-pinned 7-Zip source and exact Apache-2.0 `bitplane/rars` revision, build both private
+   plugins, and package their notices and source. This RAR integration is validated for RAR4/RAR5
+   data and header encryption; solid encrypted archives and RAR7 are not yet covered by application
+   fixtures, and multi-volume sets or split members are not supported. Unencrypted solid RAR4 remains
+   unsupported by the libarchive path. Other RAR features rejected by the backend report an
+   unsupported-feature error.
    Unsafe absolute or traversal paths, archive links, and devices are omitted;
    indexes are capped at 100,000 entries, and individual images are limited to 128 MiB uncompressed.
    That output-size cap does not limit a codec's own decompression workspace. The archive itself is
@@ -250,8 +259,9 @@ they support.
 
 ## Build
 
-The runtime framework dependencies are SDL2, Pango/FreeType, libzip for ZIP browsing, libarchive
-for TAR/TGZ and unencrypted 7z/RAR browsing, and the private Format7zF plugin for encrypted 7z.
+The runtime framework dependencies are SDL2, Pango/FreeType, libzip for ZIP browsing, and libarchive
+for TAR/TGZ and ordinary unencrypted 7z/RAR browsing. Encrypted 7z and RAR use separate optional
+private plugins; release Docker images include both.
 SDL2 development headers are not required because the frontend uses the small
 ABI declared in `src/sdl_abi.h`; Pango development
 headers and codec development packages are needed at compile time. The font stack is loaded only
@@ -272,16 +282,27 @@ linux/build/jpegview-linux image.jpg
 linux/build/jpegview-linux /path/to/photos
 ```
 
-That normal local build keeps encrypted-7z support explicitly unavailable. To enable it locally,
-download the pinned source and pass its root to Make:
+That normal local build keeps encrypted-7z and encrypted-RAR support explicitly unavailable. To
+enable both optional readers locally, fetch the pinned 7-Zip source and install the pinned Rust
+toolchain outside the repository. `cargo` fetches the exact RAR backend git revision recorded in
+`linux/rar_backend/Cargo.lock`:
 
 ```sh
 sh linux/fetch-7zip-source.sh "$PWD/out/7zip-24.09"
-make -C linux -j"$(nproc)" SEVENZIP_SOURCE_ROOT="$PWD/out/7zip-24.09" all test
+sh linux/install-rust-toolchain.sh "$PWD/out/rust-1.89"
+RUSTUP_HOME="$PWD/out/rust-1.89/rustup" \
+  CARGO_HOME="$PWD/out/rust-1.89/cargo" \
+  PATH="$PWD/out/rust-1.89/cargo/bin:$PATH" \
+  make -C linux -j"$(nproc)" \
+    SEVENZIP_SOURCE_ROOT="$PWD/out/7zip-24.09" \
+    RAR_BACKEND_ROOT="$PWD/linux/rar_backend" all test
 ```
 
-The downloaded source archive is verified by SHA-256. The Makefile builds only `Format7zF` with
-`DISABLE_RAR=1`; RAR remains handled by the existing libarchive path.
+The 7-Zip download is verified by SHA-256. Rustup 1.28.2 is also checksum-pinned; the wrapper
+build uses Rust 1.89.0 and the locked Apache-2.0 `bitplane/rars` revision, never the separately
+published crate release. `Format7zF` is built with `DISABLE_RAR=1`; ordinary unencrypted RAR still
+uses libarchive, while encrypted RAR uses the separate `librar_backend.so` plugin. Omitting
+`RAR_BACKEND_ROOT` keeps encrypted RAR on an explicit unsupported fallback.
 
 The default link statically includes libstdc++ and libgcc. Set `STATIC_RUNTIME=` if a local
 toolchain does not provide those static runtime archives.
@@ -293,10 +314,12 @@ and optional codec development libraries for their respective releases. Ubuntu 2
 pinned sources; Ubuntu 22.04 uses its AVIF package and builds JPEG XL from source; Ubuntu 24.04 and
 26.04 use distro codec packages and explicitly install libheif's HEVC decoder/encoder plugins because
 their images omit recommended packages. Every Docker release image also downloads and verifies the
-pinned 7-Zip 24.09 source, builds `Format7zF` with RAR disabled, and packages `7z.so`, its license
-notices, and the corresponding source archive in release AppImages (and in Ubuntu 24/26 `.deb`s).
-Local Make/package-script invocations without `SEVENZIP_SOURCE_ROOT` retain the documented unavailable
-fallback. The host only needs Docker; build outputs are written to a host
+pinned 7-Zip 24.09 source, builds `Format7zF` with RAR disabled, installs Rust 1.89.0, and fetches
+the exact Apache-2.0 RAR reader revision. Release AppImages package both plugins and their
+notices/sources; Ubuntu 24/26 `.deb`s do as well. The Ubuntu 20.04 image builds the RAR wrapper
+against its glibc 2.31 runtime, but this Docker compatibility gate must be run to verify that release
+target. Local Make/package-script invocations without `SEVENZIP_SOURCE_ROOT` or `RAR_BACKEND_ROOT`
+retain the documented unavailable fallbacks. The host only needs Docker; build outputs are written to a host
 `out/` directory:
 
 ```sh
@@ -325,10 +348,11 @@ version lookup; with `--rm`, this does not change your host's Git configuration.
 metadata is available and no version is passed, the build continues to use `0.0.0+unknown`.
 
 The AppImage is named `out/JPEGView-Linux-${APP_VERSION}-x86_64.AppImage`; the native executable
-is `out/jpegview-linux`. Docker's `binary` mode also copies the sibling `lib/jpegview-linux/7z.so`
-and 7-Zip notices/source into `out/`. CI and release automation upload a clearly named
-`*-with-7z.tar.gz` containing the executable, the relative plugin layout, and those notices/source;
-extract the bundle without separating its paths to keep encrypted 7z available. Substitute the
+is `out/jpegview-linux`. Docker's `binary` mode also copies both plugins under the sibling
+`lib/jpegview-linux/` directory and their source/license notices into `out/`. CI and release
+automation upload a clearly named `*-with-archive-plugins.tar.gz` containing the executable, both
+plugins, and their notices/source; extract the bundle without separating its paths to keep encrypted
+7z and RAR available. Substitute the
 Ubuntu 22.04, 24.04, or 26.04 image tag to use another build
 environment. Passing the version resolved on the host is the simplest option; the read-only `.git`
 mount above is an alternative. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
@@ -338,8 +362,8 @@ AppImage tool. Build the release artifact with the oldest supported base (Ubuntu
 must also run on later Ubuntu releases; newer-base artifacts can require newer system glibc.
 
 The Debian package Dockerfiles use standard Ubuntu 24.04 or 26.04 repositories for compiler/runtime
-dependencies; they additionally fetch the checksum-pinned 7-Zip source archive for the LGPL plugin.
-Ubuntu 20.04 and 22.04 do not produce a `.deb`.
+dependencies; they additionally fetch the checksum-pinned 7-Zip source archive and pinned RAR source
+for their optional plugins. Ubuntu 20.04 and 22.04 do not produce a `.deb`.
 
 ```sh
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.deb.ubuntu24 -t jpegview-linux-deb-build:ubuntu24 .
@@ -377,10 +401,15 @@ Supported input formats are JPEG, PNG/APNG (including animation), GIF (including
 QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
 formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, TAR, `.tar.gz`, `.tgz`, `.7z`, and `.rar`
 archives can contain any supported image format above; they are browsed read-only as virtual folders.
-RAR input uses libarchive's built-in reader; the Ubuntu 20.04 package supports both RAR4 and RAR5.
-ZIP encryption uses libzip's per-entry encrypted read API. Encrypted 7z uses the private Format7zF
-plugin in release Docker packages; encrypted RAR remains unavailable. Locally built packages without
-`SEVENZIP_SOURCE_ROOT` report encrypted 7z as unavailable while retaining unencrypted 7z browsing.
+Unencrypted RAR input stays on libarchive. When the optional private reader is present, encrypted
+RAR4/RAR5 data and header encryption use the Rust `rars` backend. Data-encrypted member names remain
+visible; header-encrypted names stay hidden until unlock. Wrong and correct passwords share the
+existing in-memory archive password dialog/cache, and locked previews do not prompt. ZIP encryption
+uses libzip's per-entry encrypted read API. Encrypted 7z uses the private Format7zF plugin in release
+Docker packages. Local builds without `RAR_BACKEND_ROOT` report encrypted RAR as unavailable while
+retaining unencrypted RAR browsing; builds without `SEVENZIP_SOURCE_ROOT` do the same for encrypted
+7z. The application fixture suite does not yet cover solid encrypted archives or RAR7; multi-volume
+sets and split members are unsupported, and other backend-rejected features fail explicitly.
 The save dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and
 JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is view-only.
 JPEG uses the linked libjpeg implementation (libjpeg-turbo in the supported builds), common
@@ -480,14 +509,15 @@ mapping, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
 trips across static and animated formats, ZIP/TAR/TGZ/7z/RAR4/RAR5 listing and member decoding, path-traversal
-rejection, nested archive navigation and archive-backed recent previews, encrypted ZIP and 7z member
-listing, header-encrypted 7z hidden-name behavior, zero-length members, wrong/correct password
-validation, in-memory credential reuse/clearing, and locked previews,
+rejection, nested archive navigation and archive-backed recent previews, encrypted ZIP, 7z, and RAR
+member listing, header-encrypted hidden-name behavior, zero-length members, wrong/correct password
+validation, in-memory credential reuse/clearing, relocking and locked previews, bounded extraction,
+output-callback failure, and cancellation,
 cancellable archive indexing, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ/7z/RAR browsing and recent
-reopening, encrypted-ZIP prompt/retry/session reuse, and—when the optional plugin is bundled—
-header-encrypted 7z password entry and cancel/reselect retry; focus restoration, paging, Home/End,
+reopening, encrypted-ZIP prompt/retry/session reuse, and—when optional plugins are bundled—
+header-encrypted 7z password entry/cancel/reselect plus RAR password retry; focus restoration, paging, Home/End,
 held-key movement, wheel and scrollbar scrolling/dragging, and
 dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,

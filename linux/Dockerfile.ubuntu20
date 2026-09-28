@@ -100,6 +100,14 @@ COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
 RUN sh /src/linux/fetch-7zip-source.sh /opt/jpegview/7zip-24.09
 ENV SEVENZIP_SOURCE_ROOT=/opt/jpegview/7zip-24.09 \
 	SEVENZIP_SOURCE_ARCHIVE=/opt/jpegview/7zip-24.09-source.tar.gz
+RUN sh /src/linux/install-rust-toolchain.sh /opt/jpegview/rust-1.89 \
+ && sh /src/linux/fetch-rars-source.sh /opt/jpegview/rars-afc60e4
+ENV RUSTUP_HOME=/opt/jpegview/rust-1.89/rustup \
+	CARGO_HOME=/opt/jpegview/rust-1.89/cargo \
+	PATH="/opt/jpegview/rust-1.89/cargo/bin:${PATH}" \
+	RAR_BACKEND_ROOT=/src/linux/rar_backend \
+	RAR_SOURCE_ARCHIVE=/opt/jpegview/rars-afc60e4-source.tar.gz \
+	RAR_LICENSE_FILE=/opt/jpegview/rars-afc60e4-COPYING
 RUN chmod 755 /usr/local/bin/jpegview-docker-build
 
 # The viewer and core-test executable are independent link targets. Build
