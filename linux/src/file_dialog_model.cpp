@@ -409,7 +409,7 @@ struct ArchiveDirectoryLoader::Impl {
 		bool validatePassword = false;
 	};
 
-	Impl() : worker([this] { Run(); }) {}
+	Impl() = default;
 
 	~Impl() {
 		stopping.store(true);
@@ -455,6 +455,10 @@ struct ArchiveDirectoryLoader::Impl {
 		}
 	}
 
+	void StartWorkerLocked() {
+		if (!worker.joinable()) worker = std::thread([this] { Run(); });
+	}
+
 	std::mutex mutex;
 	std::condition_variable condition;
 	std::deque<Task> pending;
@@ -474,6 +478,7 @@ void ArchiveDirectoryLoader::Request(const std::filesystem::path& directory,
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		impl_->pending.clear();
 		impl_->ready.clear();
+		impl_->StartWorkerLocked();
 		impl_->pending.push_back(Impl::Task{directory, generation, {}, false});
 	}
 	impl_->condition.notify_one();
@@ -486,6 +491,7 @@ void ArchiveDirectoryLoader::RequestPasswordValidation(const std::filesystem::pa
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		impl_->pending.clear();
 		impl_->ready.clear();
+		impl_->StartWorkerLocked();
 		impl_->pending.push_back(Impl::Task{archive, generation, password, true});
 	}
 	impl_->condition.notify_one();
@@ -511,7 +517,7 @@ struct DirectorySummaryLoader::Impl {
 		std::uint64_t generation = 0;
 	};
 
-	Impl() : worker([this] { Run(); }) {}
+	Impl() = default;
 
 	~Impl() {
 		stopping.store(true);
@@ -543,6 +549,10 @@ struct DirectorySummaryLoader::Impl {
 		}
 	}
 
+	void StartWorkerLocked() {
+		if (!worker.joinable()) worker = std::thread([this] { Run(); });
+	}
+
 	std::mutex mutex;
 	std::condition_variable condition;
 	std::deque<Task> pending;
@@ -562,11 +572,14 @@ void DirectorySummaryLoader::Request(
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		impl_->pending.clear();
 		impl_->ready.clear();
-		for (const std::filesystem::path& directory : directories) {
-			impl_->pending.push_back(Impl::Task{directory, generation});
+		if (!directories.empty()) {
+			impl_->StartWorkerLocked();
+			for (const std::filesystem::path& directory : directories) {
+				impl_->pending.push_back(Impl::Task{directory, generation});
+			}
 		}
 	}
-	impl_->condition.notify_one();
+	if (!directories.empty()) impl_->condition.notify_one();
 }
 
 std::vector<DirectorySummaryResult> DirectorySummaryLoader::TakeReady() {
@@ -586,7 +599,7 @@ struct FileDialogPreviewLoader::Impl {
 		std::uint64_t generation = 0;
 	};
 
-	Impl() : worker([this] { Run(); }) {}
+	Impl() = default;
 
 	~Impl() {
 		stopping.store(true);
@@ -670,6 +683,10 @@ struct FileDialogPreviewLoader::Impl {
 		}
 	}
 
+	void StartWorkerLocked() {
+		if (!worker.joinable()) worker = std::thread([this] { Run(); });
+	}
+
 	std::mutex mutex;
 	std::condition_variable condition;
 	std::optional<Task> pending;
@@ -690,6 +707,7 @@ std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path
 		impl_->ready.clear();
 		impl_->pending.reset();
 		if (!path.empty() && maximumWidth > 0 && maximumHeight > 0) {
+			impl_->StartWorkerLocked();
 			impl_->pending = Impl::Task{path, directory, mode,
 				maximumWidth, maximumHeight, requestedGeneration};
 		}

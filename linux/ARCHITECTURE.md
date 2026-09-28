@@ -190,7 +190,10 @@ the initial `FileList` or loading its current image. Directory enumeration and t
 decode/display-cache path then run unchanged while the visible dark startup frame provides feedback;
 renderer resources remain confined to the main thread. Recent history is read after that startup
 frame is shown and written once during normal cleanup, keeping history I/O out of the initial window
-presentation and rapid navigation path. `LoadCurrent` captures the outgoing file's exact viewport
+presentation and rapid navigation path. The three file-dialog workers and the low-priority
+thumbnail-resampling worker start only when their first request arrives; the decoded-image and
+display-preparation pools remain ready before the first image load so foreground rendering and
+neighbor preparation are not delayed. `LoadCurrent` captures the outgoing file's exact viewport
 snapshot when the path changes, restores that file's saved snapshot before sizing a new display
 request, and records the path only after decoding and presentation setup succeed. New paths use the
 shared navigation snapshot. Clipboard temporary paths never become recent entries, while the

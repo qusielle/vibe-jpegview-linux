@@ -132,7 +132,7 @@ struct ThumbnailPreparationWorker::Impl {
 		std::uint64_t generation = 0;
 	};
 
-	explicit Impl(Processor prepare) : processor(std::move(prepare)), worker([this] { Run(); }) {
+	explicit Impl(Processor prepare) : processor(std::move(prepare)) {
 		if (!processor) processor = PrepareThumbnail;
 	}
 
@@ -190,6 +190,10 @@ struct ThumbnailPreparationWorker::Impl {
 		}
 	}
 
+	void StartWorkerLocked() {
+		if (!worker.joinable()) worker = std::thread([this] { Run(); });
+	}
+
 	static constexpr std::size_t kMaximumQueuedSources = 2;
 	Processor processor;
 	mutable std::mutex mutex;
@@ -235,6 +239,7 @@ bool ThumbnailPreparationWorker::Request(const ThumbnailPreparationRequest& requ
 			impl_->retired.push_back(std::move(farthest->request.source));
 			impl_->queue.erase(farthest);
 		}
+		impl_->StartWorkerLocked();
 		impl_->queue.push_back({request, impl_->generation});
 	}
 	impl_->workAvailable.notify_one();
