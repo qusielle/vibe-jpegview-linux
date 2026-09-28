@@ -466,9 +466,11 @@ The default window title follows the Windows-style image title format:
 The build takes its version from the nearest reachable semantic-version Git tag. A clean build at
 the tag uses that version (with an optional leading `v` removed); commits after it add `+devN`, where
 `N` is the number of commits since the tag. Local changes add `.dirty` to the build metadata. For
-example, five commits beyond `1.3.46-linux.3` produce `1.3.46-linux.3+dev5`. A Git checkout with no
-reachable semantic-version tag uses `0.0.0+dev.g<commit>`, and a source snapshot without Git metadata
-uses `0.0.0+unknown`.
+example, five commits beyond `1.4.0` produce `1.4.0+dev5`. Starting with `1.4.0`, releases will
+follow Semantic Versioning principles more consistently: compatible feature additions increment
+the minor version, compatible fixes increment the patch version, and the major version is reserved
+for incompatible changes. A Git checkout without a reachable semantic-version tag uses
+`0.0.0+dev.g<commit>`, and a source snapshot without Git metadata uses `0.0.0+unknown`.
 
 The resolved version is embedded in the executable and shown by `jpegview-linux --version` and the
 About panel. AppImage names and its `X-AppImage-Version` desktop metadata, plus Debian package

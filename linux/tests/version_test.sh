@@ -32,28 +32,28 @@ expect_version() {
 }
 
 commit_file initial
-git -C "$REPO" tag -a 1.3.46-linux.3 -m 'Linux release tag'
-expect_version 1.3.46-linux.3
+git -C "$REPO" tag -a 1.4.0 -m 'Linux release tag'
+expect_version 1.4.0
 
 commit_file dev1
-expect_version 1.3.46-linux.3+dev1
+expect_version 1.4.0+dev1
 commit_file dev2
 commit_file dev3
 commit_file dev4
 commit_file dev5
-expect_version 1.3.46-linux.3+dev5
+expect_version 1.4.0+dev5
 
 git -C "$REPO" tag -a release-candidate -m 'Non-semantic tag'
 git -C "$REPO" tag -a 1.4 -m 'Invalid semantic version'
-expect_version 1.3.46-linux.3+dev5
+expect_version 1.4.0+dev5
 
-git -C "$REPO" tag -a v1.3.47 -m 'Version tag with conventional v prefix'
-expect_version 1.3.47
+git -C "$REPO" tag -a v1.4.1 -m 'Version tag with conventional v prefix'
+expect_version 1.4.1
 commit_file next1
 commit_file next2
-expect_version 1.3.47+dev2
+expect_version 1.4.1+dev2
 printf '%s\n' dirty >> "$REPO/history.txt"
-expect_version 1.3.47+dev2.dirty
+expect_version 1.4.1+dev2.dirty
 
 UNVERSIONED_REPO="$TEMP_DIR/unversioned-repo"
 mkdir -p "$UNVERSIONED_REPO"

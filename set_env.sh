@@ -108,13 +108,13 @@ Ubuntu Docker builds (Docker must be available to the host/container):
   docker run --rm -v "\$PWD/out:/out" jpegview-linux-build:ubuntu26 appimage
   docker run --rm -v "\$PWD/out:/out" jpegview-linux-build:ubuntu26 binary
   docker build -f linux/Dockerfile.deb.ubuntu24 -t jpegview-linux-deb-build:ubuntu24 .
-  docker run --rm -v "\$PWD/out:/out" jpegview-linux-deb-build:ubuntu24 deb 1.3.46-linux.1 24
+  docker run --rm -v "\$PWD/out:/out" jpegview-linux-deb-build:ubuntu24 deb 1.4.0 24
   docker build -f linux/Dockerfile.deb.ubuntu26 -t jpegview-linux-deb-build:ubuntu26 .
-  docker run --rm -v "\$PWD/out:/out" jpegview-linux-deb-build:ubuntu26 deb 1.3.46-linux.1 26
+  docker run --rm -v "\$PWD/out:/out" jpegview-linux-deb-build:ubuntu26 deb 1.4.0 26
   # Ubuntu 20.04 and 22.04 do not have .deb Dockerfiles.
 
 Local AppImage packaging when appimagetool is installed:
-  make -C "$SCRIPT_DIR/linux" appimage VERSION=1.3.46-linux.1
+  make -C "$SCRIPT_DIR/linux" appimage VERSION=1.4.0
 
 Headless X11 smoke test:
   Xvfb :99 -screen 0 1280x800x24 >/tmp/jpegview-xvfb.log 2>&1 &
