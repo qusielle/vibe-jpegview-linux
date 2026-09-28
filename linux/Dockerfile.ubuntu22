@@ -64,6 +64,9 @@ RUN ldconfig
 WORKDIR /src
 COPY . /src
 COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
+RUN sh /src/linux/fetch-7zip-source.sh /opt/jpegview/7zip-24.09
+ENV SEVENZIP_SOURCE_ROOT=/opt/jpegview/7zip-24.09 \
+	SEVENZIP_SOURCE_ARCHIVE=/opt/jpegview/7zip-24.09-source.tar.gz
 RUN chmod 755 /usr/local/bin/jpegview-docker-build
 
 RUN make -C linux -j"$(nproc)" all test

@@ -414,12 +414,16 @@ public:
 		recentFilesLoaded_ = recentFilesPath_.empty() ||
 			jpegview_linux::LoadRecentFiles(recentFilesPath_, recentFiles_);
 
-		fs::path emptyStartupDirectory;
+		fs::path emptyStartupLocation;
 		if (startupInputs_.size() == 1) {
-			std::error_code directoryError;
+			std::error_code inputError;
 			const fs::path startupInput(startupInputs_.front());
-			if (fs::is_directory(startupInput, directoryError) && !directoryError) {
-				emptyStartupDirectory = AbsoluteNormalized(startupInput);
+			if (fs::is_directory(startupInput, inputError) && !inputError) {
+				emptyStartupLocation = AbsoluteNormalized(startupInput);
+			} else if (jpegview_linux::IsArchiveContainerFile(startupInput)) {
+				// A header-encrypted archive has no discoverable images until the
+				// Open dialog obtains a password, so preserve its location for Browse.
+				emptyStartupLocation = AbsoluteNormalized(startupInput);
 			}
 		}
 		const jpegview_linux::FileList::SortMode initialSortMode = fileList_.GetSorting();
@@ -428,9 +432,9 @@ public:
 			initialSortAscending);
 		startupInputs_.clear();
 		if (fileList_.Empty()) {
-			if (!emptyStartupDirectory.empty()) {
+			if (!emptyStartupLocation.empty()) {
 				SetTitle();
-				OpenFileDialog(emptyStartupDirectory);
+				OpenFileDialog(emptyStartupLocation);
 			} else {
 				std::cerr << "No supported images found.\n";
 				Cleanup();
@@ -4870,6 +4874,14 @@ private:
 			if (result.generation != fileDialogPreviewGeneration_) continue;
 			fileDialogPreviewSource_ = result.source;
 			fileDialogPreviewMessage_ = result.error;
+			if (result.encryptedArchive ||
+				result.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired) {
+				const fs::path backing = jpegview_linux::ArchiveBackingFile(result.source);
+				encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
+				model.MarkEncrypted(AbsoluteNormalized(backing));
+			} else if (result.errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword) {
+				jpegview_linux::ForgetSessionArchivePassword(result.source);
+			}
 			if (result.error.find("incorrect archive password") != std::string::npos) {
 				jpegview_linux::ForgetSessionArchivePassword(result.source);
 				fileDialogPreviewMessage_ = "Saved password is incorrect — reopen archive to retry";
@@ -4996,6 +5008,14 @@ private:
 					if (!jpegview_linux::HasSessionArchivePassword(result.directory)) {
 						BeginArchivePasswordDialog(result.directory);
 					}
+				} else if (result.errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword) {
+					jpegview_linux::ForgetSessionArchivePassword(result.directory);
+					const fs::path backing = jpegview_linux::ArchiveBackingFile(result.directory);
+					encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
+					entries.push_back(FileDialogEntry{result.directory, true, false, {}, true,
+						false, true});
+					fileDialogMessage_ = "Saved archive password is incorrect";
+					BeginArchivePasswordDialog(result.directory, "Saved password is incorrect; try again");
 				}
 			} else {
 				fileDialogMessage_.clear();

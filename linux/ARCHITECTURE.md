@@ -8,15 +8,27 @@ should normally be added to one of these focused modules and covered by `tests/t
   path's index in the active ordered list is cached for constant-time thumbnail rendering.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
   and on-demand member access. ZIP catalogs use central-directory metadata; TAR/TGZ catalogs stream
-  header metadata; 7z uses libarchive's seekable reader; RAR registers both RAR4 and RAR5 readers.
+  header metadata; unencrypted 7z uses libarchive's seekable reader; encrypted 7z uses the focused
+  `seven_zip_backend` adapter described below; RAR registers both RAR4 and RAR5 readers.
   Immutable catalogs for at most four containers
   are keyed by device/inode/size/mtime and retain no extracted image payloads. Workers use independent
   libzip/libarchive handles, validate the selected member's identity, and stream at most 128 MiB of
   uncompressed data into an anonymous memory file for existing path-based decoders. Unsafe paths,
-  archive links/devices; encrypted ZIP members retain their names and locked state, while the current
-  libarchive path omits encrypted members it cannot decode. Catalogs over 100,000 entries are rejected.
+  archive links/devices are omitted; encrypted ZIP and data-encrypted 7z retain their names and locked
+  state. Header-encrypted 7z returns a password-needed catalog result without exposing hidden names.
+  Catalogs over 100,000 entries are rejected.
   New archive formats should extend this backend dispatch while keeping viewer consumers
   on the generic source operations.
+- `seven_zip_backend.h` and its selected implementation: the optional `seven_zip_backend_7zip.cpp`
+  wraps the official 7-Zip 24.09 `Format7zF` shared library through `IInArchive`, `IInStream`, and
+  per-operation callbacks. A private handler and archive stream are created for each catalog or
+  extraction operation; callbacks carry cancellation/generation checks, open/data password requests,
+  and bounded member output. Passwords are never placed in argv or sent to a child process. The
+  adapter emits raw member paths/metadata and writes extraction chunks into `archive_source`'s
+  existing private memory-file flow, where canonical archive path checks and the 100,000-entry/
+  128 MiB limits still apply. Without `SEVENZIP_SOURCE_ROOT`, Make selects
+  `seven_zip_backend_unavailable.cpp`: unencrypted 7z remains available through libarchive, while
+  encrypted 7z reports an explicit unsupported-encryption result.
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality resizing, and the automatic/manual picture-level processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
@@ -62,7 +74,7 @@ should normally be added to one of these focused modules and covered by `tests/t
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
   restoration, pane-aware preview image sizing, cancellable background archive listings and directory
-  summaries (including supported archive containers in the directory count),
+  summaries (including supported archive containers in the directory count), encrypted-row marking,
   caller-preserved row order for recent MRU entries, and replaceable
   previews for a focused image or a directory's first image.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
@@ -96,11 +108,13 @@ Archive members use the existing filesystem-shaped path contract (`container.ext
 navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The
 browser labels and color-marks ZIP/TAR/TGZ/7z/RAR containers and archive images without retaining image
 payloads; Recents uses the same cancellable preview worker. ZIP catalogs retain central-directory
-metadata only. TAR/TGZ catalogs stream member headers and skip payloads. 7z catalogs use seekable
-libarchive input to reach the encoded header, retaining member ordinal, normalized name, size, and
-modification time. RAR catalogs retain member ordinals and use the streaming readers. Cold
+metadata only. TAR/TGZ catalogs stream member headers and skip payloads. Unencrypted 7z catalogs use
+seekable libarchive input; encrypted 7z catalogs use the optional SDK adapter and retain member
+ordinal, normalized name, size, modification time, and per-entry encryption state. Header encryption
+is recorded separately from encrypted data entries because it hides the entire catalog. RAR catalogs
+retain member ordinals and use the streaming readers. Cold
 archive-directory listing runs in `ArchiveDirectoryLoader`; a newer request
-cancels obsolete libarchive input at read/seek boundaries and generation-checks returned results. A
+cancels obsolete libarchive or 7-Zip callback work at read/seek boundaries and generation-checks returned results. A
 selected ZIP member is read by index; TAR/TGZ/7z/RAR members are found by rescanning archive order. Gzip
 streams are sequential, and solid 7z/RAR5 blocks can require decompressing earlier entries to reach a
 later member. RAR4 solid archives and multi-volume RAR sets are not supported. In either backend, only
@@ -110,12 +124,25 @@ source archive is never modified and no persistent extraction directory is creat
 encryption is handled through libzip: the Open dialog owns password entry, while
 `ArchivePasswordDialogModel` masks UTF-8 input and `archive_source` checks credentials and keeps
 accepted credentials in a process-only cache keyed by backing-file identity. Credentials are never
-stored in settings or recent-file state. Previews use only an already cached credential and report a locked
-preview instead of opening UI. Encrypted 7z/RAR entries remain unsupported by the current reader;
-TAR/TGZ have no native password encryption. Archive links/devices and unsafe paths are omitted.
+stored in settings or recent-file state. The 7z adapter supplies passwords through SDK callbacks and
+extracts only through the same bounded memory-file path; it never invokes an external `7z` process.
+The Open dialog marks a hidden-header `.7z` row as encrypted after a locked result and prompts only
+when the user enters/unlocks it. Previews use only an already cached credential and report a locked
+preview instead of opening UI. Password validation tests the submitted candidate directly; successful
+header-encrypted catalogs are invalidated when credentials are forgotten or cleared, so hidden names
+are not retained after cache clearing. Encrypted RAR remains unsupported; TAR/TGZ have no native
+password encryption. Archive links/devices and unsafe paths are omitted.
 Filesystem-only actions are disabled or guarded for archive members, while image edits and saves
 still use the ordinary in-memory image path. Future containers should add extension recognition
 and list/read operations here rather than branching in the SDL viewer, recents, caches, or codecs.
+
+Release Docker builds download the pinned 7-Zip 24.09 source archive and verify its SHA-256 before
+building only `Format7zF` with `DISABLE_RAR=1`. AppImage and Ubuntu 24/26 `.deb` packages carry
+`7z.so`, upstream license/copying notices, and the corresponding source archive. Binary release
+bundles use the same `lib/jpegview-linux/7z.so` layout next to the executable and include the same
+notices/source. The plugin is dynamically replaceable under LGPL terms. Ordinary local builds do not
+download extra source and select the explicit unavailable-backend fallback unless
+`SEVENZIP_SOURCE_ROOT` is set.
 
 The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct
 command-line archive startup still builds the initial `FileList` through the synchronous source API.

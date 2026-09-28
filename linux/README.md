@@ -130,8 +130,15 @@ they support.
    directory rows in Browse. Entering one lists supported images and subfolders. Opening an archive directly
    starts at its root image list. Archive-member rows use the same gold cue in Browse, Recents, and the thumbnail
    strip, and Recents reuses the normal background preview path. ZIP browsing reads its central
-   directory; TAR browsing indexes headers without extracting or retaining image payloads. 7z
-   browsing uses libarchive's seekable reader and likewise retains only member metadata. RAR4 and
+   directory; TAR browsing indexes headers without extracting or retaining image payloads. Unencrypted
+   7z browsing uses libarchive's seekable reader and likewise retains only member metadata. Encrypted
+   7z data uses a private in-process 7-Zip 24.09 `Format7zF` plugin; release builds package that plugin
+   beside the app. Data-encrypted archives keep visible names. Header-encrypted archives show a gold
+   `[.7Z] [Encrypted]` row while locked because member names are hidden. The shared password dialog
+   appears only when entering or explicitly unlocking the archive; launching a locked 7z directly
+   opens Browse at that archive so it can prompt rather than exiting. A locked preview never prompts.
+   Correct passwords are cached only in memory for the current run and backing-file identity, and are
+   neither written to settings nor passed through process arguments. RAR4 and
    RAR5 use libarchive's streaming readers, including solid RAR5 archives. Cold archive
    listings run in the background and obsolete scans are cancelled on navigation. Gzip TAR streams
    are sequential. Solid 7z and RAR5 archives may require decompressing earlier members to reach later
@@ -143,8 +150,12 @@ they support.
    opens a password prompt, filenames remain visible, and passwords accepted by the archive's check
    are cached in memory for the current app run and backing archive only. Passwords are not written to settings or recent
    files. A locked image preview shows a password-needed label but never opens the prompt; opening
-   the archive or selecting an encrypted image is the explicit unlock action. Encrypted 7z and RAR
-   entries are not supported yet. TAR and TGZ do not have native password encryption.
+   the archive or selecting an encrypted image is the explicit unlock action. Encrypted RAR is not
+   supported. TAR and TGZ do not have native password encryption. Normal local Makefile builds use an
+   explicit unavailable 7z-encryption fallback unless `SEVENZIP_SOURCE_ROOT` points at the pinned
+   7-Zip 24.09 source tree; Docker release builds fetch and verify that source automatically with a
+   SHA-256 pin. The bundled Format7zF plugin is built with RAR disabled. AppImage and `.deb` packages
+   include the 7-Zip license notices and corresponding source archive.
    Unsafe absolute or traversal paths, archive links, and devices are omitted;
    indexes are capped at 100,000 entries, and individual images are limited to 128 MiB uncompressed.
    That output-size cap does not limit a codec's own decompression workspace. The archive itself is
@@ -239,8 +250,9 @@ they support.
 
 ## Build
 
-The runtime framework dependencies are SDL2, Pango/FreeType, libzip for ZIP browsing, and libarchive
-for TAR/TGZ/7z/RAR browsing. SDL2 development headers are not required because the frontend uses the small
+The runtime framework dependencies are SDL2, Pango/FreeType, libzip for ZIP browsing, libarchive
+for TAR/TGZ and unencrypted 7z/RAR browsing, and the private Format7zF plugin for encrypted 7z.
+SDL2 development headers are not required because the frontend uses the small
 ABI declared in `src/sdl_abi.h`; Pango development
 headers and codec development packages are needed at compile time. The font stack is loaded only
 when text outside the embedded printable-ASCII bitmap is used, so normal startup and ASCII UI do not
@@ -260,6 +272,17 @@ linux/build/jpegview-linux image.jpg
 linux/build/jpegview-linux /path/to/photos
 ```
 
+That normal local build keeps encrypted-7z support explicitly unavailable. To enable it locally,
+download the pinned source and pass its root to Make:
+
+```sh
+sh linux/fetch-7zip-source.sh "$PWD/out/7zip-24.09"
+make -C linux -j"$(nproc)" SEVENZIP_SOURCE_ROOT="$PWD/out/7zip-24.09" all test
+```
+
+The downloaded source archive is verified by SHA-256. The Makefile builds only `Format7zF` with
+`DISABLE_RAR=1`; RAR remains handled by the existing libarchive path.
+
 The default link statically includes libstdc++ and libgcc. Set `STATIC_RUNTIME=` if a local
 toolchain does not provide those static runtime archives.
 
@@ -269,7 +292,11 @@ The Ubuntu 20.04, 22.04, 24.04, and 26.04 Dockerfiles contain the compiler, SDL2
 and optional codec development libraries for their respective releases. Ubuntu 20.04 builds JPEG XL and AVIF from
 pinned sources; Ubuntu 22.04 uses its AVIF package and builds JPEG XL from source; Ubuntu 24.04 and
 26.04 use distro codec packages and explicitly install libheif's HEVC decoder/encoder plugins because
-their images omit recommended packages. The host only needs Docker; build outputs are written to a host
+their images omit recommended packages. Every Docker release image also downloads and verifies the
+pinned 7-Zip 24.09 source, builds `Format7zF` with RAR disabled, and packages `7z.so`, its license
+notices, and the corresponding source archive in release AppImages (and in Ubuntu 24/26 `.deb`s).
+Local Make/package-script invocations without `SEVENZIP_SOURCE_ROOT` retain the documented unavailable
+fallback. The host only needs Docker; build outputs are written to a host
 `out/` directory:
 
 ```sh
@@ -298,7 +325,11 @@ version lookup; with `--rm`, this does not change your host's Git configuration.
 metadata is available and no version is passed, the build continues to use `0.0.0+unknown`.
 
 The AppImage is named `out/JPEGView-Linux-${APP_VERSION}-x86_64.AppImage`; the native executable
-is `out/jpegview-linux`. Substitute the Ubuntu 22.04, 24.04, or 26.04 image tag to use another build
+is `out/jpegview-linux`. Docker's `binary` mode also copies the sibling `lib/jpegview-linux/7z.so`
+and 7-Zip notices/source into `out/`. CI and release automation upload a clearly named
+`*-with-7z.tar.gz` containing the executable, the relative plugin layout, and those notices/source;
+extract the bundle without separating its paths to keep encrypted 7z available. Substitute the
+Ubuntu 22.04, 24.04, or 26.04 image tag to use another build
 environment. Passing the version resolved on the host is the simplest option; the read-only `.git`
 mount above is an alternative. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
 dependency chains in parallel with BuildKit. Ubuntu 22.04 builds Highway/JPEG XL; Ubuntu 24.04 and
@@ -306,8 +337,9 @@ dependency chains in parallel with BuildKit. Ubuntu 22.04 builds Highway/JPEG XL
 AppImage tool. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
 must also run on later Ubuntu releases; newer-base artifacts can require newer system glibc.
 
-The Debian package Dockerfiles use only the standard Ubuntu 24.04 or 26.04 repositories for build
-tools and runtime libraries. Ubuntu 20.04 and 22.04 do not produce a `.deb`.
+The Debian package Dockerfiles use standard Ubuntu 24.04 or 26.04 repositories for compiler/runtime
+dependencies; they additionally fetch the checksum-pinned 7-Zip source archive for the LGPL plugin.
+Ubuntu 20.04 and 22.04 do not produce a `.deb`.
 
 ```sh
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.deb.ubuntu24 -t jpegview-linux-deb-build:ubuntu24 .
@@ -346,8 +378,9 @@ QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including anima
 formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, TAR, `.tar.gz`, `.tgz`, `.7z`, and `.rar`
 archives can contain any supported image format above; they are browsed read-only as virtual folders.
 RAR input uses libarchive's built-in reader; the Ubuntu 20.04 package supports both RAR4 and RAR5.
-ZIP encryption uses libzip's per-entry encrypted read API and the session-only archive credential
-cache; encrypted 7z and RAR remain unavailable in the current backend.
+ZIP encryption uses libzip's per-entry encrypted read API. Encrypted 7z uses the private Format7zF
+plugin in release Docker packages; encrypted RAR remains unavailable. Locally built packages without
+`SEVENZIP_SOURCE_ROOT` report encrypted 7z as unavailable while retaining unencrypted 7z browsing.
 The save dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and
 JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is view-only.
 JPEG uses the linked libjpeg implementation (libjpeg-turbo in the supported builds), common
@@ -447,13 +480,15 @@ mapping, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
 trips across static and animated formats, ZIP/TAR/TGZ/7z/RAR4/RAR5 listing and member decoding, path-traversal
-rejection, nested archive navigation and archive-backed recent previews, encrypted ZIP member
-listing, wrong/correct password validation, in-memory credential reuse/clearing, and locked previews,
+rejection, nested archive navigation and archive-backed recent previews, encrypted ZIP and 7z member
+listing, header-encrypted 7z hidden-name behavior, zero-length members, wrong/correct password
+validation, in-memory credential reuse/clearing, and locked previews,
 cancellable archive indexing, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ/7z/RAR browsing and recent
-reopening, encrypted-ZIP prompt/retry/session reuse, focus restoration, paging, Home/End, held-key
-movement, wheel and scrollbar scrolling/dragging, and
+reopening, encrypted-ZIP prompt/retry/session reuse, and—when the optional plugin is bundled—
+header-encrypted 7z password entry; focus restoration, paging, Home/End, held-key movement, wheel and
+scrollbar scrolling/dragging, and
 dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;

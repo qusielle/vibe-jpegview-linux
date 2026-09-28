@@ -33,6 +33,7 @@ jobs:
           artifact_dir="$RUNNER_TEMP/jpegview-linux-ci-artifacts-ubuntu${UBUNTU_VERSION}"
           app_version="$(sh ./linux/version.sh)"
           appimage_name="JPEGView-Linux-${app_version}-x86_64.AppImage"
+          binary_bundle_name="jpegview-linux-${app_version}-ubuntu${UBUNTU_VERSION}-x86_64-with-7z.tar.gz"
           mkdir -p "$output_dir" "$artifact_dir"
 
           docker build \
@@ -45,6 +46,15 @@ jobs:
           binary_version=$(docker run --rm -v "$output_dir:/out" \
             --entrypoint /out/jpegview-linux "$image" --version)
           test "$binary_version" = "JPEGView Linux $app_version"
+          test -f "$output_dir/lib/jpegview-linux/7z.so"
+          test -f "$output_dir/share/doc/jpegview-linux/7zip-24.09-notice.txt"
+          test -f "$output_dir/share/doc/jpegview-linux/7zip-24.09-source.tar.gz"
+          tar -czf "$output_dir/$binary_bundle_name" -C "$output_dir" \
+            jpegview-linux lib/jpegview-linux/7z.so \
+            share/doc/jpegview-linux/7zip-24.09-notice.txt \
+            share/doc/jpegview-linux/7zip-24.09-License.txt \
+            share/doc/jpegview-linux/7zip-24.09-LGPL-2.1.txt \
+            share/doc/jpegview-linux/7zip-24.09-source.tar.gz
 
           if [ "$UBUNTU_VERSION" = "24" ] || [ "$UBUNTU_VERSION" = "26" ]; then
             deb_image="jpegview-linux-deb-build:ubuntu${UBUNTU_VERSION}"
@@ -76,19 +86,21 @@ jobs:
               sha256sum \
                 "$appimage_name" \
                 jpegview-linux \
+                "$binary_bundle_name" \
                 "$deb_name" > SHA256SUMS
             )
             cp "$output_dir/$deb_name" "$artifact_dir/"
           else
             (
               cd "$output_dir"
-              sha256sum "$appimage_name" jpegview-linux > SHA256SUMS
+              sha256sum "$appimage_name" jpegview-linux "$binary_bundle_name" > SHA256SUMS
             )
           fi
 
           cp \
             "$output_dir/$appimage_name" \
             "$output_dir/jpegview-linux" \
+            "$output_dir/$binary_bundle_name" \
             "$output_dir/SHA256SUMS" \
             "$artifact_dir/"
 

@@ -97,6 +97,12 @@ if [ -x "$ENCRYPTED_ZIP_FIXTURE_WRITER" ]; then
 	"$ENCRYPTED_ZIP_FIXTURE_WRITER" "$temporary/images/11-password.zip"
 	touch -t 201801010000.00 "$temporary/images/11-password.zip"
 fi
+sevenzip_plugin="$(dirname -- "$BINARY")/lib/jpegview-linux/7z.so"
+if [ -f "$sevenzip_plugin" ] && [ -f "$SCRIPT_DIR/fixtures/header-encrypted.7z" ]; then
+	cp "$SCRIPT_DIR/fixtures/header-encrypted.7z" \
+		"$temporary/images/12-header-password.7z"
+	touch -t 201801010000.00 "$temporary/images/12-header-password.7z"
+fi
 mkdir -p "$temporary/images/00-album/first-subdir" "$temporary/images/00-album/second-subdir"
 write_ppm "$temporary/images/00-album/first.ppm" 128 64 32
 write_ppm "$temporary/images/00-album/second.ppm" 32 64 128
@@ -355,6 +361,40 @@ if [ -f "$temporary/images/11-password.zip" ]; then
 	export XDG_STATE_HOME
 fi
 
+if [ -f "$temporary/images/12-header-password.7z" ]; then
+	# Header-encrypted 7z must not expose names before the shared password dialog
+	# accepts a credential. This runs only when the optional Format7zF plugin is
+	# beside the executable; normal local fallback builds still test core behavior.
+	XDG_STATE_HOME="$temporary/header-password-state"
+	export XDG_STATE_HOME
+	launch_viewer "$temporary/images/12-header-password.7z"
+	assert_title_prefix "JPEGView" \
+		"header-encrypted 7z startup did not open Browse"
+	sleep 0.3
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/header-password-dialog.png"
+		password_border=$(convert "$temporary/header-password-dialog.png" \
+			-format "%[hex:p{400,311}]" info:)
+		case "$password_border" in
+			BEAA78*|beaa78*) ;;
+			*) echo "UI smoke test: header-encrypted 7z did not show the password prompt" >&2; exit 1 ;;
+		esac
+	fi
+	DISPLAY=":$display_number" xdotool type --delay 20 'wrong-password'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.3
+	DISPLAY=":$display_number" xdotool type --delay 20 'test-secret'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "visible.png" \
+		"header-encrypted 7z did not reveal/open its image after password entry"
+	stop_viewer
+	XDG_STATE_HOME="$temporary/state"
+	export XDG_STATE_HOME
+fi
+
 # Exercise the mnemonic in an isolated viewer session so the rest of this
 # smoke suite starts from the original first image and an empty recent history.
 XDG_STATE_HOME="$temporary/mnemonic-state"
@@ -565,8 +605,8 @@ if [ -f "$temporary/images/08-archive.tar.gz" ]; then
 fi
 
 if [ -f "$temporary/images/09-archive.7z" ]; then
-	# 7z catalogs use seekable libarchive input but still publish through the
-	# same cancellable Open-dialog worker and archive-member preview path.
+	# Unencrypted 7z catalogs use seekable libarchive input and publish through
+	# the same cancellable Open-dialog worker and archive-member preview path.
 	DISPLAY=":$display_number" xdotool key ctrl+o
 	DISPLAY=":$display_number" xdotool type --delay 20 '09-archive.7z'
 	DISPLAY=":$display_number" xdotool key Return

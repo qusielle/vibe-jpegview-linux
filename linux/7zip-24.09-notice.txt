@@ -1,0 +1,17 @@
+7-Zip Format7zF 24.09
+Copyright (C) 1999-2024 Igor Pavlov.
+
+JPEGView Linux builds the Format7zF archive plugin from the 7-Zip 24.09 source
+with DISABLE_RAR=1. The plugin contains the 7z format handler only; no RAR
+decoder is enabled or distributed by this build.
+
+7-Zip source files are generally licensed under the GNU LGPL version 2.1 or
+later; the source tree also identifies specific BSD-licensed and public-domain
+files. The upstream license and copying notices are included beside this file,
+and the complete corresponding 7-Zip 24.09 source archive is included in this
+package as 7zip-24.09-source.tar.gz. See DOC/License.txt and DOC/copying.txt in
+that source archive for the complete terms and file-level notices.
+
+The 7-Zip project source is available at https://github.com/ip7z/7zip, tag
+24.09. Its source archive SHA-256 is
+e4757b307925227724a2044651193664ba3d04e9ac13b8e631f1667896014bbf.

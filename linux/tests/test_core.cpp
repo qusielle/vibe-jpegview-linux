@@ -36,6 +36,7 @@
 #include "bitmap_font.h"
 #include "playback_scheduler.h"
 #include "archive_source.h"
+#include "seven_zip_backend.h"
 #include "archive_password_dialog_model.h"
 #include "rar_test_fixtures.h"
 
@@ -742,6 +743,141 @@ void TestEncryptedZipBrowsingAndSessionPasswords() {
 		previews.front().bgra.empty() && previews.front().error.find("password required") !=
 		std::string::npos,
 		"encrypted preview did not report a locked state without a password prompt");
+}
+
+void TestEncryptedSevenZipBrowsingAndSessionPasswords() {
+	struct PasswordCacheGuard {
+		PasswordCacheGuard() { jpegview_linux::ClearSessionArchivePasswords(); }
+		~PasswordCacheGuard() { jpegview_linux::ClearSessionArchivePasswords(); }
+	} passwordCacheGuard;
+	TemporaryDirectory temporary;
+	const fs::path fixtureDirectory = fs::path(__FILE__).parent_path() / "fixtures";
+	const fs::path dataArchive = temporary.path() / "data-encrypted.7z";
+	const fs::path headerArchive = temporary.path() / "header-encrypted.7z";
+	Expect(fs::copy_file(fixtureDirectory / "data-encrypted.7z", dataArchive) &&
+		fs::copy_file(fixtureDirectory / "header-encrypted.7z", headerArchive),
+		"could not copy encrypted 7z test fixtures");
+	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+	std::string error;
+	jpegview_linux::ArchiveErrorKind errorKind = jpegview_linux::ArchiveErrorKind::None;
+	bool containsEncryptedEntries = false;
+	if (!jpegview_linux::SevenZipBackendAvailable()) {
+		Expect(!jpegview_linux::ListArchiveDirectoryCancellable(dataArchive, entries,
+			[] { return true; }, error, &errorKind, &containsEncryptedEntries) &&
+			errorKind == jpegview_linux::ArchiveErrorKind::UnsupportedEncryption,
+			"normal-build fallback did not report unavailable encrypted 7z support");
+		return;
+	}
+
+	const fs::path dataMember = dataArchive / "visible.png";
+	const fs::path headerMember = headerArchive / "visible.png";
+	// 7z represents a zero-byte regular file without an encrypted data stream.
+	// Password validation must not mistake it for a password check and must
+	// continue to the non-empty encrypted payload in the same archive.
+	const bool listedDataArchive = jpegview_linux::ListArchiveDirectoryCancellable(dataArchive,
+		entries, [] { return true; }, error, &errorKind, &containsEncryptedEntries);
+	const auto emptyDataMember = std::find_if(entries.begin(), entries.end(),
+		[](const auto& entry) { return entry.path.filename() == "empty.dat"; });
+	const auto encryptedDataMember = std::find_if(entries.begin(), entries.end(),
+		[](const auto& entry) { return entry.path.filename() == "visible.png"; });
+	Expect(listedDataArchive && containsEncryptedEntries && entries.size() == 2 &&
+		emptyDataMember != entries.end() && emptyDataMember->size == 0 &&
+		!emptyDataMember->encrypted && encryptedDataMember != entries.end() &&
+		encryptedDataMember->path == dataMember && encryptedDataMember->encrypted,
+		"data-encrypted 7z did not retain visible names and encrypted-member metadata: " + error +
+		" (listed=" + (listedDataArchive ? "true" : "false") + ", kind=" +
+		std::to_string(static_cast<int>(errorKind)) + ", entries=" +
+		std::to_string(entries.size()) + ", containsEncrypted=" +
+		(containsEncryptedEntries ? "true" : "false") + (entries.empty() ? "" :
+		", path=" + entries.front().path.string() + ", encrypted=" +
+		(entries.front().encrypted ? "true" : "false")) + ")");
+	jpegview_linux::SevenZipEntry emptyEncryptedProbe;
+	emptyEncryptedProbe.encrypted = true;
+	jpegview_linux::SevenZipEntry encryptedDataProbe;
+	encryptedDataProbe.encrypted = true;
+	encryptedDataProbe.size = 1;
+	Expect(!jpegview_linux::IsSevenZipPasswordVerificationMember(emptyEncryptedProbe) &&
+		jpegview_linux::IsSevenZipPasswordVerificationMember(encryptedDataProbe),
+		"zero-length encrypted 7z metadata was treated as a password-verification signal");
+	entries.clear();
+	containsEncryptedEntries = false;
+	Expect(!jpegview_linux::ListArchiveDirectoryCancellable(headerArchive, entries,
+		[] { return true; }, error, &errorKind, &containsEncryptedEntries) &&
+		errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired && entries.empty(),
+		"header-encrypted 7z exposed hidden names or did not request a password");
+
+	const auto awaitPreview = [](jpegview_linux::FileDialogPreviewLoader& loader,
+		const fs::path& archive) {
+		const std::uint64_t generation = loader.Request(archive, true,
+			jpegview_linux::FileDialogSortMode::Name, 32, 32);
+		std::vector<jpegview_linux::FileDialogPreviewResult> results;
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+		while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			results = loader.TakeReady();
+		}
+		Expect(results.size() == 1 && results.front().generation == generation,
+			"7z preview did not finish before its bounded deadline");
+		return results.front();
+	};
+	jpegview_linux::FileDialogPreviewLoader previewLoader;
+	const auto dataPreview = awaitPreview(previewLoader, dataArchive);
+	Expect(dataPreview.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired &&
+		dataPreview.encryptedArchive && dataPreview.source == dataArchive &&
+		dataPreview.bgra.empty(),
+		"data-encrypted 7z preview did not stay locked without prompting");
+	const auto headerPreview = awaitPreview(previewLoader, headerArchive);
+	Expect(headerPreview.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired &&
+		headerPreview.source == headerArchive && headerPreview.bgra.empty(),
+		"header-encrypted 7z preview did not stay locked without prompting");
+
+	Expect(!jpegview_linux::ValidateArchivePassword(dataArchive, "wrong-password", error,
+		&errorKind) && errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword,
+		"wrong data-encrypted 7z password was not rejected");
+	Expect(!jpegview_linux::ValidateArchivePassword(headerArchive, "wrong-password", error,
+		&errorKind) && errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword,
+		"wrong header-encrypted 7z password was not rejected");
+	Expect(jpegview_linux::ValidateArchivePassword(dataArchive, "test-secret", error,
+		&errorKind), "correct data-encrypted 7z password failed: " + error);
+	Expect(jpegview_linux::ValidateArchivePassword(headerArchive, "test-secret", error,
+		&errorKind), "correct header-encrypted 7z password failed: " + error);
+
+	Expect(jpegview_linux::SetSessionArchivePassword(dataArchive, "test-secret") &&
+		jpegview_linux::HasSessionArchivePassword(dataMember),
+		"data-encrypted 7z password was not cached by backing-file identity");
+	DecodedImage decoded;
+	Expect(jpegview_linux::DecodeImage(dataMember, decoded, error) &&
+		decoded.frames.size() == 1,
+		"cached data-encrypted 7z password did not decode the visible-name member: " + error);
+	Expect(jpegview_linux::SetSessionArchivePassword(headerArchive, "test-secret") &&
+		jpegview_linux::HasSessionArchivePassword(headerMember),
+		"header-encrypted 7z password was not reused for member paths");
+	entries.clear();
+	Expect(jpegview_linux::ListArchiveDirectory(headerArchive, entries, error) &&
+		entries.size() == 1 && entries.front().path == headerMember,
+		"correct header-encrypted 7z password did not reveal names on a later open: " + error);
+	DecodedImage headerDecoded;
+	Expect(jpegview_linux::DecodeImage(headerMember, headerDecoded, error) &&
+		headerDecoded.frames.size() == 1,
+		"cached header-encrypted 7z password did not decode the image: " + error);
+
+	Expect(!jpegview_linux::ValidateArchivePassword(dataArchive, "wrong-password", error,
+		&errorKind) && errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword &&
+		jpegview_linux::HasSessionArchivePassword(dataArchive),
+		"submitted candidate validation was hidden by the existing credential cache");
+	jpegview_linux::ClearSessionArchivePasswords();
+	Expect(!jpegview_linux::HasSessionArchivePassword(dataArchive) &&
+		!jpegview_linux::HasSessionArchivePassword(headerArchive),
+		"clearing 7z credentials retained a session password");
+	entries.clear();
+	Expect(!jpegview_linux::ListArchiveDirectoryCancellable(headerArchive, entries,
+		[] { return true; }, error, &errorKind) &&
+		errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired,
+		"clearing credentials retained a decrypted header-encrypted 7z catalog");
+	Expect(!jpegview_linux::WithArchiveMemberFile(dataMember,
+		[](const fs::path&, std::string&) { return true; }, error, &errorKind) &&
+		errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired,
+		"clearing 7z credentials did not relock a data-encrypted member");
 }
 
 void TestTarAndTgzBrowsingDecodingAndSafety() {
@@ -5499,6 +5635,25 @@ void TestFileDialogModelStateAndNavigation() {
 	Expect(model.Entries().size() == entries.size() && model.Entries()[0].parent &&
 		model.Entries()[1].path.filename() == "a-folder" && model.SelectedIndex() == 1,
 		"open-dialog model did not sort by name or select the first child");
+	const fs::path encryptedArchivePath = "/pictures/locked.7z";
+	jpegview_linux::FileDialogModel encryptedModel;
+	encryptedModel.SetEntries({
+		{fs::path("/pictures"), true, true},
+		{encryptedArchivePath, true, false, {}, true},
+	});
+	encryptedModel.AppendFilter("locked");
+	const int selectionBeforeEncryptedMark = encryptedModel.SelectedIndex();
+	Expect(encryptedModel.MarkEncrypted(encryptedArchivePath) &&
+		encryptedModel.SelectedIndex() == selectionBeforeEncryptedMark &&
+		std::any_of(encryptedModel.Entries().begin(), encryptedModel.Entries().end(),
+			[&encryptedArchivePath](const Entry& entry) {
+				return entry.path == encryptedArchivePath && entry.encrypted;
+			}) &&
+		std::any_of(encryptedModel.AllEntries().begin(), encryptedModel.AllEntries().end(),
+			[&encryptedArchivePath](const Entry& entry) {
+				return entry.path == encryptedArchivePath && entry.encrypted;
+			}),
+		"encrypted archive marking did not update filtered/catalog rows without moving selection");
 	model.SetEntriesInOrder({
 		{fs::path("/recent/z/photo.jpg"), false, false},
 		{fs::path("/recent/a/other.jpg"), false, false},
@@ -5782,6 +5937,8 @@ int main() {
 		TestArchiveBrowsingDecodingAndRecentPreview, failures);
 	RunTest("encrypted-zip-browsing-and-session-passwords",
 		TestEncryptedZipBrowsingAndSessionPasswords, failures);
+	RunTest("encrypted-7z-browsing-and-session-passwords",
+		TestEncryptedSevenZipBrowsingAndSessionPasswords, failures);
 	RunTest("tar-and-tgz-browsing-decoding-and-safety",
 		TestTarAndTgzBrowsingDecodingAndSafety, failures);
 	RunTest("7z-browsing-decoding-and-preview", TestSevenZipBrowsingDecodingAndPreview, failures);

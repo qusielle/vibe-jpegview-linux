@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    g++ make pkg-config dpkg-dev patchelf git \
+    g++ make pkg-config dpkg-dev patchelf git curl ca-certificates \
     libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev fonts-dejavu-core \
     libjpeg-dev libpng-dev libzip-dev libarchive-dev \
     libgif-dev libtiff-dev libwebp-dev libheif-dev libraw-dev libjxr-dev \
@@ -16,6 +16,9 @@ RUN apt-get update \
 WORKDIR /src
 COPY . /src
 COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
+RUN sh /src/linux/fetch-7zip-source.sh /opt/jpegview/7zip-24.09
+ENV SEVENZIP_SOURCE_ROOT=/opt/jpegview/7zip-24.09 \
+	SEVENZIP_SOURCE_ARCHIVE=/opt/jpegview/7zip-24.09-source.tar.gz
 RUN chmod 755 /usr/local/bin/jpegview-docker-build
 
 VOLUME ["/out"]

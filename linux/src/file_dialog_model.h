@@ -108,6 +108,7 @@ public:
 	void SelectLast(int visibleRows);
 	void Select(int index, int visibleRows);
 	bool Focus(const std::filesystem::path& path, int visibleRows);
+	bool MarkEncrypted(const std::filesystem::path& path);
 	void ClearSelection();
 
 	const std::vector<FileDialogEntry>& AllEntries() const { return allEntries_; }
@@ -195,6 +196,8 @@ struct FileDialogPreviewResult {
 	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
 	std::string error;
+	ArchiveErrorKind errorKind = ArchiveErrorKind::None;
+	bool encryptedArchive = false;
 };
 
 // Decodes just the latest requested preview on one background worker. Preview

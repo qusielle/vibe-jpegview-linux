@@ -21,6 +21,33 @@ mkdir -p "$OUTPUT_DIR"
 case "$MODE" in
 	binary)
 		make -C "$SOURCE_DIR/linux" BUILD_DIR="$OUTPUT_DIR" VERSION="$VERSION" all
+		if [ -n "${SEVENZIP_SOURCE_ROOT:-}" ]; then
+			sevenzip_plugin="$OUTPUT_DIR/lib/jpegview-linux/7z.so"
+			if [ ! -f "$sevenzip_plugin" ]; then
+				echo "7-Zip support was requested but the Format7zF plugin is missing: $sevenzip_plugin" >&2
+				exit 1
+			fi
+			sevenzip_source_archive=${SEVENZIP_SOURCE_ARCHIVE:-}
+			if [ -z "$sevenzip_source_archive" ]; then
+				sevenzip_source_archive="$(dirname -- "$SEVENZIP_SOURCE_ROOT")/7zip-24.09-source.tar.gz"
+			fi
+			sevenzip_docs="$OUTPUT_DIR/share/doc/jpegview-linux"
+			mkdir -p "$sevenzip_docs"
+			if [ ! -f "$sevenzip_source_archive" ]; then
+				sevenzip_source_archive="$sevenzip_docs/7zip-24.09-source.tar.gz"
+				tar -czf "$sevenzip_source_archive" -C "$(dirname -- "$SEVENZIP_SOURCE_ROOT")" \
+					"$(basename -- "$SEVENZIP_SOURCE_ROOT")"
+			fi
+			cp "$SOURCE_DIR/linux/7zip-24.09-notice.txt" \
+				"$sevenzip_docs/7zip-24.09-notice.txt"
+			cp "$SEVENZIP_SOURCE_ROOT/DOC/License.txt" \
+				"$sevenzip_docs/7zip-24.09-License.txt"
+			cp "$SEVENZIP_SOURCE_ROOT/DOC/copying.txt" \
+				"$sevenzip_docs/7zip-24.09-LGPL-2.1.txt"
+			cp "$sevenzip_source_archive" "$sevenzip_docs/7zip-24.09-source.tar.gz"
+		else
+			echo "warning: building binary without SEVENZIP_SOURCE_ROOT; encrypted 7z support is unavailable" >&2
+		fi
 		printf 'Binary: %s/jpegview-linux\n' "$OUTPUT_DIR"
 		;;
 	appimage)

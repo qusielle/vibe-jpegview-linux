@@ -64,13 +64,28 @@ DirectorySummary CountImmediateDirectoryContentsWhile(
 
 std::filesystem::path FirstImageInDirectoryWhile(
 	const std::filesystem::path& directory, FileDialogSortMode mode,
-	const std::function<bool()>& shouldContinue) {
+	const std::function<bool()>& shouldContinue, std::string* errorMessage = nullptr,
+	ArchiveErrorKind* errorKind = nullptr, bool* containsEncryptedEntries = nullptr) {
 	std::vector<FileDialogEntry> images;
 	if (IsArchiveLocation(directory)) {
+		const bool sevenZip = ArchiveFormatName(directory) == ".7Z";
 		std::vector<ArchiveEntryInfo> archiveEntries;
-		std::string errorMessage;
+		std::string localErrorMessage;
+		ArchiveErrorKind localErrorKind = ArchiveErrorKind::None;
+		bool localContainsEncryptedEntries = false;
 		if (!ListArchiveDirectoryCancellable(directory, archiveEntries,
-			shouldContinue, errorMessage)) return {};
+			shouldContinue, localErrorMessage, &localErrorKind,
+			&localContainsEncryptedEntries)) {
+			if (errorMessage != nullptr) *errorMessage = std::move(localErrorMessage);
+			if (errorKind != nullptr) *errorKind = localErrorKind;
+			if (containsEncryptedEntries != nullptr) {
+				*containsEncryptedEntries = sevenZip && localContainsEncryptedEntries;
+			}
+			return {};
+		}
+		if (containsEncryptedEntries != nullptr) {
+			*containsEncryptedEntries = sevenZip && localContainsEncryptedEntries;
+		}
 		for (const ArchiveEntryInfo& entry : archiveEntries) {
 			if (!shouldContinue()) return {};
 			if (!entry.directory && IsSupportedImagePath(entry.path)) {
@@ -79,10 +94,20 @@ std::filesystem::path FirstImageInDirectoryWhile(
 					ImageSourceModificationTime(entry.path, modificationError);
 				images.push_back({entry.path, false, false,
 					modificationError ? std::filesystem::file_time_type{} : modificationTime,
-					false, true});
+					false, true, entry.encrypted});
 			}
 		}
 		SortFileDialogEntries(images, mode);
+		if (errorMessage != nullptr) errorMessage->clear();
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
+		if (sevenZip && !images.empty() && images.front().encrypted &&
+			!HasSessionArchivePassword(directory)) {
+			if (errorMessage != nullptr) {
+				*errorMessage = "password required for encrypted 7z image";
+			}
+			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::PasswordRequired;
+			return {};
+		}
 		return images.empty() ? std::filesystem::path{} : images.front().path;
 	}
 	std::error_code iteratorError;
@@ -322,6 +347,21 @@ bool FileDialogModel::Focus(const std::filesystem::path& path, int visibleRows) 
 	if (entry == entries_.end()) return false;
 	Select(static_cast<int>(std::distance(entries_.begin(), entry)), visibleRows);
 	return true;
+}
+
+bool FileDialogModel::MarkEncrypted(const std::filesystem::path& path) {
+	bool marked = false;
+	const std::filesystem::path normalizedPath = path.lexically_normal();
+	for (FileDialogEntry& entry : allEntries_) {
+		if (entry.path.lexically_normal() == normalizedPath) {
+			entry.encrypted = true;
+			marked = true;
+		}
+	}
+	for (FileDialogEntry& entry : entries_) {
+		if (entry.path.lexically_normal() == normalizedPath) entry.encrypted = true;
+	}
+	return marked;
 }
 
 void FileDialogModel::ClearSelection() {
@@ -572,9 +612,16 @@ struct FileDialogPreviewLoader::Impl {
 			result.generation = task.generation;
 			try {
 				result.source = task.directory ? FirstImageInDirectoryWhile(task.path, task.mode,
-					[this, &task] { return IsCurrent(task.generation); }) : task.path;
+					[this, &task] { return IsCurrent(task.generation); },
+					&result.error, &result.errorKind, &result.encryptedArchive) : task.path;
+				if (task.directory && result.source.empty() &&
+					result.errorKind == ArchiveErrorKind::PasswordRequired) {
+					result.source = task.path;
+				}
 				if (IsCurrent(task.generation)) {
-					if (result.source.empty()) {
+					if (!result.error.empty()) {
+						// Preserve archive errors for the UI; previews never request credentials.
+					} else if (result.source.empty()) {
 						result.error = "No images in this folder";
 					} else {
 						DecodedImage decoded;

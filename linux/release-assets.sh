@@ -12,9 +12,11 @@ safe_version=${APP_VERSION//[^a-zA-Z0-9._+-]/-}
 image="jpegview-linux-build:ubuntu${UBUNTU_VERSION}"
 appimage_name="JPEGView-Linux-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64.AppImage"
 binary_name="jpegview-linux-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64"
+binary_bundle_name="${binary_name}-with-7z.tar.gz"
 checksums_name="SHA256SUMS-ubuntu${UBUNTU_VERSION}.txt"
-checksum_inputs=("$appimage_name" "$binary_name")
-assets=("$OUTPUT_DIR/$appimage_name" "$OUTPUT_DIR/$binary_name")
+checksum_inputs=("$appimage_name" "$binary_name" "$binary_bundle_name")
+assets=("$OUTPUT_DIR/$appimage_name" "$OUTPUT_DIR/$binary_name" \
+	"$OUTPUT_DIR/$binary_bundle_name")
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -27,6 +29,15 @@ mv "$OUTPUT_DIR/jpegview-linux" "$OUTPUT_DIR/$binary_name"
 binary_version=$(docker run --rm -v "$OUTPUT_DIR:/out" \
 	--entrypoint "/out/$binary_name" "$image" --version)
 test "$binary_version" = "JPEGView Linux $safe_version"
+test -f "$OUTPUT_DIR/lib/jpegview-linux/7z.so"
+test -f "$OUTPUT_DIR/share/doc/jpegview-linux/7zip-24.09-notice.txt"
+test -f "$OUTPUT_DIR/share/doc/jpegview-linux/7zip-24.09-source.tar.gz"
+tar -czf "$OUTPUT_DIR/$binary_bundle_name" -C "$OUTPUT_DIR" \
+	"$binary_name" lib/jpegview-linux/7z.so \
+	share/doc/jpegview-linux/7zip-24.09-notice.txt \
+	share/doc/jpegview-linux/7zip-24.09-License.txt \
+	share/doc/jpegview-linux/7zip-24.09-LGPL-2.1.txt \
+	share/doc/jpegview-linux/7zip-24.09-source.tar.gz
 
 if [[ "$UBUNTU_VERSION" == 24 || "$UBUNTU_VERSION" == 26 ]]; then
 	deb_image="jpegview-linux-deb-build:ubuntu${UBUNTU_VERSION}"
