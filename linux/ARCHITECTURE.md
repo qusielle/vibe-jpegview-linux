@@ -99,7 +99,9 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
   nearest-first cache scheduling,
   cancellation/LRU policy, memory sizing, alpha-preserving antialiased source-area reduction, and
-  low-priority derivation from completed neighbor display frames.
+  low-priority derivation from completed neighbor display frames. The viewer supplies the active
+  double-page partner index so both displayed spread pages receive active-row styling without
+  moving the panel's centering or changing which row represents the navigation index.
 - `image_info_model`: stable dimensions/date/file-size presentation.
 - `system_font` and `bitmap_font`: desktop-font discovery, UTF-8 shaping, measurement, rasterization,
   and exact embedded-glyph ink bounds for crisp renderer overlays such as menu mnemonics. The SDL

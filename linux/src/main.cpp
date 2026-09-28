@@ -7027,11 +7027,15 @@ private:
 		SDL_SetRenderDrawColor(renderer_, 7, 7, 7, 238);
 		SDL_RenderFillRect(renderer_, &panel);
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
+		const std::optional<std::size_t> doublePagePartnerIndex = activeDoublePageRender_.has_value() ?
+			std::optional<std::size_t>(activeDoublePageRender_->layout.secondIndex) : std::nullopt;
 		const std::vector<jpegview_linux::ThumbnailSlot> slots = jpegview_linux::ThumbnailPanelSlots(
-			fileList_.Size(), fileList_.CurrentIndex(), panel.h, rowHeight, fileList_.MarkedIndex());
+			fileList_.Size(), fileList_.CurrentIndex(), panel.h, rowHeight,
+			fileList_.MarkedIndex(), doublePagePartnerIndex);
 		for (const jpegview_linux::ThumbnailSlot& slot : slots) {
 			const SDL_Rect row{panel.x, slot.y, panel.w, rowHeight};
-			if (slot.current) {
+			const bool activeSpreadPage = slot.current || slot.doublePagePartner;
+			if (activeSpreadPage) {
 				SDL_SetRenderDrawColor(renderer_, 32, 58, 82, 255);
 				SDL_RenderFillRect(renderer_, &row);
 			}
@@ -7052,7 +7056,7 @@ private:
 					RenderTransparencyBackground(imageRect, panel);
 				}
 				SDL_RenderCopy(renderer_, cached->second.texture, nullptr, &imageRect);
-				if (!slot.current) {
+				if (!activeSpreadPage) {
 					SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 125);
 					SDL_RenderFillRect(renderer_, &imageRect);
 				} else {
@@ -7062,7 +7066,8 @@ private:
 				const std::string position = std::to_string(slot.fileIndex + 1);
 				DrawText(position, panel.x + (panel.w - TextWidth(position, kUiTextScale)) / 2,
 					row.y + (row.h - TextLineHeight()) / 2, kUiTextScale,
-					slot.current ? 215 : 95, slot.current ? 215 : 95, slot.current ? 215 : 95);
+					activeSpreadPage ? 215 : 95, activeSpreadPage ? 215 : 95,
+					activeSpreadPage ? 215 : 95);
 			}
 			DrawLine(panel.x, row.y + row.h - 1, std::max(panel.x, panel.x + panel.w - 2),
 				row.y + row.h - 1, 48, 48, 48);

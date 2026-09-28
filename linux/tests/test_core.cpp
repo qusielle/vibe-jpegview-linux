@@ -5119,6 +5119,16 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 	Expect(std::count_if(slots.begin(), slots.end(), [](const jpegview_linux::ThumbnailSlot& slot) {
 		return slot.current;
 	}) == 1, "thumbnail panel marked more than one current image");
+	const std::vector<jpegview_linux::ThumbnailSlot> spreadSlots =
+		jpegview_linux::ThumbnailPanelSlots(10, 5, 500, 100, std::nullopt, 6);
+	Expect(spreadSlots.size() == 5, "spread thumbnail layout omitted visible rows");
+	Expect(spreadSlots[2].current && !spreadSlots[2].doublePagePartner &&
+		spreadSlots[3].fileIndex == 6 && !spreadSlots[3].current &&
+		spreadSlots[3].doublePagePartner && !spreadSlots[4].doublePagePartner,
+		"thumbnail panel did not distinguish the active double-page partner");
+	Expect(std::count_if(spreadSlots.begin(), spreadSlots.end(), [](const auto& slot) {
+		return slot.current || slot.doublePagePartner;
+	}) == 2, "thumbnail panel did not highlight exactly both pages in the spread");
 	const std::vector<jpegview_linux::ThumbnailSlot> markedSlots =
 		jpegview_linux::ThumbnailPanelSlots(10, 5, 500, 100, 7);
 	Expect(markedSlots[2].current && !markedSlots[2].marked && markedSlots[4].fileIndex == 7 &&

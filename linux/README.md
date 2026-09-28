@@ -84,8 +84,9 @@ they support.
 
 6. **Neighboring-image thumbnail panel.** Ctrl+T or the context menu opens a vertical strip on the
    left in active file order. The current image stays centered and fully bright; neighboring images
-   are darkened and clickable. A gold outline identifies the image marked with Ctrl+M, distinct from
-   the current-image highlight. The panel reserves image space instead of covering the picture,
+   are darkened and clickable. In double-page modes, both pages in the active spread receive the
+   current-image highlight. A gold outline identifies the image marked with Ctrl+M, distinct from
+   the current-spread highlight. The panel reserves image space instead of covering the picture,
    preloads nearest files first, and retains every generated thumbnail for the active file list.
    Completed neighbor display frames feed a very-low-priority thumbnail worker, so nearby thumbnails
    appear during display prefetch without decoding the large source file again. Its divider is

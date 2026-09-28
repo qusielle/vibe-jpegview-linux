@@ -296,6 +296,28 @@ assert_title_prefix "03-last.ppm" "manga reading order did not make Left advance
 DISPLAY=":$display_number" xdotool key Right
 sleep 0.15
 assert_title_prefix "01-first.ppm" "manga reading order did not make Right return to the preceding spread"
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" xdotool key ctrl+t
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/spread-thumbnails.png"
+	thumbnail_capture_height=$(identify -format '%h' "$temporary/spread-thumbnails.png")
+	thumbnail_row_height=112
+	thumbnail_current_y=$(((thumbnail_capture_height - thumbnail_row_height) / 2 + thumbnail_row_height / 2))
+	thumbnail_partner_y=$((thumbnail_current_y + thumbnail_row_height))
+	thumbnail_following_y=$((thumbnail_partner_y + thumbnail_row_height))
+	current_thumbnail_background=$(convert "$temporary/spread-thumbnails.png" \
+		-format "%[pixel:p{5,$thumbnail_current_y}]" info:)
+	partner_thumbnail_background=$(convert "$temporary/spread-thumbnails.png" \
+		-format "%[pixel:p{5,$thumbnail_partner_y}]" info:)
+	following_thumbnail_background=$(convert "$temporary/spread-thumbnails.png" \
+		-format "%[pixel:p{5,$thumbnail_following_y}]" info:)
+	if [ "$current_thumbnail_background" != 'srgb(32,58,82)' ] || \
+		[ "$partner_thumbnail_background" != 'srgb(32,58,82)' ] || \
+		[ "$following_thumbnail_background" = 'srgb(32,58,82)' ]; then
+		echo "UI smoke test: thumbnail panel did not highlight exactly the active spread pair" >&2
+		exit 1
+	fi
+fi
 stop_viewer
 
 # A reopened file must recover its own two mode flags even when the current
