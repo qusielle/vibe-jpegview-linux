@@ -3799,6 +3799,7 @@ private:
 		RepositionContextMenuToFit();
 		contextMenuOpen_ = true;
 		menuSelected_ = -1;
+		contextMenuRightKeyDown_ = false;
 	}
 
 	void OpenCropContextMenu() {
@@ -3811,6 +3812,7 @@ private:
 		RepositionContextMenuToFit();
 		contextMenuOpen_ = true;
 		menuSelected_ = -1;
+		contextMenuRightKeyDown_ = false;
 	}
 
 	void CloseContextMenu() {
@@ -3820,6 +3822,7 @@ private:
 		contextMenuCropOnly_ = false;
 		contextMenuPositionLocked_ = false;
 		menuSelected_ = -1;
+		contextMenuRightKeyDown_ = false;
 		contextMenuItems_.clear();
 		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
 		UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
@@ -3873,6 +3876,20 @@ private:
 		CloseContextMenu();
 		ExecuteCommand(command);
 		if (command == IDM_EXIT) running = false;
+	}
+
+	void ReleaseContextMenuRightKey(bool& running) {
+		if (!contextMenuRightKeyDown_) return;
+		contextMenuRightKeyDown_ = false;
+
+		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+		const int item = ContextMenuItemAt(lastMouseX_, lastMouseY_);
+		if (item >= 0) {
+			menuSelected_ = item;
+			ActivateContextMenuSelection(running);
+		} else if (!PointInRect(lastMouseX_, lastMouseY_, ContextMenuRect())) {
+			MoveContextMenuSelectionAcrossColumns(1);
+		}
 	}
 
 	SDL_Rect BatchCopyRect() const {
@@ -6855,6 +6872,16 @@ private:
 				case SDL_QUIT:
 					running = false;
 					break;
+				case SDL_WINDOWEVENT:
+					if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+						contextMenuRightKeyDown_ = false;
+					}
+					break;
+				case SDL_KEYUP:
+					if (event.key.keysym.sym == SDLK_RIGHT) {
+						ReleaseContextMenuRightKey(running);
+					}
+					break;
 				case SDL_KEYDOWN:
 					if (event.key.keysym.sym == SDLK_UP) {
 						MoveContextMenuSelection(-1);
@@ -6863,7 +6890,7 @@ private:
 					} else if (event.key.keysym.sym == SDLK_LEFT) {
 						MoveContextMenuSelectionAcrossColumns(-1);
 					} else if (event.key.keysym.sym == SDLK_RIGHT) {
-						MoveContextMenuSelectionAcrossColumns(1);
+						if (event.key.repeat == 0) contextMenuRightKeyDown_ = true;
 					} else if (event.key.repeat == 0 &&
 						(event.key.keysym.mod & 0x0FC0u) == 0 &&
 						((event.key.keysym.sym >= 'a' && event.key.keysym.sym <= 'z') ||
@@ -7316,6 +7343,7 @@ private:
 	bool contextMenuCropOnly_ = false;
 	bool contextMenuPositionLocked_ = false;
 	bool contextMenuNeedsCleanFrame_ = false;
+	bool contextMenuRightKeyDown_ = false;
 	char pendingMenuMnemonicTextInput_ = '\0';
 	int contextMenuX_ = 0;
 	int contextMenuY_ = 0;

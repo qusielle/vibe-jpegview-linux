@@ -100,8 +100,11 @@ they support.
    one-off **Show Advanced Options** reveals navigation, ordering, transforms, correction, extended
    zoom/window/auto-zoom, slideshow, Open With, print, batch, date, wallpaper, settings, and disabled
    Windows-only administration entries without persisting the expanded state. Long menus split into
-   columns, support Left/Right column movement and repeating Up/Down movement, remain inside the
-   window when expanded, open at the current pointer, and can be opened from the keyboard menu key.
+   columns, support Left and (when released outside the menu) Right column movement plus repeating
+   Up/Down movement, remain inside the window when expanded, open at the current pointer, and can be
+   opened from the keyboard menu key.
+   Releasing Right over an enabled row activates it; releasing outside the menu moves to the next
+   column, so holding Right while moving the pointer onto an item works like a click.
    Enabled command items with a Latin letter show an underlined mnemonic; pressing a unique letter
    activates it, while duplicate letters cycle matching entries for Enter. Printable-ASCII
    underlines follow visible bitmap-glyph bounds, avoiding stray pixels in the blank part of a
@@ -612,7 +615,9 @@ fullscreen, and fit-window-to-image commands available. The menu also supports k
 with Up/Down and Return. Underlined letters activate uniquely matching enabled commands; if a letter
 is shared, press it repeatedly to cycle the matching rows and press Enter to activate the selection.
 If the menu spans multiple
-columns to fit the window height, Left/Right moves between columns. Hovering over a lower
+columns to fit the window height, Left moves to the previous column; releasing Right over an enabled
+row activates it, while releasing outside the menu moves to the next column. You can hold Right, move
+the pointer onto a row, then release to click it. Hovering over a lower
 navigation-panel button displays its Windows-style action hint. Unseen files inherit the shared
 fit/fill/actual-size or manual mode as navigation proceeds; a previously visited file restores its
 own last view when opened again. Magnifier size and zoom use `magnifying_glass_width` (default 350),

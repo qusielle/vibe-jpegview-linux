@@ -1224,6 +1224,23 @@ if [ "$visual_assertions" -eq 1 ]; then
 		echo "UI smoke test: context-menu text gained a pixel beyond its final glyph (ink=$menu_terminal_ink trailing=$menu_terminal_trailing)" >&2
 		exit 1
 	fi
+	DISPLAY=":$display_number" xdotool keydown Right
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 700 30
+	sleep 0.1
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-right-key-held.png"
+	DISPLAY=":$display_number" xdotool keyup Right
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-right-key-release.png"
+	right_key_difference=$(compare -metric AE "$temporary/context-right-key-held.png" \
+		"$temporary/context-right-key-release.png" null: 2>&1 || true)
+	if [ "$right_key_difference" = "0" ]; then
+		echo "UI smoke test: releasing Right over a context-menu item did not activate it" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key Escape
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 20
+	DISPLAY=":$display_number" xdotool click 3
+	sleep 0.2
 	DISPLAY=":$display_number" xdotool key Down
 	DISPLAY=":$display_number" xdotool key Down
 	DISPLAY=":$display_number" xdotool key Return

@@ -112,7 +112,9 @@ and invoking desktop integrations. It reads the persisted transparency pattern a
 marked as containing alpha, paints the matching background beneath the image before alpha-blended
 texture rendering. The same renderer-thread helper backs transparent thumbnails and open-dialog
 previews; opaque textures retain the non-blended path. It should translate SDL events into operations
-on the modules above rather than duplicate their state.
+on the modules above rather than duplicate their state. Context-menu pointer hit testing also lives
+here: the Right key's release activates the row under the pointer, or moves to the next column when
+released outside the menu, while key-held pointer movement remains available for click-like selection.
 
 Archive members use the existing filesystem-shaped path contract (`container.ext/member.ext`) so
 navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The
