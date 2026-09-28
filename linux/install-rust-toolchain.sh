@@ -30,7 +30,7 @@ chmod 755 "$TEMP_DIR/rustup-init"
 
 export RUSTUP_HOME="$DESTINATION/rustup"
 export CARGO_HOME="$DESTINATION/cargo"
-"$TEMP_DIR/rustup-init" --yes --no-modify-path --profile minimal \
+"$TEMP_DIR/rustup-init" -y --no-modify-path --profile minimal \
 	--default-host x86_64-unknown-linux-gnu --default-toolchain "$RUST_VERSION"
 "$CARGO_HOME/bin/rustc" --version | grep -F "rustc $RUST_VERSION " >/dev/null
 printf 'Installed Rust %s with rustup %s under %s\n' \
