@@ -129,7 +129,8 @@ SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERA
 TEST_SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
 SOURCES += $(BUILD_INFO_HEADER)
 
-.PHONY: all clean run test test-ui test-shell test-sanitize test-version check appimage
+.PHONY: all clean run test test-ui test-shell test-sanitize test-version check appimage \
+	regen-encrypted-zip-fixture
 
 all: $(TARGET) $(SEVENZIP_PLUGIN_DEPENDENCY) $(RAR_BACKEND_PLUGIN_DEPENDENCY)
 
@@ -187,7 +188,10 @@ $(ENCRYPTED_ZIP_FIXTURE_WRITER): tests/write_encrypted_zip_fixture.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(ZIP_CFLAGS) $< -o $@ $(ZIP_LIBS)
 
-test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(ENCRYPTED_ZIP_FIXTURE_WRITER)
+regen-encrypted-zip-fixture: $(ENCRYPTED_ZIP_FIXTURE_WRITER)
+	$(ENCRYPTED_ZIP_FIXTURE_WRITER) tests/fixtures/encrypted-zip.zip
+
+test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER)
 	@version_output=$$($(TARGET) --version); \
 	expected_version="JPEGView Linux $(VERSION)"; \
 	if [ "$$version_output" != "$$expected_version" ]; then \
@@ -196,7 +200,7 @@ test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(ENCRYPTED_Z
 	fi
 	JPEGVIEW_TEST_HAS_7Z_PLUGIN=$(if $(strip $(SEVENZIP_SOURCE_ROOT)),1,0) \
 		JPEGVIEW_TEST_HAS_RAR_PLUGIN=$(if $(strip $(RAR_BACKEND_ROOT)),1,0) \
-		./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(ENCRYPTED_ZIP_FIXTURE_WRITER)
+		./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER)
 
 test-version:
 	sh tests/version_test.sh

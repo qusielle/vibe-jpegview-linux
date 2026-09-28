@@ -7,7 +7,6 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 BINARY=${1:-./build/jpegview-linux}
 ARCHIVE_FIXTURE_WRITER=${2:-}
 RAR_FIXTURE_WRITER=${3:-}
-ENCRYPTED_ZIP_FIXTURE_WRITER=${4:-}
 if [ ! -x "$BINARY" ]; then
 	echo "UI smoke test: binary not found: $BINARY" >&2
 	exit 2
@@ -109,10 +108,8 @@ if [ -x "$RAR_FIXTURE_WRITER" ]; then
 	"$RAR_FIXTURE_WRITER" "$temporary/images/10-archive.rar" rar5-solid
 	touch -t 201801010000.00 "$temporary/images/10-archive.rar"
 fi
-if [ -x "$ENCRYPTED_ZIP_FIXTURE_WRITER" ]; then
-	"$ENCRYPTED_ZIP_FIXTURE_WRITER" "$temporary/images/11-password.zip"
-	touch -t 201801010000.00 "$temporary/images/11-password.zip"
-fi
+cp "$SCRIPT_DIR/fixtures/encrypted-zip.zip" "$temporary/images/11-password.zip"
+touch -t 201801010000.00 "$temporary/images/11-password.zip"
 sevenzip_plugin="$(dirname -- "$BINARY")/lib/jpegview-linux/7z.so"
 if [ "${JPEGVIEW_TEST_HAS_7Z_PLUGIN:-0}" = 1 ] && [ -f "$sevenzip_plugin" ] &&
 	[ -f "$SCRIPT_DIR/fixtures/header-encrypted.7z" ]; then

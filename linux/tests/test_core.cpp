@@ -333,37 +333,6 @@ void WriteZipArchive(const fs::path& archivePath,
 	}
 }
 
-void WriteEncryptedZipArchive(const fs::path& archivePath,
-	const std::vector<std::pair<std::string, fs::path>>& members,
-	const std::string& password) {
-	int errorCode = 0;
-	zip_t* archive = zip_open(archivePath.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &errorCode);
-	if (archive == nullptr) throw TestFailure("cannot create encrypted ZIP archive: " +
-		std::to_string(errorCode));
-	for (const auto& member : members) {
-		zip_source_t* source = zip_source_file(archive, member.second.c_str(), 0, -1);
-		if (source == nullptr) {
-			const std::string message = zip_strerror(archive);
-			zip_discard(archive);
-			throw TestFailure("cannot add encrypted ZIP fixture source: " + message);
-		}
-		const zip_int64_t index = zip_file_add(archive, member.first.c_str(), source,
-			ZIP_FL_ENC_UTF_8);
-		if (index < 0 || zip_file_set_encryption(archive,
-			static_cast<zip_uint64_t>(index), ZIP_EM_TRAD_PKWARE, password.c_str()) != 0) {
-			const std::string message = zip_strerror(archive);
-			if (index < 0) zip_source_free(source);
-			zip_discard(archive);
-			throw TestFailure("cannot encrypt ZIP fixture member: " + message);
-		}
-	}
-	if (zip_close(archive) != 0) {
-		const std::string message = zip_strerror(archive);
-		zip_discard(archive);
-		throw TestFailure("cannot finish encrypted ZIP fixture: " + message);
-	}
-}
-
 void WriteTarArchive(const fs::path& archivePath,
 	const std::vector<std::pair<std::string, fs::path>>& members, bool gzip,
 	const std::vector<std::pair<std::string, std::string>>& symbolicLinks = {},
@@ -659,31 +628,21 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 
 void TestEncryptedZipBrowsingAndSessionPasswords() {
 	TemporaryDirectory temporary;
-	const fs::path sourceDirectory = temporary.path() / "source";
-	fs::create_directories(sourceDirectory);
-	const fs::path image = sourceDirectory / "encrypted.png";
-	const std::vector<std::uint8_t> pixels = TestPixels();
-	ImageWriteOptions options;
-	std::string error;
-	Expect(jpegview_linux::WriteImage(image, pixels.data(), 2, 2, options, error),
-		"cannot create encrypted ZIP image fixture: " + error);
+	const fs::path fixture = fs::path(__FILE__).parent_path() / "fixtures" / "encrypted-zip.zip";
 	const fs::path archive = temporary.path() / "encrypted.zip";
-	WriteEncryptedZipArchive(archive, {{"inside/encrypted.png", image}}, "correct horse");
-	const fs::path member = archive / "inside" / "encrypted.png";
+	Expect(fs::copy_file(fixture, archive), "could not copy encrypted ZIP test fixture");
+	const fs::path member = archive / "inside-password.ppm";
 
 	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
 	bool containsEncryptedEntries = false;
 	jpegview_linux::ArchiveErrorKind errorKind = jpegview_linux::ArchiveErrorKind::None;
+	std::string error;
 	Expect(jpegview_linux::ListArchiveDirectoryCancellable(archive, entries,
 		[] { return true; }, error, &errorKind, &containsEncryptedEntries),
 		"encrypted ZIP central directory could not be listed: " + error);
-	Expect(containsEncryptedEntries && entries.size() == 1 && entries.front().directory &&
-		!entries.front().encrypted,
-		"encrypted ZIP listing did not expose names or report archive encryption");
-	entries.clear();
-	Expect(jpegview_linux::ListArchiveDirectory(archive / "inside", entries, error) &&
-		entries.size() == 1 && entries.front().path == member && entries.front().encrypted,
-		"encrypted ZIP member was not marked in the virtual directory listing");
+	Expect(containsEncryptedEntries && entries.size() == 1 &&
+		entries.front().path == member && !entries.front().directory && entries.front().encrypted,
+		"encrypted ZIP member was not exposed and marked in the virtual directory listing");
 	jpegview_linux::ArchiveMemberInfo info;
 	Expect(jpegview_linux::GetArchiveMemberInfo(member, info, error) && info.encrypted,
 		"encrypted ZIP member metadata lost its encryption state");
@@ -713,16 +672,20 @@ void TestEncryptedZipBrowsingAndSessionPasswords() {
 		validationResults.front().generation == validationGeneration &&
 		validationResults.front().errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword,
 		"background password validation did not publish a bounded, generation-tagged rejection");
-	Expect(jpegview_linux::ValidateArchivePassword(archive, "correct horse", error, &errorKind),
+	Expect(jpegview_linux::ValidateArchivePassword(archive, "jpegview-test-password", error,
+		&errorKind),
 		"correct ZIP password failed validation: " + error);
-	Expect(jpegview_linux::SetSessionArchivePassword(archive, "correct horse") &&
+	Expect(jpegview_linux::SetSessionArchivePassword(archive, "jpegview-test-password") &&
 		jpegview_linux::HasSessionArchivePassword(member),
 		"validated ZIP password was not cached against its backing archive for this run");
 
 	DecodedImage decoded;
 	Expect(jpegview_linux::DecodeImage(member, decoded, error),
 		"cached ZIP password could not decode the encrypted image: " + error);
-	Expect(decoded.frames.size() == 1 && decoded.frames.front().bgra == pixels,
+	const std::vector<std::uint8_t> expectedPixels = {
+		0x90, 0x60, 0x30, 255, 0xa0, 0x70, 0x40, 255,
+		0xb0, 0x80, 0x50, 255, 0xc0, 0x90, 0x60, 255};
+	Expect(decoded.frames.size() == 1 && decoded.frames.front().bgra == expectedPixels,
 		"encrypted ZIP image decoding changed its pixels");
 	jpegview_linux::ClearSessionArchivePasswords();
 	Expect(!jpegview_linux::HasSessionArchivePassword(archive),
