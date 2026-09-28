@@ -235,13 +235,23 @@ Double-page behavior is modeled by `double_page_model` and adapted by Viewer. Th
 entry remains the navigation anchor; a visible partner is a separate page texture prepared through
 `display_image_cache` at the partner's current spread-slot size. Pairing uses only already-available
 dimensions and only strict portrait neighbors (the first cover is single), so checking the mode does
-not decode a neighbor on the event thread. The virtual viewport canvas combines both aspect-preserving
-page slots; zoom, pan, the zoom navigator, and magnifier hit testing use that canvas while crop
-selection remains in the anchor page's source coordinates. SDL textures are still uploaded and
-destroyed on the renderer thread. A spread does not create a composite pixel buffer or use the
-single-image transition effect. The D/J mode overrides are stored beside, but independently from,
-per-file viewport snapshots so Recents can restore them without changing the shared defaults in
-settings.
+not decode a neighbor on the event thread. Non-JPEG neighbor dimensions discovered by background
+prefetch are published to the Viewer thread before the layout is resolved. `DoublePagePresentationModel`
+tracks the exact final-size texture keys and suppresses the single-page fallback while dimensions or
+either texture are pending. Once a spread is known, Viewer submits both page requests with one
+`RequestBackgroundBatch` call; while that pair is pending, the renderer uploads up to two completed
+page textures in one tick. The spread becomes visible only after both SDL textures exist, so a late
+partner cannot shift a page that was already shown. The model records the first frame actually
+presented, so held-key repeat cannot skip a spread between texture upload and its first draw. A failed
+preparation/upload releases the single-page path instead of leaving the viewport waiting forever.
+Later non-JPEG neighbor completions append display work without replacing the active spread batch;
+callbacks from an obsolete prefetch batch are ignored after the Viewer replaces it.
+The virtual viewport canvas combines both aspect-preserving page slots; zoom, pan, the zoom navigator,
+and magnifier hit testing use that canvas while crop selection remains in the anchor page's source
+coordinates. SDL textures are still uploaded and destroyed on the renderer thread. A spread does not
+create a composite pixel buffer or use the single-image transition effect. The D/J mode overrides are
+stored beside, but independently from, per-file viewport snapshots so Recents can restore them without
+changing the shared defaults in settings.
 
 The recent-files database stores normalized absolute paths with byte-safe record encoding, so legal
 newlines and non-UTF-8 filename bytes do not break its line-based format. Loading skips malformed

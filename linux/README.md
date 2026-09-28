@@ -62,6 +62,9 @@ they support.
    PageUp/PageDown remain logical previous/next. The two checkable controls appear in the navigation
    panel and context menu. Page pairs follow
    [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
+   Spread navigation prepares both pages at their final slot sizes through background workers and
+   reveals them together in one frame; while a cold spread is being prepared, the viewer does not
+   flash the anchor page alone or shift it when its partner arrives.
    The filename and F2 information overlays show both active spread positions (for example `1-2/123`);
    single-page display retains the `1/123` form. Manga mode reverses physical Left/Right navigation
    by default; set `manga_mode_inverts_left_right=0` in `settings.conf` to keep the normal key direction

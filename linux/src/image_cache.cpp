@@ -211,16 +211,18 @@ struct DecodedImageCache::Impl {
 						queuedKeys.clear();
 					} else {
 						completedImage = image;
-						const auto desired = desiredWork.find(work.key);
-						if (desired != desiredWork.end() && desired->second.identity == work.identity) {
-							completion = desired->second.completion;
-						}
 					}
+				}
+				const auto desired = desiredWork.find(work.key);
+				if (!stopping && desired != desiredWork.end() &&
+					desired->second.generation >= work.generation &&
+					desired->second.identity == work.identity) {
+					completion = desired->second.completion;
 				}
 				--activeWorkers;
 				idle.notify_all();
 			}
-			if (completion && completedImage) completion(work.filename, completedImage);
+			if (completion) completion(work.filename, completedImage);
 		}
 	}
 

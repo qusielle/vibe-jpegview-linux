@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace jpegview_linux {
 namespace {
@@ -81,6 +82,99 @@ int LogicalDirectionForPhysicalKey(int physicalDirection, bool mangaReadingOrder
 	if (physicalDirection != -1 && physicalDirection != 1) return 0;
 	return mangaReadingOrder && invertLeftRightInMangaMode ?
 		-physicalDirection : physicalDirection;
+}
+
+void DoublePagePresentationModel::Reset(std::size_t anchorIndex,
+	std::size_t partnerIndex, DoublePagePresentationPhase phase) {
+	++generation_;
+	phase_ = phase;
+	anchorIndex_ = anchorIndex;
+	partnerIndex_ = partnerIndex;
+	anchorTextureKey_.clear();
+	partnerTextureKey_.clear();
+	anchorReady_ = false;
+	partnerReady_ = false;
+	spreadPresented_ = false;
+}
+
+void DoublePagePresentationModel::AwaitDimensions(std::size_t anchorIndex,
+	std::size_t partnerIndex) {
+	if (phase_ == DoublePagePresentationPhase::AwaitingDimensions &&
+		anchorIndex_ == anchorIndex && partnerIndex_ == partnerIndex) return;
+	Reset(anchorIndex, partnerIndex, DoublePagePresentationPhase::AwaitingDimensions);
+}
+
+void DoublePagePresentationModel::UseSinglePage(std::size_t anchorIndex) {
+	if (phase_ == DoublePagePresentationPhase::SinglePage &&
+		anchorIndex_ == anchorIndex) return;
+	Reset(anchorIndex, anchorIndex, DoublePagePresentationPhase::SinglePage);
+}
+
+bool DoublePagePresentationModel::BeginSpread(std::size_t anchorIndex,
+	std::size_t partnerIndex, std::string anchorTextureKey,
+	std::string partnerTextureKey) {
+	if (anchorTextureKey.empty() || partnerTextureKey.empty() ||
+		anchorTextureKey == partnerTextureKey) return false;
+	if ((phase_ == DoublePagePresentationPhase::PreparingSpread ||
+		phase_ == DoublePagePresentationPhase::ReadySpread ||
+		phase_ == DoublePagePresentationPhase::FailedSpread) &&
+		anchorIndex_ == anchorIndex && partnerIndex_ == partnerIndex &&
+		anchorTextureKey_ == anchorTextureKey && partnerTextureKey_ == partnerTextureKey) {
+		return false;
+	}
+	Reset(anchorIndex, partnerIndex, DoublePagePresentationPhase::PreparingSpread);
+	anchorTextureKey_ = std::move(anchorTextureKey);
+	partnerTextureKey_ = std::move(partnerTextureKey);
+	return true;
+}
+
+bool DoublePagePresentationModel::MarkTextureReady(const std::string& textureKey) {
+	if (phase_ != DoublePagePresentationPhase::PreparingSpread &&
+		phase_ != DoublePagePresentationPhase::ReadySpread) return false;
+	if (textureKey == anchorTextureKey_) anchorReady_ = true;
+	else if (textureKey == partnerTextureKey_) partnerReady_ = true;
+	else return false;
+	if (anchorReady_ && partnerReady_) phase_ = DoublePagePresentationPhase::ReadySpread;
+	return true;
+}
+
+bool DoublePagePresentationModel::MarkTextureFailed(const std::string& textureKey) {
+	if ((phase_ != DoublePagePresentationPhase::PreparingSpread &&
+		phase_ != DoublePagePresentationPhase::ReadySpread) ||
+		(textureKey != anchorTextureKey_ && textureKey != partnerTextureKey_)) return false;
+	phase_ = DoublePagePresentationPhase::FailedSpread;
+	anchorReady_ = false;
+	partnerReady_ = false;
+	return true;
+}
+
+bool DoublePagePresentationModel::MarkSpreadPresented(std::size_t anchorIndex) {
+	if (phase_ != DoublePagePresentationPhase::ReadySpread ||
+		anchorIndex_ != anchorIndex) return false;
+	spreadPresented_ = true;
+	return true;
+}
+
+bool DoublePagePresentationModel::SpreadFailed(std::size_t anchorIndex,
+	const std::string& anchorTextureKey, const std::string& partnerTextureKey) const {
+	return phase_ == DoublePagePresentationPhase::FailedSpread &&
+		anchorIndex_ == anchorIndex && anchorTextureKey_ == anchorTextureKey &&
+		partnerTextureKey_ == partnerTextureKey;
+}
+
+bool DoublePagePresentationModel::SuppressSinglePage(std::size_t anchorIndex) const {
+	return anchorIndex_ == anchorIndex &&
+		(phase_ == DoublePagePresentationPhase::AwaitingDimensions ||
+			phase_ == DoublePagePresentationPhase::PreparingSpread);
+}
+
+bool DoublePagePresentationModel::SpreadReady(std::size_t anchorIndex) const {
+	return anchorIndex_ == anchorIndex &&
+		phase_ == DoublePagePresentationPhase::ReadySpread;
+}
+
+bool DoublePagePresentationModel::SpreadPresented(std::size_t anchorIndex) const {
+	return anchorIndex_ == anchorIndex && spreadPresented_;
 }
 
 } // namespace jpegview_linux

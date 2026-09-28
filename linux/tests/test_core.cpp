@@ -1582,6 +1582,48 @@ void TestDoublePagePairingNavigationAndReadingOrder() {
 		"physical left/right navigation did not honor the manga inversion preference");
 }
 
+void TestDoublePagePresentationCommitsSpreadAtomically() {
+	using jpegview_linux::DoublePagePresentationModel;
+	using jpegview_linux::DoublePagePresentationPhase;
+	DoublePagePresentationModel presentation;
+	presentation.AwaitDimensions(3, 4);
+	const std::uint64_t dimensionGeneration = presentation.Generation();
+	Expect(presentation.Phase() == DoublePagePresentationPhase::AwaitingDimensions &&
+		presentation.SuppressSinglePage(3) && !presentation.SpreadReady(3),
+		"unresolved partner dimensions allowed the anchor to appear alone");
+
+	Expect(presentation.BeginSpread(3, 4, "anchor-final-size", "partner-final-size"),
+		"spread preparation did not start after partner dimensions resolved");
+	const std::uint64_t spreadGeneration = presentation.Generation();
+	Expect(spreadGeneration > dimensionGeneration && presentation.SuppressSinglePage(3),
+		"new spread generation did not keep the single-page fallback hidden");
+	Expect(!presentation.MarkTextureReady("stale-anchor") &&
+		presentation.MarkTextureReady("anchor-final-size") &&
+		!presentation.SpreadReady(3) && presentation.SuppressSinglePage(3),
+		"a single ready page incorrectly committed the spread");
+	Expect(!presentation.BeginSpread(3, 4, "anchor-final-size", "partner-final-size") &&
+		presentation.MarkTextureReady("partner-final-size") &&
+		presentation.SpreadReady(3) && !presentation.SpreadPresented(3) &&
+		presentation.MarkSpreadPresented(3) && presentation.SpreadPresented(3) &&
+		!presentation.SuppressSinglePage(3),
+		"refreshing a pending spread reset readiness or published before both pages were ready");
+
+	presentation.AwaitDimensions(5, 6);
+	Expect(presentation.Generation() > spreadGeneration &&
+		!presentation.MarkTextureReady("anchor-final-size") &&
+		presentation.SuppressSinglePage(5) && !presentation.SpreadPresented(5),
+		"late completion from an old spread changed the new navigation generation");
+	presentation.UseSinglePage(5);
+	Expect(!presentation.SuppressSinglePage(5) && !presentation.SpreadReady(5),
+		"resolved non-pair remained hidden as a pending spread");
+
+	presentation.BeginSpread(5, 6, "failed-anchor", "failed-partner");
+	Expect(presentation.MarkTextureFailed("failed-partner") &&
+		presentation.Phase() == DoublePagePresentationPhase::FailedSpread &&
+		!presentation.SuppressSinglePage(5),
+		"failed spread texture did not release the single-page fallback");
+}
+
 void TestHeldNavigationCoalescesKeyRepeats() {
 	jpegview_linux::HeldNavigationController navigation;
 	Expect(navigation.KeyDown(1, 79, false) == 1 && navigation.Scancode() == 79,
@@ -2175,6 +2217,31 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	Expect(!missingCompletionPixels, "decoded prefetch callback received no pixels");
 	Expect(background.CachedImages() == 4 && background.CachedBytes() == 16,
 		"background decoder did not retain completed images in the shared cache");
+	std::mutex decodeFailureMutex;
+	std::condition_variable decodeFailureChanged;
+	bool failedDecodeReported = false;
+	jpegview_linux::DecodedImageCache decodeFailure(64,
+		[](const fs::path&, DecodedImage&, std::string& error) {
+			error = "fixture decode failure";
+			return false;
+	});
+	decodeFailure.Prefetch(files, 2, 1, 1,
+		[&](const fs::path& filename,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(decodeFailureMutex);
+				failedDecodeReported = filename == files[3] && !image;
+			}
+			decodeFailureChanged.notify_all();
+		});
+	{
+		std::unique_lock<std::mutex> lock(decodeFailureMutex);
+		Expect(decodeFailureChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return failedDecodeReported; }),
+		"decoded prefetch did not report a current-generation failure to its owner");
+	}
+	Expect(decodeFailure.WaitUntilIdle(std::chrono::seconds(2)),
+		"failed decoded prefetch did not become idle");
 
 	std::atomic<int> speculativeDecodes{0};
 	jpegview_linux::DecodedImageCache fullCache(16,
@@ -2315,6 +2382,61 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	const jpegview_linux::DisplayImageRequest scaled =
 		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false);
 	Expect(scaled.Valid(), "display cache rejected a valid preparation request");
+	const auto secondScaled = jpegview_linux::MakeDisplayImageRequest(
+		secondFile, decoded, 0, 2, 2, false, 1);
+	const auto thirdScaled = jpegview_linux::MakeDisplayImageRequest(
+		thirdFile, decoded, 0, 2, 2, false, 2);
+	std::mutex pairMutex;
+	std::condition_variable pairChanged;
+	int pairWorkersStarted = 0;
+	bool pairWorkersOverlapped = false;
+	bool releasePairWorkers = false;
+	jpegview_linux::DisplayImageCache pairedPreparation(64, 2,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			{
+				std::unique_lock<std::mutex> lock(pairMutex);
+				++pairWorkersStarted;
+				pairWorkersOverlapped = pairWorkersStarted >= 2;
+				pairChanged.notify_all();
+				pairChanged.wait(lock, [&] {
+					return pairWorkersOverlapped || releasePairWorkers;
+				});
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = request.targetWidth;
+			result->height = request.targetHeight;
+			result->bgra.assign(static_cast<std::size_t>(result->width) *
+				static_cast<std::size_t>(result->height) * 4, 255);
+			return result;
+		});
+	pairedPreparation.RequestBackgroundBatch({scaled, secondScaled});
+	pairedPreparation.RequestBackgroundBatch({thirdScaled});
+	Expect(pairedPreparation.HasPendingOrCached(scaled.key) &&
+		pairedPreparation.HasPendingOrCached(secondScaled.key) &&
+		pairedPreparation.HasPendingOrCached(thirdScaled.key),
+		"adding a neighbor request discarded active or queued background work");
+	bool pairedWorkersStartedTogether = false;
+	{
+		std::unique_lock<std::mutex> lock(pairMutex);
+		pairedWorkersStartedTogether = pairChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return pairWorkersOverlapped; });
+		releasePairWorkers = true;
+	}
+	pairChanged.notify_all();
+	Expect(pairedWorkersStartedTogether &&
+		pairedPreparation.WaitUntilIdle(std::chrono::seconds(2)) &&
+		pairedPreparation.TakeCompleted(3).size() == 3 &&
+		pairedPreparation.HasPendingOrCached(scaled.key),
+		"paired display requests were not made available to workers together with later neighbors");
+	jpegview_linux::DisplayImageCache failedPreparation(64, 1,
+		[](const jpegview_linux::DisplayImageRequest&) {
+			return jpegview_linux::DisplayImageCache::ImagePtr{};
+		});
+	failedPreparation.RequestBackground(scaled);
+	Expect(failedPreparation.WaitUntilIdle(std::chrono::seconds(2)) &&
+		!failedPreparation.HasPendingOrCached(scaled.key),
+		"failed background display preparation stayed pending indefinitely");
 	jpegview_linux::ImageProcessingParams adjustedLevels;
 	adjustedLevels.contrast = 0.2;
 	const jpegview_linux::DisplayImageRequest adjusted =
@@ -6621,6 +6743,8 @@ int main() {
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);
 	RunTest("double-page-pairing-navigation-and-reading-order",
 		TestDoublePagePairingNavigationAndReadingOrder, failures);
+	RunTest("double-page-presentation-atomic-commit",
+		TestDoublePagePresentationCommitsSpreadAtomically, failures);
 	RunTest("held-navigation-repeat-coalescing", TestHeldNavigationCoalescesKeyRepeats, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
 	RunTest("file-list-size-and-random-sorting", TestFileListSizeAndRandomSorting, failures);

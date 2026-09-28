@@ -79,10 +79,18 @@ public:
 	DisplayImageCache& operator=(const DisplayImageCache&) = delete;
 
 	ImagePtr Find(const DisplayImageRequest& request);
+	// Reports whether this exact key is retained, queued, in-flight, or waiting
+	// for renderer-thread consumption. A false result after a request was queued
+	// means preparation failed or became obsolete.
+	bool HasPendingOrCached(const std::string& key) const;
 	void Request(const DisplayImageRequest& request);
 	// Adds optional work without replacing the foreground request or the current
 	// neighbor-prefetch set. Lower-priority work is scheduled after nearer items.
 	void RequestBackground(const DisplayImageRequest& request);
+	// Enqueues related background requests under one lock before waking workers.
+	// This lets a multi-image presentation start both sides without a sequential
+	// request-publication gap, while preserving ordinary foreground work.
+	void RequestBackgroundBatch(const std::vector<DisplayImageRequest>& requests);
 	// Removes queued/completed background work for a key. In-flight work is
 	// allowed to finish but its result is discarded unless another request needs it.
 	void CancelBackground(const std::string& key);

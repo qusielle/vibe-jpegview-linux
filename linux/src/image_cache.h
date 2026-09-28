@@ -29,6 +29,8 @@ class DecodedImageCache {
 public:
 	using ImagePtr = std::shared_ptr<const DecodedImage>;
 	using Decoder = std::function<bool(const std::filesystem::path&, DecodedImage&, std::string&)>;
+	// Called when this generation's requested decode completes. A null image
+	// reports a decode failure or a result that could not be retained.
 	using Completion = std::function<void(const std::filesystem::path&, const ImagePtr&)>;
 	using Filter = std::function<bool(const std::filesystem::path&)>;
 
