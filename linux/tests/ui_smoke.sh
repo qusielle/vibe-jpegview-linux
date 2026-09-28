@@ -64,11 +64,27 @@ write_ppm() {
 	} > "$filename"
 }
 
+write_solid_ppm() {
+	filename=$1
+	red=$2
+	green=$3
+	blue=$4
+	{
+		printf 'P3\n240 320\n255\n'
+		yes "$red $green $blue" 2>/dev/null | head -n 76800
+	} > "$filename"
+}
+
 write_ppm "$temporary/images/01-red.ppm" 255 0 0
 write_ppm "$temporary/images/02-green.ppm" 0 255 0
 write_ppm "$temporary/images/03-blue.ppm" 0 0 255
 write_ppm "$temporary/images/04-yellow.ppm" 255 255 0
 write_ppm "$temporary/images/05-cyan.ppm" 0 255 255
+mkdir -p "$temporary/double-page-fixtures"
+write_solid_ppm "$temporary/double-page-fixtures/00-cover.ppm" 35 75 220
+write_solid_ppm "$temporary/double-page-fixtures/01-first.ppm" 30 220 60
+write_solid_ppm "$temporary/double-page-fixtures/02-second.ppm" 220 40 30
+write_solid_ppm "$temporary/double-page-fixtures/03-last.ppm" 225 200 25
 if command -v zip >/dev/null 2>&1; then
 	mkdir -p "$temporary/archive-source"
 	write_ppm "$temporary/archive-source/inside-archive.ppm" 48 96 144
@@ -143,6 +159,10 @@ case "$help_text" in
 	*"N/M/C select display order"*"Z toggles the magnifying glass"*) ;;
 	*) echo "UI smoke test: --help does not describe the magnifying-glass shortcut" >&2; exit 1 ;;
 esac
+case "$help_text" in
+	*"D toggles double-page mode"*"J reverses manga reading order"*) ;;
+	*) echo "UI smoke test: --help does not describe the double-page shortcuts" >&2; exit 1 ;;
+esac
 
 Xvfb -displayfd 1 -screen 0 1280x800x24 >"$temporary/display" 2>"$temporary/xvfb.log" &
 xvfb_pid=$!
@@ -164,7 +184,9 @@ sleep 0.5
 
 launch_viewer() {
 	viewer_input=${1:-$temporary/images}
-	DISPLAY=":$display_number" HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/config" \
+	viewer_home=${VIEWER_TEST_HOME:-$temporary/home}
+	viewer_config=${VIEWER_TEST_CONFIG_HOME:-$temporary/config}
+	DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
 		XDG_STATE_HOME="$XDG_STATE_HOME" \
 		PATH="$temporary/bin:$PATH" JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
 		"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
@@ -203,6 +225,91 @@ assert_title_prefix() {
 	echo "UI smoke test: $failure_message ($current_title)" >&2
 	exit 1
 }
+
+# Two adjacent portrait pages should render together after the standalone
+# cover, navigation should step over the partner, and J should reverse both
+# the physical page placement and left/right reading direction.
+mkdir -p "$temporary/double-page-config/jpegview-linux"
+printf 'scale_mode=fit\ndouble_page_mode_enabled=0\nmanga_reading_order_enabled=0\n' \
+	> "$temporary/double-page-config/jpegview-linux/settings.conf"
+XDG_STATE_HOME="$temporary/double-page-state"
+export XDG_STATE_HOME
+VIEWER_TEST_HOME="$temporary/double-page-home" \
+	VIEWER_TEST_CONFIG_HOME="$temporary/double-page-config" \
+	launch_viewer "$temporary/double-page-fixtures"
+assert_title_prefix "00-cover.ppm" "double-page fixture did not start on its standalone cover"
+DISPLAY=":$display_number" xdotool key d
+sleep 0.15
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "01-first.ppm" "double-page mode did not advance from the single cover"
+if [ "$visual_assertions" -eq 1 ]; then
+	spread_rendered=0
+	for _ in $(seq 1 40); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/spread.png"
+		spread_left=$(convert "$temporary/spread.png" -format '%[hex:p{320,400}]' info:)
+		spread_right=$(convert "$temporary/spread.png" -format '%[hex:p{960,400}]' info:)
+		case "$spread_left:$spread_right" in
+			*1EDC3C*:*DC281E*) spread_rendered=1; break ;;
+		esac
+		sleep 0.05
+	done
+	if [ "$spread_rendered" -ne 1 ]; then
+		echo "UI smoke test: double-page mode did not render the adjacent portrait pages side by side" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key Right
+sleep 0.15
+assert_title_prefix "03-last.ppm" "double-page navigation did not skip the displayed partner"
+DISPLAY=":$display_number" xdotool key Left
+sleep 0.15
+assert_title_prefix "01-first.ppm" "backward double-page navigation did not return to the preceding spread"
+DISPLAY=":$display_number" xdotool key j
+sleep 0.15
+if [ "$visual_assertions" -eq 1 ]; then
+	spread_reversed=0
+	for _ in $(seq 1 40); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/spread.png"
+		spread_left=$(convert "$temporary/spread.png" -format '%[hex:p{320,400}]' info:)
+		spread_right=$(convert "$temporary/spread.png" -format '%[hex:p{960,400}]' info:)
+		case "$spread_left:$spread_right" in
+			*DC281E*:*1EDC3C*) spread_reversed=1; break ;;
+		esac
+		sleep 0.05
+	done
+	if [ "$spread_reversed" -ne 1 ]; then
+		echo "UI smoke test: manga mode did not swap the spread pages" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key Left
+sleep 0.15
+assert_title_prefix "03-last.ppm" "manga reading order did not make Left advance past the spread partner"
+DISPLAY=":$display_number" xdotool key Right
+sleep 0.15
+assert_title_prefix "01-first.ppm" "manga reading order did not make Right return to the preceding spread"
+stop_viewer
+
+# A reopened file must recover its own two mode flags even when the current
+# global defaults differ; navigating from Recents exposes both settings.
+double_settings="$temporary/double-page-config/jpegview-linux/settings.conf"
+sed -i 's/^double_page_mode_enabled=.*/double_page_mode_enabled=0/; s/^manga_reading_order_enabled=.*/manga_reading_order_enabled=0/' \
+	"$double_settings"
+VIEWER_TEST_HOME="$temporary/recents-home" \
+	VIEWER_TEST_CONFIG_HOME="$temporary/double-page-config" \
+	launch_viewer "$temporary/images/01-red.ppm"
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key ctrl+Tab
+DISPLAY=":$display_number" xdotool key Down
+DISPLAY=":$display_number" xdotool key Return
+assert_title_prefix "01-first.ppm" "Recents did not reopen the double-page fixture image"
+DISPLAY=":$display_number" xdotool key Left
+assert_title_prefix "03-last.ppm" "Recents did not restore double-page and manga mode for the selected image"
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "01-first.ppm" "restored manga mode did not persist while navigating after opening from Recents"
+stop_viewer
+XDG_STATE_HOME="$temporary/state"
+export XDG_STATE_HOME
 
 # Starting with a directory that has no direct images should leave the viewer
 # open in Browse at that directory, rather than exiting or falling back to cwd.
@@ -1713,8 +1820,8 @@ if command -v convert >/dev/null 2>&1; then
 			exit 1
 		fi
 	fi
-	# The final navigation-panel button enables crop selection mode.
-	selection_button_x=$((crop_window_width / 2 + 148))
+	# The crop-selection button is followed by the two paired-page mode controls.
+	selection_button_x=$((crop_window_width / 2 + 117))
 	selection_button_y=$((crop_window_height - 16))
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 		"$selection_button_x" "$selection_button_y" click 1

@@ -45,6 +45,8 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	if (!ctrl && !shift && key == 'n') return IDM_SORT_NAME;
 	if (!ctrl && !shift && key == 'm') return IDM_SORT_MOD_DATE;
 	if (!ctrl && !shift && key == 'z') return kCommandToggleMagnifyingGlass;
+	if (!ctrl && !shift && key == 'd') return kCommandToggleDoublePageMode;
+	if (!ctrl && !shift && key == 'j') return kCommandToggleMangaReadingOrder;
 	if (!ctrl && !shift && key == SDLK_F7) return IDM_LOOP_FOLDER;
 	if (!ctrl && !shift && key == SDLK_F8) return IDM_LOOP_RECURSIVELY;
 	if (!ctrl && !shift && key == SDLK_F9) return IDM_LOOP_SIBLINGS;

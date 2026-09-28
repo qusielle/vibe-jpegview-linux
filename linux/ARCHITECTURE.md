@@ -6,6 +6,9 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, current-file
   preservation, and the transient marked-image toggle pair used for A/B comparison. The marked
   path's index in the active ordered list is cached for constant-time thumbnail rendering.
+- `double_page_model`: portrait-pair eligibility, cover handling, aspect-preserving shared-height
+  spread geometry, page-step navigation, and physical-key direction in manga reading order. It owns
+  no image pixels, filesystem work, or SDL resources.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
   and on-demand member access. ZIP catalogs use central-directory metadata; TAR/TGZ catalogs stream
   header metadata; unencrypted 7z uses libarchive's seekable reader; encrypted 7z uses the focused
@@ -62,9 +65,11 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `settings` and `sort_mode`: persisted configuration (including the transparent-image background
   choice, default picture-level values,
   fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
-  default), zoom-navigator visibility, and magnifying-glass size/zoom), plus stable sort-mode values.
+  default), zoom-navigator visibility, magnifying-glass size/zoom, and global double-page/manga-mode
+  defaults), plus stable sort-mode values.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
-  bounded per-file `ViewportSnapshot` LRU, and tolerant atomic persistence in the XDG state
+  bounded per-file `ViewportSnapshot` LRU and independent bounded double-page/manga-mode snapshots,
+  plus tolerant atomic persistence in the XDG state
   directory. Virtual archive-member paths remain logical recent identities while source validation
   and cache freshness use the backing container. The recent database is independent from viewer
   settings and performs no image or directory scans while loading.
@@ -195,11 +200,24 @@ If the sole explicit startup argument is a directory with no directly supported 
 keeps the event loop alive and opens Browse at that directory; other empty startup cases retain the
 no-images exit behavior.
 
+Double-page behavior is planned in `double_page_model` and adapted by Viewer. The active FileList
+entry remains the navigation anchor; a visible partner is a separate page texture prepared through
+`display_image_cache` at the partner's current spread-slot size. Pairing uses only already-available
+dimensions and only strict portrait neighbors (the first cover is single), so checking the mode does
+not decode a neighbor on the event thread. The virtual viewport canvas combines both aspect-preserving
+page slots; zoom, pan, the zoom navigator, and magnifier hit testing use that canvas while crop
+selection remains in the anchor page's source coordinates. SDL textures are still uploaded and
+destroyed on the renderer thread. A spread does not create a composite pixel buffer or use the
+single-image transition effect. The D/J mode overrides are stored beside, but independently from,
+per-file viewport snapshots so Recents can restore them without changing the shared defaults in
+settings.
+
 The recent-files database stores normalized absolute paths with byte-safe record encoding, so legal
 newlines and non-UTF-8 filename bytes do not break its line-based format. Loading skips malformed
 records, accepts only finite zoom values, and clamps finite values to the viewport's supported zoom
 range. Recent-folder retention is capped at 100 rows and viewport snapshots at 256 paths; these
-bounds are independent so files from older folder rows can still restore their last view.
+bounds are independent so files from older folder rows can still restore their last view. Double-page
+mode snapshots have their own 256-path bound.
 
 ## Refactoring status
 

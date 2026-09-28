@@ -1,5 +1,6 @@
 #pragma once
 
+#include "double_page_model.h"
 #include "viewport.h"
 
 #include <cstddef>
@@ -13,6 +14,7 @@ namespace jpegview_linux {
 
 inline constexpr std::size_t kMaximumRecentFolders = 100;
 inline constexpr std::size_t kMaximumRecentViewportSnapshots = 256;
+inline constexpr std::size_t kMaximumRecentDisplayModeSnapshots = 256;
 
 // Keeps one most-recent image per normalized absolute parent directory and a
 // separately bounded MRU set of per-image viewing snapshots.
@@ -23,9 +25,14 @@ public:
 		const ViewportSnapshot& snapshot);
 	std::optional<ViewportSnapshot> FindViewport(
 		const std::filesystem::path& filename) const;
+	void RememberDoublePageMode(const std::filesystem::path& filename,
+		const DoublePageModeState& modes);
+	std::optional<DoublePageModeState> FindDoublePageMode(
+		const std::filesystem::path& filename) const;
 
 	const std::vector<std::filesystem::path>& Files() const { return files_; }
 	std::size_t ViewportSnapshotCount() const { return viewportLru_.size(); }
+	std::size_t DisplayModeSnapshotCount() const { return modeLru_.size(); }
 	void Clear();
 
 private:
@@ -35,6 +42,8 @@ private:
 	std::vector<std::filesystem::path> files_;
 	std::vector<std::string> viewportLru_;
 	std::unordered_map<std::string, ViewportSnapshot> viewports_;
+	std::vector<std::string> modeLru_;
+	std::unordered_map<std::string, DoublePageModeState> displayModes_;
 };
 
 std::filesystem::path RecentFilesDatabasePath();

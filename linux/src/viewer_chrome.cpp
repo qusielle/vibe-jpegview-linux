@@ -170,6 +170,26 @@ void AddNavigationIcon(NavigationButtonPaint& button, bool fitToWindow,
 		AddLine(button, right - corner, bottom, right, bottom);
 		break;
 	}
+	case kCommandToggleDoublePageMode:
+	case kCommandToggleMangaReadingOrder: {
+		const int left = rect.x + 5;
+		const int top = rect.y + 6;
+		const int pageWidth = 7;
+		const int pageHeight = 13;
+		for (int page = 0; page < 2; ++page) {
+			const int x = left + page * (pageWidth + 2);
+			button.outlines.push_back({x, top, pageWidth, pageHeight});
+			AddLine(button, x + 2, top + 3, x + pageWidth - 2, top + 3);
+			AddLine(button, x + 2, top + 6, x + pageWidth - 2, top + 6);
+		}
+		if (button.command == kCommandToggleMangaReadingOrder) {
+			const int centerY = top + pageHeight + 1;
+			AddLine(button, left + 13, centerY, left + 1, centerY);
+			AddLine(button, left + 1, centerY, left + 4, centerY - 2);
+			AddLine(button, left + 1, centerY, left + 4, centerY + 2);
+		}
+		break;
+	}
 	default:
 		break;
 	}
@@ -239,19 +259,21 @@ InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight,
 	int mouseX, int mouseY, bool fitToWindow, FileList::SortMode sortMode,
 	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight,
-	bool selectionModeEnabled) {
+	bool selectionModeEnabled, bool doublePageModeEnabled,
+	bool mangaReadingOrderEnabled) {
 	constexpr int buttonSize = 26;
 	constexpr int panelHeight = 32;
 	constexpr int gap = 5;
 	constexpr int margin = 6;
 	constexpr int separator = 8;
-	constexpr std::array<int, 10> commands = {
+	constexpr std::array<int, 12> commands = {
 		IDM_FIRST, IDM_PREV, IDM_NEXT, IDM_LAST, kNavigationSortModeCommand,
 		IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, IDM_FULL_SCREEN_MODE,
-		IDM_ROTATE_90, IDM_ROTATE_270, kCommandToggleSelectionMode
+		IDM_ROTATE_90, IDM_ROTATE_270, kCommandToggleSelectionMode,
+		kCommandToggleDoublePageMode, kCommandToggleMangaReadingOrder
 	};
 	const int panelWidth = margin * 2 + buttonSize * static_cast<int>(commands.size()) +
-		gap * (static_cast<int>(commands.size()) - 1) + separator * 2;
+		gap * (static_cast<int>(commands.size()) - 1) + separator * 3;
 	NavigationPanelPaint plan;
 	plan.panel = {(windowWidth - panelWidth) / 2, windowHeight - panelHeight,
 		panelWidth, panelHeight};
@@ -264,24 +286,29 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 		button.command = commands[index];
 		button.hovered = Contains(button.rect, mouseX, mouseY);
 		button.foreground = button.hovered ||
-			(button.command == kCommandToggleSelectionMode && selectionModeEnabled) ?
+			(button.command == kCommandToggleSelectionMode && selectionModeEnabled) ||
+			(button.command == kCommandToggleDoublePageMode && doublePageModeEnabled) ||
+			(button.command == kCommandToggleMangaReadingOrder && mangaReadingOrderEnabled) ?
 			kHighlightColor : kGuiColor;
 		button.foreground.alpha = plan.opacity;
 		AddNavigationIcon(button, fitToWindow, sortLabel, sortLabelWidth,
 			oneToOneLabelWidth, textLineHeight);
 		plan.buttons.push_back(std::move(button));
 		x += buttonSize + gap;
-		if (index == 4 || index == 6) x += separator;
+		if (index == 4 || index == 6 || index == 9) x += separator;
 	}
 	return plan;
 }
 
 std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
-	FileList::SortMode sortMode, bool selectionModeEnabled) {
+	FileList::SortMode sortMode, bool selectionModeEnabled,
+	bool doublePageModeEnabled, bool mangaReadingOrderEnabled) {
 	switch (command) {
 	case IDM_FIRST: return "Show first image in folder (Home)";
-	case IDM_PREV: return "Show previous image (Left)";
-	case IDM_NEXT: return "Show next image (Right)";
+	case IDM_PREV: return mangaReadingOrderEnabled ?
+		"Show previous image (Right)" : "Show previous image (Left)";
+	case IDM_NEXT: return mangaReadingOrderEnabled ?
+		"Show next image (Left)" : "Show next image (Right)";
 	case IDM_LAST: return "Show last image in folder (End)";
 	case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
 		return fitToWindow ? "Actual size of image (Space)" : "Fit image to screen (Space)";
@@ -292,6 +319,12 @@ std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
 	case kCommandToggleSelectionMode:
 		return selectionModeEnabled ? "Disable crop selection mode (Ctrl+E)" :
 			"Enable crop selection mode (Ctrl+E)";
+	case kCommandToggleDoublePageMode:
+		return doublePageModeEnabled ? "Disable double page mode (D)" :
+			"Enable double page mode (D)";
+	case kCommandToggleMangaReadingOrder:
+		return mangaReadingOrderEnabled ? "Disable double page manga mode (J)" :
+			"Enable double page manga mode (J)";
 	case kNavigationSortModeCommand: {
 		const std::string nextMode = sortMode == FileList::SortMode::FileName ?
 			"modification date" : "file name";

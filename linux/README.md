@@ -55,7 +55,12 @@ they support.
    Windows crop/selection workflow is also ported: source-pixel selections can be moved and resized
    independently of zoom, then cropped, copied, losslessly cropped from JPEG, or used to zoom the view.
    Crop selection mode is off by default and can be enabled from the new navigation-panel button,
-   either context menu, or with Ctrl+E; the explicit mode choice is saved between runs.
+   either context menu, or with Ctrl+E; the explicit mode choice is saved between runs. Double-page
+   mode (`D`) shows adjacent portrait pages together at a shared display height, leaving the first
+   cover page on its own. Double-page manga mode (`J`) swaps their left/right placement and reverses
+   physical Left/Right navigation; PageUp/PageDown remain logical previous/next. The two checkable
+   controls appear in the navigation panel and context menu. Page pairs follow
+   [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
@@ -66,7 +71,8 @@ they support.
    Ordering supports logical filename,
    filesystem modification date, creation date, file size, and random modes in either direction.
    The active filename/date ordering is visible and switchable from both the navigation panel and
-   context menu, and the selected mode is preserved between runs.
+   context menu, and the selected mode is preserved between runs. In manga mode, physical Left/Right
+   reverse direction while the navigation-panel and context-menu actions remain logical previous/next.
 
 5. **Responsive keyboard and mouse navigation.** Left/Right image navigation and menu/browser
    selection repeat while held. The open browser supports repeating Up/Down, PageUp/PageDown, and
@@ -88,11 +94,12 @@ they support.
    one-pixel vertical margin plus separator; source-area antialiasing keeps reduced images smooth.
 
 7. **Native navigation panel with automatic reveal.** The lower panel provides first/previous/next/
-   last, ordering, fit/actual, rotate, and fullscreen controls with action tooltips. By default it
+   last, ordering, fit/actual, rotate, fullscreen, double-page, and manga-order controls with action tooltips. By default it
    appears when the pointer reaches the lower edge, with options to keep it shown or disable it.
    Its compact 32-pixel height, 26-pixel outlined buttons, off-white icons, and yellow hover feedback
    follow the original Windows panel style. Navigation, fit/actual-size, window, and rotation glyphs
-   use the original Windows geometry and show the action that clicking will perform. Rendering is
+   use the original Windows geometry and show the action that clicking will perform. The two spread
+   controls use matching open-page glyphs; active modes are highlighted. Rendering is
    clipped to the panel bounds, and its visibility and hover preference persist.
 
 8. **Complete adaptive context menu.** The Linux-rendered menu uses the Windows `PopupMenu` command
@@ -128,7 +135,9 @@ they support.
    parent folder, with the folder path on the left and filename on the right; its filter matches
    both path and filename. Browse and Recents keep their own selection and filter while switching.
    A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode when it
-   is opened again; files without a saved view inherit the shared navigation mode. ZIP, TAR,
+   is opened again. Selecting a picture from Recents also restores its saved double-page and manga
+   modes; those modes then carry through normal image navigation. New paths opened from Browse or
+   dropped onto the viewer inherit the global display-mode defaults. ZIP, TAR,
    `.tar.gz`, `.tgz`, `.7z`, and `.rar` files appear as gold `[ZIP]`, `[TAR]`, `[TGZ]`, `[.7Z]`, or `[RAR]`
    directory rows in Browse. Entering one lists supported images and subfolders. Opening an archive directly
    starts at its root image list. Archive-member rows use the same gold cue in Browse, Recents, and the thumbnail
@@ -634,6 +643,8 @@ matching the Windows default escape command, and otherwise quits.
 Recent paths and per-file view snapshots are kept in
 `${XDG_STATE_HOME:-$HOME/.local/state}/jpegview-linux/recent-files.db`, separately from settings.
 The recent-folder list is capped at 100 entries and the independent viewport history at 256 files.
+Per-image double-page and manga-order overrides have a separate 256-file retention bound; the global
+defaults are stored as `double_page_mode_enabled` and `manga_reading_order_enabled` in `settings.conf`.
 Only successfully loaded image paths enter history; clipboard-pasted temporary images are excluded.
 
 The zoom navigator is enabled by default. Set `show_zoom_navigator=0` in the settings file to hide

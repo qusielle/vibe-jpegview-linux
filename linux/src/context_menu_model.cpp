@@ -114,6 +114,8 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 	const std::string sortingLabel = "Current order: " +
 		std::string(SortModeShortLabel(state.sortMode)) + " (" +
 		SortModeDescription(state.sortMode) + ")";
+	const char* nextPageShortcut = state.mangaReadingOrderEnabled ? "Left/PgDn" : "Right/PgDn";
+	const char* previousPageShortcut = state.mangaReadingOrderEnabled ? "Right/PgUp" : "Left/PgUp";
 	std::vector<MenuItem> items = {
 		// This is a flattened rendering of the complete Windows PopupMenu
 		// resource.  Indented entries are the portable equivalent of its
@@ -154,11 +156,15 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 			false, state.showZoomNavigator, true},
 		{"Magnifying glass", kCommandToggleMagnifyingGlass,
 			false, state.magnifyingGlassEnabled, state.imageAvailable, "Z"},
+		{"Double page mode", kCommandToggleDoublePageMode,
+			false, state.doublePageModeEnabled, state.imageAvailable, "D"},
+		{"Double page manga mode", kCommandToggleMangaReadingOrder,
+			false, state.mangaReadingOrderEnabled, state.imageAvailable, "J"},
 		{"Crop selection mode", jpegview_linux::kCommandToggleSelectionMode,
 			false, state.selectionModeEnabled, true, "Ctrl+E"},
 		{nullptr, 0, true},
-		{"Next image", IDM_NEXT, false, false, true, "Right/PgDn"},
-		{"Previous image", IDM_PREV, false, false, true, "Left/PgUp"},
+		{"Next image", IDM_NEXT, false, false, true, nextPageShortcut},
+		{"Previous image", IDM_PREV, false, false, true, previousPageShortcut},
 		{"First image", IDM_FIRST, false, false, true, "Home"},
 		{"Last image", IDM_LAST, false, false, true, "End"},
 		{nullptr, 0, true},

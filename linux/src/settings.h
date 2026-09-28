@@ -40,6 +40,8 @@ struct ViewerSettings {
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
 	bool showZoomNavigator = true;
+	bool doublePageModeEnabled = false;
+	bool mangaReadingOrderEnabled = false;
 	TransparencyPattern transparencyPattern = TransparencyPattern::Black;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	int fileDialogWidth = kDefaultFileDialogWidth;

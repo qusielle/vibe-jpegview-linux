@@ -1,5 +1,6 @@
 #include "sdl_abi.h"
 #include "file_list.h"
+#include "double_page_model.h"
 #include "archive_source.h"
 #include "exif_reader.h"
 #include "clipboard.h"
@@ -472,6 +473,12 @@ public:
 	}
 
 private:
+	enum class DisplayModeLoadPolicy {
+		PreserveCurrent,
+		UseDefaults,
+		RestoreRecent,
+	};
+
 	struct ContextMenuColumn {
 		std::size_t begin = 0;
 		std::size_t end = 0;
@@ -492,6 +499,7 @@ private:
 		std::size_t bytes = 0;
 		int width = 0;
 		int height = 0;
+		bool hasTransparency = false;
 		std::uint64_t lastUsed = 0;
 	};
 
@@ -506,6 +514,10 @@ private:
 		jpegview_linux::ViewportSnapshot viewport;
 		int imageAreaWidth = 0;
 		int imageAreaHeight = 0;
+		std::size_t currentIndex = 0;
+		std::size_t pageCount = 0;
+		jpegview_linux::DoublePageModeState doublePageMode;
+		std::optional<jpegview_linux::PageDimensions> currentPageDimensions;
 	};
 
 	struct DisplayPrefetchBatch {
@@ -513,10 +525,26 @@ private:
 		std::vector<jpegview_linux::DisplayImageRequest> requests;
 		std::unordered_set<std::string> retainedTextureKeys;
 		std::unordered_map<std::string, std::size_t> priorityByFilename;
+		std::unordered_map<std::string, std::size_t> indexByFilename;
 		std::unordered_map<std::string, jpegview_linux::ImageProcessingParams> processingByFilename;
 		std::unordered_map<std::string, bool> autoContrastByFilename;
 		jpegview_linux::DisplayImageCache* cache = nullptr;
 		DisplayPrefetchContext context;
+	};
+
+	struct DoublePagePartnerSpec {
+		fs::path filename;
+		int targetWidth = 0;
+		int targetHeight = 0;
+		bool autoContrast = false;
+		jpegview_linux::ImageProcessingParams processing;
+	};
+
+	struct ActiveDoublePageRender {
+		jpegview_linux::DoublePageSpread layout;
+		jpegview_linux::PageDimensions currentPage;
+		jpegview_linux::PageDimensions nextPage;
+		DoublePagePartnerSpec partnerSpec;
 	};
 
 	struct TextTextureCacheEntry {
@@ -563,6 +591,8 @@ private:
 				AbsoluteNormalized(fileList_.Current()) == loadedFilePath_) {
 				recentFiles_.RememberViewport(loadedFilePath_,
 					clipboardReturnViewport_.value_or(viewport_.Snapshot()));
+				recentFiles_.RememberDoublePageMode(loadedFilePath_,
+					{doublePageModeEnabled_, mangaReadingOrderEnabled_});
 			}
 			if (!recentFilesPath_.empty() &&
 				!jpegview_linux::SaveRecentFiles(recentFilesPath_, recentFiles_)) {
@@ -653,6 +683,10 @@ private:
 		navigationPanelAutoReveal_ = settings.navigationPanelAutoReveal;
 		thumbnailPanelVisible_ = settings.thumbnailPanelVisible;
 		showZoomNavigator_ = settings.showZoomNavigator;
+		doublePageModeDefault_ = settings.doublePageModeEnabled;
+		mangaReadingOrderDefault_ = settings.mangaReadingOrderEnabled;
+		doublePageModeEnabled_ = doublePageModeDefault_;
+		mangaReadingOrderEnabled_ = mangaReadingOrderDefault_;
 		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
 		fileDialogWidth_ = settings.fileDialogWidth;
 		fileDialogHeight_ = settings.fileDialogHeight;
@@ -690,6 +724,8 @@ private:
 		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
 		settings.thumbnailPanelVisible = thumbnailPanelVisible_;
 		settings.showZoomNavigator = showZoomNavigator_;
+		settings.doublePageModeEnabled = doublePageModeDefault_;
+		settings.mangaReadingOrderEnabled = mangaReadingOrderDefault_;
 		settings.transparencyPattern = transparencyPattern_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.fileDialogWidth = fileDialogWidth_;
@@ -738,6 +774,235 @@ private:
 		if (!jpegview_linux::ReadJpegDimensions(filename, width, height, errorMessage)) return false;
 		jpegDimensionCache_[key] = {fileSize, modified, width, height};
 		return true;
+	}
+
+	std::optional<jpegview_linux::PageDimensions> PageDimensionsAt(std::size_t index) {
+		if (index >= fileList_.Files().size()) return std::nullopt;
+		if (activeDoublePageRender_.has_value()) {
+			if (index == activeDoublePageRender_->layout.firstIndex)
+				return activeDoublePageRender_->currentPage;
+			if (index == activeDoublePageRender_->layout.secondIndex)
+				return activeDoublePageRender_->nextPage;
+		}
+		if (index == fileList_.CurrentIndex() && image_.width > 0 && image_.height > 0) {
+			return jpegview_linux::PageDimensions{image_.width, image_.height};
+		}
+		const fs::path& filename = fileList_.Files()[index];
+		if (const auto decoded = imageCache_.Find(filename); decoded && !decoded->frames.empty()) {
+			const jpegview_linux::DecodedFrame& frame = decoded->frames.front();
+			return jpegview_linux::PageDimensions{frame.width, frame.height};
+		}
+		const auto cached = jpegDimensionCache_.find(filename.string());
+		if (cached != jpegDimensionCache_.end()) {
+			return jpegview_linux::PageDimensions{cached->second.width, cached->second.height};
+		}
+		return std::nullopt;
+	}
+
+	std::pair<int, int> ViewportContentDimensions() const {
+		if (activeDoublePageRender_.has_value()) {
+			return {activeDoublePageRender_->layout.canvasWidth,
+				activeDoublePageRender_->layout.canvasHeight};
+		}
+		return {image_.width, image_.height};
+	}
+
+	std::optional<DoublePagePartnerSpec> DoublePagePartnerDisplaySpec(
+		const jpegview_linux::DoublePageSpread& spread) {
+		if (spread.secondIndex >= fileList_.Files().size()) return std::nullopt;
+		const fs::path& filename = fileList_.Files()[spread.secondIndex];
+		const SDL_Rect area = ImageAreaRect();
+		jpegview_linux::Viewport spreadViewport = viewport_;
+		spreadViewport.Restore(viewport_.Snapshot(), spread.canvasWidth, spread.canvasHeight,
+			area.w, area.h);
+		const jpegview_linux::ViewportRect canvas = spreadViewport.Destination(
+			spread.canvasWidth, spread.canvasHeight, area.w, area.h);
+		const int targetWidth = std::max(1, static_cast<int>(std::lround(
+			static_cast<double>(canvas.width) * spread.nextPage.width / spread.canvasWidth)));
+		const int targetHeight = std::max(1, static_cast<int>(std::lround(
+			static_cast<double>(canvas.height) * spread.nextPage.height / spread.canvasHeight)));
+		const auto savedProcessing = imageProcessingStore_.find(
+			AbsoluteNormalized(filename).string());
+		const jpegview_linux::ImageProcessingPreset currentPreset{
+			imageProcessing_, autoContrastEnabled_};
+		const jpegview_linux::ImageProcessingPreset filePreset =
+			jpegview_linux::ResolveImageProcessingForFile(currentPreset,
+				savedProcessing == imageProcessingStore_.end() ? nullptr : &savedProcessing->second,
+				keepPictureLevels_, defaultAutoContrastEnabled_, defaultImageProcessing_);
+		jpegview_linux::ImageProcessingParams processing = filePreset.processing;
+		processing.unsharpRadius = unsharpMaskRadius_;
+		processing.unsharpAmount = 0.0;
+		processing.unsharpThreshold = unsharpMaskThreshold_;
+		return DoublePagePartnerSpec{filename, targetWidth, targetHeight,
+			filePreset.autoContrast, processing};
+	}
+
+	static bool SameDoublePagePartnerSpec(const jpegview_linux::DisplayImageRequest& request,
+		const DoublePagePartnerSpec& spec) {
+		return request.filename == spec.filename && request.targetWidth == spec.targetWidth &&
+			request.targetHeight == spec.targetHeight && request.autoContrast == spec.autoContrast &&
+			jpegview_linux::EqualImageProcessing(request.processing, spec.processing);
+	}
+
+	std::optional<jpegview_linux::DisplayImageRequest> MakeDoublePagePartnerRequest(
+		const DoublePagePartnerSpec& spec, const jpegview_linux::PageDimensions& nextPage) {
+		const fs::path& filename = spec.filename;
+		if (jpegview_linux::IsJpegPath(filename)) {
+			return jpegview_linux::MakeJpegDisplayImageRequest(filename, nextPage.width,
+				nextPage.height, spec.targetWidth, spec.targetHeight,
+				spec.autoContrast, 1, spec.processing);
+		}
+		const auto decoded = imageCache_.Find(filename);
+		if (!decoded || decoded->frames.empty()) return std::nullopt;
+		return jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
+			spec.targetWidth, spec.targetHeight, spec.autoContrast, 1, spec.processing);
+	}
+
+	void RefreshDoublePageRenderState() {
+		const SDL_Rect area = ImageAreaRect();
+		const auto cancelPendingPartner = [this] {
+			if (pendingDoublePagePartnerDisplayKey_.empty()) return;
+			displayTextureProtectedKeys_.erase(pendingDoublePagePartnerDisplayKey_);
+			displayImageCache_.CancelBackground(pendingDoublePagePartnerDisplayKey_);
+			displayImageCache_.Release(pendingDoublePagePartnerDisplayKey_);
+			pendingDoublePagePartnerDisplayKey_.clear();
+		};
+		const auto deactivate = [this, &area] {
+			if (!activeDoublePageRender_.has_value()) return;
+			const jpegview_linux::ViewportSnapshot snapshot = viewport_.Snapshot();
+			activeDoublePageRender_.reset();
+			displayTextureProtectedKeys_.erase(doublePagePartnerDisplayKey_);
+			doublePagePartnerDisplayKey_.clear();
+			viewport_.Restore(snapshot, image_.width, image_.height, area.w, area.h);
+			currentDisplayRequest_.reset();
+			SetTitle();
+		};
+		if (!doublePageModeEnabled_ || fileList_.Empty() || image_.width <= 0 || image_.height <= 0 ||
+			fileList_.CurrentIndex() + 1 >= fileList_.Size()) {
+			cancelPendingPartner();
+			deactivate();
+			doublePagePartnerRequest_.reset();
+			return;
+		}
+		const std::size_t currentIndex = fileList_.CurrentIndex();
+		auto current = PageDimensionsAt(currentIndex);
+		auto next = PageDimensionsAt(currentIndex + 1);
+		if (activeDoublePageRender_.has_value() &&
+			activeDoublePageRender_->layout.firstIndex == currentIndex &&
+			activeDoublePageRender_->layout.secondIndex == currentIndex + 1) {
+			if (!current.has_value()) current = activeDoublePageRender_->currentPage;
+			if (!next.has_value()) next = activeDoublePageRender_->nextPage;
+		}
+		if (!current.has_value() || !next.has_value()) {
+			cancelPendingPartner();
+			deactivate();
+			doublePagePartnerRequest_.reset();
+			return;
+		}
+		const jpegview_linux::DoublePageModeState modes{
+			doublePageModeEnabled_, mangaReadingOrderEnabled_};
+		const auto layout = jpegview_linux::BuildDoublePageSpread(currentIndex,
+			fileList_.Size(), *current, next, modes);
+		if (!layout.has_value()) {
+			cancelPendingPartner();
+			deactivate();
+			doublePagePartnerRequest_.reset();
+			return;
+		}
+		const auto spec = DoublePagePartnerDisplaySpec(*layout);
+		if (!spec.has_value()) {
+			cancelPendingPartner();
+			deactivate();
+			doublePagePartnerRequest_.reset();
+			return;
+		}
+		if (doublePagePartnerRequest_.has_value() &&
+			!SameDoublePagePartnerSpec(*doublePagePartnerRequest_, *spec)) {
+			cancelPendingPartner();
+			doublePagePartnerRequest_.reset();
+		}
+		if (!doublePagePartnerRequest_.has_value()) {
+			doublePagePartnerRequest_ = MakeDoublePagePartnerRequest(*spec, *next);
+			if (!doublePagePartnerRequest_.has_value() ||
+				!doublePagePartnerRequest_->Valid()) {
+				doublePagePartnerRequest_.reset();
+				cancelPendingPartner();
+				deactivate();
+				return;
+			}
+		}
+		const std::pair<int, int> canvasDestination = [&] {
+			jpegview_linux::Viewport spreadViewport = viewport_;
+			spreadViewport.Restore(viewport_.Snapshot(), layout->canvasWidth,
+				layout->canvasHeight, area.w, area.h);
+			const jpegview_linux::ViewportRect destination = spreadViewport.Destination(
+				layout->canvasWidth, layout->canvasHeight, area.w, area.h);
+			return std::make_pair(destination.width, destination.height);
+		}();
+		const std::size_t pagePixels = static_cast<std::size_t>(canvasDestination.first) *
+			static_cast<std::size_t>(canvasDestination.second);
+		if (pagePixels > std::numeric_limits<std::size_t>::max() / 4 ||
+			pagePixels * 4 > cacheBudget_->Capacity()) {
+			cancelPendingPartner();
+			deactivate();
+			doublePagePartnerRequest_.reset();
+			return;
+		}
+		std::string requestKey = doublePagePartnerRequest_->key;
+		if (FindDisplayTexture(requestKey) != nullptr) {
+			const bool sameCanvas = activeDoublePageRender_.has_value() &&
+				activeDoublePageRender_->layout.canvasWidth == layout->canvasWidth &&
+				activeDoublePageRender_->layout.canvasHeight == layout->canvasHeight;
+			if (!sameCanvas) {
+				const jpegview_linux::ViewportSnapshot snapshot = viewport_.Snapshot();
+				viewport_.Restore(snapshot, layout->canvasWidth, layout->canvasHeight,
+					area.w, area.h);
+				currentDisplayRequest_.reset();
+			}
+			activeDoublePageRender_ = ActiveDoublePageRender{*layout, *current, *next, *spec};
+			doublePagePartnerDisplayKey_ = requestKey;
+			// The completed renderer texture is now the retained partner. Do not
+			// keep its decoded full-resolution pixels pinned outside imageCache_.
+			doublePagePartnerRequest_->decoded.reset();
+			pendingDoublePagePartnerDisplayKey_.clear();
+			return;
+		}
+		if (!doublePagePartnerRequest_->Valid()) {
+			doublePagePartnerRequest_ = MakeDoublePagePartnerRequest(*spec, *next);
+			if (!doublePagePartnerRequest_.has_value() ||
+				!doublePagePartnerRequest_->Valid()) {
+				cancelPendingPartner();
+				deactivate();
+				return;
+			}
+			requestKey = doublePagePartnerRequest_->key;
+		}
+		displayTextureProtectedKeys_.insert(requestKey);
+		if (!pendingDoublePagePartnerDisplayKey_.empty() &&
+			pendingDoublePagePartnerDisplayKey_ != requestKey) cancelPendingPartner();
+		pendingDoublePagePartnerDisplayKey_ = requestKey;
+		displayImageCache_.RequestBackground(*doublePagePartnerRequest_);
+		if (activeDoublePageRender_.has_value() &&
+			activeDoublePageRender_->layout.firstIndex == layout->firstIndex &&
+			activeDoublePageRender_->layout.secondIndex == layout->secondIndex &&
+			FindDisplayTexture(doublePagePartnerDisplayKey_) != nullptr) {
+			const bool sameCanvas =
+				activeDoublePageRender_->layout.canvasWidth == layout->canvasWidth &&
+				activeDoublePageRender_->layout.canvasHeight == layout->canvasHeight;
+			if (!sameCanvas) {
+				const jpegview_linux::ViewportSnapshot snapshot = viewport_.Snapshot();
+				viewport_.Restore(snapshot, layout->canvasWidth, layout->canvasHeight,
+					area.w, area.h);
+				currentDisplayRequest_.reset();
+			}
+			displayTextureProtectedKeys_.insert(doublePagePartnerDisplayKey_);
+			activeDoublePageRender_->layout = *layout;
+			activeDoublePageRender_->currentPage = *current;
+			activeDoublePageRender_->nextPage = *next;
+			activeDoublePageRender_->partnerSpec = *spec;
+			return;
+		}
+		if (activeDoublePageRender_.has_value()) deactivate();
 	}
 
 	bool MaterializeCurrentPixels() {
@@ -813,7 +1078,8 @@ private:
 		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
 	}
 
-	bool LoadCurrent(int prefetchDirection = 0) {
+	bool LoadCurrent(int prefetchDirection = 0,
+		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent) {
 		if (fileList_.Empty()) {
 			return false;
 		}
@@ -822,6 +1088,18 @@ private:
 		if (!clipboardMode_ && !loadedFilePath_.empty() && pathChanged) {
 			recentFiles_.RememberViewport(loadedFilePath_,
 				clipboardReturnViewport_.value_or(viewport_.Snapshot()));
+			recentFiles_.RememberDoublePageMode(loadedFilePath_,
+				{doublePageModeEnabled_, mangaReadingOrderEnabled_});
+		}
+		if (!clipboardMode_ && pathChanged &&
+			modeLoadPolicy != DisplayModeLoadPolicy::PreserveCurrent) {
+			const std::optional<jpegview_linux::DoublePageModeState> savedModes =
+				modeLoadPolicy == DisplayModeLoadPolicy::RestoreRecent ?
+					recentFiles_.FindDoublePageMode(targetPath) : std::nullopt;
+			doublePageModeEnabled_ = savedModes.has_value() ? savedModes->enabled :
+				doublePageModeDefault_;
+			mangaReadingOrderEnabled_ = savedModes.has_value() ? savedModes->mangaReadingOrder :
+				mangaReadingOrderDefault_;
 		}
 		jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.NavigationSnapshot();
 		if (!clipboardMode_) {
@@ -854,6 +1132,14 @@ private:
 		currentDecoded_.reset();
 		currentAnimationFrame_ = 0;
 		currentDisplayRequest_.reset();
+		activeDoublePageRender_.reset();
+		doublePagePartnerDisplayKey_.clear();
+		doublePagePartnerRequest_.reset();
+		if (!pendingDoublePagePartnerDisplayKey_.empty()) {
+			displayImageCache_.CancelBackground(pendingDoublePagePartnerDisplayKey_);
+			displayImageCache_.Release(pendingDoublePagePartnerDisplayKey_);
+			pendingDoublePagePartnerDisplayKey_.clear();
+		}
 		currentPixelsMaterialized_ = false;
 		materializedProcessing_ = {};
 		materializedAutoContrast_ = false;
@@ -956,6 +1242,7 @@ private:
 		SetTitle();
 		PrepareThumbnailPreload();
 		PrepareImagePrefetch(prefetchDirection);
+		RefreshDoublePageRenderState();
 		if (!clipboardMode_) {
 			recentFiles_.Add(targetPath);
 			loadedFilePath_ = targetPath;
@@ -973,7 +1260,13 @@ private:
 		const SDL_Rect imageArea = ImageAreaRect();
 		auto batch = std::make_shared<DisplayPrefetchBatch>();
 		batch->cache = &displayImageCache_;
-		batch->context = {viewport_.NavigationSnapshot(), imageArea.w, imageArea.h};
+		batch->context.viewport = viewport_.NavigationSnapshot();
+		batch->context.imageAreaWidth = imageArea.w;
+		batch->context.imageAreaHeight = imageArea.h;
+		batch->context.currentIndex = fileList_.CurrentIndex();
+		batch->context.pageCount = fileList_.Size();
+		batch->context.doublePageMode = {doublePageModeEnabled_, mangaReadingOrderEnabled_};
+		batch->context.currentPageDimensions = PageDimensionsAt(fileList_.CurrentIndex());
 		for (const auto& retained : displayTextureCache_) {
 			batch->retainedTextureKeys.insert(retained.first);
 		}
@@ -981,13 +1274,21 @@ private:
 		if (currentDisplayRequest_.has_value()) {
 			displayTextureProtectedKeys_.insert(currentDisplayRequest_->key);
 		}
+		if (!doublePagePartnerDisplayKey_.empty()) {
+			displayTextureProtectedKeys_.insert(doublePagePartnerDisplayKey_);
+		}
+		if (!pendingDoublePagePartnerDisplayKey_.empty()) {
+			displayTextureProtectedKeys_.insert(pendingDoublePagePartnerDisplayKey_);
+		}
 		const std::vector<std::size_t> prefetchOrder = jpegview_linux::ImagePrefetchOrder(
 			fileList_.Files().size(), fileList_.CurrentIndex(), preferredDirection,
 			jpegview_linux::DisplayPrefetchCount(cacheBudget_->Capacity(), imageArea.w,
 				imageArea.h, fileList_.Files().size()));
 		for (std::size_t position = 0; position < prefetchOrder.size(); ++position) {
-			const fs::path& filename = fileList_.Files()[prefetchOrder[position]];
+			const std::size_t fileIndex = prefetchOrder[position];
+			const fs::path& filename = fileList_.Files()[fileIndex];
 			batch->priorityByFilename.emplace(filename.string(), position + 1);
+			batch->indexByFilename.emplace(filename.string(), fileIndex);
 			const auto savedProcessing = imageProcessingStore_.find(AbsoluteNormalized(filename).string());
 			const jpegview_linux::ImageProcessingPreset current{imageProcessing_, autoContrastEnabled_};
 			const jpegview_linux::ImageProcessingPreset filePreset =
@@ -1006,6 +1307,18 @@ private:
 			std::string errorMessage;
 			if (!JpegDimensions(filename, sourceWidth, sourceHeight,
 				errorMessage)) continue;
+			if (doublePageModeEnabled_ && position < prefetchOrder.size() &&
+				prefetchOrder[position] == fileList_.CurrentIndex() + 1) {
+				const auto currentPage = PageDimensionsAt(fileList_.CurrentIndex());
+				if (currentPage.has_value() && jpegview_linux::BuildDoublePageSpread(
+					fileList_.CurrentIndex(), fileList_.Size(), *currentPage,
+					jpegview_linux::PageDimensions{sourceWidth, sourceHeight},
+					{true, mangaReadingOrderEnabled_}).has_value()) {
+					// The visible partner is requested separately at its spread-slot
+					// resolution; don't also produce a full-window neighbor texture.
+					continue;
+				}
+			}
 			jpegview_linux::Viewport viewport;
 			viewport.Restore(batch->context.viewport, sourceWidth, sourceHeight,
 				batch->context.imageAreaWidth, batch->context.imageAreaHeight);
@@ -1044,6 +1357,18 @@ private:
 					jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
 						target.width, target.height, autoContrast->second,
 						priority->second, processing->second);
+				if (batch->context.currentPageDimensions.has_value()) {
+					const auto index = batch->indexByFilename.find(filename.string());
+					if (index != batch->indexByFilename.end() &&
+						index->second == batch->context.currentIndex + 1 &&
+						batch->context.doublePageMode.enabled &&
+						jpegview_linux::BuildDoublePageSpread(batch->context.currentIndex,
+							batch->context.pageCount, *batch->context.currentPageDimensions,
+							jpegview_linux::PageDimensions{frame.width, frame.height},
+							batch->context.doublePageMode).has_value()) {
+						return;
+					}
+				}
 				if (!request.Valid() ||
 					batch->retainedTextureKeys.find(request.key) !=
 						batch->retainedTextureKeys.end()) return;
@@ -1175,6 +1500,7 @@ private:
 		}
 		displayTextureCache_.emplace(prepared->key,
 			DisplayTextureCacheEntry{texture, bytes, prepared->width, prepared->height,
+				prepared->hasTransparency,
 				++displayTextureUseCounter_});
 		displayTextureCacheBytes_ += bytes;
 		displayImageCache_.Retire(prepared);
@@ -1558,7 +1884,8 @@ private:
 		SetTitle(title.str());
 	}
 
-	void OpenDroppedFiles(const std::vector<std::string>& droppedFiles) {
+	void OpenDroppedFiles(const std::vector<std::string>& droppedFiles,
+		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::UseDefaults) {
 		if (droppedFiles.empty()) {
 			return;
 		}
@@ -1583,7 +1910,7 @@ private:
 		}
 		dragging_ = false;
 		CloseFileDialog();
-		LoadCurrent();
+		LoadCurrent(0, modeLoadPolicy);
 	}
 
 	void CloseFileDialog() {
@@ -1920,18 +2247,23 @@ private:
 		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return;
 		const jpegview_linux::SelectionRect bounds = cropSelection_.Rect();
 		const SDL_Rect imageArea = ImageAreaRect();
+		const SDL_Rect pageDestination = CurrentPageScreenRect(imageArea);
+		if (pageDestination.w <= 0 || pageDestination.h <= 0) return;
+		const double imageScaleX = static_cast<double>(pageDestination.w) / image_.width;
+		const double imageScaleY = static_cast<double>(pageDestination.h) / image_.height;
 		const double targetZoom = std::min(
-			static_cast<double>(std::max(1, imageArea.w)) / bounds.Width(),
-			static_cast<double>(std::max(1, imageArea.h)) / bounds.Height());
-		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, imageArea.w, imageArea.h);
-		const int selectionCenterX = destination.x + static_cast<int>(std::lround(
-			(bounds.left + bounds.right) * 0.5 * viewport_.Zoom()));
-		const int selectionCenterY = destination.y + static_cast<int>(std::lround(
-			(bounds.top + bounds.bottom) * 0.5 * viewport_.Zoom()));
-		viewport_.ZoomAt(targetZoom / viewport_.Zoom(), selectionCenterX, selectionCenterY,
-			image_.width, image_.height, imageArea.w, imageArea.h);
-		viewport_.ClampToView(image_.width, image_.height, imageArea.w, imageArea.h);
+			static_cast<double>(std::max(1, imageArea.w)) /
+				(std::max(1.0, bounds.Width() * imageScaleX)),
+			static_cast<double>(std::max(1, imageArea.h)) /
+				(std::max(1.0, bounds.Height() * imageScaleY)));
+		const int selectionCenterX = pageDestination.x - imageArea.x + static_cast<int>(std::lround(
+			(bounds.left + bounds.right) * 0.5 * imageScaleX));
+		const int selectionCenterY = pageDestination.y - imageArea.y + static_cast<int>(std::lround(
+			(bounds.top + bounds.bottom) * 0.5 * imageScaleY));
+		const auto dimensions = ViewportContentDimensions();
+		viewport_.ZoomAt(targetZoom, selectionCenterX, selectionCenterY,
+			dimensions.first, dimensions.second, imageArea.w, imageArea.h);
+		viewport_.ClampToView(dimensions.first, dimensions.second, imageArea.w, imageArea.h);
 		PanViewport(imageArea.w / 2.0 - selectionCenterX,
 			imageArea.h / 2.0 - selectionCenterY);
 		currentDisplayRequest_.reset();
@@ -2400,13 +2732,17 @@ private:
 
 	void RestoreScaleMode(const jpegview_linux::ViewportSnapshot& snapshot) {
 		const SDL_Rect imageArea = ImageAreaRect();
-		viewport_.Restore(snapshot, image_.width, image_.height, imageArea.w, imageArea.h);
+		const auto dimensions = ViewportContentDimensions();
+		viewport_.Restore(snapshot, dimensions.first, dimensions.second,
+			imageArea.w, imageArea.h);
 		SetTitle();
 	}
 
 	void FitToWindow(bool fillCrop = false, bool noEnlarge = true) {
 		const SDL_Rect imageArea = ImageAreaRect();
-		viewport_.Fit(image_.width, image_.height, imageArea.w, imageArea.h, fillCrop, noEnlarge);
+		const auto dimensions = ViewportContentDimensions();
+		viewport_.Fit(dimensions.first, dimensions.second, imageArea.w, imageArea.h,
+			fillCrop, noEnlarge);
 		currentDisplayRequest_.reset();
 		PrepareImagePrefetch();
 		SetTitle();
@@ -2417,6 +2753,30 @@ private:
 		currentDisplayRequest_.reset();
 		PrepareImagePrefetch();
 		SetTitle();
+	}
+
+	bool NavigateByPageStep(int direction) {
+		if (fileList_.Empty() || (direction != -1 && direction != 1)) return false;
+		const std::size_t currentIndex = fileList_.CurrentIndex();
+		const std::optional<jpegview_linux::PageDimensions> current =
+			PageDimensionsAt(currentIndex);
+		const std::optional<jpegview_linux::PageDimensions> next = direction > 0 &&
+			currentIndex + 1 < fileList_.Size() ? PageDimensionsAt(currentIndex + 1) : std::nullopt;
+		const std::optional<jpegview_linux::PageDimensions> previousFirst = direction < 0 &&
+			currentIndex >= 2 ? PageDimensionsAt(currentIndex - 2) : std::nullopt;
+		const std::optional<jpegview_linux::PageDimensions> previousSecond = direction < 0 &&
+			currentIndex >= 1 ? PageDimensionsAt(currentIndex - 1) : std::nullopt;
+		const int step = jpegview_linux::DoublePageNavigationStep(direction, currentIndex,
+			fileList_.Size(), doublePageModeEnabled_, current, next,
+			previousFirst, previousSecond);
+		for (int index = 0; index < step; ++index) {
+			const bool moved = direction > 0 ? fileList_.Next() : fileList_.Previous();
+			if (!moved) {
+				if (fileList_.CurrentIndex() != currentIndex) fileList_.Select(currentIndex);
+				return false;
+			}
+		}
+		return fileList_.CurrentIndex() != currentIndex;
 	}
 
 	void PanActualSize(int command) {
@@ -2433,7 +2793,8 @@ private:
 	void PanViewport(double deltaX, double deltaY) {
 		viewport_.Pan(deltaX, deltaY);
 		const SDL_Rect imageArea = ImageAreaRect();
-		viewport_.ClampToView(image_.width, image_.height, imageArea.w, imageArea.h);
+		const auto dimensions = ViewportContentDimensions();
+		viewport_.ClampToView(dimensions.first, dimensions.second, imageArea.w, imageArea.h);
 		ShowZoomNavigatorTemporarily();
 	}
 
@@ -2442,15 +2803,17 @@ private:
 	}
 
 	void ZoomAt(double factor, int mouseX, int mouseY) {
-		if (image_.width == 0 || image_.height == 0) {
+		const auto dimensions = ViewportContentDimensions();
+		if (dimensions.first == 0 || dimensions.second == 0) {
 			return;
 		}
 		const SDL_Rect imageArea = ImageAreaRect();
 		const int localMouseX = std::clamp(mouseX - imageArea.x, 0, imageArea.w);
 		const int localMouseY = std::clamp(mouseY - imageArea.y, 0, imageArea.h);
-		viewport_.ZoomAt(factor, localMouseX, localMouseY, image_.width, image_.height,
+		viewport_.ZoomAt(factor, localMouseX, localMouseY,
+			dimensions.first, dimensions.second,
 			imageArea.w, imageArea.h);
-		viewport_.ClampToView(image_.width, image_.height, imageArea.w, imageArea.h);
+		viewport_.ClampToView(dimensions.first, dimensions.second, imageArea.w, imageArea.h);
 		ShowZoomNavigatorTemporarily();
 		playback_.NotifyInteraction(SDL_GetTicks());
 		SetTitle();
@@ -2458,10 +2821,11 @@ private:
 
 	void NextImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
-		const bool animate = playback_.SlideshowSeconds() > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
+		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
+			transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage;
 		if (animate && MaterializeCurrentPixels()) previousImage = image_;
-		if (!fileList_.Next()) return;
+		if (!NavigateByPageStep(1)) return;
 		SetTitle();
 		if (showPendingNavigation) {
 			Render();
@@ -2472,10 +2836,11 @@ private:
 
 	void PreviousImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
-		const bool animate = playback_.SlideshowSeconds() > 0.0 && transitionEffect_ != IDM_EFFECT_NONE;
+		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
+			transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage;
 		if (animate && MaterializeCurrentPixels()) previousImage = image_;
-		if (!fileList_.Previous()) return;
+		if (!NavigateByPageStep(-1)) return;
 		SetTitle();
 		if (showPendingNavigation) {
 			Render();
@@ -2516,10 +2881,11 @@ private:
 	}
 
 	void FitWindowToImage() {
-		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		const auto dimensions = ViewportContentDimensions();
+		if (fileList_.Empty() || dimensions.first <= 0 || dimensions.second <= 0) return;
 		const int panelWidth = thumbnailPanelVisible_ ? thumbnailPanelWidth_ : 0;
-		const int width = std::clamp(image_.width + panelWidth + 16, 160, 4096);
-		const int height = std::clamp(image_.height + 16, 120, 4096);
+		const int width = std::clamp(dimensions.first + panelWidth + 16, 160, 4096);
+		const int height = std::clamp(dimensions.second + 16, 120, 4096);
 		SDL_SetWindowSize(window_, width, height);
 		FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
 	}
@@ -2744,7 +3110,8 @@ private:
 		return jpegview_linux::BuildNavigationPanelPaint(windowWidth, windowHeight,
 			lastMouseX_, lastMouseY_, viewport_.IsFitToWindow(), fileList_.GetSorting(),
 			TextWidth(sortLabel, kUiTextScale), TextWidth("1:1", kUiTextScale),
-			TextLineHeight(kUiTextScale), selectionModeEnabled_);
+			TextLineHeight(kUiTextScale), selectionModeEnabled_,
+			doublePageModeEnabled_, mangaReadingOrderEnabled_);
 	}
 
 	SDL_Rect PictureLevelsPanelRect() const {
@@ -3398,6 +3765,34 @@ private:
 				SetMagnifyingGlassEnabled(!magnifyingGlass_.Enabled());
 			}
 			break;
+		case jpegview_linux::kCommandToggleDoublePageMode:
+			doublePageModeEnabled_ = !doublePageModeEnabled_;
+			doublePageModeDefault_ = doublePageModeEnabled_;
+			ClearTransition();
+			if (!clipboardMode_ && !loadedFilePath_.empty()) {
+				recentFiles_.RememberDoublePageMode(loadedFilePath_,
+					{doublePageModeEnabled_, mangaReadingOrderEnabled_});
+			}
+			currentDisplayRequest_.reset();
+			RefreshDoublePageRenderState();
+			PrepareImagePrefetch();
+			SaveSettings();
+			SetTitle();
+			break;
+		case jpegview_linux::kCommandToggleMangaReadingOrder:
+			mangaReadingOrderEnabled_ = !mangaReadingOrderEnabled_;
+			mangaReadingOrderDefault_ = mangaReadingOrderEnabled_;
+			ClearTransition();
+			if (!clipboardMode_ && !loadedFilePath_.empty()) {
+				recentFiles_.RememberDoublePageMode(loadedFilePath_,
+					{doublePageModeEnabled_, mangaReadingOrderEnabled_});
+			}
+			currentDisplayRequest_.reset();
+			RefreshDoublePageRenderState();
+			PrepareImagePrefetch();
+			SaveSettings();
+			SetTitle();
+			break;
 		case jpegview_linux::kCommandToggleSelectionMode:
 			SetSelectionModeEnabled(!selectionModeEnabled_);
 			break;
@@ -3643,6 +4038,8 @@ private:
 		state.thumbnailPanelVisible = thumbnailPanelVisible_;
 		state.showZoomNavigator = showZoomNavigator_;
 		state.magnifyingGlassEnabled = magnifyingGlass_.Enabled();
+		state.doublePageModeEnabled = doublePageModeEnabled_;
+		state.mangaReadingOrderEnabled = mangaReadingOrderEnabled_;
 		state.selectionModeEnabled = selectionModeEnabled_;
 		state.navigationMode = fileList_.GetNavigationMode();
 		state.sortMode = fileList_.GetSorting();
@@ -5326,7 +5723,7 @@ private:
 		if (selected == nullptr) return;
 		const FileDialogEntry entry = *selected;
 		if (fileDialogTab_ == FileDialogTab::Recents) {
-			OpenDroppedFiles({entry.path.string()});
+			OpenDroppedFiles({entry.path.string()}, DisplayModeLoadPolicy::RestoreRecent);
 			return;
 		}
 		if (!fileDialogSave_ && !fileDialogParameterRestore_ && entry.encrypted &&
@@ -5879,6 +6276,45 @@ private:
 		return SDL_Rect{layout.imageX, 0, layout.imageWidth, layout.imageHeight};
 	}
 
+	SDL_Rect SpreadPageScreenRect(const jpegview_linux::SpreadPagePlacement& page,
+		const jpegview_linux::ViewportRect& destination, const SDL_Rect& area) const {
+		if (!activeDoublePageRender_.has_value() ||
+			activeDoublePageRender_->layout.canvasWidth <= 0 ||
+			activeDoublePageRender_->layout.canvasHeight <= 0) return {};
+		const jpegview_linux::DoublePageSpread& spread = activeDoublePageRender_->layout;
+		const int left = static_cast<int>(std::lround(
+			static_cast<double>(destination.width) * page.x / spread.canvasWidth));
+		const int top = static_cast<int>(std::lround(
+			static_cast<double>(destination.height) * page.y / spread.canvasHeight));
+		const int right = static_cast<int>(std::lround(
+			static_cast<double>(destination.width) * (page.x + page.width) / spread.canvasWidth));
+		const int bottom = static_cast<int>(std::lround(
+			static_cast<double>(destination.height) * (page.y + page.height) / spread.canvasHeight));
+		return {destination.x + area.x + left, destination.y + area.y + top,
+			std::max(1, right - left), std::max(1, bottom - top)};
+	}
+
+	SDL_Rect CurrentPageScreenRect(const SDL_Rect& area) const {
+		const auto dimensions = ViewportContentDimensions();
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			dimensions.first, dimensions.second, area.w, area.h);
+		if (activeDoublePageRender_.has_value()) {
+			return SpreadPageScreenRect(activeDoublePageRender_->layout.currentPage,
+				destination, area);
+		}
+		return {destination.x + area.x, destination.y + area.y,
+			destination.width, destination.height};
+	}
+
+	SDL_Rect NextPageScreenRect(const SDL_Rect& area) const {
+		if (!activeDoublePageRender_.has_value()) return {};
+		const auto dimensions = ViewportContentDimensions();
+		const jpegview_linux::ViewportRect destination = viewport_.Destination(
+			dimensions.first, dimensions.second, area.w, area.h);
+		return SpreadPageScreenRect(activeDoublePageRender_->layout.nextPage,
+			destination, area);
+	}
+
 	void RenderTransparencyBackground(const SDL_Rect& imageRect, const SDL_Rect& clipRect) {
 		const int visibleLeft = std::max(imageRect.x, clipRect.x);
 		const int visibleTop = std::max(imageRect.y, clipRect.y);
@@ -5918,19 +6354,21 @@ private:
 
 	jpegview_linux::ZoomNavigatorLayout CurrentZoomNavigatorLayout() const {
 		const SDL_Rect area = ImageAreaRect();
-		return jpegview_linux::CalculateZoomNavigatorLayout(image_.width, image_.height,
+		const auto dimensions = ViewportContentDimensions();
+		return jpegview_linux::CalculateZoomNavigatorLayout(dimensions.first, dimensions.second,
 			area.x, area.y, area.w, area.h);
 	}
 
 	bool IsZoomNavigatorVisibleAt(int mouseX, int mouseY) const {
-		if (!showZoomNavigator_ || image_.width <= 0 || image_.height <= 0 ||
+		const auto dimensions = ViewportContentDimensions();
+		if (!showZoomNavigator_ || dimensions.first <= 0 || dimensions.second <= 0 ||
 			cropSelection_.HasSelection() || cropMouseDragging_ || pictureLevelsPanelOpen_ ||
 			unsharpDialogOpen_ || contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ ||
 			aboutOpen_ || helpOpen_ || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
 			batchCopyDialog_.IsOpen()) return false;
 		const SDL_Rect area = ImageAreaRect();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, area.w, area.h);
+			dimensions.first, dimensions.second, area.w, area.h);
 		if (!jpegview_linux::ImageNeedsZoomNavigator(destination.width, destination.height,
 			area.w, area.h)) return false;
 		const jpegview_linux::ZoomNavigatorLayout layout = CurrentZoomNavigatorLayout();
@@ -5947,8 +6385,9 @@ private:
 		if (!PointInRect(screenX, screenY, SDL_Rect{layout.image.x, layout.image.y,
 			layout.image.width, layout.image.height})) return false;
 		const SDL_Rect area = ImageAreaRect();
+		const auto dimensions = ViewportContentDimensions();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, area.w, area.h);
+			dimensions.first, dimensions.second, area.w, area.h);
 		const jpegview_linux::ZoomNavigatorPoint requested =
 			jpegview_linux::NavigatorPointToImage(screenX, screenY, layout.image);
 		const double currentCenterX = (area.w * 0.5 - destination.x) / destination.width;
@@ -5973,8 +6412,9 @@ private:
 	void UpdateZoomNavigatorDrag(int deltaX, int deltaY) {
 		if (!zoomNavigatorDragging_) return;
 		const SDL_Rect area = ImageAreaRect();
+		const auto dimensions = ViewportContentDimensions();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, area.w, area.h);
+			dimensions.first, dimensions.second, area.w, area.h);
 		const jpegview_linux::ZoomNavigatorLayout layout = CurrentZoomNavigatorLayout();
 		const jpegview_linux::ZoomNavigatorPan pan = jpegview_linux::CalculateNavigatorDragPan(
 			deltaX, deltaY, layout.image, destination.width, destination.height);
@@ -6011,11 +6451,12 @@ private:
 			confirmationOpen_ || aboutOpen_ || helpOpen_ || resizeDialog_.IsOpen() ||
 			cropSizeDialog_.IsOpen() || batchCopyDialog_.IsOpen()) return false;
 		const SDL_Rect area = ImageAreaRect();
-		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, area.w, area.h);
-		const SDL_Rect imageRect{destination.x + area.x, destination.y + area.y,
-			destination.width, destination.height};
-		if (!PointInRect(screenX, screenY, imageRect)) return false;
+		const SDL_Rect currentPage = CurrentPageScreenRect(area);
+		const SDL_Rect nextPage = NextPageScreenRect(area);
+		const bool overCurrent = PointInRect(screenX, screenY, currentPage);
+		const bool overNext = activeDoublePageRender_.has_value() &&
+			PointInRect(screenX, screenY, nextPage);
+		if (!overCurrent && !overNext) return false;
 		// Let the transient zoom navigator retain its own hot area and cursor.
 		return !IsZoomNavigatorVisibleAt(screenX, screenY);
 	}
@@ -6129,13 +6570,11 @@ private:
 			return;
 		}
 		const SDL_Rect area = ImageAreaRect();
-		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, area.w, area.h);
-		const SDL_Rect displayed{destination.x + area.x, destination.y + area.y,
-			destination.width, destination.height};
+		SDL_Rect displayed = CurrentPageScreenRect(area);
 		SDL_Texture* lensTexture = fallbackTexture;
 		int textureWidth = image_.width;
 		int textureHeight = image_.height;
+		bool hasTransparency = image_.hasTransparency;
 		if (fallbackTexture == displayTexture_) {
 			textureWidth = displayTextureWidth_;
 			textureHeight = displayTextureHeight_;
@@ -6148,32 +6587,47 @@ private:
 				}
 			}
 		}
-
-		if (const auto request = MagnifyingGlassDisplayRequest(); request.has_value() &&
-			request->key != (currentDisplayRequest_.has_value() ?
-				currentDisplayRequest_->key : std::string())) {
-			if (magnifyingGlassRequestKey_ != request->key) {
-				DiscardMagnifyingGlassRequest(magnifyingGlassRequestKey_);
-				magnifyingGlassRequestKey_ = request->key;
-				magnifyingGlassBackgroundRequestedKey_.clear();
+		if (activeDoublePageRender_.has_value() &&
+			PointInRect(lastMouseX_, lastMouseY_, NextPageScreenRect(area))) {
+			lensTexture = FindDisplayTexture(doublePagePartnerDisplayKey_);
+			displayed = NextPageScreenRect(area);
+			const auto partner = displayTextureCache_.find(doublePagePartnerDisplayKey_);
+			if (partner != displayTextureCache_.end()) {
+				textureWidth = partner->second.width;
+				textureHeight = partner->second.height;
+				hasTransparency = partner->second.hasTransparency;
 			}
-			displayTextureProtectedKeys_.insert(request->key);
-			if (SDL_Texture* cached = FindDisplayTexture(request->key)) {
-				lensTexture = cached;
-				const auto dimensions = displayTextureCache_.find(request->key);
-				if (dimensions != displayTextureCache_.end()) {
-					textureWidth = dimensions->second.width;
-					textureHeight = dimensions->second.height;
+		}
+
+		if (!activeDoublePageRender_.has_value()) {
+			if (const auto request = MagnifyingGlassDisplayRequest(); request.has_value() &&
+				request->key != (currentDisplayRequest_.has_value() ?
+					currentDisplayRequest_->key : std::string())) {
+				if (magnifyingGlassRequestKey_ != request->key) {
+					DiscardMagnifyingGlassRequest(magnifyingGlassRequestKey_);
+					magnifyingGlassRequestKey_ = request->key;
+					magnifyingGlassBackgroundRequestedKey_.clear();
+				}
+				displayTextureProtectedKeys_.insert(request->key);
+				if (SDL_Texture* cached = FindDisplayTexture(request->key)) {
+					lensTexture = cached;
+					const auto dimensions = displayTextureCache_.find(request->key);
+					if (dimensions != displayTextureCache_.end()) {
+						textureWidth = dimensions->second.width;
+						textureHeight = dimensions->second.height;
+					}
+				} else {
+					if (magnifyingGlassBackgroundRequestedKey_ != request->key &&
+						request->targetHeight > 0 &&
+						cacheBudget_->Capacity() / 4 /
+							static_cast<std::size_t>(request->targetHeight) >=
+							static_cast<std::size_t>(request->targetWidth)) {
+						displayImageCache_.RequestBackground(*request);
+						magnifyingGlassBackgroundRequestedKey_ = request->key;
+					}
 				}
 			} else {
-				if (magnifyingGlassBackgroundRequestedKey_ != request->key &&
-					request->targetHeight > 0 &&
-					cacheBudget_->Capacity() / 4 /
-						static_cast<std::size_t>(request->targetHeight) >=
-						static_cast<std::size_t>(request->targetWidth)) {
-					displayImageCache_.RequestBackground(*request);
-					magnifyingGlassBackgroundRequestedKey_ = request->key;
-				}
+				ClearMagnifyingGlassRequest();
 			}
 		} else {
 			ClearMagnifyingGlassRequest();
@@ -6194,13 +6648,13 @@ private:
 			geometry.sourceRect.width, geometry.sourceRect.height};
 		SDL_SetRenderDrawColor(renderer_, 6, 6, 6, 255);
 		SDL_RenderFillRect(renderer_, &lens);
-		if (image_.hasTransparency) RenderTransparencyBackground(lens, lens);
+		if (hasTransparency) RenderTransparencyBackground(lens, lens);
 		SDL_RenderCopy(renderer_, lensTexture, &source, &content);
 		DrawRect({lens.x - 2, lens.y - 2, lens.w + 4, lens.h + 4}, 8, 8, 8, 255);
 		DrawRect(lens, 245, 245, 245, 255);
 	}
 
-	void RenderZoomNavigator(SDL_Texture* imageTexture) {
+	void RenderZoomNavigator(SDL_Texture* imageTexture, SDL_Texture* nextImageTexture) {
 		if (imageTexture == nullptr || !IsZoomNavigatorVisibleAt(lastMouseX_, lastMouseY_)) return;
 		const SDL_Rect area = ImageAreaRect();
 		const jpegview_linux::ZoomNavigatorLayout layout = CurrentZoomNavigatorLayout();
@@ -6210,11 +6664,32 @@ private:
 			imageRect.w + 4, imageRect.h + 4};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 230);
 		SDL_RenderFillRect(renderer_, &frame);
-		SDL_RenderCopy(renderer_, imageTexture, nullptr, &imageRect);
+		if (activeDoublePageRender_.has_value() && nextImageTexture != nullptr) {
+			const auto miniPage = [&imageRect, this](const jpegview_linux::SpreadPagePlacement& page) {
+				const auto& spread = activeDoublePageRender_->layout;
+				const int left = static_cast<int>(std::lround(
+					static_cast<double>(imageRect.w) * page.x / spread.canvasWidth));
+				const int top = static_cast<int>(std::lround(
+					static_cast<double>(imageRect.h) * page.y / spread.canvasHeight));
+				const int right = static_cast<int>(std::lround(
+					static_cast<double>(imageRect.w) * (page.x + page.width) / spread.canvasWidth));
+				const int bottom = static_cast<int>(std::lround(
+					static_cast<double>(imageRect.h) * (page.y + page.height) / spread.canvasHeight));
+				return SDL_Rect{imageRect.x + left, imageRect.y + top,
+					std::max(1, right - left), std::max(1, bottom - top)};
+			};
+			const SDL_Rect currentMini = miniPage(activeDoublePageRender_->layout.currentPage);
+			const SDL_Rect nextMini = miniPage(activeDoublePageRender_->layout.nextPage);
+			SDL_RenderCopy(renderer_, imageTexture, nullptr, &currentMini);
+			SDL_RenderCopy(renderer_, nextImageTexture, nullptr, &nextMini);
+		} else {
+			SDL_RenderCopy(renderer_, imageTexture, nullptr, &imageRect);
+		}
 		DrawRect({frame.x, frame.y, frame.w, frame.h}, 245, 245, 245, 255);
 
+		const auto dimensions = ViewportContentDimensions();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, area.w, area.h);
+			dimensions.first, dimensions.second, area.w, area.h);
 		const jpegview_linux::NormalizedImageRect visible =
 			jpegview_linux::CalculateVisibleImageRect(destination.x + area.x,
 				destination.y + area.y, destination.width, destination.height,
@@ -6229,10 +6704,8 @@ private:
 
 	jpegview_linux::SelectionScreenRect ImageDestinationScreenRect() const {
 		const SDL_Rect imageArea = ImageAreaRect();
-		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, imageArea.w, imageArea.h);
-		return {imageArea.x + destination.x, imageArea.y + destination.y,
-			destination.width, destination.height};
+		const SDL_Rect destination = CurrentPageScreenRect(imageArea);
+		return {destination.x, destination.y, destination.w, destination.h};
 	}
 
 	bool BeginCropDrag(int screenX, int screenY) {
@@ -6556,7 +7029,8 @@ private:
 		SDL_RenderSetClipRect(renderer_, nullptr);
 		if (hoveredButton == nullptr) return;
 		const std::string text = jpegview_linux::NavigationTooltip(hoveredButton->command,
-			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting(), selectionModeEnabled_);
+			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting(), selectionModeEnabled_,
+			doublePageModeEnabled_, mangaReadingOrderEnabled_);
 		if (text.empty()) return;
 		int windowWidth = 0;
 		int windowHeight = 0;
@@ -6622,7 +7096,7 @@ private:
 		DrawText("QUICK HELP — JPEGVIEW LINUX", panel.x + 18, panel.y + 14,
 			kUiTextScale, 255, 255, 255);
 		static const std::array<const char*, 10> lines = {
-			"Navigate: arrows/wheel; Home/End; Ctrl+M mark; Ctrl+Left/Right toggle; Alt+arrows siblings",
+			"Navigate: arrows/wheel; Home/End; D double page; J manga order; Ctrl+M mark; Alt+arrows siblings",
 			"Zoom/pan: Ctrl+wheel or Ctrl+Up/Down; drag; Shift+Arrow; Z lens; wheel resizes it",
 			"Navigator: hover upper-right when magnified; click or drag its map to reposition",
 			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom",
@@ -6979,12 +7453,16 @@ private:
 				// the actual key state after each rendered image to avoid a backlog.
 				if (event.key.repeat != 0 && !plainNavigationKey && !shiftPanKey) break;
 				if (plainNavigationKey && event.key.repeat != 0) {
-					const int direction = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
+					const int physicalDirection = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
+					const int direction = jpegview_linux::LogicalDirectionForPhysicalKey(
+						physicalDirection, mangaReadingOrderEnabled_);
 					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, true);
 					break;
 				}
 				if (plainNavigationKey) {
-					const int direction = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
+					const int physicalDirection = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
+					const int direction = jpegview_linux::LogicalDirectionForPhysicalKey(
+						physicalDirection, mangaReadingOrderEnabled_);
 					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, false);
 				}
 				if (event.key.keysym.sym == SDLK_MENU) {
@@ -7004,8 +7482,12 @@ private:
 					StartSlideshow(static_cast<double>(event.key.keysym.sym - '0'));
 					break;
 				}
-				const int command = jpegview_linux::CommandForKey(event.key,
+				int command = jpegview_linux::CommandForKey(event.key,
 					playback_.Mode() != PlaybackMode::None || playback_.AnimationPlaying());
+				if (plainNavigationKey && mangaReadingOrderEnabled_) {
+					if (command == IDM_NEXT) command = IDM_PREV;
+					else if (command == IDM_PREV) command = IDM_NEXT;
+				}
 				if (command != 0) {
 					ExecuteCommand(command);
 				}
@@ -7037,8 +7519,9 @@ private:
 					}
 					if (BeginCropDrag(event.button.x, event.button.y)) break;
 					const SDL_Rect imageArea = ImageAreaRect();
+					const auto dimensions = ViewportContentDimensions();
 					const jpegview_linux::ViewportRect destination = viewport_.Destination(
-						image_.width, image_.height, imageArea.w, imageArea.h);
+						dimensions.first, dimensions.second, imageArea.w, imageArea.h);
 					if (destination.width <= imageArea.w && destination.height <= imageArea.h) break;
 					dragging_ = true;
 					lastMouseX_ = event.button.x;
@@ -7153,16 +7636,18 @@ private:
 	}
 
 	void RenderFrame() {
+		RefreshDoublePageRenderState();
 		const SDL_Rect imageArea = ImageAreaRect();
 		imageCenterX_ = imageArea.x + imageArea.w / 2;
 		imageCenterY_ = imageArea.y + imageArea.h / 2;
-		const jpegview_linux::ViewportRect viewportRect = viewport_.Destination(
-			image_.width, image_.height, imageArea.w, imageArea.h);
-		const int renderWidth = viewportRect.width;
-		const int renderHeight = viewportRect.height;
-		SDL_Rect destination{viewportRect.x + imageArea.x, viewportRect.y + imageArea.y,
-			viewportRect.width, viewportRect.height};
+		const SDL_Rect destination = CurrentPageScreenRect(imageArea);
+		const int renderWidth = destination.w;
+		const int renderHeight = destination.h;
 		SDL_Texture* renderTexture = DisplayTextureFor(renderWidth, renderHeight);
+		SDL_Texture* nextPageTexture = activeDoublePageRender_.has_value() ?
+			FindDisplayTexture(doublePagePartnerDisplayKey_) : nullptr;
+		const SDL_Rect nextPageDestination = activeDoublePageRender_.has_value() ?
+			NextPageScreenRect(imageArea) : SDL_Rect{};
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
 		SDL_RenderClear(renderer_);
@@ -7170,14 +7655,24 @@ private:
 		// letterbox margins are overwritten when navigation changes image size.
 		SDL_RenderFillRect(renderer_, &imageArea);
 		SDL_RenderSetClipRect(renderer_, &imageArea);
-		if (image_.hasTransparency ||
-			(transitionTexture_ != nullptr && transitionImage_.hasTransparency)) {
-			RenderTransparencyBackground(destination, imageArea);
+		if (activeDoublePageRender_.has_value() && nextPageTexture != nullptr) {
+			if (image_.hasTransparency) RenderTransparencyBackground(destination, imageArea);
+			const auto partner = displayTextureCache_.find(doublePagePartnerDisplayKey_);
+			if (partner != displayTextureCache_.end() && partner->second.hasTransparency) {
+				RenderTransparencyBackground(nextPageDestination, imageArea);
+			}
+			if (renderTexture != nullptr) SDL_RenderCopy(renderer_, renderTexture, nullptr, &destination);
+			SDL_RenderCopy(renderer_, nextPageTexture, nullptr, &nextPageDestination);
+		} else {
+			if (image_.hasTransparency ||
+				(transitionTexture_ != nullptr && transitionImage_.hasTransparency)) {
+				RenderTransparencyBackground(destination, imageArea);
+			}
+			RenderImageTransition(destination, imageArea, renderTexture);
 		}
-		RenderImageTransition(destination, imageArea, renderTexture);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		RenderCropSelection();
-		RenderZoomNavigator(renderTexture);
+		RenderZoomNavigator(renderTexture, nextPageTexture);
 		UpdateMagnifyingGlassCursor(lastMouseX_, lastMouseY_);
 		RenderMagnifyingGlass(renderTexture);
 		SDL_RenderSetClipRect(renderer_, nullptr);
@@ -7275,6 +7770,14 @@ private:
 	std::string magnifyingGlassBackgroundRequestedKey_;
 	std::optional<jpegview_linux::DisplayImageRequest> magnifyingGlassRequest_;
 	bool selectionModeEnabled_ = false;
+	bool doublePageModeEnabled_ = false;
+	bool mangaReadingOrderEnabled_ = false;
+	bool doublePageModeDefault_ = false;
+	bool mangaReadingOrderDefault_ = false;
+	std::optional<ActiveDoublePageRender> activeDoublePageRender_;
+	std::string doublePagePartnerDisplayKey_;
+	std::optional<jpegview_linux::DisplayImageRequest> doublePagePartnerRequest_;
+	std::string pendingDoublePagePartnerDisplayKey_;
 	bool cropMouseDragging_ = false;
 	bool zoomNavigatorDragging_ = false;
 	Uint32 zoomNavigatorVisibleUntil_ = 0;
@@ -7433,6 +7936,7 @@ void PrintUsage(const char* program) {
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, Alt+Left/Right open the first image in adjacent sibling folders,\n"
 		<< "          Ctrl+M marks an image; Ctrl+Left/Right toggles between it and the paired image,\n"
 		<< "          N/M/C select display order, Z toggles the magnifying glass,\n"
+		<< "          D toggles double-page mode, J reverses manga reading order,\n"
 		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails, Ctrl+E toggles crop selection mode,\n"
 		<< "          right-click or the Context Menu key opens the context menu, Esc or Q quits.\n";
 }

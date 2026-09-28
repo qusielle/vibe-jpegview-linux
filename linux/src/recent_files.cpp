@@ -101,6 +101,22 @@ bool ParseViewportRow(const std::string& line, fs::path& path,
 	return true;
 }
 
+bool ParseDisplayModeRow(const std::string& line, fs::path& path,
+	DoublePageModeState& modes) {
+	std::istringstream row(line);
+	char record = 0;
+	std::string encoded;
+	int enabled = 0;
+	int mangaReadingOrder = 0;
+	std::string extra;
+	if (!(row >> record >> encoded >> enabled >> mangaReadingOrder) || record != 'D' ||
+		(row >> extra) || !ParseBoolean(enabled) || !ParseBoolean(mangaReadingOrder)) return false;
+	if (!DecodePath(encoded, path)) return false;
+	modes.enabled = enabled != 0;
+	modes.mangaReadingOrder = mangaReadingOrder != 0;
+	return true;
+}
+
 } // namespace
 
 void RecentFiles::Add(const fs::path& filename) {
@@ -138,10 +154,36 @@ std::optional<ViewportSnapshot> RecentFiles::FindViewport(const fs::path& filena
 		std::optional<ViewportSnapshot>(found->second);
 }
 
+void RecentFiles::RememberDoublePageMode(const fs::path& filename,
+	const DoublePageModeState& modes) {
+	const fs::path path = NormalizeAbsolute(filename);
+	if (path.empty()) return;
+	const std::string key = path.string();
+	const auto existing = std::find(modeLru_.begin(), modeLru_.end(), key);
+	if (existing != modeLru_.end()) modeLru_.erase(existing);
+	modeLru_.insert(modeLru_.begin(), key);
+	displayModes_[key] = modes;
+	if (modeLru_.size() > kMaximumRecentDisplayModeSnapshots) {
+		displayModes_.erase(modeLru_.back());
+		modeLru_.pop_back();
+	}
+}
+
+std::optional<DoublePageModeState> RecentFiles::FindDoublePageMode(
+	const fs::path& filename) const {
+	const fs::path path = NormalizeAbsolute(filename);
+	if (path.empty()) return std::nullopt;
+	const auto found = displayModes_.find(path.string());
+	return found == displayModes_.end() ? std::nullopt :
+		std::optional<DoublePageModeState>(found->second);
+}
+
 void RecentFiles::Clear() {
 	files_.clear();
 	viewportLru_.clear();
 	viewports_.clear();
+	modeLru_.clear();
+	displayModes_.clear();
 }
 
 fs::path RecentFilesDatabasePath() {
@@ -191,6 +233,16 @@ bool LoadRecentFiles(const fs::path& filename, RecentFiles& recentFiles) {
 			if (loaded.viewportLru_.size() >= kMaximumRecentViewportSnapshots) continue;
 			loaded.viewportLru_.push_back(key);
 			loaded.viewports_.emplace(key, snapshot);
+		} else if (line[0] == 'D') {
+			DoublePageModeState modes;
+			if (!ParseDisplayModeRow(line, path, modes)) continue;
+			path = NormalizeAbsolute(path);
+			if (path.empty()) continue;
+			const std::string key = path.string();
+			if (loaded.displayModes_.find(key) != loaded.displayModes_.end()) continue;
+			if (loaded.modeLru_.size() >= kMaximumRecentDisplayModeSnapshots) continue;
+			loaded.modeLru_.push_back(key);
+			loaded.displayModes_.emplace(key, modes);
 		}
 	}
 	if (!input.eof()) return false;
@@ -210,7 +262,7 @@ bool SaveRecentFiles(const fs::path& filename, const RecentFiles& recentFiles) {
 	{
 		std::ofstream output(temporary, std::ios::trunc);
 		if (!output) return false;
-		output << "# JPEGView Linux recent files, version 1\n";
+		output << "# JPEGView Linux recent files, version 2\n";
 		for (const fs::path& path : recentFiles.files_) {
 			output << "R " << EncodePath(path) << '\n';
 		}
@@ -223,6 +275,14 @@ bool SaveRecentFiles(const fs::path& filename, const RecentFiles& recentFiles) {
 				<< (snapshot.fitToWindow ? 1 : 0) << ' '
 				<< (snapshot.fillWithCrop ? 1 : 0) << ' '
 				<< (snapshot.noEnlarge ? 1 : 0) << ' ' << snapshot.zoom << '\n';
+		}
+		for (const std::string& key : recentFiles.modeLru_) {
+			const auto found = recentFiles.displayModes_.find(key);
+			if (found == recentFiles.displayModes_.end()) continue;
+			const DoublePageModeState& modes = found->second;
+			output << "D " << EncodePath(fs::path(key)) << ' '
+				<< (modes.enabled ? 1 : 0) << ' '
+				<< (modes.mangaReadingOrder ? 1 : 0) << '\n';
 		}
 		if (!output) {
 			output.close();

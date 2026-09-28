@@ -35,6 +35,7 @@
 #include "system_font.h"
 #include "bitmap_font.h"
 #include "playback_scheduler.h"
+#include "double_page_model.h"
 #include "archive_source.h"
 #include "rar_backend.h"
 #include "seven_zip_backend.h"
@@ -1475,6 +1476,8 @@ void TestKeyboardCommandMappings() {
 		{'n', 0, IDM_SORT_NAME},
 		{'m', 0, IDM_SORT_MOD_DATE},
 		{'z', 0, jpegview_linux::kCommandToggleMagnifyingGlass},
+		{'d', 0, jpegview_linux::kCommandToggleDoublePageMode},
+		{'j', 0, jpegview_linux::kCommandToggleMangaReadingOrder},
 		{SDLK_F7, 0, IDM_LOOP_FOLDER},
 		{SDLK_F8, 0, IDM_LOOP_RECURSIVELY},
 		{SDLK_F9, 0, IDM_LOOP_SIBLINGS},
@@ -1540,6 +1543,56 @@ void TestKeyboardCommandMappings() {
 	SDL_KeyboardEvent unknown{};
 	unknown.keysym.sym = 'x';
 	Expect(jpegview_linux::CommandForKey(unknown, false) == 0, "unknown key was accepted");
+}
+
+void TestDoublePagePairingNavigationAndReadingOrder() {
+	using jpegview_linux::DoublePageModeState;
+	using jpegview_linux::PageDimensions;
+	const PageDimensions cover{600, 900};
+	const PageDimensions pageOne{600, 900};
+	const PageDimensions pageTwo{600, 1200};
+	const PageDimensions landscape{1200, 800};
+	DoublePageModeState modes{true, false};
+
+	Expect(!jpegview_linux::BuildDoublePageSpread(0, 4, cover, pageOne, modes).has_value(),
+		"double-page mode paired the cover with the first interior page");
+	const auto spread = jpegview_linux::BuildDoublePageSpread(1, 4, pageOne, pageTwo, modes);
+	Expect(spread.has_value() && spread->firstIndex == 1 && spread->secondIndex == 2 &&
+		spread->canvasHeight == 1200 && spread->canvasWidth == 1400 &&
+		spread->currentPage.x == 0 && spread->currentPage.width == 800 &&
+		spread->nextPage.x == 800 && spread->nextPage.width == 600,
+		"portrait pages did not form a common-height, aspect-preserving spread");
+	modes.mangaReadingOrder = true;
+	const auto mangaSpread = jpegview_linux::BuildDoublePageSpread(1, 4, pageOne, pageTwo, modes);
+	Expect(mangaSpread.has_value() && mangaSpread->currentPage.x == 600 &&
+		mangaSpread->nextPage.x == 0,
+		"manga reading order did not swap the spread pages");
+	Expect(!jpegview_linux::BuildDoublePageSpread(1, 4, landscape, pageTwo, modes).has_value() &&
+		!jpegview_linux::BuildDoublePageSpread(1, 4, pageOne, landscape, modes).has_value(),
+		"double-page mode paired a non-portrait page");
+	Expect(!jpegview_linux::BuildDoublePageSpread(1, 4, pageOne, std::nullopt, modes).has_value(),
+		"double-page mode paired before neighbor dimensions were available");
+
+	const std::optional<PageDimensions> current = pageOne;
+	const std::optional<PageDimensions> next = pageTwo;
+	const std::optional<PageDimensions> previousStart = pageOne;
+	const std::optional<PageDimensions> previousPartner = pageTwo;
+	Expect(jpegview_linux::DoublePageNavigationStep(1, 1, 4, true,
+		current, next, std::nullopt, std::nullopt) == 2,
+		"forward navigation did not skip the visible partner page");
+	Expect(jpegview_linux::DoublePageNavigationStep(-1, 3, 5, true,
+		std::nullopt, std::nullopt, previousStart, previousPartner) == 2,
+		"backward navigation did not skip a preceding spread");
+	Expect(jpegview_linux::DoublePageNavigationStep(-1, 2, 4, true,
+		std::nullopt, std::nullopt, cover, pageOne) == 1 &&
+		jpegview_linux::DoublePageNavigationStep(1, 1, 4, false,
+			current, next, std::nullopt, std::nullopt) == 1,
+		"navigation skipped pages when a cover or single-page mode requires a one-page step");
+	Expect(jpegview_linux::LogicalDirectionForPhysicalKey(-1, false) == -1 &&
+		jpegview_linux::LogicalDirectionForPhysicalKey(-1, true) == 1 &&
+		jpegview_linux::LogicalDirectionForPhysicalKey(1, true) == -1 &&
+		jpegview_linux::LogicalDirectionForPhysicalKey(0, true) == 0,
+		"physical left/right navigation did not reverse only in manga reading order");
 }
 
 void TestHeldNavigationCoalescesKeyRepeats() {
@@ -3176,6 +3229,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.navigationPanelAutoReveal = false;
 	expected.thumbnailPanelVisible = true;
 	expected.showZoomNavigator = false;
+	expected.doublePageModeEnabled = true;
+	expected.mangaReadingOrderEnabled = true;
 	expected.transparencyPattern = jpegview_linux::TransparencyPattern::Checkerboard;
 	expected.thumbnailPanelWidth = 287;
 	expected.fileDialogWidth = 1040;
@@ -3230,6 +3285,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"thumbnail panel visibility did not round-trip");
 	Expect(loaded.showZoomNavigator == expected.showZoomNavigator,
 		"zoom navigator visibility did not round-trip");
+	Expect(loaded.doublePageModeEnabled == expected.doublePageModeEnabled &&
+		loaded.mangaReadingOrderEnabled == expected.mangaReadingOrderEnabled,
+		"double-page mode settings did not round-trip");
 	Expect(loaded.transparencyPattern == expected.transparencyPattern,
 		"transparent-image pattern did not round-trip");
 	Expect(loaded.thumbnailPanelWidth == expected.thumbnailPanelWidth,
@@ -3297,6 +3355,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"settings without a histogram choice did not retain the hidden default");
 	Expect(loaded.showZoomNavigator,
 		"malformed zoom navigator visibility did not retain its enabled default");
+	Expect(!loaded.doublePageModeEnabled && !loaded.mangaReadingOrderEnabled,
+		"missing double-page settings did not retain their disabled defaults");
 	Expect(loaded.transparencyPattern == jpegview_linux::TransparencyPattern::Black,
 		"malformed transparency pattern did not retain the default black background");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
@@ -4568,6 +4628,16 @@ void TestContextMenuCatalogAndState() {
 		magnifyingGlass->shortcut == "Z" && !magnifyingGlass->checked &&
 		!magnifyingGlass->enabled,
 		"context menu did not expose the image-dependent magnifying-glass toggle");
+	const MenuItem* doublePageMode = findCommand(compact,
+		jpegview_linux::kCommandToggleDoublePageMode);
+	const MenuItem* mangaReadingOrder = findCommand(compact,
+		jpegview_linux::kCommandToggleMangaReadingOrder);
+	Expect(doublePageMode != nullptr && doublePageMode->label == "Double page mode" &&
+		doublePageMode->shortcut == "D" && !doublePageMode->checked && !doublePageMode->enabled &&
+		mangaReadingOrder != nullptr && mangaReadingOrder->label == "Double page manga mode" &&
+		mangaReadingOrder->shortcut == "J" && !mangaReadingOrder->checked &&
+		!mangaReadingOrder->enabled,
+		"context menu did not expose the image-dependent double-page modes");
 	Expect(findCommand(compact, jpegview_linux::kCommandPreviousSiblingFolder) == nullptr &&
 		findCommand(compact, jpegview_linux::kCommandNextSiblingFolder) == nullptr,
 		"compact context menu exposed advanced sibling-folder navigation commands");
@@ -4585,6 +4655,8 @@ void TestContextMenuCatalogAndState() {
 	state.sortAscending = false;
 	state.imageAvailable = true;
 	state.magnifyingGlassEnabled = true;
+	state.doublePageModeEnabled = true;
+	state.mangaReadingOrderEnabled = true;
 	state.losslessJpegAvailable = true;
 	state.autoCorrectionEnabled = true;
 	state.pictureLevelsAvailable = true;
@@ -4601,6 +4673,12 @@ void TestContextMenuCatalogAndState() {
 	state.transitionDurationMs = 1000;
 	state.openWithApplicationNames = {"Photo Editor", u8"写真工具"};
 	const std::vector<MenuItem> advanced = jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(advanced, jpegview_linux::kCommandToggleDoublePageMode)->checked &&
+		findCommand(advanced, jpegview_linux::kCommandToggleMangaReadingOrder)->checked,
+		"context menu did not reflect active double-page and manga states");
+	Expect(findCommand(advanced, IDM_NEXT)->shortcut == "Left/PgDn" &&
+		findCommand(advanced, IDM_PREV)->shortcut == "Right/PgUp",
+		"manga context-menu navigation shortcuts did not reflect reversed reading order");
 
 	Expect(findCommand(advanced, jpegview_linux::kContextMenuShowAdvanced) == nullptr,
 		"expanded context menu retained the advanced-options command");
@@ -4957,20 +5035,21 @@ void TestViewerChromePaintPlans() {
 		"expanded EXIF spectrum or collapse button was laid out incorrectly");
 
 	jpegview_linux::NavigationPanelPaint navigation = jpegview_linux::BuildNavigationPanelPaint(
-		800, 600, 385, 585, true, FileList::SortMode::LastModificationTime, 7, 18, 11);
-	Expect(navigation.panel.x == 233 && navigation.panel.y == 568 &&
-		navigation.panel.width == 333 && navigation.panel.height == 32 &&
-		navigation.opacity == 255 && navigation.buttons.size() == 10,
-		"navigation paint plan did not keep Windows-sized panel geometry or the Linux button count");
-	Expect(navigation.buttons[0].rect.x == 239 && navigation.buttons[3].rect.x == 332 &&
-		navigation.buttons[4].rect.x == 363 && navigation.buttons[5].rect.x == 402 &&
-		navigation.buttons[7].rect.x == 472 && navigation.buttons[9].rect.x == 534,
+		800, 600, 341, 585, true, FileList::SortMode::LastModificationTime, 7, 18, 11);
+	Expect(navigation.panel.x == 198 && navigation.panel.y == 568 &&
+		navigation.panel.width == 403 && navigation.panel.height == 32 &&
+		navigation.opacity == 255 && navigation.buttons.size() == 12,
+		"navigation paint plan did not keep compact geometry or include both display-mode controls");
+	Expect(navigation.buttons[0].rect.x == 204 && navigation.buttons[3].rect.x == 297 &&
+		navigation.buttons[4].rect.x == 328 && navigation.buttons[5].rect.x == 367 &&
+		navigation.buttons[7].rect.x == 437 && navigation.buttons[9].rect.x == 499 &&
+		navigation.buttons[10].rect.x == 538 && navigation.buttons[11].rect.x == 569,
 		"navigation paint plan lost section spacing");
 	Expect(navigation.buttons[0].command == IDM_FIRST && navigation.buttons[0].lines.size() == 4 &&
-		navigation.buttons[0].lines[0].x1 == 246 && navigation.buttons[0].lines[0].y1 == 578 &&
+		navigation.buttons[0].lines[0].x1 == 211 && navigation.buttons[0].lines[0].y1 == 578 &&
 		navigation.buttons[0].lines[0].y2 == 590 &&
-		navigation.buttons[0].lines[2].x1 == 258 &&
-		navigation.buttons[0].lines[2].x2 == 253 &&
+		navigation.buttons[0].lines[2].x1 == 223 &&
+		navigation.buttons[0].lines[2].x2 == 218 &&
 		navigation.buttons[0].foreground.red == 243 &&
 		navigation.buttons[0].foreground.green == 242 &&
 		navigation.buttons[0].foreground.blue == 231,
@@ -4987,32 +5066,47 @@ void TestViewerChromePaintPlans() {
 		navigation.buttons[6].outlines.size() == 1 &&
 		navigation.buttons[6].outlines[0].width == 14 &&
 		navigation.buttons[7].lines.size() == 6 &&
-		navigation.buttons[7].lines[0].x1 == 477 &&
-		navigation.buttons[7].lines[0].x2 == 486 &&
+		navigation.buttons[7].lines[0].x1 == 442 &&
+		navigation.buttons[7].lines[0].x2 == 451 &&
 		navigation.buttons[8].lines.size() == 6 &&
 		navigation.buttons[9].command == jpegview_linux::kCommandToggleSelectionMode &&
-		navigation.buttons[9].lines.size() == 8,
+		navigation.buttons[9].lines.size() == 8 &&
+		navigation.buttons[10].command == jpegview_linux::kCommandToggleDoublePageMode &&
+		navigation.buttons[10].outlines.size() == 2 &&
+		navigation.buttons[11].command == jpegview_linux::kCommandToggleMangaReadingOrder &&
+		navigation.buttons[11].outlines.size() == 2 && navigation.buttons[11].lines.size() == 7,
 		"fit or rotation controls did not use the original Windows action glyphs");
 	navigation = jpegview_linux::BuildNavigationPanelPaint(
-		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 18, 11, true);
+		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 18, 11, true, true, true);
 	Expect(navigation.opacity == 128 && navigation.buttons[0].foreground.alpha == 128 &&
 		navigation.buttons[5].lines.size() == 12 && navigation.buttons[5].text.empty() &&
 		navigation.buttons[4].text[0].text == "N" &&
 		navigation.buttons[9].foreground.red == 255 &&
 		navigation.buttons[9].foreground.green == 205 &&
-		navigation.buttons[9].foreground.blue == 0,
+		navigation.buttons[9].foreground.blue == 0 &&
+		navigation.buttons[10].foreground.red == 255 &&
+		navigation.buttons[11].foreground.red == 255,
 		"fit-action navigation icon or name-order label is incorrect");
 
 	Expect(jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, false,
 		FileList::SortMode::FileName) == "Full screen mode (F11)" &&
 		jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, true,
 			FileList::SortMode::FileName) == "Window mode (F11)" &&
+		jpegview_linux::NavigationTooltip(IDM_NEXT, true, false,
+			FileList::SortMode::FileName, false, false, true) == "Show next image (Left)" &&
+		jpegview_linux::NavigationTooltip(IDM_PREV, true, false,
+			FileList::SortMode::FileName, false, false, true) == "Show previous image (Right)" &&
 		jpegview_linux::NavigationTooltip(jpegview_linux::kNavigationSortModeCommand, true, false,
 			FileList::SortMode::LastModificationTime).find("click for file name") != std::string::npos &&
 		jpegview_linux::NavigationTooltip(jpegview_linux::kCommandToggleSelectionMode, true, false,
 			FileList::SortMode::FileName, false) == "Enable crop selection mode (Ctrl+E)" &&
 		jpegview_linux::NavigationTooltip(jpegview_linux::kCommandToggleSelectionMode, true, false,
-			FileList::SortMode::FileName, true) == "Disable crop selection mode (Ctrl+E)",
+			FileList::SortMode::FileName, true) == "Disable crop selection mode (Ctrl+E)" &&
+		jpegview_linux::NavigationTooltip(jpegview_linux::kCommandToggleDoublePageMode, true, false,
+			FileList::SortMode::FileName, false, false) == "Enable double page mode (D)" &&
+		jpegview_linux::NavigationTooltip(jpegview_linux::kCommandToggleMangaReadingOrder,
+			true, false, FileList::SortMode::FileName, false, true, true) ==
+			"Disable double page manga mode (J)",
 		"navigation tooltip did not reflect fullscreen or sort state");
 	const jpegview_linux::UiRect anchor{2, 5, 40, 40};
 	overlay = jpegview_linux::NavigationTooltipPaint(anchor, "tip", 21, 11, 100, 60);
@@ -5609,6 +5703,7 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 
 	jpegview_linux::ViewportSnapshot snapshot{false, false, false, 2.75};
 	recent.RememberViewport(secondA, snapshot);
+	recent.RememberDoublePageMode(secondA, {true, true});
 	const auto restored = recent.FindViewport(normalizedSecondA);
 	Expect(restored.has_value() && !restored->fitToWindow &&
 		!restored->fillWithCrop && !restored->noEnlarge,
@@ -5628,6 +5723,7 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 	const fs::path unusualPath = folderB / "line\nbreak.jpg";
 	recent.Add(unusualPath);
 	recent.RememberViewport(unusualPath, {false, false, false, 0.125});
+	recent.RememberDoublePageMode(unusualPath, {true, false});
 	const fs::path database = temporary.path() / "state" / "recent-files.db";
 	Expect(jpegview_linux::SaveRecentFiles(database, recent),
 		"recent-file database could not be saved atomically");
@@ -5643,6 +5739,10 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 		"per-file viewport snapshot did not round-trip independently from the folder list");
 	ExpectNear(unusualViewport->zoom, 0.125, 0.0000001,
 		"persisted per-file zoom did not round-trip");
+	const auto unusualDisplayMode = loaded.FindDoublePageMode(unusualPath);
+	Expect(unusualDisplayMode.has_value() && unusualDisplayMode->enabled &&
+		!unusualDisplayMode->mangaReadingOrder,
+		"per-image double-page mode did not round-trip independently of viewport zoom");
 
 	std::string duplicateRecentRow;
 	{
@@ -5667,7 +5767,7 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 		std::ofstream malformed(database, std::ios::app);
 		malformed << duplicateRecentRow << "\nR " << encodedAliasPath <<
 			"\nR not-hex\nV 616263 1 0 1 nan\n"
-			"V 2f616263 1 0 1 999\n";
+			"V 2f616263 1 0 1 999\nD 2f616263 1 1\nD 2f616264 2 0\n";
 	}
 	jpegview_linux::RecentFiles tolerant;
 	Expect(jpegview_linux::LoadRecentFiles(database, tolerant),
@@ -5678,10 +5778,14 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 	Expect(clampedPersisted.has_value() &&
 		clampedPersisted->zoom == jpegview_linux::kMaximumZoom,
 		"finite out-of-range zoom in a malformed-tolerant database was not clamped");
+	const auto tolerantMode = tolerant.FindDoublePageMode(fs::path("/abc"));
+	Expect(tolerantMode.has_value() && tolerantMode->enabled && tolerantMode->mangaReadingOrder,
+		"valid recent display-mode row was not retained alongside malformed rows");
 
 	const fs::path missingDatabase = temporary.path() / "first-run" / "recent-files.db";
 	jpegview_linux::RecentFiles firstRun;
-	Expect(jpegview_linux::LoadRecentFiles(missingDatabase, firstRun) && firstRun.Files().empty(),
+	Expect(jpegview_linux::LoadRecentFiles(missingDatabase, firstRun) && firstRun.Files().empty() &&
+		!firstRun.FindDoublePageMode(onlyB).has_value(),
 		"a missing first-run recent database was not treated as an empty successful load");
 	firstRun.Add(onlyB);
 	Expect(jpegview_linux::SaveRecentFiles(missingDatabase, firstRun) &&
@@ -5707,14 +5811,19 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 		const fs::path filename = temporary.path() / ("folder-" + std::to_string(index)) / "image.jpg";
 		capped.Add(filename);
 		capped.RememberViewport(filename, {false, false, false, 1.0 + index});
+		capped.RememberDoublePageMode(filename, {true, (index & 1u) != 0});
 	}
 	Expect(capped.Files().size() == jpegview_linux::kMaximumRecentFolders &&
-		capped.ViewportSnapshotCount() == jpegview_linux::kMaximumRecentViewportSnapshots,
-		"recent folder rows or per-image viewport snapshots exceeded their independent bounds");
+		capped.ViewportSnapshotCount() == jpegview_linux::kMaximumRecentViewportSnapshots &&
+		capped.DisplayModeSnapshotCount() == jpegview_linux::kMaximumRecentDisplayModeSnapshots,
+		"recent folder rows or per-image view snapshots exceeded their independent bounds");
 	Expect(!capped.FindViewport(temporary.path() / "folder-0" / "image.jpg").has_value() &&
 		capped.FindViewport(temporary.path() /
+			("folder-" + std::to_string(capCount - 1)) / "image.jpg").has_value() &&
+		!capped.FindDoublePageMode(temporary.path() / "folder-0" / "image.jpg").has_value() &&
+		capped.FindDoublePageMode(temporary.path() /
 			("folder-" + std::to_string(capCount - 1)) / "image.jpg").has_value(),
-		"per-image viewport snapshot retention did not evict the least recently used entry");
+		"per-image snapshot retention did not evict the least recently used entry");
 
 	ScopedEnvironment stateHome("XDG_STATE_HOME", (temporary.path() / "xdg-state").string());
 	Expect(jpegview_linux::RecentFilesDatabasePath() ==
@@ -6115,6 +6224,8 @@ int main() {
 	RunTest("file-list-marked-image-toggle", TestFileListMarkedImageToggle, failures);
 	RunTest("supported-image-extension-policy", TestSupportedImageExtensionPolicy, failures);
 	RunTest("keyboard-command-mappings", TestKeyboardCommandMappings, failures);
+	RunTest("double-page-pairing-navigation-and-reading-order",
+		TestDoublePagePairingNavigationAndReadingOrder, failures);
 	RunTest("held-navigation-repeat-coalescing", TestHeldNavigationCoalescesKeyRepeats, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
 	RunTest("file-list-size-and-random-sorting", TestFileListSizeAndRandomSorting, failures);

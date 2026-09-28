@@ -125,6 +125,12 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		} else if (key == "show_zoom_navigator") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.showZoomNavigator = parsed;
+		} else if (key == "double_page_mode_enabled") {
+			bool parsed = false;
+			if (ParseBoolStrict(value, parsed)) loaded.doublePageModeEnabled = parsed;
+		} else if (key == "manga_reading_order_enabled") {
+			bool parsed = false;
+			if (ParseBoolStrict(value, parsed)) loaded.mangaReadingOrderEnabled = parsed;
 		} else if (key == "transparency_pattern") {
 			(void)ParseTransparencyPattern(value, loaded.transparencyPattern);
 		} else if (key == "thumbnail_panel_width") {
@@ -293,6 +299,8 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "navigation_panel_auto_reveal=" << (settings.navigationPanelAutoReveal ? 1 : 0) << '\n'
 		       << "thumbnail_panel_visible=" << (settings.thumbnailPanelVisible ? 1 : 0) << '\n'
 		       << "show_zoom_navigator=" << (settings.showZoomNavigator ? 1 : 0) << '\n'
+		       << "double_page_mode_enabled=" << (settings.doublePageModeEnabled ? 1 : 0) << '\n'
+		       << "manga_reading_order_enabled=" << (settings.mangaReadingOrderEnabled ? 1 : 0) << '\n'
 		       << "transparency_pattern=" << TransparencyPatternSettingName(settings.transparencyPattern) << '\n'
 		       << "thumbnail_panel_width=" << settings.thumbnailPanelWidth << '\n'
 		       << "file_dialog_width=" << std::clamp(settings.fileDialogWidth,

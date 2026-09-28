@@ -40,12 +40,13 @@ candidates are independent of the JPEGView_L comparison below. The current behav
   available as context-menu items. Group them by topic and edit the existing settings source of
   truth rather than introducing a parallel settings layer.
 
-## Comic-reading interaction candidates
+## Implemented from the comic-reading candidates
 
-- **Reverse reading order in double page mode:** allow the two pages in a spread to swap sides for
-  right-to-left reading. This matches the [YACReader](https://github.com/YACReader/yacreader) menu
-  option; prefer porting or adapting its implementation if feasible rather than reimplementing the
-  behavior independently.
+- **Double page mode and double page manga mode:** implemented with the `D` and `J` shortcuts,
+  navigation-panel and context-menu controls, portrait-page pairing, cover-single behavior, reversed
+  spread placement and Left/Right reading direction, and per-image restoration from Recents. The
+  behavior follows [YACReader 9.9.1.0](https://github.com/YACReader/yacreader) where practical; see
+  the [Linux README](README.md#linux-branch-changes-in-order-of-importance) for current behavior.
 
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
