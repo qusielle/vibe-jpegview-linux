@@ -345,3 +345,14 @@ requires that Ubuntu 20 job to complete before building or publishing the Ubuntu
 the latter are supplementary assets, not substitutes when the lowest-glibc artifact failed. The
 Ubuntu 20 build is the supported glibc baseline (2.31); glibc remains a host-provided base library
 and is intentionally not bundled into the AppImage.
+
+`package-appimage.sh` owns AppDir assembly and includes the AppRun launcher, root desktop entry,
+`.DirIcon`, and `usr/share/metainfo` AppStream metadata. It runs `desktop-file-validate` and
+`appstreamcli validate-tree --no-net` when those tools are installed; the Ubuntu AppImage build
+images provide both from their normal repositories. `release-assets.sh` verifies that the produced
+image can show help with Docker networking disabled and invokes `tests/appimage_x11_smoke.sh` in
+the same network-isolated container to ensure the packaged app creates its JPEGView window on X11.
+The smoke script uses Xvfb and checks for the visible window title; AppImageHub still performs its
+own end-to-end screenshot and compatibility review. Since each release also carries supplementary
+newer-Ubuntu AppImages, the catalog's one-line `data/` entry should link directly to the stable
+`JPEGView-x86_64.AppImage` baseline asset instead of asking the catalog to choose between variants.

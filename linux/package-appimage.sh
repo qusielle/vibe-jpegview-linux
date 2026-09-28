@@ -22,7 +22,8 @@ make -C "$SCRIPT_DIR" BUILD_DIR="$BUILD_DIR" VERSION="$VERSION" \
 	SEVENZIP_SOURCE_ROOT="$SEVENZIP_SOURCE_ROOT" RAR_BACKEND_ROOT="$RAR_BACKEND_ROOT" all
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" "$APPDIR/usr/share/applications" \
-	"$APPDIR/usr/share/icons/hicolor/64x64/apps" "$APPDIR/usr/share/jpegview"
+	"$APPDIR/usr/share/icons/hicolor/64x64/apps" "$APPDIR/usr/share/jpegview" \
+	"$APPDIR/usr/share/metainfo"
 cp "$BUILD_DIR/jpegview-linux" "$APPDIR/usr/bin/jpegview-linux"
 cp "$SCRIPT_DIR/AppRun" "$APPDIR/AppRun"
 cp "$SCRIPT_DIR/jpegview.desktop" "$APPDIR/usr/share/applications/jpegview-linux.desktop"
@@ -30,11 +31,55 @@ cp "$SCRIPT_DIR/jpegview.desktop" "$APPDIR/jpegview-linux.desktop"
 "$BUILD_DIR/jpegview-linux" --export-app-icon "$APPDIR/jpegview-linux.png"
 cp "$APPDIR/jpegview-linux.png" "$APPDIR/usr/share/icons/hicolor/64x64/apps/jpegview-linux.png"
 cp "$SCRIPT_DIR/../src/JPEGView/res/JPEGView.ico" "$APPDIR/usr/share/jpegview/JPEGView.ico"
+cp "$SCRIPT_DIR/jpegview-linux.appdata.xml" \
+	"$APPDIR/usr/share/metainfo/io.github.qusielle.vibe-jpegview-linux.appdata.xml"
+ln -s jpegview-linux.png "$APPDIR/.DirIcon"
 for desktop_file in "$APPDIR/jpegview-linux.desktop" \
 	"$APPDIR/usr/share/applications/jpegview-linux.desktop"; do
 	printf 'X-AppImage-Version=%s\n' "$VERSION" >> "$desktop_file"
 done
 chmod +x "$APPDIR/AppRun"
+
+if [ ! -x "$APPDIR/AppRun" ] || [ ! -L "$APPDIR/.DirIcon" ] || \
+		[ ! -f "$APPDIR/.DirIcon" ] || \
+		[ "$(readlink "$APPDIR/.DirIcon")" != jpegview-linux.png ]; then
+	echo "AppDir is missing an executable AppRun or its required PNG .DirIcon" >&2
+	exit 1
+fi
+if [ "$(file --brief --mime-type "$(readlink -f "$APPDIR/.DirIcon")")" != image/png ]; then
+	echo "AppDir .DirIcon must resolve to a PNG image" >&2
+	exit 1
+fi
+set -- "$APPDIR"/*.desktop
+if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+	echo "AppDir must contain exactly one root .desktop file" >&2
+	exit 1
+fi
+for desktop_key in Icon Categories; do
+	key_count=$(grep -c "^${desktop_key}=" "$1" || true)
+	if [ "$key_count" -ne 1 ]; then
+		echo "AppDir desktop entry must contain $desktop_key exactly once" >&2
+		exit 1
+	fi
+done
+
+if command -v desktop-file-validate >/dev/null 2>&1; then
+	desktop-file-validate "$APPDIR/jpegview-linux.desktop" \
+		"$APPDIR/usr/share/applications/jpegview-linux.desktop"
+elif [ -n "$APPIMAGE_UPDATE_INFORMATION" ]; then
+	echo "desktop-file-validate is required for release AppImage packaging" >&2
+	exit 1
+else
+	echo "warning: desktop-file-validate not found; skipping desktop-entry validation" >&2
+fi
+if command -v appstreamcli >/dev/null 2>&1; then
+	appstreamcli validate-tree --no-net "$APPDIR"
+elif [ -n "$APPIMAGE_UPDATE_INFORMATION" ]; then
+	echo "appstreamcli is required for release AppImage packaging" >&2
+	exit 1
+else
+	echo "warning: appstreamcli not found; skipping AppStream validation" >&2
+fi
 
 copy_runtime_dependencies() {
 	queue="$1"

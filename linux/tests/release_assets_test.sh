@@ -18,6 +18,10 @@ output_dir=
 entrypoint=
 update_information=
 requested_output=
+network_mode=
+volume=
+extract_and_run=
+x11_smoke_script=0
 mode=
 for ((index = 1; index < $#; index++)); do
 	case "${!index}" in
@@ -25,6 +29,10 @@ for ((index = 1; index < $#; index++)); do
 			next=$((index + 1))
 			volume=${!next}
 			output_dir=${volume%:/out}
+			;;
+		--network)
+			next=$((index + 1))
+			network_mode=${!next}
 			;;
 		--entrypoint)
 			next=$((index + 1))
@@ -35,15 +43,39 @@ for ((index = 1; index < $#; index++)); do
 			environment_assignment=${!next}
 			case "$environment_assignment" in
 				APPIMAGE_UPDATE_INFORMATION=*) update_information=${environment_assignment#*=} ;;
+				APPIMAGE_EXTRACT_AND_RUN=*) extract_and_run=${environment_assignment#*=} ;;
 				OUTPUT=*) requested_output=${environment_assignment#*=} ;;
 			esac
 			;;
+		/src/linux/tests/appimage_x11_smoke.sh) x11_smoke_script=1 ;;
 		appimage|binary) mode=${!index} ;;
 	esac
 done
 
 if [[ "$entrypoint" == /out/* ]]; then
-	echo "JPEGView Linux $TEST_RELEASE_VERSION"
+	if [[ "$entrypoint" == *.AppImage ]]; then
+		[[ "$network_mode" == none && "$volume" == *:/out:ro && "$extract_and_run" == 1 ]] || {
+			echo 'Release help check did not run the AppImage offline from a read-only volume' >&2
+			exit 1
+		}
+	fi
+	case "$entrypoint" in
+		*.AppImage)
+			printf 'Usage: jpegview-linux [OPTIONS]\n  --help Show this help\n'
+			;;
+		*)
+			echo "JPEGView Linux $TEST_RELEASE_VERSION"
+			;;
+	esac
+	exit 0
+fi
+if [[ "$entrypoint" == /bin/sh ]]; then
+	[[ "$network_mode" == none && "$volume" == *:/out:ro && "$extract_and_run" == 1 && \
+		"$x11_smoke_script" == 1 ]] || {
+		echo 'Release X11 smoke check did not run offline against the built AppImage' >&2
+		exit 1
+	}
+	printf 'AppImage X11 launch smoke test ran\n' >> "$RELEASE_ASSETS_TEST_TEMP_DIR/x11-smoke"
 	exit 0
 fi
 
@@ -161,6 +193,19 @@ for ubuntu_version in 20 22 24 26; do
 		echo "Ubuntu $ubuntu_version AppImage image does not install zsyncmake" >&2
 		exit 1
 	fi
+	for package in appstream desktop-file-utils xvfb x11-utils; do
+		if ! grep -Eq "(^|[[:space:]])${package}([[:space:]\\]|$)" \
+			"$REPO_DIR/linux/Dockerfile.ubuntu${ubuntu_version}"; then
+			echo "Ubuntu $ubuntu_version AppImage image does not install $package for checklist validation" >&2
+			exit 1
+		fi
+	done
 done
 
-echo 'Release AppImage update metadata, baseline alias, and zsync upload tests passed.'
+if ! test -f "$TEMP_DIR/x11-smoke" || \
+		! grep -Fqx 'AppImage X11 launch smoke test ran' "$TEMP_DIR/x11-smoke"; then
+	echo 'Release packaging did not run the offline AppImage X11 smoke check' >&2
+	exit 1
+fi
+
+echo 'Release AppImage update metadata, offline startup, baseline alias, and zsync upload tests passed.'

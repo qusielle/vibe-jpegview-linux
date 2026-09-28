@@ -208,7 +208,7 @@ test-version:
 	sh tests/version_test.sh
 
 test-shell:
-	sh -n AppRun retry-command.sh tests/ui_smoke.sh tests/version_test.sh tests/docker_build_test.sh tests/appimage_runtime_test.sh tests/retry_command_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh ../set_env.sh
+	sh -n AppRun retry-command.sh tests/ui_smoke.sh tests/appimage_x11_smoke.sh tests/version_test.sh tests/docker_build_test.sh tests/appimage_runtime_test.sh tests/retry_command_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh ../set_env.sh
 	$(MAKE) test-version
 	sh tests/docker_build_test.sh
 	sh tests/appimage_runtime_test.sh
@@ -216,7 +216,7 @@ test-shell:
 	bash -n release-assets.sh
 	bash tests/release_assets_test.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck AppRun retry-command.sh tests/ui_smoke.sh tests/version_test.sh tests/docker_build_test.sh tests/appimage_runtime_test.sh tests/retry_command_test.sh tests/release_assets_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh release-assets.sh ../set_env.sh; \
+		shellcheck AppRun retry-command.sh tests/ui_smoke.sh tests/appimage_x11_smoke.sh tests/version_test.sh tests/docker_build_test.sh tests/appimage_runtime_test.sh tests/retry_command_test.sh tests/release_assets_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh release-assets.sh ../set_env.sh; \
 	else \
 		echo "ShellCheck: SKIP (shellcheck not installed)"; \
 	fi

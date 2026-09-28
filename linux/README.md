@@ -537,6 +537,16 @@ OUTPUT="$PWD/out/JPEGView-${VERSION}-x86_64.AppImage" \
 make -C linux appimage VERSION="$VERSION"
 ```
 
+The AppDir includes an executable `AppRun`, one root desktop entry, a `.DirIcon`, and AppStream
+metainfo with screenshots. When the standard Ubuntu `desktop-file-utils` and `appstream` tools are
+available, packaging validates both desktop entries and runs `appstreamcli validate-tree --no-net`.
+The Ubuntu AppImage build images install these validators from the matching Ubuntu repositories.
+Release packaging additionally checks that the built AppImage prints help without network access
+and creates its JPEGView X11 window in a private Xvfb session before publishing it.
+Because releases also contain newer-Ubuntu variants, the AppImageHub catalog entry should use the
+stable Ubuntu 20 asset URL (`https://github.com/qusielle/vibe-jpegview-linux/releases/latest/download/JPEGView-x86_64.AppImage`)
+so its compatibility test targets the baseline artifact rather than relying on variant selection.
+
 Published GitHub Release AppImages also embed update information and are published with a matching
 `.AppImage.zsync` file, allowing AppImageUpdate and compatible tools to fetch binary-delta updates.
 The release build obtains this metadata from `release-assets.sh`; ordinary local AppImage builds do

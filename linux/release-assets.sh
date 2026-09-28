@@ -29,6 +29,24 @@ docker run --rm \
 test -f "$OUTPUT_DIR/$appimage_name"
 test -f "$OUTPUT_DIR/$appimage_zsync_name"
 
+offline_help=$(docker run --rm --network none \
+	--env APPIMAGE_EXTRACT_AND_RUN=1 \
+	-v "$OUTPUT_DIR:/out:ro" \
+	--entrypoint "/out/$appimage_name" "$image" --help)
+case "$offline_help" in
+	*"--help"*"Show this help"*) ;;
+	*)
+		echo "AppImage did not show help information without network access: $appimage_name" >&2
+		exit 1
+		;;
+esac
+
+docker run --rm --network none \
+	--env APPIMAGE_EXTRACT_AND_RUN=1 \
+	-v "$OUTPUT_DIR:/out:ro" \
+	--entrypoint /bin/sh "$image" \
+	/src/linux/tests/appimage_x11_smoke.sh "/out/$appimage_name"
+
 if [[ "$UBUNTU_VERSION" == 20 ]]; then
 	baseline_appimage_name='JPEGView-x86_64.AppImage'
 	cp -- "$OUTPUT_DIR/$appimage_name" "$OUTPUT_DIR/$baseline_appimage_name"

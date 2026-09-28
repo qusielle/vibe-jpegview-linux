@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+  <id>io.github.qusielle.vibe-jpegview-linux</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+  <name>JPEGView Linux</name>
+  <summary>Fast, lightweight image viewer</summary>
+  <description>
+    <p>A fast native image viewer and editor forked from JPEGView, with responsive browsing,
+    high-quality image rendering, and practical editing tools.</p>
+    <p>Browse large image collections with responsive thumbnails, high-quality zoom and pan,
+    crop and selection tools, live picture-level adjustments, and double-page reading. Supported
+    images can also be opened directly from ZIP, TAR, 7z, and RAR archives.</p>
+  </description>
+  <developer_name>qusielle</developer_name>
+  <icon type="stock">jpegview-linux</icon>
+  <categories>
+    <category>Graphics</category>
+  </categories>
+  <url type="homepage">https://github.com/qusielle/vibe-jpegview-linux</url>
+  <url type="bugtracker">https://github.com/qusielle/vibe-jpegview-linux/issues</url>
+  <launchable type="desktop-id">jpegview-linux.desktop</launchable>
+  <provides>
+    <binary>jpegview-linux</binary>
+  </provides>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Main window with navigation and thumbnail panels</caption>
+      <image type="source" width="1600" height="900">https://raw.githubusercontent.com/qusielle/vibe-jpegview-linux/linux-viewer-ui/linux/screenshots/main-window-panels.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Open dialog with an image preview</caption>
+      <image type="source" width="1600" height="900">https://raw.githubusercontent.com/qusielle/vibe-jpegview-linux/linux-viewer-ui/linux/screenshots/open-dialog-preview.png</image>
+    </screenshot>
+  </screenshots>
+</component>

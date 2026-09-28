@@ -45,6 +45,24 @@ fi
 EOF
 chmod 755 "$MOCK_BIN/make" "$MOCK_BIN/patchelf" "$MOCK_BIN/appimagetool" "$MOCK_BIN/ldd"
 
+cat > "$MOCK_BIN/desktop-file-validate" <<'EOF'
+#!/bin/sh
+test "$#" -eq 2
+test -f "$1"
+test -f "$2"
+printf 'desktop-file-validate\n' >> "${APPIMAGE_TEST_VALIDATION_LOG:-/dev/null}"
+EOF
+cat > "$MOCK_BIN/appstreamcli" <<'EOF'
+#!/bin/sh
+test "$#" -eq 3
+test "$1" = validate-tree
+test "$2" = --no-net
+test -d "$3"
+test -f "$3/usr/share/metainfo/io.github.qusielle.vibe-jpegview-linux.appdata.xml"
+printf 'appstreamcli\n' >> "${APPIMAGE_TEST_VALIDATION_LOG:-/dev/null}"
+EOF
+chmod 755 "$MOCK_BIN/desktop-file-validate" "$MOCK_BIN/appstreamcli"
+
 for library in libjpegview-test.so.1 libstdc++.so.6 libgcc_s.so.1 \
 	libSDL2-2.0.so.0 libpangoft2-test.so.0; do
 	: > "$LIB_DIR/$library"
@@ -60,8 +78,9 @@ EOF
 chmod 755 "$BUILD_DIR/jpegview-linux"
 
 APPIMAGE_TEST_LIB_DIR="$LIB_DIR" \
-APPIMAGE_TEST_ICON="$REPO_DIR/src/JPEGView/res/JPEGView.ico" \
+APPIMAGE_TEST_ICON="$REPO_DIR/linux/screenshots/main-window-panels.png" \
 APPIMAGE_TEST_TOOL_LOG="$TEMP_DIR/appimagetool-arguments" \
+APPIMAGE_TEST_VALIDATION_LOG="$TEMP_DIR/validation-calls" \
 PATH="$MOCK_BIN:/usr/bin:/bin" \
 BUILD_DIR="$BUILD_DIR" \
 APPDIR="$APPDIR" \
@@ -79,8 +98,9 @@ fi
 
 update_information='gh-releases-zsync|qusielle|vibe-jpegview-linux|latest|JPEGView-*-ubuntu20-x86_64.AppImage.zsync'
 APPIMAGE_TEST_LIB_DIR="$LIB_DIR" \
-APPIMAGE_TEST_ICON="$REPO_DIR/src/JPEGView/res/JPEGView.ico" \
+APPIMAGE_TEST_ICON="$REPO_DIR/linux/screenshots/main-window-panels.png" \
 APPIMAGE_TEST_TOOL_LOG="$TEMP_DIR/appimagetool-update-arguments" \
+APPIMAGE_TEST_VALIDATION_LOG="$TEMP_DIR/validation-calls" \
 PATH="$MOCK_BIN:/usr/bin:/bin" \
 BUILD_DIR="$BUILD_DIR" \
 APPDIR="$APPDIR" \
@@ -103,7 +123,7 @@ grep -Fqx "ARG<$update_information>" "$TEMP_DIR/appimagetool-update-arguments"
 grep -Fqx "ARG<$TEMP_DIR/test-update.AppImage>" "$TEMP_DIR/appimagetool-update-arguments"
 
 if APPIMAGE_TEST_LIB_DIR="$LIB_DIR" \
-	APPIMAGE_TEST_ICON="$REPO_DIR/src/JPEGView/res/JPEGView.ico" \
+	APPIMAGE_TEST_ICON="$REPO_DIR/linux/screenshots/main-window-panels.png" \
 	APPIMAGE_TEST_TOOL_LOG="$TEMP_DIR/appimagetool-missing-zsync-arguments" \
 	APPIMAGE_TEST_OMIT_ZSYNC=1 \
 	PATH="$MOCK_BIN:/usr/bin:/bin" \
@@ -122,6 +142,51 @@ fi
 
 test -f "$APPDIR/usr/lib/libjpegview-test.so.1" || {
 	echo 'AppImage packaging stopped bundling an ordinary runtime dependency' >&2
+	exit 1
+}
+test -L "$APPDIR/.DirIcon" || {
+	echo 'AppImage AppDir is missing the required .DirIcon link' >&2
+	exit 1
+}
+test -f "$APPDIR/.DirIcon" || {
+	echo 'AppImage .DirIcon points to a missing icon image' >&2
+	exit 1
+}
+test "$(readlink "$APPDIR/.DirIcon")" = jpegview-linux.png || {
+	echo 'AppImage .DirIcon does not point to the root PNG icon' >&2
+	exit 1
+}
+test "$(file --brief --mime-type "$(readlink -f "$APPDIR/.DirIcon")")" = image/png || {
+	echo 'AppImage .DirIcon is not a PNG image' >&2
+	exit 1
+}
+test -f "$APPDIR/usr/share/metainfo/io.github.qusielle.vibe-jpegview-linux.appdata.xml" || {
+	echo 'AppImage AppDir is missing its AppStream metainfo' >&2
+	exit 1
+}
+cmp -s "$REPO_DIR/linux/jpegview-linux.appdata.xml" \
+	"$APPDIR/usr/share/metainfo/io.github.qusielle.vibe-jpegview-linux.appdata.xml" || {
+	echo 'AppImage AppStream metainfo differs from the source metadata' >&2
+	exit 1
+}
+test "$(find "$APPDIR" -maxdepth 1 -type f -name '*.desktop' | wc -l)" -eq 1 || {
+	echo 'AppImage AppDir must contain exactly one root desktop entry' >&2
+	exit 1
+}
+for key in Icon Categories; do
+	count=$(grep -c "^${key}=" "$APPDIR/jpegview-linux.desktop" || true)
+	test "$count" -eq 1 || {
+		echo "AppImage root desktop entry must contain $key exactly once" >&2
+		exit 1
+	}
+done
+test -x "$APPDIR/AppRun" || {
+	echo 'AppImage AppDir AppRun is not executable' >&2
+	exit 1
+}
+test "$(sort -u "$TEMP_DIR/validation-calls" | tr '\n' ' ')" = \
+	'appstreamcli desktop-file-validate ' || {
+	echo 'AppImage packaging did not run both desktop and AppStream validators' >&2
 	exit 1
 }
 for runtime in libstdc++.so.6 libgcc_s.so.1; do
