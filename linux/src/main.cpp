@@ -415,6 +415,7 @@ public:
 		recentFilesLoaded_ = recentFilesPath_.empty() ||
 			jpegview_linux::LoadRecentFiles(recentFilesPath_, recentFiles_);
 
+		const bool startedWithoutInputs = startupInputs_.empty();
 		fs::path emptyStartupLocation;
 		if (startupInputs_.size() == 1) {
 			std::error_code inputError;
@@ -429,10 +430,15 @@ public:
 		}
 		const jpegview_linux::FileList::SortMode initialSortMode = fileList_.GetSorting();
 		const bool initialSortAscending = fileList_.IsSortedAscending();
-		fileList_ = jpegview_linux::FileList(startupInputs_, initialSortMode,
-			initialSortAscending);
+		if (!startedWithoutInputs) {
+			fileList_ = jpegview_linux::FileList(startupInputs_, initialSortMode,
+				initialSortAscending);
+		}
 		startupInputs_.clear();
-		if (fileList_.Empty()) {
+		if (startedWithoutInputs) {
+			SetTitle();
+			OpenFileDialog();
+		} else if (fileList_.Empty()) {
 			if (!emptyStartupLocation.empty()) {
 				SetTitle();
 				OpenFileDialog(emptyStartupLocation);

@@ -11,6 +11,7 @@ if [ ! -x "$BINARY" ]; then
 	echo "UI smoke test: binary not found: $BINARY" >&2
 	exit 2
 fi
+BINARY=$(cd -- "$(dirname -- "$BINARY")" && pwd)/$(basename -- "$BINARY")
 
 for command in Xvfb xdotool openbox wmctrl; do
 	if ! command -v "$command" >/dev/null 2>&1; then
@@ -335,6 +336,33 @@ DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool type --delay 20 '01-RED'
 DISPLAY=":$display_number" xdotool key Return
 assert_title_prefix "01-red.ppm" "empty-directory startup did not browse from the invoked directory"
+stop_viewer
+
+# Starting with no positional arguments should browse the current working
+# directory and let the user select an image instead of exiting.
+(
+	cd "$temporary/images"
+	DISPLAY=":$display_number" HOME="$temporary/no-argument-home" \
+		XDG_CONFIG_HOME="$temporary/no-argument-config" \
+		XDG_STATE_HOME="$temporary/no-argument-state" \
+		"$BINARY" >"$temporary/no-argument-viewer.log" 2>&1
+) &
+viewer_pid=$!
+window_id=''
+for _ in $(seq 1 50); do
+	window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible --class jpegview-linux 2>/dev/null | head -1 || true)
+	if [ -n "$window_id" ]; then break; fi
+	sleep 0.1
+done
+if [ -z "$window_id" ]; then
+	echo "UI smoke test: no-argument startup did not leave a visible viewer window" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+assert_title_prefix "JPEGView" "no-argument startup did not open Browse"
+DISPLAY=":$display_number" xdotool type --delay 20 '01-RED'
+DISPLAY=":$display_number" xdotool key Return
+assert_title_prefix "01-red.ppm" "no-argument startup did not browse the current working directory"
 stop_viewer
 
 if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then

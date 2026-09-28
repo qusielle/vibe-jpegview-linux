@@ -199,9 +199,11 @@ request, and records the path only after decoding and presentation setup succeed
 shared navigation snapshot. Clipboard temporary paths never become recent entries, while the
 ordinary file dialog's Recents tab shows one MRU image per parent folder and reuses the cancellable
 preview worker; separate Browse and Recents dialog models preserve each tab's filter and selection.
-If the sole explicit startup argument is a directory with no directly supported images, the viewer
-keeps the event loop alive and opens Browse at that directory; other empty startup cases retain the
-no-images exit behavior.
+With no positional startup arguments, the viewer skips the initial image-list scan and keeps the
+event loop alive with Browse open at the current working directory, even if that directory contains
+supported images. If the sole explicit startup argument is a directory with no directly supported
+images, it opens Browse at that directory instead; other empty startup cases retain the no-images
+exit behavior.
 
 The Recents dialog delegates row removal and restoration to `recent_files`, preserving the unique
 per-parent MRU order. Viewer owns the transient LIFO undo stack and clears it when the dialog closes;

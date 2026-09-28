@@ -249,9 +249,11 @@ they support.
     The real viewer window is painted and shown before the initial directory scan and image decode,
     so cold AppImage and large-folder startup provides immediate visual feedback without changing the
     image preparation or navigation path. File-dialog-only and thumbnail-resampling workers start on
-    first use instead of being created before the first window appears. Starting with a single
-    directory argument that has no directly supported images now opens Browse at that directory
-    instead of exiting. Compatibility handling keeps always-on-top optional on older SDL runtimes.
+    first use instead of being created before the first window appears. Starting without image
+    arguments opens Browse in the current working directory instead of automatically opening an
+    image there; starting with a single directory that has no directly supported images opens Browse
+    at that directory instead of exiting. Compatibility handling keeps always-on-top optional on
+    older SDL runtimes.
 
 14. **Rendering and metadata correctness fixes.** Context-menu close no longer leaves a white pixel
     over the image or revealed navigation panel; borders avoid endpoint rasterization artifacts;
