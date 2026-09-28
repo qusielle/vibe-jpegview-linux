@@ -27,7 +27,8 @@ they support.
    background without flattening or changing their source pixels.
 
 3. **High-quality viewing, fitting, zooming, and panning.** JPEGView's high-quality downsampling and
-   sharpening path was ported, with bicubic enlargement and a shared 1 GiB image-cache budget.
+   sharpening path was ported, with Catmull–Rom bicubic enlargement and a shared 1 GiB image-cache
+   budget.
    Fitted JPEGs use libjpeg-turbo's native reduced DCT decode, avoiding full 4000×6000 pixel buffers
    when the screen needs only a smaller image. Up to four hardware-aware, low-priority workers prepare
    the closest forward/backward pairs concurrently; the prefetch window is derived from the configured

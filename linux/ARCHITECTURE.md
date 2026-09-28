@@ -43,7 +43,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   Cancellation, member-count/header limits, password copying/zeroization, and streaming output
   bounds are enforced across the ABI. Passwords are never passed through argv or a subprocess.
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
-  high-quality resizing, and the automatic/manual picture-level processing pipeline.
+  high-quality downsampling, Catmull–Rom bicubic enlargement, and the automatic/manual picture-level
+  processing pipeline.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
   move/resize hit testing, image/view coordinate conversion, crop-mode drag eligibility, and JPEG
   MCU-boundary alignment; pixel-buffer cropping remains in `image`.
@@ -210,7 +211,7 @@ per-parent MRU order. Viewer owns the transient LIFO undo stack and clears it wh
 Delete and the Remove button are active only in Recents, while Ctrl+Z is handled only by the open
 file dialog. Removing a row does not erase its separate per-image viewport or display-mode snapshots.
 
-Double-page behavior is planned in `double_page_model` and adapted by Viewer. The active FileList
+Double-page behavior is modeled by `double_page_model` and adapted by Viewer. The active FileList
 entry remains the navigation anchor; a visible partner is a separate page texture prepared through
 `display_image_cache` at the partner's current spread-slot size. Pairing uses only already-available
 dimensions and only strict portrait neighbors (the first cover is single), so checking the mode does

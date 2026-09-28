@@ -1,10 +1,12 @@
 # Linux feature candidates
 
-This is an unprioritized list of possible future work, not a promise or release plan. Items are
-kept separate where they can be implemented and reviewed independently. Unimplemented archive
-formats remain separate candidates even if an implementation later shares a backend. Archive-format
-candidates are independent of the JPEGView_L comparison below. The current behavior documented in
-[`README.md`](README.md) is authoritative; candidate sources are identified by name.
+This is an unprioritized list of Linux features that are not implemented yet, not a promise or
+release plan. Items are kept separate where they can be implemented and reviewed independently.
+Unimplemented archive formats remain separate candidates even if an implementation later shares a
+backend. Archive-format candidates are independent of the JPEGView_L comparison below. When a
+candidate is implemented, document its user-facing behavior in [`README.md`](README.md), update
+[`ARCHITECTURE.md`](ARCHITECTURE.md) when relevant, and remove it from this list. Candidate sources
+are identified by name.
 
 ## Archive input candidates
 
@@ -12,20 +14,6 @@ candidates are independent of the JPEGView_L comparison below. The current behav
   reading positions are explicitly out of scope for this candidate.
 - **CB7 comic archives:** browse images in comic 7z files. Comic-page bookmarks and remembered
   reading positions are explicitly out of scope for this candidate.
-
-## Implemented archive input
-
-- **ZIP, TAR, TGZ, 7z, and RAR image archives:** implemented in the Linux branch. `.zip`, `.tar`,
-  `.tar.gz`, `.tgz`, `.7z`, and `.rar` browse as virtual folders, list supported images and nested
-  folders without extracting or retaining image payloads, and support archive navigation and Recents
-  previews. Encrypted ZIP and 7z plus encrypted RAR4/RAR5 data/header formats use the shared per-run
-  password prompt/cache; header-encrypted catalogs keep names hidden while locked, and previews
-  never prompt. Ordinary unencrypted RAR remains on libarchive. TAR/TGZ do not have native password
-  encryption. Multi-volume RAR sets and split members are unsupported, and RAR7 is not yet covered
-  by application fixtures. Gzip TAR access is sequential; solid 7z and RAR5 archives may need earlier
-  members decompressed to reach later entries. Cold directory listing runs in a cancellable
-  worker. See current limits and controls in the
-  [Linux README](README.md#linux-branch-changes-in-order-of-importance).
 
 ## Open-dialog display candidates
 
@@ -39,14 +27,6 @@ candidates are independent of the JPEGView_L comparison below. The current behav
 - **Advanced configuration window:** expose persisted config-file options that are not already
   available as context-menu items. Group them by topic and edit the existing settings source of
   truth rather than introducing a parallel settings layer.
-
-## Implemented from the comic-reading candidates
-
-- **Double page mode and double page manga mode:** implemented with the `D` and `J` shortcuts,
-  navigation-panel and context-menu controls, portrait-page pairing, cover-single behavior, reversed
-  spread placement and Left/Right reading direction, and per-image restoration from Recents. The
-  behavior follows [YACReader 9.9.1.0](https://github.com/YACReader/yacreader) where practical; see
-  the [Linux README](README.md#linux-branch-changes-in-order-of-importance) for current behavior.
 
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
@@ -309,12 +289,8 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   precision for viewing and saving. See the fork's
   [PSD format documentation](https://github.com/famomatic/jpegview/blob/master/README.md).
 
-Recent-fork ideas already represented above were not duplicated here: PSB, KRA, ZIP/7z/RAR browsing
-(now implemented), CBZ/CB7 browsing, recent-file history, go-to-image-number, color sampling,
-negative/inverted colors, asynchronous file-list scanning, and common resampling changes. For example,
-SupaYoshi's recent
-[HEIC-to-JPEG context action](https://github.com/SupaYoshi/jpegview/commit/48ee0020cdacf3e3a98db3e8ada8dddd4c5d809b)
-is covered functionally by Linux's existing Save As conversion path.
+Repeated ideas from the reviewed forks are consolidated into one candidate entry rather than listed
+multiple times.
 
 ## Candidates from upstream JPEGView issues
 
@@ -387,31 +363,6 @@ repeated as new candidates below.
   user-configurable map URL. Keep it opt-in per click so coordinates are not sent anywhere
   automatically. See [issue #59](https://github.com/sylikc/jpegview/issues/59).
 
-Some issue ideas are already represented elsewhere in this file or implemented in Linux:
-
-- Recent-file history ([#397](https://github.com/sylikc/jpegview/issues/397)), comic/archive reading
-  ([#293](https://github.com/sylikc/jpegview/issues/293) and
-  [#301](https://github.com/sylikc/jpegview/issues/301)), transparency backgrounds
-  ([#43](https://github.com/sylikc/jpegview/issues/43),
-  [#287](https://github.com/sylikc/jpegview/issues/287),
-  [#339](https://github.com/sylikc/jpegview/issues/339)), oversized images
-  ([#141](https://github.com/sylikc/jpegview/issues/141) and
-  [#371](https://github.com/sylikc/jpegview/issues/371)), and custom commands
-  ([#383](https://github.com/sylikc/jpegview/issues/383)) overlap candidates above.
-- The F2 information overlay already shows `[current/total]`, though adding it to the window title
-  remains a candidate ([#260](https://github.com/sylikc/jpegview/issues/260)); the Linux thumbnail
-  pipeline supports PNG, AVIF, and JPEG XL as well as JPEG
-  ([#387](https://github.com/sylikc/jpegview/issues/387)); crop mode is off by default
-  ([#401](https://github.com/sylikc/jpegview/issues/401)); and choosing the processed image for
-  wallpaper is already supported ([#400](https://github.com/sylikc/jpegview/issues/400)). The
-  requested Linux port itself ([#69](https://github.com/sylikc/jpegview/issues/69)) is the purpose
-  of this repository.
-- The upstream `wontfix` request for single-instance behavior ([#155](https://github.com/sylikc/jpegview/issues/155))
-  overlaps the per-folder single-instance candidate listed under KrokusPokus/JPEGView_L; decide
-  whether Linux should forward later launches globally or per folder. Duplicate HEIC enumeration
-  ([#147](https://github.com/sylikc/jpegview/issues/147)) is a platform-specific bug report to
-  reproduce independently on Linux, not a feature to port as described.
-
 ## Existing Windows-parity gaps
 
 These user-facing gaps are also listed in the [Linux README](README.md#known-windows-parity-gaps)
@@ -435,29 +386,3 @@ and remain possible candidates:
   Windows binary database; Linux currently stores its own text database and native backups.
 - **Print setup and full help:** add a print-layout/options dialog and port the fuller Windows help
   content and localization.
-
-## Already covered or not a direct port candidate
-
-- **Transparency background setting (implemented):** the existing XDG settings file selects a
-  black, white, or checkerboard display background for alpha-bearing images. See the user-facing
-  [`README.md`](README.md) configuration note. This extends the checkerboard option found in
-  [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L).
-
-- **Catmull–Rom enlargement is already implemented.** The Linux display-resize path uses
-  endpoint-preserving Catmull–Rom bicubic interpolation for enlargement. The possible filter work
-  above concerns additional selectable downsampling kernels, not adding Catmull–Rom enlargement.
-- **Fixed `CacheRange=2` behavior is not currently proposed.** Linux has a shared configurable image
-  cache budget and adaptive neighbor prefetch; adopting a fixed before/after count would need a
-  demonstrated use case rather than copying KrokusPokus/JPEGView_L's setting literally.
-
-## Compatibility items to verify if reproduced
-
-- [KrokusPokus/JPEGView_L's release notes](https://github.com/KrokusPokus/JPEGView_L/releases)
-  report a fix for very large JPEGs that failed to load. Linux has memory-mapped input and
-  reduced-DCT display decoding, but also has an explicit 100-megapixel image limit. Masir01's
-  `dev-up` branch adds a bounded downsample path for oversized JPEGs (see above); compare the limits
-  and output using a reproducible file before treating the existing cap as a regression.
-- [KrokusPokus/JPEGView_L's release notes](https://github.com/KrokusPokus/JPEGView_L/releases)
-  report JPEG XL animation and archive-contained image fixes. Linux advertises animated JPEG XL
-  and supports ZIP/TAR/TGZ/7z/RAR-contained images. Verify a
-  concrete failing fixture before adding a separate bug-fix item.
