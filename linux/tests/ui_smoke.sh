@@ -1474,17 +1474,20 @@ if [ "$visual_assertions" -eq 1 ]; then
 		echo "UI smoke test: Recents did not show the focused image preview at ${preview_pixel_x},${preview_pixel_y} ($preview_pixel)" >&2
 		exit 1
 	fi
-	recent_help='Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Enter: Open recent   Backspace: Edit filter   Esc: Cancel'
-	help_length=${#recent_help}
-	help_last_cell_x=$((reopened_dialog_x + 18 + help_length * 6 - 6))
+	help_start_x=$((reopened_dialog_x + 18))
+	help_scan_width=$((960 - 36))
 	help_last_row_y=$((reopened_dialog_y + 685 - 34 + 9))
-	help_ink_pixel=$(convert "$temporary/recent-dialog-preview.png" \
-		-format "%[pixel:p{$((help_last_cell_x + 3)),$help_last_row_y}]" info:)
+	help_last_ink_offset=$(convert "$temporary/recent-dialog-preview.png" \
+		-crop "${help_scan_width}x1+${help_start_x}+${help_last_row_y}" +repage txt:- |
+		awk -F '[,:]' '/srgb\(170,170,170\)/ { last = $1 } END { if (last != "") print last }')
+	if [ -z "$help_last_ink_offset" ]; then
+		echo "UI smoke test: open-dialog help text was not visible on its expected row" >&2
+		exit 1
+	fi
 	help_trailing_pixel=$(convert "$temporary/recent-dialog-preview.png" \
-		-format "%[pixel:p{$((help_last_cell_x + 4)),$help_last_row_y}]" info:)
-	if [ "$help_ink_pixel" != 'srgb(170,170,170)' ] || \
-		[ "$help_trailing_pixel" = 'srgb(170,170,170)' ]; then
-		echo "UI smoke test: open-dialog help text has a stray pixel after its final glyph (ink=$help_ink_pixel trailing=$help_trailing_pixel)" >&2
+		-format "%[pixel:p{$((help_start_x + help_last_ink_offset + 1)),$help_last_row_y}]" info:)
+	if [ "$help_trailing_pixel" = 'srgb(170,170,170)' ]; then
+		echo "UI smoke test: open-dialog help text has a stray pixel after its final glyph (trailing=$help_trailing_pixel)" >&2
 		exit 1
 	fi
 	dialog_rows=$(((685 - 168) / 26))
@@ -1529,6 +1532,63 @@ if DISPLAY=":$display_number" xdotool search --onlyvisible --class jpegview-linu
 fi
 wait "$viewer_pid" || true
 viewer_pid=''
+
+# Removing recent rows works from both the Delete key and the Recents button;
+# Ctrl+Z undoes removals in LIFO order only while the dialog remains open.
+mkdir -p "$temporary/recent-removal/album-a" "$temporary/recent-removal/album-b"
+write_solid_ppm "$temporary/recent-removal/album-a/01-a.ppm" 220 30 40
+write_solid_ppm "$temporary/recent-removal/album-b/02-b.ppm" 35 80 225
+XDG_STATE_HOME="$temporary/recent-removal-state"
+export XDG_STATE_HOME
+VIEWER_TEST_HOME="$temporary/recent-removal-home" \
+	VIEWER_TEST_CONFIG_HOME="$temporary/recent-removal-config" \
+	launch_viewer "$temporary/recent-removal/album-a/01-a.ppm"
+assert_title_prefix "01-a.ppm" "recent-removal fixture did not open its first image"
+stop_viewer
+VIEWER_TEST_HOME="$temporary/recent-removal-home" \
+	VIEWER_TEST_CONFIG_HOME="$temporary/recent-removal-config" \
+	launch_viewer "$temporary/recent-removal/album-b/02-b.ppm"
+assert_title_prefix "02-b.ppm" "recent-removal fixture did not open its second image"
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key ctrl+Tab
+DISPLAY=":$display_number" xdotool key Delete
+DISPLAY=":$display_number" xdotool key Delete
+DISPLAY=":$display_number" xdotool key ctrl+z
+DISPLAY=":$display_number" xdotool key ctrl+z
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+assert_title_prefix "02-b.ppm" "Ctrl+Z did not restore multiple recent removals in reverse order"
+
+# The GUI button follows the same undo path as Delete.
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key ctrl+Tab
+removal_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
+removal_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
+remove_button_x=$(((removal_window_width - 900) / 2 + 846))
+remove_button_y=$(((removal_window_height - 650) / 2 + 52))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$remove_button_x" "$remove_button_y" click 1
+DISPLAY=":$display_number" xdotool key ctrl+z
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+assert_title_prefix "02-b.ppm" "the Recents Remove button or Ctrl+Z undo did not preserve its item"
+
+# Delete persists after dialog close; Ctrl+Z outside the dialog has no effect.
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key ctrl+Tab
+DISPLAY=":$display_number" xdotool key Delete
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+assert_title_prefix "01-a.ppm" "Delete did not remove the selected recent item"
+DISPLAY=":$display_number" xdotool key ctrl+z
+DISPLAY=":$display_number" xdotool key ctrl+o
+DISPLAY=":$display_number" xdotool key ctrl+Tab
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.3
+assert_title_prefix "01-a.ppm" "Ctrl+Z outside the open dialog unexpectedly restored a recent item"
+stop_viewer
+XDG_STATE_HOME="$temporary/state"
+export XDG_STATE_HOME
 
 if [ "$visual_assertions" -eq 1 ]; then
 	# A narrower portrait image must repaint the side margins after a wide image

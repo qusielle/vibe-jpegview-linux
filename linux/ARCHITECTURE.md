@@ -69,10 +69,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   defaults), plus stable sort-mode values.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
   bounded per-file `ViewportSnapshot` LRU and independent bounded double-page/manga-mode snapshots,
-  plus tolerant atomic persistence in the XDG state
-  directory. Virtual archive-member paths remain logical recent identities while source validation
-  and cache freshness use the backing container. The recent database is independent from viewer
-  settings and performs no image or directory scans while loading.
+  ordered row removal/restoration for the Recents dialog, plus tolerant atomic persistence in the
+  XDG state directory. Virtual archive-member paths remain logical recent identities while source
+  validation and cache freshness use the backing container. The recent database is independent from
+  viewer settings and performs no image or directory scans while loading.
 - `viewport`: fit/fill/manual zoom modes, pan state, destination geometry, and panning bounds that
   keep the viewport inside the image.
 - `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,
@@ -199,6 +199,11 @@ preview worker; separate Browse and Recents dialog models preserve each tab's fi
 If the sole explicit startup argument is a directory with no directly supported images, the viewer
 keeps the event loop alive and opens Browse at that directory; other empty startup cases retain the
 no-images exit behavior.
+
+The Recents dialog delegates row removal and restoration to `recent_files`, preserving the unique
+per-parent MRU order. Viewer owns the transient LIFO undo stack and clears it when the dialog closes;
+Delete and the Remove button are active only in Recents, while Ctrl+Z is handled only by the open
+file dialog. Removing a row does not erase its separate per-image viewport or display-mode snapshots.
 
 Double-page behavior is planned in `double_page_model` and adapted by Viewer. The active FileList
 entry remains the navigation anchor; a visible partner is a separate page texture prepared through

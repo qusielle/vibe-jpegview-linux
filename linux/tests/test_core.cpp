@@ -5704,6 +5704,22 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 	jpegview_linux::ViewportSnapshot snapshot{false, false, false, 2.75};
 	recent.RememberViewport(secondA, snapshot);
 	recent.RememberDoublePageMode(secondA, {true, true});
+	const std::vector<fs::path> orderBeforeRemoval = recent.Files();
+	const auto removedRecent = recent.Remove(secondA);
+	Expect(removedRecent.has_value() && removedRecent->path == normalizedSecondA &&
+		removedRecent->index == 0 && recent.Files().size() == 1 &&
+		recent.Files().front() == normalizedOnlyB,
+		"removing a recent image did not return its original MRU position");
+	Expect(recent.FindViewport(secondA).has_value() && recent.FindDoublePageMode(secondA).has_value(),
+		"removing a recent row discarded independent per-image viewing snapshots");
+	Expect(recent.Restore(*removedRecent) && recent.Files() == orderBeforeRemoval,
+		"undoing a recent removal did not restore its exact MRU position");
+	const auto removedTail = recent.Remove(onlyB);
+	Expect(removedTail.has_value() && removedTail->index == 1 &&
+		recent.Restore(*removedTail) && recent.Files() == orderBeforeRemoval,
+		"undoing a non-leading recent removal changed the order");
+	Expect(!recent.Remove(folderB / "not-recent.jpg").has_value(),
+		"removing an absent image unexpectedly modified recent history");
 	const auto restored = recent.FindViewport(normalizedSecondA);
 	Expect(restored.has_value() && !restored->fitToWindow &&
 		!restored->fillWithCrop && !restored->noEnlarge,

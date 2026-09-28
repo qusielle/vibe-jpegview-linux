@@ -1936,6 +1936,7 @@ private:
 		fileDialogFilename_.clear();
 		fileDialogModel_.Clear();
 		recentFileDialogModel_.Clear();
+		recentFileRemovalUndo_.clear();
 		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogDirectorySummaries_.clear();
 	}
@@ -5009,6 +5010,15 @@ private:
 		return FileDialogRect().y + 112;
 	}
 
+	bool FileDialogCanRemoveRecent() const {
+		return FileDialogHasTabs() && fileDialogTab_ == FileDialogTab::Recents;
+	}
+
+	SDL_Rect FileDialogRemoveRecentButtonRect() const {
+		const SDL_Rect dialog = FileDialogRect();
+		return SDL_Rect{dialog.x + dialog.w - 90, dialog.y + 40, 72, 24};
+	}
+
 	SDL_Rect FileDialogTabRect(FileDialogTab tab) const {
 		const SDL_Rect dialog = FileDialogRect();
 		const int width = tab == FileDialogTab::Browse ? 62 : 70;
@@ -5572,13 +5582,8 @@ private:
 		fileDialogFilename_.clear();
 		fileDialogModel_.Begin(false);
 		recentFileDialogModel_.Begin(false);
-		std::vector<FileDialogEntry> recentEntries;
-		recentEntries.reserve(recentFiles_.Files().size());
-		for (const fs::path& path : recentFiles_.Files()) {
-			recentEntries.push_back(FileDialogEntry{path, false, false, {}, false,
-				jpegview_linux::IsArchiveMemberLocation(path)});
-		}
-		recentFileDialogModel_.SetEntriesInOrder(std::move(recentEntries), true);
+		recentFileRemovalUndo_.clear();
+		RebuildRecentFileDialogEntries();
 		recentFileDialogModel_.SelectFirst(FileDialogVisibleRows());
 		fileDialogMessage_.clear();
 		fileDialogOpen_ = true;
@@ -5596,6 +5601,45 @@ private:
 		if (!FileDialogHasTabs() || fileDialogTab_ == tab) return;
 		fileDialogTab_ = tab;
 		InvalidateFileDialogPreview();
+	}
+
+	void RebuildRecentFileDialogEntries() {
+		std::vector<FileDialogEntry> entries;
+		entries.reserve(recentFiles_.Files().size());
+		for (const fs::path& path : recentFiles_.Files()) {
+			entries.push_back(FileDialogEntry{path, false, false, {}, false,
+				jpegview_linux::IsArchiveMemberLocation(path)});
+		}
+		recentFileDialogModel_.SetEntriesInOrder(std::move(entries), true);
+	}
+
+	bool RemoveSelectedRecent() {
+		if (!FileDialogCanRemoveRecent()) return false;
+		const FileDialogEntry* selected = recentFileDialogModel_.SelectedEntry();
+		if (selected == nullptr) return false;
+		const int previousIndex = recentFileDialogModel_.SelectedIndex();
+		const auto removal = recentFiles_.Remove(selected->path);
+		if (!removal.has_value()) return false;
+		recentFileRemovalUndo_.push_back(*removal);
+		RebuildRecentFileDialogEntries();
+		if (!recentFileDialogModel_.Entries().empty()) {
+			recentFileDialogModel_.Select(std::min(previousIndex,
+				static_cast<int>(recentFileDialogModel_.Entries().size()) - 1),
+				FileDialogVisibleRows());
+		}
+		InvalidateFileDialogPreview();
+		return true;
+	}
+
+	bool UndoRecentRemoval() {
+		if (recentFileRemovalUndo_.empty()) return false;
+		const jpegview_linux::RecentFileRemoval removal = recentFileRemovalUndo_.back();
+		if (!recentFiles_.Restore(removal)) return false;
+		recentFileRemovalUndo_.pop_back();
+		RebuildRecentFileDialogEntries();
+		recentFileDialogModel_.Focus(removal.path, FileDialogVisibleRows());
+		InvalidateFileDialogPreview();
+		return true;
 	}
 
 	void OpenSaveFileDialog(bool fullSize) {
@@ -5762,7 +5806,12 @@ private:
 				event.key.keysym.sym == SDLK_PAGEDOWN || event.key.keysym.sym == SDLK_HOME ||
 				event.key.keysym.sym == SDLK_END;
 			if (event.key.repeat != 0 && !repeatableSelectionKey) break;
-			if (event.key.keysym.sym == SDLK_ESCAPE) {
+			const bool control = (event.key.keysym.mod & 0x00c0u) != 0;
+			if (control && event.key.keysym.sym == SDLK_z) {
+				UndoRecentRemoval();
+			} else if (event.key.keysym.sym == SDLK_DELETE && FileDialogCanRemoveRecent()) {
+				RemoveSelectedRecent();
+			} else if (event.key.keysym.sym == SDLK_ESCAPE) {
 				CloseFileDialog();
 			} else if (event.key.keysym.sym == SDLK_TAB &&
 				(event.key.keysym.mod & 0x00C0u) != 0 && FileDialogHasTabs()) {
@@ -5852,6 +5901,8 @@ private:
 				event.button.y, FileDialogTabRect(FileDialogTab::Browse));
 			const bool recentsTabClicked = FileDialogHasTabs() && PointInRect(event.button.x,
 				event.button.y, FileDialogTabRect(FileDialogTab::Recents));
+			const bool removeRecentClicked = FileDialogCanRemoveRecent() && PointInRect(
+				event.button.x, event.button.y, FileDialogRemoveRecentButtonRect());
 			const bool inputClicked = PointInRect(event.button.x, event.button.y, FileDialogInputRect());
 			const bool sortClicked = FileDialogCanSort() &&
 				PointInRect(event.button.x, event.button.y, FileDialogSortRect());
@@ -5864,6 +5915,8 @@ private:
 				SwitchFileDialogTab(FileDialogTab::Browse);
 			} else if (event.button.button == SDL_BUTTON_LEFT && recentsTabClicked) {
 				SwitchFileDialogTab(FileDialogTab::Recents);
+			} else if (event.button.button == SDL_BUTTON_LEFT && removeRecentClicked) {
+				RemoveSelectedRecent();
 			} else if (event.button.button == SDL_BUTTON_LEFT && sortClicked) {
 				fileDialogModel_.ToggleSortMode(FileDialogVisibleRows());
 			} else if (event.button.button == SDL_BUTTON_LEFT && inputClicked) {
@@ -5922,6 +5975,18 @@ private:
 			"One recent image per folder" :
 			jpegview_linux::ArchiveLocationDisplayName(fileDialogDirectory_),
 			dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
+		if (FileDialogCanRemoveRecent()) {
+			const SDL_Rect button = FileDialogRemoveRecentButtonRect();
+			const bool enabled = recentFileDialogModel_.SelectedEntry() != nullptr;
+			const bool hovered = enabled && PointInRect(lastMouseX_, lastMouseY_, button);
+			SDL_SetRenderDrawColor(renderer_, enabled ? (hovered ? 52 : 32) : 24,
+				enabled ? (hovered ? 78 : 38) : 24, enabled ? (hovered ? 108 : 52) : 24, 230);
+			SDL_RenderFillRect(renderer_, &button);
+			DrawRect(button, enabled ? 115 : 65, enabled ? 135 : 65, enabled ? 155 : 65);
+			const int labelX = button.x + (button.w - TextWidth("Remove", kUiTextScale)) / 2;
+			DrawText("Remove", labelX, button.y + 7, kUiTextScale,
+				enabled ? 225 : 115, enabled ? 230 : 115, enabled ? 238 : 115);
+		}
 		DrawText(fileDialogSave_ ? "File name" :
 			(fileDialogParameterRestore_ ? "Backup filter" : "Filter"),
 			dialog.x + 18, dialog.y + 68,
@@ -6038,7 +6103,7 @@ private:
 			(fileDialogParameterRestore_ ?
 				"Type: Filter   Enter: Restore backup   Backspace: Parent   Esc: Cancel" :
 				(fileDialogTab_ == FileDialogTab::Recents ?
-					"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Enter: Open recent   Backspace: Edit filter   Esc: Cancel" :
+					"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Del: Remove   Ctrl+Z: Undo   Enter: Open   Backspace: Filter   Esc: Cancel" :
 					"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Enter: Open   Ctrl+Return: Folder   Backspace: Filter/parent   Esc: Cancel")),
 			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
 		const SDL_Rect resizeHandle = FileDialogResizeHandleRect();
@@ -7887,6 +7952,7 @@ private:
 	std::string fileDialogMessage_;
 	jpegview_linux::FileDialogModel fileDialogModel_;
 	jpegview_linux::FileDialogModel recentFileDialogModel_;
+	std::vector<jpegview_linux::RecentFileRemoval> recentFileRemovalUndo_;
 	jpegview_linux::ArchivePasswordDialogModel archivePasswordDialog_;
 	fs::path archivePasswordDialogTarget_;
 	std::string archivePasswordPendingValue_;

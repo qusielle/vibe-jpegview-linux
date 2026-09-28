@@ -16,11 +16,18 @@ inline constexpr std::size_t kMaximumRecentFolders = 100;
 inline constexpr std::size_t kMaximumRecentViewportSnapshots = 256;
 inline constexpr std::size_t kMaximumRecentDisplayModeSnapshots = 256;
 
+struct RecentFileRemoval {
+	std::filesystem::path path;
+	std::size_t index = 0;
+};
+
 // Keeps one most-recent image per normalized absolute parent directory and a
 // separately bounded MRU set of per-image viewing snapshots.
 class RecentFiles {
 public:
 	void Add(const std::filesystem::path& filename);
+	std::optional<RecentFileRemoval> Remove(const std::filesystem::path& filename);
+	bool Restore(const RecentFileRemoval& removal);
 	void RememberViewport(const std::filesystem::path& filename,
 		const ViewportSnapshot& snapshot);
 	std::optional<ViewportSnapshot> FindViewport(

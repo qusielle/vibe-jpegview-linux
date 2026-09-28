@@ -137,7 +137,9 @@ they support.
    A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode when it
    is opened again. Selecting a picture from Recents also restores its saved double-page and manga
    modes; those modes then carry through normal image navigation. New paths opened from Browse or
-   dropped onto the viewer inherit the global display-mode defaults. ZIP, TAR,
+   dropped onto the viewer inherit the global display-mode defaults. In Recents, Delete or the
+   **Remove** button removes the selected row; Ctrl+Z restores removals in reverse order while the
+   dialog remains open. Closing the dialog clears its undo history. ZIP, TAR,
    `.tar.gz`, `.tgz`, `.7z`, and `.rar` files appear as gold `[ZIP]`, `[TAR]`, `[TGZ]`, `[.7Z]`, or `[RAR]`
    directory rows in Browse. Entering one lists supported images and subfolders. Opening an archive directly
    starts at its root image list. Archive-member rows use the same gold cue in Browse, Recents, and the thumbnail

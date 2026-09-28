@@ -204,6 +204,7 @@ enum : Sint32 {
 	SDLK_o = 'o',
 	SDLK_q = 'q',
 	SDLK_r = 'r',
+	SDLK_z = 'z',
 	SDLK_EQUALS = '=',
 	SDLK_MINUS = '-',
 	SDLK_LEFT = 1073741904,

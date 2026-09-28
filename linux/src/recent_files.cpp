@@ -130,6 +130,29 @@ void RecentFiles::Add(const fs::path& filename) {
 	if (files_.size() > kMaximumRecentFolders) files_.resize(kMaximumRecentFolders);
 }
 
+std::optional<RecentFileRemoval> RecentFiles::Remove(const fs::path& filename) {
+	const fs::path path = NormalizeAbsolute(filename);
+	if (path.empty()) return std::nullopt;
+	const auto found = std::find(files_.begin(), files_.end(), path);
+	if (found == files_.end()) return std::nullopt;
+	const std::size_t index = static_cast<std::size_t>(std::distance(files_.begin(), found));
+	files_.erase(found);
+	return RecentFileRemoval{path, index};
+}
+
+bool RecentFiles::Restore(const RecentFileRemoval& removal) {
+	const fs::path path = NormalizeAbsolute(removal.path);
+	if (path.empty()) return false;
+	const fs::path folder = path.parent_path();
+	files_.erase(std::remove_if(files_.begin(), files_.end(), [&folder](const fs::path& existing) {
+		return existing.parent_path() == folder;
+	}), files_.end());
+	const std::size_t index = std::min(removal.index, files_.size());
+	files_.insert(files_.begin() + static_cast<std::ptrdiff_t>(index), path);
+	if (files_.size() > kMaximumRecentFolders) files_.resize(kMaximumRecentFolders);
+	return true;
+}
+
 void RecentFiles::RememberViewport(const fs::path& filename,
 	const ViewportSnapshot& snapshot) {
 	const fs::path path = NormalizeAbsolute(filename);
