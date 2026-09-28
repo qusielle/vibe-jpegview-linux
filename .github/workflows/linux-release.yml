@@ -8,13 +8,42 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  release-ubuntu20:
+    name: Ubuntu 20.04 compatibility baseline (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Build container
+        env:
+          DOCKER_BUILDKIT: "1"
+          UBUNTU_VERSION: "20"
+        run: |
+          sh ./linux/retry-command.sh -- docker build \
+            --file "linux/Dockerfile.ubuntu${UBUNTU_VERSION}" \
+            --tag "jpegview-linux-build:ubuntu${UBUNTU_VERSION}" \
+            .
+
+      - name: Build and upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          UBUNTU_VERSION: "20"
+          OUTPUT_DIR: ${{ runner.temp }}/jpegview-linux-release
+        run: bash linux/release-assets.sh
+
+  release-newer-ubuntu:
     name: Ubuntu ${{ matrix.ubuntu }} (x86_64)
+    needs: release-ubuntu20
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        ubuntu: ["20", "22", "24", "26"]
+        ubuntu: ["22", "24", "26"]
     steps:
       - name: Check out release source
         uses: actions/checkout@v7

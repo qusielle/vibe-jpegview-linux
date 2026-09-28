@@ -339,4 +339,9 @@ filename wildcard. `appimagetool -u` embeds that value and generates a sidecar. 
 builds directly to the final versioned AppImage filename so the zsync target filename remains
 aligned, then uploads/checksums both assets together. The Ubuntu AppImage Docker images install the
 standard-repository `zsync` package to provide `zsyncmake`; package creation fails if requested
-update metadata does not produce the sidecar.
+update metadata does not produce the sidecar. The Ubuntu 20 release job also publishes a byte-for-byte
+copy as `JPEGView-x86_64.AppImage`, the stable compatibility download alias. The release workflow
+requires that Ubuntu 20 job to complete before building or publishing the Ubuntu 22/24/26 variants;
+the latter are supplementary assets, not substitutes when the lowest-glibc artifact failed. The
+Ubuntu 20 build is the supported glibc baseline (2.31); glibc remains a host-provided base library
+and is intentionally not bundled into the AppImage.

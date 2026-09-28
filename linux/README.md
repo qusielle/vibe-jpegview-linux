@@ -435,7 +435,16 @@ asset for its Ubuntu base. Release AppImages embed AppImage's `gh-releases-zsync
 their matching `.zsync` files are uploaded beside them and included in the checksum file. The embedded
 GitHub Releases channel follows the latest non-prerelease release and matches only the same Ubuntu
 base, so each AppImage updates from a compatible artifact. Asset names include the Ubuntu release
-because artifacts built on newer bases may require newer system glibc.
+because artifacts built on newer bases may require newer system glibc. The Ubuntu 20 release job is
+the compatibility baseline and must finish successfully before jobs for newer Ubuntu bases start.
+It also publishes `JPEGView-x86_64.AppImage` as a stable download alias for the byte-identical,
+versioned Ubuntu 20 AppImage. Use that asset on the [latest releases page](https://github.com/qusielle/vibe-jpegview-linux/releases/latest)
+for AppImageHub submissions and broad Linux compatibility. The alias is included in the Ubuntu 20
+checksum file. AppImages intentionally use the host's glibc rather than bundling it: Ubuntu 20 builds
+target glibc 2.31, while an Ubuntu 22 build can require glibc 2.35. The generic AppImageHub warning
+about using the system C library is expected; its reported glibc version indicates which build
+variant it inspected. Use the Ubuntu 20 artifact for the lower compatibility floor, rather than
+bundling a private glibc.
 
 If SDL2 is installed in a non-standard location, override the linker settings:
 
@@ -543,8 +552,8 @@ drivers such as Mesa load against the host's matching C++ runtime instead of an 
 for codec dependencies. The AppRun wrapper keeps SDL's accelerated renderer by default, but selects
 the SDL software renderer when the host has neither Mesa's software DRI driver nor an accessible
 GPU device; this avoids a fatal GLX startup error on headless/sandboxed hosts. An explicit
-`SDL_RENDER_DRIVER` setting is respected. Ubuntu 20.04 runtime compatibility still needs to be
-verified by running this image in the intended Docker environment.
+`SDL_RENDER_DRIVER` setting is respected. The Ubuntu 20.04 AppImage is the release compatibility
+baseline; newer Ubuntu-specific artifacts can require a newer host glibc.
 
 The native window and AppImage desktop entry both use the largest frame embedded from the upstream
 `src/JPEGView/res/JPEGView.ico`. Packaging exports that same frame as a Linux icon-theme PNG without

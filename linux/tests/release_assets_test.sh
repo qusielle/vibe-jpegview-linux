@@ -56,6 +56,7 @@ case "$mode" in
 	appimage)
 		appimage="$output_dir/${requested_output#/out/}"
 		printf 'mock AppImage\n' > "$appimage"
+		chmod 755 "$appimage"
 		printf '%s\n' "$update_information" > "$RELEASE_ASSETS_TEST_TEMP_DIR/update-information"
 		printf '%s\n' "$requested_output" > "$RELEASE_ASSETS_TEST_TEMP_DIR/appimage-output"
 		printf 'mock zsync\n' > "$appimage.zsync"
@@ -87,27 +88,72 @@ printf '%s\n' "$@" > "$RELEASE_ASSETS_TEST_UPLOAD_LOG"
 EOF
 chmod 755 "$MOCK_BIN/docker" "$MOCK_BIN/gh"
 
-TEST_RELEASE_VERSION=1.4.2 \
-RELEASE_ASSETS_TEST_TEMP_DIR="$TEMP_DIR" \
-RELEASE_ASSETS_TEST_UPLOAD_LOG="$TEMP_DIR/upload-arguments" \
-RELEASE_TAG=1.4.2 \
-UBUNTU_VERSION=20 \
-APP_VERSION=1.4.2 \
-OUTPUT_DIR="$OUTPUT_DIR" \
-PATH="$MOCK_BIN:$PATH" \
-	bash "$REPO_DIR/linux/release-assets.sh" >/dev/null
+run_release_asset_mock() {
+	local ubuntu_version=$1 output_dir=$2 upload_log=$3
+	mkdir -p "$output_dir"
+	TEST_RELEASE_VERSION=1.4.2 \
+	RELEASE_ASSETS_TEST_TEMP_DIR="$TEMP_DIR" \
+	RELEASE_ASSETS_TEST_UPLOAD_LOG="$upload_log" \
+	RELEASE_TAG=1.4.2 \
+	UBUNTU_VERSION="$ubuntu_version" \
+	APP_VERSION=1.4.2 \
+	OUTPUT_DIR="$output_dir" \
+	PATH="$MOCK_BIN:$PATH" \
+		bash "$REPO_DIR/linux/release-assets.sh" >/dev/null
+}
+
+OUTPUT_DIR_UBUNTU20="$OUTPUT_DIR/ubuntu20"
+OUTPUT_DIR_UBUNTU22="$OUTPUT_DIR/ubuntu22"
+UPLOAD_LOG_UBUNTU20="$TEMP_DIR/upload-ubuntu20-arguments"
+UPLOAD_LOG_UBUNTU22="$TEMP_DIR/upload-ubuntu22-arguments"
+run_release_asset_mock 20 "$OUTPUT_DIR_UBUNTU20" "$UPLOAD_LOG_UBUNTU20"
 
 appimage_name='JPEGView-1.4.2-ubuntu20-x86_64.AppImage'
 zsync_name="${appimage_name}.zsync"
+baseline_appimage_name='JPEGView-x86_64.AppImage'
 expected_update_information='gh-releases-zsync|qusielle|vibe-jpegview-linux|latest|JPEGView-*-ubuntu20-x86_64.AppImage.zsync'
 test "$(<"$TEMP_DIR/update-information")" = "$expected_update_information"
 test "$(<"$TEMP_DIR/appimage-output")" = "/out/$appimage_name"
-test -f "$OUTPUT_DIR/$appimage_name"
-test -f "$OUTPUT_DIR/$zsync_name"
-grep -Fqx "$OUTPUT_DIR/$appimage_name" "$TEMP_DIR/upload-arguments"
-grep -Fqx "$OUTPUT_DIR/$zsync_name" "$TEMP_DIR/upload-arguments"
-grep -Fq "  $appimage_name" "$OUTPUT_DIR/SHA256SUMS-ubuntu20.txt"
-grep -Fq "  $zsync_name" "$OUTPUT_DIR/SHA256SUMS-ubuntu20.txt"
+test -f "$OUTPUT_DIR_UBUNTU20/$appimage_name"
+test -f "$OUTPUT_DIR_UBUNTU20/$zsync_name"
+test -f "$OUTPUT_DIR_UBUNTU20/$baseline_appimage_name"
+test -x "$OUTPUT_DIR_UBUNTU20/$appimage_name"
+test -x "$OUTPUT_DIR_UBUNTU20/$baseline_appimage_name"
+cmp -s "$OUTPUT_DIR_UBUNTU20/$appimage_name" "$OUTPUT_DIR_UBUNTU20/$baseline_appimage_name"
+grep -Fqx "$OUTPUT_DIR_UBUNTU20/$appimage_name" "$UPLOAD_LOG_UBUNTU20"
+grep -Fqx "$OUTPUT_DIR_UBUNTU20/$zsync_name" "$UPLOAD_LOG_UBUNTU20"
+grep -Fqx "$OUTPUT_DIR_UBUNTU20/$baseline_appimage_name" "$UPLOAD_LOG_UBUNTU20"
+grep -Fq "  $appimage_name" "$OUTPUT_DIR_UBUNTU20/SHA256SUMS-ubuntu20.txt"
+grep -Fq "  $zsync_name" "$OUTPUT_DIR_UBUNTU20/SHA256SUMS-ubuntu20.txt"
+grep -Fq "  $baseline_appimage_name" "$OUTPUT_DIR_UBUNTU20/SHA256SUMS-ubuntu20.txt"
+(cd "$OUTPUT_DIR_UBUNTU20" && sha256sum --check SHA256SUMS-ubuntu20.txt >/dev/null)
+
+run_release_asset_mock 22 "$OUTPUT_DIR_UBUNTU22" "$UPLOAD_LOG_UBUNTU22"
+appimage_name_ubuntu22='JPEGView-1.4.2-ubuntu22-x86_64.AppImage'
+test -f "$OUTPUT_DIR_UBUNTU22/$appimage_name_ubuntu22"
+test ! -e "$OUTPUT_DIR_UBUNTU22/$baseline_appimage_name"
+if grep -Fqx "$OUTPUT_DIR_UBUNTU22/$baseline_appimage_name" "$UPLOAD_LOG_UBUNTU22"; then
+	echo 'Newer Ubuntu release unexpectedly published the compatibility alias' >&2
+	exit 1
+fi
+if grep -Fq "  $baseline_appimage_name" "$OUTPUT_DIR_UBUNTU22/SHA256SUMS-ubuntu22.txt"; then
+	echo 'Newer Ubuntu checksum unexpectedly includes the compatibility alias' >&2
+	exit 1
+fi
+
+workflow="$REPO_DIR/.github/workflows/linux-release.yml"
+grep -Fq '  release-ubuntu20:' "$workflow" || {
+	echo 'Release workflow does not define the Ubuntu 20 compatibility baseline job' >&2
+	exit 1
+}
+grep -Fq '    needs: release-ubuntu20' "$workflow" || {
+	echo 'Newer release jobs do not wait for the Ubuntu 20 compatibility baseline' >&2
+	exit 1
+}
+grep -Fq '        ubuntu: ["22", "24", "26"]' "$workflow" || {
+	echo 'Newer release job matrix unexpectedly includes or omits an Ubuntu base' >&2
+	exit 1
+}
 
 for ubuntu_version in 20 22 24 26; do
 	if ! grep -Eq '(^|[[:space:]])zsync([[:space:]\\]|$)' \
@@ -117,4 +163,4 @@ for ubuntu_version in 20 22 24 26; do
 	fi
 done
 
-echo 'Release AppImage update metadata and zsync upload tests passed.'
+echo 'Release AppImage update metadata, baseline alias, and zsync upload tests passed.'

@@ -29,6 +29,13 @@ docker run --rm \
 test -f "$OUTPUT_DIR/$appimage_name"
 test -f "$OUTPUT_DIR/$appimage_zsync_name"
 
+if [[ "$UBUNTU_VERSION" == 20 ]]; then
+	baseline_appimage_name='JPEGView-x86_64.AppImage'
+	cp -- "$OUTPUT_DIR/$appimage_name" "$OUTPUT_DIR/$baseline_appimage_name"
+	checksum_inputs+=("$baseline_appimage_name")
+	assets+=("$OUTPUT_DIR/$baseline_appimage_name")
+fi
+
 docker run --rm -v "$OUTPUT_DIR:/out" "$image" binary "$safe_version"
 mv "$OUTPUT_DIR/jpegview-linux" "$OUTPUT_DIR/$binary_name"
 binary_version=$(docker run --rm -v "$OUTPUT_DIR:/out" \
