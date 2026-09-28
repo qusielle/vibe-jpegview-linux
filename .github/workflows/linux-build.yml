@@ -32,7 +32,7 @@ jobs:
           output_dir="$RUNNER_TEMP/jpegview-linux-ci-ubuntu${UBUNTU_VERSION}"
           artifact_dir="$RUNNER_TEMP/jpegview-linux-ci-artifacts-ubuntu${UBUNTU_VERSION}"
           app_version="$(sh ./linux/version.sh)"
-          appimage_name="JPEGView-Linux-${app_version}-x86_64.AppImage"
+          appimage_name="JPEGView-${app_version}-x86_64.AppImage"
           binary_bundle_name="jpegview-linux-${app_version}-ubuntu${UBUNTU_VERSION}-x86_64-with-archive-plugins.tar.gz"
           mkdir -p "$output_dir" "$artifact_dir"
 
@@ -42,6 +42,10 @@ jobs:
             .
 
           docker run --rm -v "$output_dir:/out" "$image" appimage "$app_version"
+          case "$appimage_name" in
+            *Linux*) echo "AppImage asset name must not contain Linux: $appimage_name" >&2; exit 1 ;;
+          esac
+          test -f "$output_dir/$appimage_name"
           docker run --rm -v "$output_dir:/out" "$image" binary "$app_version"
           binary_version=$(docker run --rm -v "$output_dir:/out" \
             --entrypoint /out/jpegview-linux "$image" --version)

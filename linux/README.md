@@ -365,7 +365,7 @@ relevant tags present. The wrapper adds `/src` to the container's Git safe-direc
 version lookup; with `--rm`, this does not change your host's Git configuration. If no usable Git
 metadata is available and no version is passed, the build continues to use `0.0.0+unknown`.
 
-The AppImage is named `out/JPEGView-Linux-${APP_VERSION}-x86_64.AppImage`; the native executable
+The AppImage is named `out/JPEGView-${APP_VERSION}-x86_64.AppImage`; the native executable
 is `out/jpegview-linux`. Docker's `binary` mode also copies both plugins under the sibling
 `lib/jpegview-linux/` directory and their source/license notices into `out/`. CI and release
 automation upload a clearly named `*-with-archive-plugins.tar.gz` containing the executable, both
@@ -473,8 +473,10 @@ for incompatible changes. A Git checkout without a reachable semantic-version ta
 `0.0.0+dev.g<commit>`, and a source snapshot without Git metadata uses `0.0.0+unknown`.
 
 The resolved version is embedded in the executable and shown by `jpegview-linux --version` and the
-About panel. AppImage names and its `X-AppImage-Version` desktop metadata, plus Debian package
-filenames/control metadata, use the same value. Direct Makefile or packaging-script builds resolve it
+About panel. The human-readable desktop name remains `JPEGView Linux`; downloadable AppImage
+filenames omit the redundant operating-system name and include the version. AppImage
+`X-AppImage-Version` metadata and Debian package filenames/control metadata use that same value.
+Direct Makefile or packaging-script builds resolve it
 automatically; set `VERSION=...` for Make or pass a version argument to a packaging script to
 override it. Docker builds do not include `.git`: pass the host-resolved version, or mount `.git`
 read-only when running the container to let its wrapper resolve the version. The wrapper honors a
@@ -494,7 +496,7 @@ APPIMAGETOOL=/path/to/appimagetool \
 APPIMAGETOOL_ARGS=--appimage-extract-and-run \
 BUILD_DIR="$PWD/out/build" \
 APPDIR="$PWD/out/JPEGView-Linux.AppDir" \
-OUTPUT="$PWD/out/JPEGView-Linux-${VERSION}-x86_64.AppImage" \
+OUTPUT="$PWD/out/JPEGView-${VERSION}-x86_64.AppImage" \
 make -C linux appimage VERSION="$VERSION"
 ```
 

@@ -10,7 +10,7 @@ APP_VERSION=${APP_VERSION:-$(cd -- "$REPO_DIR" && sh "$SCRIPT_DIR/version.sh")}
 
 safe_version=${APP_VERSION//[^a-zA-Z0-9._+-]/-}
 image="jpegview-linux-build:ubuntu${UBUNTU_VERSION}"
-appimage_name="JPEGView-Linux-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64.AppImage"
+appimage_name="JPEGView-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64.AppImage"
 binary_name="jpegview-linux-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64"
 binary_bundle_name="${binary_name}-with-archive-plugins.tar.gz"
 checksums_name="SHA256SUMS-ubuntu${UBUNTU_VERSION}.txt"
@@ -21,7 +21,7 @@ assets=("$OUTPUT_DIR/$appimage_name" "$OUTPUT_DIR/$binary_name" \
 mkdir -p "$OUTPUT_DIR"
 
 docker run --rm -v "$OUTPUT_DIR:/out" "$image" appimage "$safe_version"
-mv "$OUTPUT_DIR/JPEGView-Linux-${safe_version}-x86_64.AppImage" \
+mv "$OUTPUT_DIR/JPEGView-${safe_version}-x86_64.AppImage" \
 	"$OUTPUT_DIR/$appimage_name"
 
 docker run --rm -v "$OUTPUT_DIR:/out" "$image" binary "$safe_version"
