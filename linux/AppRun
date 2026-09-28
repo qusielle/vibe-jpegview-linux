@@ -5,6 +5,52 @@ export CDPATH
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH="$HERE/usr/bin${PATH:+:$PATH}"
+
+# Some headless/sandboxed X11 hosts expose GLX but have neither a usable GPU
+# device nor Mesa's software DRI driver. SDL's OpenGL renderer can terminate
+# on the resulting X_GLXCreateContext error before its normal renderer fallback
+# runs. Keep accelerated rendering on normal desktop hosts, and select SDL's
+# software renderer only when neither route to a GL context is available.
+appimage_has_mesa_software_driver() {
+	if [ -n "${LIBGL_DRIVERS_PATH:-}" ]; then
+		remaining=$LIBGL_DRIVERS_PATH:
+		while [ -n "$remaining" ]; do
+			driver_dir=${remaining%%:*}
+			remaining=${remaining#*:}
+			if [ -n "$driver_dir" ] && {
+				[ -e "$driver_dir/swrast_dri.so" ] || [ -e "$driver_dir/kms_swrast_dri.so" ];
+			}; then
+				return 0
+			fi
+		done
+		return 1
+	fi
+	for driver in \
+		"$HERE/usr/lib/dri/swrast_dri.so" "$HERE/usr/lib/dri/kms_swrast_dri.so" \
+		/usr/lib/dri/swrast_dri.so /usr/lib/dri/kms_swrast_dri.so \
+		/usr/lib/*/dri/swrast_dri.so /usr/lib/*/dri/kms_swrast_dri.so \
+		/lib/dri/swrast_dri.so /lib/dri/kms_swrast_dri.so \
+		/lib/*/dri/swrast_dri.so /lib/*/dri/kms_swrast_dri.so; do
+		[ ! -e "$driver" ] || return 0
+	done
+	return 1
+}
+
+appimage_has_accessible_render_device() {
+	for device in /dev/dri/card* /dev/dri/renderD* /dev/nvidia[0-9]* /dev/nvidiactl; do
+		if [ -c "$device" ] && [ -r "$device" ] && [ -w "$device" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+if [ -z "${SDL_RENDER_DRIVER:-}" ] &&
+		! appimage_has_mesa_software_driver &&
+		! appimage_has_accessible_render_device; then
+	export SDL_RENDER_DRIVER=software
+fi
+
 # Newer libheif releases load codec plugins separately from libheif itself.
 # Keep those plugins inside the AppImage when the packaging host provides them.
 export LIBHEIF_PLUGIN_PATH="$HERE/usr/lib/libheif/plugins${LIBHEIF_PLUGIN_PATH:+:$LIBHEIF_PLUGIN_PATH}"

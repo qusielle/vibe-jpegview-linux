@@ -43,6 +43,8 @@ cat > "$BUILD_DIR/jpegview-linux" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = --export-app-icon ]; then
 	cp "$APPIMAGE_TEST_ICON" "$2"
+elif [ "${1:-}" = --print-render-driver ]; then
+	printf '%s\n' "${SDL_RENDER_DRIVER:-<unset>}"
 fi
 EOF
 chmod 755 "$BUILD_DIR/jpegview-linux"
@@ -69,5 +71,34 @@ for runtime in libstdc++.so.6 libgcc_s.so.1; do
 		exit 1
 	fi
 done
+
+mkdir -p "$TEMP_DIR/no-gl-drivers"
+renderer=$(LIBGL_DRIVERS_PATH="$TEMP_DIR/no-gl-drivers" \
+	"$APPDIR/AppRun" --print-render-driver)
+has_accessible_render_device=0
+for device in /dev/dri/card* /dev/dri/renderD* /dev/nvidia[0-9]* /dev/nvidiactl; do
+	if [ -c "$device" ] && [ -r "$device" ] && [ -w "$device" ]; then
+		has_accessible_render_device=1
+		break
+	fi
+done
+if [ "$has_accessible_render_device" -eq 0 ]; then
+	test "$renderer" = software || {
+		echo 'AppRun did not select SDL software rendering without a GL driver or device' >&2
+		exit 1
+	}
+else
+	test "$renderer" = '<unset>' || {
+		echo 'AppRun changed renderer selection despite an accessible GPU device' >&2
+		exit 1
+	}
+fi
+
+renderer=$(SDL_RENDER_DRIVER=opengl LIBGL_DRIVERS_PATH="$TEMP_DIR/no-gl-drivers" \
+	"$APPDIR/AppRun" --print-render-driver)
+test "$renderer" = opengl || {
+	echo 'AppRun overwrote an explicitly selected SDL renderer' >&2
+	exit 1
+}
 
 echo 'AppImage host-runtime packaging tests passed.'

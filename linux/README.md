@@ -508,8 +508,11 @@ The resulting AppImage still relies on the host kernel, glibc-compatible userspa
 working X11 or Wayland display server. SDL and codec dependencies are carried with the artifact,
 while `libstdc++` and `libgcc_s` are deliberately resolved from the host. This lets host graphics
 drivers such as Mesa load against the host's matching C++ runtime instead of an older copy bundled
-for codec dependencies. Ubuntu 20.04 runtime compatibility still needs to be verified by running
-this image in the intended Docker environment.
+for codec dependencies. The AppRun wrapper keeps SDL's accelerated renderer by default, but selects
+the SDL software renderer when the host has neither Mesa's software DRI driver nor an accessible
+GPU device; this avoids a fatal GLX startup error on headless/sandboxed hosts. An explicit
+`SDL_RENDER_DRIVER` setting is respected. Ubuntu 20.04 runtime compatibility still needs to be
+verified by running this image in the intended Docker environment.
 
 The native window and AppImage desktop entry both use the largest frame embedded from the upstream
 `src/JPEGView/res/JPEGView.ico`. Packaging exports that same frame as a Linux icon-theme PNG without
