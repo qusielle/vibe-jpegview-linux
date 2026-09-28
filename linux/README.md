@@ -62,6 +62,8 @@ they support.
    physical Left/Right navigation; PageUp/PageDown remain logical previous/next. The two checkable
    controls appear in the navigation panel and context menu. Page pairs follow
    [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
+   The filename and F2 information overlays show both active spread positions (for example `1-2/123`);
+   single-page display retains the `1/123` form.
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;

@@ -3028,7 +3028,7 @@ private:
 		if (fileList_.Empty()) return lines;
 
 		std::ostringstream title;
-		title << '[' << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
+		title << '[' << CurrentImagePositionText() << "] "
 			<< InfoText(fileList_.Current().filename().string());
 		lines.push_back(title.str());
 
@@ -3083,6 +3083,20 @@ private:
 			lines.push_back("Altitude (m): " + value.str());
 		}
 		return lines;
+	}
+
+	std::string CurrentImagePositionText() const {
+		std::optional<std::size_t> spreadPartnerIndex;
+		if (activeDoublePageRender_.has_value()) {
+			const jpegview_linux::DoublePageSpread& spread = activeDoublePageRender_->layout;
+			if (spread.firstIndex == fileList_.CurrentIndex()) {
+				spreadPartnerIndex = spread.secondIndex;
+			} else if (spread.secondIndex == fileList_.CurrentIndex()) {
+				spreadPartnerIndex = spread.firstIndex;
+			}
+		}
+		return jpegview_linux::FormatImagePosition(fileList_.CurrentIndex(),
+			fileList_.Size(), spreadPartnerIndex);
 	}
 
 	jpegview_linux::InformationOverlayPaintPlan BuildImageInfoPaintPlan() {
@@ -6318,7 +6332,7 @@ private:
 		int windowWidth = 0;
 		SDL_GetWindowSize(window_, &windowWidth, nullptr);
 		std::ostringstream text;
-		text << '[' << fileList_.CurrentIndex() + 1 << '/' << fileList_.Size() << "] "
+		text << '[' << CurrentImagePositionText() << "] "
 			<< InfoText(fileList_.Current().filename().string());
 		std::string label = text.str();
 		const jpegview_linux::OverlayLayout layout = jpegview_linux::FilenameOverlayLayout(

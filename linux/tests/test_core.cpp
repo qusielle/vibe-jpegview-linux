@@ -5451,6 +5451,18 @@ void TestGrayscaleSpectrumCalculationAndScaling() {
 }
 
 void TestImageInfoFormatting() {
+	Expect(jpegview_linux::FormatImagePosition(0, 123) == "1/123",
+		"single-page position formatting changed");
+	Expect(jpegview_linux::FormatImagePosition(0, 123, 1) == "1-2/123",
+		"double-page position did not include both visible image numbers");
+	Expect(jpegview_linux::FormatImagePosition(8, 123, 7) == "8-9/123",
+		"double-page position did not present the pair in file-list order");
+	Expect(jpegview_linux::FormatImagePosition(0, 1, 0) == "1/1" &&
+		jpegview_linux::FormatImagePosition(0, 1, 1) == "1/1",
+		"single-image position formatting added an invalid spread partner");
+	Expect(jpegview_linux::FormatImagePosition(0, 0).empty() &&
+		jpegview_linux::FormatImagePosition(3, 3).empty(),
+		"invalid image-list positions should not produce a visible count");
 	Expect(jpegview_linux::FormatImageDimensionsAndSize(1920, 1080, "2.5 MB") ==
 		"1920 X 1080, 2.5 MB",
 		"image dimensions and file size were not compacted into one line");
