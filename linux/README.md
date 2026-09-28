@@ -84,8 +84,9 @@ they support.
    selection repeat while held. The open browser supports repeating Up/Down, PageUp/PageDown, and
    Home/End movement. Repeated image navigation presents progress immediately instead of freezing
    until key release. The plain mouse wheel selects the previous/next file, while holding Ctrl
-   retains wheel zoom. The keyboard Context Menu key and the original Windows numeric command IDs
-   and corresponding supported default bindings are retained.
+   retains wheel zoom. `spacebar_navigates_images=1` changes Space to next and Shift+Space to
+   previous; by default Space retains its fit/actual scale action. The keyboard Context Menu key and
+   the original Windows numeric command IDs and corresponding supported default bindings are retained.
 
 6. **Neighboring-image thumbnail panel.** Ctrl+T or the context menu opens a vertical strip on the
    left in active file order. The current image stays centered and fully bright; neighboring images
@@ -582,7 +583,9 @@ navigates previous/next, while Ctrl+mouse wheel and Ctrl+Up/Down zoom around the
 When the image extends beyond the viewport, hover the upper-right corner to show the zoom navigator;
 click or drag the miniature image to reposition the view. **Show zoom navigator** in the context menu
 toggles it, and that preference is saved between runs.
-Up/Down rotate 90 degrees. Space toggles fit/actual, Return/0 fits, Ctrl+Return fills with crop,
+Up/Down rotate 90 degrees. Space toggles fit/actual by default; set `spacebar_navigates_images=1` in
+`settings.conf` to make Space navigate next and Shift+Space navigate previous. Return/0 fits,
+Ctrl+Return fills with crop,
 `+`/`-` zoom, and F11/F toggles fullscreen; F12 spans screens, Ctrl+F11 fits the window to the
 image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`–`9` start a
 slideshow at that interval. At actual size, Shift+Arrow pans the image in 48-pixel steps. F2
@@ -672,6 +675,8 @@ Per-image double-page and manga-order overrides have a separate 256-file retenti
 defaults are stored as `double_page_mode_enabled` and `manga_reading_order_enabled` in `settings.conf`.
 Physical Left/Right inversion in manga mode is enabled by default and can be disabled with
 `manga_mode_inverts_left_right=0`.
+Space navigation is disabled by default; set `spacebar_navigates_images=1` to make Space/Shift+Space
+move to the next/previous image instead of using Space to toggle fit/actual scale.
 Only successfully loaded image paths enter history; clipboard-pasted temporary images are excluded.
 
 The zoom navigator is enabled by default. Set `show_zoom_navigator=0` in the settings file to hide

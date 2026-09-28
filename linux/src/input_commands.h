@@ -19,21 +19,28 @@ constexpr int kCommandToggleMangaReadingOrder = -13;
 // exits only when there is nothing to stop.
 int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive);
 
+// Returns +1 for Space/next and -1 for Shift+Space/previous when the
+// configurable viewer shortcut is enabled; zero means the event is unrelated.
+int SpacebarNavigationDirection(const SDL_KeyboardEvent& event, bool enabled);
+
 // Converts key-downs into one immediate navigation step. Continuous movement
 // starts only after SDL reports the keyboard's initial repeat threshold, then
 // requests one step after each displayed image while the key remains held.
 // Repeat notifications themselves never queue image changes.
 class HeldNavigationController {
 public:
-	int KeyDown(int direction, int scancode, bool repeated);
+	int KeyDown(int direction, int scancode, bool repeated,
+		bool shiftModifierAllowed = false);
 	int AfterImageShown(bool keyIsHeld);
 	int Scancode() const { return scancode_; }
+	bool ShiftModifierAllowed() const { return shiftModifierAllowed_; }
 	void Reset();
 
 private:
 	int direction_ = 0;
 	int scancode_ = -1;
 	bool repeatObserved_ = false;
+	bool shiftModifierAllowed_ = false;
 };
 
 } // namespace jpegview_linux

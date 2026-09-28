@@ -60,15 +60,16 @@ should normally be added to one of these focused modules and covered by `tests/t
   processing/scaling of renderer-ready frames. Display keys capture every active processing value
   so an adjustment cannot reuse stale pixels. JPEG display requests use native reduced DCT decode
   before exact scaling, without requiring a retained full-resolution source frame.
-- `input_commands`: SDL key chords to shared JPEGView command IDs.
+- `input_commands`: SDL key chords to shared JPEGView command IDs, the configurable Space/Shift+Space
+  image-navigation direction, and held-navigation repeat state (including when Shift is permitted).
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
 - `transparency_pattern`: accepted background setting values and checkerboard tile colors.
 - `settings` and `sort_mode`: persisted configuration (including the transparent-image background
   choice, default picture-level values,
   fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
   default), zoom-navigator visibility, magnifying-glass size/zoom, global double-page/manga-mode
-  defaults, and the default-enabled `manga_mode_inverts_left_right` preference), plus stable
-  sort-mode values.
+  defaults, the default-enabled `manga_mode_inverts_left_right` preference, and the default-disabled
+  `spacebar_navigates_images` preference), plus stable sort-mode values.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
   bounded per-file `ViewportSnapshot` LRU and independent bounded double-page/manga-mode snapshots,
   ordered row removal/restoration for the Recents dialog, plus tolerant atomic persistence in the

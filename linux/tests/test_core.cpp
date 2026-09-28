@@ -1459,6 +1459,7 @@ void TestKeyboardCommandMappings() {
 		{SDLK_HOME, 0, IDM_FIRST},
 		{SDLK_END, 0, IDM_LAST},
 		{SDLK_SPACE, 0, IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS},
+		{SDLK_SPACE, 0x0003u, 0},
 		{SDLK_RETURN, 0, IDM_FIT_TO_SCREEN},
 		{SDLK_DOWN, 0, IDM_ROTATE_90},
 		{SDLK_UP, 0, IDM_ROTATE_270},
@@ -1490,6 +1491,26 @@ void TestKeyboardCommandMappings() {
 		Expect(jpegview_linux::CommandForKey(event, false) == testCase.command,
 			"keyboard command mapping is incorrect");
 	}
+	SDL_KeyboardEvent space{};
+	space.keysym.sym = SDLK_SPACE;
+	Expect(jpegview_linux::SpacebarNavigationDirection(space, false) == 0 &&
+		jpegview_linux::CommandForKey(space, false) == IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS,
+		"disabled Space navigation did not preserve the existing scale shortcut");
+	Expect(jpegview_linux::SpacebarNavigationDirection(space, true) == 1,
+		"enabled Space navigation did not select the next image");
+	space.keysym.mod = 0x0003u;
+	Expect(jpegview_linux::SpacebarNavigationDirection(space, true) == -1,
+		"Shift+Space did not select the previous image");
+	space.keysym.mod = 0x0040u;
+	Expect(jpegview_linux::SpacebarNavigationDirection(space, true) == 0,
+		"Ctrl+Space unexpectedly entered image navigation");
+	space.keysym.mod = 0x0100u;
+	Expect(jpegview_linux::SpacebarNavigationDirection(space, true) == 0,
+		"Alt+Space unexpectedly entered image navigation");
+	space.keysym.mod = 0;
+	space.keysym.sym = SDLK_RETURN;
+	Expect(jpegview_linux::SpacebarNavigationDirection(space, true) == 0,
+		"non-Space key unexpectedly entered Space navigation");
 	SDL_KeyboardEvent escape{};
 	escape.keysym.sym = SDLK_ESCAPE;
 	Expect(jpegview_linux::CommandForKey(escape, false) == IDM_EXIT,
@@ -1578,6 +1599,17 @@ void TestHeldNavigationCoalescesKeyRepeats() {
 		"held right-arrow did not request one step after each displayed image");
 	Expect(navigation.AfterImageShown(false) == 0 && navigation.Scancode() == -1,
 		"released right-arrow continued navigating after the displayed image");
+	Expect(navigation.KeyDown(-1, 44, false, true) == -1 &&
+		navigation.ShiftModifierAllowed(),
+		"Shift+Space did not retain its allowed modifier while held");
+	Expect(navigation.KeyDown(-1, 44, true, false) == 0 &&
+		navigation.AfterImageShown(true) == 0,
+		"stale unshifted Space repeat activated held Shift+Space navigation");
+	Expect(navigation.KeyDown(-1, 44, true, true) == 0 &&
+		navigation.AfterImageShown(true) == -1,
+		"held Shift+Space did not repeat one previous-image step");
+	Expect(navigation.AfterImageShown(false) == 0 && !navigation.ShiftModifierAllowed(),
+		"released Shift+Space kept its modifier allowance");
 	Expect(navigation.KeyDown(-1, 80, false) == -1 && navigation.AfterImageShown(true) == 0,
 		"new left-arrow press bypassed the initial repeat threshold");
 	Expect(navigation.KeyDown(-1, 80, true) == 0 && navigation.AfterImageShown(true) == -1,
@@ -3197,6 +3229,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.doublePageModeEnabled = true;
 	expected.mangaReadingOrderEnabled = true;
 	expected.mangaModeInvertsLeftRight = false;
+	expected.spacebarNavigatesImages = true;
 	expected.transparencyPattern = jpegview_linux::TransparencyPattern::Checkerboard;
 	expected.thumbnailPanelWidth = 287;
 	expected.fileDialogWidth = 1040;
@@ -3253,7 +3286,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"zoom navigator visibility did not round-trip");
 	Expect(loaded.doublePageModeEnabled == expected.doublePageModeEnabled &&
 		loaded.mangaReadingOrderEnabled == expected.mangaReadingOrderEnabled &&
-		loaded.mangaModeInvertsLeftRight == expected.mangaModeInvertsLeftRight,
+		loaded.mangaModeInvertsLeftRight == expected.mangaModeInvertsLeftRight &&
+		loaded.spacebarNavigatesImages == expected.spacebarNavigatesImages,
 		"double-page mode settings did not round-trip");
 	Expect(loaded.transparencyPattern == expected.transparencyPattern,
 		"transparent-image pattern did not round-trip");
@@ -3308,6 +3342,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=1\n"
 		"selection_mode_enabled=maybe\n"
 		"show_zoom_navigator=maybe\nmanga_mode_inverts_left_right=maybe\n"
+		"spacebar_navigates_images=maybe\n"
 		"transparency_pattern=diagonal\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
@@ -3326,6 +3361,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"missing double-page settings did not retain their disabled defaults");
 	Expect(loaded.mangaModeInvertsLeftRight,
 		"missing or malformed manga inversion setting did not preserve its enabled default");
+	Expect(!loaded.spacebarNavigatesImages,
+		"missing or malformed Space navigation setting did not preserve its disabled default");
 	Expect(loaded.transparencyPattern == jpegview_linux::TransparencyPattern::Black,
 		"malformed transparency pattern did not retain the default black background");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,

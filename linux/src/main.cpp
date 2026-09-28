@@ -703,6 +703,7 @@ private:
 		doublePageModeDefault_ = settings.doublePageModeEnabled;
 		mangaReadingOrderDefault_ = settings.mangaReadingOrderEnabled;
 		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
+		spacebarNavigatesImages_ = settings.spacebarNavigatesImages;
 		doublePageModeEnabled_ = doublePageModeDefault_;
 		mangaReadingOrderEnabled_ = mangaReadingOrderDefault_;
 		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
@@ -745,6 +746,7 @@ private:
 		settings.doublePageModeEnabled = doublePageModeDefault_;
 		settings.mangaReadingOrderEnabled = mangaReadingOrderDefault_;
 		settings.mangaModeInvertsLeftRight = mangaModeInvertsLeftRight_;
+		settings.spacebarNavigatesImages = spacebarNavigatesImages_;
 		settings.transparencyPattern = transparencyPattern_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.fileDialogWidth = fileDialogWidth_;
@@ -2968,9 +2970,11 @@ private:
 
 	void TickHeldNavigation() {
 		if (heldNavigation_.Scancode() < 0) return;
+		const Uint16 blockedModifierMask = heldNavigation_.ShiftModifierAllowed() ?
+			0x03C0u : 0x03C3u;
 		if (contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ || aboutOpen_ || helpOpen_ ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
-			(SDL_GetModState() & 0x03C3u) != 0) {
+			(SDL_GetModState() & blockedModifierMask) != 0) {
 			heldNavigation_.Reset();
 			return;
 		}
@@ -7211,11 +7215,14 @@ private:
 		DrawRect(panel, 160, 190, 225);
 		DrawText("QUICK HELP — JPEGVIEW LINUX", panel.x + 18, panel.y + 14,
 			kUiTextScale, 255, 255, 255);
-		static const std::array<const char*, 10> lines = {
+		const std::string spaceHelp = spacebarNavigatesImages_ ?
+			"Navigate: Space next; Shift+Space previous; Return fit; Ctrl+Return fill with crop; +/- zoom" :
+			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom";
+		const std::array<std::string, 10> lines = {
 			"Navigate: arrows/wheel; Home/End; D double page; J manga order; Ctrl+M mark; Alt+arrows siblings",
 			"Zoom/pan: Ctrl+wheel or Ctrl+Up/Down; drag; Shift+Arrow; Z lens; wheel resizes it",
 			"Navigator: hover upper-right when magnified; click or drag its map to reposition",
-			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom",
+			spaceHelp,
 			"Panels: F2 info; Shift+N filename; Ctrl+N nav; Ctrl+T thumbs; Ctrl+E crop mode",
 			"Files: Ctrl+O open; Ctrl+S save processed; Ctrl+Shift+S save displayed size",
 			"Clipboard: Ctrl+C copy image; Ctrl+Shift+C copy path; Ctrl+V paste PNG",
@@ -7557,6 +7564,11 @@ private:
 			case SDL_KEYDOWN:
 			{
 				const Uint16 modifiers = event.key.keysym.mod;
+				const int spaceNavigationDirection =
+					jpegview_linux::SpacebarNavigationDirection(event.key, spacebarNavigatesImages_);
+				const bool spaceNavigationKey = spaceNavigationDirection != 0;
+				const bool shiftSpaceNavigation = spaceNavigationKey &&
+					(modifiers & 0x0003u) != 0;
 				const bool plainNavigationKey =
 					(modifiers & 0x03C3u) == 0 &&
 					(event.key.keysym.sym == SDLK_LEFT || event.key.keysym.sym == SDLK_RIGHT);
@@ -7565,9 +7577,15 @@ private:
 					(event.key.keysym.sym == SDLK_LEFT || event.key.keysym.sym == SDLK_RIGHT ||
 						event.key.keysym.sym == SDLK_UP || event.key.keysym.sym == SDLK_DOWN);
 				// SDL marks OS key-repeat events instead of generating a fresh
-				// physical key press. Pan on repeats, but let held-navigation poll
-				// the actual key state after each rendered image to avoid a backlog.
-				if (event.key.repeat != 0 && !plainNavigationKey && !shiftPanKey) break;
+				// physical press. Apply shift-pan repeats directly, but let image
+				// navigation poll key state after each frame to avoid a backlog.
+				if (event.key.repeat != 0 && !plainNavigationKey && !shiftPanKey &&
+					!spaceNavigationKey) break;
+				if (spaceNavigationKey && event.key.repeat != 0) {
+					heldNavigation_.KeyDown(spaceNavigationDirection,
+						event.key.keysym.scancode, true, shiftSpaceNavigation);
+					break;
+				}
 				if (plainNavigationKey && event.key.repeat != 0) {
 					const int physicalDirection = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
 					const int direction = jpegview_linux::LogicalDirectionForPhysicalKey(
@@ -7580,6 +7598,10 @@ private:
 					const int direction = jpegview_linux::LogicalDirectionForPhysicalKey(
 						physicalDirection, mangaReadingOrderEnabled_, mangaModeInvertsLeftRight_);
 					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, false);
+				}
+				if (spaceNavigationKey) {
+					heldNavigation_.KeyDown(spaceNavigationDirection,
+						event.key.keysym.scancode, false, shiftSpaceNavigation);
 				}
 				if (event.key.keysym.sym == SDLK_MENU) {
 					if (cropSelection_.HasSelection()) OpenCropContextMenu();
@@ -7600,6 +7622,9 @@ private:
 				}
 				int command = jpegview_linux::CommandForKey(event.key,
 					playback_.Mode() != PlaybackMode::None || playback_.AnimationPlaying());
+				if (spaceNavigationKey) {
+					command = spaceNavigationDirection > 0 ? IDM_NEXT : IDM_PREV;
+				}
 				if (plainNavigationKey && mangaReadingOrderEnabled_ && mangaModeInvertsLeftRight_) {
 					if (command == IDM_NEXT) command = IDM_PREV;
 					else if (command == IDM_PREV) command = IDM_NEXT;
@@ -7608,7 +7633,7 @@ private:
 					ExecuteCommand(command);
 				}
 				if (quitRequested_) running = false;
-				if (plainNavigationKey || shiftPanKey) return;
+				if (plainNavigationKey || shiftPanKey || spaceNavigationKey) return;
 				break;
 			}
 			case SDL_MOUSEBUTTONDOWN:
@@ -7889,6 +7914,7 @@ private:
 	bool doublePageModeEnabled_ = false;
 	bool mangaReadingOrderEnabled_ = false;
 	bool mangaModeInvertsLeftRight_ = true;
+	bool spacebarNavigatesImages_ = false;
 	bool doublePageModeDefault_ = false;
 	bool mangaReadingOrderDefault_ = false;
 	std::optional<ActiveDoublePageRender> activeDoublePageRender_;
@@ -8050,7 +8076,8 @@ void PrintUsage(const char* program) {
 		<< "  --version          Show the build version\n"
 		<< "  --help             Show this help\n\n"
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel up/down navigates previous/next, Ctrl+mouse wheel zooms, left-drag pans, drop files to open,\n"
-		<< "          Space toggles fit/actual, Enter fits, 0 fits, 1-9 start a slideshow, F11/F fullscreen,\n"
+		<< "          Space toggles fit/actual by default; spacebar_navigates_images=1 maps Space/Shift+Space to next/previous, Enter fits, 0 fits,\n"
+		<< "          1-9 start a slideshow, F11/F fullscreen,\n"
 		<< "          F7/F8/F9 select folder/recursive/sibling navigation, Alt+Left/Right open the first image in adjacent sibling folders,\n"
 		<< "          Ctrl+M marks an image; Ctrl+Left/Right toggles between it and the paired image,\n"
 		<< "          N/M/C select display order, Z toggles the magnifying glass,\n"

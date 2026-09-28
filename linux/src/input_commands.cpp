@@ -84,15 +84,28 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	return 0;
 }
 
-int HeldNavigationController::KeyDown(int direction, int scancode, bool repeated) {
+int SpacebarNavigationDirection(const SDL_KeyboardEvent& event, bool enabled) {
+	if (!enabled || event.keysym.sym != SDLK_SPACE) return 0;
+	const Uint16 modifiers = event.keysym.mod;
+	const bool ctrl = (modifiers & 0x00C0u) != 0;
+	const bool shift = (modifiers & 0x0003u) != 0;
+	const bool alt = (modifiers & 0x0300u) != 0;
+	if (ctrl || alt) return 0;
+	return shift ? -1 : 1;
+}
+
+int HeldNavigationController::KeyDown(int direction, int scancode, bool repeated,
+	bool shiftModifierAllowed) {
 	if ((direction != -1 && direction != 1) || scancode < 0) return 0;
 	if (repeated) {
-		if (direction == direction_ && scancode == scancode_) repeatObserved_ = true;
+		if (direction == direction_ && scancode == scancode_ &&
+			shiftModifierAllowed == shiftModifierAllowed_) repeatObserved_ = true;
 		return 0;
 	}
 	direction_ = direction;
 	scancode_ = scancode;
 	repeatObserved_ = false;
+	shiftModifierAllowed_ = shiftModifierAllowed;
 	return direction_;
 }
 
@@ -108,6 +121,7 @@ void HeldNavigationController::Reset() {
 	direction_ = 0;
 	scancode_ = -1;
 	repeatObserved_ = false;
+	shiftModifierAllowed_ = false;
 }
 
 } // namespace jpegview_linux

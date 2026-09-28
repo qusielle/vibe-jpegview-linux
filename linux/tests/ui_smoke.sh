@@ -161,6 +161,10 @@ case "$help_text" in
 	*"D toggles double-page mode"*"J reverses manga reading order"*) ;;
 	*) echo "UI smoke test: --help does not describe the double-page shortcuts" >&2; exit 1 ;;
 esac
+case "$help_text" in
+	*"spacebar_navigates_images=1 maps Space/Shift+Space to next/previous"*) ;;
+	*) echo "UI smoke test: --help does not describe the configurable Space navigation keys" >&2; exit 1 ;;
+esac
 
 Xvfb -displayfd 1 -screen 0 1280x800x24 >"$temporary/display" 2>"$temporary/xvfb.log" &
 xvfb_pid=$!
@@ -350,6 +354,20 @@ DISPLAY=":$display_number" xdotool key Left
 assert_title_prefix "00-cover.ppm" "configured manga mode still inverted the Left key"
 DISPLAY=":$display_number" xdotool key Right
 assert_title_prefix "01-first.ppm" "configured manga mode still inverted the Right key"
+stop_viewer
+
+# Space navigation is opt-in and Shift+Space selects the previous image.
+printf 'scale_mode=fit\ndouble_page_mode_enabled=0\nmanga_reading_order_enabled=0\nspacebar_navigates_images=1\n' \
+	> "$double_settings"
+XDG_STATE_HOME="$temporary/space-navigation-state"
+export XDG_STATE_HOME
+VIEWER_TEST_HOME="$temporary/space-navigation-home" \
+	VIEWER_TEST_CONFIG_HOME="$temporary/double-page-config" \
+	launch_viewer "$temporary/double-page-fixtures/00-cover.ppm"
+DISPLAY=":$display_number" xdotool key space
+assert_title_prefix "01-first.ppm" "configured Space key did not navigate to the next image"
+DISPLAY=":$display_number" xdotool key shift+space
+assert_title_prefix "00-cover.ppm" "configured Shift+Space key did not navigate to the previous image"
 stop_viewer
 XDG_STATE_HOME="$temporary/state"
 export XDG_STATE_HOME

@@ -43,6 +43,7 @@ struct ViewerSettings {
 	bool doublePageModeEnabled = false;
 	bool mangaReadingOrderEnabled = false;
 	bool mangaModeInvertsLeftRight = true;
+	bool spacebarNavigatesImages = false;
 	TransparencyPattern transparencyPattern = TransparencyPattern::Black;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	int fileDialogWidth = kDefaultFileDialogWidth;
