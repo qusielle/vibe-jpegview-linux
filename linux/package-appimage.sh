@@ -16,6 +16,7 @@ SEVENZIP_SOURCE_ARCHIVE=${SEVENZIP_SOURCE_ARCHIVE:-}
 RAR_BACKEND_ROOT=${RAR_BACKEND_ROOT:-}
 RAR_SOURCE_ARCHIVE=${RAR_SOURCE_ARCHIVE:-}
 RAR_LICENSE_FILE=${RAR_LICENSE_FILE:-}
+APPIMAGE_UPDATE_INFORMATION=${APPIMAGE_UPDATE_INFORMATION:-}
 
 make -C "$SCRIPT_DIR" BUILD_DIR="$BUILD_DIR" VERSION="$VERSION" \
 	SEVENZIP_SOURCE_ROOT="$SEVENZIP_SOURCE_ROOT" RAR_BACKEND_ROOT="$RAR_BACKEND_ROOT" all
@@ -194,14 +195,27 @@ fi
 
 if [ -n "$APPIMAGE_TOOL" ]; then
 	# Set APPIMAGETOOL_ARGS=--appimage-extract-and-run when FUSE is unavailable.
+	set --
 	if [ -n "${APPIMAGETOOL_ARGS:-}" ]; then
-		ARCH=x86_64 "$APPIMAGE_TOOL" "$APPIMAGETOOL_ARGS" "$APPDIR" "$OUTPUT"
-	else
-		ARCH=x86_64 "$APPIMAGE_TOOL" "$APPDIR" "$OUTPUT"
+		set -- "$@" "$APPIMAGETOOL_ARGS"
+	fi
+	if [ -n "$APPIMAGE_UPDATE_INFORMATION" ]; then
+		set -- "$@" -u "$APPIMAGE_UPDATE_INFORMATION"
+	fi
+	set -- "$@" "$APPDIR" "$OUTPUT"
+	ARCH=x86_64 "$APPIMAGE_TOOL" "$@"
+	if [ -n "$APPIMAGE_UPDATE_INFORMATION" ] && [ ! -f "$OUTPUT.zsync" ]; then
+		echo "appimagetool did not create the requested update file: $OUTPUT.zsync" >&2
+		exit 1
 	fi
 	printf 'Created %s\n' "$OUTPUT"
 	if command -v sha256sum >/dev/null 2>&1; then sha256sum "$OUTPUT"; fi
 	exit 0
+fi
+
+if [ -n "$APPIMAGE_UPDATE_INFORMATION" ]; then
+	echo "APPIMAGE_UPDATE_INFORMATION requires appimagetool to create an updateable AppImage" >&2
+	exit 1
 fi
 
 echo "Prepared AppDir: $APPDIR"

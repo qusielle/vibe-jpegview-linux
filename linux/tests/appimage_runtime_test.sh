@@ -22,7 +22,17 @@ exit 0
 EOF
 cat > "$MOCK_BIN/appimagetool" <<'EOF'
 #!/bin/sh
-: > "$2"
+printf 'ARG<%s>\n' "$@" > "$APPIMAGE_TEST_TOOL_LOG"
+output=
+has_update_information=0
+for argument in "$@"; do
+	output=$argument
+	if [ "$argument" = -u ]; then has_update_information=1; fi
+done
+: > "$output"
+if [ "$has_update_information" -eq 1 ] && [ "${APPIMAGE_TEST_OMIT_ZSYNC:-0}" -ne 1 ]; then
+	: > "$output.zsync"
+fi
 exit 0
 EOF
 cat > "$MOCK_BIN/ldd" <<'EOF'
@@ -51,6 +61,7 @@ chmod 755 "$BUILD_DIR/jpegview-linux"
 
 APPIMAGE_TEST_LIB_DIR="$LIB_DIR" \
 APPIMAGE_TEST_ICON="$REPO_DIR/src/JPEGView/res/JPEGView.ico" \
+APPIMAGE_TEST_TOOL_LOG="$TEMP_DIR/appimagetool-arguments" \
 PATH="$MOCK_BIN:/usr/bin:/bin" \
 BUILD_DIR="$BUILD_DIR" \
 APPDIR="$APPDIR" \
@@ -60,6 +71,54 @@ SDL2_LIBRARY="$LIB_DIR/libSDL2-2.0.so.0" \
 WEBP_LIBRARY=/nonexistent/libwebp.so \
 APPIMAGETOOL="$MOCK_BIN/appimagetool" \
 	sh "$REPO_DIR/linux/package-appimage.sh" 1.0.0 >/dev/null
+
+if grep -Fqx 'ARG<-u>' "$TEMP_DIR/appimagetool-arguments"; then
+	echo 'Default AppImage packaging unexpectedly embedded update information' >&2
+	exit 1
+fi
+
+update_information='gh-releases-zsync|qusielle|vibe-jpegview-linux|latest|JPEGView-*-ubuntu20-x86_64.AppImage.zsync'
+APPIMAGE_TEST_LIB_DIR="$LIB_DIR" \
+APPIMAGE_TEST_ICON="$REPO_DIR/src/JPEGView/res/JPEGView.ico" \
+APPIMAGE_TEST_TOOL_LOG="$TEMP_DIR/appimagetool-update-arguments" \
+PATH="$MOCK_BIN:/usr/bin:/bin" \
+BUILD_DIR="$BUILD_DIR" \
+APPDIR="$APPDIR" \
+OUTPUT="$TEMP_DIR/test-update.AppImage" \
+PANGOFT2_LIBRARY="$LIB_DIR/libpangoft2-test.so.0" \
+SDL2_LIBRARY="$LIB_DIR/libSDL2-2.0.so.0" \
+WEBP_LIBRARY=/nonexistent/libwebp.so \
+APPIMAGETOOL_ARGS=--appimage-extract-and-run \
+APPIMAGE_UPDATE_INFORMATION="$update_information" \
+APPIMAGETOOL="$MOCK_BIN/appimagetool" \
+	sh "$REPO_DIR/linux/package-appimage.sh" 1.0.0 >/dev/null
+
+test -f "$TEMP_DIR/test-update.AppImage.zsync" || {
+	echo 'AppImage update packaging did not retain the generated zsync file' >&2
+	exit 1
+}
+grep -Fqx 'ARG<--appimage-extract-and-run>' "$TEMP_DIR/appimagetool-update-arguments"
+grep -Fqx 'ARG<-u>' "$TEMP_DIR/appimagetool-update-arguments"
+grep -Fqx "ARG<$update_information>" "$TEMP_DIR/appimagetool-update-arguments"
+grep -Fqx "ARG<$TEMP_DIR/test-update.AppImage>" "$TEMP_DIR/appimagetool-update-arguments"
+
+if APPIMAGE_TEST_LIB_DIR="$LIB_DIR" \
+	APPIMAGE_TEST_ICON="$REPO_DIR/src/JPEGView/res/JPEGView.ico" \
+	APPIMAGE_TEST_TOOL_LOG="$TEMP_DIR/appimagetool-missing-zsync-arguments" \
+	APPIMAGE_TEST_OMIT_ZSYNC=1 \
+	PATH="$MOCK_BIN:/usr/bin:/bin" \
+	BUILD_DIR="$BUILD_DIR" \
+	APPDIR="$APPDIR" \
+	OUTPUT="$TEMP_DIR/test-missing-zsync.AppImage" \
+	PANGOFT2_LIBRARY="$LIB_DIR/libpangoft2-test.so.0" \
+	SDL2_LIBRARY="$LIB_DIR/libSDL2-2.0.so.0" \
+	WEBP_LIBRARY=/nonexistent/libwebp.so \
+	APPIMAGE_UPDATE_INFORMATION="$update_information" \
+	APPIMAGETOOL="$MOCK_BIN/appimagetool" \
+	sh "$REPO_DIR/linux/package-appimage.sh" 1.0.0 >/dev/null 2>&1; then
+	echo 'AppImage packaging accepted update metadata without a generated zsync file' >&2
+	exit 1
+fi
 
 test -f "$APPDIR/usr/lib/libjpegview-test.so.1" || {
 	echo 'AppImage packaging stopped bundling an ordinary runtime dependency' >&2

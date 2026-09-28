@@ -11,18 +11,23 @@ APP_VERSION=${APP_VERSION:-$(cd -- "$REPO_DIR" && sh "$SCRIPT_DIR/version.sh")}
 safe_version=${APP_VERSION//[^a-zA-Z0-9._+-]/-}
 image="jpegview-linux-build:ubuntu${UBUNTU_VERSION}"
 appimage_name="JPEGView-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64.AppImage"
+appimage_zsync_name="${appimage_name}.zsync"
 binary_name="jpegview-linux-${safe_version}-ubuntu${UBUNTU_VERSION}-x86_64"
 binary_bundle_name="${binary_name}-with-archive-plugins.tar.gz"
 checksums_name="SHA256SUMS-ubuntu${UBUNTU_VERSION}.txt"
-checksum_inputs=("$appimage_name" "$binary_name" "$binary_bundle_name")
-assets=("$OUTPUT_DIR/$appimage_name" "$OUTPUT_DIR/$binary_name" \
+checksum_inputs=("$appimage_name" "$appimage_zsync_name" "$binary_name" "$binary_bundle_name")
+assets=("$OUTPUT_DIR/$appimage_name" "$OUTPUT_DIR/$appimage_zsync_name" "$OUTPUT_DIR/$binary_name" \
 	"$OUTPUT_DIR/$binary_bundle_name")
 
 mkdir -p "$OUTPUT_DIR"
 
-docker run --rm -v "$OUTPUT_DIR:/out" "$image" appimage "$safe_version"
-mv "$OUTPUT_DIR/JPEGView-${safe_version}-x86_64.AppImage" \
-	"$OUTPUT_DIR/$appimage_name"
+appimage_update_information="gh-releases-zsync|qusielle|vibe-jpegview-linux|latest|JPEGView-*-ubuntu${UBUNTU_VERSION}-x86_64.AppImage.zsync"
+docker run --rm \
+	--env "APPIMAGE_UPDATE_INFORMATION=$appimage_update_information" \
+	--env "OUTPUT=/out/$appimage_name" \
+	-v "$OUTPUT_DIR:/out" "$image" appimage "$safe_version"
+test -f "$OUTPUT_DIR/$appimage_name"
+test -f "$OUTPUT_DIR/$appimage_zsync_name"
 
 docker run --rm -v "$OUTPUT_DIR:/out" "$image" binary "$safe_version"
 mv "$OUTPUT_DIR/jpegview-linux" "$OUTPUT_DIR/$binary_name"

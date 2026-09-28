@@ -331,3 +331,12 @@ desktop entry's `X-AppImage-Version` and Debian control metadata use it as well.
 fetches tag history before resolving the value. Docker build contexts omit `.git`, so workflows and
 documented Docker invocations resolve the version on the host and pass it into the container. Avoid
 independent version literals in build, package, and executable metadata.
+
+Published AppImages receive `APPIMAGE_UPDATE_INFORMATION` from `release-assets.sh`; local and
+branch-build AppImages omit it unless explicitly requested. Each Ubuntu release uses AppImage's
+`gh-releases-zsync` transport with a `latest` release selector and a platform-specific `.zsync`
+filename wildcard. `appimagetool -u` embeds that value and generates a sidecar. Release packaging
+builds directly to the final versioned AppImage filename so the zsync target filename remains
+aligned, then uploads/checksums both assets together. The Ubuntu AppImage Docker images install the
+standard-repository `zsync` package to provide `zsyncmake`; package creation fails if requested
+update metadata does not produce the sidecar.

@@ -431,8 +431,11 @@ available from the workflow run's summary. When a GitHub Release is published, i
 versioned AppImage and native executable assets for each Ubuntu base. The Ubuntu 24 release job also
 builds and validates its `.deb` on Ubuntu 24, and the Ubuntu 26 job does the same on Ubuntu 26. Both
 packages use only their release's standard repositories. Each release checksum file covers every
-asset for its Ubuntu base. Asset names include the Ubuntu release because artifacts built on newer
-bases may require newer system glibc.
+asset for its Ubuntu base. Release AppImages embed AppImage's `gh-releases-zsync` update information;
+their matching `.zsync` files are uploaded beside them and included in the checksum file. The embedded
+GitHub Releases channel follows the latest non-prerelease release and matches only the same Ubuntu
+base, so each AppImage updates from a compatible artifact. Asset names include the Ubuntu release
+because artifacts built on newer bases may require newer system glibc.
 
 If SDL2 is installed in a non-standard location, override the linker settings:
 
@@ -524,6 +527,14 @@ APPDIR="$PWD/out/JPEGView-Linux.AppDir" \
 OUTPUT="$PWD/out/JPEGView-${VERSION}-x86_64.AppImage" \
 make -C linux appimage VERSION="$VERSION"
 ```
+
+Published GitHub Release AppImages also embed update information and are published with a matching
+`.AppImage.zsync` file, allowing AppImageUpdate and compatible tools to fetch binary-delta updates.
+The release build obtains this metadata from `release-assets.sh`; ordinary local AppImage builds do
+not point at the public release channel. To create an updateable local build intentionally, set
+`APPIMAGE_UPDATE_INFORMATION` to a supported AppImage update-information value and ensure
+`appimagetool` plus `zsyncmake` are available. Packaging fails if update metadata is requested but
+the matching `.zsync` file was not generated.
 
 The resulting AppImage still relies on the host kernel, glibc-compatible userspace, and a
 working X11 or Wayland display server. SDL and codec dependencies are carried with the artifact,
