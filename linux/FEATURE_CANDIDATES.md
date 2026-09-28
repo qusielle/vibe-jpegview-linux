@@ -22,12 +22,6 @@ are identified by name.
   report the member's uncompressed image size rather than the size of its containing archive. Keep
   any dimension lookup for large images off the event thread.
 
-## Configuration candidates
-
-- **Advanced configuration window:** expose persisted config-file options that are not already
-  available as context-menu items. Group them by topic and edit the existing settings source of
-  truth rather than introducing a parallel settings layer.
-
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
 - **Book Mode:** add a book-oriented viewing mode with page size configurable as a percentage of

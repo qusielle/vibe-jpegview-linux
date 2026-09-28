@@ -12,6 +12,7 @@
 #include "image_processing.h"
 #include "image_processing_store.h"
 #include "settings.h"
+#include "advanced_configuration_model.h"
 #include "sort_mode.h"
 #include "desktop_applications.h"
 #include "external_commands.h"
@@ -129,6 +130,10 @@ constexpr int kResizeApply = 0;
 constexpr int kResizeCancel = 1;
 constexpr int kCropSizeApply = 0;
 constexpr int kCropSizeCancel = 1;
+constexpr int kAdvancedConfigurationMaximumWidth = 1040;
+constexpr int kAdvancedConfigurationMaximumHeight = 760;
+constexpr int kAdvancedConfigurationRowHeight = 27;
+constexpr int kAdvancedConfigurationCategoryHeight = 28;
 constexpr int kConfirmRestoreParameterDb = -8;
 constexpr char kRepositoryUrl[] = "https://github.com/qusielle/vibe-jpegview-linux";
 
@@ -729,10 +734,7 @@ private:
 		viewport_.LoadScaleMode(settings.scaleMode, settings.manualZoomSet, settings.manualZoom);
 	}
 
-	bool SaveSettings() const {
-		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
-		if (settingsPath.empty()) return false;
-
+	jpegview_linux::ViewerSettings CurrentViewerSettings() const {
 		jpegview_linux::ViewerSettings settings;
 		settings.scaleMode = viewport_.NavigationScaleMode();
 		settings.sortMode = jpegview_linux::SortModeSettingName(fileList_.GetSorting());
@@ -772,7 +774,13 @@ private:
 		settings.unsharpMaskThreshold = unsharpMaskThreshold_;
 		settings.cacheSizeMiB = cacheSizeMiB_;
 		settings.copyRenamePattern = copyRenamePattern_;
-		return jpegview_linux::SaveViewerSettings(settingsPath, settings);
+		return settings;
+	}
+
+	bool SaveSettings() const {
+		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
+		if (settingsPath.empty()) return false;
+		return jpegview_linux::SaveViewerSettings(settingsPath, CurrentViewerSettings());
 	}
 
 	bool JpegDimensions(const fs::path& filename, int& width, int& height,
@@ -2624,6 +2632,314 @@ private:
 		}
 	}
 
+	void OpenAdvancedConfigurationDialog() {
+		advancedConfiguration_.Open(CurrentViewerSettings());
+		advancedConfiguration_.SetMessage({});
+		SDL_StartTextInput();
+	}
+
+	void CloseAdvancedConfigurationDialog() {
+		if (!advancedConfiguration_.IsOpen()) return;
+		if (advancedConfiguration_.IsEditing()) advancedConfiguration_.CancelEdit();
+		advancedConfiguration_.Close();
+		SDL_StopTextInput();
+		SetTitle();
+	}
+
+	bool ApplyAdvancedConfigurationDialog() {
+		if (!advancedConfiguration_.IsOpen()) return false;
+		if (advancedConfiguration_.IsEditing() && !advancedConfiguration_.CommitEdit()) return false;
+		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
+		if (settingsPath.empty() || !jpegview_linux::SaveViewerSettings(
+			settingsPath, advancedConfiguration_.Draft())) {
+			advancedConfiguration_.SetMessage("Could not save settings.conf; changes were not applied");
+			return false;
+		}
+
+		const jpegview_linux::ViewerSettings& settings = advancedConfiguration_.Draft();
+		const int previousThumbnailWidth = thumbnailPanelWidth_;
+		const bool magnifierChanged = magnifyingGlass_.Width() != settings.magnifyingGlassWidth ||
+			magnifyingGlass_.Height() != settings.magnifyingGlassHeight ||
+			std::abs(magnifyingGlass_.ZoomLevel() - settings.magnifyingGlassZoomLevel) > 1e-9;
+		transparencyPattern_ = settings.transparencyPattern;
+		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
+		spacebarNavigatesImages_ = settings.spacebarNavigatesImages;
+		showHistogram_ = settings.showHistogram;
+		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
+		fileDialogWidth_ = settings.fileDialogWidth;
+		fileDialogHeight_ = settings.fileDialogHeight;
+		fileDialogPreviewRatio_ = settings.fileDialogPreviewRatio;
+		cropUserAspectWidth_ = settings.userCropAspectWidth;
+		cropUserAspectHeight_ = settings.userCropAspectHeight;
+		defaultImageProcessing_ = settings.defaultImageProcessing;
+		unsharpMaskRadius_ = settings.unsharpMaskRadius;
+		unsharpMaskAmount_ = settings.unsharpMaskAmount;
+		unsharpMaskThreshold_ = settings.unsharpMaskThreshold;
+		cacheSizeMiB_ = settings.cacheSizeMiB;
+		copyRenamePattern_ = settings.copyRenamePattern;
+
+		if (magnifierChanged) {
+			ClearMagnifyingGlassRequest();
+			const SDL_Rect imageArea = ImageAreaRect();
+			magnifyingGlass_.SetParameters(settings.magnifyingGlassWidth,
+				settings.magnifyingGlassHeight, settings.magnifyingGlassZoomLevel,
+				imageArea.w, imageArea.h);
+		}
+		if (thumbnailPanelWidth_ != previousThumbnailWidth) {
+			ClearThumbnailCache();
+			if (thumbnailPanelVisible_) {
+				PrepareThumbnailPreload();
+				if (viewport_.IsFitToWindow()) {
+					FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+				}
+			}
+		}
+		advancedConfiguration_.Close();
+		SDL_StopTextInput();
+		SetTitle();
+		return true;
+	}
+
+	SDL_Rect AdvancedConfigurationDialogRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::max(1, std::min(kAdvancedConfigurationMaximumWidth, windowWidth - 32));
+		const int height = std::max(1, std::min(kAdvancedConfigurationMaximumHeight, windowHeight - 32));
+		return SDL_Rect{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+	}
+
+	SDL_Rect AdvancedConfigurationCategoryRect(int category) const {
+		const SDL_Rect dialog = AdvancedConfigurationDialogRect();
+		const int count = std::max(1, advancedConfiguration_.CategoryCount());
+		const int usableWidth = dialog.w - 32;
+		const int tabWidth = usableWidth / count;
+		const int remainder = usableWidth % count;
+		const int xOffset = category * tabWidth + std::min(category, remainder);
+		return SDL_Rect{dialog.x + 16 + xOffset, dialog.y + 60,
+			tabWidth + (category < remainder ? 1 : 0), kAdvancedConfigurationCategoryHeight};
+	}
+
+	SDL_Rect AdvancedConfigurationRowsRect() const {
+		const SDL_Rect dialog = AdvancedConfigurationDialogRect();
+		return SDL_Rect{dialog.x + 16, dialog.y + 100, dialog.w - 32, dialog.h - 170};
+	}
+
+	SDL_Rect AdvancedConfigurationRowRect(int visibleRow) const {
+		const SDL_Rect rows = AdvancedConfigurationRowsRect();
+		return SDL_Rect{rows.x, rows.y + visibleRow * kAdvancedConfigurationRowHeight,
+			rows.w, kAdvancedConfigurationRowHeight - 1};
+	}
+
+	int AdvancedConfigurationVisibleRows() const {
+		return std::max(1, AdvancedConfigurationRowsRect().h / kAdvancedConfigurationRowHeight);
+	}
+
+	SDL_Rect AdvancedConfigurationButtonRect(bool apply) const {
+		const SDL_Rect dialog = AdvancedConfigurationDialogRect();
+		const int y = dialog.y + dialog.h - 46;
+		return apply ? SDL_Rect{dialog.x + dialog.w - 208, y, 94, 30} :
+			SDL_Rect{dialog.x + dialog.w - 106, y, 90, 30};
+	}
+
+	int AdvancedConfigurationRowAt(int x, int y) const {
+		const SDL_Rect rows = AdvancedConfigurationRowsRect();
+		if (!PointInRect(x, y, rows)) return -1;
+		const int visibleRow = (y - rows.y) / kAdvancedConfigurationRowHeight;
+		if (visibleRow < 0 || visibleRow >= advancedConfiguration_.VisibleRows()) return -1;
+		const int row = static_cast<int>(advancedConfiguration_.Scroll()) + visibleRow;
+		return row < advancedConfiguration_.RowCount() ? row : -1;
+	}
+
+	void HandleAdvancedConfigurationEvents(const SDL_Event& event, bool& running) {
+		if (!advancedConfiguration_.IsOpen()) return;
+		advancedConfiguration_.SetVisibleRows(AdvancedConfigurationVisibleRows());
+		if (event.type == SDL_QUIT) {
+			running = false;
+			return;
+		}
+		if (event.type == SDL_TEXTINPUT) {
+			advancedConfiguration_.AppendText(event.text.text);
+			return;
+		}
+		if (event.type == SDL_MOUSEMOTION) {
+			lastMouseX_ = event.motion.x;
+			lastMouseY_ = event.motion.y;
+			return;
+		}
+		if (event.type == SDL_MOUSEWHEEL) {
+			if (!advancedConfiguration_.IsEditing()) {
+				advancedConfiguration_.ScrollBy(-std::clamp(event.wheel.y, -10, 10));
+			}
+			return;
+		}
+		if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+			const int key = event.key.keysym.sym;
+			const bool control = (event.key.keysym.mod & 0x00C0u) != 0;
+			const bool shift = (event.key.keysym.mod & 0x0003u) != 0;
+			const auto commitPendingEdit = [this]() {
+				return !advancedConfiguration_.IsEditing() || advancedConfiguration_.CommitEdit();
+			};
+			if (key == SDLK_ESCAPE) {
+				if (advancedConfiguration_.IsEditing()) advancedConfiguration_.CancelEdit();
+				else CloseAdvancedConfigurationDialog();
+			} else if (control && key == SDLK_RETURN) {
+				ApplyAdvancedConfigurationDialog();
+			} else if (advancedConfiguration_.IsEditing() && control &&
+				(key == 'a' || key == 'A')) {
+				advancedConfiguration_.SelectAll();
+			} else if (advancedConfiguration_.IsEditing() && control &&
+				(key == 'v' || key == 'V')) {
+				std::unique_ptr<char, SdlClipboardTextWiper> clipboardText(SDL_GetClipboardText());
+				if (clipboardText) advancedConfiguration_.AppendText(clipboardText.get());
+			} else if (advancedConfiguration_.IsEditing() && key == SDLK_BACKSPACE) {
+				advancedConfiguration_.Backspace();
+			} else if (advancedConfiguration_.IsEditing() &&
+				key == SDLK_RETURN) {
+				advancedConfiguration_.CommitEdit();
+			} else if (key == SDLK_TAB) {
+				if (commitPendingEdit()) advancedConfiguration_.MoveCategory(shift ? -1 : 1);
+			} else if (key == SDLK_UP) {
+				if (commitPendingEdit()) advancedConfiguration_.MoveSelection(-1);
+			} else if (key == SDLK_DOWN) {
+				if (commitPendingEdit()) advancedConfiguration_.MoveSelection(1);
+			} else if (key == SDLK_PAGEUP) {
+				if (commitPendingEdit()) {
+					advancedConfiguration_.ScrollBy(-advancedConfiguration_.VisibleRows());
+				}
+			} else if (key == SDLK_PAGEDOWN) {
+				if (commitPendingEdit()) {
+					advancedConfiguration_.ScrollBy(advancedConfiguration_.VisibleRows());
+				}
+			} else if (key == SDLK_HOME) {
+				if (commitPendingEdit()) advancedConfiguration_.SelectRow(0);
+			} else if (key == SDLK_END) {
+				if (commitPendingEdit()) {
+					advancedConfiguration_.SelectRow(advancedConfiguration_.RowCount() - 1);
+				}
+			} else if (advancedConfiguration_.IsEditing() && key == SDLK_SPACE) {
+				advancedConfiguration_.AppendText(" ");
+			} else if (!advancedConfiguration_.IsEditing() &&
+				(key == SDLK_RETURN || key == SDLK_SPACE)) {
+				advancedConfiguration_.ActivateSelected();
+			} else if (!advancedConfiguration_.IsEditing() && key == SDLK_LEFT) {
+				advancedConfiguration_.AdjustSelected(-1);
+			} else if (!advancedConfiguration_.IsEditing() && key == SDLK_RIGHT) {
+				advancedConfiguration_.AdjustSelected(1);
+			}
+			return;
+		}
+		if (event.type != SDL_MOUSEBUTTONDOWN || event.button.button != SDL_BUTTON_LEFT) return;
+		lastMouseX_ = event.button.x;
+		lastMouseY_ = event.button.y;
+		if (PointInRect(event.button.x, event.button.y, AdvancedConfigurationButtonRect(true))) {
+			ApplyAdvancedConfigurationDialog();
+			return;
+		}
+		if (PointInRect(event.button.x, event.button.y, AdvancedConfigurationButtonRect(false))) {
+			CloseAdvancedConfigurationDialog();
+			return;
+		}
+		for (int category = 0; category < advancedConfiguration_.CategoryCount(); ++category) {
+			if (PointInRect(event.button.x, event.button.y,
+				AdvancedConfigurationCategoryRect(category))) {
+				if (!advancedConfiguration_.IsEditing() || advancedConfiguration_.CommitEdit()) {
+					advancedConfiguration_.SelectCategory(category);
+				}
+				return;
+			}
+		}
+		const int row = AdvancedConfigurationRowAt(event.button.x, event.button.y);
+		if (row >= 0 && (!advancedConfiguration_.IsEditing() || advancedConfiguration_.CommitEdit())) {
+			advancedConfiguration_.SelectRow(row);
+			advancedConfiguration_.ActivateSelected();
+		}
+	}
+
+	void RenderAdvancedConfigurationDialog() {
+		if (!advancedConfiguration_.IsOpen()) return;
+		advancedConfiguration_.SetVisibleRows(AdvancedConfigurationVisibleRows());
+		const SDL_Rect dialog = AdvancedConfigurationDialogRect();
+		SDL_SetRenderDrawColor(renderer_, 8, 12, 18, 246);
+		SDL_RenderFillRect(renderer_, &dialog);
+		DrawRect(dialog, 195, 205, 220);
+		DrawText("ADVANCED CONFIGURATION", dialog.x + 16, dialog.y + 12,
+			kUiTextScale, 245, 245, 250);
+		DrawText("Changes remain staged until Apply; values use the existing settings.conf format.",
+			dialog.x + 16, dialog.y + 32, kUiTextScale, 175, 185, 200);
+		for (int category = 0; category < advancedConfiguration_.CategoryCount(); ++category) {
+			const SDL_Rect tab = AdvancedConfigurationCategoryRect(category);
+			const bool selected = category == advancedConfiguration_.ActiveCategory();
+			SDL_SetRenderDrawColor(renderer_, selected ? 55 : 25, selected ? 82 : 32,
+				selected ? 112 : 42, 255);
+			SDL_RenderFillRect(renderer_, &tab);
+			DrawRect(tab, selected ? 150 : 75, selected ? 185 : 85, selected ? 220 : 95);
+			const std::string label = ClipText(advancedConfiguration_.CategoryName(category), tab.w - 8);
+			const int labelX = tab.x + std::max(4, (tab.w - TextWidth(label, kUiTextScale)) / 2);
+			DrawText(label, labelX, tab.y + (tab.h - TextLineHeight()) / 2,
+				kUiTextScale, 225, 230, 240);
+		}
+
+		const SDL_Rect rows = AdvancedConfigurationRowsRect();
+		const int firstRow = static_cast<int>(advancedConfiguration_.Scroll());
+		for (int visibleRow = 0; visibleRow < advancedConfiguration_.VisibleRows(); ++visibleRow) {
+			const int row = firstRow + visibleRow;
+			if (row >= advancedConfiguration_.RowCount()) break;
+			const jpegview_linux::AdvancedConfigurationField* field =
+				advancedConfiguration_.FieldAt(row);
+			if (field == nullptr) continue;
+			const SDL_Rect rowRect = AdvancedConfigurationRowRect(visibleRow);
+			const bool selected = row == advancedConfiguration_.SelectedRow();
+			SDL_SetRenderDrawColor(renderer_, selected ? 38 : 18, selected ? 54 : 22,
+				selected ? 72 : 28, 255);
+			SDL_RenderFillRect(renderer_, &rowRect);
+			if (selected) DrawRect(rowRect, 92, 135, 175);
+			DrawText(advancedConfiguration_.FieldLabel(row), rowRect.x + 8, rowRect.y + 2,
+				kUiTextScale, 225, 230, 235);
+			DrawText(advancedConfiguration_.FieldKey(row), rowRect.x + 8, rowRect.y + 14,
+				kUiTextScale, 135, 145, 160);
+			SDL_Rect valueRect{rowRect.x + rowRect.w * 2 / 3, rowRect.y + 3,
+				rowRect.w / 3 - 8, rowRect.h - 6};
+			const bool editing = selected && advancedConfiguration_.IsEditing();
+			SDL_SetRenderDrawColor(renderer_, editing ? 48 : 10, editing ? 58 : 14,
+				editing ? 72 : 18, 255);
+			SDL_RenderFillRect(renderer_, &valueRect);
+			DrawRect(valueRect, editing ? 175 : 78, editing ? 190 : 88, editing ? 220 : 98);
+			std::string value = editing ? advancedConfiguration_.EditingText() :
+				advancedConfiguration_.FieldValue(row);
+			if (editing) value += "_";
+			value = ClipText(value, valueRect.w - 10);
+			DrawText(value, valueRect.x + 5,
+				valueRect.y + (valueRect.h - TextLineHeight()) / 2, kUiTextScale,
+				255, 225, 150);
+		}
+		if (advancedConfiguration_.RowCount() > advancedConfiguration_.VisibleRows()) {
+			const std::string page = std::to_string(firstRow + 1) + "–" +
+				std::to_string(std::min(advancedConfiguration_.RowCount(),
+					firstRow + advancedConfiguration_.VisibleRows())) + "/" +
+				std::to_string(advancedConfiguration_.RowCount());
+			DrawText(page, rows.x + rows.w - TextWidth(page, kUiTextScale),
+				rows.y + rows.h + 3, kUiTextScale, 160, 170, 185);
+		}
+		const std::string footer = advancedConfiguration_.Message().empty() ?
+			"Up/Down select  Left/Right adjust  Enter edit/toggle  Tab group  Ctrl+Enter apply  Esc cancel" :
+			advancedConfiguration_.Message();
+		DrawText(ClipText(footer, dialog.w - 232), dialog.x + 16, dialog.y + dialog.h - 38,
+			kUiTextScale, 205, 205, advancedConfiguration_.Message().empty() ? 215 : 140);
+		const SDL_Rect apply = AdvancedConfigurationButtonRect(true);
+		SDL_SetRenderDrawColor(renderer_, 38, 75, 105, 255);
+		SDL_RenderFillRect(renderer_, &apply);
+		DrawRect(apply, 135, 175, 205);
+		DrawText("Apply", apply.x + (apply.w - TextWidth("Apply", kUiTextScale)) / 2,
+			apply.y + (apply.h - TextLineHeight()) / 2, kUiTextScale, 245, 245, 250);
+		const SDL_Rect cancel = AdvancedConfigurationButtonRect(false);
+		SDL_SetRenderDrawColor(renderer_, 40, 40, 42, 255);
+		SDL_RenderFillRect(renderer_, &cancel);
+		DrawRect(cancel, 115, 115, 120);
+		DrawText("Cancel", cancel.x + (cancel.w - TextWidth("Cancel", kUiTextScale)) / 2,
+			cancel.y + (cancel.h - TextLineHeight()) / 2, kUiTextScale, 225, 225, 230);
+	}
+
 	void OpenAbout() {
 		aboutOpen_ = true;
 		contextMenuOpen_ = false;
@@ -2973,6 +3289,7 @@ private:
 		const Uint16 blockedModifierMask = heldNavigation_.ShiftModifierAllowed() ?
 			0x03C0u : 0x03C3u;
 		if (contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ || aboutOpen_ || helpOpen_ ||
+			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
 			(SDL_GetModState() & blockedModifierMask) != 0) {
 			heldNavigation_.Reset();
@@ -3499,6 +3816,7 @@ private:
 
 	void RenderPictureLevels() {
 		if (!pictureLevelsPanelOpen_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
 		const SDL_Rect panel = PictureLevelsPanelRect();
 		SDL_SetRenderDrawColor(renderer_, 10, 15, 22, 238);
@@ -3569,6 +3887,10 @@ private:
 	void ExecuteCommand(int command) {
 		if (command >= IDM_FIRST_OPENWITH_CMD && command <= IDM_LAST_OPENWITH_CMD) {
 			OpenCurrentWith(static_cast<std::size_t>(command - IDM_FIRST_OPENWITH_CMD));
+			return;
+		}
+		if (command == jpegview_linux::kCommandAdvancedConfiguration) {
+			OpenAdvancedConfigurationDialog();
 			return;
 		}
 		switch (command) {
@@ -6334,7 +6656,7 @@ private:
 
 	void RenderFileName() {
 		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
-			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
+			advancedConfiguration_.IsOpen() || batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
 		int windowWidth = 0;
 		SDL_GetWindowSize(window_, &windowWidth, nullptr);
 		std::ostringstream text;
@@ -6350,7 +6672,7 @@ private:
 	}
 
 	void RenderImageInfo() {
-		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
+		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ || advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
 		const jpegview_linux::InformationOverlayPaintPlan paint = BuildImageInfoPaintPlan();
 		if (paint.overlay.panel.width <= 0 || paint.overlay.panel.height <= 0) return;
@@ -7123,6 +7445,7 @@ private:
 
 	bool HandleImageInfoClick(int x, int y) {
 		if (!infoVisible_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return false;
 		const jpegview_linux::InformationOverlayPaintPlan paint = BuildImageInfoPaintPlan();
 		if (!jpegview_linux::Contains(paint.spectrumButton, x, y)) return false;
@@ -7133,6 +7456,7 @@ private:
 
 	void RenderControls() {
 		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
+			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen()) return;
 		const jpegview_linux::NavigationPanelPaint paint = CurrentNavigationPanelPaint();
 		const SDL_Rect panel = SdlRect(paint.panel);
@@ -7440,6 +7764,10 @@ private:
 				else HandleAboutEvents(event);
 				continue;
 			}
+			if (advancedConfiguration_.IsOpen()) {
+				HandleAdvancedConfigurationEvents(event, running);
+				continue;
+			}
 			if (fileDialogOpen_) {
 				HandleFileDialogEvents(event, running);
 				continue;
@@ -7484,6 +7812,11 @@ private:
 						MoveContextMenuSelection(-1);
 					} else if (event.key.keysym.sym == SDLK_DOWN) {
 						MoveContextMenuSelection(1);
+					} else if (event.key.keysym.sym == SDLK_HOME) {
+						menuSelected_ = jpegview_linux::NextMenuSelection(contextMenuItems_, -1, 1);
+					} else if (event.key.keysym.sym == SDLK_END) {
+						menuSelected_ = jpegview_linux::NextMenuSelection(contextMenuItems_,
+							static_cast<int>(contextMenuItems_.size()), -1);
 					} else if (event.key.keysym.sym == SDLK_LEFT) {
 						MoveContextMenuSelectionAcrossColumns(-1);
 					} else if (event.key.keysym.sym == SDLK_RIGHT) {
@@ -7829,6 +8162,7 @@ private:
 		RenderBatchCopy();
 		RenderResizeDialog();
 		RenderFixedCropSizeDialog();
+		RenderAdvancedConfigurationDialog();
 		RenderConfirmation();
 		RenderAbout();
 		RenderHelp();
@@ -8055,6 +8389,7 @@ private:
 	jpegview_linux::BatchCopyDialogController batchCopyDialog_;
 	jpegview_linux::ResizeDialogController resizeDialog_;
 	jpegview_linux::CropSizeDialogController cropSizeDialog_;
+	jpegview_linux::AdvancedConfigurationModel advancedConfiguration_;
 	std::vector<std::string> pendingDroppedFiles_;
 	std::unique_ptr<jpegview_linux::FileList> fileListBeforeClipboard_;
 	fs::path clipboardTempFile_;

@@ -714,6 +714,44 @@ stop_viewer
 XDG_STATE_HOME="$temporary/state"
 export XDG_STATE_HOME
 
+# Advanced configuration is available as the last compact-menu command. The
+# dialog stages values by category and persists only after Apply.
+XDG_STATE_HOME="$temporary/advanced-config-state"
+VIEWER_TEST_CONFIG_HOME="$temporary/advanced-config-config"
+export XDG_STATE_HOME VIEWER_TEST_CONFIG_HOME
+launch_viewer "$temporary/images/01-red.ppm"
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
+DISPLAY=":$display_number" xdotool key End
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.15
+DISPLAY=":$display_number" xdotool key Tab
+DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool key Tab
+DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool type --delay 30 '128'
+DISPLAY=":$display_number" xdotool key Tab
+DISPLAY=":$display_number" xdotool key ctrl+Return
+sleep 0.2
+advanced_config_settings="$VIEWER_TEST_CONFIG_HOME/jpegview-linux/settings.conf"
+grep -q '^transparency_pattern=white$' "$advanced_config_settings"
+grep -q '^thumbnail_panel_width=128$' "$advanced_config_settings"
+assert_title_prefix "01-red.ppm" "applying advanced configuration did not return to the viewer"
+
+# Reopening and escaping discards an un-applied draft.
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
+DISPLAY=":$display_number" xdotool key End
+DISPLAY=":$display_number" xdotool key Return
+sleep 0.1
+DISPLAY=":$display_number" xdotool key Tab
+DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool key Escape
+sleep 0.1
+grep -q '^transparency_pattern=white$' "$advanced_config_settings"
+stop_viewer
+unset VIEWER_TEST_CONFIG_HOME
+XDG_STATE_HOME="$temporary/state"
+export XDG_STATE_HOME
+
 launch_viewer
 help_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
 DISPLAY=":$display_number" xdotool windowfocus --sync "$window_id"
@@ -755,6 +793,7 @@ fi
 # link through the desktop URL opener rather than listing generic features.
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
 sleep 0.1
+DISPLAY=":$display_number" xdotool key End
 DISPLAY=":$display_number" xdotool key Up
 DISPLAY=":$display_number" xdotool key Up
 DISPLAY=":$display_number" xdotool key Return
@@ -2099,13 +2138,18 @@ if command -v convert >/dev/null 2>&1; then
 		if command -v jpegtran >/dev/null 2>&1; then crop_copy_steps=4; else crop_copy_steps=3; fi
 		for _ in $(seq 1 "$crop_copy_steps"); do DISPLAY=":$display_number" xdotool key Down; done
 		DISPLAY=":$display_number" xdotool key Return
+		copied_selection_dimensions=''
 		for _ in $(seq 1 30); do
 			if DISPLAY=":$display_number" xclip -selection clipboard -t image/png -o \
-				>"$temporary/copied-selection.png" 2>/dev/null; then break; fi
+				>"$temporary/copied-selection.png" 2>/dev/null; then
+				copied_selection_dimensions=$(identify -format '%wx%h' \
+					"$temporary/copied-selection.png" 2>/dev/null || true)
+				if [ "$copied_selection_dimensions" = "64x48" ]; then break; fi
+			fi
 			sleep 0.1
 		done
 		if [ ! -s "$temporary/copied-selection.png" ] || \
-			[ "$(identify -format '%wx%h' "$temporary/copied-selection.png")" != "64x48" ]; then
+			[ "$copied_selection_dimensions" != "64x48" ]; then
 			echo "UI smoke test: Copy Selection did not place its source-size crop on the clipboard" >&2
 			exit 1
 		fi

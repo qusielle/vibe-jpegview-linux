@@ -9,6 +9,7 @@
 #include "image_processing_store.h"
 #include "image_writer.h"
 #include "settings.h"
+#include "advanced_configuration_model.h"
 #include "sort_mode.h"
 #include "desktop_applications.h"
 #include "desktop_association.h"
@@ -3421,6 +3422,347 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"missing settings file modified the caller's existing settings");
 }
 
+void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
+	using Category = jpegview_linux::AdvancedConfigurationCategory;
+	using FieldKind = jpegview_linux::AdvancedConfigurationFieldKind;
+	jpegview_linux::ViewerSettings source;
+	source.scaleMode = "manual";
+	source.maximized = true;
+	source.selectionModeEnabled = true;
+	source.autoContrast = true;
+	source.mangaModeInvertsLeftRight = false;
+	source.spacebarNavigatesImages = true;
+	source.transparencyPattern = jpegview_linux::TransparencyPattern::White;
+	source.showHistogram = true;
+	source.thumbnailPanelWidth = 287;
+	source.fileDialogWidth = 1040;
+	source.fileDialogHeight = 735;
+	source.fileDialogPreviewRatio = 0.375;
+	source.magnifyingGlassWidth = 425;
+	source.magnifyingGlassHeight = 215;
+	source.magnifyingGlassZoomLevel = 0.725;
+	source.userCropAspectWidth = 13;
+	source.userCropAspectHeight = 7;
+	source.defaultImageProcessing.contrast = 0.18;
+	source.defaultImageProcessing.gamma = 1.15;
+	source.defaultImageProcessing.saturation = 1.25;
+	source.defaultImageProcessing.cyanRed = 0.2;
+	source.defaultImageProcessing.magentaGreen = -0.2;
+	source.defaultImageProcessing.yellowBlue = 0.3;
+	source.defaultImageProcessing.lightenShadows = 0.4;
+	source.defaultImageProcessing.darkenHighlights = 0.2;
+	source.defaultImageProcessing.deepShadows = 0.6;
+	source.defaultImageProcessing.colorCorrection = 0.1;
+	source.defaultImageProcessing.contrastCorrection = 0.55;
+	source.defaultImageProcessing.sharpen = 0.15;
+	source.defaultImageProcessing.localDensityEnabled = true;
+	source.unsharpMaskRadius = 2.25;
+	source.unsharpMaskAmount = 3.5;
+	source.unsharpMaskThreshold = 7.0;
+	source.cacheSizeMiB = 1536;
+	source.copyRenamePattern = u8"%F=旅行-%n";
+
+	const std::array<std::vector<std::string>, 7> expectedKeys = {{
+		{"manga_mode_inverts_left_right", "spacebar_navigates_images"},
+		{"transparency_pattern", "show_histogram"},
+		{"thumbnail_panel_width", "file_dialog_width", "file_dialog_height",
+			"file_dialog_preview_ratio"},
+		{"magnifying_glass_width", "magnifying_glass_height", "magnifying_glass_zoom_level"},
+		{"user_crop_aspect_width", "user_crop_aspect_height"},
+		{"default_local_density", "default_contrast", "default_gamma", "default_saturation",
+			"default_cyan_red", "default_magenta_green", "default_yellow_blue",
+			"default_lighten_shadows", "default_darken_highlights", "default_deep_shadows",
+			"default_color_correction", "default_contrast_correction", "default_sharpen",
+			"unsharp_mask_radius", "unsharp_mask_amount", "unsharp_mask_threshold"},
+		{"cache_size_mb", "copy_rename_pattern"},
+	}};
+	const char* const categoryNames[] = {
+		"Behavior", "Appearance", "Panels & dialogs", "Magnifying glass", "Crop",
+		"Image defaults", "Performance & batch",
+	};
+
+	jpegview_linux::AdvancedConfigurationModel model;
+	model.Open(source);
+	Expect(model.IsOpen() && model.CategoryCount() == 7 && model.ActiveCategory() == 0,
+		"advanced configuration did not open on its first category");
+	std::size_t fieldTotal = 0;
+	for (int category = 0; category < model.CategoryCount(); ++category) {
+		Expect(std::string(model.CategoryName(category)) == categoryNames[category],
+			"advanced configuration category label changed");
+		Expect(model.SelectCategory(category) && model.ActiveCategory() == category,
+			"advanced configuration could not select a category");
+		Expect(model.RowCount() == static_cast<int>(expectedKeys[category].size()),
+			"advanced configuration category has an unexpected row count");
+		for (int row = 0; row < model.RowCount(); ++row) {
+			const jpegview_linux::AdvancedConfigurationField* field = model.FieldAt(row);
+			Expect(field != nullptr && model.FieldKey(row) == expectedKeys[category][row] &&
+				model.FieldLabel(row)[0] != '\0',
+				"advanced configuration field metadata is missing or out of order");
+			if (field->kind == FieldKind::Integer || field->kind == FieldKind::Decimal) {
+				Expect(field->minimum < field->maximum && field->step > 0.0,
+					"numeric advanced setting has invalid bounds or adjustment step");
+			} else if (field->kind == FieldKind::Choice) {
+				Expect(field->choices != nullptr && field->choiceCount >= 2,
+					"choice advanced setting has no choice labels");
+			}
+			++fieldTotal;
+		}
+	}
+	Expect(fieldTotal == 31, "advanced configuration did not expose every requested setting");
+	Expect(model.SelectCategory(static_cast<int>(Category::Appearance)) &&
+		model.FieldValue(0) == "White" && model.FieldValue(1) == "On",
+		"choice or boolean setting values were not formatted for display");
+	Expect(model.SelectCategory(static_cast<int>(Category::PanelsAndDialogs)) &&
+		model.FieldValue(3) == "37.5%",
+		"file-dialog preview ratio did not use its percentage display format");
+	Expect(model.SelectCategory(static_cast<int>(Category::MagnifyingGlass)) &&
+		model.FieldValue(2) == "0.725",
+		"magnifying-glass zoom level did not retain its source-scale meaning");
+	Expect(jpegview_linux::EqualImageProcessing(model.Draft().defaultImageProcessing,
+		source.defaultImageProcessing) && model.Draft().copyRenamePattern == source.copyRenamePattern &&
+		model.Draft().magnifyingGlassWidth == source.magnifyingGlassWidth &&
+		model.Draft().fileDialogPreviewRatio == source.fileDialogPreviewRatio,
+		"opening and visiting categories changed the persisted settings draft");
+	Expect(model.Draft().scaleMode == source.scaleMode && model.Draft().maximized == source.maximized &&
+		model.Draft().selectionModeEnabled == source.selectionModeEnabled &&
+		model.Draft().autoContrast == source.autoContrast,
+		"advanced configuration altered excluded automatic or session settings");
+
+	auto edit = [&model](int row, const std::string& text) {
+		model.SelectRow(row);
+		Expect(model.ActivateSelected() && model.IsEditing(),
+			"activating a typed advanced setting did not begin editing");
+		Expect(model.AppendText(text), "advanced configuration rejected valid edit text");
+		Expect(model.CommitEdit() && !model.IsEditing(),
+			"valid advanced setting edit did not commit");
+	};
+
+	model.SelectCategory(static_cast<int>(Category::Behavior));
+	model.SelectRow(0);
+	Expect(model.ActivateSelected() && model.Draft().mangaModeInvertsLeftRight,
+		"behavior boolean did not toggle on activation");
+	Expect(model.AdjustSelected(1) && !model.Draft().mangaModeInvertsLeftRight,
+		"directional adjustment did not toggle a boolean setting");
+	model.SelectRow(1);
+	Expect(model.AdjustSelected(-1) && !model.Draft().spacebarNavigatesImages,
+		"behavior boolean did not toggle through directional adjustment");
+
+	model.SelectCategory(static_cast<int>(Category::Appearance));
+	model.SelectRow(0);
+	Expect(model.AdjustSelected(1) &&
+		model.Draft().transparencyPattern == jpegview_linux::TransparencyPattern::Checkerboard,
+		"appearance choice did not advance to the next transparency pattern");
+	Expect(model.AdjustSelected(1) &&
+		model.Draft().transparencyPattern == jpegview_linux::TransparencyPattern::Black,
+		"appearance choice did not wrap after its final value");
+	model.SelectRow(1);
+	Expect(model.ActivateSelected() && !model.Draft().showHistogram,
+		"appearance boolean did not toggle on activation");
+
+	model.SelectCategory(static_cast<int>(Category::PanelsAndDialogs));
+	model.SelectRow(0);
+	Expect(model.AdjustSelected(1) && model.Draft().thumbnailPanelWidth == 295,
+		"thumbnail panel width did not use its configured adjustment step");
+	edit(1, "1400");
+	edit(2, "850");
+	edit(3, "0.5");
+	Expect(model.Draft().fileDialogWidth == 1400 && model.Draft().fileDialogHeight == 850 &&
+		std::abs(model.Draft().fileDialogPreviewRatio - 0.5) < 1e-12,
+		"panels and dialogs fields did not round-trip edits to the ViewerSettings draft");
+
+	model.SelectCategory(static_cast<int>(Category::MagnifyingGlass));
+	edit(0, "560");
+	edit(1, "280");
+	model.SelectRow(2);
+	Expect(model.AdjustSelected(1) &&
+		std::abs(model.Draft().magnifyingGlassZoomLevel - 0.75) < 1e-12,
+		"magnifying-glass zoom level did not adjust in its source-scale units");
+	Expect(model.FieldValue(2) == "0.750", "magnifying-glass zoom formatting lost precision");
+	model.SelectCategory(static_cast<int>(Category::Crop));
+	edit(0, "21");
+	edit(1, "9");
+	Expect(model.Draft().userCropAspectWidth == 21 && model.Draft().userCropAspectHeight == 9,
+		"crop aspect fields did not round-trip typed values");
+
+	model.SelectCategory(static_cast<int>(Category::ImageDefaults));
+	model.SelectRow(0);
+	Expect(model.ActivateSelected() && !model.Draft().defaultImageProcessing.localDensityEnabled,
+		"default local-density boolean did not toggle");
+	for (std::size_t index = 0; index < static_cast<std::size_t>(jpegview_linux::LevelControl::Count); ++index) {
+		const int row = static_cast<int>(index) + 1;
+		const auto* field = model.FieldAt(row);
+		const auto control = static_cast<jpegview_linux::LevelControl>(index);
+		const double target = (field->minimum + field->maximum) / 2.0;
+		edit(row, std::to_string(target));
+		ExpectNear(jpegview_linux::GetLevelControlValue(model.Draft().defaultImageProcessing,
+			control), target, 0.00001,
+			"one of the twelve default picture-level controls did not round-trip");
+	}
+	edit(13, "3.25");
+	edit(14, "8.75");
+	edit(15, "19.5");
+	Expect(model.Draft().unsharpMaskRadius == 3.25 && model.Draft().unsharpMaskAmount == 8.75 &&
+		model.Draft().unsharpMaskThreshold == 19.5,
+		"unsharp-mask defaults did not round-trip through typed edits");
+
+	model.SelectCategory(static_cast<int>(Category::PerformanceAndBatch));
+	model.SelectRow(0);
+	Expect(model.AdjustSelected(1) && model.Draft().cacheSizeMiB == 1600,
+		"cache budget did not adjust by the declared MB step");
+	edit(1, u8"copy-旅行-%F_%n");
+	Expect(model.Draft().copyRenamePattern == u8"copy-旅行-%F_%n",
+		"copy/rename pattern did not preserve Unicode and template text");
+
+	model.SelectCategory(static_cast<int>(Category::ImageDefaults));
+	model.SetVisibleRows(3);
+	Expect(model.VisibleRows() == 3 && model.Scroll() == 0,
+		"advanced configuration did not retain the visible row count");
+	model.MoveSelection(8);
+	Expect(model.SelectedRow() == 8 && model.Scroll() == 6,
+		"row selection did not scroll to keep the selected field visible");
+	model.ScrollBy(100);
+	Expect(model.Scroll() == static_cast<std::size_t>(model.RowCount() - model.VisibleRows()) &&
+		model.SelectedRow() == 8,
+		"independent field scrolling did not clamp at the end or changed selection");
+	model.ScrollBy(-100);
+	Expect(model.Scroll() == 0, "field scrolling did not clamp at the beginning");
+	model.MoveSelection(-100);
+	Expect(model.SelectedRow() == 0 && model.Scroll() == 0,
+		"row selection did not clamp to the first field");
+	model.SelectCategory(static_cast<int>(Category::Behavior));
+	model.MoveCategory(-1);
+	Expect(model.ActiveCategory() == static_cast<int>(Category::PerformanceAndBatch),
+		"category cycling did not wrap backward");
+	model.MoveCategory(1);
+	Expect(model.ActiveCategory() == static_cast<int>(Category::Behavior),
+		"category cycling did not wrap forward");
+
+	model.Close();
+	Expect(!model.IsOpen() && !model.IsEditing(), "advanced configuration did not close cleanly");
+}
+
+void TestAdvancedConfigurationModelValidationAndCancellation() {
+	using Category = jpegview_linux::AdvancedConfigurationCategory;
+	jpegview_linux::ViewerSettings original;
+	original.fileDialogWidth = 900;
+	original.fileDialogPreviewRatio = 0.375;
+	original.unsharpMaskRadius = 1.0;
+	original.copyRenamePattern = u8"old-写像-%n";
+	jpegview_linux::AdvancedConfigurationModel model;
+	model.Open(original);
+
+	model.SelectCategory(static_cast<int>(Category::PanelsAndDialogs));
+	model.SelectRow(1);
+	model.BeginEdit();
+	Expect(model.IsEditing() && model.EditingText() == "900",
+		"numeric edit did not start with the current setting");
+	Expect(model.AppendText("12px"), "numeric editor rejected input before strict validation");
+	Expect(!model.CommitEdit() && model.IsEditing() && !model.Message().empty() &&
+		model.Draft().fileDialogWidth == 900,
+		"malformed integer input changed the draft or failed without a validation message");
+	model.CancelEdit();
+	Expect(!model.IsEditing() && model.Draft().fileDialogWidth == 900,
+		"cancelling an invalid numeric edit changed the draft");
+
+	model.BeginEdit();
+	model.AppendText("999999");
+	Expect(model.CommitEdit() && model.Draft().fileDialogWidth == jpegview_linux::kMaximumFileDialogDimension &&
+		!model.Message().empty(),
+		"integer setting did not clamp to its documented maximum");
+	model.SelectRow(1);
+	model.BeginEdit();
+	model.AppendText("-5");
+	Expect(model.CommitEdit() && model.Draft().fileDialogWidth == jpegview_linux::kMinimumFileDialogWidth,
+		"integer setting did not clamp to its documented minimum");
+
+	model.SelectRow(3);
+	model.BeginEdit();
+	model.AppendText("nan");
+	Expect(!model.CommitEdit() && model.Draft().fileDialogPreviewRatio == 0.375,
+		"non-finite decimal input was accepted or changed the draft");
+	model.SelectAll();
+	model.AppendText("0x1p-1");
+	Expect(!model.CommitEdit() && model.Draft().fileDialogPreviewRatio == 0.375,
+		"non-decimal hexadecimal notation passed strict numeric validation");
+	model.SelectAll();
+	model.AppendText("1");
+	Expect(model.CommitEdit() && model.Draft().fileDialogPreviewRatio == 0.8,
+		"decimal setting did not clamp to its documented maximum");
+
+	model.SelectCategory(static_cast<int>(Category::MagnifyingGlass));
+	model.SelectRow(2);
+	model.BeginEdit();
+	model.AppendText("-1");
+	Expect(model.CommitEdit() &&
+		model.Draft().magnifyingGlassZoomLevel == jpegview_linux::MagnifyingGlassModel::kMinimumZoomLevel,
+		"magnifying-glass zoom did not clamp to its documented minimum");
+	model.SelectCategory(static_cast<int>(Category::ImageDefaults));
+	model.SelectRow(13);
+	model.BeginEdit();
+	model.AppendText("100");
+	Expect(model.CommitEdit() && model.Draft().unsharpMaskRadius == 5.0,
+		"unsharp radius did not clamp to its documented maximum");
+	model.BeginEdit();
+	model.AppendText("-1");
+	Expect(model.CommitEdit() && model.Draft().unsharpMaskRadius == 0.0,
+		"unsharp radius did not clamp to its documented minimum");
+
+	model.SelectCategory(static_cast<int>(Category::Crop));
+	model.SelectRow(0);
+	model.BeginEdit();
+	model.AppendText("0");
+	Expect(model.CommitEdit() && model.Draft().userCropAspectWidth == 1,
+		"crop aspect integer did not clamp to its documented minimum");
+	model.SelectRow(1);
+	model.BeginEdit();
+	model.AppendText("999999");
+	Expect(model.CommitEdit() && model.Draft().userCropAspectHeight ==
+		jpegview_linux::kMaximumFixedCropDimension,
+		"crop aspect integer did not clamp to its documented maximum");
+
+	model.SelectCategory(static_cast<int>(Category::PerformanceAndBatch));
+	model.SelectRow(1);
+	model.BeginEdit();
+	model.SelectAll();
+	model.AppendText(u8"copy-写像");
+	model.Backspace();
+	Expect(model.EditingText() == u8"copy-写",
+		"copy/rename pattern backspace split a UTF-8 code point");
+	model.AppendText(u8"像");
+	Expect(model.CommitEdit() && model.Draft().copyRenamePattern == u8"copy-写像",
+		"copy/rename text edit did not commit the edited string");
+
+	model.BeginEdit();
+	model.SelectAll();
+	model.AppendText("temporary");
+	model.CancelEdit();
+	Expect(model.Draft().copyRenamePattern == u8"copy-写像",
+		"cancelling a text edit changed the active draft");
+	model.BeginEdit();
+	model.SelectAll();
+	Expect(!model.AppendText("bad\npattern") && model.EditingText().empty(),
+		"copy/rename editor accepted a line break that would corrupt settings storage");
+	model.CancelEdit();
+
+	model.Open(original);
+	model.SelectCategory(static_cast<int>(Category::Behavior));
+	model.SelectRow(0);
+	Expect(model.ActivateSelected() && model.Draft().mangaModeInvertsLeftRight !=
+		original.mangaModeInvertsLeftRight,
+		"draft mutation could not be staged before cancelling the dialog");
+	Expect(original.mangaModeInvertsLeftRight && original.fileDialogWidth == 900 &&
+		original.copyRenamePattern == u8"old-写像-%n",
+		"editing an advanced configuration draft mutated its source settings");
+	model.Close();
+	model.Open(original);
+	Expect(model.Draft().mangaModeInvertsLeftRight == original.mangaModeInvertsLeftRight &&
+		model.Draft().fileDialogWidth == original.fileDialogWidth &&
+		model.Draft().copyRenamePattern == original.copyRenamePattern,
+		"reopening after cancellation did not restore the caller-provided settings");
+	model.SetMessage("adapter message");
+	Expect(model.Message() == "adapter message", "advanced configuration message was not retained");
+}
+
 void TestTransparencyPatternValuesAndTileColors() {
 	using jpegview_linux::TransparencyPattern;
 	TransparencyPattern pattern = TransparencyPattern::Black;
@@ -4623,6 +4965,12 @@ void TestContextMenuCatalogAndState() {
 		"compact context menu omitted the built-in help command");
 	Expect(findCommand(compact, jpegview_linux::kCommandEditPictureLevels) != nullptr,
 		"compact context menu omitted the picture-level editor");
+	Expect(compact.back().command == jpegview_linux::kCommandAdvancedConfiguration &&
+		compact.back().label == "Advanced configuration..." && compact.back().enabled,
+		"advanced configuration was not the final enabled compact-menu command");
+	Expect(jpegview_linux::kCommandAdvancedConfiguration !=
+		jpegview_linux::kCommandToggleMagnifyingGlass,
+		"advanced configuration reused the magnifying-glass keyboard command ID");
 	const MenuItem* compactSelectionMode = findCommand(compact,
 		jpegview_linux::kCommandToggleSelectionMode);
 	Expect(compactSelectionMode != nullptr && compactSelectionMode->label == "Crop selection mode" &&
@@ -4679,6 +5027,9 @@ void TestContextMenuCatalogAndState() {
 	state.transitionDurationMs = 1000;
 	state.openWithApplicationNames = {"Photo Editor", u8"写真工具"};
 	const std::vector<MenuItem> advanced = jpegview_linux::BuildContextMenu(state, true);
+	Expect(advanced.back().command == jpegview_linux::kCommandAdvancedConfiguration &&
+		advanced.back().label == "Advanced configuration..." && advanced.back().enabled,
+		"advanced configuration was not the final enabled expanded-menu command");
 	Expect(findCommand(advanced, jpegview_linux::kCommandToggleDoublePageMode)->checked &&
 		findCommand(advanced, jpegview_linux::kCommandToggleMangaReadingOrder)->checked,
 		"context menu did not reflect active double-page and manga states");
@@ -6294,6 +6645,10 @@ int main() {
 	RunTest("picture-levels-model-and-processing", TestPictureLevelsModelAndProcessing, failures);
 	RunTest("picture-levels-store-round-trip", TestPictureLevelsStoreRoundTrip, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
+	RunTest("advanced-configuration-model-categories-and-round-trips",
+		TestAdvancedConfigurationModelCategoriesAndRoundTrips, failures);
+	RunTest("advanced-configuration-model-validation-and-cancellation",
+		TestAdvancedConfigurationModelValidationAndCancellation, failures);
 	RunTest("transparency-pattern-values-and-tile-colors",
 		TestTransparencyPatternValuesAndTileColors, failures);
 	RunTest("settings-path-selection", TestSettingsPathSelection, failures);

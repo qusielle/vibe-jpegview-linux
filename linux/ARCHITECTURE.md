@@ -70,6 +70,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   default), zoom-navigator visibility, magnifying-glass size/zoom, global double-page/manga-mode
   defaults, the default-enabled `manga_mode_inverts_left_right` preference, and the default-disabled
   `spacebar_navigates_images` preference), plus stable sort-mode values.
+- `advanced_configuration_model`: category and row metadata for persisted settings that lack a normal
+  context-menu command, with a transient `ViewerSettings` draft, value bounds, text editing, and
+  selection/scroll transitions. It performs no file I/O; Apply is routed through the existing settings
+  serializer by the SDL adapter, while Cancel drops the draft.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
   bounded per-file `ViewportSnapshot` LRU and independent bounded double-page/manga-mode snapshots,
   ordered row removal/restoration for the Recents dialog, plus tolerant atomic persistence in the
@@ -127,6 +131,14 @@ previews; opaque textures retain the non-blended path. It should translate SDL e
 on the modules above rather than duplicate their state. Context-menu pointer hit testing also lives
 here: the Right key's release activates the row under the pointer, or moves to the next column when
 released outside the menu, while key-held pointer movement remains available for click-like selection.
+
+The Advanced configuration modal is a thin adapter over `AdvancedConfigurationModel`: its category
+tabs, visible row count, hit testing, text input, and painting stay in Viewer, while the model owns
+only the staged `ViewerSettings` values and their validated transitions. Apply writes the complete
+draft with `SaveViewerSettings` before updating the corresponding runtime fields; a failed write
+leaves live state untouched. The image-cache budget remains next-launch-only, so the UI does not
+change the shared cache capacity while running. Automatically captured window/session geometry and
+settings with existing menu commands are intentionally outside this editor.
 
 Archive members use the existing filesystem-shaped path contract (`container.ext/member.ext`) so
 navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The

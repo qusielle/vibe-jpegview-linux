@@ -15,6 +15,7 @@ constexpr int kContextMenuShowAdvanced = -1;
 constexpr int kToggleNavigationPanelAutoReveal = -3;
 constexpr int kCommandEditPictureLevels = -7;
 constexpr int kCommandToggleZoomNavigator = -9;
+constexpr int kCommandAdvancedConfiguration = -14;
 
 struct MenuItem {
 	std::string label;

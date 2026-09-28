@@ -264,6 +264,17 @@ they support.
     at that directory instead of exiting. Compatibility handling keeps always-on-top optional on
     older SDL runtimes.
 
+    **Advanced configuration...** at the bottom of both compact and expanded main context menus
+    opens a seven-section editor for persisted settings without ordinary context-menu commands. It
+    covers navigation behavior, transparency and histogram display, panel/dialog dimensions,
+    magnifying-glass geometry, the user crop aspect, default picture-level and unsharp values, the
+    cache budget, and the batch copy/rename pattern. It stages a `ViewerSettings` copy and saves
+    through the existing atomic settings writer only after **Apply**; **Cancel** discards the draft.
+    Escape cancels a field edit first, then closes the window and discards the draft. Session state
+    and controls already represented by menu commands remain owned by their existing UI. Live
+    behavior/display values apply immediately; default image values affect
+    subsequently initialized images, while the cache budget takes effect on the next launch.
+
 14. **Rendering and metadata correctness fixes.** Context-menu close no longer leaves a white pixel
     over the image or revealed navigation panel; borders avoid endpoint rasterization artifacts;
     overlays no longer retain unnecessary minimum widths; large images fit edge-to-edge; and signed
@@ -272,13 +283,16 @@ they support.
 
 15. **Regression tests, modularization, and faster builds.** A dependency-light core suite and X11
     UI smoke suite now cover codecs, mutable image transforms/resampling, file ordering, browser
-    state, settings, keyboard mappings, viewport geometry, overlays, context-menu columns and
+    state, settings and advanced-configuration validation, keyboard mappings, viewport geometry,
+    overlays, context-menu columns and
     repainting, thumbnail layout/persistence, per-folder recent-file MRU and per-file viewport
     persistence, Recents-tab filtering/preview/open interaction, transparency-pattern settings,
+    advanced-configuration draft editing and Apply/Cancel behavior,
     alpha metadata, resize and batch models, application discovery, startup maximization, and
     held-key behavior. Viewer logic was extracted into focused modules for image pixels, settings,
-    sorting, input commands, viewport, recent-file history, open-dialog state, overlays, thumbnails,
-    fonts, image information, context menus, resize, batch operations, archive sources, and desktop applications.
+    sorting, input commands, viewport, recent-file history, open-dialog state,
+    advanced-configuration state, overlays, thumbnails, fonts, image information, context menus,
+    resize, batch operations, archive sources, and desktop applications.
     Shell and sanitizer targets supplement the regular suites. Docker builds use distro codec
     packages where available and build only codecs missing from that Ubuntu release; independent
     codec stages and the viewer/tests compile in parallel.
@@ -557,7 +571,8 @@ open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ
 recent reopening, encrypted-ZIP prompt/retry/session reuse and clipboard paste shortcuts, and
 header-encrypted 7z password entry/cancel/reselect plus RAR password retry when optional plugins are
 bundled; focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and
-dialog/preview resizing; thumbnail
+dialog/preview resizing; advanced-configuration opening from the final context-menu item and
+Apply/Cancel; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;
 mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; crop-mode dialog, selection
@@ -648,9 +663,16 @@ with, Print, batch rename/copy, date and wallpaper commands, extended navigation
 transforms and correction, extra zoom and window controls, slideshow controls, and settings
 administration, including the user-local default-viewer registration and disabled Windows-only
 commands, without saving that choice. The compact menu keeps common navigation, fit/actual-size,
-fullscreen, and fit-window-to-image commands available. The menu also supports keyboard selection
-with Up/Down and Return. Underlined letters activate uniquely matching enabled commands; if a letter
-is shared, press it repeatedly to cycle the matching rows and press Enter to activate the selection.
+fullscreen, and fit-window-to-image commands available. **Advanced configuration...** is the final
+item in either menu view. It groups config-only options into Behavior, Appearance, Panels & dialogs,
+Magnifying glass, Crop, Image defaults, and Performance & batch. In that window, use Tab/Shift+Tab
+to switch groups, Up/Down to choose a setting, Left/Right to adjust it, and Enter to toggle/cycle or
+edit a value; Ctrl+A selects all in a text edit and Ctrl+V pastes. Valid edits commit when switching
+groups or rows. **Apply** or Ctrl+Enter writes the changes; Cancel discards them, and Escape cancels
+the active edit before closing the window on the next press. The context menu supports keyboard
+selection with Up/Down and Return; Home/End select its first/last
+enabled command. Underlined letters activate uniquely matching enabled commands; if a letter is
+shared, press it repeatedly to cycle the matching rows and press Enter to activate the selection.
 If the menu spans multiple
 columns to fit the window height, Left moves to the previous column; releasing Right over an enabled
 row activates it, while releasing outside the menu moves to the next column. You can hold Right, move
@@ -658,8 +680,9 @@ the pointer onto a row, then release to click it. Hovering over a lower
 navigation-panel button displays its Windows-style action hint. Unseen files inherit the shared
 fit/fill/actual-size or manual mode as navigation proceeds; a previously visited file restores its
 own last view when opened again. Magnifier size and zoom use `magnifying_glass_width` (default 350),
-`magnifying_glass_height` (default 175), and `magnifying_glass_zoom_level` (default 0.5); the lens
-itself remains disabled at startup. The shared scale mode remains saved between application runs, as
+`magnifying_glass_height` (default 175), and `magnifying_glass_zoom_level` (default 0.5), editable
+under Advanced configuration; the lens itself remains disabled at startup. The shared scale mode
+remains saved between application runs, as
 does the last maximized or
 normal window mode, the lower navigation panel's show/hide selection, and the F2/Ctrl+F2 overlay
 visibility choices. The navigation panel hover preference and current file-order mode/direction are
@@ -674,24 +697,25 @@ The recent-folder list is capped at 100 entries and the independent viewport his
 Per-image double-page and manga-order overrides have a separate 256-file retention bound; the global
 defaults are stored as `double_page_mode_enabled` and `manga_reading_order_enabled` in `settings.conf`.
 Physical Left/Right inversion in manga mode is enabled by default and can be disabled with
-`manga_mode_inverts_left_right=0`.
-Space navigation is disabled by default; set `spacebar_navigates_images=1` to make Space/Shift+Space
-move to the next/previous image instead of using Space to toggle fit/actual scale.
+`manga_mode_inverts_left_right=0` or the Behavior section of Advanced configuration.
+Space navigation is disabled by default; set `spacebar_navigates_images=1` (or enable it in Advanced
+configuration) to make Space/Shift+Space move to the next/previous image instead of using Space to
+toggle fit/actual scale.
 Only successfully loaded image paths enter history; clipboard-pasted temporary images are excluded.
 
 The zoom navigator is enabled by default. Set `show_zoom_navigator=0` in the settings file to hide
 it; the context-menu toggle updates this preference immediately.
 
 Transparent image pixels use a black background by default, matching the Windows configuration.
-Set `transparency_pattern=white` or `transparency_pattern=checkerboard` in
-`${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf` to choose another display
-background; `black`, `white`, and `checkerboard` are the accepted values. This setting has no GUI
-control yet. It applies to the main viewer, thumbnail panel, and open-dialog preview; it only changes
-how alpha is composited on screen and does not flatten or alter saved image pixels.
+Choose `black`, `white`, or `checkerboard` through the Appearance section of Advanced configuration,
+or set `transparency_pattern=...` in `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`.
+The pattern applies to the main viewer, thumbnail panel, and open-dialog preview; it only changes how
+alpha is composited on screen and does not flatten or alter saved image pixels.
 
-The same settings file accepts `cache_size_mb=1024` to control the aggregate memory retained for
-decoded images, worker-prepared display frames, and renderer-ready textures. The value is in MiB,
-takes effect at the next launch, and defaults to 1024. Set it to `0` to disable retained image/display
+The same settings file accepts `cache_size_mb=1024`, also editable under Performance & batch in
+Advanced configuration, to control the aggregate memory retained for decoded images, worker-prepared
+display frames, and renderer-ready textures. The value is in MiB, takes effect at the next launch,
+and defaults to 1024. Set it to `0` to disable retained image/display
 caching; this does not disable the separate thumbnail cache, whose generated entries are retained for
 the active file list regardless of the large-image budget.
 
@@ -729,7 +753,9 @@ preview, turn on `Local density` to enable the shadow/highlight controls, and us
 the neutral slider values. Color/contrast correction strength controls refine automatic correction
 and are available while automatic correction is enabled.
 The separate `Unsharp mask...` dialog previews radius, amount, and threshold and has Apply/Cancel
-actions. `Keep levels` carries current adjustments to the next image and temporarily takes precedence
+actions. Advanced configuration's **Image defaults** section can edit the saved default level values,
+local-density default, and the unsharp-mask radius/amount/threshold used by the existing dialog.
+These defaults do not overwrite a per-image parameter entry. `Keep levels` carries current adjustments to the next image and temporarily takes precedence
 over saved per-image values. With keep disabled, each saved entry (including its auto-correction and
 local-density state) is restored for that image. Save/remove actions are disabled while Keep levels is
 on; `Set current parameters as default...` stores slider values and automatic-correction state for
@@ -749,7 +775,8 @@ launches them with the current image, including standard `%f`/`%F` and URI place
 are discovered from the user and system application directories at menu-open time.
 `Batch rename/copy...` is also available: select images, preview a Windows-compatible target pattern,
 save it as a template, and rename within the folder or copy into newly-created subdirectories without
-overwriting existing files. Its `%pictures%` placeholder maps to `$XDG_PICTURES_DIR` or `$HOME/Pictures`.
+overwriting existing files. Its pattern can also be edited under Performance & batch in Advanced
+configuration. The `%pictures%` placeholder maps to `$XDG_PICTURES_DIR` or `$HOME/Pictures`.
 `Change size...` is ported from the Windows Resize dialog: percentage, width, and height edits retain
 the aspect ratio, and the point, Lanczos/Bicubic, sharpen-low, and sharpen-medium filters are available.
 The resize is applied to the processed image in memory and can then be saved with `Ctrl+S`; `Ctrl+Shift+R`
@@ -773,8 +800,8 @@ flattens the currently displayed frame.
 `Fixed size...` opens a dialog for width, height, and screen-pixel versus image-pixel units. Screen-pixel
 sizes track the current zoom, while image-pixel sizes remain in source pixels; while drawing, the
 pointer positions the fixed rectangle's top-left corner. The fixed size and unit choice are persisted
-when applied. To customize the final crop-menu ratio, set
-`user_crop_aspect_width=14` and `user_crop_aspect_height=11` (or another positive pair) in
+when applied. To customize the final crop-menu ratio, use the Crop section of Advanced configuration
+or set `user_crop_aspect_width=14` and `user_crop_aspect_height=11` (or another positive pair) in
 `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. The explicit crop-selection mode
 is persisted as `selection_mode_enabled=0` or `selection_mode_enabled=1` and defaults to `0`. The
 older `default_selection_mode` setting is ignored so an existing Windows-parity default cannot
