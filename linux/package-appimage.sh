@@ -48,7 +48,10 @@ copy_runtime_dependencies() {
 			[ -n "$dependency" ] || continue
 			base=$(basename "$dependency")
 			case "$base" in
-				libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|ld-linux*.so.*|linux-vdso.so.*)
+				libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|ld-linux*.so.*|linux-vdso.so.*|libstdc++.so.*|libgcc_s.so.*)
+					# Host graphics drivers (notably Mesa's software renderer) load
+					# into this process too. An older AppImage-bundled C++ runtime
+					# can prevent those host drivers from loading on newer systems.
 					continue
 					;;
 			esac
