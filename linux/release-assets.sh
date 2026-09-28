@@ -54,7 +54,7 @@ if [[ "$UBUNTU_VERSION" == 24 || "$UBUNTU_VERSION" == 26 ]]; then
 	deb_name="jpegview-linux_${safe_version}_ubuntu${UBUNTU_VERSION}_amd64.deb"
 	deb_path="$OUTPUT_DIR/$deb_name"
 
-	docker build \
+	sh "$SCRIPT_DIR/retry-command.sh" -- docker build \
 		--file "linux/Dockerfile.deb.ubuntu${UBUNTU_VERSION}" \
 		--tag "$deb_image" \
 		.

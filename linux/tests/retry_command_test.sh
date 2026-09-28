@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+RETRY_SCRIPT="$SCRIPT_DIR/../retry-command.sh"
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
+
+MOCK_COMMAND="$TEMP_DIR/retry-mock"
+COUNTER_FILE="$TEMP_DIR/count"
+cat > "$MOCK_COMMAND" <<'EOF'
+#!/bin/sh
+count=0
+if [ -f "$RETRY_TEST_COUNTER" ]; then
+	count=$(cat "$RETRY_TEST_COUNTER")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$RETRY_TEST_COUNTER"
+if [ "$count" -lt "$RETRY_TEST_SUCCESS_ON" ]; then
+	exit "${RETRY_TEST_FAILURE_STATUS:-1}"
+fi
+exit 0
+EOF
+chmod 755 "$MOCK_COMMAND"
+
+JPEGVIEW_RETRY_ATTEMPTS=3 \
+JPEGVIEW_RETRY_INITIAL_DELAY_SECONDS=0 \
+JPEGVIEW_RETRY_MAX_DELAY_SECONDS=0 \
+RETRY_TEST_COUNTER="$COUNTER_FILE" \
+RETRY_TEST_SUCCESS_ON=3 \
+	sh "$RETRY_SCRIPT" -- "$MOCK_COMMAND"
+test "$(cat "$COUNTER_FILE")" = 3
+
+printf '0\n' > "$COUNTER_FILE"
+set +e
+JPEGVIEW_RETRY_ATTEMPTS=3 \
+JPEGVIEW_RETRY_INITIAL_DELAY_SECONDS=0 \
+JPEGVIEW_RETRY_MAX_DELAY_SECONDS=0 \
+RETRY_TEST_COUNTER="$COUNTER_FILE" \
+RETRY_TEST_SUCCESS_ON=4 \
+RETRY_TEST_FAILURE_STATUS=23 \
+	sh "$RETRY_SCRIPT" -- "$MOCK_COMMAND" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" = 23
+test "$(cat "$COUNTER_FILE")" = 3
+
+echo 'Retry command tests passed.'

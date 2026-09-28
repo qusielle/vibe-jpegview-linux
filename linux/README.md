@@ -397,6 +397,9 @@ These create `jpegview-linux_${APP_VERSION}_ubuntu24_amd64.deb` and
 its shared-library dependencies are resolved from the corresponding Ubuntu repositories.
 
 GitHub Actions builds and tests all four AppImage Dockerfiles on branch pushes and pull requests.
+Docker image builds get up to three total attempts, with 15- and 30-second delays between attempts.
+This covers transient registry or source-host failures while still failing the job if the build
+remains unsuccessful.
 Each successful Ubuntu build job uploads its x86_64 AppImage, native executable, and a `SHA256SUMS`
 file as a downloadable workflow artifact named `jpegview-linux-ubuntu20-x86_64`,
 `jpegview-linux-ubuntu22-x86_64`, `jpegview-linux-ubuntu24-x86_64`, or

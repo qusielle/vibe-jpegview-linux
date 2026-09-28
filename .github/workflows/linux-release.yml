@@ -26,11 +26,11 @@ jobs:
         env:
           DOCKER_BUILDKIT: "1"
           UBUNTU_VERSION: ${{ matrix.ubuntu }}
-        run: >-
-          docker build
-          --file "linux/Dockerfile.ubuntu${UBUNTU_VERSION}"
-          --tag "jpegview-linux-build:ubuntu${UBUNTU_VERSION}"
-          .
+        run: |
+          sh ./linux/retry-command.sh -- docker build \
+            --file "linux/Dockerfile.ubuntu${UBUNTU_VERSION}" \
+            --tag "jpegview-linux-build:ubuntu${UBUNTU_VERSION}" \
+            .
 
       - name: Build and upload release assets
         env:
