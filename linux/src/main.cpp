@@ -4969,7 +4969,9 @@ private:
 			fileDialogArchiveLoader_.TakeReady()) {
 			if (!fileDialogOpen_ || fileDialogSave_ || fileDialogParameterRestore_ ||
 				result.generation != fileDialogArchiveGeneration_ ||
-				result.directory != fileDialogDirectory_) continue;
+				(result.passwordValidation ?
+					result.directory != archivePasswordDialogTarget_ :
+					result.directory != fileDialogDirectory_)) continue;
 			if (result.passwordValidation) {
 				archivePasswordValidationPending_ = false;
 				if (result.error.empty()) {
@@ -5312,7 +5314,7 @@ private:
 		}
 		if (!fileDialogSave_ && !fileDialogParameterRestore_ && entry.encrypted &&
 			!jpegview_linux::HasSessionArchivePassword(entry.path)) {
-			BeginArchivePasswordDialog(fileDialogDirectory_);
+			BeginArchivePasswordDialog(entry.path);
 			return;
 		}
 		if (entry.directory) {

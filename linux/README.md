@@ -487,8 +487,8 @@ cancellable archive indexing, all PNM variants, malformed input, batch-copy plan
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
 open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ/7z/RAR browsing and recent
 reopening, encrypted-ZIP prompt/retry/session reuse, and—when the optional plugin is bundled—
-header-encrypted 7z password entry; focus restoration, paging, Home/End, held-key movement, wheel and
-scrollbar scrolling/dragging, and
+header-encrypted 7z password entry and cancel/reselect retry; focus restoration, paging, Home/End,
+held-key movement, wheel and scrollbar scrolling/dragging, and
 dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;

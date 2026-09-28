@@ -393,6 +393,52 @@ if [ -f "$temporary/images/12-header-password.7z" ]; then
 	stop_viewer
 	XDG_STATE_HOME="$temporary/state"
 	export XDG_STATE_HOME
+	# Reselecting a marked container after canceling must retry against that
+	# archive, not the filesystem folder currently containing it.
+	XDG_STATE_HOME="$temporary/header-password-reselect-state"
+	export XDG_STATE_HOME
+	launch_viewer
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool type --delay 20 '12-header-password.7z'
+	sleep 1.5
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.3
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/header-password-first-attempt.png"
+		password_border=$(convert "$temporary/header-password-first-attempt.png" \
+			-format "%[hex:p{400,311}]" info:)
+		case "$password_border" in
+			BEAA78*|beaa78*) ;;
+			*) echo "UI smoke test: selecting a marked 7z row did not show its password prompt" >&2; exit 1 ;;
+		esac
+	fi
+	DISPLAY=":$display_number" xdotool key Escape
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.3
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/header-password-retry.png"
+		password_border=$(convert "$temporary/header-password-retry.png" \
+			-format "%[hex:p{400,311}]" info:)
+		case "$password_border" in
+			BEAA78*|beaa78*) ;;
+			*) echo "UI smoke test: reselecting the canceled 7z row did not show a new password prompt" >&2; exit 1 ;;
+		esac
+	fi
+	DISPLAY=":$display_number" xdotool type --delay 20 'test-secret'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.6
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.3
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.3
+	assert_title_prefix "visible.png" \
+		"reselecting a canceled encrypted 7z prompt used the parent-folder path"
+	stop_viewer
+	XDG_STATE_HOME="$temporary/state"
+	export XDG_STATE_HOME
 fi
 
 # Exercise the mnemonic in an isolated viewer session so the rest of this
