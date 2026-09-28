@@ -143,7 +143,9 @@ the selected member is copied, bounded to 128 MiB, into a short-lived
 anonymous memory file. That output cap does not bound the codec's internal memory or CPU use. The
 source archive is never modified and no persistent extraction directory is created. ZIP member
 encryption is handled through libzip: the Open dialog owns password entry, while
-`ArchivePasswordDialogModel` masks UTF-8 input and `archive_source` checks credentials and keeps
+`ArchivePasswordDialogModel` masks UTF-8 input. The SDL adapter handles Ctrl+V, Ctrl+Shift+V, and
+Shift+Insert by passing clipboard UTF-8 through the same model and wiping SDL's temporary clipboard
+buffer. `archive_source` checks credentials and keeps
 accepted credentials in a process-only cache keyed by backing-file identity. Credentials are never
 stored in settings or recent-file state. The 7z adapter supplies passwords through SDK callbacks and
 extracts only through the same bounded memory-file path; it never invokes an external `7z` process.

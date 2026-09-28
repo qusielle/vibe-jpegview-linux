@@ -224,6 +224,16 @@ assert_title_prefix() {
 	exit 1
 }
 
+set_clipboard_text() {
+	printf '%s' "$1" | DISPLAY=":$display_number" xclip -selection clipboard -i
+	sleep 0.1
+}
+
+clear_clipboard_text() {
+	: | DISPLAY=":$display_number" xclip -selection clipboard -i
+	sleep 0.1
+}
+
 # Two adjacent portrait pages should render together after the standalone
 # cover, navigation should step over the partner, and J should reverse both
 # the physical page placement and left/right reading direction.
@@ -479,7 +489,12 @@ if [ -f "$temporary/images/11-password.zip" ]; then
 	DISPLAY=":$display_number" xdotool type --delay 20 'wrong-password'
 	DISPLAY=":$display_number" xdotool key Return
 	sleep 0.3
-	DISPLAY=":$display_number" xdotool type --delay 20 'jpegview-test-password'
+	if command -v xclip >/dev/null 2>&1; then
+		set_clipboard_text 'jpegview-test-password'
+		DISPLAY=":$display_number" xdotool key ctrl+v
+	else
+		DISPLAY=":$display_number" xdotool type --delay 20 'jpegview-test-password'
+	fi
 	DISPLAY=":$display_number" xdotool key Return
 	sleep 0.2
 	DISPLAY=":$display_number" xdotool key Return
@@ -497,6 +512,22 @@ if [ -f "$temporary/images/11-password.zip" ]; then
 	DISPLAY=":$display_number" xdotool key Return
 	assert_title_prefix "inside-password.ppm" "reopening an encrypted ZIP asked again for its session password"
 	stop_viewer
+	if command -v xclip >/dev/null 2>&1; then
+		for shortcut in ctrl+shift+v shift+Insert; do
+			launch_viewer "$temporary/images/11-password.zip"
+			set_clipboard_text 'jpegview-test-password'
+			DISPLAY=":$display_number" xdotool key "$shortcut"
+			DISPLAY=":$display_number" xdotool key Return
+			sleep 0.2
+			DISPLAY=":$display_number" xdotool key Return
+			assert_title_prefix "inside-password.ppm" \
+				"encrypted ZIP password paste shortcut '$shortcut' did not unlock the image"
+			stop_viewer
+		done
+	else
+		echo "UI smoke test: SKIP password clipboard shortcuts (missing xclip)"
+	fi
+	if command -v xclip >/dev/null 2>&1; then clear_clipboard_text; fi
 	XDG_STATE_HOME="$temporary/state"
 	export XDG_STATE_HOME
 fi

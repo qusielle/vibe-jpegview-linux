@@ -132,6 +132,17 @@ constexpr int kCropSizeCancel = 1;
 constexpr int kConfirmRestoreParameterDb = -8;
 constexpr char kRepositoryUrl[] = "https://github.com/qusielle/vibe-jpegview-linux";
 
+struct SdlClipboardTextWiper {
+	void operator()(char* text) const {
+		if (text == nullptr) return;
+		std::size_t length = 0;
+		while (text[length] != '\0') ++length;
+		volatile char* bytes = text;
+		for (std::size_t index = 0; index < length; ++index) bytes[index] = '\0';
+		SDL_free(text);
+	}
+};
+
 jpegview_linux::SystemFont& UiFont() {
 	static jpegview_linux::SystemFont font;
 	return font;
@@ -5484,6 +5495,12 @@ private:
 		archivePasswordValidationPending_ = false;
 		archivePasswordPendingValue_.clear();
 		fileDialogMessage_.clear();
+		SDL_StartTextInput();
+	}
+
+	void PasteArchivePasswordFromClipboard() {
+		std::unique_ptr<char, SdlClipboardTextWiper> clipboardText(SDL_GetClipboardText());
+		if (clipboardText) archivePasswordDialog_.AppendText(clipboardText.get());
 	}
 
 	void HandleArchivePasswordEvents(const SDL_Event& event, bool& running) {
@@ -5503,7 +5520,14 @@ private:
 			return;
 		}
 		if (event.type == SDL_KEYDOWN) {
-			if (event.key.keysym.sym == SDLK_ESCAPE) {
+			const Uint16 modifiers = event.key.keysym.mod;
+			const bool control = (modifiers & 0x00c0u) != 0;
+			const bool shift = (modifiers & 0x0003u) != 0;
+			const bool paste = (control && event.key.keysym.sym == 'v') ||
+				(shift && event.key.keysym.sym == SDLK_INSERT);
+			if (paste) {
+				if (event.key.repeat == 0) PasteArchivePasswordFromClipboard();
+			} else if (event.key.keysym.sym == SDLK_ESCAPE) {
 				archivePasswordDialog_.Cancel();
 			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
 				archivePasswordDialog_.Backspace();

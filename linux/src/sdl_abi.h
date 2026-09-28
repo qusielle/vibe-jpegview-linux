@@ -217,6 +217,7 @@ enum : Sint32 {
 	SDLK_PAGEDOWN = 1073741902,
 	SDLK_HOME = 1073741898,
 	SDLK_END = 1073741901,
+	SDLK_INSERT = 1073741897,
 	SDLK_F7 = 1073741888,
 	SDLK_F8 = 1073741889,
 	SDLK_F9 = 1073741890,
@@ -257,6 +258,7 @@ int SDL_ShowCursor(int toggle);
 void SDL_FreeCursor(SDL_Cursor* cursor);
 int SDL_CaptureMouse(int enabled);
 int SDL_SetClipboardText(const char* text);
+char* SDL_GetClipboardText();
 void SDL_StartTextInput();
 void SDL_StopTextInput();
 void SDL_free(void* memory);

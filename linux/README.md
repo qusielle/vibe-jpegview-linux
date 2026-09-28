@@ -151,7 +151,8 @@ they support.
    beside the app. Data-encrypted archives keep visible names. Header-encrypted archives show a gold
    `[.7Z] [Encrypted]` row while locked because member names are hidden. The shared password dialog
    appears only when entering or explicitly unlocking the archive; launching a locked 7z directly
-   opens Browse at that archive so it can prompt rather than exiting. A locked preview never prompts.
+   opens Browse at that archive so it can prompt rather than exiting. The dialog accepts typed input
+   and clipboard paste with Ctrl+V, Ctrl+Shift+V, or Shift+Insert. A locked preview never prompts.
    Correct passwords are cached only in memory for the current run and backing-file identity, and are
    neither written to settings nor passed through process arguments. Unencrypted RAR4 and
    RAR5 use libarchive's streaming readers, including solid RAR5 archives; the optional reader
@@ -164,9 +165,9 @@ they support.
    command-line argument also needs an initial index; the Open dialog remains responsive while it
    builds that index. Encrypted ZIP entries are supported: entering an encrypted ZIP in Browse
    opens a password prompt, filenames remain visible, and passwords accepted by the archive's check
-   are cached in memory for the current app run and backing archive only. Passwords are not written to settings or recent
-   files. A locked image preview shows a password-needed label but never opens the prompt; opening
-   the archive or selecting an encrypted image is the explicit unlock action. Encrypted RAR4 and
+   are cached in memory for the current app run and backing archive only. Passwords are not written
+   to settings or recent files. A locked preview shows a password-needed label without prompting;
+   opening the archive or selecting an encrypted image is the explicit unlock action. Encrypted RAR4 and
    RAR5 data and headers are supported by the optional private reader: data-encrypted archives keep
    member names visible, while header-encrypted archives show a gold `[RAR] [Encrypted]` row with
    names hidden until unlock. Previews never prompt. Accepted passwords are cached only in memory
@@ -537,10 +538,10 @@ validation, in-memory credential reuse/clearing, relocking and locked previews, 
 output-callback failure, and cancellation,
 cancellable archive indexing, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
-open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ/7z/RAR browsing and recent
-reopening, encrypted-ZIP prompt/retry/session reuse, and—when optional plugins are bundled—
-header-encrypted 7z password entry/cancel/reselect plus RAR password retry; focus restoration, paging, Home/End,
-held-key movement, wheel and scrollbar scrolling/dragging, and
+open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ/7z/RAR browsing and
+recent reopening, encrypted-ZIP prompt/retry/session reuse and clipboard paste shortcuts, and
+header-encrypted 7z password entry/cancel/reselect plus RAR password retry when optional plugins are
+bundled; focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and
 dialog/preview resizing; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;
