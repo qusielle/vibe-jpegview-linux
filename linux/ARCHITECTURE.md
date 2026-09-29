@@ -129,7 +129,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   moving the panel's centering or changing which row represents the navigation index.
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation. Viewer
   supplies the active spread partner so filename and information overlays report both visible
-  positions without coupling the formatting module to SDL or spread state.
+  positions without coupling the formatting module to SDL or spread state. The SDL composition root
+  reuses this position text in the window title and refreshes it when a newly prepared spread becomes
+  active.
 - `system_font` and `bitmap_font`: desktop-font discovery, UTF-8 shaping, measurement, rasterization,
   and exact embedded-glyph ink bounds for crisp renderer overlays such as menu mnemonics. The SDL
   adapter creates printable-ASCII bitmap-font textures with nearest-neighbor sampling while keeping

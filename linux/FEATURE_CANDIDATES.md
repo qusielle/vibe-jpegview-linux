@@ -297,9 +297,6 @@ repeated as new candidates below.
   ordered file list, complementing the existing `[current/total]` indicator in the F2 information
   overlay. See
   [issue #26](https://github.com/sylikc/jpegview/issues/26).
-- **Show position in the window title:** add `[current/total]` to the SDL window title; Linux
-  currently shows that count in the F2 information overlay, but its title only shows the filename,
-  dimensions, and file size. See [issue #260](https://github.com/sylikc/jpegview/issues/260).
 - **Skip hidden images:** add an optional setting to omit hidden image files from navigation. On
   Linux, define this in terms of dotfiles (and decide explicitly whether `.hidden` directory
   metadata should also count), rather than copying Windows hidden-attribute behavior. See

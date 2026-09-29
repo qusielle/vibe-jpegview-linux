@@ -1005,6 +1005,7 @@ private:
 			activeDoublePageRender_->layout.secondIndex == layout->secondIndex &&
 			activeDoublePageRender_->layout.canvasWidth == layout->canvasWidth &&
 			activeDoublePageRender_->layout.canvasHeight == layout->canvasHeight;
+		const std::string previousPosition = CurrentImagePositionText();
 		if (!sameSpreadCanvas) {
 			const jpegview_linux::ViewportSnapshot snapshot = viewport_.Snapshot();
 			viewport_.Restore(snapshot, layout->canvasWidth, layout->canvasHeight,
@@ -1012,6 +1013,7 @@ private:
 			currentDisplayRequest_.reset();
 		}
 		activeDoublePageRender_ = ActiveDoublePageRender{*layout, *current, *next, *spec};
+		if (CurrentImagePositionText() != previousPosition) SetTitle();
 		const auto anchorSize = DoublePagePageDisplaySize(*layout, layout->currentPage, area);
 		const jpegview_linux::DisplayImageRequest* anchorRequestPointer =
 			CurrentDisplayRequest(anchorSize.first, anchorSize.second);
@@ -2003,7 +2005,8 @@ private:
 		std::error_code fileError;
 		const std::uintmax_t fileSize = jpegview_linux::ImageSourceFileSize(fileList_.Current(), fileError);
 		std::ostringstream title;
-		title << fileList_.Current().filename().string()
+		title << '[' << CurrentImagePositionText() << "] "
+			<< fileList_.Current().filename().string()
 			<< " (" << image_.originalWidth << 'x' << image_.originalHeight;
 		if (!fileError) title << ", " << jpegview_linux::FormatFileSize(fileSize);
 		title << ") - JPEGView";

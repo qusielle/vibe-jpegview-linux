@@ -222,9 +222,15 @@ assert_title_prefix() {
 	failure_message=$2
 	current_title=''
 	for _ in $(seq 1 40); do
-		current_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		current_title=$(DISPLAY=":$display_number" command xdotool getwindowname "$window_id")
 		case "$current_title" in
 			"$expected_prefix"*) return 0 ;;
+			\[*/*\]*)
+				title_without_position=${current_title#*] }
+				case "$title_without_position" in
+					"$expected_prefix"*) return 0 ;;
+				esac
+				;;
 		esac
 		sleep 0.05
 	done
@@ -232,12 +238,17 @@ assert_title_prefix() {
 	exit 1
 }
 
+window_title_without_position() {
+	DISPLAY=":$display_number" command xdotool getwindowname "$window_id" |
+		sed -E 's/^\[[0-9]+(-[0-9]+)?\/[0-9]+\] //'
+}
+
 assert_window_title_exact() {
 	expected_title=$1
 	failure_message=$2
 	current_title=''
 	for _ in $(seq 1 60); do
-		current_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		current_title=$(DISPLAY=":$display_number" window_title_without_position)
 		if [ "$current_title" = "$expected_title" ]; then return 0; fi
 		sleep 0.05
 	done
@@ -267,10 +278,12 @@ VIEWER_TEST_HOME="$temporary/double-page-home" \
 	VIEWER_TEST_CONFIG_HOME="$temporary/double-page-config" \
 	launch_viewer "$temporary/double-page-fixtures"
 assert_title_prefix "00-cover.ppm" "double-page fixture did not start on its standalone cover"
+assert_title_prefix "[1/4] " "window title did not show the initial image position"
 DISPLAY=":$display_number" xdotool key d
 sleep 0.15
 DISPLAY=":$display_number" xdotool key Right
 assert_title_prefix "01-first.ppm" "double-page mode did not advance from the single cover"
+assert_title_prefix "[2-3/4] " "window title did not show both positions in the active double-page spread"
 if [ "$visual_assertions" -eq 1 ]; then
 	spread_rendered=0
 	for _ in $(seq 1 40); do
@@ -484,14 +497,14 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		echo "UI smoke test: startup window waited for initial image decoding" >&2
 		exit 1
 	fi
-	startup_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	startup_title=$(DISPLAY=":$display_number" window_title_without_position)
 	case "$startup_title" in
 		*Loading*) ;;
 		*) echo "UI smoke test: startup window did not show loading state" >&2; exit 1 ;;
 	esac
 	loaded_title=''
 	for _ in $(seq 1 50); do
-		loaded_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		loaded_title=$(DISPLAY=":$display_number" window_title_without_position)
 		case "$loaded_title" in
 			startup-delay.jpg\ *) break ;;
 		esac
@@ -797,11 +810,11 @@ XDG_STATE_HOME="$temporary/state"
 export XDG_STATE_HOME
 
 launch_viewer
-help_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+help_previous_title=$(DISPLAY=":$display_number" window_title_without_position)
 DISPLAY=":$display_number" xdotool windowfocus --sync "$window_id"
 DISPLAY=":$display_number" xdotool key --clearmodifiers F1
 sleep 0.2
-help_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+help_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$help_title" in
 	*Help*) ;;
 	*) echo "UI smoke test: F1 did not open the quick-help panel (title: $help_title)" >&2; exit 1 ;;
@@ -827,7 +840,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 fi
 DISPLAY=":$display_number" xdotool key Escape
 sleep 0.2
-help_closed_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+help_closed_title=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$help_closed_title" != "$help_previous_title" ]; then
 	echo "UI smoke test: Escape did not close quick help and restore the image title" >&2
 	exit 1
@@ -945,7 +958,7 @@ click_file_dialog_tab browse
 click_file_dialog_blank_space
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.4
-filtered_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+filtered_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$filtered_title" in
 	03-blue.ppm*) ;;
 	*) echo "UI smoke test: Ctrl+O filename filter did not open the matching image" >&2; exit 1 ;;
@@ -1034,7 +1047,7 @@ DISPLAY=":$display_number" xdotool key Home
 DISPLAY=":$display_number" xdotool key Down
 DISPLAY=":$display_number" xdotool key ctrl+Return
 sleep 0.3
-immediate_directory_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+immediate_directory_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$immediate_directory_title" in
 	inside-first.ppm*) ;;
 	*) echo "UI smoke test: modification-date sorting did not reorder folders newest first" >&2; exit 1 ;;
@@ -1054,7 +1067,7 @@ DISPLAY=":$display_number" xdotool type --delay 20 '00-ENTRY-TEST'
 DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-entered_directory_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+entered_directory_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$entered_directory_title" in
 	inside-first.ppm*) ;;
 	*) echo "UI smoke test: entering a directory focused [..] instead of its first child" >&2; exit 1 ;;
@@ -1065,7 +1078,7 @@ DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-restored_directory_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+restored_directory_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$restored_directory_title" in
 	inside-first.ppm*) ;;
 	*) echo "UI smoke test: returning to the parent did not focus the directory just exited" >&2; exit 1 ;;
@@ -1079,7 +1092,7 @@ sleep 0.9
 DISPLAY=":$display_number" xdotool keyup Down
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-repeated_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+repeated_dialog_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$repeated_dialog_title" in
 	05-cyan.ppm*) ;;
 	*) echo "UI smoke test: held Down did not repeat selection in the Ctrl+O dialog" >&2; exit 1 ;;
@@ -1092,7 +1105,7 @@ DISPLAY=":$display_number" xdotool key Page_Up
 DISPLAY=":$display_number" xdotool key Down
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-paged_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+paged_dialog_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$paged_dialog_title" in
 	01-red.ppm*) ;;
 	*) echo "UI smoke test: PageUp/PageDown did not page through the Ctrl+O dialog" >&2; exit 1 ;;
@@ -1103,7 +1116,7 @@ DISPLAY=":$display_number" xdotool type --delay 20 '.ppm'
 DISPLAY=":$display_number" xdotool key End
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-end_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+end_dialog_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$end_dialog_title" in
 	05-cyan.ppm*) ;;
 	*) echo "UI smoke test: End did not select the last row in the Ctrl+O dialog" >&2; exit 1 ;;
@@ -1115,7 +1128,7 @@ DISPLAY=":$display_number" xdotool key Home
 DISPLAY=":$display_number" xdotool key Down
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-home_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+home_dialog_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$home_dialog_title" in
 	01-red.ppm*) ;;
 	*) echo "UI smoke test: Home did not select the first row in the Ctrl+O dialog" >&2; exit 1 ;;
@@ -1143,7 +1156,7 @@ DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$wheel_list_
 DISPLAY=":$display_number" xdotool click 5
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-wheel_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+wheel_dialog_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$wheel_dialog_title" in
 	wheel-04.ppm*) ;;
 	*) echo "UI smoke test: mouse wheel did not scroll and select through the open-dialog file list" >&2; exit 1 ;;
@@ -1183,7 +1196,7 @@ DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 	"$wheel_content_x" "$wheel_last_row_y" click 1
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-scrollbar_page_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+scrollbar_page_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$scrollbar_page_title" in
 	wheel-34.ppm*) ;;
 	*) echo "UI smoke test: clicking below the scrollbar thumb did not page the file list" >&2; exit 1 ;;
@@ -1201,7 +1214,7 @@ DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 	"$wheel_content_x" "$wheel_last_row_y" click 1
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-scrollbar_drag_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+scrollbar_drag_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$scrollbar_drag_title" in
 	wheel-39.ppm*) ;;
 	*) echo "UI smoke test: dragging the scrollbar thumb to its end did not reveal the final file" >&2; exit 1 ;;
@@ -1212,7 +1225,7 @@ DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool type --delay 10 '01-RED'
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-wheel_restore_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+wheel_restore_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$wheel_restore_title" in
 	01-red.ppm*) ;;
 	*) echo "UI smoke test: returning from the wheel fixture did not restore the root image listing" >&2; exit 1 ;;
@@ -1226,26 +1239,26 @@ DISPLAY=":$display_number" xdotool key Home
 DISPLAY=":$display_number" xdotool key Down
 DISPLAY=":$display_number" xdotool key ctrl+Return
 sleep 0.3
-sibling_start_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+sibling_start_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$sibling_start_title" in
 	first.ppm*) ;;
 	*) echo "UI smoke test: could not enter the first sibling-folder fixture ($sibling_start_title)" >&2; exit 1 ;;
 esac
 DISPLAY=":$display_number" xdotool key alt+Right
 sleep 0.3
-sibling_next_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+sibling_next_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$sibling_next_title" in
 	inside-first.ppm*) ;;
 	*) echo "UI smoke test: Alt+Right did not open the next sibling folder's first image" >&2; exit 1 ;;
 esac
 DISPLAY=":$display_number" xdotool key alt+Left
-sibling_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+sibling_previous_title=$(DISPLAY=":$display_number" window_title_without_position)
 for _ in $(seq 1 40); do
 	case "$sibling_previous_title" in
 		first.ppm*) break ;;
 	esac
 	sleep 0.05
-	sibling_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	sibling_previous_title=$(DISPLAY=":$display_number" window_title_without_position)
 done
 case "$sibling_previous_title" in
 	first.ppm*) ;;
@@ -1256,7 +1269,7 @@ DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool type --delay 10 '01-RED'
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-sibling_restore_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+sibling_restore_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$sibling_restore_title" in
 	01-red.ppm*) ;;
 	*) echo "UI smoke test: sibling-folder test did not restore the root image" >&2; exit 1 ;;
@@ -1326,7 +1339,7 @@ DISPLAY=":$display_number" xdotool key Escape
 # the first render used to advance from 01 directly to 03.
 DISPLAY=":$display_number" xdotool key Right
 sleep 0.2
-single_press_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+single_press_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$single_press_title" in
 	02-green.ppm*) ;;
 	*) echo "UI smoke test: one Right press skipped over the adjacent image" >&2; exit 1 ;;
@@ -1334,11 +1347,11 @@ esac
 DISPLAY=":$display_number" xdotool key Left
 sleep 0.2
 
-title_before=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_before=$(DISPLAY=":$display_number" window_title_without_position)
 DISPLAY=":$display_number" xdotool mousemove 640 400
 DISPLAY=":$display_number" xdotool click 4
 sleep 0.4
-title_after_wheel=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_after_wheel=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$title_before" = "$title_after_wheel" ]; then
 	echo "UI smoke test: plain wheel did not navigate" >&2
 	exit 1
@@ -1349,13 +1362,13 @@ DISPLAY=":$display_number" xdotool keydown Right
 sleep 0.7
 DISPLAY=":$display_number" xdotool keyup Right
 sleep 0.2
-title_after_hold=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_after_hold=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$title_before_hold" = "$title_after_hold" ]; then
 	echo "UI smoke test: held Right key did not repeat navigation" >&2
 	exit 1
 fi
 sleep 0.3
-title_after_release_settled=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_after_release_settled=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$title_after_hold" != "$title_after_release_settled" ]; then
 	echo "UI smoke test: navigation continued after Right was released" >&2
 	exit 1
@@ -1392,12 +1405,12 @@ if [ "$visual_assertions" -eq 1 ]; then
 	fi
 fi
 
-title_before_ctrl_wheel=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_before_ctrl_wheel=$(DISPLAY=":$display_number" window_title_without_position)
 DISPLAY=":$display_number" xdotool keydown ctrl
 DISPLAY=":$display_number" xdotool click 5
 DISPLAY=":$display_number" xdotool keyup ctrl
 sleep 0.3
-title_after_ctrl_wheel=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_after_ctrl_wheel=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$title_before_ctrl_wheel" != "$title_after_ctrl_wheel" ]; then
 	echo "UI smoke test: Ctrl+wheel navigated instead of zooming" >&2
 	exit 1
@@ -1456,13 +1469,13 @@ if [ "$visual_assertions" -eq 1 ]; then
 		*) echo "UI smoke test: Ctrl+M did not outline the marked thumbnail (pixel $thumbnail_mark_outline at y=$thumbnail_mark_y)" >&2; exit 1 ;;
 	esac
 fi
-title_before_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_before_thumbnail_click=$(DISPLAY=":$display_number" window_title_without_position)
 thumbnail_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
 thumbnail_neighbor_y=$(((thumbnail_window_height + 163) / 2))
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 80 "$thumbnail_neighbor_y"
 DISPLAY=":$display_number" xdotool click 1
 sleep 0.3
-title_after_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_after_thumbnail_click=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$title_before_thumbnail_click" = "$title_after_thumbnail_click" ]; then
 	echo "UI smoke test: clicking a neighboring thumbnail did not navigate" >&2
 	exit 1
@@ -1611,7 +1624,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 fi
 DISPLAY=":$display_number" xdotool key Home
 sleep 0.3
-title_after_reload=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_after_reload=$(DISPLAY=":$display_number" window_title_without_position)
 case "$title_after_reload" in
 	01-red.ppm\ *) ;;
 	*) echo "UI smoke test: persisted filename ordering was not restored" >&2; exit 1 ;;
@@ -1621,7 +1634,7 @@ thumbnail_neighbor_y=$(((thumbnail_window_height + 163) / 2))
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 200 "$thumbnail_neighbor_y"
 DISPLAY=":$display_number" xdotool click 1
 sleep 0.3
-title_after_restored_thumbnail_click=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+title_after_restored_thumbnail_click=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$title_after_reload" = "$title_after_restored_thumbnail_click" ]; then
 	echo "UI smoke test: persisted thumbnail panel was not interactive after relaunch" >&2
 	exit 1
@@ -1733,7 +1746,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 fi
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.3
-recent_open_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+recent_open_title=$(DISPLAY=":$display_number" window_title_without_position)
 case "$recent_open_title" in
 	inside-first.ppm\ *) ;;
 	*) echo "UI smoke test: Enter did not open the focused recent image ($recent_open_title)" >&2; exit 1 ;;
@@ -1857,7 +1870,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 	sleep 0.2
 	DISPLAY=":$display_number" xdotool key Right
 	sleep 0.2
-	portrait_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	portrait_title=$(DISPLAY=":$display_number" window_title_without_position)
 	case "$portrait_title" in
 		02-portrait.png\ *) ;;
 		*) echo "UI smoke test: aspect-ratio navigation did not return to the portrait image" >&2; exit 1 ;;
@@ -1992,7 +2005,7 @@ if command -v convert >/dev/null 2>&1; then
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 		"$magnifier_center_x" "$magnifier_center_y" key z
 	sleep 0.4
-	magnifier_title_before=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	magnifier_title_before=$(DISPLAY=":$display_number" window_title_without_position)
 	case "$magnifier_title_before" in
 		01-magnifier.png\ *) ;;
 		*) echo "UI smoke test: magnifying-glass fixture did not open its first image ($magnifier_title_before)" >&2; exit 1 ;;
@@ -2014,7 +2027,7 @@ if command -v convert >/dev/null 2>&1; then
 	fi
 	DISPLAY=":$display_number" xdotool click 5
 	sleep 0.2
-	magnifier_title_after=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	magnifier_title_after=$(DISPLAY=":$display_number" window_title_without_position)
 	if [ "$magnifier_title_before" != "$magnifier_title_after" ]; then
 		echo "UI smoke test: wheel resizing the magnifier navigated to another image" >&2
 		exit 1
@@ -2166,7 +2179,7 @@ if command -v convert >/dev/null 2>&1; then
 	for _ in $(seq 1 "$crop_fixed_mode_steps"); do DISPLAY=":$display_number" xdotool key Down; done
 	DISPLAY=":$display_number" xdotool key Return
 	sleep 0.2
-	crop_dialog_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	crop_dialog_title=$(DISPLAY=":$display_number" window_title_without_position)
 	if [ "$crop_dialog_title" != "Set fixed crop size" ]; then
 		echo "UI smoke test: crop menu did not open the fixed-size editor ($crop_dialog_title)" >&2
 		exit 1
@@ -2233,7 +2246,7 @@ if command -v convert >/dev/null 2>&1; then
 			echo "UI smoke test: Copy Selection did not place its source-size crop on the clipboard" >&2
 			exit 1
 		fi
-		copied_selection_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		copied_selection_title=$(DISPLAY=":$display_number" window_title_without_position)
 		case "$copied_selection_title" in
 			"Copied selection to clipboard"*) ;;
 			*) echo "UI smoke test: Copy Selection did not complete ($copied_selection_title)" >&2; exit 1 ;;
@@ -2247,7 +2260,7 @@ if command -v convert >/dev/null 2>&1; then
 		echo "UI smoke test: regular crop unexpectedly modified its source file" >&2
 		exit 1
 	fi
-	cropped_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	cropped_title=$(DISPLAY=":$display_number" window_title_without_position)
 	case "$cropped_title" in
 		"01-crop.jpg (64x48,"*) ;;
 		*) echo "UI smoke test: in-memory crop did not update the current image dimensions ($cropped_title)" >&2; exit 1 ;;
@@ -2332,7 +2345,7 @@ if command -v convert >/dev/null 2>&1; then
 			echo "UI smoke test: new lossless crop did not respect the process umask ($actual_crop_mode/$expected_crop_mode)" >&2
 			exit 1
 		fi
-		lossless_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		lossless_title=$(DISPLAY=":$display_number" window_title_without_position)
 		case "$lossless_title" in
 			*"Saved lossless crop: 01-crop_crop.jpg"*) ;;
 			*) echo "UI smoke test: lossless crop did not return to the viewer ($lossless_title)" >&2; exit 1 ;;
@@ -2357,7 +2370,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
 			--class jpegview-linux 2>/dev/null | head -1 || true)
 		if [ -n "$window_id" ]; then
-			transparency_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+			transparency_title=$(DISPLAY=":$display_number" window_title_without_position)
 			case "$transparency_title" in
 				transparent.png\ *) break ;;
 				*) window_id='' ;;

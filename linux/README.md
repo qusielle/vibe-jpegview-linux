@@ -258,7 +258,8 @@ they support.
     Filename, EXIF, and counter text remain responsive during navigation. The information popup uses
     a readable `W X H, Size` line and an unlabeled modification date. The EXIF popup includes a
     toggleable grayscale histogram, hidden by default. Overlay visibility persists
-    immediately. The window title shows filename, dimensions, and size. Menus, dialogs, tooltips,
+    immediately. The window title shows the current position and total before the filename, followed
+    by dimensions and size; double-page mode shows both visible positions. Menus, dialogs, tooltips,
     and panels use the hinted 9-point Terminus bitmap when the complete string is printable ASCII,
     preserving lowercase letters as drawn and using crisp one-bit pixels without antialiased edges. Strings
     containing other characters use the desktop's configured UI font through Pango, retaining Unicode
@@ -528,8 +529,9 @@ uses the desktop font discovered from XFCE, GTK, xsettingsd, or KDE configuratio
 `JPEGVIEW_FONT` to a Pango font description such as `Sans 11` to override desktop discovery for that
 Unicode fallback.
 
-The default window title follows the Windows-style image title format:
-`filename (widthxheight, file size) - JPEGView`.
+The window title prefixes the Windows-style image title with `[current/total]`, for example
+`[1/20] filename (widthxheight, file size) - JPEGView`. In double-page mode it shows both active
+positions, such as `[2-3/20]`. With no image open, the title is `JPEGView`.
 
 ## Application version
 
