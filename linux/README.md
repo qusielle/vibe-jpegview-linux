@@ -292,12 +292,12 @@ they support.
     at that directory instead of exiting. Compatibility handling keeps always-on-top optional on
     older SDL runtimes.
 
-    **Advanced configuration...** at the bottom of both compact and expanded main context menus
-    opens a seven-section editor for persisted settings without ordinary context-menu commands. It
-    covers navigation behavior, including folder wrap-around, transparency and histogram display,
-    panel/dialog dimensions,
-    magnifying-glass geometry, the user crop aspect, default picture-level and unsharp values, the
-    cache budget, and the batch copy/rename pattern. It stages a `ViewerSettings` copy and saves
+    **Advanced configuration...**, immediately before **Help...** in both compact and expanded main
+    context menus, opens a seven-section editor for persisted settings without ordinary context-menu
+    commands. It covers navigation behavior, including folder wrap-around, transparency and histogram
+    display, panel/dialog dimensions, magnifying-glass geometry, the user crop aspect, default
+    picture-level and unsharp values, the cache budget, and the batch copy/rename pattern. It stages a
+    `ViewerSettings` copy and saves
     through the existing atomic settings writer only after **Apply**; **Cancel** discards the draft.
     Escape cancels a field edit first, then closes the window and discards the draft. Session state
     and controls already represented by menu commands remain owned by their existing UI. Live
@@ -645,8 +645,8 @@ open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/CBZ
 recent reopening, encrypted-ZIP prompt/retry/session reuse and clipboard paste shortcuts, and
 header-encrypted 7z password entry/cancel/reselect plus RAR password retry when optional plugins are
 bundled; focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and
-dialog/preview resizing; advanced-configuration opening from the final context-menu item and
-Apply/Cancel; thumbnail
+dialog/preview resizing; opening Advanced configuration from immediately before Help and its
+Apply/Cancel behavior; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;
 mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; crop-mode dialog, selection
@@ -740,9 +740,10 @@ with, Print, batch rename/copy, date and wallpaper commands, extended navigation
 transforms and correction, extra zoom and window controls, slideshow controls, and settings
 administration, including the user-local default-viewer registration and disabled Windows-only
 commands, without saving that choice. The compact menu keeps common navigation, fit/actual-size,
-fullscreen, and fit-window-to-image commands available. **Advanced configuration...** is the final
-item in either menu view. It groups config-only options into Behavior, Appearance, Panels & dialogs,
-Magnifying glass, Crop, Image defaults, and Performance & batch. In that window, use Tab/Shift+Tab
+fullscreen, and fit-window-to-image commands available. **Advanced configuration...** appears
+immediately before **Help...** in either menu view. It groups config-only options into Behavior,
+Appearance, Panels & dialogs, Magnifying glass, Crop, Image defaults, and Performance & batch. In
+that window, use Tab/Shift+Tab
 to switch groups, Up/Down to choose a setting, Left/Right to adjust it, and Enter to toggle/cycle or
 edit a value; Ctrl+A selects all in a text edit and Ctrl+V pastes. Valid edits commit when switching
 groups or rows. **Apply** or Ctrl+Enter writes the changes; Cancel discards them, and Escape cancels

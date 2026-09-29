@@ -5349,9 +5349,19 @@ void TestContextMenuCatalogAndState() {
 		});
 		return found == items.end() ? nullptr : &*found;
 	};
+	const auto immediatelyBefore = [](const std::vector<MenuItem>& items, int firstCommand,
+		int secondCommand) {
+		const auto first = std::find_if(items.begin(), items.end(), [firstCommand](const MenuItem& item) {
+			return item.command == firstCommand;
+		});
+		return first != items.end() && first + 1 != items.end() &&
+			(first + 1)->command == secondCommand;
+	};
 
 	ContextMenuState state;
 	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
+	const MenuItem* compactAdvancedConfiguration = findCommand(compact,
+		jpegview_linux::kCommandAdvancedConfiguration);
 	Expect(findCommand(compact, jpegview_linux::kContextMenuShowAdvanced) != nullptr,
 		"compact context menu omitted the one-off advanced-options command");
 	Expect(findCommand(compact, IDM_PRINT) == nullptr && findCommand(compact, IDM_LOOP_FOLDER) == nullptr &&
@@ -5365,9 +5375,11 @@ void TestContextMenuCatalogAndState() {
 		"compact context menu omitted the built-in help command");
 	Expect(findCommand(compact, jpegview_linux::kCommandEditPictureLevels) != nullptr,
 		"compact context menu omitted the picture-level editor");
-	Expect(compact.back().command == jpegview_linux::kCommandAdvancedConfiguration &&
-		compact.back().label == "Advanced configuration..." && compact.back().enabled,
-		"advanced configuration was not the final enabled compact-menu command");
+	Expect(immediatelyBefore(compact, jpegview_linux::kCommandAdvancedConfiguration, IDM_HELP) &&
+		compactAdvancedConfiguration != nullptr &&
+		compactAdvancedConfiguration->label == "Advanced configuration..." &&
+		compactAdvancedConfiguration->enabled,
+		"advanced configuration was not immediately before Help in the compact menu");
 	Expect(jpegview_linux::kCommandAdvancedConfiguration !=
 		jpegview_linux::kCommandToggleMagnifyingGlass,
 		"advanced configuration reused the magnifying-glass keyboard command ID");
@@ -5427,9 +5439,13 @@ void TestContextMenuCatalogAndState() {
 	state.transitionDurationMs = 1000;
 	state.openWithApplicationNames = {"Photo Editor", u8"写真工具"};
 	const std::vector<MenuItem> advanced = jpegview_linux::BuildContextMenu(state, true);
-	Expect(advanced.back().command == jpegview_linux::kCommandAdvancedConfiguration &&
-		advanced.back().label == "Advanced configuration..." && advanced.back().enabled,
-		"advanced configuration was not the final enabled expanded-menu command");
+	const MenuItem* expandedAdvancedConfiguration = findCommand(advanced,
+		jpegview_linux::kCommandAdvancedConfiguration);
+	Expect(immediatelyBefore(advanced, jpegview_linux::kCommandAdvancedConfiguration, IDM_HELP) &&
+		expandedAdvancedConfiguration != nullptr &&
+		expandedAdvancedConfiguration->label == "Advanced configuration..." &&
+		expandedAdvancedConfiguration->enabled,
+		"advanced configuration was not immediately before Help in the expanded menu");
 	Expect(findCommand(advanced, jpegview_linux::kCommandToggleDoublePageMode)->checked &&
 		findCommand(advanced, jpegview_linux::kCommandToggleMangaReadingOrder)->checked,
 		"context menu did not reflect active double-page and manga states");

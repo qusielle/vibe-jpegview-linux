@@ -305,11 +305,11 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		{"User commands", 0, false, false, true, nullptr, true},
 		{"  (none configured)", 0, false, false, false, nullptr, true},
 		{nullptr, 0, true},
+		{"Advanced configuration...", kCommandAdvancedConfiguration},
 		{"Help...", IDM_HELP, false, false, true, "F1"},
 		{"About JPEGView...", IDM_ABOUT},
 		{nullptr, 0, true},
 		{"Exit", IDM_EXIT, false, false, true, "Q/Esc"},
-		{"Advanced configuration...", kCommandAdvancedConfiguration},
 	};
 
 	const auto openWithHeader = std::find_if(items.begin(), items.end(), [](const MenuItem& item) {

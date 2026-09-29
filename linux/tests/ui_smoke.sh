@@ -802,14 +802,15 @@ stop_viewer
 XDG_STATE_HOME="$temporary/state"
 export XDG_STATE_HOME
 
-# Advanced configuration is available as the last compact-menu command. The
-# dialog stages values by category and persists only after Apply.
+# Advanced configuration appears immediately before Help in the compact menu.
+# The dialog stages values by category and persists only after Apply.
 XDG_STATE_HOME="$temporary/advanced-config-state"
 VIEWER_TEST_CONFIG_HOME="$temporary/advanced-config-config"
 export XDG_STATE_HOME VIEWER_TEST_CONFIG_HOME
 launch_viewer "$temporary/images/01-red.ppm"
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
 DISPLAY=":$display_number" xdotool key End
+DISPLAY=":$display_number" xdotool key Up Up Up
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.15
 DISPLAY=":$display_number" xdotool key Down Down Return
@@ -836,6 +837,7 @@ assert_title_prefix "02-green.ppm" "folder navigation did not continue from an i
 # Reopening and escaping discards an un-applied draft.
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
 DISPLAY=":$display_number" xdotool key End
+DISPLAY=":$display_number" xdotool key Up Up Up
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.1
 DISPLAY=":$display_number" xdotool key Tab
@@ -891,7 +893,6 @@ fi
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
 sleep 0.1
 DISPLAY=":$display_number" xdotool key End
-DISPLAY=":$display_number" xdotool key Up
 DISPLAY=":$display_number" xdotool key Up
 DISPLAY=":$display_number" xdotool key Return
 assert_title_prefix "About JPEGView Linux" "context-menu navigation did not open About"
