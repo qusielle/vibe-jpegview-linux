@@ -62,12 +62,17 @@ RUN curl --fail --location --retry 8 --retry-max-time 90 "https://github.com/lib
 FROM base AS aom-avif
 
 ARG AOM_VERSION=3.2.0
+ARG AOM_URL=https://storage.googleapis.com/aom-releases/libaom-${AOM_VERSION}.tar.gz
+ARG AOM_SHA256=8fa7418bf4ea12ef6dcf0eeb21cba932b71c6079ffdf7b9d13cf907fa46c0568
 ARG LIBAVIF_VERSION=0.9.3
+ARG LIBAVIF_URL=https://archive.ubuntu.com/ubuntu/pool/universe/liba/libavif/libavif_${LIBAVIF_VERSION}.orig.tar.gz
+ARG LIBAVIF_SHA256=bcd9a1f57f982a9615eb7e2faf87236dc88eb1d0c886f3471c7440ead605060d
 
 RUN mkdir -p "/tmp/jpegview-codecs/aom-${AOM_VERSION}" \
  && curl --fail --location --retry 8 --retry-max-time 90 \
-    "https://aomedia.googlesource.com/aom/+archive/v${AOM_VERSION}.tar.gz" \
+    "$AOM_URL" \
     --output /tmp/jpegview-codecs/aom.tar.gz \
+ && printf '%s  %s\n' "$AOM_SHA256" /tmp/jpegview-codecs/aom.tar.gz | sha256sum --check \
  && tar -xzf /tmp/jpegview-codecs/aom.tar.gz \
     -C "/tmp/jpegview-codecs/aom-${AOM_VERSION}" \
  && cmake -S "/tmp/jpegview-codecs/aom-${AOM_VERSION}" -B /tmp/jpegview-codecs/aom-build -GNinja \
@@ -76,8 +81,9 @@ RUN mkdir -p "/tmp/jpegview-codecs/aom-${AOM_VERSION}" \
  && cmake --build /tmp/jpegview-codecs/aom-build --parallel \
  && cmake --install /tmp/jpegview-codecs/aom-build
 
-RUN curl --fail --location --retry 8 --retry-max-time 90 "https://github.com/AOMediaCodec/libavif/archive/refs/tags/v${LIBAVIF_VERSION}.tar.gz" \
+RUN curl --fail --location --retry 8 --retry-max-time 90 "$LIBAVIF_URL" \
     --output /tmp/jpegview-codecs/libavif.tar.gz \
+ && printf '%s  %s\n' "$LIBAVIF_SHA256" /tmp/jpegview-codecs/libavif.tar.gz | sha256sum --check \
  && tar -xzf /tmp/jpegview-codecs/libavif.tar.gz -C /tmp/jpegview-codecs \
  && cmake -S "/tmp/jpegview-codecs/libavif-${LIBAVIF_VERSION}" -B /tmp/jpegview-codecs/libavif-build -GNinja \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DAVIF_CODEC_AOM=SYSTEM \

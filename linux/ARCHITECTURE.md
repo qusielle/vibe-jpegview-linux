@@ -196,6 +196,10 @@ GitHub Actions gives Ubuntu 20 image builds ten outer attempts (other Ubuntu ima
 with exponential delays capped at 60 seconds. BuildKit can reuse completed stages between those
 attempts; persistent failures still fail the job.
 
+Ubuntu 20's AOM/AVIF stage fetches libaom 3.2.0 from AOMedia's release bucket and libavif 0.9.3
+from the Ubuntu archive mirror, avoiding the frequently failing Gitiles and GitHub archive endpoints.
+Both archives are pinned by SHA-256 before extraction.
+
 The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct
 command-line archive startup still builds the initial `FileList` through the synchronous source API.
 Consequently, a cold TGZ passed directly at startup can wait for its sequential catalog scan and a 7z

@@ -353,10 +353,12 @@ toolchain does not provide those static runtime archives.
 ## Isolated Docker build
 
 The Ubuntu 20.04, 22.04, 24.04, and 26.04 Dockerfiles contain the compiler, SDL2, libzip, libarchive,
-and optional codec development libraries for their respective releases. Ubuntu 20.04 builds JPEG XL and AVIF from
-pinned sources; Ubuntu 22.04 uses its AVIF package and builds JPEG XL from source; Ubuntu 24.04 and
-26.04 use distro codec packages and explicitly install libheif's HEVC decoder/encoder plugins because
-their images omit recommended packages. Every Docker release image also downloads and verifies the
+and optional codec development libraries for their respective releases. Ubuntu 20.04 builds JPEG XL
+and AVIF from pinned sources. Its AVIF stage downloads libaom from AOMedia's release bucket and
+libavif from the Ubuntu archive, then verifies both SHA-256 checksums. Ubuntu 22.04 uses its AVIF
+package and builds JPEG XL from source; Ubuntu 24.04 and 26.04 use distro codec packages and
+explicitly install libheif's HEVC decoder/encoder plugins because their images omit recommended
+packages. Every Docker release image also downloads and verifies the
 pinned 7-Zip 24.09 source, builds `Format7zF` with RAR disabled, installs Rust 1.89.0, and fetches
 the exact Apache-2.0 RAR reader revision. Release AppImages package both plugins and their
 notices/sources; Ubuntu 24/26 `.deb`s do as well. The Ubuntu 20.04 image builds the RAR wrapper
