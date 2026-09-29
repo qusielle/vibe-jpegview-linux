@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -365,6 +366,21 @@ bool FileDialogModel::MarkEncrypted(const std::filesystem::path& path) {
 	return marked;
 }
 
+bool FileDialogModel::SetFileSize(const std::filesystem::path& path, std::uintmax_t size) {
+	bool updated = false;
+	const std::filesystem::path normalizedPath = path.lexically_normal();
+	const auto update = [&normalizedPath, size, &updated](FileDialogEntry& entry) {
+		if (entry.path.lexically_normal() == normalizedPath) {
+			entry.fileSize = size;
+			entry.fileSizeKnown = true;
+			updated = true;
+		}
+	};
+	for (FileDialogEntry& entry : allEntries_) update(entry);
+	for (FileDialogEntry& entry : entries_) update(entry);
+	return updated;
+}
+
 void FileDialogModel::ClearSelection() {
 	selected_ = -1;
 }
@@ -511,6 +527,105 @@ std::vector<ArchiveDirectoryResult> ArchiveDirectoryLoader::TakeReady() {
 	return results;
 }
 
+struct FileDialogFileSizeLoader::Impl {
+	struct Task {
+		std::vector<std::filesystem::path> paths;
+		std::uint64_t generation = 0;
+	};
+
+	Impl() = default;
+
+	~Impl() {
+		stopping.store(true);
+		condition.notify_one();
+		if (worker.joinable()) worker.join();
+	}
+
+	bool IsCurrent(std::uint64_t requestedGeneration) const {
+		return !stopping.load() && currentGeneration.load() == requestedGeneration;
+	}
+
+	void Publish(std::vector<FileDialogFileSizeResult>& batch, std::uint64_t requestedGeneration) {
+		if (batch.empty() || !IsCurrent(requestedGeneration)) return;
+		std::lock_guard<std::mutex> lock(mutex);
+		if (IsCurrent(requestedGeneration)) {
+			ready.insert(ready.end(), std::make_move_iterator(batch.begin()),
+				std::make_move_iterator(batch.end()));
+		}
+		batch.clear();
+	}
+
+	void Run() {
+		while (!stopping.load()) {
+			Task task;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				condition.wait(lock, [this] { return stopping.load() || pending.has_value(); });
+				if (stopping.load()) return;
+				task = std::move(*pending);
+				pending.reset();
+			}
+
+			std::vector<FileDialogFileSizeResult> batch;
+			batch.reserve(32);
+			for (const std::filesystem::path& path : task.paths) {
+				if (!IsCurrent(task.generation)) break;
+				std::error_code error;
+				const std::uintmax_t size = ImageSourceFileSize(path, error);
+				if (!error) {
+					batch.push_back(FileDialogFileSizeResult{task.generation, path, size});
+				}
+				if (batch.size() >= 32) Publish(batch, task.generation);
+			}
+			Publish(batch, task.generation);
+		}
+	}
+
+	void StartWorkerLocked() {
+		if (!worker.joinable()) worker = std::thread([this] { Run(); });
+	}
+
+	std::mutex mutex;
+	std::condition_variable condition;
+	std::optional<Task> pending;
+	std::vector<FileDialogFileSizeResult> ready;
+	std::atomic<std::uint64_t> currentGeneration{0};
+	std::atomic<bool> stopping{false};
+	std::thread worker;
+};
+
+FileDialogFileSizeLoader::FileDialogFileSizeLoader() : impl_(std::make_unique<Impl>()) {}
+FileDialogFileSizeLoader::~FileDialogFileSizeLoader() = default;
+
+void FileDialogFileSizeLoader::Request(
+	const std::vector<std::filesystem::path>& paths, std::uint64_t generation) {
+	impl_->currentGeneration.store(generation);
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->pending.reset();
+		impl_->ready.clear();
+		if (!paths.empty()) {
+			impl_->StartWorkerLocked();
+			impl_->pending = Impl::Task{paths, generation};
+		}
+	}
+	if (!paths.empty()) impl_->condition.notify_one();
+}
+
+void FileDialogFileSizeLoader::Clear(std::uint64_t generation) {
+	impl_->currentGeneration.store(generation);
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	impl_->pending.reset();
+	impl_->ready.clear();
+}
+
+std::vector<FileDialogFileSizeResult> FileDialogFileSizeLoader::TakeReady() {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	std::vector<FileDialogFileSizeResult> results;
+	results.swap(impl_->ready);
+	return results;
+}
+
 struct DirectorySummaryLoader::Impl {
 	struct Task {
 		std::filesystem::path directory;
@@ -638,18 +753,24 @@ struct FileDialogPreviewLoader::Impl {
 					} else if (result.source.empty()) {
 						result.error = "No images in this folder";
 					} else {
+						std::error_code sizeError;
+						result.fileSize = ImageSourceFileSize(result.source, sizeError);
+						result.fileSizeKnown = !sizeError;
 						DecodedImage decoded;
 						bool success = false;
 						if (IsJpegPath(result.source)) {
-							int sourceWidth = 0;
-							int sourceHeight = 0;
 							success = DecodeJpegForDisplay(result.source, task.maximumWidth,
-								task.maximumHeight, decoded, sourceWidth, sourceHeight, result.error);
+								task.maximumHeight, decoded, result.sourceWidth,
+								result.sourceHeight, result.error);
 						} else {
 							success = DecodeImage(result.source, decoded, result.error);
 						}
 						if (success && !decoded.frames.empty()) {
 							DecodedFrame frame = std::move(decoded.frames.front());
+							if (result.sourceWidth <= 0 || result.sourceHeight <= 0) {
+								result.sourceWidth = frame.width;
+								result.sourceHeight = frame.height;
+							}
 							result.hasTransparency = frame.hasTransparency;
 							const double scale = std::min({1.0,
 								static_cast<double>(task.maximumWidth) / frame.width,

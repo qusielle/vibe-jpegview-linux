@@ -461,6 +461,7 @@ public:
 			TickFileListScan();
 			TickFileDialogArchiveDirectory();
 			TickFileDialogDirectorySummaries();
+			TickFileDialogFileSizes();
 			Render();
 			// Present the current image before doing renderer-thread cache uploads.
 			// Held navigation then advances only after the closest ready neighbor
@@ -2043,6 +2044,7 @@ private:
 		fileDialogArchiveLoader_.Clear(++fileDialogArchiveGeneration_);
 		++fileDialogSummaryGeneration_;
 		fileDialogSummaryLoader_.Request({}, fileDialogSummaryGeneration_);
+		fileDialogFileSizeLoader_.Clear(++fileDialogFileSizeGeneration_);
 		fileDialogOpen_ = false;
 		fileDialogSave_ = false;
 		fileDialogParameterBackup_ = false;
@@ -5893,6 +5895,10 @@ private:
 		fileDialogPreviewTexture_ = nullptr;
 		fileDialogPreviewWidth_ = 0;
 		fileDialogPreviewHeight_ = 0;
+		fileDialogPreviewSourceWidth_ = 0;
+		fileDialogPreviewSourceHeight_ = 0;
+		fileDialogPreviewFileSize_ = 0;
+		fileDialogPreviewFileSizeKnown_ = false;
 		fileDialogPreviewHasTransparency_ = false;
 		fileDialogPreviewRequestKey_.clear();
 		fileDialogPreviewContentKey_.clear();
@@ -5933,6 +5939,10 @@ private:
 				fileDialogPreviewTexture_ = nullptr;
 				fileDialogPreviewWidth_ = 0;
 				fileDialogPreviewHeight_ = 0;
+				fileDialogPreviewSourceWidth_ = 0;
+				fileDialogPreviewSourceHeight_ = 0;
+				fileDialogPreviewFileSize_ = 0;
+				fileDialogPreviewFileSizeKnown_ = false;
 				fileDialogPreviewHasTransparency_ = false;
 				fileDialogPreviewSource_.clear();
 				fileDialogPreviewMessage_.clear();
@@ -5960,6 +5970,10 @@ private:
 		for (jpegview_linux::FileDialogPreviewResult& result : fileDialogPreviewLoader_.TakeReady()) {
 			if (result.generation != fileDialogPreviewGeneration_) continue;
 			fileDialogPreviewSource_ = result.source;
+			fileDialogPreviewSourceWidth_ = result.sourceWidth;
+			fileDialogPreviewSourceHeight_ = result.sourceHeight;
+			fileDialogPreviewFileSize_ = result.fileSize;
+			fileDialogPreviewFileSizeKnown_ = result.fileSizeKnown;
 			fileDialogPreviewMessage_ = result.error;
 			if (result.encryptedArchive ||
 				result.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired) {
@@ -6023,6 +6037,14 @@ private:
 				165, 165, 165);
 		}
 		if (!fileDialogPreviewSource_.empty()) {
+			if (fileDialogPreviewSourceWidth_ > 0 && fileDialogPreviewSourceHeight_ > 0) {
+				const std::string formattedSize = fileDialogPreviewFileSizeKnown_ ?
+					jpegview_linux::FormatFileSize(fileDialogPreviewFileSize_) : std::string();
+				const std::string dimensions = jpegview_linux::FormatImageDimensionsAndSize(
+					fileDialogPreviewSourceWidth_, fileDialogPreviewSourceHeight_, formattedSize);
+				DrawText(ClipText(dimensions, previewRect.w - 16), previewRect.x + 8,
+					previewRect.y + previewRect.h - 37, kUiTextScale, 165, 175, 185);
+			}
 			const std::string filename = fileDialogPreviewSource_.filename().string();
 			DrawText(ClipText(filename, previewRect.w - 16), previewRect.x + 8,
 				previewRect.y + previewRect.h - 19, kUiTextScale, 165, 175, 185);
@@ -6048,6 +6070,34 @@ private:
 			if (!fileDialogOpen_ || fileDialogSave_ || fileDialogParameterRestore_ ||
 				result.generation != fileDialogSummaryGeneration_) continue;
 			fileDialogDirectorySummaries_[result.directory.string()] = result.summary;
+		}
+	}
+
+	void RequestFileDialogFileSizes() {
+		++fileDialogFileSizeGeneration_;
+		std::vector<fs::path> paths;
+		std::unordered_set<std::string> seen;
+		const auto appendUnknownFiles = [&paths, &seen](
+			const std::vector<FileDialogEntry>& entries) {
+			for (const FileDialogEntry& entry : entries) {
+				if (entry.directory || entry.fileSizeKnown) continue;
+				const std::string identity = entry.path.lexically_normal().string();
+				if (seen.insert(identity).second) paths.push_back(entry.path);
+			}
+		};
+		if (!fileDialogSave_ && !fileDialogParameterBackup_ && !fileDialogParameterRestore_) {
+			appendUnknownFiles(fileDialogModel_.AllEntries());
+			appendUnknownFiles(recentFileDialogModel_.AllEntries());
+		}
+		fileDialogFileSizeLoader_.Request(paths, fileDialogFileSizeGeneration_);
+	}
+
+	void TickFileDialogFileSizes() {
+		for (const jpegview_linux::FileDialogFileSizeResult& result :
+			fileDialogFileSizeLoader_.TakeReady()) {
+			if (!fileDialogOpen_ || result.generation != fileDialogFileSizeGeneration_) continue;
+			fileDialogModel_.SetFileSize(result.path, result.size);
+			recentFileDialogModel_.SetFileSize(result.path, result.size);
 		}
 	}
 
@@ -6118,7 +6168,8 @@ private:
 					const fs::file_time_type modificationTime =
 						jpegview_linux::ArchiveFileModificationTime(archiveEntry.modificationTime);
 					entries.push_back(FileDialogEntry{archiveEntry.path, archiveEntry.directory,
-						false, modificationTime, false, true, archiveEntry.encrypted});
+						false, modificationTime, false, true, archiveEntry.encrypted,
+						archiveEntry.directory ? 0 : archiveEntry.size, !archiveEntry.directory});
 				}
 			}
 			fileDialogModel_.SetEntries(std::move(entries));
@@ -6128,6 +6179,7 @@ private:
 					FileDialogVisibleRows());
 			}
 			RequestFileDialogDirectorySummaries();
+			RequestFileDialogFileSizes();
 			if (result.error.empty() && result.containsEncryptedEntries &&
 				!jpegview_linux::HasSessionArchivePassword(result.directory)) {
 				BeginArchivePasswordDialog(result.directory);
@@ -6204,6 +6256,7 @@ private:
 			fileDialogMessage_ = "Reading archive contents…";
 			fileDialogModel_.SetEntries(std::move(entries));
 			RequestFileDialogDirectorySummaries();
+			RequestFileDialogFileSizes();
 			fileDialogArchiveLoader_.Request(fileDialogDirectory_, fileDialogArchiveGeneration_);
 			return;
 		}
@@ -6235,6 +6288,7 @@ private:
 
 		fileDialogModel_.SetEntries(std::move(entries));
 		RequestFileDialogDirectorySummaries();
+		RequestFileDialogFileSizes();
 	}
 
 	void OpenFileDialog(const fs::path& preferredDirectory = fs::path()) {
@@ -6303,6 +6357,7 @@ private:
 		if (!removal.has_value()) return false;
 		recentFileRemovalUndo_.push_back(*removal);
 		RebuildRecentFileDialogEntries();
+		RequestFileDialogFileSizes();
 		if (!recentFileDialogModel_.Entries().empty()) {
 			recentFileDialogModel_.Select(std::min(previousIndex,
 				static_cast<int>(recentFileDialogModel_.Entries().size()) - 1),
@@ -6713,37 +6768,48 @@ private:
 			if (fileDialogTab_ == FileDialogTab::Recents) {
 				const int leftX = listContentRect.x + 10;
 				const int pathWidth = std::max(1, (listContentRect.w - 30) / 2);
-				const int filenameWidth = std::max(1, listContentRect.w - 30 - pathWidth);
+				const std::string sizeText = entry.fileSizeKnown ?
+					jpegview_linux::FormatFileSize(entry.fileSize) : std::string();
+				const int sizeWidth = TextWidth(sizeText, kUiTextScale);
+				const int rightEdge = listContentRect.x + listContentRect.w - 10;
+				const int sizeX = rightEdge - sizeWidth;
+				const int filenameRight = sizeText.empty() ? rightEdge : sizeX - 8;
+				const int filenameWidth = std::max(1,
+					filenameRight - (leftX + pathWidth + 8));
 				const std::string parent = ClipText(
 					jpegview_linux::ArchiveLocationDisplayName(entry.path.parent_path()), pathWidth);
 				const std::string filename = ClipText(entry.path.filename().string(), filenameWidth);
-				const int filenameX = listContentRect.x + listContentRect.w - 10 -
-					TextWidth(filename, kUiTextScale);
+				const int filenameX = filenameRight - TextWidth(filename, kUiTextScale);
 				const bool fromArchive = entry.archiveMember;
 				DrawText(parent, leftX, rowTop + 5, kUiTextScale,
 					fromArchive ? 210 : 165, fromArchive ? 170 : 175, fromArchive ? 105 : 190);
 				DrawText(filename, filenameX, rowTop + 5, kUiTextScale,
 					fromArchive ? 255 : 235, fromArchive ? 205 : 235, fromArchive ? 125 : 235);
+				if (!sizeText.empty()) {
+					DrawText(sizeText, sizeX, rowTop + 5, kUiTextScale, 165, 180, 200);
+				}
 			} else {
-				std::string summaryText;
+				std::string rightText;
 				if (FileDialogCanSort() && entry.directory && !entry.parent && !entry.encrypted) {
 					const auto summary = fileDialogDirectorySummaries_.find(entry.path.string());
-					summaryText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
+					rightText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
 						jpegview_linux::FormatDirectorySummary(summary->second);
-					summaryText = ClipText(summaryText, std::max(1, listContentRect.w / 2 - 20));
+				} else if (!entry.directory && entry.fileSizeKnown) {
+					rightText = jpegview_linux::FormatFileSize(entry.fileSize);
 				}
-				const int summaryWidth = TextWidth(summaryText, kUiTextScale);
-				const int summaryX = listContentRect.x + listContentRect.w - 10 - summaryWidth;
-				const int labelWidth = summaryText.empty() ? listContentRect.w - 20 :
-					std::max(1, summaryX - (listContentRect.x + 10) - 12);
+				rightText = ClipText(rightText, std::max(1, listContentRect.w / 2 - 20));
+				const int rightTextWidth = TextWidth(rightText, kUiTextScale);
+				const int rightTextX = listContentRect.x + listContentRect.w - 10 - rightTextWidth;
+				const int labelWidth = rightText.empty() ? listContentRect.w - 20 :
+					std::max(1, rightTextX - (listContentRect.x + 10) - 12);
 				const bool archiveEntry = entry.archiveContainer || entry.archiveMember;
 				const Uint8 red = archiveEntry ? 255 : entry.directory ? 185 : 235;
 				const Uint8 green = archiveEntry ? 205 : entry.directory ? 205 : 235;
 				const Uint8 blue = archiveEntry ? 125 : 235;
 				DrawText(ClipText(FileDialogEntryLabel(entry), labelWidth), listContentRect.x + 10,
 					rowTop + 5, kUiTextScale, red, green, blue);
-				if (!summaryText.empty()) {
-					DrawText(summaryText, summaryX, rowTop + 5, kUiTextScale, 155, 175, 195);
+				if (!rightText.empty()) {
+					DrawText(rightText, rightTextX, rowTop + 5, kUiTextScale, 155, 175, 195);
 				}
 			}
 		}
@@ -8717,15 +8783,21 @@ private:
 	std::string archivePasswordPendingValue_;
 	bool archivePasswordValidationPending_ = false;
 	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;
+	jpegview_linux::FileDialogFileSizeLoader fileDialogFileSizeLoader_;
 	jpegview_linux::ArchiveDirectoryLoader fileDialogArchiveLoader_;
 	jpegview_linux::FileDialogPreviewLoader fileDialogPreviewLoader_;
 	std::unordered_map<std::string, jpegview_linux::DirectorySummary> fileDialogDirectorySummaries_;
 	std::unordered_set<std::string> encryptedArchivePaths_;
 	std::uint64_t fileDialogSummaryGeneration_ = 0;
+	std::uint64_t fileDialogFileSizeGeneration_ = 0;
 	std::uint64_t fileDialogArchiveGeneration_ = 0;
 	SDL_Texture* fileDialogPreviewTexture_ = nullptr;
 	int fileDialogPreviewWidth_ = 0;
 	int fileDialogPreviewHeight_ = 0;
+	int fileDialogPreviewSourceWidth_ = 0;
+	int fileDialogPreviewSourceHeight_ = 0;
+	std::uintmax_t fileDialogPreviewFileSize_ = 0;
+	bool fileDialogPreviewFileSizeKnown_ = false;
 	bool fileDialogPreviewHasTransparency_ = false;
 	std::uint64_t fileDialogPreviewGeneration_ = 0;
 	std::string fileDialogPreviewRequestKey_;

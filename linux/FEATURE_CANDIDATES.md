@@ -15,13 +15,6 @@ are identified by name.
 - **CB7 comic archives:** browse images in comic 7z files. Comic-page bookmarks and remembered
   reading positions are explicitly out of scope for this candidate.
 
-## Open-dialog display candidates
-
-- **Image details in the open dialog:** show the focused image's pixel resolution and file size in
-  the preview pane, and show each file's size in the Browse and Recents lists. For archive members,
-  report the member's uncompressed image size rather than the size of its containing archive. Keep
-  any dimension lookup for large images off the event thread.
-
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
 - **Book Mode:** add a book-oriented viewing mode with page size configurable as a percentage of

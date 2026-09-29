@@ -20,6 +20,8 @@ struct FileDialogEntry {
 	bool archiveContainer = false;
 	bool archiveMember = false;
 	bool encrypted = false;
+	std::uintmax_t fileSize = 0;
+	bool fileSizeKnown = false;
 };
 
 enum class FileDialogSortMode {
@@ -109,6 +111,7 @@ public:
 	void Select(int index, int visibleRows);
 	bool Focus(const std::filesystem::path& path, int visibleRows);
 	bool MarkEncrypted(const std::filesystem::path& path);
+	bool SetFileSize(const std::filesystem::path& path, std::uintmax_t size);
 	void ClearSelection();
 
 	const std::vector<FileDialogEntry>& AllEntries() const { return allEntries_; }
@@ -138,6 +141,31 @@ struct DirectorySummaryResult {
 	std::filesystem::path directory;
 	std::uint64_t generation = 0;
 	DirectorySummary summary;
+};
+
+struct FileDialogFileSizeResult {
+	std::uint64_t generation = 0;
+	std::filesystem::path path;
+	std::uintmax_t size = 0;
+};
+
+// Resolves ordinary-file and archive-member sizes away from the SDL event
+// thread. Replacing a request drops queued work and prevents stale results
+// from being published into a newer dialog listing.
+class FileDialogFileSizeLoader {
+public:
+	FileDialogFileSizeLoader();
+	~FileDialogFileSizeLoader();
+	FileDialogFileSizeLoader(const FileDialogFileSizeLoader&) = delete;
+	FileDialogFileSizeLoader& operator=(const FileDialogFileSizeLoader&) = delete;
+
+	void Request(const std::vector<std::filesystem::path>& paths, std::uint64_t generation);
+	void Clear(std::uint64_t generation);
+	std::vector<FileDialogFileSizeResult> TakeReady();
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> impl_;
 };
 
 struct ArchiveDirectoryResult {
@@ -193,6 +221,10 @@ struct FileDialogPreviewResult {
 	std::filesystem::path source;
 	int width = 0;
 	int height = 0;
+	int sourceWidth = 0;
+	int sourceHeight = 0;
+	std::uintmax_t fileSize = 0;
+	bool fileSizeKnown = false;
 	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
 	std::string error;

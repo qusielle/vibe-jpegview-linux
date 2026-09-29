@@ -629,8 +629,21 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 	}
 	Expect(previews.size() == 1 && previews.front().generation == generation &&
 		previews.front().source == rootImage && previews.front().error.empty() &&
-		previews.front().width == 2 && previews.front().height == 2,
+		previews.front().width == 2 && previews.front().height == 2 &&
+		previews.front().sourceWidth == 2 && previews.front().sourceHeight == 2 &&
+		previews.front().fileSizeKnown && previews.front().fileSize == memberInfo.size,
 		"recent-image preview did not decode a virtual archive member");
+	jpegview_linux::FileDialogFileSizeLoader archiveSizeLoader;
+	archiveSizeLoader.Request({rootImage}, 1);
+	std::vector<jpegview_linux::FileDialogFileSizeResult> archiveSizes;
+	const auto archiveSizeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (archiveSizes.empty() && std::chrono::steady_clock::now() < archiveSizeDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		archiveSizes = archiveSizeLoader.TakeReady();
+	}
+	Expect(archiveSizes.size() == 1 && archiveSizes.front().path == rootImage &&
+		archiveSizes.front().size == fs::file_size(image),
+		"background file-size lookup used the ZIP container size instead of the uncompressed member size");
 
 	const fs::path malformed = temporary.path() / "broken.zip";
 	WriteText(malformed, "not a ZIP archive");
@@ -6651,6 +6664,17 @@ void TestFileDialogModelStateAndNavigation() {
 	Expect(model.Entries().size() == entries.size() && model.Entries()[0].parent &&
 		model.Entries()[1].path.filename() == "a-folder" && model.SelectedIndex() == 1,
 		"open-dialog model did not sort by name or select the first child");
+	const fs::path sizedEntry = "/pictures/03-last.jpg";
+	Expect(model.SetFileSize(sizedEntry, 1536) &&
+		std::any_of(model.AllEntries().begin(), model.AllEntries().end(),
+			[&sizedEntry](const Entry& entry) {
+				return entry.path == sizedEntry && entry.fileSizeKnown && entry.fileSize == 1536;
+			}) &&
+		std::any_of(model.Entries().begin(), model.Entries().end(),
+			[&sizedEntry](const Entry& entry) {
+				return entry.path == sizedEntry && entry.fileSizeKnown && entry.fileSize == 1536;
+			}),
+		"file-size updates did not reach the sorted and filtered open-dialog rows");
 	const fs::path encryptedArchivePath = "/pictures/locked.7z";
 	jpegview_linux::FileDialogModel encryptedModel;
 	encryptedModel.SetEntries({
@@ -6872,10 +6896,29 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 		results[0].source == ppm && results[0].error.empty(),
 		"background preview loading published stale or failed directory work");
 	Expect(results[0].width == 2 && results[0].height == 2 &&
+		results[0].sourceWidth == 800 && results[0].sourceHeight == 600 &&
+		results[0].fileSizeKnown && results[0].fileSize == fs::file_size(ppm) &&
 		results[0].bgra == std::vector<std::uint8_t>({
 			128, 128, 128, 255, 128, 128, 128, 255,
 			128, 128, 128, 255, 128, 128, 128, 255}),
 		"background image preview did not area-filter high-frequency detail");
+	const fs::path sizeOld = imageDirectory / "old-size.bin";
+	const fs::path sizeCurrent = imageDirectory / "current-size.bin";
+	WriteText(sizeOld, "stale size request");
+	WriteText(sizeCurrent, "current file size");
+	jpegview_linux::FileDialogFileSizeLoader sizeLoader;
+	sizeLoader.Request({sizeOld}, 50);
+	sizeLoader.Request({sizeCurrent}, 51);
+	std::vector<jpegview_linux::FileDialogFileSizeResult> sizeResults;
+	const auto sizeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (sizeResults.empty() && std::chrono::steady_clock::now() < sizeDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		sizeResults = sizeLoader.TakeReady();
+	}
+	Expect(sizeResults.size() == 1 && sizeResults.front().generation == 51 &&
+		sizeResults.front().path == sizeCurrent &&
+		sizeResults.front().size == fs::file_size(sizeCurrent),
+		"file-size worker published stale results after its request was replaced");
 	const fs::path transparentPng = imageDirectory / "transparent.png";
 	const std::vector<std::uint8_t> transparentPixels = TestPixels();
 	ImageWriteOptions pngOptions;

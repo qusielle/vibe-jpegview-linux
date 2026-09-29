@@ -1684,6 +1684,24 @@ if [ "$visual_assertions" -eq 1 ]; then
 		echo "UI smoke test: Recents did not show the focused image preview at ${preview_pixel_x},${preview_pixel_y} ($preview_pixel)" >&2
 		exit 1
 	fi
+	preview_details_y=$((reopened_dialog_y + 112 + preview_rows * 26 - 37))
+	preview_details_ink=$(convert "$temporary/recent-dialog-preview.png" \
+		-crop "${preview_image_width}x14+${preview_left}+${preview_details_y}" +repage txt:- |
+		awk '/srgb\(165,175,185\)/ { found = 1; exit } END { if (found) print "present" }')
+	if [ -z "$preview_details_ink" ]; then
+		echo "UI smoke test: focused-image dimensions and size were not drawn in the preview footer" >&2
+		exit 1
+	fi
+	file_list_x=$((reopened_dialog_x + 12))
+	file_list_y=$((reopened_dialog_y + 112))
+	file_list_width=$((960 - 24 - (preview_width + 12) - 16))
+	file_size_ink=$(convert "$temporary/recent-dialog-preview.png" \
+		-crop "${file_list_width}x$((preview_rows * 26))+${file_list_x}+${file_list_y}" +repage txt:- |
+		awk '/srgb\(165,180,200\)/ { found = 1; exit } END { if (found) print "present" }')
+	if [ -z "$file_size_ink" ]; then
+		echo "UI smoke test: Recents file sizes were not drawn in the list" >&2
+		exit 1
+	fi
 	help_start_x=$((reopened_dialog_x + 18))
 	help_scan_width=$((960 - 36))
 	help_last_row_y=$((reopened_dialog_y + 685 - 34 + 9))

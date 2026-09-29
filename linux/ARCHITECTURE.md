@@ -112,9 +112,12 @@ should normally be added to one of these focused modules and covered by `tests/t
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
   restoration, pane-aware preview image sizing, cancellable background archive listings and directory
-  summaries (including supported archive containers in the directory count), encrypted-row marking,
-  caller-preserved row order for recent MRU entries, and replaceable
-  previews for a focused image or a directory's first image.
+  summaries (including supported archive containers in the directory count), replaceable background
+  file-size lookup for Browse and Recents rows, encrypted-row marking, caller-preserved row order for
+  recent MRU entries, and replaceable previews for a focused image or a directory's first image.
+  Preview results carry original source dimensions and byte size; archive-member sizes come from
+  uncompressed member metadata. Image-dimension and archive-member size lookups stay off the SDL
+  event thread.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, dynamic labels, and tooltip placement.
@@ -319,6 +322,10 @@ resolve/scale only the newest requested selection using
 the thumbnail resampler's source-area antialiasing. A pane resize replaces the target-size request;
 the generation check prevents stale work from replacing the current preview. Preview pixels remain
 outside the persistent viewer caches, and their SDL texture is uploaded and destroyed by Viewer.
+The same worker returns full source dimensions (including for reduced-DCT JPEG previews) and file
+size; a separate replaceable file-size worker fills Browse and Recents rows using archive
+central-directory/header metadata for virtual members. Both reject stale generations, and neither
+adds image decoding to the event thread.
 Display pixels may be prepared on workers, but SDL texture upload and destruction stay on the
 renderer thread because SDL renderer objects are not thread-safe. Decoded pixels, prepared frames, and retained SDL textures
 reserve from one configured cache budget. Prepared
