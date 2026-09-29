@@ -431,6 +431,9 @@ retries repository requests five times and its source downloads allow up to eigh
 7-Zip/Rust downloads allow eight retries, and the pinned RAR source fetch also retries. These layers
 address transient 503s without rerunning successful BuildKit stages; a persistent failure still
 fails the job.
+The Ubuntu 20 and 22 JPEG XL builds fetch their pinned `skcms` revision from the MacPorts distfiles
+mirror and verify its SHA-256 before extraction, rather than relying on the frequently failing
+`skia.googlesource.com` archive endpoint.
 Each successful Ubuntu build job uploads its x86_64 AppImage, native executable, and a `SHA256SUMS`
 file as a downloadable workflow artifact named `jpegview-linux-ubuntu20-x86_64`,
 `jpegview-linux-ubuntu22-x86_64`, `jpegview-linux-ubuntu24-x86_64`, or

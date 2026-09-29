@@ -200,6 +200,10 @@ Ubuntu 20's AOM/AVIF stage fetches libaom 3.2.0 from AOMedia's release bucket an
 from the Ubuntu archive mirror, avoiding the frequently failing Gitiles and GitHub archive endpoints.
 Both archives are pinned by SHA-256 before extraction.
 
+The Ubuntu 20 and 22 `highway-jxl` stages fetch the pinned `skcms` snapshot from the MacPorts distfiles
+mirror instead of the frequently failing Gitiles archive endpoint. Its SHA-256 is checked before
+extraction so the alternate mirror does not weaken source integrity.
+
 The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct
 command-line archive startup still builds the initial `FileList` through the synchronous source API.
 Consequently, a cold TGZ passed directly at startup can wait for its sequential catalog scan and a 7z

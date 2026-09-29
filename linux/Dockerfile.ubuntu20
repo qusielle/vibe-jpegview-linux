@@ -31,6 +31,8 @@ FROM base AS highway-jxl
 ARG HIGHWAY_VERSION=1.0.7
 ARG LIBJXL_VERSION=0.7.0
 ARG LIBJXL_SKCMS_VERSION=64374756e03700d649f897dbd98c95e78c30c7da
+ARG LIBJXL_SKCMS_URL=https://distfiles.macports.org/libjxl/skcms-${LIBJXL_SKCMS_VERSION}.tar.gz
+ARG LIBJXL_SKCMS_SHA256=aabd4bae8b741c9bdc8b31bec95df3a3344b77c7d17bf9d25befb401f4971d18
 RUN mkdir -p /tmp/jpegview-codecs \
  && curl --fail --location --retry 8 --retry-max-time 90 "https://github.com/google/highway/archive/refs/tags/${HIGHWAY_VERSION}.tar.gz" \
     --output /tmp/jpegview-codecs/highway.tar.gz \
@@ -45,8 +47,9 @@ RUN curl --fail --location --retry 8 --retry-max-time 90 "https://github.com/lib
  && tar -xzf /tmp/jpegview-codecs/libjxl.tar.gz -C /tmp/jpegview-codecs \
  && mkdir -p "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}/third_party/skcms" \
  && curl --fail --location --retry 8 --retry-max-time 90 \
-    "https://skia.googlesource.com/skcms/+archive/${LIBJXL_SKCMS_VERSION}.tar.gz" \
+    "$LIBJXL_SKCMS_URL" \
     --output /tmp/jpegview-codecs/skcms.tar.gz \
+ && printf '%s  %s\n' "$LIBJXL_SKCMS_SHA256" /tmp/jpegview-codecs/skcms.tar.gz | sha256sum --check \
  && tar -xzf /tmp/jpegview-codecs/skcms.tar.gz \
     -C "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}/third_party/skcms" \
  && cmake -S "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}" -B /tmp/jpegview-codecs/libjxl-build -GNinja \
