@@ -968,13 +968,34 @@ on a marked image:
 
 <p><img src="screenshots/main-window-panels.png" width="720" alt="JPEGView Linux main window with thumbnail and navigation panels, including a marked-image outline"></p>
 
-The resizable Browse dialog with folder counts, a selected image, and its live preview:
+The resizable Browse dialog with folder counts, file sizes, and a live preview whose footer shows
+the selected image's dimensions and size:
 
-<p><img src="screenshots/open-dialog-preview.png" width="720" alt="JPEGView Linux Browse dialog with a selected-image preview and adjustable preview pane"></p>
+<p><img src="screenshots/open-dialog-preview.png" width="720" alt="JPEGView Linux Browse dialog showing folder counts, image file sizes, and preview dimensions and size"></p>
 
-The Recents tab keeps one image per folder and shows the focused image in the same preview pane:
+The Recents tab keeps one image per folder, shows its preview, and offers both the Remove button and
+Delete/Ctrl+Z keyboard controls:
 
-<p><img src="screenshots/recent-files-preview.png" width="720" alt="JPEGView Linux Recents tab showing folder paths, filenames, and the focused image preview"></p>
+<p><img src="screenshots/recent-files-preview.png" width="720" alt="JPEGView Linux Recents tab with one image per folder, a preview, Remove button, and Delete and undo hints"></p>
+
+Supported archives behave like folders in Browse. This CBZ example shows gold archive-member rows,
+member sizes, and a preview without extracting the image to disk:
+
+<p><img src="screenshots/archive-browsing.png" width="720" alt="JPEGView Linux open dialog browsing images inside a CBZ archive with gold member rows and a preview"></p>
+
+Delete opens a confirmation with a cached preview of the selected image before moving it to the
+desktop trash; Escape cancels the operation:
+
+<p><img src="screenshots/deletion-confirmation-preview.png" width="720" alt="JPEGView Linux move-to-trash confirmation showing a preview of the selected lake photo"></p>
+
+With two portrait images after the standalone cover, double-page mode displays both at once and
+highlights both files in the thumbnail strip:
+
+<p><a href="screenshots/double-page-mode.png"><img src="screenshots/double-page-mode.png" width="720" alt="JPEGView Linux double-page mode displaying two portrait Yellowstone images side by side"></a></p>
+
+Double-page manga mode uses the same pair in reverse left/right order:
+
+<p><a href="screenshots/double-page-manga-mode.png"><img src="screenshots/double-page-manga-mode.png" width="720" alt="JPEGView Linux double-page manga mode showing the same portrait pages in reversed order"></a></p>
 
 Crop selection mode provides a movable, resizable source-area selection and a crop-action menu:
 
@@ -997,10 +1018,11 @@ The compact context menu exposes the newer viewing controls and underlined keybo
 
 <p><img src="screenshots/context-menu-mnemonics.png" width="720" alt="JPEGView Linux context menu with crop, magnifying glass, picture levels, and mnemonic hints"></p>
 
-Choosing **Show Advanced Options** expands the full context menu into columns. It includes sibling-
-folder navigation with Alt+Left/Right; click the image to view the full-resolution capture:
+Choosing **Show Advanced Options** (or Shift+right-click) expands the full context menu into columns.
+It includes both page modes, sibling-folder navigation with Alt+Left/Right, and the Advanced
+configuration entry immediately before Help; click the image to view the full-resolution capture:
 
-<p><a href="screenshots/context-menu-advanced.png"><img src="screenshots/context-menu-advanced.png" width="720" alt="JPEGView Linux full advanced context menu with sibling-folder navigation and keyboard shortcuts"></a></p>
+<p><a href="screenshots/context-menu-advanced.png"><img src="screenshots/context-menu-advanced.png" width="720" alt="JPEGView Linux full context menu showing page modes, sibling-folder navigation, and Advanced configuration before Help"></a></p>
 
 The **Advanced configuration** window groups settings into seven tabs. This Image defaults view
 shows the controls for default picture adjustments and unsharp masking; edits stay staged until
@@ -1008,7 +1030,16 @@ Apply. Click the image to view it at full resolution:
 
 <p><a href="screenshots/advanced-configuration.png"><img src="screenshots/advanced-configuration.png" width="720" alt="JPEGView Linux Advanced configuration window showing its seven tabs and image-default adjustment controls"></a></p>
 
-The sample photos shown are CC0 images from Wikimedia Commons: [Lake Mountain Landscape](https://commons.wikimedia.org/wiki/File:Lake_Mountain_Landscape.jpg),
+The Behavior tab contains settings for manga left/right inversion, Spacebar navigation, and folder
+wrap; these edits also remain staged until Apply:
+
+<p><a href="screenshots/advanced-configuration-behavior.png"><img src="screenshots/advanced-configuration-behavior.png" width="720" alt="JPEGView Linux Advanced configuration Behavior tab with manga direction, Spacebar navigation, and folder-wrap settings"></a></p>
+
+The lake, waterfall, autumn, and beach photos shown are CC0 images from Wikimedia Commons:
+[Lake Mountain Landscape](https://commons.wikimedia.org/wiki/File:Lake_Mountain_Landscape.jpg),
 [Waterfall in forest](https://commons.wikimedia.org/wiki/File:Waterfall_in_forest.jpg),
 [Autumn Forest Wet Bark](https://commons.wikimedia.org/wiki/File:Autumn_Forest_Wet_Bark.jpg), and
-[Beach Scene](https://commons.wikimedia.org/wiki/File:Beach_Scene.jpg).
+[Beach Scene](https://commons.wikimedia.org/wiki/File:Beach_Scene.jpg). The portrait Yellowstone
+photos used for the double-page and archive examples are public-domain U.S. National Park Service
+works by NPS / Jacob W. Frank: [Grand Canyon of the Yellowstone](https://commons.wikimedia.org/wiki/File:Grand_Canyon_of_the_Yellowstone_from_Brink_of_the_Lower_Falls_viewing_area_%28portrait%29_%2853041957249%29.jpg)
+and [Fiery sunset over Bunsen Peak](https://commons.wikimedia.org/wiki/File:Fiery_sunset_over_Bunsen_Peak_portrait_%2834046709664%29.jpg).
