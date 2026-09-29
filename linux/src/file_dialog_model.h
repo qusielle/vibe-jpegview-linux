@@ -66,6 +66,12 @@ struct FileDialogPreviewSize {
 	int height = 0;
 };
 
+struct FileDialogPreviewFooterLayout {
+	int filenameWidth = 0;
+	int detailsWidth = 0;
+	int detailsOffsetX = 0;
+};
+
 struct FileDialogScrollbarGeometry {
 	int trackY = 0;
 	int trackHeight = 0;
@@ -87,8 +93,13 @@ int FileDialogScrollForThumbPosition(const FileDialogScrollbarGeometry& geometry
 	int requestedThumbY);
 
 // Returns the preview image area inside a pane, accounting for its label,
-// frame inset, and reserved filename footer.
+// frame inset, and combined filename/details footer.
 FileDialogPreviewSize FileDialogPreviewImageSize(int paneWidth, int paneHeight);
+
+// Shares one footer row between the left-aligned filename and right-aligned
+// image details, reserving at least half the content width for the filename.
+FileDialogPreviewFooterLayout CalculateFileDialogPreviewFooterLayout(
+	int contentWidth, int filenameTextWidth, int detailsTextWidth, int gap = 8);
 
 class FileDialogModel {
 public:

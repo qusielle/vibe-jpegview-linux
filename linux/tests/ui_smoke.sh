@@ -1749,7 +1749,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 	preview_left=$((reopened_dialog_x + 960 - 12 - preview_width))
 	preview_rows=$(((685 - 168) / 26))
 	preview_image_width=$((preview_width - 16))
-	preview_image_height=$((preview_rows * 26 - 82))
+	preview_image_height=$((preview_rows * 26 - 64))
 	preview_pixel_x=$((preview_left + 8 + (preview_image_width - 2) / 2))
 	preview_pixel_y=$((reopened_dialog_y + 112 + 28 + (preview_image_height - 2) / 2))
 	# The existing shell fixture writes textual backslash-octal bytes after its P6 header.
@@ -1766,12 +1766,24 @@ if [ "$visual_assertions" -eq 1 ]; then
 		echo "UI smoke test: Recents did not show the focused image preview at ${preview_pixel_x},${preview_pixel_y} ($preview_pixel)" >&2
 		exit 1
 	fi
-	preview_details_y=$((reopened_dialog_y + 112 + preview_rows * 26 - 37))
-	preview_details_ink=$(convert "$temporary/recent-dialog-preview.png" \
-		-crop "${preview_image_width}x14+${preview_left}+${preview_details_y}" +repage txt:- |
+	preview_footer_y=$((reopened_dialog_y + 112 + preview_rows * 26 - 19))
+	preview_footer_left=$((preview_left + 8))
+	preview_footer_half=$((preview_image_width / 2))
+	preview_footer_left_ink=$(convert "$temporary/recent-dialog-preview.png" \
+		-crop "${preview_footer_half}x14+${preview_footer_left}+${preview_footer_y}" +repage txt:- |
 		awk '/srgb\(165,175,185\)/ { found = 1; exit } END { if (found) print "present" }')
-	if [ -z "$preview_details_ink" ]; then
-		echo "UI smoke test: focused-image dimensions and size were not drawn in the preview footer" >&2
+	preview_footer_right_x=$((preview_footer_left + preview_footer_half))
+	preview_footer_right_width=$((preview_image_width - preview_footer_half))
+	preview_footer_right_ink=$(convert "$temporary/recent-dialog-preview.png" \
+		-crop "${preview_footer_right_width}x14+${preview_footer_right_x}+${preview_footer_y}" +repage txt:- |
+		awk '/srgb\(165,175,185\)/ { found = 1; exit } END { if (found) print "present" }')
+	preview_old_details_y=$((reopened_dialog_y + 112 + preview_rows * 26 - 37))
+	preview_old_details_ink=$(convert "$temporary/recent-dialog-preview.png" \
+		-crop "${preview_image_width}x14+${preview_left}+${preview_old_details_y}" +repage txt:- |
+		awk '/srgb\(165,175,185\)/ { found = 1; exit } END { if (found) print "present" }')
+	if [ -z "$preview_footer_left_ink" ] || [ -z "$preview_footer_right_ink" ] || \
+		[ -n "$preview_old_details_ink" ]; then
+		echo "UI smoke test: preview filename and image details were not combined on one footer row" >&2
 		exit 1
 	fi
 	file_list_x=$((reopened_dialog_x + 12))

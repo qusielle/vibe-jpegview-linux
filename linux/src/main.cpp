@@ -6047,17 +6047,28 @@ private:
 				165, 165, 165);
 		}
 		if (!fileDialogPreviewSource_.empty()) {
+			const std::string filename = fileDialogPreviewSource_.filename().string();
+			std::string dimensions;
 			if (fileDialogPreviewSourceWidth_ > 0 && fileDialogPreviewSourceHeight_ > 0) {
 				const std::string formattedSize = fileDialogPreviewFileSizeKnown_ ?
 					jpegview_linux::FormatFileSize(fileDialogPreviewFileSize_) : std::string();
-				const std::string dimensions = jpegview_linux::FormatImageDimensionsAndSize(
+				dimensions = jpegview_linux::FormatImageDimensionsAndSize(
 					fileDialogPreviewSourceWidth_, fileDialogPreviewSourceHeight_, formattedSize);
-				DrawText(ClipText(dimensions, previewRect.w - 16), previewRect.x + 8,
-					previewRect.y + previewRect.h - 37, kUiTextScale, 165, 175, 185);
 			}
-			const std::string filename = fileDialogPreviewSource_.filename().string();
-			DrawText(ClipText(filename, previewRect.w - 16), previewRect.x + 8,
-				previewRect.y + previewRect.h - 19, kUiTextScale, 165, 175, 185);
+			const int footerX = previewRect.x + 8;
+			const int footerWidth = std::max(0, previewRect.w - 16);
+			const jpegview_linux::FileDialogPreviewFooterLayout footerLayout =
+				jpegview_linux::CalculateFileDialogPreviewFooterLayout(footerWidth,
+					TextWidth(filename, kUiTextScale), TextWidth(dimensions, kUiTextScale));
+			const std::string visibleFilename = ClipText(filename, footerLayout.filenameWidth);
+			const int footerY = previewRect.y + previewRect.h - 19;
+			DrawText(visibleFilename, footerX, footerY, kUiTextScale, 165, 175, 185);
+			if (!dimensions.empty() && footerLayout.detailsWidth > 0) {
+				const std::string visibleDimensions = ClipText(dimensions, footerLayout.detailsWidth);
+				const int detailsX = footerX + footerLayout.detailsOffsetX +
+					footerLayout.detailsWidth - TextWidth(visibleDimensions, kUiTextScale);
+				DrawText(visibleDimensions, detailsX, footerY, kUiTextScale, 165, 175, 185);
+			}
 		}
 	}
 

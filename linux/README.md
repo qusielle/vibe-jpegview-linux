@@ -153,7 +153,8 @@ they support.
    thumb dragging and track clicks that page by one viewport, synchronized with wheel and keyboard
    scrolling. Browse and Recents rows show file sizes; archive-member sizes refer to the member's
    uncompressed image data, not the containing archive. The preview pane reports the focused image's
-   original pixel dimensions and file size, including when a directory is selected. File-size
+   original pixel dimensions and file size beside its filename on one footer row, including when a
+   directory is selected; the freed row gives the preview image more height. File-size
    metadata and preview decoding run in the background so large images and cold archive catalogs do
    not require metadata lookup on the UI thread.
    Dialog dimensions and the preview/list proportion are preserved between runs. The preview image

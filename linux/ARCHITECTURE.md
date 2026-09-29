@@ -112,7 +112,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
-  restoration, pane-aware preview image sizing, cancellable background archive listings and directory
+  restoration, pane-aware preview image sizing and testable filename/details footer allocation,
+  cancellable background archive listings and directory
   summaries (including supported archive containers in the directory count), replaceable background
   file-size lookup for Browse and Recents rows, encrypted-row marking, caller-preserved row order for
   recent MRU entries, and replaceable previews for a focused image or a directory's first image.
@@ -325,8 +326,9 @@ settings module. A proportional scrollbar reserves a narrow list gutter; its pur
 mapping live in `file_dialog_model`, while the adapter draws it, pages on track clicks, captures thumb
 drags, and applies scroll offsets without changing keyboard selection. Wheel scroll deltas update the
 model viewport independently from keyboard selection, then the adapter focuses the row under the
-pointer. File-dialog preview workers derive their decode target from the pane's usable image area and
-resolve/scale only the newest requested selection using
+pointer. File-dialog preview workers derive their decode target from the pane's usable image area,
+which reserves one shared footer row for the left-aligned filename and right-aligned image details,
+and resolve/scale only the newest requested selection using
 the thumbnail resampler's source-area antialiasing. A pane resize replaces the target-size request;
 the generation check prevents stale work from replacing the current preview. Preview pixels remain
 outside the persistent viewer caches, and their SDL texture is uploaded and destroyed by Viewer.

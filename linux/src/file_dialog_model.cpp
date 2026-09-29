@@ -202,8 +202,27 @@ std::filesystem::path FirstImageInDirectory(
 FileDialogPreviewSize FileDialogPreviewImageSize(int paneWidth, int paneHeight) {
 	return FileDialogPreviewSize{
 		std::max(1, paneWidth - 16),
-		std::max(1, paneHeight - 82),
+		std::max(1, paneHeight - 64),
 	};
+}
+
+FileDialogPreviewFooterLayout CalculateFileDialogPreviewFooterLayout(
+	int contentWidth, int filenameTextWidth, int detailsTextWidth, int gap) {
+	FileDialogPreviewFooterLayout layout;
+	const int width = std::max(0, contentWidth);
+	layout.filenameWidth = width;
+	layout.detailsOffsetX = width;
+	if (width == 0 || detailsTextWidth <= 0) return layout;
+
+	gap = std::clamp(gap, 0, width);
+	const int minimumFilenameWidth = std::min(std::max(0, filenameTextWidth),
+		std::max(0, (width - gap) / 2));
+	const int maximumDetailsWidth = std::max(0, width - gap - minimumFilenameWidth);
+	layout.detailsWidth = std::min(detailsTextWidth, maximumDetailsWidth);
+	if (layout.detailsWidth <= 0) return layout;
+	layout.filenameWidth = std::max(0, width - gap - layout.detailsWidth);
+	layout.detailsOffsetX = width - layout.detailsWidth;
+	return layout;
 }
 
 FileDialogScrollbarGeometry CalculateFileDialogScrollbarGeometry(

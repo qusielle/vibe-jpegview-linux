@@ -6918,10 +6918,26 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 		jpegview_linux::FileDialogPreviewImageSize(320, 468);
 	const jpegview_linux::FileDialogPreviewSize tinyPreviewSize =
 		jpegview_linux::FileDialogPreviewImageSize(8, 10);
-	Expect(defaultPreviewSize.width == 244 && defaultPreviewSize.height == 386 &&
-		widerPreviewSize.width == 304 && widerPreviewSize.height == 386 &&
+	Expect(defaultPreviewSize.width == 244 && defaultPreviewSize.height == 404 &&
+		widerPreviewSize.width == 304 && widerPreviewSize.height == 404 &&
 		tinyPreviewSize.width == 1 && tinyPreviewSize.height == 1,
 		"preview image target did not follow the pane size and its content insets");
+	const jpegview_linux::FileDialogPreviewFooterLayout normalFooter =
+		jpegview_linux::CalculateFileDialogPreviewFooterLayout(304, 80, 120);
+	const jpegview_linux::FileDialogPreviewFooterLayout narrowFooter =
+		jpegview_linux::CalculateFileDialogPreviewFooterLayout(184, 120, 140);
+	const jpegview_linux::FileDialogPreviewFooterLayout filenameOnlyFooter =
+		jpegview_linux::CalculateFileDialogPreviewFooterLayout(184, 80, 0);
+	Expect(normalFooter.filenameWidth == 176 && normalFooter.detailsWidth == 120 &&
+		normalFooter.detailsOffsetX == 184 &&
+		normalFooter.detailsOffsetX + normalFooter.detailsWidth == 304,
+		"preview footer did not left-align the name and right-align image details");
+	Expect(narrowFooter.filenameWidth == 88 && narrowFooter.detailsWidth == 88 &&
+		narrowFooter.detailsOffsetX == 96 &&
+		narrowFooter.filenameWidth + 8 + narrowFooter.detailsWidth == 184,
+		"narrow preview footer did not split and clip its two labels safely");
+	Expect(filenameOnlyFooter.filenameWidth == 184 && filenameOnlyFooter.detailsWidth == 0,
+		"preview footer did not give the full row to a filename without image details");
 
 	const fs::path imageDirectory = temporary.path() / "images";
 	fs::create_directories(imageDirectory);
