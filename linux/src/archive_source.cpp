@@ -132,7 +132,7 @@ bool HasArchiveExtension(const fs::path& path) {
 	const std::string name = Lower(path.filename().string());
 	const std::string extension = Lower(path.extension().string());
 	return extension == ".zip" || extension == ".cbz" || extension == ".tar" ||
-		extension == ".7z" ||
+		extension == ".7z" || extension == ".cb7" ||
 		extension == ".rar" ||
 		(name.size() >= 7 && name.compare(name.size() - 7, 7, ".tar.gz") == 0) ||
 		(name.size() >= 4 && name.compare(name.size() - 4, 4, ".tgz") == 0);
@@ -1431,7 +1431,8 @@ std::string ArchiveFormatName(const fs::path& path) {
 		return Lower(location.archive.extension().string()) == ".cbz" ? "CBZ" : "ZIP";
 	case ArchiveFormat::Tar: return "TAR";
 	case ArchiveFormat::Tgz: return "TGZ";
-	case ArchiveFormat::SevenZip: return ".7Z";
+	case ArchiveFormat::SevenZip:
+		return Lower(location.archive.extension().string()) == ".cb7" ? "CB7" : ".7Z";
 	case ArchiveFormat::Rar: return "RAR";
 	}
 	return {};

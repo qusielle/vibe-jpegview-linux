@@ -108,6 +108,8 @@ fi
 if [ -x "$ARCHIVE_FIXTURE_WRITER" ]; then
 	"$ARCHIVE_FIXTURE_WRITER" "$temporary/images/09-archive.7z"
 	touch -t 201801010000.00 "$temporary/images/09-archive.7z"
+	cp "$temporary/images/09-archive.7z" "$temporary/images/15-comic.cb7"
+	touch -t 201801010000.00 "$temporary/images/15-comic.cb7"
 fi
 if [ -x "$RAR_FIXTURE_WRITER" ]; then
 	"$RAR_FIXTURE_WRITER" "$temporary/images/10-archive.rar" rar5-solid
@@ -1072,6 +1074,20 @@ if [ -f "$temporary/images/09-archive.7z" ]; then
 	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
 	DISPLAY=":$display_number" xdotool key Return
 	assert_title_prefix "03-blue.ppm" "open dialog could not leave 7z and return to a filesystem image"
+fi
+
+if [ -f "$temporary/images/15-comic.cb7" ]; then
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool type --delay 20 '15-comic.cb7'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-7z.ppm" "open dialog did not browse and open a CB7 image member"
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool key BackSpace
+	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "03-blue.ppm" "open dialog could not leave a CB7 and return to a filesystem image"
 fi
 
 if [ -f "$temporary/images/10-archive.rar" ]; then

@@ -1034,9 +1034,12 @@ void TestSevenZipBrowsingDecodingAndPreview() {
 		{"01-root.png", image}, {"nested/02-child.png", image},
 		{"notes.txt", notes}, {"../escape.png", image}, {"/absolute.png", image},
 	});
+	const fs::path comicArchive = temporary.path() / "comic.CB7";
+	Expect(fs::copy_file(archive, comicArchive), "could not copy 7z fixture as CB7");
 	const fs::path rootImage = archive / "01-root.png";
 	const fs::path nestedDirectory = archive / "nested";
 	const fs::path nestedImage = nestedDirectory / "02-child.png";
+	const fs::path comicImage = comicArchive / "01-root.png";
 
 	Expect(jpegview_linux::IsArchiveContainerName(archive) &&
 		jpegview_linux::IsArchiveContainerFile(archive) &&
@@ -1044,8 +1047,12 @@ void TestSevenZipBrowsingDecodingAndPreview() {
 		jpegview_linux::IsArchiveLocation(nestedDirectory) &&
 		jpegview_linux::IsArchiveMemberLocation(rootImage) &&
 		jpegview_linux::ArchiveFormatName(nestedImage) == ".7Z" &&
+		jpegview_linux::IsArchiveContainerName(comicArchive) &&
+		jpegview_linux::IsArchiveContainerFile(comicArchive) &&
+		jpegview_linux::IsArchiveMemberLocation(comicImage) &&
+		jpegview_linux::ArchiveFormatName(comicImage) == "CB7" &&
 		jpegview_linux::ArchiveBackingFile(nestedImage) == archive,
-		"7z path recognition did not preserve the virtual archive-member contract");
+		"7z/CB7 path recognition did not preserve the virtual archive-member contract");
 
 	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
 	Expect(jpegview_linux::ListArchiveDirectory(archive, entries, error),
@@ -1080,6 +1087,20 @@ void TestSevenZipBrowsingDecodingAndPreview() {
 	Expect(decoded.frames.size() == 1 && decoded.frames.front().width == 2 &&
 		decoded.frames.front().height == 2 && decoded.frames.front().bgra == pixels,
 		"7z member decoding changed dimensions or pixels");
+	std::vector<jpegview_linux::ArchiveEntryInfo> comicEntries;
+	Expect(jpegview_linux::ListArchiveDirectory(comicArchive, comicEntries, error) &&
+		std::any_of(comicEntries.begin(), comicEntries.end(), [](const auto& entry) {
+			return !entry.directory && entry.path.filename() == "01-root.png";
+		}), "CB7 did not list its 7z image members: " + error);
+	FileList comicFiles({comicArchive.string()}, FileList::SortMode::FileName, true, false);
+	Expect(comicFiles.Size() == 1 && comicFiles.Current() == comicImage && comicFiles.IsArchiveMember(0),
+		"opening a CB7 did not expose its image as a virtual file");
+	DecodedImage comicDecoded;
+	Expect(jpegview_linux::DecodeImage(comicImage, comicDecoded, error),
+		"CB7 member decoding did not reuse the 7z reader: " + error);
+	Expect(comicDecoded.frames.size() == 1 && comicDecoded.frames.front().width == 2 &&
+		comicDecoded.frames.front().height == 2 && comicDecoded.frames.front().bgra == pixels,
+		"CB7 member decoding changed dimensions or pixels");
 	DecodedImage nestedDecoded;
 	Expect(jpegview_linux::DecodeImage(nestedImage, nestedDecoded, error) &&
 		nestedDecoded.frames.size() == 1 && nestedDecoded.frames.front().bgra == pixels,

@@ -25,11 +25,11 @@ should normally be added to one of these focused modules and covered by `tests/t
   order. It owns no image pixels, filesystem work, or SDL resources.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
   and on-demand member access. ZIP and CBZ containers share the central-directory reader and member
-  access path; CBZ retains its own display label. TAR/TGZ catalogs stream
-  header metadata; unencrypted 7z uses libarchive's seekable reader; encrypted 7z uses the focused
-  `seven_zip_backend` adapter described below. Ordinary unencrypted RAR catalogs and extraction
-  remain on libarchive; when present, the optional `rar_backend` probes RAR metadata and handles
-  encrypted RAR4/RAR5 catalogs and extraction.
+  access path; CBZ retains its own display label. 7z and CB7 containers share libarchive's seekable
+  reader and member path; CB7 retains its own display label. TAR/TGZ catalogs stream header metadata.
+  Encrypted 7z and CB7 use the focused `seven_zip_backend` adapter described below. Ordinary
+  unencrypted RAR catalogs and extraction remain on libarchive; when present, the optional
+  `rar_backend` probes RAR metadata and handles encrypted RAR4/RAR5 catalogs and extraction.
   Immutable catalogs for at most four containers
   are keyed by device/inode/size/mtime and retain no extracted image payloads. Workers use independent
   libzip/libarchive handles, validate the selected member's identity, and stream at most 128 MiB of
@@ -171,11 +171,11 @@ settings with existing menu commands are intentionally outside this editor.
 
 Archive members use the existing filesystem-shaped path contract (`container.ext/member.ext`) so
 navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The
-browser labels and color-marks ZIP/CBZ/TAR/TGZ/7z/RAR containers and archive images without retaining
-image payloads; Recents uses the same cancellable preview worker. ZIP catalogs retain central-directory
-metadata only. TAR/TGZ catalogs stream member headers and skip payloads. Unencrypted 7z catalogs use
-seekable libarchive input; encrypted 7z catalogs use the optional SDK adapter and retain member
-ordinal, normalized name, size, modification time, and per-entry encryption state. Header encryption
+browser labels and color-marks ZIP/CBZ/TAR/TGZ/7z/CB7/RAR containers and archive images without
+retaining image payloads; Recents uses the same cancellable preview worker. ZIP catalogs retain
+central-directory metadata only. TAR/TGZ catalogs stream member headers and skip payloads. Unencrypted
+7z/CB7 catalogs use seekable libarchive input; encrypted 7z/CB7 catalogs use the optional SDK adapter
+and retain member ordinal, normalized name, size, modification time, and per-entry encryption state. Header encryption
 is recorded separately from encrypted data entries because it hides the entire catalog. Ordinary
 unencrypted RAR catalogs remain on libarchive; the optional RAR backend inspects RAR metadata and is
 used for encrypted RAR4/RAR5 catalogs and extraction. Cold

@@ -8,11 +8,6 @@ candidate is implemented, document its user-facing behavior in [`README.md`](REA
 [`ARCHITECTURE.md`](ARCHITECTURE.md) when relevant, and remove it from this list. Candidate sources
 are identified by name.
 
-## Archive input candidates
-
-- **CB7 comic archives:** browse images in comic 7z files. Comic-page bookmarks and remembered
-  reading positions are explicitly out of scope for this candidate.
-
 ## Candidates from [KrokusPokus/JPEGView_L](https://github.com/KrokusPokus/JPEGView_L)
 
 - **Book Mode:** add a book-oriented viewing mode with page size configurable as a percentage of
