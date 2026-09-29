@@ -1002,6 +1002,12 @@ folder navigation with Alt+Left/Right; click the image to view the full-resoluti
 
 <p><a href="screenshots/context-menu-advanced.png"><img src="screenshots/context-menu-advanced.png" width="720" alt="JPEGView Linux full advanced context menu with sibling-folder navigation and keyboard shortcuts"></a></p>
 
+The **Advanced configuration** window groups settings into seven tabs. This Image defaults view
+shows the controls for default picture adjustments and unsharp masking; edits stay staged until
+Apply. Click the image to view it at full resolution:
+
+<p><a href="screenshots/advanced-configuration.png"><img src="screenshots/advanced-configuration.png" width="720" alt="JPEGView Linux Advanced configuration window showing its seven tabs and image-default adjustment controls"></a></p>
+
 The sample photos shown are CC0 images from Wikimedia Commons: [Lake Mountain Landscape](https://commons.wikimedia.org/wiki/File:Lake_Mountain_Landscape.jpg),
 [Waterfall in forest](https://commons.wikimedia.org/wiki/File:Waterfall_in_forest.jpg),
 [Autumn Forest Wet Bark](https://commons.wikimedia.org/wiki/File:Autumn_Forest_Wet_Bark.jpg), and
