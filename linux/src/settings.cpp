@@ -137,6 +137,9 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		} else if (key == "spacebar_navigates_images") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.spacebarNavigatesImages = parsed;
+		} else if (key == "folder_wrap_around") {
+			bool parsed = false;
+			if (ParseBoolStrict(value, parsed)) loaded.folderWrapAround = parsed;
 		} else if (key == "transparency_pattern") {
 			(void)ParseTransparencyPattern(value, loaded.transparencyPattern);
 		} else if (key == "thumbnail_panel_width") {
@@ -309,6 +312,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "manga_reading_order_enabled=" << (settings.mangaReadingOrderEnabled ? 1 : 0) << '\n'
 		       << "manga_mode_inverts_left_right=" << (settings.mangaModeInvertsLeftRight ? 1 : 0) << '\n'
 		       << "spacebar_navigates_images=" << (settings.spacebarNavigatesImages ? 1 : 0) << '\n'
+		       << "folder_wrap_around=" << (settings.folderWrapAround ? 1 : 0) << '\n'
 		       << "transparency_pattern=" << TransparencyPatternSettingName(settings.transparencyPattern) << '\n'
 		       << "thumbnail_panel_width=" << settings.thumbnailPanelWidth << '\n'
 		       << "file_dialog_width=" << std::clamp(settings.fileDialogWidth,

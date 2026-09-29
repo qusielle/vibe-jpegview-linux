@@ -44,6 +44,7 @@ struct ViewerSettings {
 	bool mangaReadingOrderEnabled = false;
 	bool mangaModeInvertsLeftRight = true;
 	bool spacebarNavigatesImages = false;
+	bool folderWrapAround = true;
 	TransparencyPattern transparencyPattern = TransparencyPattern::Black;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	int fileDialogWidth = kDefaultFileDialogWidth;

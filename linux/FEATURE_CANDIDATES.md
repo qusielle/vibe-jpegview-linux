@@ -77,10 +77,6 @@ feature is absent from Linux.
 - **Custom movie frame rate:** supplement the current fixed playback-rate choices with a bounded,
   persisted numeric FPS entry; the branch uses the same
   [numeric value dialog](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/SetValueDlg.cpp).
-- **Folder wrap-around toggle:** expose a menu setting to stop at the first/last image instead of
-  wrapping to the other end. Linux currently wraps within a folder by default and has no user-facing
-  toggle for this behavior. See the branch's
-  [file-list setting](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/FileList.cpp).
 - **Transparent title-bar presentation:** investigate a Linux-native equivalent to the branch's
   transparent title-bar panel. The Windows implementation uses DWM frame integration, so this is
   not a direct API port; Linux already supports hiding the window title bar.

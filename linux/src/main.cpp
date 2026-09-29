@@ -694,6 +694,7 @@ private:
 		if (jpegview_linux::ParseSortMode(settings.sortMode, sortMode)) {
 			fileList_.SetSorting(sortMode, settings.sortAscending);
 		}
+		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
 
 		maximized_ = settings.maximized;
 		navigationPanelEnabled_ = settings.navigationPanelEnabled;
@@ -744,6 +745,7 @@ private:
 		settings.mangaReadingOrderEnabled = mangaReadingOrderDefault_;
 		settings.mangaModeInvertsLeftRight = mangaModeInvertsLeftRight_;
 		settings.spacebarNavigatesImages = spacebarNavigatesImages_;
+		settings.folderWrapAround = fileList_.WrapAroundFolder();
 		settings.transparencyPattern = transparencyPattern_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.fileDialogWidth = fileDialogWidth_;
@@ -2637,6 +2639,7 @@ private:
 					SetTitle("No supported images in dropped input");
 					continue;
 				}
+				result.prepared.replacement.SetWrapAroundFolder(fileList_.WrapAroundFolder());
 				fileList_ = std::move(result.prepared.replacement);
 				ClearPendingFileListScan();
 				dragging_ = false;
@@ -2918,6 +2921,10 @@ private:
 		transparencyPattern_ = settings.transparencyPattern;
 		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
 		spacebarNavigatesImages_ = settings.spacebarNavigatesImages;
+		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
+		if (fileListBeforeClipboard_) {
+			fileListBeforeClipboard_->SetWrapAroundFolder(settings.folderWrapAround);
+		}
 		showHistogram_ = settings.showHistogram;
 		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
 		fileDialogWidth_ = settings.fileDialogWidth;
@@ -3315,6 +3322,7 @@ private:
 		RestoreClipboardImage();
 		fileListBeforeClipboard_ = std::make_unique<jpegview_linux::FileList>(std::move(fileList_));
 		fileList_ = jpegview_linux::FileList({temporaryFile.string()});
+		fileList_.SetWrapAroundFolder(fileListBeforeClipboard_->WrapAroundFolder());
 		clipboardTempFile_ = temporaryFile;
 		clipboardTempDirectory_ = temporaryDirectory;
 		clipboardMode_ = true;
@@ -8752,7 +8760,7 @@ void PrintUsage(const char* program) {
 		<< "Controls: Right/Left navigate, Up/Down rotate, mouse wheel up/down navigates previous/next, Ctrl+mouse wheel zooms, left-drag pans, drop files to open,\n"
 		<< "          Space toggles fit/actual by default; spacebar_navigates_images=1 maps Space/Shift+Space to next/previous, Enter fits, 0 fits,\n"
 		<< "          1-9 start a slideshow, F11/F fullscreen,\n"
-		<< "          F7/F8/F9 select folder/recursive/sibling navigation, Alt+Left/Right open the first image in adjacent sibling folders,\n"
+		<< "          F7/F8/F9 select folder/recursive/sibling navigation; folder_wrap_around=0 disables F7/list wrapping, Alt+Left/Right open the first image in adjacent sibling folders,\n"
 		<< "          Ctrl+M marks an image; Ctrl+Left/Right toggles between it and the paired image,\n"
 		<< "          N/M/C select display order, Z toggles the magnifying glass,\n"
 		<< "          D toggles double-page mode, J reverses manga reading order,\n"

@@ -3,9 +3,10 @@
 The SDL frontend deliberately keeps platform-independent behavior outside `main.cpp`. New logic
 should normally be added to one of these focused modules and covered by `tests/test_core.cpp`:
 
-- `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, current-file
-  preservation, and the transient marked-image toggle pair used for A/B comparison. The marked
-  path's index in the active ordered list is cached for constant-time thumbnail rendering.
+- `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, configurable
+  folder-boundary wrap-around, current-file preservation, and the transient marked-image toggle pair
+  used for A/B comparison. The marked path's index in the active ordered list is cached for
+  constant-time thumbnail rendering.
 - `file_list_scan_worker`: one lazy, low-priority worker for viewer-list initialization, reloads,
   recursive/sibling transitions, dropped inputs, cross-folder marked-image toggles, and
   multiple-input scope changes. Requests carry
@@ -81,8 +82,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   choice, default picture-level values,
   fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
   default), zoom-navigator visibility, magnifying-glass size/zoom, global double-page/manga-mode
-  defaults, the default-enabled `manga_mode_inverts_left_right` preference, and the default-disabled
-  `spacebar_navigates_images` preference), plus stable sort-mode values.
+  defaults, the default-enabled `manga_mode_inverts_left_right` preference, the default-disabled
+  `spacebar_navigates_images` preference, and the default-enabled `folder_wrap_around` preference),
+  plus stable sort-mode values. Applying prepared list scans preserves the live folder-wrap value,
+  so editing the setting does not require canceling or repeating a directory scan.
 - `advanced_configuration_model`: category and row metadata for persisted settings that lack a normal
   context-menu command, with a transient `ViewerSettings` draft, value bounds, text editing, and
   selection/scroll transitions. It performs no file I/O; Apply is routed through the existing settings

@@ -81,7 +81,8 @@ they support.
    The active filename/date ordering is visible and switchable from both the navigation panel and
    context menu, and the selected mode is preserved between runs. By default, manga mode reverses
    physical Left/Right navigation; `manga_mode_inverts_left_right=0` disables that inversion while
-   navigation-panel and context-menu actions remain logical previous/next.
+   navigation-panel and context-menu actions remain logical previous/next. Folder navigation wraps
+   at the ends by default; set `folder_wrap_around=0` to stop at the current list's boundary.
    Viewer file-list discovery now runs on a lazy, low-priority worker for startup, refresh, sibling
    folder jumps, recursive folder boundaries, dropped inputs, cross-folder marked-image toggles,
    and changes from multiple inputs to folder navigation. Enumeration, per-file metadata, sorting,
@@ -282,7 +283,8 @@ they support.
 
     **Advanced configuration...** at the bottom of both compact and expanded main context menus
     opens a seven-section editor for persisted settings without ordinary context-menu commands. It
-    covers navigation behavior, transparency and histogram display, panel/dialog dimensions,
+    covers navigation behavior, including folder wrap-around, transparency and histogram display,
+    panel/dialog dimensions,
     magnifying-glass geometry, the user crop aspect, default picture-level and unsharp values, the
     cache budget, and the batch copy/rename pattern. It stages a `ViewerSettings` copy and saves
     through the existing atomic settings writer only after **Apply**; **Cancel** discards the draft.
@@ -799,6 +801,12 @@ navigation and sorting commands, including these sibling-folder jumps.
 Previous-folder history is retained when F8/F9 traversal enters another directory. Explicit Alt+Left/Right
 jumps discard that history so subsequent Left/Right navigation follows the active mode within the
 destination folder.
+
+Folder looping wraps from the last image to the first and vice versa by default. Set
+`folder_wrap_around=0` in `settings.conf`, or turn off **Wrap around folder ends** in the Behavior
+section of Advanced configuration, to stop at the current list's boundary. This option affects F7
+folder looping and explicit multi-input lists; F8/F9 traversal still stops when there are no more
+eligible directories.
 
 The context menu is a native rendering of the Windows `PopupMenu` resource, including its navigation,
 sorting, slideshow/movie, transform, zoom, auto-zoom, settings, and administration sections. The

@@ -165,6 +165,10 @@ case "$help_text" in
 	*"spacebar_navigates_images=1 maps Space/Shift+Space to next/previous"*) ;;
 	*) echo "UI smoke test: --help does not describe the configurable Space navigation keys" >&2; exit 1 ;;
 esac
+case "$help_text" in
+	*"folder_wrap_around=0 disables F7/list wrapping"*) ;;
+	*) echo "UI smoke test: --help does not describe the folder-wrap setting" >&2; exit 1 ;;
+esac
 
 Xvfb -displayfd 1 -screen 0 1280x800x24 >"$temporary/display" 2>"$temporary/xvfb.log" &
 xvfb_pid=$!
@@ -755,6 +759,7 @@ DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click
 DISPLAY=":$display_number" xdotool key End
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.15
+DISPLAY=":$display_number" xdotool key Down Down Return
 DISPLAY=":$display_number" xdotool key Tab
 DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool key Tab
@@ -766,7 +771,14 @@ sleep 0.2
 advanced_config_settings="$VIEWER_TEST_CONFIG_HOME/jpegview-linux/settings.conf"
 grep -q '^transparency_pattern=white$' "$advanced_config_settings"
 grep -q '^thumbnail_panel_width=128$' "$advanced_config_settings"
+grep -q '^folder_wrap_around=0$' "$advanced_config_settings"
 assert_title_prefix "01-red.ppm" "applying advanced configuration did not return to the viewer"
+DISPLAY=":$display_number" xdotool key Left
+sleep 0.1
+assert_title_prefix "01-red.ppm" "disabled folder wrap moved past the first image"
+DISPLAY=":$display_number" xdotool key Right
+sleep 0.1
+assert_title_prefix "02-green.ppm" "folder navigation did not continue from an interior image"
 
 # Reopening and escaping discards an un-applied draft.
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
@@ -778,6 +790,7 @@ DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool key Escape
 sleep 0.1
 grep -q '^transparency_pattern=white$' "$advanced_config_settings"
+grep -q '^folder_wrap_around=0$' "$advanced_config_settings"
 stop_viewer
 unset VIEWER_TEST_CONFIG_HOME
 XDG_STATE_HOME="$temporary/state"

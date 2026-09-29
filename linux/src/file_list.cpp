@@ -531,6 +531,9 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 		(!replacement.Current().empty() ? replacement.Current() : replacement.emptyPath_));
 
 	if (operation == ScanOperation::Initialize) {
+		// A settings edit can happen while startup scanning is in flight. Keep
+		// the live navigation preference instead of restoring the request snapshot.
+		replacement.wrapAroundFolder_ = wrapAroundFolder_;
 		if (!preferredPathAtApply.empty() && !replacement.entries_.empty()) {
 			const std::size_t selectedIndex = replacement.FindEntry(preferredPathAtApply);
 			if (replacement.entries_[selectedIndex].path == Normalize(preferredPathAtApply)) {
@@ -557,6 +560,7 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 		const fs::path markedCurrent = markedFileCurrent_;
 		const int markedToggle = markedToggleIndex_;
 		replacement.navigationMode_ = navigationMode_;
+		replacement.wrapAroundFolder_ = wrapAroundFolder_;
 		replacement.markedFile_ = markedFile;
 		replacement.markedFileCurrent_ = markedCurrent;
 		replacement.markedToggleIndex_ = markedToggle;

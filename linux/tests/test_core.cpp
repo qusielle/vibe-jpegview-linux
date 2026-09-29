@@ -1829,6 +1829,20 @@ void TestFileListNavigationModesAndReload() {
 	wrapping.Last();
 	Expect(wrapping.Next(), "wrapping navigation should advance from the last image");
 	Expect(wrapping.Current().filename() == "root.png", "wrapping navigation selected the wrong image");
+	wrapping.SetWrapAroundFolder(false);
+	wrapping.Last();
+	Expect(wrapping.NextLoaded() == FileList::LoadedNavigationResult::NoMove &&
+		wrapping.Current().filename() == "root.png",
+		"disabling folder wrap did not stop forward navigation at the final image");
+	wrapping.First();
+	Expect(wrapping.PreviousLoaded() == FileList::LoadedNavigationResult::NoMove &&
+		wrapping.Current().filename() == "root.png",
+		"disabling folder wrap did not stop backward navigation at the first image");
+	wrapping.SetWrapAroundFolder(true);
+	wrapping.Last();
+	Expect(wrapping.NextLoaded() == FileList::LoadedNavigationResult::Moved &&
+		wrapping.Current().filename() == "root.png",
+		"re-enabling folder wrap did not restore the default boundary behavior");
 }
 
 void TestFileListMultipleInputs() {
@@ -1846,6 +1860,13 @@ void TestFileListMultipleInputs() {
 	Expect(files.Files()[0].filename() == "other.png", "multiple input filename ordering is incorrect");
 	Expect(files.Files()[1].parent_path().filename() == "first", "multiple input tie ordering is unstable");
 	Expect(files.Files()[2].parent_path().filename() == "second", "multiple input tie ordering is unstable");
+	files.Last();
+	Expect(files.NextLoaded() == FileList::LoadedNavigationResult::NoMove,
+		"folder-wrap-disabled multiple inputs did not stop at the list boundary");
+	files.SetWrapAroundFolder(true);
+	files.Last();
+	Expect(files.NextLoaded() == FileList::LoadedNavigationResult::Moved,
+		"folder-wrap-enabled multiple inputs did not loop at the list boundary");
 }
 
 void TestFileListAsynchronousScanning() {
@@ -1931,6 +1952,19 @@ void TestFileListAsynchronousScanning() {
 		(secondChild / "second-child.png").string()});
 	Expect(provisional.Empty(),
 		"multiple explicit startup inputs were provisionally reduced to only the first image");
+
+	FileList configurableStartup;
+	configurableStartup.SetProvisionalInputs({root.string()});
+	FileListPreparedScan startupScan = FileList::PrepareScan(
+		configurableStartup.MakeScanRequest(FileList::ScanOperation::Initialize),
+		[] { return true; });
+	configurableStartup.SetWrapAroundFolder(false);
+	Expect(startupScan.completed && configurableStartup.ApplyPreparedScan(std::move(startupScan)) &&
+		!configurableStartup.WrapAroundFolder(),
+		"applying an in-flight startup scan overwrote a changed folder-wrap preference");
+	configurableStartup.Last();
+	Expect(configurableStartup.NextLoaded() == FileList::LoadedNavigationResult::NoMove,
+		"startup scan did not apply the current folder-wrap preference to active navigation");
 
 	const FileList::ScanRequest canceledRequest = list.MakeScanRequest(FileList::ScanOperation::Reload);
 	std::size_t cancellationChecks = 0;
@@ -3530,6 +3564,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.mangaReadingOrderEnabled = true;
 	expected.mangaModeInvertsLeftRight = false;
 	expected.spacebarNavigatesImages = true;
+	expected.folderWrapAround = false;
 	expected.transparencyPattern = jpegview_linux::TransparencyPattern::Checkerboard;
 	expected.thumbnailPanelWidth = 287;
 	expected.fileDialogWidth = 1040;
@@ -3587,8 +3622,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 	Expect(loaded.doublePageModeEnabled == expected.doublePageModeEnabled &&
 		loaded.mangaReadingOrderEnabled == expected.mangaReadingOrderEnabled &&
 		loaded.mangaModeInvertsLeftRight == expected.mangaModeInvertsLeftRight &&
-		loaded.spacebarNavigatesImages == expected.spacebarNavigatesImages,
-		"double-page mode settings did not round-trip");
+		loaded.spacebarNavigatesImages == expected.spacebarNavigatesImages &&
+		loaded.folderWrapAround == expected.folderWrapAround,
+		"navigation and display-mode settings did not round-trip");
 	Expect(loaded.transparencyPattern == expected.transparencyPattern,
 		"transparent-image pattern did not round-trip");
 	Expect(loaded.thumbnailPanelWidth == expected.thumbnailPanelWidth,
@@ -3642,7 +3678,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=1\n"
 		"selection_mode_enabled=maybe\n"
 		"show_zoom_navigator=maybe\nmanga_mode_inverts_left_right=maybe\n"
-		"spacebar_navigates_images=maybe\n"
+		"spacebar_navigates_images=maybe\nfolder_wrap_around=maybe\n"
 		"transparency_pattern=diagonal\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
@@ -3663,6 +3699,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"missing or malformed manga inversion setting did not preserve its enabled default");
 	Expect(!loaded.spacebarNavigatesImages,
 		"missing or malformed Space navigation setting did not preserve its disabled default");
+	Expect(loaded.folderWrapAround,
+		"missing or malformed folder-wrap setting did not preserve the wrapping default");
 	Expect(loaded.transparencyPattern == jpegview_linux::TransparencyPattern::Black,
 		"malformed transparency pattern did not retain the default black background");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
@@ -3731,6 +3769,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	source.autoContrast = true;
 	source.mangaModeInvertsLeftRight = false;
 	source.spacebarNavigatesImages = true;
+	source.folderWrapAround = false;
 	source.transparencyPattern = jpegview_linux::TransparencyPattern::White;
 	source.showHistogram = true;
 	source.thumbnailPanelWidth = 287;
@@ -3762,7 +3801,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	source.copyRenamePattern = u8"%F=旅行-%n";
 
 	const std::array<std::vector<std::string>, 7> expectedKeys = {{
-		{"manga_mode_inverts_left_right", "spacebar_navigates_images"},
+		{"manga_mode_inverts_left_right", "spacebar_navigates_images", "folder_wrap_around"},
 		{"transparency_pattern", "show_histogram"},
 		{"thumbnail_panel_width", "file_dialog_width", "file_dialog_height",
 			"file_dialog_preview_ratio"},
@@ -3807,7 +3846,10 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 			++fieldTotal;
 		}
 	}
-	Expect(fieldTotal == 31, "advanced configuration did not expose every requested setting");
+	Expect(fieldTotal == 32, "advanced configuration did not expose every requested setting");
+	Expect(model.SelectCategory(static_cast<int>(Category::Behavior)) &&
+		model.FieldValue(2) == "Off",
+		"folder-wrap setting did not display its disabled draft value");
 	Expect(model.SelectCategory(static_cast<int>(Category::Appearance)) &&
 		model.FieldValue(0) == "White" && model.FieldValue(1) == "On",
 		"choice or boolean setting values were not formatted for display");
@@ -3845,6 +3887,10 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	model.SelectRow(1);
 	Expect(model.AdjustSelected(-1) && !model.Draft().spacebarNavigatesImages,
 		"behavior boolean did not toggle through directional adjustment");
+	model.SelectRow(2);
+	Expect(model.ActivateSelected() && model.Draft().folderWrapAround &&
+		model.AdjustSelected(-1) && !model.Draft().folderWrapAround,
+		"folder-wrap setting did not toggle in both advanced-configuration controls");
 
 	model.SelectCategory(static_cast<int>(Category::Appearance));
 	model.SelectRow(0);

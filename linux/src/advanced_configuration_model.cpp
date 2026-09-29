@@ -48,6 +48,7 @@ const std::vector<AdvancedConfigurationField>& FieldsFor(int category) {
 	static const std::vector<AdvancedConfigurationField> behavior = {
 		BooleanField("manga_mode_inverts_left_right", "Manga mode reverses Left/Right"),
 		BooleanField("spacebar_navigates_images", "Space navigates images"),
+		BooleanField("folder_wrap_around", "Wrap around folder ends"),
 	};
 	static const std::vector<AdvancedConfigurationField> appearance = {
 		ChoiceField("transparency_pattern", "Transparent image background",
@@ -155,6 +156,7 @@ bool IsKey(const AdvancedConfigurationField& field, const char* key) {
 bool GetBooleanValue(const ViewerSettings& settings, const char* key) {
 	if (std::string(key) == "manga_mode_inverts_left_right") return settings.mangaModeInvertsLeftRight;
 	if (std::string(key) == "spacebar_navigates_images") return settings.spacebarNavigatesImages;
+	if (std::string(key) == "folder_wrap_around") return settings.folderWrapAround;
 	if (std::string(key) == "show_histogram") return settings.showHistogram;
 	if (std::string(key) == "default_local_density") {
 		return settings.defaultImageProcessing.localDensityEnabled;
@@ -165,6 +167,7 @@ bool GetBooleanValue(const ViewerSettings& settings, const char* key) {
 void SetBooleanValue(ViewerSettings& settings, const char* key, bool value) {
 	if (std::string(key) == "manga_mode_inverts_left_right") settings.mangaModeInvertsLeftRight = value;
 	else if (std::string(key) == "spacebar_navigates_images") settings.spacebarNavigatesImages = value;
+	else if (std::string(key) == "folder_wrap_around") settings.folderWrapAround = value;
 	else if (std::string(key) == "show_histogram") settings.showHistogram = value;
 	else if (std::string(key) == "default_local_density") {
 		settings.defaultImageProcessing.localDensityEnabled = value;

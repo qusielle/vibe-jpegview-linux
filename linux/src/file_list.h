@@ -112,6 +112,7 @@ public:
 	SortMode GetSorting() const { return sortMode_; }
 	bool IsSortedAscending() const { return sortAscending_; }
 	bool WrapAroundFolder() const { return wrapAroundFolder_; }
+	void SetWrapAroundFolder(bool enabled) { wrapAroundFolder_ = enabled; }
 
 	// Returns true when a multiple-input list needs an off-thread directory scan
 	// before it can take on the selected image's folder scope.
