@@ -645,6 +645,27 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 		archiveSizes.front().size == fs::file_size(image),
 		"background file-size lookup used the ZIP container size instead of the uncompressed member size");
 
+	const fs::path comicArchive = temporary.path() / "comic.CBZ";
+	Expect(fs::copy_file(archive, comicArchive), "could not copy ZIP fixture as CBZ");
+	const fs::path comicImage = comicArchive / "01-root.png";
+	Expect(jpegview_linux::IsArchiveContainerName(comicArchive) &&
+		jpegview_linux::IsArchiveContainerFile(comicArchive) &&
+		jpegview_linux::IsArchiveMemberLocation(comicImage) &&
+		jpegview_linux::ArchiveFormatName(comicImage) == "CBZ",
+		"CBZ extension was not recognized or given its comic-archive label");
+	entries.clear();
+	Expect(jpegview_linux::ListArchiveDirectory(comicArchive, entries, error) &&
+		std::any_of(entries.begin(), entries.end(), [&](const auto& entry) {
+			return !entry.directory && entry.path == comicImage;
+		}), "CBZ did not list its ZIP image members: " + error);
+	FileList comicFiles({comicArchive.string()}, FileList::SortMode::FileName, true, false);
+	Expect(comicFiles.Size() == 1 && comicFiles.Current() == comicImage &&
+		comicFiles.IsArchiveMember(0), "opening a CBZ did not expose its image as a virtual file");
+	DecodedImage comicDecoded;
+	Expect(jpegview_linux::DecodeImage(comicImage, comicDecoded, error) &&
+		comicDecoded.frames.size() == 1 && comicDecoded.frames.front().bgra == pixels,
+		"CBZ member decoding did not reuse the ZIP reader: " + error);
+
 	const fs::path malformed = temporary.path() / "broken.zip";
 	WriteText(malformed, "not a ZIP archive");
 	entries.clear();

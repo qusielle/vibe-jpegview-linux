@@ -18,8 +18,9 @@ they support.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
    PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, and LibRaw camera formats. Embedded
-   color profiles are transformed through LCMS2. Supported images inside ZIP, TAR, gzip-compressed
-   TAR, 7z, and RAR containers can also be browsed and viewed. The save dialog writes JPEG, PNG, BMP, TGA,
+   color profiles are transformed through LCMS2. Supported images inside ZIP/CBZ, TAR,
+   gzip-compressed TAR, 7z, and RAR containers can also be browsed and viewed. CBZ comic ZIP archives
+   reuse ZIP browsing. The save dialog writes JPEG, PNG, BMP, TGA,
    WebP, GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images. Codec detection and fixtures
    were made portable across Ubuntu 20.04 and newer distributions, including giflib installations
    without pkg-config metadata and HEIF encoders with different supported profiles. Transparent PNG
@@ -166,11 +167,12 @@ they support.
    modes; those modes then carry through normal image navigation. New paths opened from Browse or
    dropped onto the viewer inherit the global display-mode defaults. In Recents, Delete or the
    **Remove** button removes the selected row; Ctrl+Z restores removals in reverse order while the
-   dialog remains open. Closing the dialog clears its undo history. ZIP, TAR,
-   `.tar.gz`, `.tgz`, `.7z`, and `.rar` files appear as gold `[ZIP]`, `[TAR]`, `[TGZ]`, `[.7Z]`, or `[RAR]`
-   directory rows in Browse. Entering one lists supported images and subfolders. Opening an archive directly
-   starts at its root image list. Archive-member rows use the same gold cue in Browse, Recents, and the thumbnail
-   strip, and Recents reuses the normal background preview path. ZIP browsing reads its central
+   dialog remains open. Closing the dialog clears its undo history. ZIP, CBZ, TAR,
+   `.tar.gz`, `.tgz`, `.7z`, and `.rar` files appear as gold `[ZIP]`, `[CBZ]`, `[TAR]`, `[TGZ]`,
+   `[.7Z]`, or `[RAR]` directory rows in Browse. Entering one lists supported images and subfolders.
+   Opening an archive directly starts at its root image list. Archive-member rows use the same gold
+   cue in Browse, Recents, and the thumbnail strip, and Recents reuses the normal background preview
+   path. ZIP browsing reads its central
    directory; TAR browsing indexes headers without extracting or retaining image payloads. Unencrypted
    7z browsing uses libarchive's seekable reader and likewise retains only member metadata. Encrypted
    7z data uses a private in-process 7-Zip 24.09 `Format7zF` plugin; release builds package that plugin
@@ -326,7 +328,7 @@ they support.
 
 ## Build
 
-The runtime framework dependencies are SDL2, Pango/FreeType, libzip for ZIP browsing, and libarchive
+The runtime framework dependencies are SDL2, Pango/FreeType, libzip for ZIP/CBZ browsing, and libarchive
 for TAR/TGZ and ordinary unencrypted 7z/RAR browsing. Encrypted 7z and RAR use separate optional
 private plugins; release Docker images include both.
 SDL2 development headers are not required because the frontend uses the small
@@ -491,8 +493,10 @@ make -C linux SDL2_LIBS='-L/path/to/lib -lSDL2'
 
 Supported input formats are JPEG, PNG/APNG (including animation), GIF (including animation), BMP, TGA, PSD, PNM-family files,
 QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
-formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, TAR, `.tar.gz`, `.tgz`, `.7z`, and `.rar`
-archives can contain any supported image format above; they are browsed read-only as virtual folders.
+formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, CBZ, TAR, `.tar.gz`, `.tgz`, `.7z`, and
+`.rar` archives can contain any supported image format above; they are browsed read-only as virtual
+folders. CBZ uses the ZIP reader and adds no comic-specific page bookmarks or archive-level
+reading-position memory.
 Unencrypted RAR input stays on libarchive. When the optional private reader is present, encrypted
 RAR4/RAR5 data and header encryption use the Rust `rars` backend. Data-encrypted member names remain
 visible; header-encrypted names stay hidden until unlock. Wrong and correct passwords share the
@@ -628,14 +632,14 @@ downsampling, resize- and crop-size-dialog editing/validation, scrollbar geometr
 mapping, content-sized overlay layout, compact/advanced menu filtering and
 keyboard selection, thumbnail layout/resampling, shared cache accounting, reduced JPEG display
 decoding, and nearest-display upload priority, desktop-font resolution, decoder and writer round
-trips across static and animated formats, ZIP/TAR/TGZ/7z/RAR4/RAR5 listing and member decoding, path-traversal
+trips across static and animated formats, ZIP/CBZ/TAR/TGZ/7z/RAR4/RAR5 listing and member decoding, path-traversal
 rejection, nested archive navigation and archive-backed recent previews, encrypted ZIP, 7z, and RAR
 member listing, header-encrypted hidden-name behavior, zero-length members, wrong/correct password
 validation, in-memory credential reuse/clearing, relocking and locked previews, bounded extraction,
 output-callback failure, and cancellation,
 cancellable archive indexing, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
-open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/TGZ/7z/RAR browsing and
+open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/CBZ/TGZ/7z/RAR browsing and
 recent reopening, encrypted-ZIP prompt/retry/session reuse and clipboard paste shortcuts, and
 header-encrypted 7z password entry/cancel/reselect plus RAR password retry when optional plugins are
 bundled; focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and

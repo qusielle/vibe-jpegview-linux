@@ -10,8 +10,6 @@ are identified by name.
 
 ## Archive input candidates
 
-- **CBZ comic archives:** browse images in comic ZIP files. Comic-page bookmarks and remembered
-  reading positions are explicitly out of scope for this candidate.
 - **CB7 comic archives:** browse images in comic 7z files. Comic-page bookmarks and remembered
   reading positions are explicitly out of scope for this candidate.
 

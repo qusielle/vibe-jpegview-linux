@@ -95,6 +95,8 @@ if command -v zip >/dev/null 2>&1; then
 		zip -q "$temporary/images/06-archive.zip" inside-archive.ppm
 	)
 	touch -t 201801010000.00 "$temporary/images/06-archive.zip"
+	cp "$temporary/images/06-archive.zip" "$temporary/images/14-comic.cbz"
+	touch -t 201801010000.00 "$temporary/images/14-comic.cbz"
 fi
 if command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
 	mkdir -p "$temporary/tar-source"
@@ -1020,6 +1022,20 @@ if [ -f "$temporary/images/06-archive.zip" ]; then
 	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
 	DISPLAY=":$display_number" xdotool key Return
 	assert_title_prefix "03-blue.ppm" "open dialog could not leave the archive and return to a filesystem image"
+fi
+
+if [ -f "$temporary/images/14-comic.cbz" ]; then
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool type --delay 20 '14-comic.cbz'
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.2
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "inside-archive.ppm" "open dialog did not browse and open a CBZ image member"
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool key BackSpace
+	DISPLAY=":$display_number" xdotool type --delay 20 '03-BLUE'
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "03-blue.ppm" "open dialog could not leave a CBZ and return to a filesystem image"
 fi
 
 if [ -f "$temporary/images/08-archive.tar.gz" ]; then

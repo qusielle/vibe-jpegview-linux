@@ -24,7 +24,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   spread geometry, page-step navigation, and configurable physical-key direction in manga reading
   order. It owns no image pixels, filesystem work, or SDL resources.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
-  and on-demand member access. ZIP catalogs use central-directory metadata; TAR/TGZ catalogs stream
+  and on-demand member access. ZIP and CBZ containers share the central-directory reader and member
+  access path; CBZ retains its own display label. TAR/TGZ catalogs stream
   header metadata; unencrypted 7z uses libarchive's seekable reader; encrypted 7z uses the focused
   `seven_zip_backend` adapter described below. Ordinary unencrypted RAR catalogs and extraction
   remain on libarchive; when present, the optional `rar_backend` probes RAR metadata and handles
@@ -170,8 +171,8 @@ settings with existing menu commands are intentionally outside this editor.
 
 Archive members use the existing filesystem-shaped path contract (`container.ext/member.ext`) so
 navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The
-browser labels and color-marks ZIP/TAR/TGZ/7z/RAR containers and archive images without retaining image
-payloads; Recents uses the same cancellable preview worker. ZIP catalogs retain central-directory
+browser labels and color-marks ZIP/CBZ/TAR/TGZ/7z/RAR containers and archive images without retaining
+image payloads; Recents uses the same cancellable preview worker. ZIP catalogs retain central-directory
 metadata only. TAR/TGZ catalogs stream member headers and skip payloads. Unencrypted 7z catalogs use
 seekable libarchive input; encrypted 7z catalogs use the optional SDK adapter and retain member
 ordinal, normalized name, size, modification time, and per-entry encryption state. Header encryption

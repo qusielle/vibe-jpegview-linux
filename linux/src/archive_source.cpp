@@ -108,29 +108,31 @@ bool ShouldContinue(const std::function<bool()>& shouldContinue) {
 
 ArchiveFormat FormatForContainerName(const fs::path& path) {
 	const std::string name = Lower(path.filename().string());
+	const std::string extension = Lower(path.extension().string());
 	if (name.size() >= 7 && name.compare(name.size() - 7, 7, ".tar.gz") == 0) {
 		return ArchiveFormat::Tgz;
 	}
 	if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".tgz") == 0) {
 		return ArchiveFormat::Tgz;
 	}
-	if (Lower(path.extension().string()) == ".7z") {
+	if (extension == ".7z" || extension == ".cb7") {
 		return ArchiveFormat::SevenZip;
 	}
-	if (Lower(path.extension().string()) == ".rar") {
+	if (extension == ".rar") {
 		return ArchiveFormat::Rar;
 	}
-	if (Lower(path.extension().string()) == ".zip") {
+	if (extension == ".zip" || extension == ".cbz") {
 		return ArchiveFormat::Zip;
 	}
-	if (Lower(path.extension().string()) == ".tar") return ArchiveFormat::Tar;
+	if (extension == ".tar") return ArchiveFormat::Tar;
 	return ArchiveFormat::Zip;
 }
 
 bool HasArchiveExtension(const fs::path& path) {
 	const std::string name = Lower(path.filename().string());
 	const std::string extension = Lower(path.extension().string());
-	return extension == ".zip" || extension == ".tar" || extension == ".7z" ||
+	return extension == ".zip" || extension == ".cbz" || extension == ".tar" ||
+		extension == ".7z" ||
 		extension == ".rar" ||
 		(name.size() >= 7 && name.compare(name.size() - 7, 7, ".tar.gz") == 0) ||
 		(name.size() >= 4 && name.compare(name.size() - 4, 4, ".tgz") == 0);
@@ -1425,7 +1427,8 @@ std::string ArchiveFormatName(const fs::path& path) {
 	ArchiveLocation location;
 	if (!ParseArchiveLocation(path, location)) return {};
 	switch (location.format) {
-	case ArchiveFormat::Zip: return "ZIP";
+	case ArchiveFormat::Zip:
+		return Lower(location.archive.extension().string()) == ".cbz" ? "CBZ" : "ZIP";
 	case ArchiveFormat::Tar: return "TAR";
 	case ArchiveFormat::Tgz: return "TGZ";
 	case ArchiveFormat::SevenZip: return ".7Z";
