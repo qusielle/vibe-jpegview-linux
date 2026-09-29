@@ -59,6 +59,7 @@ struct ContextMenuState {
 	bool doublePageModeEnabled = false;
 	bool mangaReadingOrderEnabled = false;
 	bool selectionModeEnabled = false;
+	bool spacebarNavigatesImages = false;
 	FileList::NavigationMode navigationMode = FileList::NavigationMode::LoopDirectory;
 	FileList::SortMode sortMode = FileList::SortMode::FileName;
 	bool sortAscending = true;

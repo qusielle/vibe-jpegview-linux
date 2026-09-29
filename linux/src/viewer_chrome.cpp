@@ -302,7 +302,8 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 
 std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
 	FileList::SortMode sortMode, bool selectionModeEnabled,
-	bool doublePageModeEnabled, bool mangaReadingOrderEnabled) {
+	bool doublePageModeEnabled, bool mangaReadingOrderEnabled,
+	bool spacebarNavigatesImages) {
 	switch (command) {
 	case IDM_FIRST: return "Show first image in folder (Home)";
 	case IDM_PREV: return mangaReadingOrderEnabled ?
@@ -311,6 +312,9 @@ std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
 		"Show next image (Left)" : "Show next image (Right)";
 	case IDM_LAST: return "Show last image in folder (End)";
 	case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
+		if (spacebarNavigatesImages) {
+			return fitToWindow ? "Actual size of image" : "Fit image to screen";
+		}
 		return fitToWindow ? "Actual size of image (Space)" : "Fit image to screen (Space)";
 	case IDM_FULL_SCREEN_MODE:
 		return fullscreen ? "Window mode (F11)" : "Full screen mode (F11)";

@@ -674,8 +674,10 @@ When the image extends beyond the viewport, hover the upper-right corner to show
 click or drag the miniature image to reposition the view. **Show zoom navigator** in the context menu
 toggles it, and that preference is saved between runs.
 Up/Down rotate 90 degrees. Space toggles fit/actual by default; set `spacebar_navigates_images=1` in
-`settings.conf` to make Space navigate next and Shift+Space navigate previous. Return/0 fits,
-Ctrl+Return fills with crop,
+`settings.conf` to make Space navigate next and Shift+Space navigate previous. In that mode, the
+navigation-panel fit/actual hint drops the Space label, and the context menu omits Space from the
+Actual size item.
+Return/0 fits, Ctrl+Return fills with crop,
 `+`/`-` zoom, and F11/F toggles fullscreen; F12 spans screens, Ctrl+F11 fits the window to the
 image, Shift+F11 hides the title bar, and Shift+F12 toggles always-on-top. `1`–`9` start a
 slideshow at that interval. At actual size, Shift+Arrow pans the image in 48-pixel steps. F2

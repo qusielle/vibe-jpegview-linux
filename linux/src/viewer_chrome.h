@@ -85,7 +85,8 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 	bool mangaReadingOrderEnabled = false);
 std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
 	FileList::SortMode sortMode, bool selectionModeEnabled = false,
-	bool doublePageModeEnabled = false, bool mangaReadingOrderEnabled = false);
+	bool doublePageModeEnabled = false, bool mangaReadingOrderEnabled = false,
+	bool spacebarNavigatesImages = false);
 OverlayPaintPlan NavigationTooltipPaint(const UiRect& anchor, std::string label,
 	int labelWidth, int textLineHeight, int windowWidth, int windowHeight);
 bool Contains(const UiRect& rect, int x, int y);

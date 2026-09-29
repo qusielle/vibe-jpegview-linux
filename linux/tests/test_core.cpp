@@ -5370,6 +5370,8 @@ void TestContextMenuCatalogAndState() {
 	Expect(findCommand(compact, IDM_OPEN) != nullptr && findCommand(compact, IDM_NEXT) != nullptr &&
 		findCommand(compact, IDM_ZOOM_100) != nullptr && findCommand(compact, IDM_EXIT) != nullptr,
 		"compact context menu lost a primary command");
+	Expect(findCommand(compact, IDM_ZOOM_100)->shortcut == "Space",
+		"context menu omitted the default actual-size Space shortcut");
 	Expect(findCommand(compact, IDM_HELP) != nullptr && findCommand(compact, IDM_HELP)->enabled &&
 		findCommand(compact, IDM_HELP)->shortcut == "F1",
 		"compact context menu omitted the built-in help command");
@@ -5424,6 +5426,7 @@ void TestContextMenuCatalogAndState() {
 	state.doublePageModeEnabled = true;
 	state.mangaReadingOrderEnabled = true;
 	state.losslessJpegAvailable = true;
+	state.spacebarNavigatesImages = true;
 	state.autoCorrectionEnabled = true;
 	state.pictureLevelsAvailable = true;
 	state.selectionModeEnabled = true;
@@ -5505,6 +5508,7 @@ void TestContextMenuCatalogAndState() {
 		findCommand(editableDatabase, IDM_CLEAR_PARAM_DB)->enabled,
 		"parameter database actions stayed disabled after keep-between-images was turned off");
 	Expect(findCommand(advanced, IDM_ZOOM_100)->checked &&
+		findCommand(advanced, IDM_ZOOM_100)->shortcut.empty() &&
 		findCommand(advanced, IDM_FULL_SCREEN_MODE)->checked &&
 		findCommand(advanced, IDM_HIDE_TITLE_BAR)->checked &&
 		findCommand(advanced, IDM_ALWAYS_ON_TOP)->checked,
@@ -5863,6 +5867,14 @@ void TestViewerChromePaintPlans() {
 
 	Expect(jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, false,
 		FileList::SortMode::FileName) == "Full screen mode (F11)" &&
+		jpegview_linux::NavigationTooltip(IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, true, false,
+			FileList::SortMode::FileName) == "Actual size of image (Space)" &&
+		jpegview_linux::NavigationTooltip(IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, false, false,
+			FileList::SortMode::FileName) == "Fit image to screen (Space)" &&
+		jpegview_linux::NavigationTooltip(IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, false, false,
+			FileList::SortMode::FileName, false, false, false, true) == "Fit image to screen" &&
+		jpegview_linux::NavigationTooltip(IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, true, false,
+			FileList::SortMode::FileName, false, false, false, true) == "Actual size of image" &&
 		jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, true,
 			FileList::SortMode::FileName) == "Window mode (F11)" &&
 		jpegview_linux::NavigationTooltip(IDM_NEXT, true, false,

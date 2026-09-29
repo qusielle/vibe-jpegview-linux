@@ -4716,6 +4716,7 @@ private:
 		state.doublePageModeEnabled = doublePageModeEnabled_;
 		state.mangaReadingOrderEnabled = mangaReadingOrderEnabled_;
 		state.selectionModeEnabled = selectionModeEnabled_;
+		state.spacebarNavigatesImages = spacebarNavigatesImages_;
 		state.navigationMode = fileList_.GetNavigationMode();
 		state.sortMode = fileList_.GetSorting();
 		state.sortAscending = fileList_.IsSortedAscending();
@@ -7872,7 +7873,7 @@ private:
 		if (hoveredButton == nullptr) return;
 		const std::string text = jpegview_linux::NavigationTooltip(hoveredButton->command,
 			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting(), selectionModeEnabled_,
-			doublePageModeEnabled_, mangaReadingOrderEnabled_);
+			doublePageModeEnabled_, mangaReadingOrderEnabled_, spacebarNavigatesImages_);
 		if (text.empty()) return;
 		int windowWidth = 0;
 		int windowHeight = 0;
