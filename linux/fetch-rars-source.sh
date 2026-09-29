@@ -21,12 +21,17 @@ if [ -e "$SOURCE_ARCHIVE" ] || [ -e "$LICENSE_FILE" ]; then
 fi
 
 DESTINATION_PARENT=$(dirname -- "$DESTINATION")
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$DESTINATION_PARENT"
 TEMP_DIR=$(mktemp -d "$DESTINATION_PARENT/.rars-source.XXXXXX")
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
 git init -q "$TEMP_DIR/repository"
 git -C "$TEMP_DIR/repository" remote add origin "$RARS_URL"
-git -C "$TEMP_DIR/repository" fetch --quiet --depth 1 origin "$RARS_REV"
+JPEGVIEW_RETRY_ATTEMPTS=8 \
+JPEGVIEW_RETRY_INITIAL_DELAY_SECONDS=2 \
+JPEGVIEW_RETRY_MAX_DELAY_SECONDS=15 \
+	sh "$SCRIPT_DIR/retry-command.sh" -- \
+	git -C "$TEMP_DIR/repository" fetch --quiet --depth 1 origin "$RARS_REV"
 git -C "$TEMP_DIR/repository" checkout --quiet --detach FETCH_HEAD
 ACTUAL_REV=$(git -C "$TEMP_DIR/repository" rev-parse HEAD)
 if [ "$ACTUAL_REV" != "$RARS_REV" ] ||

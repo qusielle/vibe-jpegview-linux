@@ -22,7 +22,7 @@ fi
 mkdir -p "$DESTINATION"
 TEMP_DIR=$(mktemp -d "$DESTINATION/.install.XXXXXX")
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
-curl --fail --location --retry 3 \
+curl --fail --location --retry 8 --retry-max-time 90 \
 	"https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init" \
 	--output "$TEMP_DIR/rustup-init"
 printf '%s  %s\n' "$RUSTUP_SHA256" "$TEMP_DIR/rustup-init" | sha256sum --check

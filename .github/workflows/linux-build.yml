@@ -34,9 +34,14 @@ jobs:
           app_version="$(sh ./linux/version.sh)"
           appimage_name="JPEGView-${app_version}-x86_64.AppImage"
           binary_bundle_name="jpegview-linux-${app_version}-ubuntu${UBUNTU_VERSION}-x86_64-with-archive-plugins.tar.gz"
+          docker_build_attempts=3
+          if [ "$UBUNTU_VERSION" = "20" ]; then
+            docker_build_attempts=10
+          fi
           mkdir -p "$output_dir" "$artifact_dir"
 
-          sh ./linux/retry-command.sh -- docker build \
+          JPEGVIEW_RETRY_ATTEMPTS="$docker_build_attempts" \
+            sh ./linux/retry-command.sh -- docker build \
             --file "linux/Dockerfile.ubuntu${UBUNTU_VERSION}" \
             --tag "$image" \
             .

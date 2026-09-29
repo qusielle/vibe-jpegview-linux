@@ -367,7 +367,9 @@ retain the documented unavailable fallbacks. The host only needs Docker; build o
 
 ```sh
 mkdir -p out
-DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build:ubuntu20 .
+DOCKER_BUILDKIT=1 JPEGVIEW_RETRY_ATTEMPTS=10 \
+  sh ./linux/retry-command.sh -- docker build \
+    -f linux/Dockerfile.ubuntu20 -t jpegview-linux-build:ubuntu20 .
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu22 -t jpegview-linux-build:ubuntu22 .
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu24 -t jpegview-linux-build:ubuntu24 .
 DOCKER_BUILDKIT=1 docker build -f linux/Dockerfile.ubuntu26 -t jpegview-linux-build:ubuntu26 .
@@ -421,9 +423,12 @@ These create `jpegview-linux_${APP_VERSION}_ubuntu24_amd64.deb` and
 its shared-library dependencies are resolved from the corresponding Ubuntu repositories.
 
 GitHub Actions builds and tests all four AppImage Dockerfiles on branch pushes and pull requests.
-Docker image builds get up to three total attempts, with 15- and 30-second delays between attempts.
-This covers transient registry or source-host failures while still failing the job if the build
-remains unsuccessful.
+Ubuntu 20 Docker image builds get up to ten total attempts; the other Ubuntu image builds retain
+three. Retry delays start at 15 seconds, double, and cap at 60 seconds. Inside the images, APT
+retries repository requests five times and its source downloads allow up to eight retries. Shared
+7-Zip/Rust downloads allow eight retries, and the pinned RAR source fetch also retries. These layers
+address transient 503s without rerunning successful BuildKit stages; a persistent failure still
+fails the job.
 Each successful Ubuntu build job uploads its x86_64 AppImage, native executable, and a `SHA256SUMS`
 file as a downloadable workflow artifact named `jpegview-linux-ubuntu20-x86_64`,
 `jpegview-linux-ubuntu22-x86_64`, `jpegview-linux-ubuntu24-x86_64`, or

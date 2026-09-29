@@ -189,6 +189,13 @@ bundles use the same `lib/jpegview-linux/` layout next to the executable and inc
 and sources. Ordinary local builds select explicit unavailable-backend fallbacks unless
 `SEVENZIP_SOURCE_ROOT` and/or `RAR_BACKEND_ROOT` are set.
 
+Docker image downloads tolerate transient repository/CDN failures at each layer. Ubuntu 20 APT has
+five acquisition retries and its source downloads allow eight retries; the shared 7-Zip/Rust
+downloads also allow eight retries, and the pinned RAR Git fetch uses the retry-command helper.
+GitHub Actions gives Ubuntu 20 image builds ten outer attempts (other Ubuntu images keep three),
+with exponential delays capped at 60 seconds. BuildKit can reuse completed stages between those
+attempts; persistent failures still fail the job.
+
 The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct
 command-line archive startup still builds the initial `FileList` through the synchronous source API.
 Consequently, a cold TGZ passed directly at startup can wait for its sequential catalog scan and a 7z

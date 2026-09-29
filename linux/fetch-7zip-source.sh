@@ -29,7 +29,7 @@ mkdir -p "$DESTINATION_PARENT"
 TEMP_DIR=$(mktemp -d "$DESTINATION_PARENT/.7zip-$VERSION.XXXXXX")
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
 
-curl --fail --location --retry 3 "$SOURCE_URL" --output "$TEMP_DIR/source.tar.gz"
+curl --fail --location --retry 8 --retry-max-time 90 "$SOURCE_URL" --output "$TEMP_DIR/source.tar.gz"
 printf '%s  %s\n' "$SOURCE_SHA256" "$TEMP_DIR/source.tar.gz" | sha256sum --check
 tar -xzf "$TEMP_DIR/source.tar.gz" -C "$TEMP_DIR"
 SOURCE_ROOT="$TEMP_DIR/7zip-$VERSION"
