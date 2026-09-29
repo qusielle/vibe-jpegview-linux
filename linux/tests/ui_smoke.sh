@@ -1496,14 +1496,26 @@ if [ "$visual_assertions" -eq 1 ]; then
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 20
 	DISPLAY=":$display_number" xdotool click 3
 	sleep 0.2
-	DISPLAY=":$display_number" xdotool key Down
-	DISPLAY=":$display_number" xdotool key Down
-	DISPLAY=":$display_number" xdotool key Return
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 700 31
+	DISPLAY=":$display_number" xdotool click 1
 	sleep 0.2
 	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-advanced.png"
 	advanced_difference=$(compare -metric AE "$temporary/context-compact.png" "$temporary/context-advanced.png" null: 2>&1 || true)
 	if [ "$advanced_difference" = "0" ]; then
 		echo "UI smoke test: Advanced Options did not expand the context menu" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key Escape
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 20
+	DISPLAY=":$display_number" xdotool keydown Shift_L
+	DISPLAY=":$display_number" xdotool click 3
+	DISPLAY=":$display_number" xdotool keyup Shift_L
+	sleep 0.2
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-shift-right.png"
+	shift_right_difference=$(compare -metric AE "$temporary/context-advanced.png" \
+		"$temporary/context-shift-right.png" null: 2>&1 || true)
+	if [ "$shift_right_difference" != "0" ]; then
+		echo "UI smoke test: Shift+right-click did not open the full context menu immediately ($shift_right_difference)" >&2
 		exit 1
 	fi
 	DISPLAY=":$display_number" xdotool key Escape

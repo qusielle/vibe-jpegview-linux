@@ -4652,14 +4652,14 @@ private:
 		menuSelected_ = ContextMenuItemAt(x, y);
 	}
 
-	void OpenContextMenu() {
+	void OpenContextMenu(bool advancedOptions = false) {
 		// A first right-click can arrive before SDL has delivered any motion
 		// event. Read the current pointer state so both mouse and keyboard
 		// invocation place the menu at the actual pointer position.
 		int x = 0;
 		int y = 0;
 		SDL_GetMouseState(&x, &y);
-		contextMenuAdvancedOptions_ = false;
+		contextMenuAdvancedOptions_ = advancedOptions;
 		contextMenuCropOnly_ = false;
 		contextMenuItems_ = ContextMenuItems(contextMenuAdvancedOptions_);
 		contextMenuX_ = x;
@@ -7668,7 +7668,7 @@ private:
 			DrawText(ClipText(lines[index], width - 36), panel.x + 18,
 				panel.y + 48 + static_cast<int>(index) * 27, kUiTextScale, 220, 225, 235);
 		}
-		DrawText("Right-click or Menu key: context menu     F1 / Esc / click: close help",
+		DrawText("Right-click: compact; Shift+right: full; Menu: compact; Esc/F1 closes",
 			panel.x + 18, panel.y + height - 32, kUiTextScale, 180, 190, 205);
 	}
 
@@ -8114,7 +8114,10 @@ private:
 					imageCenterX_ = event.button.x;
 					imageCenterY_ = event.button.y;
 				} else if (event.button.button == SDL_BUTTON_RIGHT) {
-					if (cropSelection_.HasSelection()) OpenCropContextMenu();
+					const bool shiftHeld =
+						(static_cast<Uint16>(SDL_GetModState()) & 0x0003u) != 0;
+					if (shiftHeld) OpenContextMenu(true);
+					else if (cropSelection_.HasSelection()) OpenCropContextMenu();
 					else OpenContextMenu();
 				}
 				break;

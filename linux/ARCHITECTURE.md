@@ -131,6 +131,8 @@ previews; opaque textures retain the non-blended path. It should translate SDL e
 on the modules above rather than duplicate their state. Context-menu pointer hit testing also lives
 here: the Right key's release activates the row under the pointer, or moves to the next column when
 released outside the menu, while key-held pointer movement remains available for click-like selection.
+Right-click opens the compact menu, while Shift+right-click selects the expanded menu at invocation;
+the mouse adapter reads SDL's modifier state before constructing the menu.
 
 The Advanced configuration modal is a thin adapter over `AdvancedConfigurationModel`: its category
 tabs, visible row count, hit testing, text input, and painting stay in Viewer, while the model owns

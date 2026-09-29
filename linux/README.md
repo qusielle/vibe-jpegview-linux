@@ -701,7 +701,8 @@ switches between those two modes. By default the panel is hidden until the point
 lower edge of the window; the context menu can disable this automatic reveal mode. Ctrl+N
 disables the panel entirely, and the panel is temporarily suppressed while a modal menu or file
 browser is open. F1 opens the Linux quick-help panel. Right-click or the keyboard Context Menu key
-opens the compact core JPEGView context menu; Show Advanced Options temporarily restores Open image
+opens the compact core JPEGView context menu; Shift+right-click opens its full expanded form
+immediately. Show Advanced Options temporarily restores Open image
 with, Print, batch rename/copy, date and wallpaper commands, extended navigation and sorting, image
 transforms and correction, extra zoom and window controls, slideshow controls, and settings
 administration, including the user-local default-viewer registration and disabled Windows-only
