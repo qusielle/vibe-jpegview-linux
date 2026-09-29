@@ -85,6 +85,8 @@ write_solid_ppm "$temporary/double-page-fixtures/00-cover.ppm" 35 75 220
 write_solid_ppm "$temporary/double-page-fixtures/01-first.ppm" 30 220 60
 write_solid_ppm "$temporary/double-page-fixtures/02-second.ppm" 220 40 30
 write_solid_ppm "$temporary/double-page-fixtures/03-last.ppm" 225 200 25
+mkdir -p "$temporary/deletion-preview"
+write_solid_ppm "$temporary/deletion-preview/01-delete-preview.ppm" 255 0 255
 if command -v zip >/dev/null 2>&1; then
 	mkdir -p "$temporary/archive-source"
 	write_ppm "$temporary/archive-source/inside-archive.ppm" 48 96 144
@@ -474,6 +476,40 @@ assert_title_prefix "JPEGView" "no-argument startup did not open Browse"
 DISPLAY=":$display_number" xdotool type --delay 20 '01-RED'
 DISPLAY=":$display_number" xdotool key Return
 assert_title_prefix "01-red.ppm" "no-argument startup did not browse the current working directory"
+stop_viewer
+
+# Delete confirmation should identify the target visually without doing a new
+# image decode; Escape must leave the source file untouched.
+VIEWER_TEST_HOME="$temporary/delete-preview-home" \
+	VIEWER_TEST_CONFIG_HOME="$temporary/delete-preview-config" \
+	launch_viewer "$temporary/deletion-preview/01-delete-preview.ppm"
+assert_title_prefix "01-delete-preview.ppm" "delete-preview fixture did not open"
+DISPLAY=":$display_number" xdotool key Delete
+sleep 0.3
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/delete-confirmation.png"
+	viewer_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" |
+		sed -n 's/^WIDTH=//p')
+	viewer_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" |
+		sed -n 's/^HEIGHT=//p')
+	confirmation_width=$((viewer_width - 40))
+	if [ "$confirmation_width" -gt 760 ]; then confirmation_width=760; fi
+	if [ "$confirmation_width" -lt 360 ]; then confirmation_width=360; fi
+	preview_pixel_x=$(((viewer_width - confirmation_width) / 2 + 18 + 56))
+	preview_pixel_y=$(((viewer_height - 180) / 2 + 64 + 36))
+	preview_pixel=$(convert "$temporary/delete-confirmation.png" \
+		-format "%[hex:p{$preview_pixel_x,$preview_pixel_y}]" info: | tr 'A-F' 'a-f')
+	case "$preview_pixel" in
+		ff00ff*) ;;
+		*) echo "UI smoke test: delete confirmation did not show the cached image preview ($preview_pixel)" >&2; exit 1 ;;
+	esac
+fi
+DISPLAY=":$display_number" xdotool key Escape
+assert_title_prefix "01-delete-preview.ppm" "Escape did not cancel delete confirmation"
+if [ ! -f "$temporary/deletion-preview/01-delete-preview.ppm" ]; then
+	echo "UI smoke test: canceling delete confirmation removed the source image" >&2
+	exit 1
+fi
 stop_viewer
 
 if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then

@@ -155,6 +155,11 @@ released outside the menu, while key-held pointer movement remains available for
 Right-click opens the compact menu, while Shift+right-click selects the expanded menu at invocation;
 the mouse adapter reads SDL's modifier state before constructing the menu.
 
+The move-to-trash confirmation draws a small preview from the active-file thumbnail cache when
+available, otherwise from the already-rendered current-image texture. It creates no preview decode or
+pixel resize on the SDL event/render thread; if no matching renderer resource is ready yet, the dialog
+shows a no-preview placeholder alongside the filename.
+
 The Advanced configuration modal is a thin adapter over `AdvancedConfigurationModel`: its category
 tabs, visible row count, hit testing, text input, and painting stay in Viewer, while the model owns
 only the staged `ViewerSettings` values and their validated transitions. Apply writes the complete

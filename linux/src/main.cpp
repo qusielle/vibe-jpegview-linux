@@ -508,6 +508,13 @@ private:
 		bool hasTransparency = false;
 	};
 
+	struct ConfirmationPreview {
+		SDL_Texture* texture = nullptr;
+		int width = 0;
+		int height = 0;
+		bool hasTransparency = false;
+	};
+
 	struct DisplayTextureCacheEntry {
 		SDL_Texture* texture = nullptr;
 		std::size_t bytes = 0;
@@ -7869,8 +7876,11 @@ private:
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const bool moveToTrash = confirmationCommand_ == IDM_MOVE_TO_RECYCLE_BIN ||
+			confirmationCommand_ == IDM_MOVE_TO_RECYCLE_BIN_CONFIRM ||
+			confirmationCommand_ == IDM_MOVE_TO_RECYCLE_BIN_CONFIRM_PERMANENT_DELETE;
 		const int width = std::min(760, std::max(360, windowWidth - 40));
-		const int height = 136;
+		const int height = moveToTrash ? 180 : 136;
 		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 220);
 		SDL_RenderFillRect(renderer_, &panel);
@@ -7881,8 +7891,63 @@ private:
 			ClipText(InfoText(pendingParameterDbRestoreSource_), width - 36) :
 			(fileList_.Empty() ? std::string() :
 				ClipText(InfoText(fileList_.Current().filename().string()), width - 36));
-		DrawText(filename, panel.x + 18, panel.y + 68, kUiTextScale, 220, 220, 220);
-		DrawText("ENTER or SPACE: YES     ESC: CANCEL", panel.x + 18, panel.y + 104, kUiTextScale, 180, 180, 180);
+		if (moveToTrash) {
+			const ConfirmationPreview preview = AvailableConfirmationPreview();
+			const SDL_Rect previewBox{panel.x + 18, panel.y + 64, 112, 72};
+			SDL_SetRenderDrawColor(renderer_, 15, 15, 15, 255);
+			SDL_RenderFillRect(renderer_, &previewBox);
+			if (preview.texture != nullptr && preview.width > 0 && preview.height > 0) {
+				const jpegview_linux::ThumbnailSize size = jpegview_linux::FitThumbnailSize(
+					preview.width, preview.height, previewBox.w - 8, previewBox.h - 8);
+				const SDL_Rect imageRect{previewBox.x + (previewBox.w - size.width) / 2,
+					previewBox.y + (previewBox.h - size.height) / 2, size.width, size.height};
+				if (preview.hasTransparency) RenderTransparencyBackground(imageRect, previewBox);
+				SDL_RenderCopy(renderer_, preview.texture, nullptr, &imageRect);
+			} else {
+				DrawText("NO PREVIEW", previewBox.x + 10,
+					previewBox.y + (previewBox.h - TextLineHeight()) / 2, kUiTextScale,
+					150, 150, 150);
+			}
+			DrawRect(previewBox, 90, 90, 90);
+			DrawText(ClipText(filename, width - 166), panel.x + 142, panel.y + 70,
+				kUiTextScale, 235, 235, 235);
+			DrawText("Selected image", panel.x + 142, panel.y + 94,
+				kUiTextScale, 165, 165, 165);
+			DrawText("ENTER or SPACE: YES     ESC: CANCEL", panel.x + 18,
+				panel.y + height - 26, kUiTextScale, 180, 180, 180);
+		} else {
+			DrawText(filename, panel.x + 18, panel.y + 68, kUiTextScale, 220, 220, 220);
+			DrawText("ENTER or SPACE: YES     ESC: CANCEL", panel.x + 18,
+				panel.y + 104, kUiTextScale, 180, 180, 180);
+		}
+	}
+
+	ConfirmationPreview AvailableConfirmationPreview() {
+		if (fileList_.Empty()) return {};
+		const fs::path& current = fileList_.Current();
+		const fs::path normalizedCurrent = current.lexically_normal();
+		const auto thumbnail = thumbnailCache_.find(current.string());
+		if (thumbnail != thumbnailCache_.end() && thumbnail->second.texture != nullptr) {
+			return {thumbnail->second.texture, thumbnail->second.width,
+				thumbnail->second.height, thumbnail->second.hasTransparency};
+		}
+		if (currentDisplayRequest_.has_value() &&
+			currentDisplayRequest_->filename.lexically_normal() == normalizedCurrent) {
+			const auto display = displayTextureCache_.find(currentDisplayRequest_->key);
+			if (display != displayTextureCache_.end() && display->second.texture != nullptr) {
+				return {display->second.texture, display->second.width,
+					display->second.height, display->second.hasTransparency};
+			}
+		}
+		if (loadedFilePath_.lexically_normal() != normalizedCurrent) return {};
+		if (displayTexture_ != nullptr) {
+			return {displayTexture_, displayTextureWidth_, displayTextureHeight_,
+				displayImage_.hasTransparency};
+		}
+		if (texture_ != nullptr && image_.width > 0 && image_.height > 0) {
+			return {texture_, image_.width, image_.height, image_.hasTransparency};
+		}
+		return {};
 	}
 
 	void RenderAbout() {

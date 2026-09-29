@@ -216,8 +216,10 @@ they support.
    The recent-file
    list and view snapshots are stored separately from settings at
    `${XDG_STATE_HOME:-$HOME/.local/state}/jpegview-linux/recent-files.db` and are written on
-   normal shutdown. The browser also provides move-to-trash
-   confirmation, original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
+   normal shutdown. The browser also provides move-to-trash confirmation with the selected filename
+   and a small image preview from an existing thumbnail or current renderer texture. If neither is
+   ready, it shows a placeholder instead of decoding synchronously. Other actions include
+   original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
    modification-date updates from now or EXIF, wallpaper integration, folder exploration, and
    lossless JPEG rotation through `jpegtran`. The **Open image with** submenu discovers freedesktop
    `.desktop` applications
@@ -313,8 +315,9 @@ they support.
     persistence, Recents-tab filtering/preview/open interaction, transparency-pattern settings,
     advanced-configuration draft editing and Apply/Cancel behavior,
     alpha metadata, resize and batch models, application discovery, startup maximization, and
-    held-key behavior. Viewer logic was extracted into focused modules for image pixels, settings,
-    sorting, input commands, viewport, recent-file history, open-dialog state,
+    held-key behavior and the move-to-trash confirmation preview. Viewer logic was extracted into
+    focused modules for image pixels, settings, sorting, input commands, viewport, recent-file history,
+    open-dialog state,
     advanced-configuration state, overlays, thumbnails, fonts, image information, context menus,
     resize, batch operations, archive sources, and desktop applications.
     Shell and sanitizer targets supplement the regular suites. Docker builds use distro codec
@@ -700,7 +703,9 @@ preview alongside the list follows the focused file, or the first image in a foc
 the current listing order. Ctrl+R reloads, and
 Ctrl+N toggles the navigation panel. Ctrl+T toggles a thumbnail strip on the left. Ctrl+C copies the
 image at original size, Ctrl+Shift+C copies its path, Ctrl+V pastes a
-PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens the move-to-trash confirmation.
+PNG image, Ctrl+P sends the processed image to `lp`, and Delete opens a move-to-trash confirmation
+with the target's filename and an existing thumbnail/renderer preview (or a placeholder); Escape
+cancels without changing the source.
 Ctrl+M marks the current image; after navigating to another image, Ctrl+Left/Right alternates between
 the marked image and the image current when toggling began. The mark stays in memory only, is not
 saved between runs, and is replaced by the next Ctrl+M.

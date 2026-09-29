@@ -304,10 +304,6 @@ repeated as new candidates below.
 - **Quick rename of the current image:** add a one-file rename command and shortcut, initially
   selecting the basename but not the extension, with collision-safe behavior. This complements the
   existing batch rename/copy dialog; see [issue #280](https://github.com/sylikc/jpegview/issues/280).
-- **Deletion confirmation preview:** show a small thumbnail and filename in the move-to-trash
-  confirmation so the user can verify the target before confirming. Reuse an already available
-  thumbnail when possible rather than decoding synchronously; see
-  [issue #337](https://github.com/sylikc/jpegview/issues/337).
 - **Pixel color sampler:** show the color under the pointer in a small readout and optionally copy
   it in a common notation such as hexadecimal RGBA. Define whether sampling reflects the source or
   the currently processed display. See [issue #278](https://github.com/sylikc/jpegview/issues/278).
