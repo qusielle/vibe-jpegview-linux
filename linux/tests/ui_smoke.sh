@@ -228,6 +228,19 @@ assert_title_prefix() {
 	exit 1
 }
 
+assert_window_title_exact() {
+	expected_title=$1
+	failure_message=$2
+	current_title=''
+	for _ in $(seq 1 60); do
+		current_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+		if [ "$current_title" = "$expected_title" ]; then return 0; fi
+		sleep 0.05
+	done
+	echo "UI smoke test: $failure_message ($current_title)" >&2
+	exit 1
+}
+
 set_clipboard_text() {
 	printf '%s' "$1" | DISPLAY=":$display_number" xclip -selection clipboard -i
 	sleep 0.1
@@ -327,7 +340,7 @@ stop_viewer
 # A reopened file must recover its own two mode flags even when the current
 # global defaults differ; navigating from Recents exposes both settings.
 double_settings="$temporary/double-page-config/jpegview-linux/settings.conf"
-sed -i 's/^double_page_mode_enabled=.*/double_page_mode_enabled=0/; s/^manga_reading_order_enabled=.*/manga_reading_order_enabled=0/' \
+sed -i 's/^double_page_mode_enabled=.*/double_page_mode_enabled=0/; s/^manga_reading_order_enabled=.*/manga_reading_order_enabled=0/; s/^thumbnail_panel_visible=.*/thumbnail_panel_visible=0/' \
 	"$double_settings"
 VIEWER_TEST_HOME="$temporary/recents-home" \
 	VIEWER_TEST_CONFIG_HOME="$temporary/double-page-config" \
@@ -337,6 +350,24 @@ DISPLAY=":$display_number" xdotool key ctrl+Tab
 DISPLAY=":$display_number" xdotool key Down
 DISPLAY=":$display_number" xdotool key Return
 assert_title_prefix "01-first.ppm" "Recents did not reopen the double-page fixture image"
+if [ "$visual_assertions" -eq 1 ]; then
+	recent_spread_rendered=0
+	for _ in $(seq 1 40); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/recent-spread.png"
+		recent_spread_left=$(convert "$temporary/recent-spread.png" -format '%[hex:p{320,400}]' info:)
+		recent_spread_right=$(convert "$temporary/recent-spread.png" -format '%[hex:p{960,400}]' info:)
+		case "$recent_spread_left:$recent_spread_right" in
+			*DC281E*:*1EDC3C*) recent_spread_rendered=1; break ;;
+		esac
+		sleep 0.05
+	done
+	if [ "$recent_spread_rendered" -ne 1 ]; then
+		echo "UI smoke test: Recents did not restore the complete double-page spread before navigation ($recent_spread_left:$recent_spread_right)" >&2
+		exit 1
+	fi
+else
+	sleep 0.15
+fi
 DISPLAY=":$display_number" xdotool key Left
 assert_title_prefix "03-last.ppm" "Recents did not restore double-page and manga mode for the selected image"
 DISPLAY=":$display_number" xdotool key Right
@@ -391,7 +422,7 @@ if [ -z "$window_id" ]; then
 	exit 1
 fi
 DISPLAY=":$display_number" xdotool windowactivate "$window_id"
-assert_title_prefix "JPEGView" "empty-directory startup did not open the viewer's Browse dialog"
+assert_window_title_exact "JPEGView" "empty-directory startup did not finish scanning into the Browse dialog"
 DISPLAY=":$display_number" xdotool key BackSpace
 DISPLAY=":$display_number" xdotool type --delay 20 '00-empty-startup'
 DISPLAY=":$display_number" xdotool key Return
@@ -1195,11 +1226,17 @@ case "$sibling_next_title" in
 	*) echo "UI smoke test: Alt+Right did not open the next sibling folder's first image" >&2; exit 1 ;;
 esac
 DISPLAY=":$display_number" xdotool key alt+Left
-sleep 0.3
 sibling_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+for _ in $(seq 1 40); do
+	case "$sibling_previous_title" in
+		first.ppm*) break ;;
+	esac
+	sleep 0.05
+	sibling_previous_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+done
 case "$sibling_previous_title" in
 	first.ppm*) ;;
-	*) echo "UI smoke test: Alt+Left did not open the previous sibling folder's first image" >&2; exit 1 ;;
+	*) echo "UI smoke test: Alt+Left did not open the previous sibling folder's first image ($sibling_previous_title)" >&2; exit 1 ;;
 esac
 DISPLAY=":$display_number" xdotool key ctrl+o
 DISPLAY=":$display_number" xdotool key BackSpace

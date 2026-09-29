@@ -1,5 +1,6 @@
 #include "sdl_abi.h"
 #include "file_list.h"
+#include "file_list_scan_worker.h"
 #include "double_page_model.h"
 #include "archive_source.h"
 #include "exif_reader.h"
@@ -432,40 +433,20 @@ public:
 			jpegview_linux::LoadRecentFiles(recentFilesPath_, recentFiles_);
 
 		const bool startedWithoutInputs = startupInputs_.empty();
-		fs::path emptyStartupLocation;
-		if (startupInputs_.size() == 1) {
-			std::error_code inputError;
-			const fs::path startupInput(startupInputs_.front());
-			if (fs::is_directory(startupInput, inputError) && !inputError) {
-				emptyStartupLocation = AbsoluteNormalized(startupInput);
-			} else if (jpegview_linux::IsArchiveContainerFile(startupInput)) {
-				// A header-encrypted archive has no discoverable images until the
-				// Open dialog obtains a password, so preserve its location for Browse.
-				emptyStartupLocation = AbsoluteNormalized(startupInput);
-			}
-		}
-		const jpegview_linux::FileList::SortMode initialSortMode = fileList_.GetSorting();
-		const bool initialSortAscending = fileList_.IsSortedAscending();
-		if (!startedWithoutInputs) {
-			fileList_ = jpegview_linux::FileList(startupInputs_, initialSortMode,
-				initialSortAscending);
-		}
-		startupInputs_.clear();
 		if (startedWithoutInputs) {
 			SetTitle();
 			OpenFileDialog();
-		} else if (fileList_.Empty()) {
-			if (!emptyStartupLocation.empty()) {
-				SetTitle();
-				OpenFileDialog(emptyStartupLocation);
-			} else {
-				std::cerr << "No supported images found.\n";
-				Cleanup();
-				return 2;
+		} else {
+			fileList_.SetProvisionalInputs(startupInputs_);
+			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Initialize,
+				0, FileListScanHandling::Startup, true, false, {},
+				DisplayModeLoadPolicy::UseDefaults);
+			startupInputs_.clear();
+			if (!fileList_.Empty() && !LoadCurrent(0, DisplayModeLoadPolicy::UseDefaults)) {
+				startupImageLoadFailed_ = true;
+			} else if (fileList_.Empty()) {
+				SetTitle("JPEGView — Scanning folder");
 			}
-		} else if (!LoadCurrent()) {
-			Cleanup();
-			return 1;
 		}
 		int mouseX = 0;
 		int mouseY = 0;
@@ -477,6 +458,7 @@ public:
 			HandleEvents(running);
 			if (quitRequested_) running = false;
 			TickPlayback();
+			TickFileListScan();
 			TickFileDialogArchiveDirectory();
 			TickFileDialogDirectorySummaries();
 			Render();
@@ -491,7 +473,7 @@ public:
 		}
 
 		Cleanup();
-		return 0;
+		return deferredExitCode_;
 	}
 
 private:
@@ -499,6 +481,15 @@ private:
 		PreserveCurrent,
 		UseDefaults,
 		RestoreRecent,
+	};
+
+	enum class FileListScanHandling {
+		None,
+		Startup,
+		DroppedInputs,
+		Reload,
+		Navigation,
+		MarkedToggle,
 	};
 
 	struct ContextMenuColumn {
@@ -606,6 +597,7 @@ private:
 	}
 
 	void Cleanup() {
+		fileListScanWorker_.Clear();
 		SaveSettings();
 		if (magnifyingGlassCursorActive_) {
 			SDL_ShowCursor(magnifyingGlassPreviousCursorVisibility_);
@@ -1993,8 +1985,7 @@ private:
 		}
 		std::error_code removeError;
 		fs::remove_all(temporaryDirectory, removeError);
-		ReloadAfterFileChange();
-		SetTitle("Applied lossless JPEG transformation");
+		ReloadAfterFileChange("Applied lossless JPEG transformation");
 	}
 
 	void SetTitle(const std::string& title) {
@@ -2022,30 +2013,21 @@ private:
 			return;
 		}
 		RestoreClipboardImage();
-
-		try {
-			jpegview_linux::FileList droppedFileList(
-				droppedFiles, fileList_.GetSorting(), fileList_.IsSortedAscending(), fileList_.WrapAroundFolder());
-			// Construction performs the same initial-file/folder discovery as
-			// the Windows CFileList constructor.
-			if (droppedFileList.Empty()) {
-				SetTitle("No supported images in dropped input");
-				return;
-			}
-
-			const jpegview_linux::FileList::NavigationMode navigationMode = fileList_.GetNavigationMode();
-			fileList_ = std::move(droppedFileList);
-			fileList_.SetNavigationMode(navigationMode);
-		} catch (const fs::filesystem_error& error) {
-			SetTitle(std::string("Cannot open dropped input: ") + error.what());
-			return;
-		}
-		dragging_ = false;
-		CloseFileDialog();
-		LoadCurrent(0, modeLoadPolicy);
+		jpegview_linux::FileList::ScanRequest request =
+			jpegview_linux::FileList::InitialScanRequest(droppedFiles,
+				fileList_.GetSorting(), fileList_.IsSortedAscending(),
+				fileList_.WrapAroundFolder(), fileList_.GetNavigationMode());
+		SubmitFileListScan(std::move(request), FileListScanHandling::DroppedInputs,
+			true, false, 0, {}, modeLoadPolicy);
+		if (fileDialogOpen_) SetTitle("JPEGView — Opening selection");
 	}
 
-	void CloseFileDialog() {
+	void CloseFileDialog(bool cancelPendingDrop = true) {
+		if (cancelPendingDrop &&
+			pendingFileListScanHandling_ == FileListScanHandling::DroppedInputs) {
+			fileListScanWorker_.Clear();
+			ClearPendingFileListScan();
+		}
 		if (fileDialogOpen_) SDL_StopTextInput();
 		archivePasswordDialog_.Cancel();
 		archivePasswordValidationPending_ = false;
@@ -2173,12 +2155,12 @@ private:
 		const std::string savedName = output.filename().string();
 		CloseFileDialog();
 		if (output == source) {
-			ReloadAfterFileChange();
+			ReloadAfterFileChange("Saved lossless crop: " + savedName);
 		} else {
-			fileList_.Reload();
-			PrepareThumbnailPreload();
+			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
+				0, FileListScanHandling::Reload, true, false, {},
+				DisplayModeLoadPolicy::PreserveCurrent, {}, "Saved lossless crop: " + savedName);
 		}
-		SetTitle("Saved lossless crop: " + savedName);
 	}
 
 	void SaveImageFromDialog() {
@@ -2563,8 +2545,180 @@ private:
 		return utimensat(AT_FDCWD, filename.c_str(), times, 0) == 0;
 	}
 
-	void ReloadAfterFileChange() {
-		if (fileList_.Reload()) LoadCurrent();
+	void SubmitFileListScan(jpegview_linux::FileList::ScanRequest request,
+		FileListScanHandling handling, bool force, bool forceImageReload,
+		int direction = 0, const fs::path& preferredPath = {},
+		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent,
+		const fs::path& markedToggleReturnPath = {},
+		std::string completionTitle = {}) {
+		if (!force && pendingFileListScanOperation_.has_value() &&
+			*pendingFileListScanOperation_ == request.operation &&
+			pendingFileListScanHandling_ == handling &&
+			pendingFileListScanDirection_ == direction) return;
+		if (!preferredPath.empty()) request.selectedPath = preferredPath;
+		pendingFileListScanOperation_ = request.operation;
+		pendingFileListScanHandling_ = handling;
+		pendingFileListScanDirection_ = direction;
+		pendingFileListScanForceImageReload_ = forceImageReload;
+		pendingFileListScanPreferredPath_ = preferredPath;
+		pendingFileListScanModeLoadPolicy_ = modeLoadPolicy;
+		pendingMarkedToggleReturnPath_ = markedToggleReturnPath;
+		pendingFileListScanCompletionTitle_ = std::move(completionTitle);
+		fileListScanGeneration_ = fileListScanWorker_.Request(std::move(request));
+	}
+
+	void RequestFileListScan(jpegview_linux::FileList::ScanOperation operation,
+		int direction = 0, FileListScanHandling handling = FileListScanHandling::Navigation,
+		bool force = false, bool forceImageReload = false,
+		const fs::path& preferredPath = {},
+		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent,
+		const fs::path& markedToggleReturnPath = {},
+		std::string completionTitle = {}) {
+		SubmitFileListScan(fileList_.MakeScanRequest(operation, direction), handling,
+			force, forceImageReload, direction, preferredPath, modeLoadPolicy,
+			markedToggleReturnPath, std::move(completionTitle));
+	}
+
+	void ClearPendingFileListScan() {
+		pendingFileListScanOperation_.reset();
+		pendingFileListScanHandling_ = FileListScanHandling::None;
+		pendingFileListScanDirection_ = 0;
+		pendingFileListScanForceImageReload_ = false;
+		pendingFileListScanPreferredPath_.clear();
+		pendingFileListScanModeLoadPolicy_ = DisplayModeLoadPolicy::PreserveCurrent;
+		pendingMarkedToggleReturnPath_.clear();
+		pendingFileListScanCompletionTitle_.clear();
+	}
+
+	void RefreshFileListConsumers(int preferredDirection = 0) {
+		SetTitle();
+		PrepareThumbnailPreload();
+		PrepareImagePrefetch(preferredDirection);
+		RefreshDoublePageRenderState();
+	}
+
+	void TickFileListScan() {
+		for (jpegview_linux::FileListScanResult& result : fileListScanWorker_.TakeReady()) {
+			if (result.generation != fileListScanGeneration_ ||
+				!pendingFileListScanOperation_.has_value()) continue;
+			const FileListScanHandling handling = pendingFileListScanHandling_;
+			if (!result.error.empty()) {
+				ClearPendingFileListScan();
+				SetTitle("Directory scan failed: " + result.error);
+				if (handling == FileListScanHandling::Startup) {
+					deferredExitCode_ = 2;
+					quitRequested_ = true;
+				}
+				continue;
+			}
+			const bool forceImageReload = pendingFileListScanForceImageReload_;
+			const DisplayModeLoadPolicy modeLoadPolicy = pendingFileListScanModeLoadPolicy_;
+			const int direction = pendingFileListScanDirection_;
+			const std::string completionTitle = pendingFileListScanCompletionTitle_;
+			const fs::path previousPath = fileList_.Current();
+			const fs::path markedToggleReturnPath = pendingMarkedToggleReturnPath_;
+			const bool targetFound = result.prepared.targetFound;
+			if ((result.prepared.operation == jpegview_linux::FileList::ScanOperation::ForwardBoundary &&
+				previousPath != result.prepared.sourceSelectedPath) ||
+				((result.prepared.operation == jpegview_linux::FileList::ScanOperation::PreviousSibling ||
+					result.prepared.operation == jpegview_linux::FileList::ScanOperation::NextSibling) &&
+					!previousPath.empty() &&
+					previousPath.parent_path() != result.prepared.sourceSelectedPath.parent_path()) ||
+				(handling == FileListScanHandling::MarkedToggle &&
+					(previousPath != markedToggleReturnPath ||
+					fileList_.MarkedToggleTarget() != pendingFileListScanPreferredPath_))) {
+				ClearPendingFileListScan();
+				continue;
+			}
+
+			if (handling == FileListScanHandling::DroppedInputs) {
+				if (!result.prepared.completed || !targetFound || result.prepared.replacement.Empty()) {
+					ClearPendingFileListScan();
+					SetTitle("No supported images in dropped input");
+					continue;
+				}
+				fileList_ = std::move(result.prepared.replacement);
+				ClearPendingFileListScan();
+				dragging_ = false;
+				CloseFileDialog();
+				LoadCurrent(0, modeLoadPolicy);
+				continue;
+			}
+
+			const fs::path preferredPathAtApply = result.prepared.operation ==
+				jpegview_linux::FileList::ScanOperation::MarkedToggleTarget ? fs::path{} : previousPath;
+			const bool accepted = fileList_.ApplyPreparedScan(std::move(result.prepared),
+				preferredPathAtApply);
+			if (!accepted) {
+				const jpegview_linux::FileList::ScanOperation operation = *pendingFileListScanOperation_;
+				const fs::path preferredPath = pendingFileListScanPreferredPath_;
+				RequestFileListScan(operation, direction, handling, true, forceImageReload,
+					preferredPath, modeLoadPolicy, markedToggleReturnPath, completionTitle);
+				continue;
+			}
+			ClearPendingFileListScan();
+			if (!targetFound) continue;
+			if (handling == FileListScanHandling::MarkedToggle) {
+				if (fileList_.CompleteMarkedToggle(markedToggleReturnPath)) LoadCurrent(direction);
+				continue;
+			}
+
+			const fs::path currentPath = fileList_.Current();
+			const bool currentPathChanged = currentPath != previousPath ||
+				(!currentPath.empty() && loadedFilePath_ != AbsoluteNormalized(currentPath));
+			if (handling == FileListScanHandling::Startup) {
+				if (fileList_.Empty()) {
+					const fs::path browseLocation = fileList_.BrowseLocationOnEmpty();
+					if (!browseLocation.empty()) {
+						SetTitle();
+						OpenFileDialog(browseLocation);
+					} else {
+						std::cerr << "No supported images found.\n";
+						deferredExitCode_ = 2;
+						quitRequested_ = true;
+					}
+					continue;
+				}
+				if (currentPathChanged) {
+					if (!LoadCurrent(0, modeLoadPolicy)) {
+						deferredExitCode_ = 1;
+						quitRequested_ = true;
+						continue;
+					}
+				} else {
+					if (startupImageLoadFailed_ && loadedFilePath_.empty()) {
+						deferredExitCode_ = 1;
+						quitRequested_ = true;
+						continue;
+					}
+					RefreshFileListConsumers();
+				}
+				continue;
+			}
+
+			if (handling == FileListScanHandling::Reload && fileList_.Empty()) {
+				if (quitAfterEmptyScan_) quitRequested_ = true;
+				else if (!completionTitle.empty()) SetTitle(completionTitle);
+				else SetTitle("No supported images in this folder");
+				quitAfterEmptyScan_ = false;
+				continue;
+			}
+			if (handling == FileListScanHandling::Reload) quitAfterEmptyScan_ = false;
+			bool refreshed = true;
+			if (currentPathChanged || forceImageReload) {
+				if (!fileList_.Empty()) refreshed = LoadCurrent(direction);
+			} else {
+				RefreshFileListConsumers(direction);
+			}
+			if (refreshed && !completionTitle.empty()) SetTitle(completionTitle);
+		}
+	}
+
+	void ReloadAfterFileChange(const std::string& completionTitle = {}) {
+		if (!fileList_.Empty()) RequestFileListScan(
+			jpegview_linux::FileList::ScanOperation::Reload,
+			0, FileListScanHandling::Reload, true, true, {},
+			DisplayModeLoadPolicy::PreserveCurrent, {}, completionTitle);
 	}
 
 	void TouchCurrentImage(bool useExifDate) {
@@ -2585,8 +2739,8 @@ private:
 			SetTitle("Cannot set image modification date");
 			return;
 		}
-		ReloadAfterFileChange();
-		SetTitle(useExifDate ? "Set modification date to EXIF date" : "Set modification date to current date");
+		ReloadAfterFileChange(useExifDate ? "Set modification date to EXIF date" :
+			"Set modification date to current date");
 	}
 
 	void TouchFolderImagesToExifDate() {
@@ -2612,8 +2766,7 @@ private:
 				++updated;
 			}
 		}
-		ReloadAfterFileChange();
-		SetTitle("Set EXIF dates for " + std::to_string(updated) + " image(s)");
+		ReloadAfterFileChange("Set EXIF dates for " + std::to_string(updated) + " image(s)");
 	}
 
 	void SetWallpaper(bool processed) {
@@ -2706,12 +2859,10 @@ private:
 			SetTitle("Delete failed: " + errorMessage);
 			return;
 		}
-		if (fileList_.Reload()) {
-			LoadCurrent();
-		} else {
-			quitRequested_ = true;
-		}
-		SetTitle("Moved image to trash");
+		quitAfterEmptyScan_ = true;
+		RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
+			0, FileListScanHandling::Reload, true, true, {},
+			DisplayModeLoadPolicy::PreserveCurrent, {}, "Moved image to trash");
 	}
 
 	void HandleConfirmationEvents(const SDL_Event& event) {
@@ -3196,7 +3347,8 @@ private:
 		SetTitle();
 	}
 
-	bool NavigateByPageStep(int direction) {
+	bool NavigateByPageStep(int direction, bool& needsDirectoryScan) {
+		needsDirectoryScan = false;
 		if (fileList_.Empty() || (direction != -1 && direction != 1)) return false;
 		const std::size_t currentIndex = fileList_.CurrentIndex();
 		const std::optional<jpegview_linux::PageDimensions> current =
@@ -3211,8 +3363,14 @@ private:
 			fileList_.Size(), doublePageModeEnabled_, current, next,
 			previousFirst, previousSecond);
 		for (int index = 0; index < step; ++index) {
-			const bool moved = direction > 0 ? fileList_.Next() : fileList_.Previous();
-			if (!moved) {
+			const jpegview_linux::FileList::LoadedNavigationResult moved = direction > 0 ?
+				fileList_.NextLoaded() : fileList_.PreviousLoaded();
+			if (moved == jpegview_linux::FileList::LoadedNavigationResult::NeedsDirectoryScan) {
+				if (fileList_.CurrentIndex() != currentIndex) fileList_.Select(currentIndex);
+				needsDirectoryScan = true;
+				return false;
+			}
+			if (moved == jpegview_linux::FileList::LoadedNavigationResult::NoMove) {
 				if (fileList_.CurrentIndex() != currentIndex) fileList_.Select(currentIndex);
 				return false;
 			}
@@ -3266,7 +3424,13 @@ private:
 			transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage;
 		if (animate && MaterializeCurrentPixels()) previousImage = image_;
-		if (!NavigateByPageStep(1)) return;
+		bool needsDirectoryScan = false;
+		if (!NavigateByPageStep(1, needsDirectoryScan)) {
+			if (needsDirectoryScan) RequestFileListScan(
+				jpegview_linux::FileList::ScanOperation::ForwardBoundary,
+				1, FileListScanHandling::Navigation);
+			return;
+		}
 		SetTitle();
 		if (showPendingNavigation) {
 			Render();
@@ -3281,7 +3445,8 @@ private:
 			transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage;
 		if (animate && MaterializeCurrentPixels()) previousImage = image_;
-		if (!NavigateByPageStep(-1)) return;
+		bool needsDirectoryScan = false;
+		if (!NavigateByPageStep(-1, needsDirectoryScan)) return;
 		SetTitle();
 		if (showPendingNavigation) {
 			Render();
@@ -3292,9 +3457,11 @@ private:
 
 	void NavigateToSiblingFolder(int direction) {
 		if (clipboardMode_) RestoreClipboardImage();
-		const bool navigated = direction < 0 ? fileList_.PreviousSiblingDirectory() :
-			fileList_.NextSiblingDirectory();
-		if (navigated) LoadCurrent(direction);
+		if (fileList_.Empty() || (direction != -1 && direction != 1)) return;
+		RequestFileListScan(direction < 0 ?
+			jpegview_linux::FileList::ScanOperation::PreviousSibling :
+			jpegview_linux::FileList::ScanOperation::NextSibling,
+			direction, FileListScanHandling::Navigation);
 	}
 
 	void FirstImage() {
@@ -4072,7 +4239,14 @@ private:
 		case IDM_TOGGLE:
 			if (fileList_.HasMarkedFile()) {
 				if (clipboardMode_) RestoreClipboardImage();
-				if (fileList_.ToggleBetweenMarkedAndCurrent()) {
+				const fs::path markedTarget = fileList_.MarkedToggleTarget();
+				const fs::path previousPath = fileList_.Current();
+				if (!markedTarget.empty() && !fileList_.ContainsPath(markedTarget)) {
+					RequestFileListScan(
+						jpegview_linux::FileList::ScanOperation::MarkedToggleTarget,
+						0, FileListScanHandling::MarkedToggle, true, false,
+						markedTarget, DisplayModeLoadPolicy::PreserveCurrent, previousPath);
+				} else if (fileList_.ToggleBetweenMarkedAndCurrent()) {
 					LoadCurrent();
 				}
 			}
@@ -4200,7 +4374,9 @@ private:
 			OpenSaveFileDialog(false);
 			break;
 		case IDM_RELOAD:
-			if (fileList_.Reload()) LoadCurrent();
+			if (!fileList_.Empty()) RequestFileListScan(
+				jpegview_linux::FileList::ScanOperation::Reload,
+				0, FileListScanHandling::Reload, true, true);
 			break;
 		case IDM_SHOW_FILEINFO:
 			infoVisible_ = !infoVisible_;
@@ -4273,15 +4449,23 @@ private:
 			SaveSettings();
 			break;
 		case IDM_LOOP_FOLDER:
-			fileList_.SetNavigationMode(jpegview_linux::FileList::NavigationMode::LoopDirectory);
+			(void)fileList_.SetNavigationMode(jpegview_linux::FileList::NavigationMode::LoopDirectory);
 			SetTitle();
 			break;
 		case IDM_LOOP_RECURSIVELY:
-			fileList_.SetNavigationMode(jpegview_linux::FileList::NavigationMode::LoopSubDirectories);
+			if (fileList_.SetNavigationMode(
+				jpegview_linux::FileList::NavigationMode::LoopSubDirectories)) {
+				RequestFileListScan(jpegview_linux::FileList::ScanOperation::PrepareDirectoryScope,
+					0, FileListScanHandling::Navigation, true);
+			}
 			SetTitle();
 			break;
 		case IDM_LOOP_SIBLINGS:
-			fileList_.SetNavigationMode(jpegview_linux::FileList::NavigationMode::LoopSameDirectoryLevel);
+			if (fileList_.SetNavigationMode(
+				jpegview_linux::FileList::NavigationMode::LoopSameDirectoryLevel)) {
+				RequestFileListScan(jpegview_linux::FileList::ScanOperation::PrepareDirectoryScope,
+					0, FileListScanHandling::Navigation, true);
+			}
 			SetTitle();
 			break;
 		case IDM_SORT_MOD_DATE:
@@ -4907,7 +5091,8 @@ private:
 		}
 
 		if (renamed > 0 || copied > 0) {
-			if (fileList_.Reload(preferredCurrentPath)) LoadCurrent();
+			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
+				0, FileListScanHandling::Reload, true, true, preferredCurrentPath);
 		}
 		batchCopyDialog_.ReplaceItems(CollectBatchCopyEntries(), fileList_.CurrentIndex(), BatchCopyVisibleRows());
 		batchCopyDialog_.Preview();
@@ -6045,6 +6230,11 @@ private:
 	}
 
 	void OpenFileDialog(const fs::path& preferredDirectory = fs::path()) {
+		if (pendingFileListScanHandling_ == FileListScanHandling::DroppedInputs) {
+			fileListScanWorker_.Clear();
+			ClearPendingFileListScan();
+			SetTitle();
+		}
 		std::error_code error;
 		fs::path directory = preferredDirectory;
 		if (directory.empty()) {
@@ -6251,6 +6441,7 @@ private:
 		const FileDialogEntry entry = *selected;
 		if (fileDialogTab_ == FileDialogTab::Recents) {
 			OpenDroppedFiles({entry.path.string()}, DisplayModeLoadPolicy::RestoreRecent);
+			CloseFileDialog(false);
 			return;
 		}
 		if (!fileDialogSave_ && !fileDialogParameterRestore_ && entry.encrypted &&
@@ -6274,6 +6465,7 @@ private:
 			BeginParameterDbRestore(entry.path);
 		} else {
 			OpenDroppedFiles({entry.path.string()});
+			CloseFileDialog(false);
 		}
 	}
 
@@ -8318,6 +8510,19 @@ private:
 	}
 
 	jpegview_linux::FileList fileList_;
+	jpegview_linux::FileListScanWorker fileListScanWorker_;
+	std::uint64_t fileListScanGeneration_ = 0;
+	std::optional<jpegview_linux::FileList::ScanOperation> pendingFileListScanOperation_;
+	FileListScanHandling pendingFileListScanHandling_ = FileListScanHandling::None;
+	int pendingFileListScanDirection_ = 0;
+	bool pendingFileListScanForceImageReload_ = false;
+	fs::path pendingFileListScanPreferredPath_;
+	fs::path pendingMarkedToggleReturnPath_;
+	DisplayModeLoadPolicy pendingFileListScanModeLoadPolicy_ = DisplayModeLoadPolicy::PreserveCurrent;
+	std::string pendingFileListScanCompletionTitle_;
+	bool startupImageLoadFailed_ = false;
+	bool quitAfterEmptyScan_ = false;
+	int deferredExitCode_ = 0;
 	std::vector<std::string> startupInputs_;
 	jpegview_linux::RecentFiles recentFiles_;
 	fs::path recentFilesPath_;

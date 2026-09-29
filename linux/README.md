@@ -82,6 +82,17 @@ they support.
    context menu, and the selected mode is preserved between runs. By default, manga mode reverses
    physical Left/Right navigation; `manga_mode_inverts_left_right=0` disables that inversion while
    navigation-panel and context-menu actions remain logical previous/next.
+   Viewer file-list discovery now runs on a lazy, low-priority worker for startup, refresh, sibling
+   folder jumps, recursive folder boundaries, dropped inputs, cross-folder marked-image toggles,
+   and changes from multiple inputs to folder navigation. Enumeration, per-file metadata, sorting,
+   and replacement-list construction stay off the SDL event thread. A directly named image is
+   displayed from a provisional one-image list while the rest of its folder is scanned; a
+   directory-only launch stays responsive and opens Browse if its completed scan is empty. New
+   requests cancel obsolete scans, while generation and
+   list-revision checks prevent stale results from replacing the current folder or restoring a
+   removed file. Moving within the already-loaded list remains a constant-time index change without
+   scanner locks or copies of the active list. The Open-dialog Browse listing remains on its
+   separate refresh path; this worker covers the viewer's active file list.
 
 5. **Responsive keyboard and mouse navigation.** Left/Right image navigation and menu/browser
    selection repeat while held. The open browser supports repeating Up/Down, PageUp/PageDown, and
@@ -258,10 +269,12 @@ they support.
     magnifying-glass dimensions and magnification, and the
     image-cache budget are stored under XDG configuration paths. A previously
     maximized window is created maximized before it is shown, avoiding the visible delayed maximize.
-    The real viewer window is painted and shown before the initial directory scan and image decode,
-    so cold AppImage and large-folder startup provides immediate visual feedback without changing the
-    image preparation or navigation path. File-dialog-only and thumbnail-resampling workers start on
-    first use instead of being created before the first window appears. Starting without image
+    The real viewer window is painted and shown before directory scanning; a directly named image
+    can load while its cancellable, low-priority folder scan runs, so large-folder startup provides
+    immediate visual feedback without moving enumeration or sorting onto the event thread. A scan
+    result is moved into the active list only after it is complete and current. File-dialog-only,
+    viewer-list scanning, and thumbnail-resampling workers start on first use instead of being
+    created before the first window appears. Starting without image
     arguments opens Browse in the current working directory instead of automatically opening an
     image there; starting with a single directory that has no directly supported images opens Browse
     at that directory instead of exiting. Compatibility handling keeps always-on-top optional on
@@ -285,7 +298,8 @@ they support.
     and no longer damage underlying image pixels.
 
 15. **Regression tests, modularization, and faster builds.** A dependency-light core suite and X11
-    UI smoke suite now cover codecs, mutable image transforms/resampling, file ordering, browser
+    UI smoke suite now cover codecs, mutable image transforms/resampling, file ordering and
+    asynchronous-scan cancellation/stale-result rejection, browser
     state, settings and advanced-configuration validation, keyboard mappings, viewport geometry,
     overlays, context-menu columns and
     repainting, thumbnail layout/persistence, per-folder recent-file MRU and per-file viewport

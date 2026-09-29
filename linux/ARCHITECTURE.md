@@ -6,6 +6,19 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, current-file
   preservation, and the transient marked-image toggle pair used for A/B comparison. The marked
   path's index in the active ordered list is cached for constant-time thumbnail rendering.
+- `file_list_scan_worker`: one lazy, low-priority worker for viewer-list initialization, reloads,
+  recursive/sibling transitions, dropped inputs, cross-folder marked-image toggles, and
+  multiple-input scope changes. Requests carry
+  immutable input/settings snapshots and a list revision; the worker owns enumeration, archive
+  catalog reads, file metadata, sorting, and replacement-list construction. It checks a generation
+  cancellation predicate while traversing and publishes only the newest complete result. The SDL
+  thread applies that result only after generation, revision, and navigation-source checks pass.
+  The active `FileList` remains main-thread-owned, so ordinary next/previous steps within its loaded
+  entries stay lock-free and do not copy the list. A compact path-sorted vector of entry indices
+  preserves logarithmic path selection regardless of the active metadata sort, without duplicating
+  each path string. A direct image launch uses a provisional one-image list so decoding can start
+  before its folder scan completes. Cancellation never blocks waiting for the worker; destruction
+  joins it during normal owner teardown.
 - `double_page_model`: portrait-pair eligibility, cover handling, aspect-preserving shared-height
   spread geometry, page-step navigation, and configurable physical-key direction in manga reading
   order. It owns no image pixels, filesystem work, or SDL resources.
@@ -206,11 +219,14 @@ The Ubuntu 20 and 22 `highway-jxl` stages fetch the pinned `skcms` snapshot from
 mirror instead of the frequently failing Gitiles archive endpoint. Its SHA-256 is checked before
 extraction so the alternate mirror does not weaken source integrity.
 
-The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; direct
-command-line archive startup still builds the initial `FileList` through the synchronous source API.
-Consequently, a cold TGZ passed directly at startup can wait for its sequential catalog scan and a 7z
-or RAR can wait for its catalog scan before the viewer is ready, while browsing into those archives
-from the Open dialog stays responsive.
+The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; viewer-list
+startup and folder transitions route archive catalogs through `FileListScanWorker`, so even a
+sequential TGZ catalog or a 7z/RAR catalog cannot block the SDL event thread. The Open dialog's
+ordinary filesystem Browse refresh remains a separate synchronous path; this worker specifically
+owns the viewer's `FileList` scans. The async result/cancellation pattern was cross-checked against
+the large-folder reports in [upstream issues #194](https://github.com/sylikc/jpegview/issues/194) and
+[#263](https://github.com/sylikc/jpegview/issues/263), and the worker/result approach in
+[Masir01/jpegview_up's `dev-up` FileList](https://github.com/Masir01/jpegview_up/blob/dev-up/src/JPEGView/FileList.cpp).
 
 The magnifying-glass lens is a temporary viewer interaction; its enablement resets each run while
 its size and magnification are stored by `settings`. Its pure model owns those values, wheel
@@ -223,12 +239,13 @@ immediate fallback, and the higher-resolution SDL texture is uploaded, protected
 destroyed on the renderer thread. Thus enabling the lens adds no decoding or resampling to ordinary
 navigation and does not introduce a second cache budget.
 
-At startup the composition root creates, paints, and maps the final SDL window before constructing
-the initial `FileList` or loading its current image. Directory enumeration and the existing
-decode/display-cache path then run unchanged while the visible dark startup frame provides feedback;
-renderer resources remain confined to the main thread. Recent history is read after that startup
+At startup the composition root creates, paints, and maps the final SDL window before requesting the
+initial `FileList` scan. The lazy `FileListScanWorker` constructs and sorts a complete replacement
+off-thread; a directly named image can start decoding from a provisional one-image list while that
+scan runs. Only the current, revision-matching result is moved into the active list on the main
+thread. Renderer resources remain confined to that thread. Recent history is read after the startup
 frame is shown and written once during normal cleanup, keeping history I/O out of the initial window
-presentation and rapid navigation path. The three file-dialog workers and the low-priority
+presentation and rapid navigation path. The file-dialog workers, viewer-list scanner, and low-priority
 thumbnail-resampling worker start only when their first request arrives; the decoded-image and
 display-preparation pools remain ready before the first image load so foreground rendering and
 neighbor preparation are not delayed. `LoadCurrent` captures the outgoing file's exact viewport

@@ -92,14 +92,6 @@ branch at `79a18f9` and also checked [`dev-up`](https://github.com/Masir01/jpegv
 at `93efb7a`, which was 24 commits ahead and contains newer decoder work. The bullets below are
 gaps against Linux, not a recommendation to port Windows-specific code or dependencies verbatim.
 
-- **Asynchronous directory scanning:** enumerate large folders off the event thread so opening a
-  folder, refreshing it, or changing navigation scope remains responsive. Cancel obsolete scans and
-  reject stale results so a slower previous-directory scan cannot replace the current list or
-  resurrect removed files. Linux currently scans synchronously in `FileList::ScanDirectory`; reports
-  about large-folder startup ([upstream issue #194](https://github.com/sylikc/jpegview/issues/194)
-  and [#263](https://github.com/sylikc/jpegview/issues/263)) reinforce this need. The fork's
-  [file-list implementation](https://github.com/Masir01/jpegview_up/blob/dev-hw/src/JPEGView/FileList.cpp)
-  is a reference for the worker/result pattern.
 - **Oversized JPEG viewing:** Linux currently rejects images above its 100-megapixel limit. Add a
   bounded reduced-resolution JPEG decode option for larger sources, clearly identify when the
   displayed pixels are only a reduced preview, and do not save that preview as though it were the

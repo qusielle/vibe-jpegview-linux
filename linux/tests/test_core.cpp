@@ -1,5 +1,6 @@
 #include "exif_reader.h"
 #include "file_list.h"
+#include "file_list_scan_worker.h"
 #include "image_decoder.h"
 #include "image_cache.h"
 #include "display_image_cache.h"
@@ -83,6 +84,9 @@
 namespace fs = std::filesystem;
 using jpegview_linux::DecodedImage;
 using jpegview_linux::FileList;
+using jpegview_linux::FileListPreparedScan;
+using jpegview_linux::FileListScanResult;
+using jpegview_linux::FileListScanWorker;
 using jpegview_linux::ImageWriteOptions;
 
 namespace {
@@ -578,6 +582,14 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 	FileList files({archive.string()}, FileList::SortMode::FileName, true, false);
 	Expect(files.Size() == 1 && files.Current() == rootImage && files.IsArchiveMember(0),
 		"opening a ZIP container did not initialize its image list or archive identity");
+	FileListPreparedScan asyncArchiveScan = FileList::PrepareScan(
+		FileList::InitialScanRequest({archive.string()}, FileList::SortMode::FileName,
+			true, false, FileList::NavigationMode::LoopDirectory),
+		[] { return true; });
+	Expect(asyncArchiveScan.completed && asyncArchiveScan.targetFound &&
+		asyncArchiveScan.replacement.Current() == rootImage &&
+		asyncArchiveScan.replacement.IsArchiveMember(0),
+		"an asynchronous initial scan did not prepare an archive catalog and image list");
 	Expect(files.MarkCurrentForToggle(), "archive image could not be marked for A/B toggling");
 	files.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
 	Expect(files.Next() && files.Current() == nestedImage && files.IsArchiveMember(0),
@@ -1380,6 +1392,34 @@ void TestFileListMarkedImageToggle() {
 	Expect(nestedNavigation.ToggleBetweenMarkedAndCurrent() && nestedNavigation.Current() == nestedImage &&
 		nestedNavigation.Size() == 1,
 		"toggle did not restore the captured image and its directory");
+	const fs::path markedReturnPath = nestedNavigation.Current();
+	const fs::path asynchronousMarkedTarget = nestedNavigation.MarkedToggleTarget();
+	Expect(!asynchronousMarkedTarget.empty() && !nestedNavigation.ContainsPath(asynchronousMarkedTarget),
+		"cross-directory marked toggle was not identified as requiring a prepared folder list");
+	FileList::ScanRequest markedScanRequest = nestedNavigation.MakeScanRequest(
+		FileList::ScanOperation::MarkedToggleTarget);
+	markedScanRequest.selectedPath = asynchronousMarkedTarget;
+	FileListPreparedScan markedScan = FileList::PrepareScan(markedScanRequest,
+		[] { return true; });
+	Expect(markedScan.completed && markedScan.targetFound &&
+		markedScan.replacement.Current() == topImage,
+		"the worker did not prepare the marked image's directory and selected path");
+	Expect(nestedNavigation.ApplyPreparedScan(std::move(markedScan)) &&
+		nestedNavigation.CompleteMarkedToggle(markedReturnPath) &&
+		nestedNavigation.Current() == topImage,
+		"an asynchronously prepared marked-image toggle did not preserve its return target");
+	const fs::path markedToggleBackPath = nestedNavigation.Current();
+	const fs::path asynchronousReturnTarget = nestedNavigation.MarkedToggleTarget();
+	FileList::ScanRequest returnScanRequest = nestedNavigation.MakeScanRequest(
+		FileList::ScanOperation::MarkedToggleTarget);
+	returnScanRequest.selectedPath = asynchronousReturnTarget;
+	FileListPreparedScan returnScan = FileList::PrepareScan(returnScanRequest,
+		[] { return true; });
+	Expect(returnScan.completed && returnScan.targetFound &&
+		nestedNavigation.ApplyPreparedScan(std::move(returnScan)) &&
+		nestedNavigation.CompleteMarkedToggle(markedToggleBackPath) &&
+		nestedNavigation.Current() == nestedImage,
+		"the asynchronously prepared marked-image toggle did not return to the prior folder");
 
 	FileList missingMarked({root.string()}, FileList::SortMode::FileName, true, false);
 	Expect(missingMarked.MarkCurrentForToggle() && missingMarked.Next(),
@@ -1679,6 +1719,17 @@ void TestFileListDateSortingAndSelectionPreservation() {
 	FileList files({directory.string()}, FileList::SortMode::LastModificationTime, true, false);
 	Expect(FileNames(files) == std::vector<std::string>({"z-old.png", "m-middle.png", "a-new.png"}),
 		"modification-date ordering is not based on filesystem modification time");
+	FileList directInput({middleFile.string()}, FileList::SortMode::LastModificationTime,
+		true, false);
+	Expect(directInput.Current() == middleFile,
+		"a directly requested image was replaced by a different timestamp-sorted entry");
+	FileList::ScanRequest directScanRequest = FileList::InitialScanRequest(
+		{middleFile.string()}, FileList::SortMode::LastModificationTime, true, false,
+		FileList::NavigationMode::LoopDirectory);
+	FileListPreparedScan directScan = FileList::PrepareScan(directScanRequest,
+		[] { return true; });
+	Expect(directScan.completed && directScan.replacement.Current() == middleFile,
+		"the asynchronous initial scan did not preserve its explicitly requested image");
 	files.Next();
 	Expect(files.Current().filename() == "m-middle.png", "date-sorted navigation selected the wrong image");
 	files.SetSorting(FileList::SortMode::FileName, true);
@@ -1795,6 +1846,132 @@ void TestFileListMultipleInputs() {
 	Expect(files.Files()[0].filename() == "other.png", "multiple input filename ordering is incorrect");
 	Expect(files.Files()[1].parent_path().filename() == "first", "multiple input tie ordering is unstable");
 	Expect(files.Files()[2].parent_path().filename() == "second", "multiple input tie ordering is unstable");
+}
+
+void TestFileListAsynchronousScanning() {
+	TemporaryDirectory temporary;
+	const fs::path root = temporary.path() / "root";
+	const fs::path child = root / "01-child";
+	const fs::path latest = temporary.path() / "latest";
+	fs::create_directories(child);
+	fs::create_directories(latest);
+	WriteTinyImage(root / "root.png");
+	WriteTinyImage(root / "root2.png");
+	WriteTinyImage(child / "child.png");
+	WriteTinyImage(child / "z-child.png");
+	WriteTinyImage(latest / "latest.png");
+
+	FileList list({root.string()}, FileList::SortMode::FileName, true, false);
+	list.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
+	list.First();
+	Expect(list.NextLoaded() == FileList::LoadedNavigationResult::Moved &&
+		list.Current().filename() == "root2.png",
+		"moving within the loaded directory did not use the immediate index-only navigation path");
+	list.Last();
+	Expect(list.NextLoaded() == FileList::LoadedNavigationResult::NeedsDirectoryScan,
+		"the loaded-list hot path did not defer recursive folder entry to the scanner");
+	const FileList::ScanRequest boundaryRequest = list.MakeScanRequest(
+		FileList::ScanOperation::ForwardBoundary, 1);
+	FileListPreparedScan boundary = FileList::PrepareScan(boundaryRequest, [] { return true; });
+	Expect(boundary.completed && boundary.targetFound &&
+		boundary.replacement.Current().filename() == "child.png",
+		"the worker did not prepare the first populated child directory");
+	const std::size_t oldIndex = list.CurrentIndex();
+	Expect(list.ApplyPreparedScan(std::move(boundary), list.Current()) &&
+		list.Current().filename() == "child.png",
+		"the prepared boundary result did not select its first image in the new folder");
+	const fs::path secondChild = root / "02-child";
+	fs::create_directories(secondChild);
+	WriteTinyImage(secondChild / "second-child.png");
+	const FileList::ScanRequest nextBoundaryRequest = list.MakeScanRequest(
+		FileList::ScanOperation::ForwardBoundary, 1);
+	FileListPreparedScan nextBoundary = FileList::PrepareScan(nextBoundaryRequest, [] { return true; });
+	Expect(nextBoundary.completed && nextBoundary.targetFound &&
+		nextBoundary.replacement.Current().filename() == "second-child.png",
+		"recursive navigation lost its original root after entering the first child");
+	Expect(list.ApplyPreparedScan(std::move(nextBoundary), list.Current()) &&
+		list.Current().filename() == "second-child.png",
+		"the second recursive folder transition was not applied");
+	Expect(list.PreviousLoaded() == FileList::LoadedNavigationResult::Moved &&
+		list.Current().filename() == "child.png",
+		"reverse traversal did not restore the immediately previous recursive folder");
+	Expect(list.PreviousLoaded() == FileList::LoadedNavigationResult::Moved &&
+		list.Current().filename() == "root2.png" && list.CurrentIndex() == oldIndex,
+		"returning from an asynchronously entered folder did not restore its active entry and index");
+
+	const fs::path siblingRoot = temporary.path() / "sibling-root";
+	const fs::path previousSibling = siblingRoot / "01-previous";
+	const fs::path currentSibling = siblingRoot / "02-current";
+	fs::create_directories(previousSibling);
+	fs::create_directories(currentSibling);
+	WriteTinyImage(previousSibling / "a-first.png");
+	WriteTinyImage(previousSibling / "z-last.png");
+	WriteTinyImage(currentSibling / "current.png");
+	FileList siblings({currentSibling.string()}, FileList::SortMode::FileName, true, false);
+	const fs::path oldSiblingSelection = siblings.Current();
+	FileListPreparedScan previousSiblingScan = FileList::PrepareScan(
+		siblings.MakeScanRequest(FileList::ScanOperation::PreviousSibling, -1),
+		[] { return true; });
+	Expect(previousSiblingScan.completed && previousSiblingScan.targetFound &&
+		previousSiblingScan.replacement.Current().filename() == "a-first.png" &&
+		siblings.ApplyPreparedScan(std::move(previousSiblingScan), oldSiblingSelection) &&
+		siblings.Current() == previousSibling / "a-first.png",
+		"an async previous-sibling transition preserved the old path instead of selecting the first image");
+	FileListPreparedScan nextSiblingScan = FileList::PrepareScan(
+		siblings.MakeScanRequest(FileList::ScanOperation::NextSibling, 1),
+		[] { return true; });
+	Expect(nextSiblingScan.completed && nextSiblingScan.targetFound &&
+		nextSiblingScan.replacement.Current().filename() == "current.png" &&
+		siblings.ApplyPreparedScan(std::move(nextSiblingScan), siblings.Current()) &&
+		siblings.Current() == currentSibling / "current.png",
+		"an async next-sibling transition did not select the first image in its target folder");
+
+	FileList provisional;
+	provisional.SetProvisionalInputs({(root / "root.png").string(),
+		(secondChild / "second-child.png").string()});
+	Expect(provisional.Empty(),
+		"multiple explicit startup inputs were provisionally reduced to only the first image");
+
+	const FileList::ScanRequest canceledRequest = list.MakeScanRequest(FileList::ScanOperation::Reload);
+	std::size_t cancellationChecks = 0;
+	FileListPreparedScan canceled = FileList::PrepareScan(canceledRequest, [&cancellationChecks] {
+		return ++cancellationChecks < 4;
+	});
+	Expect(!canceled.completed,
+		"a scan canceled during enumeration returned a publishable partial list");
+
+	list.Select(0);
+	const FileList::ScanRequest reloadRequest = list.MakeScanRequest(FileList::ScanOperation::Reload);
+	FileListPreparedScan reload = FileList::PrepareScan(reloadRequest, [] { return true; });
+	list.Select(list.Size() - 1);
+	const fs::path selectedAtCompletion = list.Current();
+	Expect(list.ApplyPreparedScan(std::move(reload), selectedAtCompletion) &&
+		list.Current() == selectedAtCompletion,
+		"a reload did not preserve navigation performed while its scan was running");
+
+	const FileList::ScanRequest staleRequest = list.MakeScanRequest(FileList::ScanOperation::Reload);
+	FileListPreparedScan stale = FileList::PrepareScan(staleRequest, [] { return true; });
+	list.SetSorting(FileList::SortMode::FileName, false);
+	Expect(!list.ApplyPreparedScan(std::move(stale), list.Current()),
+		"a result prepared for a previous list/sort revision replaced the current list");
+
+	FileListScanWorker worker;
+	const std::uint64_t superseded = worker.Request(FileList::InitialScanRequest(
+		{root.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	const std::uint64_t current = worker.Request(FileList::InitialScanRequest(
+		{latest.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	Expect(current > superseded, "a newer scan did not receive a fresh generation identity");
+	std::vector<FileListScanResult> results;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+		results = worker.TakeReady();
+		if (results.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	Expect(results.size() == 1 && results.front().generation == current &&
+		results.front().prepared.replacement.Current().filename() == "latest.png",
+		"a superseded directory scan published stale files instead of the latest request");
 }
 
 void ExpectDecoded(const fs::path& filename, const std::vector<std::uint8_t>& expected,
@@ -6750,6 +6927,7 @@ int main() {
 	RunTest("file-list-size-and-random-sorting", TestFileListSizeAndRandomSorting, failures);
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);
 	RunTest("file-list-multiple-inputs", TestFileListMultipleInputs, failures);
+	RunTest("file-list-asynchronous-scanning", TestFileListAsynchronousScanning, failures);
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
 	RunTest("pnm-variants", TestPnmVariants, failures);
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
