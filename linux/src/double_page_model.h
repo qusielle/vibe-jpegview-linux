@@ -29,6 +29,7 @@ struct DoublePageSpread {
 	std::size_t secondIndex = 0;
 	int canvasWidth = 0;
 	int canvasHeight = 0;
+	int clockwiseQuarterTurns = 0;
 	SpreadPagePlacement currentPage;
 	SpreadPagePlacement nextPage;
 };
@@ -42,7 +43,7 @@ bool IsDoublePagePair(std::size_t firstIndex, std::size_t pageCount,
 std::optional<DoublePageSpread> BuildDoublePageSpread(std::size_t currentIndex,
 	std::size_t pageCount, const PageDimensions& current,
 	const std::optional<PageDimensions>& next, const DoublePageModeState& modes,
-	bool coverSingle = true);
+	bool coverSingle = true, int clockwiseQuarterTurns = 0);
 
 // Returns the number of source-list entries to move. Forward movement skips
 // the visible partner; backward movement skips a preceding spread, matching

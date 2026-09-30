@@ -21,8 +21,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   before its folder scan completes. Cancellation never blocks waiting for the worker; destruction
   joins it during normal owner teardown.
 - `double_page_model`: portrait-pair eligibility, cover handling, aspect-preserving shared-height
-  spread geometry, page-step navigation, and configurable physical-key direction in manga reading
-  order. It owns no image pixels, filesystem work, or SDL resources.
+  spread geometry, whole-spread quarter-turn placement, page-step navigation, and configurable
+  physical-key direction in manga reading order. It owns no image pixels, filesystem work, or SDL
+  resources.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
   and on-demand member access. ZIP and CBZ containers share the central-directory reader and member
   access path; CBZ retains its own display label. 7z and CB7 containers share libarchive's seekable
@@ -73,8 +74,11 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
   processing/scaling of renderer-ready frames. Display keys capture every active processing value
-  so an adjustment cannot reuse stale pixels. JPEG display requests use native reduced DCT decode
-  before exact scaling, without requiring a retained full-resolution source frame.
+  and quarter-turn orientation so an adjustment or spread rotation cannot reuse stale pixels.
+  Rotated spread partners are oriented on the worker before final slot-size resampling; unrotated
+  image requests retain the same processing path. JPEG display requests use native reduced DCT
+  decode with swapped target axes for quarter-turns before exact scaling, without requiring a
+  retained full-resolution source frame.
 - `input_commands`: SDL key chords to shared JPEGView command IDs, the configurable Space/Shift+Space
   image-navigation direction, and held-navigation repeat state (including when Shift is permitted).
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
@@ -158,6 +162,14 @@ here: the Right key's release activates the row under the pointer, or moves to t
 released outside the menu, while key-held pointer movement remains available for click-like selection.
 Right-click opens the compact menu, while Shift+right-click selects the expanded menu at invocation;
 the mouse adapter reads SDL's modifier state before constructing the menu.
+
+Double-page rotation keeps the current page's already-transformed renderer texture as the spread
+anchor and applies the same quarter-turn to its partner in `display_image_cache`. Source page
+dimensions remain available for pair eligibility after the current image becomes landscape, while
+the model rotates the shared canvas and page placements together. The presentation model still gates
+publication on both pages: a transformed anchor is marked ready from its existing SDL texture, and
+the spread stays hidden until the partner's rotated frame is uploaded. Rotated partner frames are not
+reused as source-orientation thumbnails.
 
 The move-to-trash confirmation draws a small preview from the active-file thumbnail cache when
 available, otherwise from the already-rendered current-image texture. It creates no preview decode or
@@ -297,6 +309,11 @@ presented, so held-key repeat cannot skip a spread between texture upload and it
 preparation/upload releases the single-page path instead of leaving the viewport waiting forever.
 Later non-JPEG neighbor completions append display work without replacing the active spread batch;
 callbacks from an obsolete prefetch batch are ignored after the Viewer replaces it.
+Up/Down rotates the current image as before while rotating the spread canvas and page placements as
+a unit. The partner's matching orientation is prepared off the renderer thread; the already
+transformed anchor texture counts as ready, but both pages remain hidden until the partner is ready.
+Original page dimensions are retained for pairing after the anchor rotates to landscape, so toggling
+double-page mode off and back on does not strand the rotated image in single-page presentation.
 The virtual viewport canvas combines both aspect-preserving page slots; zoom, pan, the zoom navigator,
 and magnifier hit testing use that canvas while crop selection remains in the anchor page's source
 coordinates. SDL textures are still uploaded and destroyed on the renderer thread. A spread does not

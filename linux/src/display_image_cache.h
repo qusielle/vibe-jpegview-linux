@@ -24,6 +24,7 @@ struct DisplayImageRequest {
 	int sourceHeight = 0;
 	int targetWidth = 0;
 	int targetHeight = 0;
+	int rotationQuarterTurns = 0;
 	bool autoContrast = false;
 	ImageProcessingParams processing;
 	std::size_t priority = 0;
@@ -40,6 +41,7 @@ struct PreparedDisplayImage {
 	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
 	std::size_t priority = 0;
+	int rotationQuarterTurns = 0;
 };
 
 // Captures the source identity at request time. An invalid request is returned
@@ -47,12 +49,12 @@ struct PreparedDisplayImage {
 DisplayImageRequest MakeDisplayImageRequest(const std::filesystem::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0,
-	const ImageProcessingParams& processing = {});
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
 
 DisplayImageRequest MakeJpegDisplayImageRequest(const std::filesystem::path& filename,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	bool autoContrast, std::size_t priority = 0,
-	const ImageProcessingParams& processing = {});
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
 

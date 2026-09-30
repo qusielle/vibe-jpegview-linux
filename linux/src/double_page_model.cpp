@@ -19,6 +19,21 @@ int ScaledWidthAtHeight(const PageDimensions& page, int height) {
 	return std::max(1, static_cast<int>(std::lround(width)));
 }
 
+SpreadPagePlacement RotatePlacement(const SpreadPagePlacement& page,
+	int canvasWidth, int canvasHeight, int clockwiseQuarterTurns) {
+	switch (clockwiseQuarterTurns) {
+	case 1:
+		return {canvasHeight - page.y - page.height, page.x, page.height, page.width};
+	case 2:
+		return {canvasWidth - page.x - page.width,
+			canvasHeight - page.y - page.height, page.width, page.height};
+	case 3:
+		return {page.y, canvasWidth - page.x - page.width, page.height, page.width};
+	default:
+		return page;
+	}
+}
+
 } // namespace
 
 bool IsDoublePagePair(std::size_t firstIndex, std::size_t pageCount,
@@ -31,11 +46,13 @@ bool IsDoublePagePair(std::size_t firstIndex, std::size_t pageCount,
 std::optional<DoublePageSpread> BuildDoublePageSpread(std::size_t currentIndex,
 	std::size_t pageCount, const PageDimensions& current,
 	const std::optional<PageDimensions>& next, const DoublePageModeState& modes,
-	bool coverSingle) {
+	bool coverSingle, int clockwiseQuarterTurns) {
 	if (!modes.enabled || !next.has_value() ||
 		!IsDoublePagePair(currentIndex, pageCount, current, *next, coverSingle)) {
 		return std::nullopt;
 	}
+	clockwiseQuarterTurns %= 4;
+	if (clockwiseQuarterTurns < 0) clockwiseQuarterTurns += 4;
 	const int canvasHeight = std::max(current.height, next->height);
 	const int currentWidth = ScaledWidthAtHeight(current, canvasHeight);
 	const int nextWidth = ScaledWidthAtHeight(*next, canvasHeight);
@@ -53,6 +70,19 @@ std::optional<DoublePageSpread> BuildDoublePageSpread(std::size_t currentIndex,
 	} else {
 		spread.currentPage = {0, 0, currentWidth, canvasHeight};
 		spread.nextPage = {currentWidth, 0, nextWidth, canvasHeight};
+	}
+	spread.clockwiseQuarterTurns = clockwiseQuarterTurns;
+	if (clockwiseQuarterTurns != 0) {
+		const int originalCanvasWidth = spread.canvasWidth;
+		const int originalCanvasHeight = spread.canvasHeight;
+		spread.currentPage = RotatePlacement(spread.currentPage, originalCanvasWidth,
+			originalCanvasHeight, clockwiseQuarterTurns);
+		spread.nextPage = RotatePlacement(spread.nextPage, originalCanvasWidth,
+			originalCanvasHeight, clockwiseQuarterTurns);
+		if ((clockwiseQuarterTurns & 1) != 0) {
+			spread.canvasWidth = originalCanvasHeight;
+			spread.canvasHeight = originalCanvasWidth;
+		}
 	}
 	return spread;
 }

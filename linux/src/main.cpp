@@ -562,6 +562,7 @@ private:
 		int targetHeight = 0;
 		bool autoContrast = false;
 		jpegview_linux::ImageProcessingParams processing;
+		int rotationQuarterTurns = 0;
 	};
 
 	struct ActiveDoublePageRender {
@@ -569,6 +570,7 @@ private:
 		jpegview_linux::PageDimensions currentPage;
 		jpegview_linux::PageDimensions nextPage;
 		DoublePagePartnerSpec partnerSpec;
+		bool transformedAnchorTexture = false;
 	};
 
 	struct TextTextureCacheEntry {
@@ -819,6 +821,9 @@ private:
 				return activeDoublePageRender_->nextPage;
 		}
 		if (index == fileList_.CurrentIndex() && image_.width > 0 && image_.height > 0) {
+			if (currentSpreadRotationValid_ && currentSourcePageDimensions_.has_value()) {
+				return currentSourcePageDimensions_;
+			}
 			return jpegview_linux::PageDimensions{image_.width, image_.height};
 		}
 		const fs::path& filename = fileList_.Files()[index];
@@ -902,7 +907,7 @@ private:
 		processing.unsharpAmount = 0.0;
 		processing.unsharpThreshold = unsharpMaskThreshold_;
 		return DoublePagePartnerSpec{filename, targetWidth, targetHeight,
-			filePreset.autoContrast, processing};
+			filePreset.autoContrast, processing, spread.clockwiseQuarterTurns};
 	}
 
 	std::optional<jpegview_linux::DisplayImageRequest> MakeDoublePagePartnerRequest(
@@ -911,12 +916,27 @@ private:
 		if (jpegview_linux::IsJpegPath(filename)) {
 			return jpegview_linux::MakeJpegDisplayImageRequest(filename, nextPage.width,
 				nextPage.height, spec.targetWidth, spec.targetHeight,
-				spec.autoContrast, 1, spec.processing);
+				spec.autoContrast, 1, spec.processing, spec.rotationQuarterTurns);
 		}
 		const auto decoded = imageCache_.Find(filename);
 		if (!decoded || decoded->frames.empty()) return std::nullopt;
 		return jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
-			spec.targetWidth, spec.targetHeight, spec.autoContrast, 1, spec.processing);
+			spec.targetWidth, spec.targetHeight, spec.autoContrast, 1, spec.processing,
+			spec.rotationQuarterTurns);
+	}
+
+	std::string ModifiedSpreadAnchorKey() const {
+		if (fileList_.Empty()) return {};
+		return "modified-spread-anchor:" +
+			AbsoluteNormalized(fileList_.Current()).string() + ':' +
+			std::to_string(modifiedImageRevision_) + ':' +
+			std::to_string(currentImageRotationQuarterTurns_);
+	}
+
+	SDL_Texture* ActiveDoublePageAnchorTexture() {
+		if (!activeDoublePageRender_.has_value()) return nullptr;
+		if (activeDoublePageRender_->transformedAnchorTexture) return texture_;
+		return FindDisplayTexture(doublePagePresentation_.AnchorTextureKey());
 	}
 
 	void CancelPendingDoublePageRequests() {
@@ -989,7 +1009,8 @@ private:
 		const jpegview_linux::DoublePageModeState modes{
 			doublePageModeEnabled_, mangaReadingOrderEnabled_};
 		const auto layout = jpegview_linux::BuildDoublePageSpread(currentIndex,
-			fileList_.Size(), *current, next, modes);
+			fileList_.Size(), *current, next, modes, true,
+			currentImageRotationQuarterTurns_);
 		if (!layout.has_value()) {
 			useSinglePage(true);
 			return;
@@ -1019,16 +1040,28 @@ private:
 				area.w, area.h);
 			currentDisplayRequest_.reset();
 		}
-		activeDoublePageRender_ = ActiveDoublePageRender{*layout, *current, *next, *spec};
+		const bool transformedAnchor = currentSpreadRotationValid_ &&
+			imageModified_ && texture_ != nullptr;
+		activeDoublePageRender_ = ActiveDoublePageRender{
+			*layout, *current, *next, *spec, transformedAnchor};
 		if (CurrentImagePositionText() != previousPosition) SetTitle();
 		const auto anchorSize = DoublePagePageDisplaySize(*layout, layout->currentPage, area);
-		const jpegview_linux::DisplayImageRequest* anchorRequestPointer =
-			CurrentDisplayRequest(anchorSize.first, anchorSize.second);
-		if (anchorRequestPointer == nullptr || !anchorRequestPointer->Valid()) {
-			useSinglePage();
-			return;
+		std::optional<jpegview_linux::DisplayImageRequest> anchorRequest;
+		std::string anchorKey;
+		if (transformedAnchor) {
+			currentDisplayRequest_.reset();
+			deferredCurrentDisplayPreparation_ = false;
+			anchorKey = ModifiedSpreadAnchorKey();
+		} else {
+			const jpegview_linux::DisplayImageRequest* anchorRequestPointer =
+				CurrentDisplayRequest(anchorSize.first, anchorSize.second);
+			if (anchorRequestPointer == nullptr || !anchorRequestPointer->Valid()) {
+				useSinglePage();
+				return;
+			}
+			anchorRequest = *anchorRequestPointer;
+			anchorKey = anchorRequest->key;
 		}
-		const jpegview_linux::DisplayImageRequest anchorRequest = *anchorRequestPointer;
 		const std::size_t anchorPixels = static_cast<std::size_t>(anchorSize.first) *
 			static_cast<std::size_t>(anchorSize.second);
 		const std::size_t partnerPixels =
@@ -1044,7 +1077,7 @@ private:
 
 		const std::string oldAnchorKey = doublePagePresentation_.AnchorTextureKey();
 		const std::string oldPartnerKey = doublePagePresentation_.PartnerTextureKey();
-		if (doublePagePresentation_.SpreadFailed(currentIndex, anchorRequest.key,
+		if (doublePagePresentation_.SpreadFailed(currentIndex, anchorKey,
 			partnerRequest->key)) {
 			CancelPendingDoublePageRequests();
 			deferredCurrentDisplayPreparation_ = true;
@@ -1053,10 +1086,10 @@ private:
 			return;
 		}
 		const bool newPairRequests = doublePagePresentation_.BeginSpread(currentIndex,
-			currentIndex + 1, anchorRequest.key, partnerRequest->key);
+			currentIndex + 1, anchorKey, partnerRequest->key);
 		if (newPairRequests) {
 			for (const std::string* oldKey : {&oldAnchorKey, &oldPartnerKey}) {
-				if (oldKey->empty() || *oldKey == anchorRequest.key ||
+				if (oldKey->empty() || *oldKey == anchorKey ||
 					*oldKey == partnerRequest->key) continue;
 				displayTextureProtectedKeys_.erase(*oldKey);
 				if (FindDisplayTexture(*oldKey) == nullptr) {
@@ -1067,36 +1100,39 @@ private:
 			doublePagePartnerRequest_.reset();
 		}
 		if (!previousCurrentDisplayKey.empty() &&
-			previousCurrentDisplayKey != anchorRequest.key) {
+			previousCurrentDisplayKey != anchorKey) {
 			displayTextureProtectedKeys_.erase(previousCurrentDisplayKey);
 		}
-		currentDisplayRequest_ = anchorRequest;
+		if (anchorRequest.has_value()) currentDisplayRequest_ = *anchorRequest;
 		doublePagePartnerRequest_ = std::move(partnerRequest);
 		doublePagePartnerDisplayKey_ = doublePagePartnerRequest_->key;
-		displayTextureProtectedKeys_.insert(anchorRequest.key);
+		displayTextureProtectedKeys_.insert(anchorKey);
 		displayTextureProtectedKeys_.insert(doublePagePartnerDisplayKey_);
 
 		std::vector<jpegview_linux::DisplayImageRequest> requests;
-		if (FindDisplayTexture(anchorRequest.key) == nullptr) requests.push_back(anchorRequest);
+		if (anchorRequest.has_value() && FindDisplayTexture(anchorKey) == nullptr) {
+			requests.push_back(*anchorRequest);
+		}
 		if (FindDisplayTexture(doublePagePartnerDisplayKey_) == nullptr) {
 			requests.push_back(*doublePagePartnerRequest_);
 		}
 		if (!requests.empty()) displayImageCache_.RequestBackgroundBatch(requests);
-		if (FindDisplayTexture(anchorRequest.key) != nullptr) {
-			doublePagePresentation_.MarkTextureReady(anchorRequest.key);
+		if (transformedAnchor || FindDisplayTexture(anchorKey) != nullptr) {
+			doublePagePresentation_.MarkTextureReady(anchorKey);
 		}
 		if (FindDisplayTexture(doublePagePartnerDisplayKey_) != nullptr) {
 			doublePagePresentation_.MarkTextureReady(doublePagePartnerDisplayKey_);
 			doublePagePartnerRequest_->decoded.reset();
 		}
-		const bool anchorUnavailable = FindDisplayTexture(anchorRequest.key) == nullptr &&
-			!displayImageCache_.HasPendingOrCached(anchorRequest.key);
+		const bool anchorUnavailable = !transformedAnchor &&
+			FindDisplayTexture(anchorKey) == nullptr &&
+			!displayImageCache_.HasPendingOrCached(anchorKey);
 		const bool partnerUnavailable = FindDisplayTexture(doublePagePartnerDisplayKey_) == nullptr &&
 			!displayImageCache_.HasPendingOrCached(doublePagePartnerDisplayKey_);
 		if (!doublePagePresentation_.SpreadReady(currentIndex) &&
 			(anchorUnavailable || partnerUnavailable)) {
 			doublePagePresentation_.MarkTextureFailed(
-				anchorUnavailable ? anchorRequest.key : doublePagePartnerDisplayKey_);
+				anchorUnavailable ? anchorKey : doublePagePartnerDisplayKey_);
 			deferredCurrentDisplayPreparation_ = true;
 		}
 	}
@@ -1247,6 +1283,10 @@ private:
 		correctionBaseValid_ = false;
 		image_ = {};
 		imageModified_ = false;
+		currentImageRotationQuarterTurns_ = 0;
+		currentSpreadRotationValid_ = false;
+		modifiedImageRevision_ = 0;
+		currentSourcePageDimensions_.reset();
 		const Uint32 now = SDL_GetTicks();
 		const SDL_Rect imageArea = ImageAreaRect();
 		const bool deferForPossibleSpread = IsPotentialDoublePageAnchor(currentIndex);
@@ -1257,6 +1297,8 @@ private:
 			int sourceHeight = 0;
 			if (JpegDimensions(fileList_.Current(), sourceWidth,
 				sourceHeight, errorMessage)) {
+				currentSourcePageDimensions_ =
+					jpegview_linux::PageDimensions{sourceWidth, sourceHeight};
 				image_.width = image_.originalWidth = sourceWidth;
 				image_.height = image_.originalHeight = sourceHeight;
 				RestoreScaleMode(viewportSnapshot);
@@ -1315,6 +1357,8 @@ private:
 				animationFrameDelaysMs.push_back(std::max(10, decodedFrame.delayMs));
 			}
 			const jpegview_linux::DecodedFrame& firstFrame = decoded->frames.front();
+			currentSourcePageDimensions_ =
+				jpegview_linux::PageDimensions{firstFrame.width, firstFrame.height};
 			image_.width = image_.originalWidth = firstFrame.width;
 			image_.height = image_.originalHeight = firstFrame.height;
 			image_.hasTransparency = firstFrame.hasTransparency;
@@ -1593,7 +1637,7 @@ private:
 
 	bool CacheDisplayTexture(const jpegview_linux::DisplayImageCache::ImagePtr& prepared) {
 		if (!prepared || prepared->key.empty()) return false;
-		QueuePreparedThumbnail(prepared);
+		if (prepared->rotationQuarterTurns == 0) QueuePreparedThumbnail(prepared);
 		if (FindDisplayTexture(prepared->key) != nullptr) {
 			displayImageCache_.Release(prepared->key);
 			displayImageCache_.Retire(prepared);
@@ -1905,6 +1949,7 @@ private:
 	void ApplyTransform(int command) {
 		if (!MaterializeCurrentPixels()) return;
 		ClearCropSelection();
+		const bool canKeepSpreadRotation = currentSpreadRotationValid_ || !imageModified_;
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		if (!TransformImage(image_, command) ||
 			(correctionBaseValid_ && !TransformImage(correctionBase_, command)) || !UpdateTexture()) {
@@ -1912,6 +1957,15 @@ private:
 			return;
 		}
 		imageModified_ = true;
+		if (command == IDM_ROTATE_90 || command == IDM_ROTATE_270) {
+			const int turns = command == IDM_ROTATE_90 ? 1 : 3;
+			currentImageRotationQuarterTurns_ =
+				(currentImageRotationQuarterTurns_ + turns) % 4;
+			currentSpreadRotationValid_ = canKeepSpreadRotation;
+		} else {
+			currentSpreadRotationValid_ = false;
+		}
+		++modifiedImageRevision_;
 		RestoreScaleMode(viewportSnapshot);
 	}
 
@@ -2342,6 +2396,8 @@ private:
 			playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
 		}
 		imageModified_ = true;
+		currentSpreadRotationValid_ = false;
+		++modifiedImageRevision_;
 		currentDisplayRequest_.reset();
 		ClearCropSelection();
 		cropSelection_.SetImageSize(image_.width, image_.height);
@@ -3597,7 +3653,7 @@ private:
 		if (activeDoublePageRender_.has_value() &&
 			(!doublePagePresentation_.SpreadReady(fileList_.CurrentIndex()) ||
 			!doublePagePresentation_.SpreadPresented(fileList_.CurrentIndex()) ||
-			FindDisplayTexture(doublePagePresentation_.AnchorTextureKey()) == nullptr ||
+			ActiveDoublePageAnchorTexture() == nullptr ||
 			FindDisplayTexture(doublePagePresentation_.PartnerTextureKey()) == nullptr)) return;
 		const int direction = heldNavigation_.AfterImageShown(keyIsHeld);
 		if (direction == 0 || fileList_.Empty()) return;
@@ -3618,6 +3674,8 @@ private:
 		correctionBase_ = std::move(base);
 		correctionBaseValid_ = true;
 		imageModified_ = false;
+		currentImageRotationQuarterTurns_ = 0;
+		currentSpreadRotationValid_ = false;
 		currentAnimationFrame_ = index;
 		currentPixelsMaterialized_ = true;
 		materializedProcessing_ = imageProcessing_;
@@ -5389,6 +5447,8 @@ private:
 			return;
 		}
 		imageModified_ = true;
+		currentSpreadRotationValid_ = false;
+		++modifiedImageRevision_;
 		RestoreScaleMode(viewportSnapshot);
 		SetTitle();
 		CloseResizeDialog();
@@ -8585,7 +8645,7 @@ private:
 		SDL_Texture* renderTexture = nullptr;
 		SDL_Texture* nextPageTexture = nullptr;
 		if (activeDoublePageRender_.has_value() && spreadModelReady) {
-			renderTexture = FindDisplayTexture(doublePagePresentation_.AnchorTextureKey());
+			renderTexture = ActiveDoublePageAnchorTexture();
 			nextPageTexture = FindDisplayTexture(doublePagePresentation_.PartnerTextureKey());
 		} else if (!activeDoublePageRender_.has_value() && selectedImageLoaded &&
 			!doublePagePresentation_.SuppressSinglePage(currentIndex)) {
@@ -8705,6 +8765,10 @@ private:
 	bool startFullscreen_ = false;
 	Image image_;
 	Image correctionBase_;
+	std::optional<jpegview_linux::PageDimensions> currentSourcePageDimensions_;
+	int currentImageRotationQuarterTurns_ = 0;
+	bool currentSpreadRotationValid_ = false;
+	std::uint64_t modifiedImageRevision_ = 0;
 	jpegview_linux::ImageProcessingParams imageProcessing_;
 	jpegview_linux::ImageProcessingParams defaultImageProcessing_;
 	jpegview_linux::ImageProcessingParams materializedProcessing_;

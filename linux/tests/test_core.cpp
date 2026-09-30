@@ -1642,6 +1642,29 @@ void TestDoublePagePairingNavigationAndReadingOrder() {
 		spread->currentPage.x == 0 && spread->currentPage.width == 800 &&
 		spread->nextPage.x == 800 && spread->nextPage.width == 600,
 		"portrait pages did not form a common-height, aspect-preserving spread");
+	const auto clockwiseSpread = jpegview_linux::BuildDoublePageSpread(
+		1, 4, pageOne, pageTwo, modes, true, 1);
+	Expect(clockwiseSpread.has_value() && clockwiseSpread->canvasWidth == 1200 &&
+		clockwiseSpread->canvasHeight == 1400 &&
+		clockwiseSpread->currentPage.x == 0 && clockwiseSpread->currentPage.y == 0 &&
+		clockwiseSpread->currentPage.width == 1200 &&
+		clockwiseSpread->currentPage.height == 800 &&
+		clockwiseSpread->nextPage.x == 0 && clockwiseSpread->nextPage.y == 800 &&
+		clockwiseSpread->nextPage.width == 1200 && clockwiseSpread->nextPage.height == 600,
+		"clockwise rotation did not turn the full spread into a correctly stacked book");
+	const auto counterClockwiseSpread = jpegview_linux::BuildDoublePageSpread(
+		1, 4, pageOne, pageTwo, modes, true, 3);
+	Expect(counterClockwiseSpread.has_value() && counterClockwiseSpread->canvasWidth == 1200 &&
+		counterClockwiseSpread->canvasHeight == 1400 &&
+		counterClockwiseSpread->currentPage.y == 600 &&
+		counterClockwiseSpread->nextPage.y == 0,
+		"counterclockwise rotation did not retain both pages in the rotated spread");
+	const auto halfTurnSpread = jpegview_linux::BuildDoublePageSpread(
+		1, 4, pageOne, pageTwo, modes, true, 2);
+	Expect(halfTurnSpread.has_value() && halfTurnSpread->canvasWidth == 1400 &&
+		halfTurnSpread->canvasHeight == 1200 && halfTurnSpread->currentPage.x == 600 &&
+		halfTurnSpread->nextPage.x == 0,
+		"half-turn rotation did not turn both pages together");
 	modes.mangaReadingOrder = true;
 	const auto mangaSpread = jpegview_linux::BuildDoublePageSpread(1, 4, pageOne, pageTwo, modes);
 	Expect(mangaSpread.has_value() && mangaSpread->currentPage.x == 600 &&
@@ -2397,6 +2420,21 @@ void TestJpegDisplayDecodeScaling() {
 		prepared->width == 10 && prepared->height == 8 &&
 		prepared->bgra.size() == 10u * 8u * 4u,
 		"file-backed JPEG preparation did not produce exact display-size pixels");
+	const jpegview_linux::DisplayImageRequest rotatedRequest =
+		jpegview_linux::MakeJpegDisplayImageRequest(filename, width, height,
+			8, 10, false, 1, {}, 1);
+	const jpegview_linux::DisplayImageRequest sameSizeUnrotatedRequest =
+		jpegview_linux::MakeJpegDisplayImageRequest(filename, width, height,
+			8, 10, false, 1);
+	Expect(rotatedRequest.Valid() && sameSizeUnrotatedRequest.Valid() &&
+		rotatedRequest.key != sameSizeUnrotatedRequest.key,
+		"rotated JPEG display request was invalid or reused the unrotated cache key");
+	const jpegview_linux::DisplayImageCache::ImagePtr rotatedPrepared =
+		display.RequestAndWait(rotatedRequest);
+	Expect(rotatedPrepared && rotatedPrepared->width == 8 &&
+		rotatedPrepared->height == 10 && rotatedPrepared->rotationQuarterTurns == 1 &&
+		rotatedPrepared->bgra.size() == 8u * 10u * 4u,
+		"reduced-DCT JPEG preparation did not rotate before producing the final slot size");
 }
 
 std::shared_ptr<DecodedImage> CachedTestImage(std::size_t bytes) {
@@ -2791,6 +2829,44 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		"display image worker did not produce exact target-size pixels");
 	Expect(prepared && !prepared->hasTransparency,
 		"display image worker invented transparency for an opaque frame");
+	const auto rotatedClockwiseRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, DisplayCacheTestImage(2, 3), 0, 3, 2, false, 0, {}, 1);
+	const auto rotatedCounterClockwiseRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, DisplayCacheTestImage(2, 3), 0, 3, 2, false, 0, {}, 3);
+	const auto unrotatedRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, DisplayCacheTestImage(2, 3), 0, 2, 3, false);
+	const auto halfTurnRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, DisplayCacheTestImage(2, 3), 0, 2, 3, false, 0, {}, 2);
+	Expect(rotatedClockwiseRequest.Valid() && rotatedCounterClockwiseRequest.Valid() &&
+		unrotatedRequest.Valid() && halfTurnRequest.Valid() &&
+		rotatedClockwiseRequest.key != rotatedCounterClockwiseRequest.key &&
+		unrotatedRequest.key != halfTurnRequest.key,
+		"display cache keys did not distinguish quarter-turn orientation");
+	jpegview_linux::DisplayImageCache rotationProcessor(256, 1);
+	const auto rotatedClockwise = rotationProcessor.RequestAndWait(rotatedClockwiseRequest);
+	const auto rotatedCounterClockwise =
+		rotationProcessor.RequestAndWait(rotatedCounterClockwiseRequest);
+	const auto halfTurn = rotationProcessor.RequestAndWait(halfTurnRequest);
+	const auto blueChannel = [](const jpegview_linux::DisplayImageCache::ImagePtr& image) {
+		std::vector<std::uint8_t> values;
+		if (!image) return values;
+		for (std::size_t offset = 0; offset < image->bgra.size(); offset += 4) {
+			values.push_back(image->bgra[offset]);
+		}
+		return values;
+	};
+	Expect(rotatedClockwise && rotatedClockwise->width == 3 &&
+		rotatedClockwise->height == 2 && rotatedClockwise->rotationQuarterTurns == 1 &&
+		blueChannel(rotatedClockwise) == std::vector<std::uint8_t>({4, 2, 0, 5, 3, 1}),
+		"display worker did not rotate decoded pixels clockwise before scaling");
+	Expect(rotatedCounterClockwise && rotatedCounterClockwise->width == 3 &&
+		rotatedCounterClockwise->height == 2 &&
+		blueChannel(rotatedCounterClockwise) ==
+			std::vector<std::uint8_t>({1, 3, 5, 0, 2, 4}),
+		"display worker did not rotate decoded pixels counterclockwise");
+	Expect(halfTurn && halfTurn->width == 2 && halfTurn->height == 3 &&
+		blueChannel(halfTurn) == std::vector<std::uint8_t>({5, 4, 3, 2, 1, 0}),
+		"display worker did not rotate decoded pixels through a half turn");
 	auto transparentDecoded = DisplayCacheTestImage(4, 4);
 	transparentDecoded->frames.front().bgra[3] = 0;
 	transparentDecoded->frames.front().hasTransparency = true;

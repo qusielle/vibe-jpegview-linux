@@ -306,6 +306,48 @@ if [ "$visual_assertions" -eq 1 ]; then
 		exit 1
 	fi
 fi
+# Up/Down rotate the open book as one spread. Keep the mode checked and the
+# partner visible while the rotated partner frame is prepared asynchronously.
+DISPLAY=":$display_number" xdotool key Down
+assert_title_prefix "[2-3/4] " "rotating a double-page spread fell back to one image"
+if [ "$visual_assertions" -eq 1 ]; then
+	rotated_spread_rendered=0
+	for _ in $(seq 1 40); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/rotated-spread.png"
+		rotated_top=$(convert "$temporary/rotated-spread.png" -format '%[hex:p{640,200}]' info:)
+		rotated_bottom=$(convert "$temporary/rotated-spread.png" -format '%[hex:p{640,600}]' info:)
+		case "$rotated_top:$rotated_bottom" in
+			*1EDC3C*:*DC281E*) rotated_spread_rendered=1; break ;;
+		esac
+		sleep 0.05
+	done
+	if [ "$rotated_spread_rendered" -ne 1 ]; then
+		echo "UI smoke test: rotating the spread did not keep both pages visible as a vertical book" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key d
+assert_title_prefix "01-first.ppm" "turning double-page mode off lost the current image"
+DISPLAY=":$display_number" xdotool key d
+assert_title_prefix "[2-3/4] " "turning double-page mode back on did not restore the rotated spread"
+DISPLAY=":$display_number" xdotool key Up
+assert_title_prefix "[2-3/4] " "counter-rotating a spread fell back to one image"
+if [ "$visual_assertions" -eq 1 ]; then
+	spread_restored=0
+	for _ in $(seq 1 40); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/restored-spread.png"
+		restored_left=$(convert "$temporary/restored-spread.png" -format '%[hex:p{320,400}]' info:)
+		restored_right=$(convert "$temporary/restored-spread.png" -format '%[hex:p{960,400}]' info:)
+		case "$restored_left:$restored_right" in
+			*1EDC3C*:*DC281E*) spread_restored=1; break ;;
+		esac
+		sleep 0.05
+	done
+	if [ "$spread_restored" -ne 1 ]; then
+		echo "UI smoke test: inverse rotation did not restore the side-by-side spread" >&2
+		exit 1
+	fi
+fi
 DISPLAY=":$display_number" xdotool key Right
 sleep 0.15
 assert_title_prefix "03-last.ppm" "double-page navigation did not skip the displayed partner"

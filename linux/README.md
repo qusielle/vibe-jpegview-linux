@@ -61,6 +61,9 @@ they support.
    either context menu, or with Ctrl+E; the explicit mode choice is saved between runs. Double-page
    mode (`D`) shows adjacent portrait pages together at a shared display height, leaving the first
    cover page on its own. Double-page manga mode (`J`) swaps their left/right placement.
+   Up/Down rotation turns the open spread as one unit: both pages stay visible and stack vertically
+   after a quarter-turn, then return to a horizontal spread when rotated back. The spread remains
+   paired if double-page mode is switched off and on while the rotation is applied.
    PageUp/PageDown remain logical previous/next. The two checkable controls appear in the navigation
    panel and context menu. Page pairs follow
    [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).

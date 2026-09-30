@@ -48,9 +48,15 @@ std::string NormalizedPath(const fs::path& filename) {
 	return (error ? filename : absolute).lexically_normal().string();
 }
 
+int NormalizeQuarterTurns(int turns) {
+	turns %= 4;
+	if (turns < 0) turns += 4;
+	return turns;
+}
+
 std::string RequestKey(const fs::path& filename, const FileIdentity& identity,
 	std::size_t frameIndex, int width, int height, bool autoContrast,
-	const ImageProcessingParams& processing) {
+	const ImageProcessingParams& processing, int rotationQuarterTurns) {
 	if (!identity.valid) return {};
 	const bool localDensity = processing.localDensityEnabled &&
 		(processing.lightenShadows > 0.0 || processing.darkenHighlights > 0.0);
@@ -61,6 +67,7 @@ std::string RequestKey(const fs::path& filename, const FileIdentity& identity,
 		<< identity.device << ':' << identity.inode << ':' << identity.size << ':'
 		<< identity.modifiedSeconds << ':' << identity.modifiedNanoseconds << '\n'
 		<< frameIndex << ':' << width << 'x' << height << ':' << autoContrast << ':'
+		<< NormalizeQuarterTurns(rotationQuarterTurns) << ':'
 		<< processing.contrast << ':' << processing.gamma << ':' << processing.saturation << ':'
 		<< processing.cyanRed << ':' << processing.magentaGreen << ':' << processing.yellowBlue << ':'
 		<< (localDensity ? processing.lightenShadows : 0.0) << ':' <<
@@ -84,7 +91,10 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		int sourceWidth = 0;
 		int sourceHeight = 0;
 		std::string errorMessage;
-		if (!DecodeJpegForDisplay(request.filename, request.targetWidth, request.targetHeight,
+		const bool swapsAxes = (request.rotationQuarterTurns & 1) != 0;
+		const int decodeTargetWidth = swapsAxes ? request.targetHeight : request.targetWidth;
+		const int decodeTargetHeight = swapsAxes ? request.targetWidth : request.targetHeight;
+		if (!DecodeJpegForDisplay(request.filename, decodeTargetWidth, decodeTargetHeight,
 			displayDecoded, sourceWidth, sourceHeight, errorMessage) ||
 			displayDecoded.frames.empty() || sourceWidth != request.sourceWidth ||
 			sourceHeight != request.sourceHeight) return {};
@@ -104,6 +114,19 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		image.hasTransparency = ownedFrame.hasTransparency;
 	}
 	if (!image.ApplyProcessing(request.processing, request.autoContrast)) return {};
+	switch (request.rotationQuarterTurns) {
+	case 1:
+		if (!image.Rotate(true)) return {};
+		break;
+	case 2:
+		if (!image.Rotate(true) || !image.Rotate(true)) return {};
+		break;
+	case 3:
+		if (!image.Rotate(false)) return {};
+		break;
+	default:
+		break;
+	}
 	if ((request.targetWidth < image.width || request.targetHeight < image.height) &&
 		!image.Resize(request.targetWidth, request.targetHeight)) return {};
 
@@ -115,6 +138,7 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	prepared->hasTransparency = image.hasTransparency;
 	prepared->bgra = std::move(image.bgra);
 	prepared->priority = request.priority;
+	prepared->rotationQuarterTurns = request.rotationQuarterTurns;
 	return prepared;
 }
 
@@ -122,7 +146,8 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 
 bool DisplayImageRequest::Valid() const {
 	if (key.empty() ||
-		targetWidth <= 0 || targetHeight <= 0) return false;
+		targetWidth <= 0 || targetHeight <= 0 ||
+		rotationQuarterTurns < 0 || rotationQuarterTurns > 3) return false;
 	if (!decoded) return sourceWidth > 0 && sourceHeight > 0 && IsJpegPath(filename);
 	if (frameIndex >= decoded->frames.size()) return false;
 	const DecodedFrame& frame = decoded->frames[frameIndex];
@@ -132,13 +157,14 @@ bool DisplayImageRequest::Valid() const {
 DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority,
-	const ImageProcessingParams& processing) {
+	const ImageProcessingParams& processing, int rotationQuarterTurns) {
 	DisplayImageRequest request;
 	request.filename = filename;
 	request.decoded = decoded;
 	request.frameIndex = frameIndex;
 	request.targetWidth = targetWidth;
 	request.targetHeight = targetHeight;
+	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	request.autoContrast = autoContrast;
 	request.processing = processing;
 	request.priority = priority;
@@ -148,26 +174,28 @@ DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	request.sourceWidth = decoded->frames[frameIndex].width;
 	request.sourceHeight = decoded->frames[frameIndex].height;
 	request.key = RequestKey(filename, Identify(filename), frameIndex,
-		targetWidth, targetHeight, autoContrast, processing);
+		targetWidth, targetHeight, autoContrast, processing, request.rotationQuarterTurns);
 	return request;
 }
 
 DisplayImageRequest MakeJpegDisplayImageRequest(const fs::path& filename,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
-	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing) {
+	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing,
+	int rotationQuarterTurns) {
 	DisplayImageRequest request;
 	request.filename = filename;
 	request.sourceWidth = sourceWidth;
 	request.sourceHeight = sourceHeight;
 	request.targetWidth = targetWidth;
 	request.targetHeight = targetHeight;
+	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	request.autoContrast = autoContrast;
 	request.processing = processing;
 	request.priority = priority;
 	if (!IsJpegPath(filename) || sourceWidth <= 0 || sourceHeight <= 0 ||
 		targetWidth <= 0 || targetHeight <= 0) return request;
 	request.key = RequestKey(filename, Identify(filename), 0,
-		targetWidth, targetHeight, autoContrast, processing);
+		targetWidth, targetHeight, autoContrast, processing, request.rotationQuarterTurns);
 	return request;
 }
 
@@ -309,7 +337,8 @@ struct DisplayImageCache::Impl {
 			const std::string currentKey = RequestKey(work.request.filename,
 				Identify(work.request.filename), work.request.frameIndex,
 				work.request.targetWidth, work.request.targetHeight,
-				work.request.autoContrast, work.request.processing);
+				work.request.autoContrast, work.request.processing,
+				work.request.rotationQuarterTurns);
 
 			{
 				std::lock_guard<std::mutex> lock(mutex);
@@ -393,7 +422,7 @@ DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& r
 	if (!request.Valid()) return {};
 	if (request.key != RequestKey(request.filename, Identify(request.filename),
 		request.frameIndex, request.targetWidth, request.targetHeight,
-		request.autoContrast, request.processing)) return {};
+		request.autoContrast, request.processing, request.rotationQuarterTurns)) return {};
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	const auto found = impl_->entries.find(request.key);
 	if (found != impl_->entries.end()) {
