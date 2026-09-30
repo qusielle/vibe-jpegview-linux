@@ -209,6 +209,11 @@ The final handoff must list the exact test commands that passed and any check th
   project's semantic-versioning line from `1.4.0` onward (PATCH for compatible fixes, MINOR for
   backward-compatible features, MAJOR for incompatible changes). Do not push the tag or publish a
   release unless separately requested.
+- For each explicitly requested release tag, prepare release notes from the actual diff in
+  `out/RELEASE_NOTES_<version>.tmp.md`, then copy the complete Markdown contents verbatim into the
+  annotated tag message body after the `JPEGView Linux <version>` subject. Do not replace the notes
+  with a GitHub link; the tag object should preserve the notes independently of GitHub. After
+  tagging, verify the complete annotation with `git cat-file -p refs/tags/<version>`.
 - `linux/version.sh` derives build metadata from the nearest reachable semantic-version tag:
   exactly the tag version there, `+devN` after it, and `.dirty` for local edits. Do not add separate
   version literals to the binary, AppImage, or Debian packaging. For version or packaging changes,
