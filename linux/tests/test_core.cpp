@@ -3733,9 +3733,33 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.unsharpMaskThreshold = 7.0;
 	expected.cacheSizeMiB = 1536;
 	expected.copyRenamePattern = "%F=%n";
+	expected.windowTitlePattern = "%f | [%p] | %m | %%";
 	Expect(jpegview_linux::SaveViewerSettings(settingsPath, expected), "settings could not be saved");
 	Expect(fs::exists(settingsPath), "settings file was not created");
 	Expect(!fs::exists(settingsPath.string() + ".tmp"), "temporary settings file was left behind");
+	std::ifstream settingsInput(settingsPath);
+	std::string settingsContents;
+	std::string settingsLine;
+	while (std::getline(settingsInput, settingsLine)) settingsContents += settingsLine + '\n';
+	Expect(settingsContents.find("# Window title codes:") != std::string::npos &&
+		settingsContents.find("# %a application name, %v build version, %% literal percent.") !=
+			std::string::npos &&
+		settingsContents.find("%i one-based image index") != std::string::npos &&
+		settingsContents.find("%F filename without extension (stem)") != std::string::npos &&
+		settingsContents.find("%w/%h original width/height in pixels") != std::string::npos &&
+		settingsContents.find("window_title_pattern=%f | [%p] | %m | %%\n") !=
+			std::string::npos,
+		"saved config did not explain title codes beside the custom pattern");
+	const std::size_t titleSettingPosition = settingsContents.find("window_title_pattern=");
+	const std::size_t titleCommentPosition = settingsContents.rfind("# Window title codes:", titleSettingPosition);
+	const std::string titleCommentText = titleSettingPosition == std::string::npos ||
+		titleCommentPosition == std::string::npos ? std::string() :
+		settingsContents.substr(titleCommentPosition, titleSettingPosition - titleCommentPosition);
+	for (const char* token : {"%p", "%i", "%n", "%f", "%F", "%e", "%P", "%D",
+		"%w", "%h", "%s", "%b", "%m", "%a", "%v", "%%"}) {
+		Expect(titleCommentText.find(token) != std::string::npos,
+			std::string("settings.conf title comment omits ") + token);
+	}
 
 	jpegview_linux::ViewerSettings loaded;
 	Expect(jpegview_linux::LoadViewerSettings(settingsPath, loaded), "settings could not be loaded");
@@ -3793,6 +3817,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	ExpectNear(loaded.unsharpMaskThreshold, expected.unsharpMaskThreshold, 0.0000001,
 		"unsharp threshold setting did not round-trip");
 	Expect(loaded.copyRenamePattern == expected.copyRenamePattern, "batch pattern did not round-trip");
+	Expect(loaded.windowTitlePattern == expected.windowTitlePattern,
+		"window-title pattern did not round-trip");
 	Expect(loaded.cacheSizeMiB == expected.cacheSizeMiB, "cache size did not round-trip");
 	Expect(loaded.manualZoomSet, "saved manual zoom was not marked present");
 	ExpectNear(loaded.manualZoom, expected.manualZoom, 0.0000001, "manual zoom did not round-trip");
@@ -3800,6 +3826,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	const fs::path malformed = temporary.path() / "malformed.conf";
 	std::ofstream malformedOutput(malformed);
 	malformedOutput << "  scale_mode = manual\nmanual_zoom=not-a-number\ndefault_gamma=not-a-number\n"
+		"window_title_pattern=%q is invalid\n"
 		"thumbnail_panel_width=not-a-number\nfile_dialog_width=not-a-number\n"
 		"file_dialog_height=not-a-number\nfile_dialog_preview_ratio=nan\n"
 		"magnifying_glass_width=not-a-number\nmagnifying_glass_height=not-a-number\n"
@@ -3816,6 +3843,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	loaded = {};
 	Expect(jpegview_linux::LoadViewerSettings(malformed, loaded), "malformed settings file was rejected entirely");
 	Expect(loaded.scaleMode == "manual", "whitespace around a setting was not trimmed");
+	Expect(loaded.windowTitlePattern == jpegview_linux::kDefaultWindowTitlePattern,
+		"unknown window-title code did not retain the built-in default");
 	Expect(!loaded.manualZoomSet && loaded.manualZoom == 1.0,
 		"malformed manual zoom did not retain its default");
 	Expect(!loaded.thumbnailPanelVisible,
@@ -3888,6 +3917,13 @@ void TestSettingsRoundTripAndMalformedValues() {
 	Expect(!jpegview_linux::LoadViewerSettings(temporary.path() / "missing.conf", unchanged) &&
 		unchanged.scaleMode == "sentinel",
 		"missing settings file modified the caller's existing settings");
+	unchanged.windowTitlePattern = "invalid %q";
+	Expect(!jpegview_linux::SaveViewerSettings(settingsPath, unchanged),
+		"invalid window-title pattern was written to settings");
+	loaded = {};
+	Expect(jpegview_linux::LoadViewerSettings(settingsPath, loaded) &&
+		loaded.windowTitlePattern == expected.windowTitlePattern,
+		"invalid settings save replaced the last valid title pattern");
 }
 
 void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
@@ -3930,10 +3966,11 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	source.unsharpMaskThreshold = 7.0;
 	source.cacheSizeMiB = 1536;
 	source.copyRenamePattern = u8"%F=旅行-%n";
+	source.windowTitlePattern = "%f (%m) [%p]";
 
 	const std::array<std::vector<std::string>, 7> expectedKeys = {{
 		{"manga_mode_inverts_left_right", "spacebar_navigates_images", "folder_wrap_around"},
-		{"transparency_pattern", "show_histogram"},
+		{"transparency_pattern", "show_histogram", "window_title_pattern"},
 		{"thumbnail_panel_width", "file_dialog_width", "file_dialog_height",
 			"file_dialog_preview_ratio"},
 		{"magnifying_glass_width", "magnifying_glass_height", "magnifying_glass_zoom_level"},
@@ -3977,12 +4014,13 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 			++fieldTotal;
 		}
 	}
-	Expect(fieldTotal == 32, "advanced configuration did not expose every requested setting");
+	Expect(fieldTotal == 33, "advanced configuration did not expose every requested setting");
 	Expect(model.SelectCategory(static_cast<int>(Category::Behavior)) &&
 		model.FieldValue(2) == "Off",
 		"folder-wrap setting did not display its disabled draft value");
 	Expect(model.SelectCategory(static_cast<int>(Category::Appearance)) &&
-		model.FieldValue(0) == "White" && model.FieldValue(1) == "On",
+		model.FieldValue(0) == "White" && model.FieldValue(1) == "On" &&
+		model.FieldValue(2) == source.windowTitlePattern,
 		"choice or boolean setting values were not formatted for display");
 	Expect(model.SelectCategory(static_cast<int>(Category::PanelsAndDialogs)) &&
 		model.FieldValue(3) == "37.5%",
@@ -3993,7 +4031,8 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	Expect(jpegview_linux::EqualImageProcessing(model.Draft().defaultImageProcessing,
 		source.defaultImageProcessing) && model.Draft().copyRenamePattern == source.copyRenamePattern &&
 		model.Draft().magnifyingGlassWidth == source.magnifyingGlassWidth &&
-		model.Draft().fileDialogPreviewRatio == source.fileDialogPreviewRatio,
+		model.Draft().fileDialogPreviewRatio == source.fileDialogPreviewRatio &&
+		model.Draft().windowTitlePattern == source.windowTitlePattern,
 		"opening and visiting categories changed the persisted settings draft");
 	Expect(model.Draft().scaleMode == source.scaleMode && model.Draft().maximized == source.maximized &&
 		model.Draft().selectionModeEnabled == source.selectionModeEnabled &&
@@ -4034,6 +4073,13 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	model.SelectRow(1);
 	Expect(model.ActivateSelected() && !model.Draft().showHistogram,
 		"appearance boolean did not toggle on activation");
+	model.SelectRow(2);
+	model.BeginEdit();
+	model.SelectAll();
+	Expect(model.AppendText("%f - [%i/%n] - %a") && model.CommitEdit() &&
+		model.Draft().windowTitlePattern == "%f - [%i/%n] - %a" &&
+		model.Draft().copyRenamePattern == source.copyRenamePattern,
+		"window-title text editor did not update its independent setting");
 
 	model.SelectCategory(static_cast<int>(Category::PanelsAndDialogs));
 	model.SelectRow(0);
@@ -4124,6 +4170,7 @@ void TestAdvancedConfigurationModelValidationAndCancellation() {
 	original.fileDialogPreviewRatio = 0.375;
 	original.unsharpMaskRadius = 1.0;
 	original.copyRenamePattern = u8"old-写像-%n";
+	original.windowTitlePattern = "%f - [%p]";
 	jpegview_linux::AdvancedConfigurationModel model;
 	model.Open(original);
 
@@ -4220,6 +4267,33 @@ void TestAdvancedConfigurationModelValidationAndCancellation() {
 		"copy/rename editor accepted a line break that would corrupt settings storage");
 	model.CancelEdit();
 
+	model.SelectCategory(static_cast<int>(Category::Appearance));
+	model.SelectRow(2);
+	model.BeginEdit();
+	model.SelectAll();
+	model.AppendText("%f %q");
+	Expect(!model.CommitEdit() && model.IsEditing() &&
+		model.Message().find("%q") != std::string::npos &&
+		model.Draft().windowTitlePattern == original.windowTitlePattern,
+		"unknown title-format code changed the draft or omitted its validation message");
+	model.CancelEdit();
+	model.BeginEdit();
+	model.SelectAll();
+	model.AppendText("%f [%p] %%");
+	Expect(model.CommitEdit() && model.Draft().windowTitlePattern == "%f [%p] %%",
+		"valid title-format edit was not committed");
+	model.BeginEdit();
+	model.SelectAll();
+	model.AppendText("temporary %v");
+	model.CancelEdit();
+	Expect(model.Draft().windowTitlePattern == "%f [%p] %%",
+		"cancelling a title-format edit changed the active draft");
+	model.BeginEdit();
+	model.SelectAll();
+	Expect(model.AppendText("   ") && model.CommitEdit() &&
+		model.Draft().windowTitlePattern == jpegview_linux::kDefaultWindowTitlePattern,
+		"empty title-format edit did not restore the built-in pattern");
+
 	model.Open(original);
 	model.SelectCategory(static_cast<int>(Category::Behavior));
 	model.SelectRow(0);
@@ -4227,13 +4301,15 @@ void TestAdvancedConfigurationModelValidationAndCancellation() {
 		original.mangaModeInvertsLeftRight,
 		"draft mutation could not be staged before cancelling the dialog");
 	Expect(original.mangaModeInvertsLeftRight && original.fileDialogWidth == 900 &&
-		original.copyRenamePattern == u8"old-写像-%n",
+		original.copyRenamePattern == u8"old-写像-%n" &&
+		original.windowTitlePattern == "%f - [%p]",
 		"editing an advanced configuration draft mutated its source settings");
 	model.Close();
 	model.Open(original);
 	Expect(model.Draft().mangaModeInvertsLeftRight == original.mangaModeInvertsLeftRight &&
 		model.Draft().fileDialogWidth == original.fileDialogWidth &&
-		model.Draft().copyRenamePattern == original.copyRenamePattern,
+		model.Draft().copyRenamePattern == original.copyRenamePattern &&
+		model.Draft().windowTitlePattern == original.windowTitlePattern,
 		"reopening after cancellation did not restore the caller-provided settings");
 	model.SetMessage("adapter message");
 	Expect(model.Message() == "adapter message", "advanced configuration message was not retained");
@@ -6437,6 +6513,72 @@ void TestImageInfoFormatting() {
 		jpegview_linux::FormatFileSize(10 * 1024) == "10 KB" &&
 		jpegview_linux::FormatFileSize(3ull * 1024 * 1024 * 1024) == "3.0 GB",
 		"file-size formatting changed at a unit or precision boundary");
+
+	using jpegview_linux::WindowTitleContext;
+	WindowTitleContext context;
+	context.position = "2-3/12";
+	context.currentIndex = 1;
+	context.imageCount = 12;
+	context.filename = "photo-%s.jpeg";
+	context.filenameStem = "photo-%s";
+	context.extension = "jpeg";
+	context.fullPath = "/photos/day/photo-%s.jpeg";
+	context.directory = "/photos/day";
+	context.width = 8001;
+	context.height = 6000;
+	context.fileSize = 10u * 1024u * 1024u;
+	context.applicationVersion = "1.4.2+dev29";
+	Expect(jpegview_linux::FormatWindowTitle(
+		jpegview_linux::kDefaultWindowTitlePattern, context) ==
+		"[2-3/12] photo-%s.jpeg (8001x6000, 10 MB) - JPEGView",
+		"default window-title pattern did not preserve the current title layout");
+	Expect(jpegview_linux::FormatWindowTitle("%q", context) ==
+		jpegview_linux::FormatWindowTitle(jpegview_linux::kDefaultWindowTitlePattern, context),
+		"invalid window-title patterns did not safely fall back to the default");
+	Expect(jpegview_linux::FormatWindowTitle(
+		"%f [%i/%n] %p %F %e %P %D %w %h %s %b %m %a %v %%", context) ==
+		"photo-%s.jpeg [2/12] 2-3/12 photo-%s jpeg /photos/day/photo-%s.jpeg "
+		"/photos/day 8001 6000 10 MB 10485760 8001x6000, 10 MB JPEGView "
+		"1.4.2+dev29 %",
+		"window-title token expansion changed or recursively parsed replacement text");
+	context.fileSize.reset();
+	Expect(jpegview_linux::FormatWindowTitle("%w x %h (%m)|%s|%b", context) ==
+		"8001 x 6000 (8001x6000)||",
+		"window-title dimensions left size punctuation when file size was unavailable");
+	Expect(jpegview_linux::NormalizeWindowTitlePattern(" \t ") ==
+		jpegview_linux::kDefaultWindowTitlePattern &&
+		jpegview_linux::NormalizeWindowTitlePattern("  [%f]  ") == "[%f]",
+		"window-title pattern normalization did not trim or restore the default");
+	std::string patternError;
+	Expect(jpegview_linux::ValidateWindowTitlePattern("%f [%p] %%", &patternError) &&
+		patternError.empty(), "valid window-title pattern was rejected");
+	Expect(!jpegview_linux::ValidateWindowTitlePattern("%f %q", &patternError) &&
+		patternError.find("%q") != std::string::npos,
+		"unknown window-title code was accepted without an explanation");
+	Expect(!jpegview_linux::ValidateWindowTitlePattern("dangling%", &patternError) &&
+		patternError.find("trailing %") != std::string::npos,
+		"incomplete window-title code was accepted without an explanation");
+	Expect(!jpegview_linux::ValidateWindowTitlePattern("two\nlines", &patternError) &&
+		!jpegview_linux::ValidateWindowTitlePattern(
+			std::string(jpegview_linux::kMaximumWindowTitlePatternBytes + 1, 'x'), &patternError),
+		"window-title pattern accepted line breaks or an oversized value");
+	const std::string titleLegend = std::string(jpegview_linux::kWindowTitlePatternHelpLine1) +
+		" " + jpegview_linux::kWindowTitlePatternHelpLine2 + " " +
+		jpegview_linux::kWindowTitlePatternHelpLine3;
+	for (const char* token : {"%p", "%i", "%n", "%f", "%F", "%e", "%P", "%D",
+		"%w", "%h", "%s", "%b", "%m", "%a", "%v", "%%"}) {
+		Expect(titleLegend.find(token) != std::string::npos,
+			std::string("Advanced configuration title legend omits ") + token);
+	}
+	Expect(titleLegend.find("%i one-based image index") != std::string::npos &&
+		titleLegend.find("%F filename stem (no extension)") != std::string::npos &&
+		titleLegend.find("%e extension (no dot)") != std::string::npos &&
+		titleLegend.find("%w/%h original pixel width/height") != std::string::npos,
+		"Advanced configuration title legend did not clarify index, filename, extension, or dimension codes");
+	context.fileSize = 0;
+	Expect(jpegview_linux::FormatWindowTitle("%s|%b|%m", context) ==
+		"0 B|0|8001x6000, 0 B",
+		"window-title pattern did not distinguish a zero-byte file from an unavailable size");
 }
 
 void TestSystemFontResolutionAndUnicodeRendering() {

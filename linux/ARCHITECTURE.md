@@ -86,7 +86,8 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `settings` and `sort_mode`: persisted configuration (including the transparent-image background
   choice, default picture-level values,
   fixed crop dimensions/units, user crop aspect, the explicit crop-selection mode (disabled by
-  default), zoom-navigator visibility, magnifying-glass size/zoom, global double-page/manga-mode
+  default), zoom-navigator visibility, magnifying-glass size/zoom, the validated window-title
+  pattern, global double-page/manga-mode
   defaults, the default-enabled `manga_mode_inverts_left_right` preference, the default-disabled
   `spacebar_navigates_images` preference, and the default-enabled `folder_wrap_around` preference),
   plus stable sort-mode values. Applying prepared list scans preserves the live folder-wrap value,
@@ -135,11 +136,11 @@ should normally be added to one of these focused modules and covered by `tests/t
   low-priority derivation from completed neighbor display frames. The viewer supplies the active
   double-page partner index so both displayed spread pages receive active-row styling without
   moving the panel's centering or changing which row represents the navigation index.
-- `image_info_model`: stable image-position, dimensions, date, and file-size presentation. Viewer
-  supplies the active spread partner so filename and information overlays report both visible
-  positions without coupling the formatting module to SDL or spread state. The SDL composition root
-  reuses this position text in the window title and refreshes it when a newly prepared spread becomes
-  active.
+- `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
+  validation and single-pass expansion for the configurable window-title pattern. Viewer supplies
+  image context—including active spread position, path, original dimensions, source size, and build
+  version—so title formatting remains independent of SDL and spread state. Filename and information
+  overlays also receive the active partner for both visible positions.
 - `system_font` and `bitmap_font`: desktop-font discovery, UTF-8 shaping, measurement, rasterization,
   and exact embedded-glyph ink bounds for crisp renderer overlays such as menu mnemonics. The SDL
   adapter creates printable-ASCII bitmap-font textures with nearest-neighbor sampling while keeping
@@ -153,7 +154,9 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `exif_reader`: JPEG metadata parsing.
 
 `main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
-and invoking desktop integrations. It reads the persisted transparency pattern and, for frames
+and invoking desktop integrations. It assembles current viewer state for the pure title-pattern
+formatter and passes the result to SDL; transient loading and error titles remain direct status
+messages. It reads the persisted transparency pattern and, for frames
 marked as containing alpha, paints the matching background beneath the image before alpha-blended
 texture rendering. The same renderer-thread helper backs transparent thumbnails and open-dialog
 previews; opaque textures retain the non-blended path. It should translate SDL events into operations
@@ -178,11 +181,13 @@ shows a no-preview placeholder alongside the filename.
 
 The Advanced configuration modal is a thin adapter over `AdvancedConfigurationModel`: its category
 tabs, visible row count, hit testing, text input, and painting stay in Viewer, while the model owns
-only the staged `ViewerSettings` values and their validated transitions. Apply writes the complete
-draft with `SaveViewerSettings` before updating the corresponding runtime fields; a failed write
-leaves live state untouched. The image-cache budget remains next-launch-only, so the UI does not
-change the shared cache capacity while running. Automatically captured window/session geometry and
-settings with existing menu commands are intentionally outside this editor.
+only the staged `ViewerSettings` values and their validated transitions. The Appearance category
+edits the title pattern as a text setting; a three-line UI legend lists the supported formatter
+codes, and title-format errors keep the edit open without changing the draft. Apply writes the
+complete draft with `SaveViewerSettings` before updating the corresponding runtime fields; a failed
+write leaves live state untouched. The image-cache budget remains next-launch-only, so the UI does
+not change the shared cache capacity while running. Automatically captured window/session geometry
+and settings with existing menu commands are intentionally outside this editor.
 
 Archive members use the existing filesystem-shaped path contract (`container.ext/member.ext`) so
 navigation, sorting, recent-folder grouping, cache keys, and decoder APIs remain unchanged. The

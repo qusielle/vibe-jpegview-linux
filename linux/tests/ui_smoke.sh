@@ -858,6 +858,9 @@ sleep 0.15
 DISPLAY=":$display_number" xdotool key Down Down Return
 DISPLAY=":$display_number" xdotool key Tab
 DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool key Down Down Return
+DISPLAY=":$display_number" xdotool key ctrl+a
+DISPLAY=":$display_number" xdotool type --delay 30 --clearmodifiers '%f - [%p] - %a'
 DISPLAY=":$display_number" xdotool key Tab
 DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool type --delay 30 '128'
@@ -868,13 +871,16 @@ advanced_config_settings="$VIEWER_TEST_CONFIG_HOME/jpegview-linux/settings.conf"
 grep -q '^transparency_pattern=white$' "$advanced_config_settings"
 grep -q '^thumbnail_panel_width=128$' "$advanced_config_settings"
 grep -q '^folder_wrap_around=0$' "$advanced_config_settings"
+grep -Fqx 'window_title_pattern=%f - [%p] - %a' "$advanced_config_settings"
 assert_title_prefix "01-red.ppm" "applying advanced configuration did not return to the viewer"
+assert_title_prefix "01-red.ppm - [1/" "advanced configuration did not apply the reordered title pattern"
 DISPLAY=":$display_number" xdotool key Left
 sleep 0.1
 assert_title_prefix "01-red.ppm" "disabled folder wrap moved past the first image"
 DISPLAY=":$display_number" xdotool key Right
 sleep 0.1
 assert_title_prefix "02-green.ppm" "folder navigation did not continue from an interior image"
+assert_title_prefix "02-green.ppm - [2/" "window title pattern did not update its position after navigation"
 
 # Reopening and escaping discards an un-applied draft.
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3

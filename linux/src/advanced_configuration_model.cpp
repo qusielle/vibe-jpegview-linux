@@ -54,6 +54,7 @@ const std::vector<AdvancedConfigurationField>& FieldsFor(int category) {
 		ChoiceField("transparency_pattern", "Transparent image background",
 			kTransparencyChoices, sizeof(kTransparencyChoices) / sizeof(kTransparencyChoices[0])),
 		BooleanField("show_histogram", "Show histogram"),
+		TextField("window_title_pattern", "Window title pattern"),
 	};
 	static const std::vector<AdvancedConfigurationField> panelsAndDialogs = {
 		IntegerField("thumbnail_panel_width", "Thumbnail panel width",
@@ -272,13 +273,17 @@ std::string FormatValue(const ViewerSettings& settings, const AdvancedConfigurat
 		return result;
 	}
 	case AdvancedConfigurationFieldKind::Text:
-		return settings.copyRenamePattern;
+		return IsKey(field, "window_title_pattern") ?
+			settings.windowTitlePattern : settings.copyRenamePattern;
 	}
 	return {};
 }
 
 std::string FormatEditValue(const ViewerSettings& settings, const AdvancedConfigurationField& field) {
-	if (field.kind == AdvancedConfigurationFieldKind::Text) return settings.copyRenamePattern;
+	if (field.kind == AdvancedConfigurationFieldKind::Text) {
+		return IsKey(field, "window_title_pattern") ?
+			settings.windowTitlePattern : settings.copyRenamePattern;
+	}
 	if (field.kind == AdvancedConfigurationFieldKind::Integer) {
 		return std::to_string(static_cast<long long>(std::llround(GetNumericValue(settings, field))));
 	}
@@ -536,6 +541,15 @@ bool AdvancedConfigurationModel::AppendText(const std::string& text) {
 		message_ = "Text cannot contain line breaks or NUL bytes.";
 		return false;
 	}
+	if (field->kind == AdvancedConfigurationFieldKind::Text &&
+		IsKey(*field, "window_title_pattern")) {
+		const std::size_t existingBytes = inputPrimed_ ? 0 : editingText_.size();
+		if (existingBytes > kMaximumWindowTitlePatternBytes ||
+			text.size() > kMaximumWindowTitlePatternBytes - existingBytes) {
+			message_ = "Window title pattern exceeds 1024 bytes.";
+			return false;
+		}
+	}
 	if (inputPrimed_) {
 		editingText_.clear();
 		inputPrimed_ = false;
@@ -572,7 +586,17 @@ bool AdvancedConfigurationModel::CommitEdit() {
 			message_ = "Text cannot contain line breaks or NUL bytes.";
 			return false;
 		}
-		draft_.copyRenamePattern = editingText_;
+		if (IsKey(*field, "window_title_pattern")) {
+			std::string error;
+			const std::string normalized = NormalizeWindowTitlePattern(editingText_);
+			if (!ValidateWindowTitlePattern(normalized, &error)) {
+				message_ = std::move(error);
+				return false;
+			}
+			draft_.windowTitlePattern = normalized;
+		} else {
+			draft_.copyRenamePattern = editingText_;
+		}
 		editing_ = false;
 		inputPrimed_ = false;
 		editingText_.clear();
@@ -638,6 +662,10 @@ void AdvancedConfigurationModel::NormalizeDraft() {
 	draft_.unsharpMaskAmount = clampFinite(draft_.unsharpMaskAmount, 0.0, 0.0, 10.0);
 	draft_.unsharpMaskThreshold = clampFinite(draft_.unsharpMaskThreshold, 4.0, 0.0, 20.0);
 	draft_.cacheSizeMiB = std::min(draft_.cacheSizeMiB, kMaximumCacheSizeMiB);
+	draft_.windowTitlePattern = NormalizeWindowTitlePattern(draft_.windowTitlePattern);
+	if (!ValidateWindowTitlePattern(draft_.windowTitlePattern)) {
+		draft_.windowTitlePattern = kDefaultWindowTitlePattern;
+	}
 	if (draft_.transparencyPattern != TransparencyPattern::Black &&
 		draft_.transparencyPattern != TransparencyPattern::White &&
 		draft_.transparencyPattern != TransparencyPattern::Checkerboard) {

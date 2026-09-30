@@ -692,6 +692,7 @@ private:
 		jpegview_linux::ViewerSettings settings;
 		if (!jpegview_linux::LoadViewerSettings(settingsPath, settings)) return;
 		copyRenamePattern_ = settings.copyRenamePattern;
+		windowTitlePattern_ = settings.windowTitlePattern;
 		transparencyPattern_ = settings.transparencyPattern;
 		defaultAutoContrastEnabled_ = settings.autoContrast;
 		defaultImageProcessing_ = settings.defaultImageProcessing;
@@ -781,6 +782,7 @@ private:
 		settings.unsharpMaskThreshold = unsharpMaskThreshold_;
 		settings.cacheSizeMiB = cacheSizeMiB_;
 		settings.copyRenamePattern = copyRenamePattern_;
+		settings.windowTitlePattern = windowTitlePattern_;
 		return settings;
 	}
 
@@ -2063,15 +2065,27 @@ private:
 			SetTitle("JPEGView");
 			return;
 		}
+		const fs::path& currentPath = fileList_.Current();
 		std::error_code fileError;
-		const std::uintmax_t fileSize = jpegview_linux::ImageSourceFileSize(fileList_.Current(), fileError);
-		std::ostringstream title;
-		title << '[' << CurrentImagePositionText() << "] "
-			<< fileList_.Current().filename().string()
-			<< " (" << image_.originalWidth << 'x' << image_.originalHeight;
-		if (!fileError) title << ", " << jpegview_linux::FormatFileSize(fileSize);
-		title << ") - JPEGView";
-		SetTitle(title.str());
+		const std::uintmax_t fileSize = jpegview_linux::ImageSourceFileSize(currentPath, fileError);
+		jpegview_linux::WindowTitleContext context;
+		context.position = CurrentImagePositionText();
+		context.currentIndex = fileList_.CurrentIndex();
+		context.imageCount = fileList_.Size();
+		context.filename = currentPath.filename().string();
+		context.filenameStem = currentPath.stem().string();
+		context.extension = currentPath.extension().string();
+		if (!context.extension.empty() && context.extension.front() == '.') {
+			context.extension.erase(context.extension.begin());
+		}
+		context.fullPath = currentPath.string();
+		context.directory = currentPath.parent_path().string();
+		context.width = image_.originalWidth;
+		context.height = image_.originalHeight;
+		if (!fileError) context.fileSize = fileSize;
+		context.applicationName = "JPEGView";
+		context.applicationVersion = JPEGVIEW_APP_VERSION;
+		SetTitle(jpegview_linux::FormatWindowTitle(windowTitlePattern_, context));
 	}
 
 	void OpenDroppedFiles(const std::vector<std::string>& droppedFiles,
@@ -2990,6 +3004,7 @@ private:
 			magnifyingGlass_.Height() != settings.magnifyingGlassHeight ||
 			std::abs(magnifyingGlass_.ZoomLevel() - settings.magnifyingGlassZoomLevel) > 1e-9;
 		transparencyPattern_ = settings.transparencyPattern;
+		windowTitlePattern_ = settings.windowTitlePattern;
 		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
 		spacebarNavigatesImages_ = settings.spacebarNavigatesImages;
 		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
@@ -3048,13 +3063,13 @@ private:
 		const int tabWidth = usableWidth / count;
 		const int remainder = usableWidth % count;
 		const int xOffset = category * tabWidth + std::min(category, remainder);
-		return SDL_Rect{dialog.x + 16 + xOffset, dialog.y + 60,
+		return SDL_Rect{dialog.x + 16 + xOffset, dialog.y + 92,
 			tabWidth + (category < remainder ? 1 : 0), kAdvancedConfigurationCategoryHeight};
 	}
 
 	SDL_Rect AdvancedConfigurationRowsRect() const {
 		const SDL_Rect dialog = AdvancedConfigurationDialogRect();
-		return SDL_Rect{dialog.x + 16, dialog.y + 100, dialog.w - 32, dialog.h - 170};
+		return SDL_Rect{dialog.x + 16, dialog.y + 132, dialog.w - 32, dialog.h - 202};
 	}
 
 	SDL_Rect AdvancedConfigurationRowRect(int visibleRow) const {
@@ -3149,8 +3164,6 @@ private:
 				if (commitPendingEdit()) {
 					advancedConfiguration_.SelectRow(advancedConfiguration_.RowCount() - 1);
 				}
-			} else if (advancedConfiguration_.IsEditing() && key == SDLK_SPACE) {
-				advancedConfiguration_.AppendText(" ");
 			} else if (!advancedConfiguration_.IsEditing() &&
 				(key == SDLK_RETURN || key == SDLK_SPACE)) {
 				advancedConfiguration_.ActivateSelected();
@@ -3199,6 +3212,12 @@ private:
 			kUiTextScale, 245, 245, 250);
 		DrawText(ClipText(advancedConfigurationLocation_, dialog.w - 32),
 			dialog.x + 16, dialog.y + 32, kUiTextScale, 175, 185, 200);
+		DrawText(ClipText(jpegview_linux::kWindowTitlePatternHelpLine1, dialog.w - 32),
+			dialog.x + 16, dialog.y + 46, kUiTextScale, 145, 160, 180);
+		DrawText(ClipText(jpegview_linux::kWindowTitlePatternHelpLine2, dialog.w - 32),
+			dialog.x + 16, dialog.y + 59, kUiTextScale, 145, 160, 180);
+		DrawText(ClipText(jpegview_linux::kWindowTitlePatternHelpLine3, dialog.w - 32),
+			dialog.x + 16, dialog.y + 72, kUiTextScale, 145, 160, 180);
 		for (int category = 0; category < advancedConfiguration_.CategoryCount(); ++category) {
 			const SDL_Rect tab = AdvancedConfigurationCategoryRect(category);
 			const bool selected = category == advancedConfiguration_.ActiveCategory();
@@ -8952,6 +8971,7 @@ private:
 	fs::path fileDialogPreviewSource_;
 	std::string fileDialogPreviewMessage_;
 	std::string copyRenamePattern_;
+	std::string windowTitlePattern_ = jpegview_linux::kDefaultWindowTitlePattern;
 	jpegview_linux::BatchCopyDialogController batchCopyDialog_;
 	jpegview_linux::ResizeDialogController resizeDialog_;
 	jpegview_linux::CropSizeDialogController cropSizeDialog_;

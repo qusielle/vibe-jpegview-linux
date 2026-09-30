@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cache_budget.h"
+#include "image_info_model.h"
 #include "image_processing.h"
 #include "magnifying_glass_model.h"
 #include "transparency_pattern.h"
@@ -72,6 +73,7 @@ struct ViewerSettings {
 	double unsharpMaskThreshold = 4.0;
 	std::size_t cacheSizeMiB = kDefaultCacheSizeMiB;
 	std::string copyRenamePattern;
+	std::string windowTitlePattern = kDefaultWindowTitlePattern;
 };
 
 // Missing or unreadable files leave settings unchanged and return false.

@@ -95,7 +95,10 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		if (separator == std::string::npos) continue;
 		const std::string key = Trim(line.substr(0, separator));
 		const std::string value = Trim(line.substr(separator + 1));
-		if (key == "scale_mode") {
+		if (key == "window_title_pattern") {
+			const std::string normalized = NormalizeWindowTitlePattern(value);
+			if (ValidateWindowTitlePattern(normalized)) loaded.windowTitlePattern = normalized;
+		} else if (key == "scale_mode") {
 			loaded.scaleMode = value;
 		} else if (key == "sort_mode") {
 			loaded.sortMode = value;
@@ -281,6 +284,8 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 
 bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings) {
 	if (filename.empty()) return false;
+	const std::string windowTitlePattern = NormalizeWindowTitlePattern(settings.windowTitlePattern);
+	if (!ValidateWindowTitlePattern(windowTitlePattern)) return false;
 	const double fileDialogPreviewRatio = std::isfinite(settings.fileDialogPreviewRatio) ?
 		std::clamp(settings.fileDialogPreviewRatio, 0.0, 0.8) : 0.0;
 	const double magnifyingGlassZoomLevel = std::isfinite(settings.magnifyingGlassZoomLevel) ?
@@ -338,6 +343,13 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "info_visible=" << (settings.infoVisible ? 1 : 0) << '\n'
 		       << "show_histogram=" << (settings.showHistogram ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'
+		       << "# Window title codes: %p visible position/total, %i one-based image index, %n total images,\n"
+		       << "# %f filename with extension, %F filename without extension (stem), %e extension without its dot,\n"
+		       << "# %P full path, %D containing directory, %w/%h original width/height in pixels,\n"
+		       << "# %s readable file size, %b exact bytes, %m dimensions and readable size,\n"
+		       << "# %a application name, %v build version, %% literal percent. Empty uses the default.\n"
+		       << "# Unknown or incomplete codes are invalid; surrounding whitespace is trimmed.\n"
+		       << "window_title_pattern=" << windowTitlePattern << '\n'
 		       << "auto_contrast=" << (settings.autoContrast ? 1 : 0) << '\n'
 		       << "keep_picture_levels=" << (settings.keepPictureLevels ? 1 : 0) << '\n'
 		       << "unsharp_mask_radius=" << std::clamp(settings.unsharpMaskRadius, 0.0, 5.0) << '\n'

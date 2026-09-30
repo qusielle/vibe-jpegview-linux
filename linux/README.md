@@ -263,13 +263,14 @@ they support.
     therefore avoid repeated synchronous decoding, correction, high-quality scaling, and texture
     creation during navigation.
 
-12. **Information overlays and window feedback.** F2 picture information and Shift+N/Ctrl+F2 filename
+12. **Information overlays and configurable window title.** F2 picture information and Shift+N/Ctrl+F2 filename
     overlays use compact translucent surfaces sized to their content with small comfortable margins.
     Filename, EXIF, and counter text remain responsive during navigation. The information popup uses
     a readable `W X H, Size` line and an unlabeled modification date. The EXIF popup includes a
     toggleable grayscale histogram, hidden by default. Overlay visibility persists
-    immediately. The window title shows the current position and total before the filename, followed
-    by dimensions and size; double-page mode shows both visible positions. Menus, dialogs, tooltips,
+    immediately. The window title uses a configurable pattern whose default keeps the current
+    position and total before the filename, followed by dimensions and size; double-page mode shows
+    both visible positions. Menus, dialogs, tooltips,
     and panels use the hinted 9-point Terminus bitmap when the complete string is printable ASCII,
     preserving lowercase letters as drawn and using crisp one-bit pixels without antialiased edges. Strings
     containing other characters use the desktop's configured UI font through Pango, retaining Unicode
@@ -278,7 +279,8 @@ they support.
     best-quality image filter cannot interpolate faint pixels into the blank edge of a glyph cell;
     image textures retain the best-quality filter.
 
-13. **Reliable startup and saved session state.** Scale mode, default picture levels, ordering
+13. **Reliable startup and saved session state.** Scale mode, default picture levels, the main
+    window title pattern, ordering
     mode/direction, maximized or normal state, navigation-panel choices,
     filename/EXIF/histogram visibility, automatic correction,
     batch pattern, thumbnail visibility/width, open-dialog dimensions and preview proportion,
@@ -542,9 +544,37 @@ uses the desktop font discovered from XFCE, GTK, xsettingsd, or KDE configuratio
 `JPEGVIEW_FONT` to a Pango font description such as `Sans 11` to override desktop discovery for that
 Unicode fallback.
 
-The window title prefixes the Windows-style image title with `[current/total]`, for example
-`[1/20] filename (widthxheight, file size) - JPEGView`. In double-page mode it shows both active
-positions, such as `[2-3/20]`. With no image open, the title is `JPEGView`.
+The main image title is controlled by `window_title_pattern` in `settings.conf`, or by **Window title
+pattern** under Advanced configuration → Appearance. Its default, `[%p] %f (%m) - %a`, preserves the
+existing layout, such as `[1/20] filename.jpg (1920x1080, 2.5 MB) - JPEGView`; `%p` shows both visible
+positions in double-page mode (for example `[2-3/20]`). Reorder or omit tokens to customize the title,
+such as `%f — [%p]` to put the position after the filename. These are single-character substitutions,
+not general `printf` directives. Use `%%` for a literal percent sign. Unknown or incomplete codes are
+rejected in Advanced configuration and an invalid file value falls back to the default. An empty
+pattern restores the default; surrounding whitespace is trimmed. Patterns are limited to 1024 bytes.
+The Advanced configuration window shows this token legend, and the application writes it as comments
+next to the setting in `settings.conf`.
+
+| Code | Expands to |
+| --- | --- |
+| `%p` | Current visible position and total, such as `1/20` or `2-3/20` in double-page mode |
+| `%i` | One-based current navigation image number |
+| `%n` | Total images in the active list |
+| `%f` | Filename including its extension |
+| `%F` | Filename stem, without the extension |
+| `%e` | Extension without its leading dot |
+| `%P` | Full source path, including a virtual archive-member path when applicable |
+| `%D` | Containing directory path |
+| `%w`, `%h` | Original image width and height in pixels |
+| `%s` | Human-readable source file size, such as `2.5 MB` |
+| `%b` | Source file size in bytes |
+| `%m` | Combined dimensions and readable size; unavailable values and extra punctuation are omitted |
+| `%a` | Application name (`JPEGView`) |
+| `%v` | Embedded application build version |
+| `%%` | A literal `%` |
+
+With no image open, the title remains `JPEGView`; transient loading and error messages continue to use
+their own status titles.
 
 ## Application version
 
@@ -749,7 +779,8 @@ commands, without saving that choice. The compact menu keeps common navigation, 
 fullscreen, and fit-window-to-image commands available. **Advanced configuration...** appears
 immediately before **Help...** in either menu view. It groups config-only options into Behavior,
 Appearance, Panels & dialogs, Magnifying glass, Crop, Image defaults, and Performance & batch. In
-that window, use Tab/Shift+Tab
+Appearance, set the main window's title pattern; the three-line legend explains every supported `%` code.
+The dialog also shows the resolved settings-file path. In that window, use Tab/Shift+Tab
 to switch groups, Up/Down to choose a setting, Left/Right to adjust it, and Enter to toggle/cycle or
 edit a value; Ctrl+A selects all in a text edit and Ctrl+V pastes. Valid edits commit when switching
 groups or rows. **Apply** or Ctrl+Enter writes the changes; Cancel discards them, and Escape cancels
