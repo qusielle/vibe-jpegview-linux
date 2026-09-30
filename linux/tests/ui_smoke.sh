@@ -1589,12 +1589,13 @@ if [ "$visual_assertions" -eq 1 ]; then
 	DISPLAY=":$display_number" xdotool click 3
 	sleep 0.2
 	DISPLAY=":$display_number" import -window "$window_id" "$temporary/context-compact.png"
-	# “Show Advanced Options” gets the `S` mnemonic. The five-pixel glyph ink
-	# ends at x=656; x=657 is blank cell space and must not get an underline
-	# endpoint. The menu is opened at (640,20), and this underline is at y=36.
-	mnemonic_ink_pixel=$(convert "$temporary/context-compact.png" -crop 1x1+656+36 +repage \
+	# “Show Advanced Options” gets the `A` mnemonic after shared commands keep
+	# their full-menu assignments. Its five-pixel glyph ink ends at x=686;
+	# x=687 is blank cell space and must not get an underline endpoint. The menu
+	# is opened at (640,20), and this underline is at y=36.
+	mnemonic_ink_pixel=$(convert "$temporary/context-compact.png" -crop 1x1+686+36 +repage \
 		-colorspace Gray -threshold 50% -format "%[fx:mean]" info:)
-	mnemonic_trailing_pixel=$(convert "$temporary/context-compact.png" -crop 1x1+657+36 +repage \
+	mnemonic_trailing_pixel=$(convert "$temporary/context-compact.png" -crop 1x1+687+36 +repage \
 		-colorspace Gray -threshold 50% -format "%[fx:mean]" info:)
 	if [ "$mnemonic_ink_pixel" != "1" ] || [ "$mnemonic_trailing_pixel" != "0" ]; then
 		echo "UI smoke test: menu mnemonic underline did not follow the glyph ink bounds (ink=$mnemonic_ink_pixel trailing=$mnemonic_trailing_pixel)" >&2

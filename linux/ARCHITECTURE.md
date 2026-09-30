@@ -107,7 +107,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   focus/text-editing transitions.
 - `context_menu_model`: the complete menu catalog, state-derived enablement/checkmarks,
   compact/advanced filtering, actionable-item keyboard navigation, and deterministic letter
-  mnemonic assignment with duplicate-letter matching/cycling.
+  mnemonic assignment with duplicate-letter matching/cycling. Mnemonics are assigned to the full
+  catalog before compact filtering so commands shared by both views keep the same letter and
+  underline position; the compact-only “Show Advanced Options” row is assigned afterward.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently

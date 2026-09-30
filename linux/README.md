@@ -1014,7 +1014,8 @@ view area:
 
 <p><img src="screenshots/zoom-region-navigator.png" width="720" alt="JPEGView Linux zoom-region navigator showing the visible viewport on a mountain lake"></p>
 
-The compact context menu exposes the newer viewing controls and underlined keyboard mnemonics:
+The compact context menu exposes the newer viewing controls and underlined keyboard mnemonics.
+Commands shared with the expanded menu keep the same hint letter in both views:
 
 <p><img src="screenshots/context-menu-mnemonics.png" width="720" alt="JPEGView Linux context menu with crop, magnifying glass, picture levels, and mnemonic hints"></p>
 

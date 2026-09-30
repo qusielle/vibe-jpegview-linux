@@ -48,6 +48,45 @@ int ItemHeight(const MenuItem& item, int itemHeight, int separatorHeight) {
 	return std::max(1, item.separator ? separatorHeight : itemHeight);
 }
 
+void AssignMenuMnemonic(MenuItem& item, std::array<unsigned int, 26>& usage) {
+	item.mnemonic = '\0';
+	item.mnemonicOffset = -1;
+	if (!IsSelectable(item)) return;
+
+	std::vector<std::size_t> candidates;
+	bool inWord = false;
+	for (std::size_t offset = 0; offset < item.label.size(); ++offset) {
+		const bool letter = IsAsciiLetter(static_cast<unsigned char>(item.label[offset]));
+		if (letter && !inWord) candidates.push_back(offset);
+		inWord = letter;
+	}
+	for (std::size_t offset = 0; offset < item.label.size(); ++offset) {
+		if (IsAsciiLetter(static_cast<unsigned char>(item.label[offset]))) {
+			candidates.push_back(offset);
+		}
+	}
+	if (candidates.empty()) return;
+
+	std::size_t selectedOffset = candidates.front();
+	unsigned int minimumUse = std::numeric_limits<unsigned int>::max();
+	for (const std::size_t offset : candidates) {
+		const char candidate = LowerAscii(item.label[offset]);
+		const unsigned int count = usage[static_cast<std::size_t>(candidate - 'a')];
+		if (count == 0) {
+			selectedOffset = offset;
+			minimumUse = 0;
+			break;
+		}
+		if (count < minimumUse) {
+			selectedOffset = offset;
+			minimumUse = count;
+		}
+	}
+	item.mnemonic = LowerAscii(item.label[selectedOffset]);
+	item.mnemonicOffset = static_cast<int>(selectedOffset);
+	++usage[static_cast<std::size_t>(item.mnemonic - 'a')];
+}
+
 } // namespace
 
 std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
@@ -327,52 +366,28 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 					false, false, true, nullptr, true});
 		}
 	}
+	AssignMenuMnemonics(items);
 	if (!advancedOptions) {
 		items = CompactMenuItems(items, kContextMenuShowAdvanced, "Show Advanced Options");
+		std::array<unsigned int, 26> usage{};
+		for (const MenuItem& item : items) {
+			if (!IsSelectable(item) || item.mnemonic < 'a' || item.mnemonic > 'z') continue;
+			++usage[static_cast<std::size_t>(item.mnemonic - 'a')];
+		}
+		for (MenuItem& item : items) {
+			if (item.command == kContextMenuShowAdvanced) {
+				AssignMenuMnemonic(item, usage);
+				break;
+			}
+		}
 	}
-	AssignMenuMnemonics(items);
 	return items;
 }
 
 void AssignMenuMnemonics(std::vector<MenuItem>& items) {
 	std::array<unsigned int, 26> usage{};
 	for (MenuItem& item : items) {
-		item.mnemonic = '\0';
-		item.mnemonicOffset = -1;
-		if (!IsSelectable(item)) continue;
-
-		std::vector<std::size_t> candidates;
-		bool inWord = false;
-		for (std::size_t offset = 0; offset < item.label.size(); ++offset) {
-			const bool letter = IsAsciiLetter(static_cast<unsigned char>(item.label[offset]));
-			if (letter && !inWord) candidates.push_back(offset);
-			inWord = letter;
-		}
-		for (std::size_t offset = 0; offset < item.label.size(); ++offset) {
-			if (IsAsciiLetter(static_cast<unsigned char>(item.label[offset]))) {
-				candidates.push_back(offset);
-			}
-		}
-		if (candidates.empty()) continue;
-
-		std::size_t selectedOffset = candidates.front();
-		unsigned int minimumUse = std::numeric_limits<unsigned int>::max();
-		for (const std::size_t offset : candidates) {
-			const char candidate = LowerAscii(item.label[offset]);
-			const unsigned int count = usage[static_cast<std::size_t>(candidate - 'a')];
-			if (count == 0) {
-				selectedOffset = offset;
-				minimumUse = 0;
-				break;
-			}
-			if (count < minimumUse) {
-				selectedOffset = offset;
-				minimumUse = count;
-			}
-		}
-		item.mnemonic = LowerAscii(item.label[selectedOffset]);
-		item.mnemonicOffset = static_cast<int>(selectedOffset);
-		++usage[static_cast<std::size_t>(item.mnemonic - 'a')];
+		AssignMenuMnemonic(item, usage);
 	}
 }
 

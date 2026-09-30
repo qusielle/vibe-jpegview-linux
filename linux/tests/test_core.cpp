@@ -5553,6 +5553,68 @@ void TestContextMenuCatalogAndState() {
 void TestContextMenuMnemonics() {
 	using jpegview_linux::ContextMenuState;
 	using jpegview_linux::MenuItem;
+	const auto expectStableSharedMnemonics = [](const ContextMenuState& menuState) {
+		const std::vector<MenuItem> compactMenu = jpegview_linux::BuildContextMenu(menuState, false);
+		const std::vector<MenuItem> expandedMenu = jpegview_linux::BuildContextMenu(menuState, true);
+		for (const MenuItem& compactItem : compactMenu) {
+			if (compactItem.command == 0 ||
+				compactItem.command == jpegview_linux::kContextMenuShowAdvanced) continue;
+			const std::size_t matchingItems = static_cast<std::size_t>(std::count_if(
+				expandedMenu.begin(), expandedMenu.end(), [&compactItem](const MenuItem& candidate) {
+					return candidate.command == compactItem.command &&
+						candidate.label == compactItem.label;
+				}));
+			Expect(matchingItems == 1,
+				"compact command did not have exactly one matching expanded item: " + compactItem.label);
+			const auto expandedItem = std::find_if(expandedMenu.begin(), expandedMenu.end(),
+				[&compactItem](const MenuItem& candidate) {
+					return candidate.command == compactItem.command &&
+						candidate.label == compactItem.label;
+				});
+			Expect(expandedItem != expandedMenu.end(),
+				"compact command was missing from the expanded context-menu catalog: " +
+				compactItem.label);
+			if (expandedItem != expandedMenu.end()) {
+				Expect(expandedItem->mnemonic == compactItem.mnemonic &&
+					expandedItem->mnemonicOffset == compactItem.mnemonicOffset,
+					"shared context-menu item changed its mnemonic between compact and expanded views: " +
+					compactItem.label);
+			}
+		}
+		const auto findAdvancedConfiguration = [](const std::vector<MenuItem>& menu) {
+			return std::find_if(menu.begin(), menu.end(), [](const MenuItem& item) {
+				return item.command == jpegview_linux::kCommandAdvancedConfiguration;
+			});
+		};
+		const auto compactAdvancedConfiguration = findAdvancedConfiguration(compactMenu);
+		const auto expandedAdvancedConfiguration = findAdvancedConfiguration(expandedMenu);
+		Expect(compactAdvancedConfiguration != compactMenu.end() &&
+			expandedAdvancedConfiguration != expandedMenu.end() &&
+			compactAdvancedConfiguration->mnemonic == expandedAdvancedConfiguration->mnemonic &&
+			compactAdvancedConfiguration->mnemonicOffset == expandedAdvancedConfiguration->mnemonicOffset,
+			"Advanced configuration changed its mnemonic between compact and expanded views");
+	};
+
+	ContextMenuState defaultState;
+	expectStableSharedMnemonics(defaultState);
+	ContextMenuState populatedState;
+	populatedState.playbackMode = jpegview_linux::PlaybackMode::Slideshow;
+	populatedState.animationAvailable = true;
+	populatedState.imageAvailable = true;
+	populatedState.losslessJpegAvailable = true;
+	populatedState.pictureLevelsAvailable = true;
+	populatedState.cropSelectionAvailable = true;
+	populatedState.losslessJpegCropAvailable = true;
+	populatedState.openWithApplicationNames = {"Photo Editor", u8"写真工具"};
+	expectStableSharedMnemonics(populatedState);
+	ContextMenuState archiveState = populatedState;
+	archiveState.archiveMember = true;
+	archiveState.openWithApplicationNames.clear();
+	expectStableSharedMnemonics(archiveState);
+	ContextMenuState unavailableState;
+	unavailableState.parameterDatabaseAvailable = false;
+	expectStableSharedMnemonics(unavailableState);
+
 	ContextMenuState state;
 	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
 	const auto open = std::find_if(compact.begin(), compact.end(), [](const MenuItem& item) {
