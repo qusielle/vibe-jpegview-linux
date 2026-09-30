@@ -2960,6 +2960,9 @@ private:
 	void OpenAdvancedConfigurationDialog() {
 		advancedConfiguration_.Open(CurrentViewerSettings());
 		advancedConfiguration_.SetMessage({});
+		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
+		advancedConfigurationLocation_ = settingsPath.empty() ?
+			"Config file path unavailable" : "Config file: " + settingsPath.string();
 		SDL_StartTextInput();
 	}
 
@@ -3194,7 +3197,7 @@ private:
 		DrawRect(dialog, 195, 205, 220);
 		DrawText("ADVANCED CONFIGURATION", dialog.x + 16, dialog.y + 12,
 			kUiTextScale, 245, 245, 250);
-		DrawText("Changes remain staged until Apply; values use the existing settings.conf format.",
+		DrawText(ClipText(advancedConfigurationLocation_, dialog.w - 32),
 			dialog.x + 16, dialog.y + 32, kUiTextScale, 175, 185, 200);
 		for (int category = 0; category < advancedConfiguration_.CategoryCount(); ++category) {
 			const SDL_Rect tab = AdvancedConfigurationCategoryRect(category);
@@ -8953,6 +8956,7 @@ private:
 	jpegview_linux::ResizeDialogController resizeDialog_;
 	jpegview_linux::CropSizeDialogController cropSizeDialog_;
 	jpegview_linux::AdvancedConfigurationModel advancedConfiguration_;
+	std::string advancedConfigurationLocation_;
 	std::vector<std::string> pendingDroppedFiles_;
 	std::unique_ptr<jpegview_linux::FileList> fileListBeforeClipboard_;
 	fs::path clipboardTempFile_;
