@@ -856,6 +856,7 @@ DISPLAY=":$display_number" xdotool key Up Up Up
 DISPLAY=":$display_number" xdotool key Return
 sleep 0.15
 DISPLAY=":$display_number" xdotool key Down Down Return
+DISPLAY=":$display_number" xdotool key Down Return
 DISPLAY=":$display_number" xdotool key Tab
 DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool key Down Down Return
@@ -871,9 +872,23 @@ advanced_config_settings="$VIEWER_TEST_CONFIG_HOME/jpegview-linux/settings.conf"
 grep -q '^transparency_pattern=white$' "$advanced_config_settings"
 grep -q '^thumbnail_panel_width=128$' "$advanced_config_settings"
 grep -q '^folder_wrap_around=0$' "$advanced_config_settings"
+grep -q '^fit_relative_zoom_mode=1$' "$advanced_config_settings"
 grep -Fqx 'window_title_pattern=%f - [%p] - %a' "$advanced_config_settings"
 assert_title_prefix "01-red.ppm" "applying advanced configuration did not return to the viewer"
 assert_title_prefix "01-red.ppm - [1/" "advanced configuration did not apply the reordered title pattern"
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" xdotool key ctrl+Up
+	sleep 0.15
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/fit-relative-zoom.png"
+	zoom_capture_width=$(identify -format '%w' "$temporary/fit-relative-zoom.png")
+	zoom_capture_height=$(identify -format '%h' "$temporary/fit-relative-zoom.png")
+	zoom_readout_border=$(convert "$temporary/fit-relative-zoom.png" -format \
+		"%[hex:p{$((zoom_capture_width - 7)),$((zoom_capture_height - 9))}]" info:)
+	case "$zoom_readout_border" in
+		787878*) ;;
+		*) echo "UI smoke test: fit-relative zoom action did not draw its readout (pixel $zoom_readout_border)" >&2; exit 1 ;;
+	esac
+fi
 DISPLAY=":$display_number" xdotool key Left
 sleep 0.1
 assert_title_prefix "01-red.ppm" "disabled folder wrap moved past the first image"
@@ -894,6 +909,7 @@ DISPLAY=":$display_number" xdotool key Escape
 sleep 0.1
 grep -q '^transparency_pattern=white$' "$advanced_config_settings"
 grep -q '^folder_wrap_around=0$' "$advanced_config_settings"
+grep -q '^fit_relative_zoom_mode=1$' "$advanced_config_settings"
 stop_viewer
 unset VIEWER_TEST_CONFIG_HOME
 XDG_STATE_HOME="$temporary/state"

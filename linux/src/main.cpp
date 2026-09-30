@@ -716,6 +716,7 @@ private:
 		mangaReadingOrderDefault_ = settings.mangaReadingOrderEnabled;
 		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
 		spacebarNavigatesImages_ = settings.spacebarNavigatesImages;
+		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
 		doublePageModeEnabled_ = doublePageModeDefault_;
 		mangaReadingOrderEnabled_ = mangaReadingOrderDefault_;
 		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
@@ -757,6 +758,7 @@ private:
 		settings.mangaModeInvertsLeftRight = mangaModeInvertsLeftRight_;
 		settings.spacebarNavigatesImages = spacebarNavigatesImages_;
 		settings.folderWrapAround = fileList_.WrapAroundFolder();
+		settings.fitRelativeZoomMode = viewport_.FitRelativeZoomMode();
 		settings.transparencyPattern = transparencyPattern_;
 		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
 		settings.fileDialogWidth = fileDialogWidth_;
@@ -2465,6 +2467,7 @@ private:
 		viewport_.ClampToView(dimensions.first, dimensions.second, imageArea.w, imageArea.h);
 		PanViewport(imageArea.w / 2.0 - selectionCenterX,
 			imageArea.h / 2.0 - selectionCenterY);
+		ShowZoomReadoutTemporarily();
 		currentDisplayRequest_.reset();
 		PrepareImagePrefetch();
 		playback_.NotifyInteraction(SDL_GetTicks());
@@ -3007,6 +3010,8 @@ private:
 		windowTitlePattern_ = settings.windowTitlePattern;
 		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
 		spacebarNavigatesImages_ = settings.spacebarNavigatesImages;
+		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
+		RefreshFitRelativeZoomBase();
 		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
 		if (fileListBeforeClipboard_) {
 			fileListBeforeClipboard_->SetWrapAroundFolder(settings.folderWrapAround);
@@ -3038,6 +3043,8 @@ private:
 				PrepareThumbnailPreload();
 				if (viewport_.IsFitToWindow()) {
 					FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+				} else {
+					RefreshFitRelativeZoomBase();
 				}
 			}
 		}
@@ -3428,6 +3435,14 @@ private:
 		SetTitle();
 	}
 
+	void RefreshFitRelativeZoomBase() {
+		const auto dimensions = ViewportContentDimensions();
+		if (dimensions.first <= 0 || dimensions.second <= 0) return;
+		const SDL_Rect imageArea = ImageAreaRect();
+		viewport_.UpdateFitRelativeZoomBase(dimensions.first, dimensions.second,
+			imageArea.w, imageArea.h);
+	}
+
 	void FitToWindow(bool fillCrop = false, bool noEnlarge = true) {
 		const SDL_Rect imageArea = ImageAreaRect();
 		const auto dimensions = ViewportContentDimensions();
@@ -3435,6 +3450,7 @@ private:
 			fillCrop, noEnlarge);
 		currentDisplayRequest_.reset();
 		PrepareImagePrefetch();
+		ShowZoomReadoutTemporarily();
 		SetTitle();
 	}
 
@@ -3442,6 +3458,7 @@ private:
 		viewport_.ActualSize();
 		currentDisplayRequest_.reset();
 		PrepareImagePrefetch();
+		ShowZoomReadoutTemporarily();
 		SetTitle();
 	}
 
@@ -3499,7 +3516,26 @@ private:
 		zoomNavigatorVisibleUntil_ = SDL_GetTicks() + 1200;
 	}
 
-	void ZoomAt(double factor, int mouseX, int mouseY) {
+	void ShowZoomReadoutTemporarily() {
+		if (!viewport_.FitRelativeZoomMode()) return;
+		zoomReadoutVisibleUntil_ = SDL_GetTicks() + 1200;
+	}
+
+	void ZoomByStep(int direction, int mouseX, int mouseY) {
+		if (direction == 0) return;
+		const double step = viewport_.ZoomStepMultiplier();
+		ZoomAt(direction > 0 ? step : 1.0 / step, mouseX, mouseY,
+			viewport_.FitRelativeZoomMode());
+	}
+
+	void ZoomToPreset(double relativeFactor) {
+		const double targetZoom = viewport_.ZoomTargetForPreset(relativeFactor);
+		const double currentZoom = viewport_.Zoom();
+		if (currentZoom <= 0.0) return;
+		ZoomAt(targetZoom / currentZoom, imageCenterX_, imageCenterY_);
+	}
+
+	void ZoomAt(double factor, int mouseX, int mouseY, bool pauseAtFitRelativeAnchor = false) {
 		const auto dimensions = ViewportContentDimensions();
 		if (dimensions.first == 0 || dimensions.second == 0) {
 			return;
@@ -3509,9 +3545,10 @@ private:
 		const int localMouseY = std::clamp(mouseY - imageArea.y, 0, imageArea.h);
 		viewport_.ZoomAt(factor, localMouseX, localMouseY,
 			dimensions.first, dimensions.second,
-			imageArea.w, imageArea.h);
+			imageArea.w, imageArea.h, pauseAtFitRelativeAnchor);
 		viewport_.ClampToView(dimensions.first, dimensions.second, imageArea.w, imageArea.h);
 		ShowZoomNavigatorTemporarily();
+		ShowZoomReadoutTemporarily();
 		playback_.NotifyInteraction(SDL_GetTicks());
 		SetTitle();
 	}
@@ -3582,6 +3619,7 @@ private:
 		if (viewport_.IsFitToWindow()) {
 			FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
 		} else {
+			RefreshFitRelativeZoomBase();
 			SetTitle();
 		}
 	}
@@ -3840,11 +3878,12 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		const std::string sortLabel = jpegview_linux::SortModeShortLabel(fileList_.GetSorting());
+		const std::string scaleLabel = viewport_.FitRelativeZoomMode() ? "100%" : "1:1";
 		return jpegview_linux::BuildNavigationPanelPaint(windowWidth, windowHeight,
 			lastMouseX_, lastMouseY_, viewport_.IsFitToWindow(), fileList_.GetSorting(),
-			TextWidth(sortLabel, kUiTextScale), TextWidth("1:1", kUiTextScale),
+			TextWidth(sortLabel, kUiTextScale), TextWidth(scaleLabel, kUiTextScale),
 			TextLineHeight(kUiTextScale), selectionModeEnabled_,
-			doublePageModeEnabled_, mangaReadingOrderEnabled_);
+			doublePageModeEnabled_, mangaReadingOrderEnabled_, viewport_.FitRelativeZoomMode());
 	}
 
 	SDL_Rect PictureLevelsPanelRect() const {
@@ -4497,6 +4536,8 @@ private:
 			UpdateThumbnailPanelCursor(lastMouseX_, lastMouseY_);
 			if (viewport_.IsFitToWindow()) {
 				FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+			} else {
+				RefreshFitRelativeZoomBase();
 			}
 			SaveSettings();
 			break;
@@ -4653,22 +4694,22 @@ private:
 			StartSlideshow(static_cast<double>(command - IDM_SLIDESHOW_START));
 			break;
 		case IDM_ZOOM_400:
-			ZoomAt(4.0 / viewport_.Zoom(), imageCenterX_, imageCenterY_);
+			ZoomToPreset(4.0);
 			break;
 		case IDM_ZOOM_200:
-			ZoomAt(2.0 / viewport_.Zoom(), imageCenterX_, imageCenterY_);
+			ZoomToPreset(2.0);
 			break;
 		case IDM_ZOOM_50:
-			ZoomAt(0.5 / viewport_.Zoom(), imageCenterX_, imageCenterY_);
+			ZoomToPreset(0.5);
 			break;
 		case IDM_ZOOM_25:
-			ZoomAt(0.25 / viewport_.Zoom(), imageCenterX_, imageCenterY_);
+			ZoomToPreset(0.25);
 			break;
 		case IDM_ZOOM_INC:
-			ZoomAt(1.2, imageCenterX_, imageCenterY_);
+			ZoomByStep(1, imageCenterX_, imageCenterY_);
 			break;
 		case IDM_ZOOM_DEC:
-			ZoomAt(1.0 / 1.2, imageCenterX_, imageCenterY_);
+			ZoomByStep(-1, imageCenterX_, imageCenterY_);
 			break;
 		case IDM_PAN_UP:
 		case IDM_PAN_DOWN:
@@ -4823,6 +4864,8 @@ private:
 		state.fitToWindow = viewport_.IsFitToWindow();
 		state.fillWithCrop = viewport_.FillWithCrop();
 		state.noEnlarge = viewport_.NoEnlarge();
+		state.fitRelativeZoomMode = viewport_.FitRelativeZoomMode();
+		state.fitRelativeZoomBase = viewport_.FitRelativeZoomBase();
 		state.zoom = viewport_.Zoom();
 		state.fullscreen = fullscreen_;
 		state.borderless = borderless_;
@@ -7152,6 +7195,25 @@ private:
 			TextLineHeight(), kOverlayTextPadding));
 	}
 
+	void RenderZoomReadout() {
+		if (!viewport_.FitRelativeZoomMode() || fileList_.Empty() || image_.width <= 0 ||
+			static_cast<Sint32>(zoomReadoutVisibleUntil_ - SDL_GetTicks()) <= 0 ||
+			contextMenuOpen_ || fileDialogOpen_ || advancedConfiguration_.IsOpen() ||
+			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
+		const std::string label = viewport_.ZoomReadout();
+		const int textWidth = TextWidth(label, kUiTextScale);
+		const int lineHeight = TextLineHeight();
+		const SDL_Rect imageArea = ImageAreaRect();
+		const SDL_Rect panel{imageArea.x + imageArea.w - textWidth - 22,
+			imageArea.y + imageArea.h - lineHeight - 16, textWidth + 16, lineHeight + 8};
+		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 210);
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 120, 120, 120);
+		DrawText(label, panel.x + 8, panel.y + (panel.h - lineHeight) / 2,
+			kUiTextScale, 245, 245, 245);
+	}
+
 	void RenderImageInfo() {
 		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ || advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
@@ -7827,6 +7889,8 @@ private:
 		thumbnailPanelResizeChanged_ = true;
 		if (viewport_.IsFitToWindow()) {
 			FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+		} else {
+			RefreshFitRelativeZoomBase();
 		}
 	}
 
@@ -7955,7 +8019,8 @@ private:
 		if (hoveredButton == nullptr) return;
 		const std::string text = jpegview_linux::NavigationTooltip(hoveredButton->command,
 			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting(), selectionModeEnabled_,
-			doublePageModeEnabled_, mangaReadingOrderEnabled_, spacebarNavigatesImages_);
+			doublePageModeEnabled_, mangaReadingOrderEnabled_, spacebarNavigatesImages_,
+			viewport_.FitRelativeZoomMode());
 		if (text.empty()) return;
 		int windowWidth = 0;
 		int windowHeight = 0;
@@ -8430,6 +8495,8 @@ private:
 					event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
 					if (viewport_.IsFitToWindow()) {
 						FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+					} else if (image_.width > 0) {
+						RefreshFitRelativeZoomBase();
 					}
 				}
 				break;
@@ -8621,11 +8688,8 @@ private:
 					break;
 				}
 				if ((SDL_GetModState() & 0x00C0u) != 0) {
-					if (event.wheel.y > 0) {
-						ZoomAt(1.2, lastMouseX_, lastMouseY_);
-					} else if (event.wheel.y < 0) {
-						ZoomAt(1.0 / 1.2, lastMouseX_, lastMouseY_);
-					}
+					ZoomByStep(event.wheel.y > 0 ? 1 : event.wheel.y < 0 ? -1 : 0,
+						lastMouseX_, lastMouseY_);
 				} else if (event.wheel.y > 0) {
 					PreviousImage();
 				} else if (event.wheel.y < 0) {
@@ -8713,6 +8777,7 @@ private:
 		RenderThumbnailPanel();
 		RenderFileName();
 		RenderImageInfo();
+		RenderZoomReadout();
 		RenderControls();
 		RenderPictureLevels();
 		RenderUnsharpMaskDialog();
@@ -8837,6 +8902,7 @@ private:
 	bool cropMouseDragging_ = false;
 	bool zoomNavigatorDragging_ = false;
 	Uint32 zoomNavigatorVisibleUntil_ = 0;
+	Uint32 zoomReadoutVisibleUntil_ = 0;
 	bool cropDragWasNew_ = false;
 	bool cropZoomOnRelease_ = false;
 	bool cropDragMoved_ = false;

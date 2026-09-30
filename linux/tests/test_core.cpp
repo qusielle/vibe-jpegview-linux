@@ -3681,6 +3681,8 @@ void TestPictureLevelsStoreRoundTrip() {
 void TestSettingsRoundTripAndMalformedValues() {
 	TemporaryDirectory temporary;
 	const fs::path settingsPath = temporary.path() / "config" / "settings.conf";
+	Expect(!jpegview_linux::ViewerSettings{}.fitRelativeZoomMode,
+		"fit-relative zoom was enabled in the built-in settings defaults");
 	jpegview_linux::ViewerSettings expected;
 	expected.scaleMode = "manual";
 	expected.sortMode = "file_name";
@@ -3696,6 +3698,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.mangaModeInvertsLeftRight = false;
 	expected.spacebarNavigatesImages = true;
 	expected.folderWrapAround = false;
+	expected.fitRelativeZoomMode = true;
 	expected.transparencyPattern = jpegview_linux::TransparencyPattern::Checkerboard;
 	expected.thumbnailPanelWidth = 287;
 	expected.fileDialogWidth = 1040;
@@ -3778,8 +3781,12 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.mangaReadingOrderEnabled == expected.mangaReadingOrderEnabled &&
 		loaded.mangaModeInvertsLeftRight == expected.mangaModeInvertsLeftRight &&
 		loaded.spacebarNavigatesImages == expected.spacebarNavigatesImages &&
-		loaded.folderWrapAround == expected.folderWrapAround,
+		loaded.folderWrapAround == expected.folderWrapAround &&
+		loaded.fitRelativeZoomMode == expected.fitRelativeZoomMode,
 		"navigation and display-mode settings did not round-trip");
+	Expect(settingsContents.find("# Define fit-to-window as 100% zoom instead of source-pixel scale.\n"
+		"fit_relative_zoom_mode=1\n") != std::string::npos,
+		"saved config omitted the fit-relative zoom setting or its explanation");
 	Expect(loaded.transparencyPattern == expected.transparencyPattern,
 		"transparent-image pattern did not round-trip");
 	Expect(loaded.thumbnailPanelWidth == expected.thumbnailPanelWidth,
@@ -3837,6 +3844,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"selection_mode_enabled=maybe\n"
 		"show_zoom_navigator=maybe\nmanga_mode_inverts_left_right=maybe\n"
 		"spacebar_navigates_images=maybe\nfolder_wrap_around=maybe\n"
+		"fit_relative_zoom_mode=maybe\n"
 		"transparency_pattern=diagonal\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
@@ -3861,6 +3869,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"missing or malformed Space navigation setting did not preserve its disabled default");
 	Expect(loaded.folderWrapAround,
 		"missing or malformed folder-wrap setting did not preserve the wrapping default");
+	Expect(!loaded.fitRelativeZoomMode,
+		"missing or malformed fit-relative zoom setting did not preserve its disabled default");
 	Expect(loaded.transparencyPattern == jpegview_linux::TransparencyPattern::Black,
 		"malformed transparency pattern did not retain the default black background");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
@@ -3937,6 +3947,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	source.mangaModeInvertsLeftRight = false;
 	source.spacebarNavigatesImages = true;
 	source.folderWrapAround = false;
+	source.fitRelativeZoomMode = true;
 	source.transparencyPattern = jpegview_linux::TransparencyPattern::White;
 	source.showHistogram = true;
 	source.thumbnailPanelWidth = 287;
@@ -3969,7 +3980,8 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	source.windowTitlePattern = "%f (%m) [%p]";
 
 	const std::array<std::vector<std::string>, 7> expectedKeys = {{
-		{"manga_mode_inverts_left_right", "spacebar_navigates_images", "folder_wrap_around"},
+		{"manga_mode_inverts_left_right", "spacebar_navigates_images", "folder_wrap_around",
+			"fit_relative_zoom_mode"},
 		{"transparency_pattern", "show_histogram", "window_title_pattern"},
 		{"thumbnail_panel_width", "file_dialog_width", "file_dialog_height",
 			"file_dialog_preview_ratio"},
@@ -4014,10 +4026,10 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 			++fieldTotal;
 		}
 	}
-	Expect(fieldTotal == 33, "advanced configuration did not expose every requested setting");
+	Expect(fieldTotal == 34, "advanced configuration did not expose every requested setting");
 	Expect(model.SelectCategory(static_cast<int>(Category::Behavior)) &&
-		model.FieldValue(2) == "Off",
-		"folder-wrap setting did not display its disabled draft value");
+		model.FieldValue(2) == "Off" && model.FieldValue(3) == "On",
+		"behavior settings did not display their draft values");
 	Expect(model.SelectCategory(static_cast<int>(Category::Appearance)) &&
 		model.FieldValue(0) == "White" && model.FieldValue(1) == "On" &&
 		model.FieldValue(2) == source.windowTitlePattern,
@@ -4032,7 +4044,8 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 		source.defaultImageProcessing) && model.Draft().copyRenamePattern == source.copyRenamePattern &&
 		model.Draft().magnifyingGlassWidth == source.magnifyingGlassWidth &&
 		model.Draft().fileDialogPreviewRatio == source.fileDialogPreviewRatio &&
-		model.Draft().windowTitlePattern == source.windowTitlePattern,
+		model.Draft().windowTitlePattern == source.windowTitlePattern &&
+		model.Draft().fitRelativeZoomMode == source.fitRelativeZoomMode,
 		"opening and visiting categories changed the persisted settings draft");
 	Expect(model.Draft().scaleMode == source.scaleMode && model.Draft().maximized == source.maximized &&
 		model.Draft().selectionModeEnabled == source.selectionModeEnabled &&
@@ -4061,6 +4074,10 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	Expect(model.ActivateSelected() && model.Draft().folderWrapAround &&
 		model.AdjustSelected(-1) && !model.Draft().folderWrapAround,
 		"folder-wrap setting did not toggle in both advanced-configuration controls");
+	model.SelectRow(3);
+	Expect(model.ActivateSelected() && !model.Draft().fitRelativeZoomMode &&
+		model.AdjustSelected(1) && model.Draft().fitRelativeZoomMode,
+		"fit-relative zoom setting did not toggle in both advanced-configuration controls");
 
 	model.SelectCategory(static_cast<int>(Category::Appearance));
 	model.SelectRow(0);
@@ -5229,6 +5246,99 @@ void TestViewportNavigationResetsTransientZoom() {
 		"legacy manual setting was allowed to propagate to subsequent images");
 }
 
+void TestViewportFitRelativeZoomMode() {
+	using jpegview_linux::Viewport;
+	Viewport viewport;
+	Expect(!viewport.FitRelativeZoomMode() &&
+		std::abs(viewport.ZoomStepMultiplier() - 1.2) < 1e-12 &&
+		std::abs(viewport.ZoomTargetForPreset(2.0) - 2.0) < 1e-12,
+		"fit-relative zoom changed the default source-pixel scale behavior");
+	viewport.SetFitRelativeZoomMode(true);
+	viewport.Fit(4000, 3000, 1000, 800, false, true);
+	ExpectNear(viewport.FitRelativeZoomBase(), 0.25, 1e-12,
+		"fit-relative zoom base did not use the full window-fit scale");
+	ExpectNear(viewport.ZoomTargetForPreset(4.0), 1.0, 1e-12,
+		"zoom preset was not resolved relative to the fit scale");
+	Expect(std::abs(viewport.ZoomStepMultiplier() - 1.1) < 1e-12,
+		"fit-relative zoom steps did not use a stable ratio");
+	Viewport nearFitAnchor;
+	nearFitAnchor.SetFitRelativeZoomMode(true);
+	nearFitAnchor.Fit(4000, 3000, 1000, 800, false, true);
+	nearFitAnchor.ZoomAt(0.995, 500, 400, 4000, 3000, 1000, 800);
+	ExpectNear(nearFitAnchor.Zoom(), nearFitAnchor.FitRelativeZoomBase(), 1e-12,
+		"fit-relative zoom did not snap a near-100% target to the fit anchor");
+	Viewport fitAnchor;
+	fitAnchor.SetFitRelativeZoomMode(true);
+	fitAnchor.Fit(4000, 3000, 1000, 800, false, true);
+	fitAnchor.ZoomAt(0.95, 500, 400, 4000, 3000, 1000, 800);
+	fitAnchor.ZoomAt(fitAnchor.ZoomStepMultiplier(), 500, 400,
+		4000, 3000, 1000, 800, true);
+	ExpectNear(fitAnchor.Zoom(), fitAnchor.FitRelativeZoomBase(), 1e-12,
+		"fit-relative zoom step did not pause at the fit-relative 100% anchor");
+	fitAnchor.ZoomAt(fitAnchor.ZoomStepMultiplier(), 500, 400,
+		4000, 3000, 1000, 800, true);
+	ExpectNear(fitAnchor.Zoom(), fitAnchor.FitRelativeZoomBase() * 1.1, 1e-12,
+		"fit-relative zoom could not continue after pausing at the 100% anchor");
+	Viewport sourceScale;
+	sourceScale.Fit(4000, 3000, 1000, 800, false, true);
+	sourceScale.ZoomAt(3.98, 500, 400, 4000, 3000, 1000, 800);
+	ExpectNear(sourceScale.Zoom(), 0.25 * 3.98, 1e-12,
+		"fit-relative snapping changed a near-100% target in default mode");
+	sourceScale.Fit(4000, 3000, 1000, 800, false, true);
+	sourceScale.ZoomAt(0.95, 500, 400, 4000, 3000, 1000, 800);
+	sourceScale.ZoomAt(sourceScale.ZoomStepMultiplier(), 500, 400,
+		4000, 3000, 1000, 800, true);
+	ExpectNear(sourceScale.Zoom(), 0.25 * 0.95 * 1.2, 1e-12,
+		"fit-relative pause behavior changed the default source-pixel zoom mode");
+	Viewport smallImage;
+	smallImage.SetFitRelativeZoomMode(true);
+	smallImage.Fit(100, 50, 500, 300, false, true);
+	ExpectNear(smallImage.Zoom(), 1.0, 1e-12,
+		"fit-no-enlarge unexpectedly changed the normal displayed size of a small image");
+	ExpectNear(smallImage.FitRelativeZoomBase(), 5.0, 1e-12,
+		"fit-relative base did not use the window-fit scale when fit mode avoids enlargement");
+	smallImage.ActualSize();
+	ExpectNear(smallImage.Zoom(), 5.0, 1e-12,
+		"fit-relative 100% did not use the full-window fit scale for a small image");
+	Expect(smallImage.ZoomReadout() == "100% (500%)",
+		"fit-relative readout did not retain the source-pixel scale for a small image");
+	smallImage.ZoomAt(smallImage.ZoomStepMultiplier(), 250, 150,
+		100, 50, 500, 300);
+	ExpectNear(smallImage.Zoom(), 5.5, 1e-12,
+		"fit-relative step did not grow by the configured ratio");
+
+	const double fourHundredPercent = viewport.ZoomTargetForPreset(4.0);
+	viewport.ZoomAt(fourHundredPercent / viewport.Zoom(), 500, 400,
+		4000, 3000, 1000, 800);
+	ExpectNear(viewport.Zoom(), 1.0, 1e-12,
+		"400% fit-relative zoom did not produce source-pixel size for this image");
+	Expect(viewport.ZoomReadout() == "400% (100%)",
+		"fit-relative readout omitted the source-pixel percentage");
+	const jpegview_linux::ViewportSnapshot nextImage = viewport.NavigationSnapshot();
+	ExpectNear(nextImage.relativeZoom, 4.0, 1e-12,
+		"navigation snapshot did not retain the current fit-relative zoom ratio");
+	viewport.Restore(nextImage, 2000, 1000, 1000, 800);
+	ExpectNear(viewport.FitRelativeZoomBase(), 0.5, 1e-12,
+		"fit-relative base was not recalculated for the next image");
+	ExpectNear(viewport.Zoom(), 2.0, 1e-12,
+		"navigation did not preserve the relative zoom on an image of another size");
+	Expect(viewport.ZoomReadout() == "400% (200%)",
+		"readout did not retain the actual source-pixel percentage for a different image");
+	viewport.ActualSize();
+	ExpectNear(viewport.Zoom(), 0.5, 1e-12,
+		"fit-relative 100% did not use the current image's fit scale");
+	Expect(viewport.IsActualSize() && viewport.ZoomReadout() == "100% (50%)",
+		"fit-relative actual-size state or readout was incorrect");
+
+	viewport.SetFitRelativeZoomMode(false);
+	Expect(viewport.ZoomReadout() == "50%" &&
+		std::abs(viewport.ZoomTargetForPreset(2.0) - 2.0) < 1e-12,
+		"disabling fit-relative zoom did not restore the source-scale readout and presets");
+	viewport.ActualSize();
+	ExpectNear(viewport.Zoom(), 1.0, 1e-12,
+		"source-pixel actual size changed after disabling fit-relative zoom");
+}
+
 void TestResizeModelAspectRatioValidationAndFilters() {
 	jpegview_linux::ResizeModel model;
 	model.Reset(400, 200);
@@ -5524,6 +5634,26 @@ void TestContextMenuCatalogAndState() {
 		"compact context menu lost a primary command");
 	Expect(findCommand(compact, IDM_ZOOM_100)->shortcut == "Space",
 		"context menu omitted the default actual-size Space shortcut");
+	state.fitRelativeZoomMode = true;
+	state.fitRelativeZoomBase = 0.25;
+	state.fitToWindow = false;
+	state.zoom = 0.25;
+	const std::vector<MenuItem> fitRelativeMenu =
+		jpegview_linux::BuildContextMenu(state, true);
+	const MenuItem* fitRelativeSize = findCommand(fitRelativeMenu, IDM_ZOOM_100);
+	Expect(fitRelativeSize != nullptr && fitRelativeSize->label == "  Fit-relative size (100 %)" &&
+		fitRelativeSize->checked,
+		"context menu did not label and check the fit-relative 100% command");
+	state.zoom = 0.257;
+	const std::vector<MenuItem> notAtRelativeSize =
+		jpegview_linux::BuildContextMenu(state, true);
+	const MenuItem* notAtRelativeSizeItem = findCommand(notAtRelativeSize, IDM_ZOOM_100);
+	Expect(notAtRelativeSizeItem != nullptr && !notAtRelativeSizeItem->checked,
+		"fit-relative 100% checkmark used an absolute tolerance for a small scale");
+	state.fitRelativeZoomMode = false;
+	state.fitRelativeZoomBase = 1.0;
+	state.fitToWindow = true;
+	state.zoom = 1.0;
 	Expect(findCommand(compact, IDM_HELP) != nullptr && findCommand(compact, IDM_HELP)->enabled &&
 		findCommand(compact, IDM_HELP)->shortcut == "F1",
 		"compact context menu omitted the built-in help command");
@@ -6068,6 +6198,12 @@ void TestViewerChromePaintPlans() {
 		navigation.buttons[11].outlines.size() == 2 && navigation.buttons[11].lines.size() == 7,
 		"fit or rotation controls did not use the original Windows action glyphs");
 	navigation = jpegview_linux::BuildNavigationPanelPaint(
+		800, 600, -1, -1, true, FileList::SortMode::FileName, 7, 24, 11,
+		false, false, false, true);
+	Expect(navigation.buttons[5].text.size() == 1 &&
+		navigation.buttons[5].text[0].text == "100%",
+		"navigation panel did not identify fit-relative 100% instead of source-pixel 1:1");
+	navigation = jpegview_linux::BuildNavigationPanelPaint(
 		800, 600, -1, -1, false, FileList::SortMode::FileName, 7, 18, 11, true, true, true);
 	Expect(navigation.opacity == 128 && navigation.buttons[0].foreground.alpha == 128 &&
 		navigation.buttons[5].lines.size() == 12 && navigation.buttons[5].text.empty() &&
@@ -6089,6 +6225,9 @@ void TestViewerChromePaintPlans() {
 			FileList::SortMode::FileName, false, false, false, true) == "Fit image to screen" &&
 		jpegview_linux::NavigationTooltip(IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, true, false,
 			FileList::SortMode::FileName, false, false, false, true) == "Actual size of image" &&
+		jpegview_linux::NavigationTooltip(IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS, true, false,
+			FileList::SortMode::FileName, false, false, false, false, true) ==
+			"Fit-relative zoom (100%) (Space)" &&
 		jpegview_linux::NavigationTooltip(IDM_FULL_SCREEN_MODE, true, true,
 			FileList::SortMode::FileName) == "Window mode (F11)" &&
 		jpegview_linux::NavigationTooltip(IDM_NEXT, true, false,
@@ -6788,7 +6927,7 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 	Expect(recent.Files().size() == 2 && recent.Files()[0] == normalizedSecondA,
 		"reopening a recent image duplicated its folder row instead of moving it to the front");
 
-	jpegview_linux::ViewportSnapshot snapshot{false, false, false, 2.75};
+	jpegview_linux::ViewportSnapshot snapshot{false, false, false, 2.75, 3.5};
 	recent.RememberViewport(secondA, snapshot);
 	recent.RememberDoublePageMode(secondA, {true, true});
 	const std::vector<fs::path> orderBeforeRemoval = recent.Files();
@@ -6813,6 +6952,8 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 		"recent viewport snapshot did not preserve its manual view mode");
 	ExpectNear(restored->zoom, 2.75, 0.0000001,
 		"recent viewport snapshot did not preserve its manual zoom");
+	ExpectNear(restored->relativeZoom, 3.5, 0.0000001,
+		"recent viewport snapshot did not preserve its fit-relative zoom");
 	recent.RememberViewport(firstA, {true, true, false, 1000.0});
 	const auto clamped = recent.FindViewport(firstA);
 	Expect(clamped.has_value() && clamped->fitToWindow && clamped->fillWithCrop &&
@@ -6825,7 +6966,7 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 
 	const fs::path unusualPath = folderB / "line\nbreak.jpg";
 	recent.Add(unusualPath);
-	recent.RememberViewport(unusualPath, {false, false, false, 0.125});
+	recent.RememberViewport(unusualPath, {false, false, false, 0.125, 0.25});
 	recent.RememberDoublePageMode(unusualPath, {true, false});
 	const fs::path database = temporary.path() / "state" / "recent-files.db";
 	Expect(jpegview_linux::SaveRecentFiles(database, recent),
@@ -6842,6 +6983,8 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 		"per-file viewport snapshot did not round-trip independently from the folder list");
 	ExpectNear(unusualViewport->zoom, 0.125, 0.0000001,
 		"persisted per-file zoom did not round-trip");
+	ExpectNear(unusualViewport->relativeZoom, 0.25, 0.0000001,
+		"persisted per-file relative zoom did not round-trip");
 	const auto unusualDisplayMode = loaded.FindDoublePageMode(unusualPath);
 	Expect(unusualDisplayMode.has_value() && unusualDisplayMode->enabled &&
 		!unusualDisplayMode->mangaReadingOrder,
@@ -6881,6 +7024,8 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 	Expect(clampedPersisted.has_value() &&
 		clampedPersisted->zoom == jpegview_linux::kMaximumZoom,
 		"finite out-of-range zoom in a malformed-tolerant database was not clamped");
+	ExpectNear(clampedPersisted->relativeZoom, 1.0, 1e-12,
+		"legacy viewport records without a relative zoom ratio were not accepted");
 	const auto tolerantMode = tolerant.FindDoublePageMode(fs::path("/abc"));
 	Expect(tolerantMode.has_value() && tolerantMode->enabled && tolerantMode->mangaReadingOrder,
 		"valid recent display-mode row was not retained alongside malformed rows");
@@ -7424,6 +7569,7 @@ int main() {
 	RunTest("magnifying-glass-geometry-native-scaling-and-edge-padding",
 		TestMagnifyingGlassGeometryMapsNativeTextureAndPadsEdges, failures);
 	RunTest("viewport-navigation-resets-transient-zoom", TestViewportNavigationResetsTransientZoom, failures);
+	RunTest("viewport-fit-relative-zoom-mode", TestViewportFitRelativeZoomMode, failures);
 	RunTest("resize-model-aspect-ratio-validation-and-filters", TestResizeModelAspectRatioValidationAndFilters, failures);
 	RunTest("resize-dialog-controller", TestResizeDialogController, failures);
 	RunTest("crop-size-dialog-controller", TestCropSizeDialogController, failures);

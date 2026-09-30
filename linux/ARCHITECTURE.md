@@ -89,21 +89,28 @@ should normally be added to one of these focused modules and covered by `tests/t
   default), zoom-navigator visibility, magnifying-glass size/zoom, the validated window-title
   pattern, global double-page/manga-mode
   defaults, the default-enabled `manga_mode_inverts_left_right` preference, the default-disabled
-  `spacebar_navigates_images` preference, and the default-enabled `folder_wrap_around` preference),
+  `spacebar_navigates_images` preference, the default-enabled `folder_wrap_around` preference, and
+  the default-disabled `fit_relative_zoom_mode` preference),
   plus stable sort-mode values. Applying prepared list scans preserves the live folder-wrap value,
   so editing the setting does not require canceling or repeating a directory scan.
 - `advanced_configuration_model`: category and row metadata for persisted settings that lack a normal
-  context-menu command, with a transient `ViewerSettings` draft, value bounds, text editing, and
+  context-menu command, including the Behavior category's fit-relative zoom option, with a transient
+  `ViewerSettings` draft, value bounds, text editing, and
   selection/scroll transitions. It performs no file I/O; Apply is routed through the existing settings
   serializer by the SDL adapter, while Cancel drops the draft.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
-  bounded per-file `ViewportSnapshot` LRU and independent bounded double-page/manga-mode snapshots,
+  bounded per-file `ViewportSnapshot` LRU (absolute and fit-relative zoom) and independent bounded
+  double-page/manga-mode snapshots,
   ordered row removal/restoration for the Recents dialog, plus tolerant atomic persistence in the
   XDG state directory. Virtual archive-member paths remain logical recent identities while source
   validation and cache freshness use the backing container. The recent database is independent from
   viewer settings and performs no image or directory scans while loading.
-- `viewport`: fit/fill/manual zoom modes, pan state, destination geometry, and panning bounds that
-  keep the viewport inside the image.
+- `viewport`: fit/fill/manual zoom modes, optional fit-relative scale base and
+  preset/step/snap calculations, source-pixel plus fit-relative zoom readout formatting, relative
+  navigation snapshots, pan state, destination geometry, and panning bounds that keep the viewport
+  inside the image. Fit-relative calculations follow the `ZoomMath.cpp` model from
+  [andrewvladved/jpegview](https://github.com/andrewvladved/jpegview/blob/9dcd25766585be5fb65ca6a26c0a6beb46346112/src/JPEGView/ZoomMath.cpp);
+  the mode remains disabled by default.
 - `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,
   and click/drag pan calculations for the transient zoom navigator.
 - `magnifying_glass_model`: lens enable/size/zoom state and bounds, wheel-modifier transitions,
@@ -129,7 +136,7 @@ should normally be added to one of these focused modules and covered by `tests/t
   event thread.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
-  primitives, hit regions, dynamic labels, and tooltip placement.
+  primitives, hit regions, fit-relative scale labels, dynamic labels, and tooltip placement.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
   nearest-first cache scheduling,
   cancellation/LRU policy, memory sizing, alpha-preserving antialiased source-area reduction, and
@@ -328,8 +335,10 @@ changing the shared defaults in settings.
 
 The recent-files database stores normalized absolute paths with byte-safe record encoding, so legal
 newlines and non-UTF-8 filename bytes do not break its line-based format. Loading skips malformed
-records, accepts only finite zoom values, and clamps finite values to the viewport's supported zoom
-range. Recent-folder retention is capped at 100 rows and viewport snapshots at 256 paths; these
+records, accepts only finite absolute and relative zoom values, and clamps finite values to the
+viewport's supported zoom ranges. Version-3 viewport records carry both the source-pixel scale and
+fit-relative factor; older records without the factor remain readable and default that factor to 1.
+Recent-folder retention is capped at 100 rows and viewport snapshots at 256 paths; these
 bounds are independent so files from older folder rows can still restore their last view. Double-page
 mode snapshots have their own 256-path bound.
 
@@ -408,6 +417,11 @@ and drawing; `zoom_navigator_model` owns only the geometry and pointer-to-pan ma
 the current image texture, so it does not schedule another decode, resize, or cache entry. Click and
 drag pans are clamped by `Viewport::ClampToView` so they cannot expose empty space beyond the image.
 The user-visible toggle is persisted through `settings`.
+
+Fit-relative zoom arithmetic and navigation snapshots belong to `viewport`; the Viewer passes the
+current virtual image/window geometry and renders its formatted readout as a short-lived SDL overlay.
+That indicator uses the same viewport state as presets and steps, reports both fit-relative and
+source-pixel percentages when they differ, and does not decode, resize, or retain image data.
 
 ## Build version metadata
 

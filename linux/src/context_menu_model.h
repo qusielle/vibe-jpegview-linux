@@ -83,6 +83,8 @@ struct ContextMenuState {
 	bool fitToWindow = true;
 	bool fillWithCrop = false;
 	bool noEnlarge = true;
+	bool fitRelativeZoomMode = false;
+	double fitRelativeZoomBase = 1.0;
 	double zoom = 1.0;
 	bool fullscreen = false;
 	bool borderless = false;

@@ -43,8 +43,14 @@ they support.
    copying its full decoded pixels on the UI thread; navigation therefore avoids CPU resizing and
    normally avoids texture upload as well. Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
-   Fit, fill, actual-size, and manual modes survive navigation appropriately, while temporary zoom
-   on one image is reset to the selected fit/actual mode for the next image. Ctrl+wheel zooms around
+   Fit, fill, actual-size, and manual modes survive navigation appropriately. Temporary zoom on one
+   image resets to the selected mode by default. The opt-in `fit_relative_zoom_mode=1` instead defines
+   the window-fit scale as 100%: zoom presets and steps keep the same relative effect on differently
+   sized images, a zoom step pauses/snaps at that 100% fit anchor, and the relative zoom is carried
+   to the next image and saved in its Recents snapshot.
+   A temporary readout shows both fit-relative and source-pixel percentages (for example,
+   `400% (100%)`). The option is off by default and is also available under Advanced configuration's
+   Behavior category. Ctrl+wheel zooms around
    the pointer, mouse dragging pans, and repeatable Shift+Arrow commands pan an actual-size image in
    the original 48-pixel steps. When magnified beyond the viewport, a transient upper-right zoom
    navigator shows the whole image and the visible area; click or drag it to pan. Its visibility
@@ -792,9 +798,14 @@ If the menu spans multiple
 columns to fit the window height, Left moves to the previous column; releasing Right over an enabled
 row activates it, while releasing outside the menu moves to the next column. You can hold Right, move
 the pointer onto a row, then release to click it. Hovering over a lower
-navigation-panel button displays its Windows-style action hint. Unseen files inherit the shared
-fit/fill/actual-size or manual mode as navigation proceeds; a previously visited file restores its
-own last view when opened again. Magnifier size and zoom use `magnifying_glass_width` (default 350),
+navigation-panel button displays its Windows-style action hint. Set `fit_relative_zoom_mode=1` in
+`settings.conf` (or enable **Fit-relative zoom mode** under Advanced configuration → Behavior) to
+make window-fit size count as 100%; the zoom presets and `+`/`-` steps then use that fit scale, while
+the temporary readout also shows the source-pixel percentage. In this mode unseen files inherit the
+current relative zoom ratio, and a visited image restores its own saved ratio. With the option off,
+zoom percentages remain relative to source pixels as before. In default mode, unseen files inherit the
+shared fit/fill/actual-size or manual mode as navigation proceeds; a previously visited file restores
+its own last view when opened again. Magnifier size and zoom use `magnifying_glass_width` (default 350),
 `magnifying_glass_height` (default 175), and `magnifying_glass_zoom_level` (default 0.5), editable
 under Advanced configuration; the lens itself remains disabled at startup. The shared scale mode
 remains saved between application runs, as

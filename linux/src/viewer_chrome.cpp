@@ -33,7 +33,7 @@ UiRect WindowsInflatedRect(const UiRect& rect, float amount) {
 
 void AddNavigationIcon(NavigationButtonPaint& button, bool fitToWindow,
 	const std::string& sortLabel, int sortLabelWidth, int oneToOneLabelWidth,
-	int textLineHeight) {
+	int textLineHeight, bool fitRelativeZoomMode) {
 	const UiRect& rect = button.rect;
 	switch (button.command) {
 	case IDM_FIRST: {
@@ -88,7 +88,7 @@ void AddNavigationIcon(NavigationButtonPaint& button, bool fitToWindow,
 	}
 	case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
 		if (fitToWindow) {
-			button.text.push_back({"1:1",
+			button.text.push_back({fitRelativeZoomMode ? "100%" : "1:1",
 				rect.x + (rect.width - oneToOneLabelWidth) / 2,
 				rect.y + (rect.height - textLineHeight) / 2,
 				button.foreground});
@@ -260,7 +260,7 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 	int mouseX, int mouseY, bool fitToWindow, FileList::SortMode sortMode,
 	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight,
 	bool selectionModeEnabled, bool doublePageModeEnabled,
-	bool mangaReadingOrderEnabled) {
+	bool mangaReadingOrderEnabled, bool fitRelativeZoomMode) {
 	constexpr int buttonSize = 26;
 	constexpr int panelHeight = 32;
 	constexpr int gap = 5;
@@ -292,7 +292,7 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 			kHighlightColor : kGuiColor;
 		button.foreground.alpha = plan.opacity;
 		AddNavigationIcon(button, fitToWindow, sortLabel, sortLabelWidth,
-			oneToOneLabelWidth, textLineHeight);
+			oneToOneLabelWidth, textLineHeight, fitRelativeZoomMode);
 		plan.buttons.push_back(std::move(button));
 		x += buttonSize + gap;
 		if (index == 4 || index == 6 || index == 9) x += separator;
@@ -303,7 +303,7 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
 	FileList::SortMode sortMode, bool selectionModeEnabled,
 	bool doublePageModeEnabled, bool mangaReadingOrderEnabled,
-	bool spacebarNavigatesImages) {
+	bool spacebarNavigatesImages, bool fitRelativeZoomMode) {
 	switch (command) {
 	case IDM_FIRST: return "Show first image in folder (Home)";
 	case IDM_PREV: return mangaReadingOrderEnabled ?
@@ -312,6 +312,10 @@ std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
 		"Show next image (Left)" : "Show next image (Right)";
 	case IDM_LAST: return "Show last image in folder (End)";
 	case IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS:
+		if (fitToWindow && fitRelativeZoomMode) {
+			return spacebarNavigatesImages ? "Fit-relative zoom (100%)" :
+				"Fit-relative zoom (100%) (Space)";
+		}
 		if (spacebarNavigatesImages) {
 			return fitToWindow ? "Actual size of image" : "Fit image to screen";
 		}

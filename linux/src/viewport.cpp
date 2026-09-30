@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace jpegview_linux {
 namespace {
@@ -30,6 +31,40 @@ const char* Viewport::NavigationScaleMode() const {
 	return ScaleModeName(navigationState_);
 }
 
+bool Viewport::IsActualSize() const {
+	const double actualSizeZoom = fitRelativeZoomMode_ ? fitRelativeZoomBase_ : 1.0;
+	return !fitToWindow_ && std::abs(zoom_ - actualSizeZoom) < 1e-9;
+}
+
+double Viewport::ZoomTargetForPreset(double factor) const {
+	if (!std::isfinite(factor) || factor <= 0.0) return zoom_;
+	return ClampedZoom((fitRelativeZoomMode_ ? fitRelativeZoomBase_ : 1.0) * factor);
+}
+
+std::string Viewport::ZoomReadout() const {
+	const auto percent = [](double zoom) {
+		return std::to_string(std::max(0L, std::lround(zoom * 100.0))) + "%";
+	};
+	const std::string sourceScale = percent(zoom_);
+	if (!fitRelativeZoomMode_ || std::abs(fitRelativeZoomBase_ - 1.0) < 0.0001) {
+		return sourceScale;
+	}
+	return percent(zoom_ / fitRelativeZoomBase_) + " (" + sourceScale + ")";
+}
+
+void Viewport::UpdateFitRelativeZoomBase(int imageWidth, int imageHeight,
+	int windowWidth, int windowHeight) {
+	if (imageWidth <= 0 || imageHeight <= 0) return;
+	const double widthScale = static_cast<double>(std::max(1, windowWidth)) / imageWidth;
+	const double heightScale = static_cast<double>(std::max(1, windowHeight)) / imageHeight;
+	fitRelativeZoomBase_ = ClampedZoom(std::min(widthScale, heightScale));
+}
+
+ViewportSnapshot Viewport::NavigationSnapshot() const {
+	if (fitRelativeZoomMode_ && !fitToWindow_) return Snapshot();
+	return navigationState_;
+}
+
 void Viewport::LoadScaleMode(std::string_view mode, bool manualZoomSet, double manualZoom) {
 	(void)manualZoomSet;
 	(void)manualZoom;
@@ -50,15 +85,22 @@ void Viewport::LoadScaleMode(std::string_view mode, bool manualZoomSet, double m
 }
 
 ViewportSnapshot Viewport::Snapshot() const {
-	return {fitToWindow_, fillWithCrop_, noEnlarge_, zoom_};
+	const double relativeZoom = fitRelativeZoomBase_ > 0.0 ?
+		std::clamp(zoom_ / fitRelativeZoomBase_, kMinimumZoom / kMaximumZoom,
+			kMaximumZoom / kMinimumZoom) : 1.0;
+	return {fitToWindow_, fillWithCrop_, noEnlarge_, zoom_, relativeZoom};
 }
 
 void Viewport::Restore(const ViewportSnapshot& snapshot, int imageWidth, int imageHeight,
 	int windowWidth, int windowHeight) {
 	const ViewportSnapshot navigationState = navigationState_;
+	UpdateFitRelativeZoomBase(imageWidth, imageHeight, windowWidth, windowHeight);
 	if (snapshot.fitToWindow) {
 		Fit(imageWidth, imageHeight, windowWidth, windowHeight,
 			snapshot.fillWithCrop, snapshot.noEnlarge);
+	} else if (fitRelativeZoomMode_) {
+		SetManualZoom(fitRelativeZoomBase_ * std::clamp(snapshot.relativeZoom,
+			kMinimumZoom / kMaximumZoom, kMaximumZoom / kMinimumZoom));
 	} else {
 		SetManualZoom(snapshot.zoom);
 	}
@@ -68,6 +110,7 @@ void Viewport::Restore(const ViewportSnapshot& snapshot, int imageWidth, int ima
 void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowHeight,
 	bool fillWithCrop, bool noEnlarge) {
 	if (imageWidth <= 0 || imageHeight <= 0) return;
+	UpdateFitRelativeZoomBase(imageWidth, imageHeight, windowWidth, windowHeight);
 	// Fit against the complete client area. The old calculation reserved an
 	// eight-pixel border on every side, leaving visible bands even when the
 	// image and window had matching aspect ratios.
@@ -85,17 +128,26 @@ void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowH
 }
 
 void Viewport::ActualSize() {
-	SetManualZoom(1.0);
+	SetManualZoom(fitRelativeZoomMode_ ? fitRelativeZoomBase_ : 1.0);
 	navigationState_ = Snapshot();
 }
 
 void Viewport::ZoomAt(double factor, int mouseX, int mouseY, int imageWidth, int imageHeight,
-	int windowWidth, int windowHeight) {
+	int windowWidth, int windowHeight, bool pauseAtFitRelativeAnchor) {
 	if (imageWidth <= 0 || imageHeight <= 0 || factor <= 0.0) return;
+	UpdateFitRelativeZoomBase(imageWidth, imageHeight, windowWidth, windowHeight);
 	const double oldZoom = zoom_;
 	const double imageX = (mouseX - (windowWidth - imageWidth * oldZoom) / 2.0 - offsetX_) / oldZoom;
 	const double imageY = (mouseY - (windowHeight - imageHeight * oldZoom) / 2.0 - offsetY_) / oldZoom;
-	zoom_ = ClampedZoom(oldZoom * factor);
+	double newZoom = ClampedZoom(oldZoom * factor);
+	if (fitRelativeZoomMode_) {
+		const double anchor = fitRelativeZoomBase_;
+		const bool nearFitRelativeAnchor = std::abs(newZoom - anchor) < anchor * 0.01;
+		const bool crossedFitRelativeAnchor = pauseAtFitRelativeAnchor &&
+			((oldZoom < anchor && newZoom > anchor) || (oldZoom > anchor && newZoom < anchor));
+		if (nearFitRelativeAnchor || crossedFitRelativeAnchor) newZoom = anchor;
+	}
+	zoom_ = newZoom;
 	offsetX_ = mouseX - (windowWidth - imageWidth * zoom_) / 2.0 - imageX * zoom_;
 	offsetY_ = mouseY - (windowHeight - imageHeight * zoom_) / 2.0 - imageY * zoom_;
 	fitToWindow_ = false;

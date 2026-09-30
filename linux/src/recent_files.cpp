@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
 #include <unistd.h>
@@ -28,9 +29,13 @@ fs::path NormalizeAbsolute(const fs::path& path) {
 }
 
 bool NormalizeSnapshot(const ViewportSnapshot& input, ViewportSnapshot& output) {
-	if (!std::isfinite(input.zoom)) return false;
+	if (!std::isfinite(input.zoom) || !std::isfinite(input.relativeZoom) || input.relativeZoom <= 0.0) {
+		return false;
+	}
 	output = input;
 	output.zoom = std::clamp(input.zoom, kMinimumZoom, kMaximumZoom);
+	output.relativeZoom = std::clamp(input.relativeZoom,
+		kMinimumZoom / kMaximumZoom, kMaximumZoom / kMinimumZoom);
 	return true;
 }
 
@@ -89,15 +94,31 @@ bool ParseViewportRow(const std::string& line, fs::path& path,
 	int fill = 0;
 	int noEnlarge = 0;
 	double zoom = 0.0;
+	double relativeZoom = 1.0;
+	std::string relativeZoomToken;
 	std::string extra;
 	if (!(row >> record >> encoded >> fit >> fill >> noEnlarge >> zoom) || record != 'V' ||
-		(row >> extra) || !ParseBoolean(fit) || !ParseBoolean(fill) ||
+		!ParseBoolean(fit) || !ParseBoolean(fill) ||
 		!ParseBoolean(noEnlarge) || !std::isfinite(zoom)) return false;
+	if (row >> relativeZoomToken) {
+		try {
+			std::size_t parsedCharacters = 0;
+			relativeZoom = std::stod(relativeZoomToken, &parsedCharacters);
+			if (parsedCharacters != relativeZoomToken.size() || !std::isfinite(relativeZoom) ||
+				relativeZoom <= 0.0 || (row >> extra)) return false;
+		} catch (const std::exception&) {
+			return false;
+		}
+	} else if (!row.eof()) {
+		return false;
+	}
 	if (!DecodePath(encoded, path)) return false;
 	snapshot.fitToWindow = fit != 0;
 	snapshot.fillWithCrop = fill != 0;
 	snapshot.noEnlarge = noEnlarge != 0;
 	snapshot.zoom = std::clamp(zoom, kMinimumZoom, kMaximumZoom);
+	snapshot.relativeZoom = std::clamp(relativeZoom,
+		kMinimumZoom / kMaximumZoom, kMaximumZoom / kMinimumZoom);
 	return true;
 }
 
@@ -285,7 +306,7 @@ bool SaveRecentFiles(const fs::path& filename, const RecentFiles& recentFiles) {
 	{
 		std::ofstream output(temporary, std::ios::trunc);
 		if (!output) return false;
-		output << "# JPEGView Linux recent files, version 2\n";
+		output << "# JPEGView Linux recent files, version 3\n";
 		for (const fs::path& path : recentFiles.files_) {
 			output << "R " << EncodePath(path) << '\n';
 		}
@@ -297,7 +318,8 @@ bool SaveRecentFiles(const fs::path& filename, const RecentFiles& recentFiles) {
 			output << "V " << EncodePath(fs::path(key)) << ' '
 				<< (snapshot.fitToWindow ? 1 : 0) << ' '
 				<< (snapshot.fillWithCrop ? 1 : 0) << ' '
-				<< (snapshot.noEnlarge ? 1 : 0) << ' ' << snapshot.zoom << '\n';
+				<< (snapshot.noEnlarge ? 1 : 0) << ' ' << snapshot.zoom << ' '
+				<< snapshot.relativeZoom << '\n';
 		}
 		for (const std::string& key : recentFiles.modeLru_) {
 			const auto found = recentFiles.displayModes_.find(key);

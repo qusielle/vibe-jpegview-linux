@@ -44,13 +44,6 @@ feature is absent from Linux.
   the part extending beyond the viewport. Configure the hold duration; short images need no glide.
   This is separate from the existing slideshow and movie modes. See the branch's
   [scroll state model](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/ScrollMath.cpp).
-- **Fit-relative zoom mode:** optionally define the window-fitted image as 100%, so zoom presets,
-  steps, snap points, and pause points have the same relative effect for differently sized images.
-  Retain the current source-pixel scale in the zoom readout as well. Linux currently preserves the
-  chosen zoom mode across navigation, but its 100% zoom still means original-pixel scale. A related,
-  distinct request is to preserve the manually chosen on-screen width, height, or area while moving
-  between images ([upstream issue #285](https://github.com/sylikc/jpegview/issues/285)). See
-  [zoom calculations](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/ZoomMath.cpp).
 - **Shared cross-fade for playback modes:** extend Linux's existing slideshow transitions with an
   optional cross-fade between files during movie playback and the proposed scroll mode, using one
   transition duration. Do not fade frames within an animated image; cap or skip fades that would

@@ -46,6 +46,7 @@ struct ViewerSettings {
 	bool mangaModeInvertsLeftRight = true;
 	bool spacebarNavigatesImages = false;
 	bool folderWrapAround = true;
+	bool fitRelativeZoomMode = false;
 	TransparencyPattern transparencyPattern = TransparencyPattern::Black;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	int fileDialogWidth = kDefaultFileDialogWidth;

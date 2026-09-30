@@ -261,8 +261,12 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		{"  Span all screens", IDM_SPAN_SCREENS, false, state.fullscreen, true, "F12", true},
 		{"  400 %", IDM_ZOOM_400, false, false, true, nullptr, true},
 		{"  200 %", IDM_ZOOM_200, false, false, true, nullptr, true},
-		{"  Actual size (100 %)", IDM_ZOOM_100, false,
-			!state.fitToWindow && std::abs(state.zoom - 1.0) < 0.01, true,
+		{state.fitRelativeZoomMode ? "  Fit-relative size (100 %)" : "  Actual size (100 %)",
+			IDM_ZOOM_100, false,
+			!state.fitToWindow && (state.fitRelativeZoomMode ?
+				state.fitRelativeZoomBase > 0.0 &&
+				std::abs(state.zoom / state.fitRelativeZoomBase - 1.0) < 0.01 :
+				std::abs(state.zoom - 1.0) < 0.01), true,
 			state.spacebarNavigatesImages ? nullptr : "Space"},
 		{"  50 %", IDM_ZOOM_50, false, false, true, nullptr, true},
 		{"  25 %", IDM_ZOOM_25, false, false, true, nullptr, true},

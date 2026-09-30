@@ -82,11 +82,11 @@ NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight
 	int mouseX, int mouseY, bool fitToWindow, FileList::SortMode sortMode,
 	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight,
 	bool selectionModeEnabled = false, bool doublePageModeEnabled = false,
-	bool mangaReadingOrderEnabled = false);
+	bool mangaReadingOrderEnabled = false, bool fitRelativeZoomMode = false);
 std::string NavigationTooltip(int command, bool fitToWindow, bool fullscreen,
 	FileList::SortMode sortMode, bool selectionModeEnabled = false,
 	bool doublePageModeEnabled = false, bool mangaReadingOrderEnabled = false,
-	bool spacebarNavigatesImages = false);
+	bool spacebarNavigatesImages = false, bool fitRelativeZoomMode = false);
 OverlayPaintPlan NavigationTooltipPaint(const UiRect& anchor, std::string label,
 	int labelWidth, int textLineHeight, int windowWidth, int windowHeight);
 bool Contains(const UiRect& rect, int x, int y);
