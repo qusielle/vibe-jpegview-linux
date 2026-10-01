@@ -125,18 +125,27 @@ bool CanReuseDisplayPixelsForThumbnail(int width, int height,
 bool ThumbnailPreparationRequest::Valid() const {
 	const bool validDisplaySource = source && source->width > 0 && source->height > 0;
 	const bool validFileSource = !logicalSource.empty();
-	return !key.empty() && (validDisplaySource || validFileSource) &&
+	return !key.Empty() && (validDisplaySource || validFileSource) &&
 		maximumWidth > 0 && maximumHeight > 0;
+}
+
+bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
+	std::uint64_t catalogRevision, std::uint64_t geometryRevision,
+	std::size_t fileIndex, const SourceKey& sourceKey,
+	int maximumWidth, int maximumHeight) {
+	return result.catalogRevision == catalogRevision &&
+		result.geometryRevision == geometryRevision && result.fileIndex == fileIndex &&
+		result.key == sourceKey &&
+		result.maximumWidth == maximumWidth && result.maximumHeight == maximumHeight;
 }
 
 bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
 	std::uint64_t catalogRevision, std::uint64_t geometryRevision,
 	std::size_t fileIndex, const std::string& sourceKey,
 	int maximumWidth, int maximumHeight) {
-	return result.catalogRevision == catalogRevision &&
-		result.geometryRevision == geometryRevision && result.fileIndex == fileIndex &&
-		result.key == sourceKey &&
-		result.maximumWidth == maximumWidth && result.maximumHeight == maximumHeight;
+	return ThumbnailPreparationResultMatches(result, catalogRevision,
+		geometryRevision, fileIndex, SourceKey(sourceKey), maximumWidth,
+		maximumHeight);
 }
 
 namespace {
@@ -148,6 +157,8 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 		return !request.cancellation || !request.cancellation->load();
 	};
 	if (!shouldContinue()) return {};
+	if (request.sourceDescriptor.Valid() &&
+		!IsImageSourceCurrent(request.sourceDescriptor)) return {};
 	DecodedImage decoded;
 	const std::vector<std::uint8_t>* sourcePixels = nullptr;
 	int sourceWidth = 0;
@@ -194,6 +205,7 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 	if (!shouldContinue()) return {};
 	auto prepared = std::make_shared<PreparedThumbnailImage>();
 	prepared->key = request.key;
+	prepared->sourceDescriptor = request.sourceDescriptor;
 	prepared->width = size.width;
 	prepared->height = size.height;
 	prepared->hasTransparency = hasTransparency;
@@ -265,10 +277,27 @@ struct ThumbnailPreparationWorker::Impl {
 
 			PerfContextScope context(work.request.workClass, PerfExecution::WorkerThread);
 			ImagePtr image;
-			try {
-				image = processor(work.request);
-			} catch (const std::exception&) {
-				image.reset();
+			SourceDescriptor observedSource;
+			const SourceDescriptor& sourceDescriptor = work.request.sourceDescriptor;
+			const bool hasDescriptorPath = !sourceDescriptor.LogicalPath().empty();
+			if (hasDescriptorPath && !sourceDescriptor.Valid()) {
+				SourceDescriptor recaptured =
+					DescribeImageSource(sourceDescriptor.LogicalPath());
+				if (recaptured.Valid()) observedSource = std::move(recaptured);
+			} else {
+				if (sourceDescriptor.Valid() && !IsImageSourceCurrent(sourceDescriptor)) {
+					observedSource = DescribeImageSource(sourceDescriptor.LogicalPath());
+				} else {
+					try {
+						image = processor(work.request);
+					} catch (const std::exception&) {
+						image.reset();
+					}
+					if (sourceDescriptor.Valid() && !IsImageSourceCurrent(sourceDescriptor)) {
+						image.reset();
+						observedSource = DescribeImageSource(sourceDescriptor.LogicalPath());
+					}
+				}
 			}
 			work.request.source.reset();
 			retiredSource.reset();
@@ -282,6 +311,7 @@ struct ThumbnailPreparationWorker::Impl {
 					if (!wasCancelled || !activeCancellationReported) {
 						Result result;
 						result.key = work.request.key;
+						result.observedSource = std::move(observedSource);
 						result.fileIndex = work.request.fileIndex;
 						result.catalogRevision = work.request.catalogRevision;
 						result.geometryRevision = work.request.geometryRevision;
@@ -322,7 +352,7 @@ struct ThumbnailPreparationWorker::Impl {
 	std::deque<Work> queue;
 	std::deque<Result> completed;
 	std::deque<DisplayImageCache::ImagePtr> retired;
-	std::unordered_set<std::string> inFlightKeys;
+	std::unordered_set<SourceKey, SourceKeyHash> inFlightKeys;
 	DisplayImageCache::ImagePtr activeSource;
 	std::shared_ptr<std::atomic<bool>> activeCancellation;
 	PerfWorkClass activeWorkClass = PerfWorkClass::Unspecified;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "archive_source.h"
 #include "image_decoder.h"
 #include "cache_budget.h"
 #include "perf_diagnostics.h"
@@ -61,33 +62,46 @@ public:
 	DecodedImageCache& operator=(const DecodedImageCache&) = delete;
 
 	ImagePtr Find(const std::filesystem::path& filename);
+	ImagePtr Find(const SourceDescriptor& source);
 	// If the requested file is already queued or being decoded, promote that
 	// work and join it. Returns immediately on a cache hit or when no matching
 	// work exists, allowing the caller to perform its normal foreground load.
 	ImagePtr FindOrWait(const std::filesystem::path& filename);
+	ImagePtr FindOrWait(const SourceDescriptor& source);
 	void Store(const std::filesystem::path& filename,
+		const std::shared_ptr<DecodedImage>& image);
+	void Store(const SourceDescriptor& source,
 		const std::shared_ptr<DecodedImage>& image);
 	// Adds one non-speculative decode without replacing the current neighbor set.
 	void RequestBackground(const std::filesystem::path& filename,
+		Completion completion, PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
+	void RequestBackground(const SourceDescriptor& source,
 		Completion completion, PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
 	// Reads only JPEG header dimensions on the existing worker, without retaining
 	// or materializing full-resolution decoded pixels.
 	void RequestJpegDimensions(const std::filesystem::path& filename,
 		DimensionsCompletion completion,
 		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
+	void RequestJpegDimensions(const SourceDescriptor& source,
+		DimensionsCompletion completion,
+		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
 	// Cancels only a matching active-spread source request. Foreground requests
 	// promoted by FindOrWait are protected, even when they share the same key.
 	bool CancelActiveSpreadRequest(const std::filesystem::path& filename,
 		bool dimensionsOnly = false);
+	bool CancelActiveSpreadRequest(const SourceDescriptor& source,
+		bool dimensionsOnly = false);
+	using DescriptorProvider = std::function<const SourceDescriptor*(std::size_t)>;
 	void Prefetch(const std::vector<std::filesystem::path>& files,
 		std::size_t currentIndex, int preferredDirection,
 		std::size_t maximumCount, Completion completion = {}, Filter filter = {},
-		std::size_t nearestCount = 2);
+		std::size_t nearestCount = 2, DescriptorProvider descriptorProvider = {});
 	void Clear();
 
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;
 	DecodedImageCacheDiagnostics GetDiagnostics() const;
+	std::vector<SourceChangeNotice> TakeChangedSources();
 	std::size_t EvictLeastRecentlyUsed();
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);
 

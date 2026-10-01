@@ -9,11 +9,22 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace jpegview_linux {
 
 struct FileDialogEntry {
+	FileDialogEntry(std::filesystem::path sourcePath = {}, bool isDirectory = false,
+		bool isParent = false, std::filesystem::file_time_type modified = {},
+		bool archive = false, bool member = false, bool isEncrypted = false,
+		std::uintmax_t size = 0, bool sizeKnown = false,
+		SourceDescriptor source = {})
+		: path(std::move(sourcePath)), directory(isDirectory), parent(isParent),
+		  modificationTime(modified), archiveContainer(archive), archiveMember(member),
+		  encrypted(isEncrypted), fileSize(size), fileSizeKnown(sizeKnown),
+		  sourceDescriptor(std::move(source)) {}
+
 	std::filesystem::path path;
 	bool directory = false;
 	bool parent = false;
@@ -23,6 +34,7 @@ struct FileDialogEntry {
 	bool encrypted = false;
 	std::uintmax_t fileSize = 0;
 	bool fileSizeKnown = false;
+	SourceDescriptor sourceDescriptor;
 };
 
 enum class FileDialogSortMode {
@@ -102,6 +114,11 @@ FileDialogPreviewSize FileDialogPreviewImageSize(int paneWidth, int paneHeight);
 FileDialogPreviewFooterLayout CalculateFileDialogPreviewFooterLayout(
 	int contentWidth, int filenameTextWidth, int detailsTextWidth, int gap = 8);
 
+// A preview completion needs a source refresh only when the descriptor for the
+// requested image no longer matches the identity observed by its worker.
+bool ShouldRefreshFileDialogPreviewSource(const SourceKey& requested,
+	const SourceDescriptor& observed);
+
 class FileDialogModel {
 public:
 	void Begin(bool saveDialog);
@@ -124,6 +141,8 @@ public:
 	bool Focus(const std::filesystem::path& path, int visibleRows);
 	bool MarkEncrypted(const std::filesystem::path& path);
 	bool SetFileSize(const std::filesystem::path& path, std::uintmax_t size);
+	bool RefreshSourceDescriptor(const SourceKey& expected,
+		const SourceDescriptor& observed);
 	void ClearSelection();
 
 	const std::vector<FileDialogEntry>& AllEntries() const { return allEntries_; }
@@ -159,6 +178,8 @@ struct FileDialogFileSizeResult {
 	std::uint64_t generation = 0;
 	std::filesystem::path path;
 	std::uintmax_t size = 0;
+	SourceDescriptor requestedSource;
+	SourceDescriptor observedSource;
 };
 
 // Resolves ordinary-file and archive-member sizes away from the SDL event
@@ -166,12 +187,16 @@ struct FileDialogFileSizeResult {
 // from being published into a newer dialog listing.
 class FileDialogFileSizeLoader {
 public:
-	FileDialogFileSizeLoader();
+	using SourceCapture = std::function<SourceDescriptor(const SourceDescriptor&)>;
+
+	explicit FileDialogFileSizeLoader(SourceCapture sourceCapture = {});
 	~FileDialogFileSizeLoader();
 	FileDialogFileSizeLoader(const FileDialogFileSizeLoader&) = delete;
 	FileDialogFileSizeLoader& operator=(const FileDialogFileSizeLoader&) = delete;
 
 	void Request(const std::vector<std::filesystem::path>& paths, std::uint64_t generation);
+	void RequestSources(const std::vector<SourceDescriptor>& sources,
+		std::uint64_t generation);
 	void Clear(std::uint64_t generation);
 	std::vector<FileDialogFileSizeResult> TakeReady();
 
@@ -231,6 +256,9 @@ private:
 struct FileDialogPreviewResult {
 	std::uint64_t generation = 0;
 	std::filesystem::path source;
+	SourceDescriptor requestedSourceDescriptor;
+	SourceDescriptor sourceDescriptor;
+	SourceDescriptor observedSource;
 	int width = 0;
 	int height = 0;
 	int sourceWidth = 0;
@@ -251,14 +279,17 @@ public:
 	using Processor = std::function<FileDialogPreviewResult(
 		const std::filesystem::path&, bool, FileDialogSortMode, int, int,
 		const std::function<bool()>&)>;
+	using SourceCapture = std::function<SourceDescriptor(const SourceDescriptor&)>;
 
-	explicit FileDialogPreviewLoader(Processor processor = {});
+	explicit FileDialogPreviewLoader(Processor processor = {},
+		SourceCapture sourceCapture = {});
 	~FileDialogPreviewLoader();
 	FileDialogPreviewLoader(const FileDialogPreviewLoader&) = delete;
 	FileDialogPreviewLoader& operator=(const FileDialogPreviewLoader&) = delete;
 
 	std::uint64_t Request(const std::filesystem::path& path, bool directory,
-		FileDialogSortMode mode, int maximumWidth, int maximumHeight);
+		FileDialogSortMode mode, int maximumWidth, int maximumHeight,
+		SourceDescriptor source = {});
 	void Clear();
 	std::vector<FileDialogPreviewResult> TakeReady();
 

@@ -8,15 +8,20 @@ should normally be added to one of these focused modules and covered by `tests/t
   used for A/B comparison. The marked path's index in the active ordered list is cached for
   constant-time thumbnail rendering. `IndexOf(path)` uses the same sorted path index for an exact
   optional result; unlike the internal selection lookup, a missing path never falls back to the last
-  entry. `MutationRevision()` changes when membership or ordering changes, not for ordinary current-
-  image navigation.
+  entry. Each entry also owns an immutable `SourceDescriptor` captured with its filesystem metadata
+  during enumeration. `MutationRevision()` changes when membership or ordering changes, while
+  `DescriptorRevision()` changes when source identity or metadata is refreshed; ordinary current-image
+  navigation changes neither.
 - `file_list_scan_worker`: one lazy, low-priority worker for viewer-list initialization, reloads,
   recursive/sibling transitions, dropped inputs, cross-folder marked-image toggles, and
   multiple-input scope changes. Requests carry
-  immutable input/settings snapshots and a list revision; the worker owns enumeration, archive
-  catalog reads, file metadata, sorting, and replacement-list construction. It checks a generation
-  cancellation predicate while traversing and publishes only the newest complete result. The SDL
-  thread applies that result only after generation, revision, and navigation-source checks pass.
+  immutable input/settings snapshots with list and descriptor revisions; the worker owns
+  enumeration, archive catalog reads, file metadata, sorting, and replacement-list construction. It
+  checks a generation cancellation predicate while traversing and publishes only the newest complete
+  result. The SDL thread applies it only after checking generation, membership/order revision,
+  descriptor revision, and navigation source. A source refresh invalidates in-flight prepared scans even when
+  the active sort order and list membership stay unchanged; dropped-input replacement uses the same
+  acceptance check and retries its original request after a stale result.
   While foreground image or spread work is pending, enumeration pauses at the existing continuation
   checkpoints and resumes the same scan when foreground work clears; the active list is never rebuilt or
   replaced early. Foreground-state and generation changes share the pause mutex with its wait predicate,
@@ -46,6 +51,13 @@ should normally be added to one of these focused modules and covered by `tests/t
   their names and locked state. Header-encrypted 7z/RAR return a password-needed catalog result
   without exposing hidden names.
   Catalogs over 100,000 entries are rejected.
+  `SourceIdentity` records backing-file device, inode, size, and stat modification seconds/nanoseconds;
+  `SourceKey` adds the raw logical path bytes, keeping archive members distinct while sharing their
+  container identity. `SourceDescriptor` carries available sort and display metadata as well. Archive
+  member size is the uncompressed size. Modification and creation metadata for regular files and
+  archive members use Unix epoch nanoseconds; only adapters to `file_time_type` convert to the
+  filesystem clock domain. The backing identity retains Unix stat seconds and nanoseconds. Failed
+  stats produce an invalid identity that is distinct from every valid cache key.
   New archive formats should extend this backend dispatch while keeping viewer consumers
   on the generic source operations.
 - `seven_zip_backend.h` and its selected implementation: the optional `seven_zip_backend_7zip.cpp`
@@ -80,8 +92,22 @@ should normally be added to one of these focused modules and covered by `tests/t
   metadata so opaque-image textures can keep blending disabled.
 - `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
-  processing/scaling of renderer-ready frames. Display keys capture every active processing value
-  and quarter-turn orientation so an adjustment or spread rotation cannot reuse stale pixels.
+  processing/scaling of renderer-ready frames. Decoded, display, and thumbnail caches use the same
+  structured `SourceKey` equality and hashing. Display keys add frame, effective processing controls,
+  target geometry, and quarter-turn orientation, so disabled controls normalize away while an active
+  adjustment, animation frame, or spread rotation cannot reuse different pixels. Renderer lookups use
+  the `SourceDescriptor` already captured by the active `FileList`; they do not stat the path on each
+  render or pan. Workers validate the descriptor before opening and before publishing. A stale worker
+  result is discarded and emits a notice containing its exact previous key plus the observed
+  descriptor, including an invalid descriptor when the source is missing. The SDL owner applies the
+  notice only if the active file list still contains that exact previous key, then rebuilds requests
+  from the refreshed descriptor. If the selected source changed, Viewer reloads it before the new
+  descriptor can own current pixels. A noncurrent refresh retires affected display-prefetch and
+  double-page state; changed partner dimensions or modified-time reordering rebuild the visible
+  spread while keeping the selected path anchored. An accepted whole-list replacement retires all
+  index-bound prefetch and spread state before rebuilding against the new order, while preserving the
+  selected path and current pixels. Explicit reload and application-owned writes use the same refresh
+  path.
   Rotated spread partners are oriented on the worker before final slot-size resampling; unrotated
   image requests retain the same processing path. JPEG display requests use native reduced DCT
   decode with swapped target axes for quarter-turns before exact scaling, without requiring a
@@ -155,23 +181,35 @@ should normally be added to one of these focused modules and covered by `tests/t
   file-size lookup for Browse and Recents rows, encrypted-row marking, caller-preserved row order for
   recent MRU entries, and replaceable previews for a focused image or a directory's first image.
   Preview results carry original source dimensions and byte size; archive-member sizes come from
-  uncompressed member metadata. Replacing queued or ready previews records cancellation on the event
+  uncompressed member metadata. Descriptor/catalog capture for Browse and Recents stays on the
+  file-size and preview workers; event-thread row rebuilds use path placeholders rather than opening
+  cold archive catalogs. Each preview request carries its requested descriptor and validates a valid
+  identity before and after reading; a stale completion returns both the requested and observed
+  descriptors for exact refresh. The SDL owner refreshes and invalidates only when their `SourceKey`s
+  differ; an unchanged invalid key keeps its terminal missing-source error without resubmitting it.
+  Replacing queued or ready previews records cancellation on the event
   thread; a stale active result records cancellation on its worker, once per discarded task.
   Image-dimension and archive-member size lookups stay off the SDL event thread.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, fit-relative scale labels, dynamic labels, and tooltip placement.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
-  nearest-first cache scheduling from a catalog captured only when membership or order changes. The
-  viewer pairs each `FileList::MutationRevision()` with a monotonically increasing owner revision
-  whenever it replaces the whole `FileList`, including dropped inputs and clipboard transitions.
+  nearest-first cache scheduling from a catalog refreshed when membership, order, source identity,
+  or descriptor metadata changes. The viewer pairs each `FileList::MutationRevision()` and
+  `FileList::DescriptorRevision()` with a monotonically increasing owner revision whenever it
+  replaces the whole `FileList`, including dropped inputs and clipboard transitions.
   `SetCurrent` updates priority without visiting a full catalog; finite cache capacities select a
   nearest-first working window, while the viewer's full-list capacity keeps every active source
   eligible. `TakeNext` emits a bounded batch, and evictions outside the working window are not
   requeued until navigation or capacity makes them eligible. Navigation keeps useful in-flight work
   valid. Completion identities carry the source index, catalog revision, and target-geometry
   revision, so removed or reordered entries and old-size pixels cannot be published through a stale
-  index.
+  index. Thumbnail cache, queued work, failures, and results are keyed by `SourceKey`; catalog updates
+  evict only identities no longer present. The viewer passes each entry's captured descriptor to
+  cache planning, and source changes or incompatible geometry invalidate old thumbnail pixels while
+  navigation and sorting keep unchanged ones. Renderer-texture invalidation erases by the exact
+  structured keys returned by the scheduler, so bulk list replacement performs one lookup per
+  evicted identity rather than rescanning the full texture map for each removed path.
   cancellation/LRU and decode-failure policy, memory sizing, alpha-preserving antialiased
   source-area reduction, and low-priority thumbnail preparation from either completed neighbor
   display frames or file-backed requests. One worker performs file reads, JPEG dimension lookup,
@@ -245,6 +283,11 @@ Pending active-spread work counts as foreground source demand, pausing visible-t
 and yielding list scans. When neighbor speculation is suspended, a cold JPEG partner receives an
 `active_image_spread` header-dimension read; a cold non-JPEG partner receives an
 `active_image_spread` decode. Both resolve pair eligibility without admitting adjacent neighbors.
+For viewer images, it passes the active `FileList` entry's captured descriptor through decode, display,
+thumbnail, metadata, and preview requests. A changed-source notice refreshes only the matching old key.
+Explicit reloads and list-changing operations, including successful lossless JPEG crop saves, rebuild
+the list. A successful processed-image save refreshes a matching entry's descriptor directly; overwriting
+the current image keeps its materialized pixels detached from the refreshed source.
 It assembles current viewer state for the pure title-pattern
 formatter and passes the result to SDL; transient loading and error titles remain direct status
 messages. It reads the persisted transparency pattern and, for frames
@@ -459,8 +502,10 @@ the generation check prevents stale work from replacing the current preview. Pre
 outside the persistent viewer caches, and their SDL texture is uploaded and destroyed by Viewer.
 The same worker returns full source dimensions (including for reduced-DCT JPEG previews) and file
 size; a separate replaceable file-size worker fills Browse and Recents rows using archive
-central-directory/header metadata for virtual members. Both reject stale generations, and neither
-adds image decoding to the event thread.
+central-directory/header metadata for virtual members. For a nonempty image path, the preview worker
+recaptures an invalid requested descriptor before decoding and publishes pixels only under a valid,
+still-current source identity. Both reject stale generations, and neither adds image decoding to the
+event thread.
 Display pixels may be prepared on workers, but SDL texture upload and destruction stay on the
 renderer thread because SDL renderer objects are not thread-safe. Decoded pixels, prepared frames, and retained SDL textures
 reserve from one configured cache budget. Prepared
@@ -495,6 +540,12 @@ With keep-between-images enabled, current values take precedence; otherwise a sa
 restored. `image_processing` provides clamped ranges and identity defaults for the panel.
 Unsharp-mask parameters are included in display request keys so changing its preview cannot reuse
 stale prepared pixels.
+When Save processed overwrites the selected source, Viewer refreshes the file-list descriptor and
+thumbnail catalog while retaining the already materialized current image and correction base. The
+detached-pixel state prevents a refreshed source key from being paired with the old decoded image or
+from reapplying the active picture-level preset; ordinary `LoadCurrent` clears that state. While the
+image is detached, source-coordinate lossless JPEG crop is unavailable because it operates on the
+refreshed source; reloading restores that operation.
 
 Crop selection remains in source-image coordinates while the SDL adapter maps pointer gestures and
 the dotted/handled overlay through the current viewport destination. Crop and copy actions first

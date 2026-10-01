@@ -18,6 +18,7 @@
 #include <mutex>
 #include <new>
 #include <string_view>
+#include <linux/stat.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <archive.h>
@@ -50,14 +51,7 @@ struct ArchiveLocation {
 	ArchiveFormat format = ArchiveFormat::Zip;
 };
 
-struct BackingIdentity {
-	std::uint64_t device = 0;
-	std::uint64_t inode = 0;
-	std::uint64_t size = 0;
-	std::int64_t modifiedSeconds = 0;
-	std::int64_t modifiedNanoseconds = 0;
-	bool valid = false;
-};
+using BackingIdentity = SourceIdentity;
 
 struct SessionPassword {
 	BackingIdentity identity;
@@ -72,13 +66,6 @@ struct SessionPasswordCache {
 SessionPasswordCache& GlobalSessionPasswordCache() {
 	static SessionPasswordCache cache;
 	return cache;
-}
-
-bool operator==(const BackingIdentity& left, const BackingIdentity& right) {
-	return left.valid && right.valid && left.device == right.device &&
-		left.inode == right.inode && left.size == right.size &&
-		left.modifiedSeconds == right.modifiedSeconds &&
-		left.modifiedNanoseconds == right.modifiedNanoseconds;
 }
 
 bool StatIdentity(const fs::path& path, BackingIdentity& identity) {
@@ -1556,6 +1543,7 @@ bool ListArchiveDirectoryCancellable(const fs::path& directory,
 	if (containsEncryptedEntries != nullptr) {
 		*containsEncryptedEntries = catalog->containsEncryptedEntries;
 	}
+	const SourceIdentity& backingIdentity = catalog->identity;
 	if (!ShouldContinue(shouldContinue)) {
 		errorMessage = "archive listing was cancelled";
 		return false;
@@ -1568,7 +1556,7 @@ bool ListArchiveDirectoryCancellable(const fs::path& directory,
 			location.memberDirectory + "/" + child.name;
 		entries.push_back(ArchiveEntryInfo{
 			location.archive / fs::path(member), child.directory, child.size,
-			child.modificationTime, child.encrypted});
+			child.modificationTime, child.encrypted, backingIdentity});
 	}
 	return true;
 }
@@ -1930,6 +1918,191 @@ bool IdentifyImageSourceBackingFile(const fs::path& path, std::uint64_t& device,
 	modifiedSeconds = identity.modifiedSeconds;
 	modifiedNanoseconds = identity.modifiedNanoseconds;
 	return true;
+}
+
+bool operator==(const SourceIdentity& left, const SourceIdentity& right) {
+	return left.device == right.device && left.inode == right.inode &&
+		left.size == right.size && left.modifiedSeconds == right.modifiedSeconds &&
+		left.modifiedNanoseconds == right.modifiedNanoseconds && left.valid == right.valid;
+}
+
+bool operator!=(const SourceIdentity& left, const SourceIdentity& right) {
+	return !(left == right);
+}
+
+bool operator==(const SourceKey& left, const SourceKey& right) {
+	return left.logicalPath == right.logicalPath &&
+		left.backingIdentity == right.backingIdentity;
+}
+
+bool operator!=(const SourceKey& left, const SourceKey& right) {
+	return !(left == right);
+}
+
+bool operator==(const SourceKey& left, const std::string& right) {
+	return left.logicalPath == right;
+}
+
+bool operator!=(const SourceKey& left, const std::string& right) {
+	return !(left == right);
+}
+
+bool operator==(const std::string& left, const SourceKey& right) {
+	return right == left;
+}
+
+bool operator!=(const std::string& left, const SourceKey& right) {
+	return !(left == right);
+}
+
+bool operator==(const SourceKey& left, const char* right) {
+	return left.logicalPath == (right == nullptr ? "" : right);
+}
+
+bool operator!=(const SourceKey& left, const char* right) {
+	return !(left == right);
+}
+
+bool operator==(const char* left, const SourceKey& right) {
+	return right == left;
+}
+
+bool operator!=(const char* left, const SourceKey& right) {
+	return !(left == right);
+}
+
+namespace {
+
+std::size_t HashCombine(std::size_t seed, std::size_t value) {
+	return seed ^ (value + static_cast<std::size_t>(0x9e3779b9u) +
+		(seed << 6) + (seed >> 2));
+}
+
+fs::path NormalizeLogicalPath(const fs::path& path) {
+	std::error_code error;
+	const fs::path absolute = fs::absolute(path, error);
+	return (error ? path : absolute).lexically_normal();
+}
+
+std::int64_t UnixNanoseconds(std::int64_t seconds, std::int64_t nanoseconds = 0) {
+	constexpr std::int64_t scale = 1000000000ll;
+	if (seconds > std::numeric_limits<std::int64_t>::max() / scale) {
+		return std::numeric_limits<std::int64_t>::max();
+	}
+	if (seconds < std::numeric_limits<std::int64_t>::min() / scale) {
+		return std::numeric_limits<std::int64_t>::min();
+	}
+	const std::int64_t base = seconds * scale;
+	if (nanoseconds > 0 && base > std::numeric_limits<std::int64_t>::max() - nanoseconds) {
+		return std::numeric_limits<std::int64_t>::max();
+	}
+	if (nanoseconds < 0 && base < std::numeric_limits<std::int64_t>::min() - nanoseconds) {
+		return std::numeric_limits<std::int64_t>::min();
+	}
+	return base + nanoseconds;
+}
+
+} // namespace
+
+std::size_t SourceKeyHash::operator()(const SourceKey& key) const {
+	std::size_t value = std::hash<std::string>{}(key.logicalPath);
+	value = HashCombine(value, std::hash<std::uint64_t>{}(key.backingIdentity.device));
+	value = HashCombine(value, std::hash<std::uint64_t>{}(key.backingIdentity.inode));
+	value = HashCombine(value, std::hash<std::uint64_t>{}(key.backingIdentity.size));
+	value = HashCombine(value, std::hash<std::int64_t>{}(key.backingIdentity.modifiedSeconds));
+	value = HashCombine(value, std::hash<std::int64_t>{}(key.backingIdentity.modifiedNanoseconds));
+	return HashCombine(value, std::hash<bool>{}(key.backingIdentity.valid));
+}
+
+SourceDescriptor::SourceDescriptor(fs::path logicalPath, SourceIdentity backingIdentity,
+	SourceMetadata metadata)
+	: logicalPath_(NormalizeLogicalPath(logicalPath)),
+	  backingIdentity_(backingIdentity), metadata_(metadata) {}
+
+SourceKey SourceDescriptor::Key() const {
+	return SourceKey{logicalPath_.string(), backingIdentity_};
+}
+
+SourceDescriptor SourceDescriptor::WithImageProperties(int width, int height,
+	bool hasTransparency) const {
+	SourceMetadata metadata = metadata_;
+	metadata.width = width;
+	metadata.height = height;
+	metadata.hasDimensions = width > 0 && height > 0;
+	metadata.hasTransparency = hasTransparency;
+	metadata.transparencyKnown = true;
+	return SourceDescriptor(logicalPath_, backingIdentity_, metadata);
+}
+
+bool CaptureImageSourceIdentity(const fs::path& path, SourceIdentity& identity) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
+	return StatIdentity(ArchiveBackingFile(path), identity);
+}
+
+SourceDescriptor DescribeArchiveMember(const fs::path& path,
+	const SourceIdentity& backingIdentity, std::uint64_t memberSize,
+	std::int64_t modificationTimeSeconds, bool encrypted) {
+	SourceMetadata metadata;
+	metadata.fileSize = memberSize;
+	metadata.modificationTimeNanoseconds = UnixNanoseconds(modificationTimeSeconds);
+	metadata.creationTimeNanoseconds = metadata.modificationTimeNanoseconds;
+	metadata.hasFileSize = true;
+	metadata.hasModificationTime = true;
+	metadata.hasCreationTime = true;
+	metadata.archiveMember = true;
+	metadata.archiveMemberEncrypted = encrypted;
+	return SourceDescriptor(path, backingIdentity, metadata);
+}
+
+SourceDescriptor DescribeImageSource(const fs::path& path) {
+	SourceIdentity identity;
+	if (!CaptureImageSourceIdentity(path, identity)) {
+		return SourceDescriptor(path, identity, {});
+	}
+	if (IsArchiveMemberLocation(path)) {
+		ArchiveMemberInfo member;
+		std::string errorMessage;
+		if (!GetArchiveMemberInfo(path, member, errorMessage)) {
+			SourceMetadata metadata;
+			metadata.archiveMember = true;
+			return SourceDescriptor(path, identity, metadata);
+		}
+		return DescribeArchiveMember(path, identity, member.size,
+			member.modificationTime, member.encrypted);
+	}
+
+	SourceMetadata metadata;
+	metadata.fileSize = identity.size;
+	metadata.modificationTimeNanoseconds = UnixNanoseconds(identity.modifiedSeconds,
+		identity.modifiedNanoseconds);
+	metadata.creationTimeNanoseconds = metadata.modificationTimeNanoseconds;
+	metadata.hasFileSize = true;
+	metadata.hasModificationTime = true;
+	metadata.hasCreationTime = true;
+#if defined(SYS_statx)
+	struct statx status{};
+	if (::syscall(SYS_statx, AT_FDCWD, path.c_str(), AT_STATX_SYNC_AS_STAT,
+		STATX_BTIME, &status) == 0 && (status.stx_mask & STATX_BTIME) != 0) {
+		metadata.creationTimeNanoseconds = UnixNanoseconds(status.stx_btime.tv_sec,
+			status.stx_btime.tv_nsec);
+	}
+#endif
+	return SourceDescriptor(path, identity, metadata);
+}
+
+bool IsImageSourceCurrent(const SourceDescriptor& descriptor) {
+	if (!descriptor.Valid()) return false;
+	SourceIdentity current;
+	if (!CaptureImageSourceIdentity(descriptor.LogicalPath(), current) ||
+		current != descriptor.BackingIdentity()) return false;
+	if (!descriptor.Metadata().archiveMember) return true;
+	ArchiveMemberInfo member;
+	std::string errorMessage;
+	return GetArchiveMemberInfo(descriptor.LogicalPath(), member, errorMessage) &&
+		member.size == descriptor.Metadata().fileSize &&
+		UnixNanoseconds(member.modificationTime) ==
+			descriptor.Metadata().modificationTimeNanoseconds &&
+		member.encrypted == descriptor.Metadata().archiveMemberEncrypted;
 }
 
 } // namespace jpegview_linux

@@ -34,6 +34,12 @@ struct DoublePageSpread {
 	SpreadPagePlacement nextPage;
 };
 
+// Cached spread geometry belongs to both list positions. A descriptor refresh
+// invalidates it when either displayed member changes; reordering invalidates
+// every captured pair because the same indices may name different sources.
+bool DoublePageSpreadAffectedBySourceRefresh(const DoublePageSpread& spread,
+	std::size_t changedIndex, bool listOrderChanged);
+
 // YACReader pairs only two adjacent portrait pages. Page zero is treated as a
 // standalone cover by default, so page one starts the first spread.
 bool CanAnchorDoublePageSpread(std::size_t firstIndex, std::size_t pageCount,
@@ -82,6 +88,9 @@ class DoublePagePresentationModel {
 public:
 	void AwaitDimensions(std::size_t anchorIndex, std::size_t partnerIndex);
 	void UseSinglePage(std::size_t anchorIndex);
+	// Whole-list replacement can change the source at every stored index, even
+	// when the selected path and selected index remain the same.
+	void InvalidateForFileListReplacement(std::size_t selectedIndex);
 	bool BeginSpread(std::size_t anchorIndex, std::size_t partnerIndex,
 		std::string anchorTextureKey, std::string partnerTextureKey);
 	bool MarkTextureReady(const std::string& textureKey);

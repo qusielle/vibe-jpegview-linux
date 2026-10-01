@@ -1,5 +1,6 @@
 #pragma once
 
+#include "archive_source.h"
 #include "image_decoder.h"
 #include "cache_budget.h"
 #include "image_processing.h"
@@ -17,10 +18,33 @@
 
 namespace jpegview_linux {
 
+// Exact identity for a renderer-ready bitmap. Optional processing values are
+// normalized when this key is built, so disabled controls do not split cache
+// entries while active pixel-affecting controls remain distinct.
+struct DisplayImageCacheKey {
+	SourceKey source;
+	std::size_t frameIndex = 0;
+	int targetWidth = 0;
+	int targetHeight = 0;
+	int rotationQuarterTurns = 0;
+	bool autoContrast = false;
+	ImageProcessingParams processing;
+
+	bool Valid() const;
+};
+
+bool operator==(const DisplayImageCacheKey& left, const DisplayImageCacheKey& right);
+bool operator!=(const DisplayImageCacheKey& left, const DisplayImageCacheKey& right);
+
+struct DisplayImageCacheKeyHash {
+	std::size_t operator()(const DisplayImageCacheKey& key) const;
+};
+
 // Identifies one renderer-ready bitmap. The key includes the source file
 // identity as well as every setting that changes the resulting pixels.
 struct DisplayImageRequest {
 	std::filesystem::path filename;
+	SourceDescriptor source;
 	std::shared_ptr<const DecodedImage> decoded;
 	std::size_t frameIndex = 0;
 	int sourceWidth = 0;
@@ -32,6 +56,7 @@ struct DisplayImageRequest {
 	ImageProcessingParams processing;
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::Unspecified;
+	DisplayImageCacheKey cacheKey;
 	std::string key;
 	std::shared_ptr<std::atomic<bool>> cancellation;
 
@@ -40,6 +65,8 @@ struct DisplayImageRequest {
 
 struct PreparedDisplayImage {
 	std::filesystem::path filename;
+	SourceDescriptor source;
+	DisplayImageCacheKey cacheKey;
 	std::string key;
 	int width = 0;
 	int height = 0;
@@ -56,8 +83,16 @@ DisplayImageRequest MakeDisplayImageRequest(const std::filesystem::path& filenam
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0,
 	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
+DisplayImageRequest MakeDisplayImageRequest(const SourceDescriptor& source,
+	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
+	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0,
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
 
 DisplayImageRequest MakeJpegDisplayImageRequest(const std::filesystem::path& filename,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority = 0,
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
+DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	bool autoContrast, std::size_t priority = 0,
 	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
@@ -132,6 +167,7 @@ public:
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;
 	DisplayImageCacheDiagnostics GetDiagnostics() const;
+	std::vector<SourceChangeNotice> TakeChangedSources();
 	bool HasPendingWork() const;
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);
 

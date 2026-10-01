@@ -6,6 +6,17 @@
 
 namespace jpegview_linux {
 
+namespace {
+
+std::vector<std::string> SourceKeyPaths(const std::vector<SourceKey>& keys) {
+	std::vector<std::string> paths;
+	paths.reserve(keys.size());
+	for (const SourceKey& key : keys) paths.push_back(key.logicalPath);
+	return paths;
+}
+
+} // namespace
+
 ThumbnailPanelLayout CalculateThumbnailPanelLayout(int windowWidth, int windowHeight,
 	bool panelVisible, int preferredPanelWidth) {
 	const int width = std::max(0, windowWidth);
@@ -112,14 +123,18 @@ ThumbnailRect ThumbnailImageRect(int sourceWidth, int sourceHeight,
 	};
 }
 
-bool ThumbnailCatalogRevisionTracker::NeedsUpdate(std::uint64_t mutationRevision) const {
+bool ThumbnailCatalogRevisionTracker::NeedsUpdate(std::uint64_t mutationRevision,
+	std::uint64_t descriptorRevision) const {
 	return !hasApplied_ || appliedOwnerRevision_ != ownerRevision_ ||
-		appliedMutationRevision_ != mutationRevision;
+		appliedMutationRevision_ != mutationRevision ||
+		appliedDescriptorRevision_ != descriptorRevision;
 }
 
-void ThumbnailCatalogRevisionTracker::MarkUpdated(std::uint64_t mutationRevision) {
+void ThumbnailCatalogRevisionTracker::MarkUpdated(std::uint64_t mutationRevision,
+	std::uint64_t descriptorRevision) {
 	appliedOwnerRevision_ = ownerRevision_;
 	appliedMutationRevision_ = mutationRevision;
+	appliedDescriptorRevision_ = descriptorRevision;
 	hasApplied_ = true;
 }
 
@@ -140,7 +155,21 @@ std::vector<std::string> ThumbnailCacheScheduler::SetCatalog(
 
 std::vector<std::string> ThumbnailCacheScheduler::SetCatalog(
 	std::vector<std::string> fileKeys, std::size_t capacity) {
-	if (catalog_ == fileKeys) {
+	std::vector<SourceKey> sourceKeys;
+	sourceKeys.reserve(fileKeys.size());
+	for (std::string& fileKey : fileKeys) sourceKeys.emplace_back(std::move(fileKey));
+	return SourceKeyPaths(SetSourceCatalog(std::move(sourceKeys), capacity));
+}
+
+std::vector<SourceKey> ThumbnailCacheScheduler::SetSourceCatalog(
+	std::vector<SourceKey> sourceKeys) {
+	const std::size_t capacity = sourceKeys.size();
+	return SetSourceCatalog(std::move(sourceKeys), capacity);
+}
+
+std::vector<SourceKey> ThumbnailCacheScheduler::SetSourceCatalog(
+	std::vector<SourceKey> sourceKeys, std::size_t capacity) {
+	if (catalog_ == sourceKeys) {
 		if (capacity_ == capacity) return {};
 		capacity_ = capacity;
 		RebuildWorkingSet();
@@ -149,8 +178,8 @@ std::vector<std::string> ThumbnailCacheScheduler::SetCatalog(
 	}
 	++catalogRevision_;
 	if (catalogRevision_ == 0) ++catalogRevision_;
-	const std::string previousCurrent = protectedKey_;
-	catalog_ = std::move(fileKeys);
+	const SourceKey previousCurrent = protectedKey_;
+	catalog_ = std::move(sourceKeys);
 	capacity_ = capacity;
 	catalogIndices_.clear();
 	catalogIndices_.reserve(catalog_.size());
@@ -158,13 +187,13 @@ std::vector<std::string> ThumbnailCacheScheduler::SetCatalog(
 	catalogPositions_.reserve(catalog_.size());
 	for (std::size_t index = 0; index < catalog_.size(); ++index) {
 		++operationCounts_.catalogEntriesVisited;
-		if (!catalog_[index].empty() &&
+		if (!catalog_[index].Empty() &&
 			catalogIndices_.emplace(catalog_[index], index).second) {
 			catalogPositions_.push_back(index);
 		}
 	}
 
-	std::vector<std::string> evicted;
+	std::vector<SourceKey> evicted;
 	for (auto cached = cache_.begin(); cached != cache_.end();) {
 		if (catalogIndices_.find(cached->first) == catalogIndices_.end()) {
 			evicted.push_back(cached->first);
@@ -181,7 +210,7 @@ std::vector<std::string> ThumbnailCacheScheduler::SetCatalog(
 	const auto activeCurrent = catalogIndices_.find(previousCurrent);
 	if (activeCurrent == catalogIndices_.end()) {
 		currentIndex_ = catalog_.size();
-		protectedKey_.clear();
+		protectedKey_ = {};
 	} else {
 		currentIndex_ = activeCurrent->second;
 		protectedKey_ = previousCurrent;
@@ -189,17 +218,21 @@ std::vector<std::string> ThumbnailCacheScheduler::SetCatalog(
 	RebuildWorkingSet();
 	RebuildPendingIndices();
 	nextLoadTick_ = 0;
-	const std::vector<std::string> capacityEvictions = Trim();
+	const std::vector<SourceKey> capacityEvictions = Trim();
 	evicted.insert(evicted.end(), capacityEvictions.begin(), capacityEvictions.end());
 	return evicted;
 }
 
 std::vector<std::string> ThumbnailCacheScheduler::SetCurrent(std::size_t currentIndex) {
+	return SourceKeyPaths(SetSourceCurrent(currentIndex));
+}
+
+std::vector<SourceKey> ThumbnailCacheScheduler::SetSourceCurrent(std::size_t currentIndex) {
 	++operationCounts_.currentUpdates;
 	const std::size_t previousIndex = currentIndex_;
 	if (currentIndex >= catalog_.size()) {
 		currentIndex_ = catalog_.size();
-		protectedKey_.clear();
+		protectedKey_ = {};
 	} else {
 		currentIndex_ = currentIndex;
 		protectedKey_ = catalog_[currentIndex];
@@ -222,7 +255,7 @@ std::vector<std::string> ThumbnailCacheScheduler::SetGeometry(
 	if (geometryRevision_ == 0) ++geometryRevision_;
 	std::vector<std::string> evicted;
 	evicted.reserve(cache_.size());
-	for (const auto& cached : cache_) evicted.push_back(cached.first);
+	for (const auto& cached : cache_) evicted.push_back(cached.first.logicalPath);
 	cache_.clear();
 	failed_.clear();
 	inFlight_.clear();
@@ -266,7 +299,7 @@ std::vector<std::string> ThumbnailCacheScheduler::Complete(
 	if (!IsEligible(request.fileIndex)) return {};
 	cache_[request.key].lastUsed = ++useCounter_;
 	nextLoadTick_ = now + delayMs;
-	return Trim();
+	return SourceKeyPaths(Trim());
 }
 
 void ThumbnailCacheScheduler::Fail(const ThumbnailLoadRequest& request,
@@ -285,7 +318,11 @@ void ThumbnailCacheScheduler::Retry(const ThumbnailLoadRequest& request) {
 }
 
 std::vector<std::string> ThumbnailCacheScheduler::Store(const std::string& key) {
-	if (key.empty()) return {};
+	return SourceKeyPaths(Store(SourceKey(key)));
+}
+
+std::vector<SourceKey> ThumbnailCacheScheduler::Store(const SourceKey& key) {
+	if (key.Empty()) return {};
 	const auto index = catalogIndices_.find(key);
 	if (index == catalogIndices_.end() || !IsEligible(index->second)) return {};
 	failed_.erase(key);
@@ -296,6 +333,10 @@ std::vector<std::string> ThumbnailCacheScheduler::Store(const std::string& key) 
 }
 
 void ThumbnailCacheScheduler::Touch(const std::string& key) {
+	Touch(SourceKey(key));
+}
+
+void ThumbnailCacheScheduler::Touch(const SourceKey& key) {
 	const auto found = cache_.find(key);
 	if (found != cache_.end()) found->second.lastUsed = ++useCounter_;
 }
@@ -313,7 +354,7 @@ void ThumbnailCacheScheduler::Clear() {
 	cache_.clear();
 	failed_.clear();
 	inFlight_.clear();
-	protectedKey_.clear();
+	protectedKey_ = {};
 	currentIndex_ = 0;
 	capacity_ = 0;
 	wholeCatalogWorking_ = false;
@@ -323,10 +364,18 @@ void ThumbnailCacheScheduler::Clear() {
 }
 
 bool ThumbnailCacheScheduler::IsCached(const std::string& key) const {
+	return IsCached(SourceKey(key));
+}
+
+bool ThumbnailCacheScheduler::IsCached(const SourceKey& key) const {
 	return cache_.find(key) != cache_.end();
 }
 
 bool ThumbnailCacheScheduler::IsFailed(const std::string& key) const {
+	return IsFailed(SourceKey(key));
+}
+
+bool ThumbnailCacheScheduler::IsFailed(const SourceKey& key) const {
 	return failed_.find(key) != failed_.end();
 }
 
@@ -406,7 +455,7 @@ void ThumbnailCacheScheduler::RebuildPendingIndices() {
 	pendingIndices_.clear();
 	const auto addPending = [this](std::size_t index) {
 		++operationCounts_.catalogEntriesVisited;
-		const std::string& key = catalog_[index];
+		const SourceKey& key = catalog_[index];
 		if (!IsCached(key) && !IsFailed(key) && inFlight_.find(key) == inFlight_.end()) {
 			pendingIndices_.insert(index);
 		}
@@ -418,8 +467,8 @@ void ThumbnailCacheScheduler::RebuildPendingIndices() {
 	}
 }
 
-std::vector<std::string> ThumbnailCacheScheduler::Trim() {
-	std::vector<std::string> evicted;
+std::vector<SourceKey> ThumbnailCacheScheduler::Trim() {
+	std::vector<SourceKey> evicted;
 	if (wholeCatalogWorking_ && cache_.size() <= capacity_) return evicted;
 	while (true) {
 		auto oldest = cache_.end();
@@ -442,7 +491,7 @@ std::vector<std::string> ThumbnailCacheScheduler::Trim() {
 			}
 		}
 		if (oldest == cache_.end()) break;
-		const std::string key = oldest->first;
+		const SourceKey key = oldest->first;
 		const auto active = catalogIndices_.find(key);
 		if (active != catalogIndices_.end() && IsEligible(active->second) && !IsFailed(key) &&
 			inFlight_.find(key) == inFlight_.end()) pendingIndices_.insert(active->second);

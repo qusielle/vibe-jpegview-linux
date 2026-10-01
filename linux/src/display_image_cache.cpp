@@ -5,12 +5,13 @@
 #include "perf_diagnostics.h"
 
 #include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <iterator>
-#include <iomanip>
 #include <limits>
+#include <locale>
 #include <mutex>
 #include <sstream>
 #include <sys/resource.h>
@@ -33,26 +34,32 @@ void RecordDisplayCancellation(PerfWorkClass workClass,
 	PerfDiagnostics::Instance().Record(PerfMetric::Cancellation);
 }
 
-struct FileIdentity {
-	std::uint64_t device = 0;
-	std::uint64_t inode = 0;
-	std::uint64_t size = 0;
-	std::int64_t modifiedSeconds = 0;
-	std::int64_t modifiedNanoseconds = 0;
-	bool valid = false;
-};
-
-FileIdentity Identify(const fs::path& filename) {
-	FileIdentity result;
-	result.valid = IdentifyImageSourceBackingFile(filename, result.device, result.inode,
-		result.size, result.modifiedSeconds, result.modifiedNanoseconds);
-	return result;
+bool FiniteProcessingValues(const ImageProcessingParams& processing) {
+	for (const double value : {processing.contrast, processing.gamma,
+		processing.saturation, processing.cyanRed, processing.magentaGreen,
+		processing.yellowBlue, processing.lightenShadows, processing.darkenHighlights,
+		processing.deepShadows, processing.colorCorrection, processing.contrastCorrection,
+		processing.sharpen, processing.unsharpRadius, processing.unsharpAmount,
+		processing.unsharpThreshold}) {
+		if (!std::isfinite(value)) return false;
+	}
+	return true;
 }
 
-std::string NormalizedPath(const fs::path& filename) {
-	std::error_code error;
-	const fs::path absolute = fs::absolute(filename, error);
-	return (error ? filename : absolute).lexically_normal().string();
+bool EqualProcessingKeyValues(const ImageProcessingParams& left,
+	const ImageProcessingParams& right) {
+	return left.contrast == right.contrast && left.gamma == right.gamma &&
+		left.saturation == right.saturation && left.cyanRed == right.cyanRed &&
+		left.magentaGreen == right.magentaGreen && left.yellowBlue == right.yellowBlue &&
+		left.lightenShadows == right.lightenShadows &&
+		left.darkenHighlights == right.darkenHighlights &&
+		left.deepShadows == right.deepShadows &&
+		left.colorCorrection == right.colorCorrection &&
+		left.contrastCorrection == right.contrastCorrection &&
+		left.sharpen == right.sharpen && left.unsharpRadius == right.unsharpRadius &&
+		left.unsharpAmount == right.unsharpAmount &&
+		left.unsharpThreshold == right.unsharpThreshold &&
+		left.localDensityEnabled == right.localDensityEnabled;
 }
 
 int NormalizeQuarterTurns(int turns) {
@@ -61,31 +68,73 @@ int NormalizeQuarterTurns(int turns) {
 	return turns;
 }
 
-std::string RequestKey(const fs::path& filename, const FileIdentity& identity,
-	std::size_t frameIndex, int width, int height, bool autoContrast,
-	const ImageProcessingParams& processing, int rotationQuarterTurns) {
-	if (!identity.valid) return {};
+ImageProcessingParams EffectiveProcessing(const ImageProcessingParams& processing,
+	bool autoContrast) {
+	ImageProcessingParams effective = processing;
 	const bool localDensity = processing.localDensityEnabled &&
 		(processing.lightenShadows > 0.0 || processing.darkenHighlights > 0.0);
-	const bool unsharp = processing.unsharpRadius > 0.0 && processing.unsharpAmount > 0.0;
-	std::ostringstream key;
-	key << std::setprecision(17);
-	key << NormalizedPath(filename) << '\n'
-		<< identity.device << ':' << identity.inode << ':' << identity.size << ':'
-		<< identity.modifiedSeconds << ':' << identity.modifiedNanoseconds << '\n'
-		<< frameIndex << ':' << width << 'x' << height << ':' << autoContrast << ':'
-		<< NormalizeQuarterTurns(rotationQuarterTurns) << ':'
-		<< processing.contrast << ':' << processing.gamma << ':' << processing.saturation << ':'
-		<< processing.cyanRed << ':' << processing.magentaGreen << ':' << processing.yellowBlue << ':'
-		<< (localDensity ? processing.lightenShadows : 0.0) << ':' <<
-		(localDensity ? processing.darkenHighlights : 0.0) << ':' <<
-		(localDensity ? processing.deepShadows : 0.0) << ':' <<
-		(autoContrast ? processing.colorCorrection : 0.0) << ':' <<
-		(autoContrast ? processing.contrastCorrection : 0.0) << ':' << processing.sharpen << ':' <<
-		(unsharp ? processing.unsharpRadius : 0.0) << ':' <<
-		(unsharp ? processing.unsharpAmount : 0.0) << ':' <<
-		(unsharp ? processing.unsharpThreshold : 0.0) << ':' << localDensity;
-	return key.str();
+	if (!localDensity) {
+		effective.lightenShadows = 0.0;
+		effective.darkenHighlights = 0.0;
+		effective.deepShadows = 0.0;
+	}
+	effective.localDensityEnabled = localDensity;
+	if (!autoContrast) {
+		effective.colorCorrection = 0.0;
+		effective.contrastCorrection = 0.0;
+	}
+	if (!(processing.unsharpRadius > 0.0 && processing.unsharpAmount > 0.0)) {
+		effective.unsharpRadius = 0.0;
+		effective.unsharpAmount = 0.0;
+		effective.unsharpThreshold = 0.0;
+	}
+	for (double* value : {&effective.contrast, &effective.gamma,
+		&effective.saturation, &effective.cyanRed, &effective.magentaGreen,
+		&effective.yellowBlue, &effective.lightenShadows, &effective.darkenHighlights,
+		&effective.deepShadows, &effective.colorCorrection, &effective.contrastCorrection,
+		&effective.sharpen, &effective.unsharpRadius, &effective.unsharpAmount,
+		&effective.unsharpThreshold}) {
+		if (*value == 0.0) *value = 0.0;
+	}
+	return effective;
+}
+
+DisplayImageCacheKey MakeCacheKey(const SourceDescriptor& source,
+	std::size_t frameIndex, int width, int height, bool autoContrast,
+	const ImageProcessingParams& processing, int rotationQuarterTurns) {
+	DisplayImageCacheKey key;
+	key.source = source.Key();
+	key.frameIndex = frameIndex;
+	key.targetWidth = width;
+	key.targetHeight = height;
+	key.autoContrast = autoContrast;
+	key.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
+	key.processing = EffectiveProcessing(processing, autoContrast);
+	return key;
+}
+
+std::string SerializeCacheKey(const DisplayImageCacheKey& key) {
+	if (!key.Valid()) return {};
+	std::ostringstream result;
+	result.imbue(std::locale::classic());
+	result << key.source.logicalPath.size() << ':';
+	result.write(key.source.logicalPath.data(),
+		static_cast<std::streamsize>(key.source.logicalPath.size()));
+	result << ':' << key.source.backingIdentity.device << ':'
+		<< key.source.backingIdentity.inode << ':' << key.source.backingIdentity.size << ':'
+		<< key.source.backingIdentity.modifiedSeconds << ':'
+		<< key.source.backingIdentity.modifiedNanoseconds << ':' << key.frameIndex << ':'
+		<< key.targetWidth << 'x' << key.targetHeight << ':' << key.autoContrast << ':'
+		<< key.rotationQuarterTurns << ':' << std::hexfloat
+		<< key.processing.contrast << ':' << key.processing.gamma << ':'
+		<< key.processing.saturation << ':' << key.processing.cyanRed << ':'
+		<< key.processing.magentaGreen << ':' << key.processing.yellowBlue << ':'
+		<< key.processing.lightenShadows << ':' << key.processing.darkenHighlights << ':'
+		<< key.processing.deepShadows << ':' << key.processing.colorCorrection << ':'
+		<< key.processing.contrastCorrection << ':' << key.processing.sharpen << ':'
+		<< key.processing.unsharpRadius << ':' << key.processing.unsharpAmount << ':'
+		<< key.processing.unsharpThreshold << ':' << key.processing.localDensityEnabled;
+	return result.str();
 }
 
 DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& request) {
@@ -149,6 +198,9 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 
 	auto prepared = std::make_shared<PreparedDisplayImage>();
 	prepared->filename = request.filename;
+	prepared->source = request.source.WithImageProperties(request.sourceWidth,
+		request.sourceHeight, image.hasTransparency);
+	prepared->cacheKey = request.cacheKey;
 	prepared->key = request.key;
 	prepared->width = image.width;
 	prepared->height = image.height;
@@ -162,8 +214,50 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 
 } // namespace
 
+bool DisplayImageCacheKey::Valid() const {
+	return source.Valid() && targetWidth > 0 && targetHeight > 0 &&
+		FiniteProcessingValues(processing);
+}
+
+bool operator==(const DisplayImageCacheKey& left, const DisplayImageCacheKey& right) {
+	return left.source == right.source && left.frameIndex == right.frameIndex &&
+		left.targetWidth == right.targetWidth && left.targetHeight == right.targetHeight &&
+		left.rotationQuarterTurns == right.rotationQuarterTurns &&
+		left.autoContrast == right.autoContrast &&
+		EqualProcessingKeyValues(left.processing, right.processing);
+}
+
+bool operator!=(const DisplayImageCacheKey& left, const DisplayImageCacheKey& right) {
+	return !(left == right);
+}
+
+std::size_t DisplayImageCacheKeyHash::operator()(const DisplayImageCacheKey& key) const {
+	const auto combine = [](std::size_t seed, std::size_t value) {
+		return seed ^ (value + static_cast<std::size_t>(0x9e3779b9u) +
+			(seed << 6) + (seed >> 2));
+	};
+	std::size_t value = SourceKeyHash{}(key.source);
+	value = combine(value, std::hash<std::size_t>{}(key.frameIndex));
+	value = combine(value, std::hash<int>{}(key.targetWidth));
+	value = combine(value, std::hash<int>{}(key.targetHeight));
+	value = combine(value, std::hash<int>{}(key.rotationQuarterTurns));
+	value = combine(value, std::hash<bool>{}(key.autoContrast));
+	const ImageProcessingParams& processing = key.processing;
+	for (const double parameter : {processing.contrast, processing.gamma,
+		processing.saturation, processing.cyanRed, processing.magentaGreen,
+		processing.yellowBlue, processing.lightenShadows, processing.darkenHighlights,
+		processing.deepShadows, processing.colorCorrection, processing.contrastCorrection,
+		processing.sharpen, processing.unsharpRadius, processing.unsharpAmount,
+		processing.unsharpThreshold}) {
+		value = combine(value, std::hash<double>{}(parameter));
+	}
+	return combine(value, std::hash<bool>{}(processing.localDensityEnabled));
+}
+
 bool DisplayImageRequest::Valid() const {
-	if (key.empty() ||
+	if (!cacheKey.Valid() || key.empty() || !FiniteProcessingValues(processing) ||
+		filename.lexically_normal() != source.LogicalPath() ||
+		source.Key() != cacheKey.source ||
 		targetWidth <= 0 || targetHeight <= 0 ||
 		rotationQuarterTurns < 0 || rotationQuarterTurns > 3) return false;
 	if (!decoded) return sourceWidth > 0 && sourceHeight > 0 && IsJpegPath(filename);
@@ -176,8 +270,18 @@ DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority,
 	const ImageProcessingParams& processing, int rotationQuarterTurns) {
+	return MakeDisplayImageRequest(DescribeImageSource(filename), decoded, frameIndex,
+		targetWidth, targetHeight, autoContrast, priority, processing,
+		rotationQuarterTurns);
+}
+
+DisplayImageRequest MakeDisplayImageRequest(const SourceDescriptor& source,
+	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
+	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority,
+	const ImageProcessingParams& processing, int rotationQuarterTurns) {
 	DisplayImageRequest request;
-	request.filename = filename;
+	request.source = source;
+	request.filename = source.LogicalPath();
 	request.decoded = decoded;
 	request.frameIndex = frameIndex;
 	request.targetWidth = targetWidth;
@@ -191,8 +295,9 @@ DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	}
 	request.sourceWidth = decoded->frames[frameIndex].width;
 	request.sourceHeight = decoded->frames[frameIndex].height;
-	request.key = RequestKey(filename, Identify(filename), frameIndex,
-		targetWidth, targetHeight, autoContrast, processing, request.rotationQuarterTurns);
+	request.cacheKey = MakeCacheKey(source, frameIndex, targetWidth, targetHeight,
+		autoContrast, processing, request.rotationQuarterTurns);
+	request.key = SerializeCacheKey(request.cacheKey);
 	return request;
 }
 
@@ -200,8 +305,18 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const fs::path& filename,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing,
 	int rotationQuarterTurns) {
+	return MakeJpegDisplayImageRequest(DescribeImageSource(filename), sourceWidth,
+		sourceHeight, targetWidth, targetHeight, autoContrast, priority, processing,
+		rotationQuarterTurns);
+}
+
+DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing,
+	int rotationQuarterTurns) {
 	DisplayImageRequest request;
-	request.filename = filename;
+	request.source = source;
+	request.filename = source.LogicalPath();
 	request.sourceWidth = sourceWidth;
 	request.sourceHeight = sourceHeight;
 	request.targetWidth = targetWidth;
@@ -210,10 +325,11 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const fs::path& filename,
 	request.autoContrast = autoContrast;
 	request.processing = processing;
 	request.priority = priority;
-	if (!IsJpegPath(filename) || sourceWidth <= 0 || sourceHeight <= 0 ||
+	if (!IsJpegPath(request.filename) || sourceWidth <= 0 || sourceHeight <= 0 ||
 		targetWidth <= 0 || targetHeight <= 0) return request;
-	request.key = RequestKey(filename, Identify(filename), 0,
-		targetWidth, targetHeight, autoContrast, processing, request.rotationQuarterTurns);
+	request.cacheKey = MakeCacheKey(source, 0, targetWidth, targetHeight,
+		autoContrast, processing, request.rotationQuarterTurns);
+	request.key = SerializeCacheKey(request.cacheKey);
 	return request;
 }
 
@@ -253,6 +369,8 @@ struct DisplayImageCache::Impl {
 		std::size_t bytes = 0;
 		std::uint64_t lastUsed = 0;
 	};
+	using EntryMap = std::unordered_map<DisplayImageCacheKey, Entry,
+		DisplayImageCacheKeyHash>;
 
 	struct Work {
 		DisplayImageRequest request;
@@ -341,7 +459,7 @@ struct DisplayImageCache::Impl {
 	void QueueRetirement(ImagePtr image) {
 		if (!image) return;
 		ForgetBorrowed(image);
-		const auto cached = entries.find(image->key);
+		const auto cached = entries.find(image->cacheKey);
 		if (cached != entries.end() && cached->second.image.get() == image.get()) return;
 		const PreparedDisplayImage* identity = image.get();
 		std::lock_guard<std::mutex> retirementLock(retirementState->mutex);
@@ -355,7 +473,7 @@ struct DisplayImageCache::Impl {
 		retirementState->available.notify_one();
 	}
 
-	void Erase(std::unordered_map<std::string, Entry>::iterator entry) {
+	void Erase(EntryMap::iterator entry) {
 		const std::size_t bytes = entry->second.bytes;
 		ImagePtr retiredImage = std::move(entry->second.image);
 		entries.erase(entry);
@@ -364,7 +482,7 @@ struct DisplayImageCache::Impl {
 		QueueRetirement(std::move(retiredImage));
 	}
 
-	std::unordered_map<std::string, Entry>::iterator Oldest() {
+	EntryMap::iterator Oldest() {
 		if (entries.empty()) return entries.end();
 		auto oldest = entries.begin();
 		for (auto candidate = std::next(entries.begin()); candidate != entries.end(); ++candidate) {
@@ -374,10 +492,10 @@ struct DisplayImageCache::Impl {
 	}
 
 	bool Insert(const ImagePtr& image, bool mayEvict) {
-		if (!image || image->key.empty()) return false;
+		if (!image || !image->cacheKey.Valid()) return false;
 		const std::size_t bytes = PreparedDisplayImageBytes(*image);
 		if (bytes == 0 || bytes > byteBudget) return false;
-		const auto existing = entries.find(image->key);
+		const auto existing = entries.find(image->cacheKey);
 		if (existing != entries.end()) Erase(existing);
 		if (!mayEvict && bytes > byteBudget - cachedBytes) return false;
 		while (bytes > byteBudget - cachedBytes && !entries.empty()) {
@@ -390,9 +508,25 @@ struct DisplayImageCache::Impl {
 				Erase(Oldest());
 			}
 		}
-		entries.emplace(image->key, Entry{image, bytes, ++useCounter});
+		entries.emplace(image->cacheKey, Entry{image, bytes, ++useCounter});
 		cachedBytes += bytes;
 		return true;
+	}
+
+	bool ResolveExternalKey(const std::string& externalKey,
+		DisplayImageCacheKey& key) const {
+		const auto matches = [&externalKey, &key](const DisplayImageCacheKey& candidate) {
+			if (SerializeCacheKey(candidate) != externalKey) return false;
+			key = candidate;
+			return true;
+		};
+		for (const auto& entry : entries) if (matches(entry.first)) return true;
+		for (const Work& work : queue) if (matches(work.request.cacheKey)) return true;
+		for (const Completion& completion : completed) {
+			if (completion.image && matches(completion.image->cacheKey)) return true;
+		}
+		for (const DisplayImageCacheKey& candidate : inFlightKeys) if (matches(candidate)) return true;
+		return false;
 	}
 
 	void Run() {
@@ -407,45 +541,71 @@ struct DisplayImageCache::Impl {
 				if (stopping) return;
 				work = std::move(queue.front());
 				queue.pop_front();
-				queuedKeys.erase(work.request.key);
-				inFlightKeys.insert(work.request.key);
-				inFlightCancellation[work.request.key] = work.request.cancellation;
-				inFlightWorkClasses[work.request.key] = work.request.workClass;
-				inFlightPriorities[work.request.key] =
+				queuedKeys.erase(work.request.cacheKey);
+				inFlightKeys.insert(work.request.cacheKey);
+				inFlightCancellation[work.request.cacheKey] = work.request.cancellation;
+				inFlightWorkClasses[work.request.cacheKey] = work.request.workClass;
+				inFlightPriorities[work.request.cacheKey] =
 					work.foreground ? 0 : work.request.priority;
 				++activeWorkers;
 			}
 
 			PerfContextScope context(work.request.workClass, PerfExecution::WorkerThread);
-			ImagePtr image = processor(work.request);
-			const std::string currentKey = RequestKey(work.request.filename,
-				Identify(work.request.filename), work.request.frameIndex,
-				work.request.targetWidth, work.request.targetHeight,
-				work.request.autoContrast, work.request.processing,
-				work.request.rotationQuarterTurns);
+			const bool cancelledBeforeOpen = work.request.cancellation &&
+				work.request.cancellation->load();
+			const bool sourceCurrentBeforeOpen = !cancelledBeforeOpen &&
+				IsImageSourceCurrent(work.request.source);
+			ImagePtr image = sourceCurrentBeforeOpen ? processor(work.request) : ImagePtr{};
+			const bool cancelledAfterWork = work.request.cancellation &&
+				work.request.cancellation->load();
+			const bool sourceCurrentBeforePublish = !cancelledAfterWork &&
+				IsImageSourceCurrent(work.request.source);
+			const bool sourceChanged = !cancelledBeforeOpen &&
+				(!sourceCurrentBeforeOpen ||
+					(!cancelledAfterWork && !sourceCurrentBeforePublish));
+			SourceDescriptor changedSource;
+			if (sourceChanged) {
+				changedSource = DescribeImageSource(work.request.source.LogicalPath());
+				image.reset();
+			}
+			const SourceChangeNotice sourceChange{
+				work.request.source.Key(), changedSource};
+			const DisplayImageCacheKey currentKey = MakeCacheKey(work.request.source,
+				work.request.frameIndex, work.request.targetWidth,
+				work.request.targetHeight, work.request.autoContrast,
+				work.request.processing, work.request.rotationQuarterTurns);
 
 			{
 				std::lock_guard<std::mutex> lock(mutex);
-				inFlightKeys.erase(work.request.key);
-				inFlightPriorities.erase(work.request.key);
-				inFlightCancellation.erase(work.request.key);
+				if (sourceChanged) {
+					const auto existing = std::find_if(changedSources.begin(), changedSources.end(),
+					[&sourceChange](const SourceChangeNotice& notice) {
+							return notice.previous == sourceChange.previous;
+						});
+					if (existing == changedSources.end()) changedSources.push_back(sourceChange);
+					else *existing = sourceChange;
+				}
+				inFlightKeys.erase(work.request.cacheKey);
+				inFlightPriorities.erase(work.request.cacheKey);
+				inFlightCancellation.erase(work.request.cacheKey);
 				PerfWorkClass effectiveWorkClass = work.request.workClass;
-				const auto activeWorkClass = inFlightWorkClasses.find(work.request.key);
+				const auto activeWorkClass = inFlightWorkClasses.find(work.request.cacheKey);
 				if (activeWorkClass != inFlightWorkClasses.end()) {
 					effectiveWorkClass = activeWorkClass->second;
 					inFlightWorkClasses.erase(activeWorkClass);
 				}
 				--activeWorkers;
 				const bool foreground = work.foreground ||
-					foregroundKeys.erase(work.request.key) != 0;
+					foregroundKeys.erase(work.request.cacheKey) != 0;
 				const bool stillCurrentForeground = !foreground ||
-					work.request.key == latestForegroundKey;
-				const auto desiredPriority = desiredPrefetchPriorities.find(work.request.key);
+					work.request.cacheKey == latestForegroundKey;
+				const auto desiredPriority = desiredPrefetchPriorities.find(work.request.cacheKey);
 				const std::size_t completionPriority = foreground ? 0 :
 					(desiredPriority == desiredPrefetchPriorities.end() ? work.request.priority :
 						desiredPriority->second);
-				if (!stopping && stillCurrentForeground && work.epoch == epoch && image && image->key == currentKey &&
-					(foreground || desiredPrefetchKeys.find(work.request.key) !=
+				if (!stopping && sourceCurrentBeforePublish && stillCurrentForeground &&
+					work.epoch == epoch && image && image->cacheKey == currentKey &&
+					(foreground || desiredPrefetchKeys.find(work.request.cacheKey) !=
 						desiredPrefetchKeys.end())) {
 					// A finished worker frame remains eligible for immediate SDL upload
 					// even if retained-cache space is currently occupied by decoded data.
@@ -505,19 +665,24 @@ struct DisplayImageCache::Impl {
 	std::vector<std::thread> workers;
 	std::thread retirementWorker;
 	std::shared_ptr<RetirementState> retirementState;
-	std::unordered_map<std::string, Entry> entries;
+	EntryMap entries;
 	std::deque<Work> queue;
 	std::deque<Completion> completed;
+	std::vector<SourceChangeNotice> changedSources;
 	std::unordered_map<const PreparedDisplayImage*, std::size_t> borrowedAllocations;
-	std::unordered_set<std::string> queuedKeys;
-	std::unordered_set<std::string> inFlightKeys;
-	std::unordered_map<std::string, std::size_t> inFlightPriorities;
-	std::unordered_map<std::string, std::weak_ptr<std::atomic<bool>>> inFlightCancellation;
-	std::unordered_map<std::string, PerfWorkClass> inFlightWorkClasses;
-	std::unordered_set<std::string> desiredPrefetchKeys;
-	std::unordered_map<std::string, std::size_t> desiredPrefetchPriorities;
-	std::unordered_set<std::string> foregroundKeys;
-	std::string latestForegroundKey;
+	std::unordered_set<DisplayImageCacheKey, DisplayImageCacheKeyHash> queuedKeys;
+	std::unordered_set<DisplayImageCacheKey, DisplayImageCacheKeyHash> inFlightKeys;
+	std::unordered_map<DisplayImageCacheKey, std::size_t,
+		DisplayImageCacheKeyHash> inFlightPriorities;
+	std::unordered_map<DisplayImageCacheKey, std::weak_ptr<std::atomic<bool>>,
+		DisplayImageCacheKeyHash> inFlightCancellation;
+	std::unordered_map<DisplayImageCacheKey, PerfWorkClass,
+		DisplayImageCacheKeyHash> inFlightWorkClasses;
+	std::unordered_set<DisplayImageCacheKey, DisplayImageCacheKeyHash> desiredPrefetchKeys;
+	std::unordered_map<DisplayImageCacheKey, std::size_t,
+		DisplayImageCacheKeyHash> desiredPrefetchPriorities;
+	std::unordered_set<DisplayImageCacheKey, DisplayImageCacheKeyHash> foregroundKeys;
+	DisplayImageCacheKey latestForegroundKey;
 	std::size_t cachedBytes = 0;
 	std::size_t activeWorkers = 0;
 	std::uint64_t useCounter = 0;
@@ -537,18 +702,19 @@ DisplayImageCache::~DisplayImageCache() = default;
 
 DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& request) {
 	if (!request.Valid()) return {};
-	if (request.key != RequestKey(request.filename, Identify(request.filename),
-		request.frameIndex, request.targetWidth, request.targetHeight,
-		request.autoContrast, request.processing, request.rotationQuarterTurns)) return {};
+	if (request.cacheKey != MakeCacheKey(request.source, request.frameIndex,
+		request.targetWidth, request.targetHeight, request.autoContrast,
+		request.processing, request.rotationQuarterTurns) ||
+		request.key != SerializeCacheKey(request.cacheKey)) return {};
 	std::lock_guard<std::mutex> lock(impl_->mutex);
-	const auto found = impl_->entries.find(request.key);
+	const auto found = impl_->entries.find(request.cacheKey);
 	if (found != impl_->entries.end()) {
 		found->second.lastUsed = ++impl_->useCounter;
 		return found->second.image;
 	}
 	const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
 		[&request](const Impl::Completion& completion) {
-			return completion.image && completion.image->key == request.key;
+			return completion.image && completion.image->cacheKey == request.cacheKey;
 		});
 	return completed == impl_->completed.end() ? ImagePtr{} : completed->image;
 }
@@ -556,17 +722,23 @@ DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& r
 bool DisplayImageCache::HasPendingOrCached(const std::string& key) const {
 	if (key.empty()) return false;
 	std::lock_guard<std::mutex> lock(impl_->mutex);
-	if (impl_->entries.find(key) != impl_->entries.end() ||
-		impl_->queuedKeys.find(key) != impl_->queuedKeys.end() ||
-		impl_->inFlightKeys.find(key) != impl_->inFlightKeys.end()) return true;
-	return std::any_of(impl_->completed.begin(), impl_->completed.end(),
-		[&key](const Impl::Completion& completion) {
-			return completion.image && completion.image->key == key;
-		});
+	DisplayImageCacheKey cacheKey;
+	if (!impl_->ResolveExternalKey(key, cacheKey)) return false;
+	return impl_->entries.find(cacheKey) != impl_->entries.end() ||
+		impl_->queuedKeys.find(cacheKey) != impl_->queuedKeys.end() ||
+		impl_->inFlightKeys.find(cacheKey) != impl_->inFlightKeys.end() ||
+		std::any_of(impl_->completed.begin(), impl_->completed.end(),
+			[&cacheKey](const Impl::Completion& completion) {
+				return completion.image && completion.image->cacheKey == cacheKey;
+			});
 }
 
 void DisplayImageCache::Request(const DisplayImageRequest& request) {
-	if (!request.Valid()) return;
+	if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
+		request.frameIndex, request.targetWidth, request.targetHeight,
+		request.autoContrast, request.processing, request.rotationQuarterTurns) ||
+		request.key != SerializeCacheKey(request.cacheKey)) return;
+	const DisplayImageCacheKey& cacheKey = request.cacheKey;
 	DisplayImageRequest foregroundRequest = request;
 	if (!foregroundRequest.cancellation) {
 		foregroundRequest.cancellation = std::make_shared<std::atomic<bool>>(false);
@@ -579,13 +751,13 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	bool hasQueuedWork = false;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		if (impl_->latestForegroundKey != request.key) {
-			impl_->latestForegroundKey = request.key;
+		if (impl_->latestForegroundKey != cacheKey) {
+			impl_->latestForegroundKey = cacheKey;
 			for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
-				if (queued->foreground && queued->request.key != request.key) {
+				if (queued->foreground && queued->request.cacheKey != cacheKey) {
 					RecordDisplayCancellation(queued->request.workClass);
-					impl_->queuedKeys.erase(queued->request.key);
-					impl_->foregroundKeys.erase(queued->request.key);
+					impl_->queuedKeys.erase(queued->request.cacheKey);
+					impl_->foregroundKeys.erase(queued->request.cacheKey);
 					queued = impl_->queue.erase(queued);
 					removedQueuedForeground = true;
 				} else {
@@ -593,7 +765,7 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 				}
 			}
 			for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
-				if (completed->priority == 0 && completed->image && completed->image->key != request.key) {
+				if (completed->priority == 0 && completed->image && completed->image->cacheKey != cacheKey) {
 					impl_->QueueRetirement(std::move(completed->image));
 					completed = impl_->completed.erase(completed);
 				} else {
@@ -602,28 +774,28 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 			}
 		}
 		const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
-			[&request](const Impl::Completion& completion) {
-				return completion.image && completion.image->key == request.key;
+			[&cacheKey](const Impl::Completion& completion) {
+				return completion.image && completion.image->cacheKey == cacheKey;
 			});
 		if (completed != impl_->completed.end()) {
 			completed->priority = 0;
 			completed->workClass = foregroundWorkClass;
-		} else if (const auto cached = impl_->entries.find(request.key); cached != impl_->entries.end()) {
+		} else if (const auto cached = impl_->entries.find(cacheKey); cached != impl_->entries.end()) {
 			// A speculative frame can become the foreground between worker
 			// completion and renderer upload. Promote the shared completion object
 			// so it cannot wait behind any neighboring frame.
 			impl_->completed.push_front({cached->second.image, 0, foregroundWorkClass});
-		} else if (impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) {
-			impl_->foregroundKeys.insert(request.key);
-			impl_->inFlightPriorities[request.key] = 0;
-			impl_->inFlightWorkClasses[request.key] = foregroundWorkClass;
-			const auto cancellation = impl_->inFlightCancellation.find(request.key);
+		} else if (impl_->inFlightKeys.find(cacheKey) != impl_->inFlightKeys.end()) {
+			impl_->foregroundKeys.insert(cacheKey);
+			impl_->inFlightPriorities[cacheKey] = 0;
+			impl_->inFlightWorkClasses[cacheKey] = foregroundWorkClass;
+			const auto cancellation = impl_->inFlightCancellation.find(cacheKey);
 			if (cancellation != impl_->inFlightCancellation.end()) {
 				if (const auto token = cancellation->second.lock()) token->store(false);
 			}
-		} else if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end()) {
+		} else if (impl_->queuedKeys.find(cacheKey) != impl_->queuedKeys.end()) {
 			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
-				[&request](const Impl::Work& work) { return work.request.key == request.key; });
+				[&cacheKey](const Impl::Work& work) { return work.request.cacheKey == cacheKey; });
 			if (queued != impl_->queue.end()) {
 				Impl::Work promoted = std::move(*queued);
 				impl_->queue.erase(queued);
@@ -639,7 +811,7 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 			foregroundRequest.workClass = foregroundWorkClass;
 			impl_->queue.push_front(Impl::Work{
 				std::move(foregroundRequest), 0, impl_->epoch, true});
-			impl_->queuedKeys.insert(request.key);
+			impl_->queuedKeys.insert(cacheKey);
 			hasQueuedWork = true;
 		}
 	}
@@ -657,7 +829,11 @@ void DisplayImageCache::RequestBackgroundBatch(
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		for (const DisplayImageRequest& request : requests) {
-			if (!request.Valid()) continue;
+			if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
+				request.frameIndex, request.targetWidth, request.targetHeight,
+				request.autoContrast, request.processing, request.rotationQuarterTurns) ||
+				request.key != SerializeCacheKey(request.cacheKey)) continue;
+			const DisplayImageCacheKey& cacheKey = request.cacheKey;
 			DisplayImageRequest classifiedRequest = request;
 			if (!classifiedRequest.cancellation) {
 				classifiedRequest.cancellation = std::make_shared<std::atomic<bool>>(false);
@@ -669,17 +845,17 @@ void DisplayImageCache::RequestBackgroundBatch(
 				classifiedRequest.workClass = priority <= 2 ?
 					PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
 			}
-			impl_->desiredPrefetchKeys.insert(request.key);
-			auto desiredPriority = impl_->desiredPrefetchPriorities.emplace(request.key, priority);
+			impl_->desiredPrefetchKeys.insert(cacheKey);
+			auto desiredPriority = impl_->desiredPrefetchPriorities.emplace(cacheKey, priority);
 			if (!desiredPriority.second) desiredPriority.first->second =
 				std::min(desiredPriority.first->second, priority);
 
-			const auto cached = impl_->entries.find(request.key);
+			const auto cached = impl_->entries.find(cacheKey);
 			if (cached != impl_->entries.end()) {
 				cached->second.lastUsed = ++impl_->useCounter;
 				const auto completion = std::find_if(impl_->completed.begin(), impl_->completed.end(),
-					[&request](const Impl::Completion& candidate) {
-						return candidate.image && candidate.image->key == request.key;
+					[&cacheKey](const Impl::Completion& candidate) {
+						return candidate.image && candidate.image->cacheKey == cacheKey;
 				});
 				if (completion == impl_->completed.end()) {
 					impl_->completed.push_back({cached->second.image, priority,
@@ -692,8 +868,8 @@ void DisplayImageCache::RequestBackgroundBatch(
 			}
 
 			const auto completion = std::find_if(impl_->completed.begin(), impl_->completed.end(),
-				[&request](const Impl::Completion& candidate) {
-					return candidate.image && candidate.image->key == request.key;
+				[&cacheKey](const Impl::Completion& candidate) {
+					return candidate.image && candidate.image->cacheKey == cacheKey;
 			});
 			if (completion != impl_->completed.end()) {
 				completion->priority = std::min(completion->priority, priority);
@@ -701,11 +877,11 @@ void DisplayImageCache::RequestBackgroundBatch(
 				continue;
 			}
 
-			const auto inFlight = impl_->inFlightPriorities.find(request.key);
+			const auto inFlight = impl_->inFlightPriorities.find(cacheKey);
 			if (inFlight != impl_->inFlightPriorities.end()) {
 				inFlight->second = std::min(inFlight->second, priority);
-				impl_->inFlightWorkClasses[request.key] = classifiedRequest.workClass;
-				const auto cancellation = impl_->inFlightCancellation.find(request.key);
+				impl_->inFlightWorkClasses[cacheKey] = classifiedRequest.workClass;
+				const auto cancellation = impl_->inFlightCancellation.find(cacheKey);
 				if (cancellation != impl_->inFlightCancellation.end()) {
 					if (const auto token = cancellation->second.lock()) token->store(false);
 				}
@@ -713,7 +889,7 @@ void DisplayImageCache::RequestBackgroundBatch(
 			}
 
 			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
-				[&request](const Impl::Work& work) { return work.request.key == request.key; });
+				[&cacheKey](const Impl::Work& work) { return work.request.cacheKey == cacheKey; });
 			if (queued != impl_->queue.end()) {
 				if (queued->foreground) continue;
 				Impl::Work work = std::move(*queued);
@@ -739,7 +915,7 @@ void DisplayImageCache::RequestBackgroundBatch(
 						candidate.request.priority > work.request.priority;
 				});
 			impl_->queue.insert(insertion, std::move(work));
-			impl_->queuedKeys.insert(request.key);
+			impl_->queuedKeys.insert(cacheKey);
 			queuedWork = true;
 		}
 	}
@@ -749,29 +925,31 @@ void DisplayImageCache::RequestBackgroundBatch(
 void DisplayImageCache::CancelBackground(const std::string& key) {
 	if (key.empty()) return;
 	std::lock_guard<std::mutex> lock(impl_->mutex);
-	const auto activePriority = impl_->inFlightPriorities.find(key);
-	const bool foreground = impl_->foregroundKeys.find(key) != impl_->foregroundKeys.end() ||
+	DisplayImageCacheKey cacheKey;
+	if (!impl_->ResolveExternalKey(key, cacheKey)) return;
+	const auto activePriority = impl_->inFlightPriorities.find(cacheKey);
+	const bool foreground = impl_->foregroundKeys.find(cacheKey) != impl_->foregroundKeys.end() ||
 		(activePriority != impl_->inFlightPriorities.end() && activePriority->second == 0);
-	impl_->desiredPrefetchKeys.erase(key);
-	impl_->desiredPrefetchPriorities.erase(key);
+	impl_->desiredPrefetchKeys.erase(cacheKey);
+	impl_->desiredPrefetchPriorities.erase(cacheKey);
 	if (!foreground) {
-		const auto active = impl_->inFlightCancellation.find(key);
+		const auto active = impl_->inFlightCancellation.find(cacheKey);
 		if (active != impl_->inFlightCancellation.end()) {
 			if (const auto cancellation = active->second.lock()) cancellation->store(true);
 		}
-		impl_->inFlightWorkClasses.erase(key);
+		impl_->inFlightWorkClasses.erase(cacheKey);
 	}
 	for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
-		if (!queued->foreground && queued->request.key == key) {
+		if (!queued->foreground && queued->request.cacheKey == cacheKey) {
 			RecordDisplayCancellation(queued->request.workClass);
-			impl_->queuedKeys.erase(key);
+			impl_->queuedKeys.erase(cacheKey);
 			queued = impl_->queue.erase(queued);
 		} else {
 			++queued;
 		}
 	}
 	for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
-		if (completed->priority != 0 && completed->image && completed->image->key == key) {
+		if (completed->priority != 0 && completed->image && completed->image->cacheKey == cacheKey) {
 			impl_->QueueRetirement(std::move(completed->image));
 			completed = impl_->completed.erase(completed);
 		} else {
@@ -785,28 +963,29 @@ DisplayImageCache::ImagePtr DisplayImageCache::RequestAndWait(
 	const DisplayImageRequest& request) {
 	if (!request.Valid()) return {};
 	Request(request);
+	const DisplayImageCacheKey& cacheKey = request.cacheKey;
 	std::unique_lock<std::mutex> lock(impl_->mutex);
 	const auto findCompleted = [&]() -> ImagePtr {
-		const auto cached = impl_->entries.find(request.key);
+		const auto cached = impl_->entries.find(cacheKey);
 		if (cached != impl_->entries.end()) {
 			cached->second.lastUsed = ++impl_->useCounter;
 			return cached->second.image;
 		}
 		const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
-			[&request](const Impl::Completion& completion) {
-				return completion.image && completion.image->key == request.key;
+			[&cacheKey](const Impl::Completion& completion) {
+				return completion.image && completion.image->cacheKey == cacheKey;
 			});
 		return completed == impl_->completed.end() ? ImagePtr{} : completed->image;
 	};
 	if (ImagePtr ready = findCompleted()) return ready;
 	impl_->idle.wait(lock, [&] {
-		if (impl_->stopping || impl_->entries.find(request.key) != impl_->entries.end()) return true;
+		if (impl_->stopping || impl_->entries.find(cacheKey) != impl_->entries.end()) return true;
 		if (std::any_of(impl_->completed.begin(), impl_->completed.end(),
-			[&request](const Impl::Completion& completion) {
-				return completion.image && completion.image->key == request.key;
+			[&cacheKey](const Impl::Completion& completion) {
+				return completion.image && completion.image->cacheKey == cacheKey;
 			})) return true;
-		return impl_->queuedKeys.find(request.key) == impl_->queuedKeys.end() &&
-			impl_->inFlightKeys.find(request.key) == impl_->inFlightKeys.end();
+		return impl_->queuedKeys.find(cacheKey) == impl_->queuedKeys.end() &&
+			impl_->inFlightKeys.find(cacheKey) == impl_->inFlightKeys.end();
 	});
 	return findCompleted();
 }
@@ -835,7 +1014,7 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 			for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
 				const bool stillDesiredSpread = completed->image &&
 					completed->workClass == PerfWorkClass::ActiveImageSpread &&
-					previouslyDesiredKeys.find(completed->image->key) !=
+					previouslyDesiredKeys.find(completed->image->cacheKey) !=
 						previouslyDesiredKeys.end();
 				if (completed->priority == 0 || stillDesiredSpread) {
 					++completed;
@@ -848,7 +1027,7 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 		for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
 			const bool stillDesiredSpread =
 				queued->request.workClass == PerfWorkClass::ActiveImageSpread &&
-				previouslyDesiredKeys.find(queued->request.key) !=
+				previouslyDesiredKeys.find(queued->request.cacheKey) !=
 					previouslyDesiredKeys.end();
 			if (!queued->foreground && !stillDesiredSpread) {
 				RecordDisplayCancellation(queued->request.workClass);
@@ -878,7 +1057,7 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 			}
 			const bool remainsDesired = std::any_of(prioritizedRequests.begin(),
 				prioritizedRequests.end(), [&active](const DisplayImageRequest& request) {
-					return request.key == active.first;
+					return request.cacheKey == active.first;
 				});
 			if (const auto cancellation = active.second.lock()) {
 				cancellation->store(!remainsDesired);
@@ -887,32 +1066,36 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 		for (const Impl::Completion& completion : impl_->completed) {
 			if (!completion.image || completion.priority == 0 ||
 				completion.workClass != PerfWorkClass::ActiveImageSpread ||
-				previouslyDesiredKeys.find(completion.image->key) ==
+				previouslyDesiredKeys.find(completion.image->cacheKey) ==
 					previouslyDesiredKeys.end()) continue;
-			impl_->desiredPrefetchKeys.insert(completion.image->key);
-			const auto priority = previouslyDesiredPriorities.find(completion.image->key);
-			impl_->desiredPrefetchPriorities[completion.image->key] =
+			impl_->desiredPrefetchKeys.insert(completion.image->cacheKey);
+			const auto priority = previouslyDesiredPriorities.find(completion.image->cacheKey);
+			impl_->desiredPrefetchPriorities[completion.image->cacheKey] =
 				priority == previouslyDesiredPriorities.end() ? completion.priority :
 					priority->second;
 		}
 		for (const Impl::Work& work : impl_->queue) {
-			impl_->queuedKeys.insert(work.request.key);
+			impl_->queuedKeys.insert(work.request.cacheKey);
 			if (work.foreground || work.request.workClass == PerfWorkClass::ActiveImageSpread) {
-				impl_->desiredPrefetchKeys.insert(work.request.key);
-				impl_->desiredPrefetchPriorities[work.request.key] = work.foreground ? 0 :
+				impl_->desiredPrefetchKeys.insert(work.request.cacheKey);
+				impl_->desiredPrefetchPriorities[work.request.cacheKey] = work.foreground ? 0 :
 					std::max<std::size_t>(1, work.request.priority);
 			}
 		}
 		for (const DisplayImageRequest& request : prioritizedRequests) {
-			if (!request.Valid()) continue;
+			if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
+				request.frameIndex, request.targetWidth, request.targetHeight,
+				request.autoContrast, request.processing, request.rotationQuarterTurns) ||
+				request.key != SerializeCacheKey(request.cacheKey)) continue;
+			const DisplayImageCacheKey& cacheKey = request.cacheKey;
 			const std::size_t requestPriority = std::max<std::size_t>(1, request.priority);
-			impl_->desiredPrefetchKeys.insert(request.key);
-			impl_->desiredPrefetchPriorities[request.key] = requestPriority;
-			const auto retained = impl_->entries.find(request.key);
+			impl_->desiredPrefetchKeys.insert(cacheKey);
+			impl_->desiredPrefetchPriorities[cacheKey] = requestPriority;
+			const auto retained = impl_->entries.find(cacheKey);
 			if (retained != impl_->entries.end()) {
 				const auto completion = std::find_if(impl_->completed.begin(),
-					impl_->completed.end(), [&request](const Impl::Completion& completion) {
-						return completion.image && completion.image->key == request.key;
+					impl_->completed.end(), [&cacheKey](const Impl::Completion& completion) {
+						return completion.image && completion.image->cacheKey == cacheKey;
 					});
 				if (completion == impl_->completed.end()) {
 					impl_->completed.push_back({retained->second.image, requestPriority,
@@ -923,19 +1106,19 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 				}
 				continue;
 			}
-			if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end()) continue;
-			if (impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) {
-				if (impl_->foregroundKeys.find(request.key) == impl_->foregroundKeys.end()) {
-					impl_->inFlightPriorities[request.key] = std::min(
-						impl_->inFlightPriorities[request.key], requestPriority);
-					impl_->inFlightWorkClasses[request.key] = request.workClass;
+			if (impl_->queuedKeys.find(cacheKey) != impl_->queuedKeys.end()) continue;
+			if (impl_->inFlightKeys.find(cacheKey) != impl_->inFlightKeys.end()) {
+				if (impl_->foregroundKeys.find(cacheKey) == impl_->foregroundKeys.end()) {
+					impl_->inFlightPriorities[cacheKey] = std::min(
+						impl_->inFlightPriorities[cacheKey], requestPriority);
+					impl_->inFlightWorkClasses[cacheKey] = request.workClass;
 				}
 				continue;
 			}
 			DisplayImageRequest queuedRequest = request;
 			queuedRequest.priority = requestPriority;
 			impl_->queue.push_back(Impl::Work{queuedRequest, impl_->generation, impl_->epoch, false});
-			impl_->queuedKeys.insert(request.key);
+			impl_->queuedKeys.insert(cacheKey);
 		}
 		impl_->idle.notify_all();
 	}
@@ -996,8 +1179,11 @@ std::vector<DisplayImageCache::ImagePtr> DisplayImageCache::TakeCompleted(
 
 void DisplayImageCache::Release(const std::string& key) {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
-	const auto found = impl_->entries.find(key);
-	if (found != impl_->entries.end()) impl_->Erase(found);
+	DisplayImageCacheKey cacheKey;
+	if (impl_->ResolveExternalKey(key, cacheKey)) {
+		const auto found = impl_->entries.find(cacheKey);
+		if (found != impl_->entries.end()) impl_->Erase(found);
+	}
 	impl_->workAvailable.notify_one();
 }
 
@@ -1006,7 +1192,7 @@ void DisplayImageCache::Retire(const ImagePtr& image) {
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		impl_->ForgetBorrowed(image);
-		const auto cached = impl_->entries.find(image->key);
+		const auto cached = impl_->entries.find(image->cacheKey);
 		const bool stillCached = cached != impl_->entries.end() &&
 			cached->second.image.get() == image.get();
 		if (!stillCached) impl_->QueueRetirement(image);
@@ -1032,7 +1218,7 @@ void DisplayImageCache::Clear() {
 	impl_->desiredPrefetchKeys.clear();
 	impl_->desiredPrefetchPriorities.clear();
 	impl_->foregroundKeys.clear();
-	impl_->latestForegroundKey.clear();
+	impl_->latestForegroundKey = {};
 	while (!impl_->entries.empty()) impl_->Erase(impl_->entries.begin());
 	impl_->idle.notify_all();
 	impl_->workAvailable.notify_all();
@@ -1081,6 +1267,13 @@ DisplayImageCacheDiagnostics DisplayImageCache::GetDiagnostics() const {
 	}
 	diagnostics.activeRetiredBytes = impl_->retirementState->retiringBytes;
 	return diagnostics;
+}
+
+std::vector<SourceChangeNotice> DisplayImageCache::TakeChangedSources() {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	std::vector<SourceChangeNotice> changed;
+	changed.swap(impl_->changedSources);
+	return changed;
 }
 
 bool DisplayImageCache::HasPendingWork() const {

@@ -73,6 +73,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -550,6 +552,363 @@ void SetModificationTime(const fs::path& filename, int secondsAfterEpoch) {
 	if (error) throw TestFailure("cannot set test timestamp: " + error.message());
 }
 
+void SetModificationTimeNanoseconds(const fs::path& filename, std::int64_t seconds,
+	long nanoseconds) {
+	timespec times[2]{};
+	times[0].tv_nsec = UTIME_OMIT;
+	times[1].tv_sec = static_cast<time_t>(seconds);
+	times[1].tv_nsec = nanoseconds;
+	Expect(::utimensat(AT_FDCWD, filename.c_str(), times, 0) == 0,
+		"cannot set precise test timestamp for " + filename.string());
+}
+
+void TestSourceDescriptorIdentityAndUnusualPaths() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "identities";
+	fs::create_directories(directory);
+	const fs::path source = directory / "same-size.png";
+	const fs::path replacement = directory / "replacement.tmp";
+	WriteBytes(source, {1, 2, 3, 4});
+	constexpr std::int64_t timestampSeconds = 1700000000;
+	SetModificationTimeNanoseconds(source, timestampSeconds, 123456000);
+	const jpegview_linux::SourceDescriptor original =
+		jpegview_linux::DescribeImageSource(source);
+	Expect(original.Valid() && original.Metadata().hasFileSize &&
+		original.Metadata().fileSize == 4 && original.Metadata().hasModificationTime,
+		"regular-file descriptor omitted its backing identity or captured metadata");
+	const jpegview_linux::SourceKey originalKey = original.Key();
+	const jpegview_linux::SourceKey missingKeyA{source.string(),
+		jpegview_linux::SourceIdentity{}};
+	const jpegview_linux::SourceKey missingKeyB{source.string(),
+		jpegview_linux::SourceIdentity{}};
+	jpegview_linux::SourceIdentity otherInvalidIdentity;
+	otherInvalidIdentity.device = 1;
+	const jpegview_linux::SourceKey missingKeyWithFields{source.string(),
+		otherInvalidIdentity};
+	const jpegview_linux::SourceKey duplicateOriginalKey{originalKey.logicalPath,
+		originalKey.backingIdentity};
+	Expect(originalKey == duplicateOriginalKey &&
+		jpegview_linux::SourceKeyHash{}(originalKey) ==
+			jpegview_linux::SourceKeyHash{}(duplicateOriginalKey),
+		"equal valid source keys did not produce matching hashes");
+	Expect(!missingKeyA.Valid() && missingKeyA == missingKeyA &&
+		missingKeyA == missingKeyB && missingKeyA != missingKeyWithFields &&
+		jpegview_linux::SourceKeyHash{}(missingKeyA) ==
+			jpegview_linux::SourceKeyHash{}(missingKeyB),
+		"invalid source keys did not compare all identity fields or retain matching hashes");
+	FileList files({directory.string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.DescriptorAt(0) != nullptr &&
+		files.DescriptorAt(0)->Key() == originalKey,
+		"file-list scan did not retain the source descriptor captured for its entry");
+
+	WriteBytes(source, {4, 3, 2, 1});
+	SetModificationTimeNanoseconds(source, timestampSeconds, 123457000);
+	const jpegview_linux::SourceDescriptor edited =
+		jpegview_linux::DescribeImageSource(source);
+	Expect(edited.Valid() && edited.BackingIdentity().device == original.BackingIdentity().device &&
+		edited.BackingIdentity().inode == original.BackingIdentity().inode &&
+		edited.BackingIdentity().size == original.BackingIdentity().size &&
+		edited.BackingIdentity().modifiedSeconds == original.BackingIdentity().modifiedSeconds &&
+		edited.BackingIdentity().modifiedNanoseconds !=
+			original.BackingIdentity().modifiedNanoseconds && edited.Key() != originalKey,
+		"same-inode, same-size edit with a nanosecond-only timestamp change reused its source key");
+	Expect(files.RefreshSourceDescriptor(originalKey, edited) &&
+		files.DescriptorAt(0)->Key() == edited.Key() &&
+		!files.RefreshSourceDescriptor(originalKey, original),
+		"file list did not accept a matching source refresh or reject a delayed stale descriptor");
+
+	WriteBytes(replacement, {9, 8, 7, 6});
+	SetModificationTimeNanoseconds(replacement, timestampSeconds, 123457000);
+	std::error_code renameError;
+	fs::rename(replacement, source, renameError);
+	Expect(!renameError && fs::file_size(source) == 4,
+		"same-size inode replacement fixture failed: " + renameError.message());
+	const jpegview_linux::SourceDescriptor replaced =
+		jpegview_linux::DescribeImageSource(source);
+	Expect(replaced.Valid() && replaced.BackingIdentity().size == edited.BackingIdentity().size &&
+		replaced.BackingIdentity().modifiedSeconds == edited.BackingIdentity().modifiedSeconds &&
+		replaced.BackingIdentity().modifiedNanoseconds == edited.BackingIdentity().modifiedNanoseconds &&
+		replaced.BackingIdentity().inode != edited.BackingIdentity().inode &&
+		replaced.Key() != edited.Key(),
+		"same-size rename-over replacement was not distinguished by inode identity");
+	Expect(files.RefreshSourceDescriptor(edited.Key(), replaced) &&
+		files.DescriptorAt(0)->Key() == replaced.Key(),
+		"file list did not refresh after same-path inode replacement");
+
+	std::error_code removeError;
+	Expect(fs::remove(source, removeError) && !removeError,
+		"could not remove source for missing-descriptor coverage");
+	const jpegview_linux::SourceDescriptor missing =
+		jpegview_linux::DescribeImageSource(source);
+	Expect(!missing.Valid() && !missing.BackingIdentity().valid &&
+		!jpegview_linux::IsImageSourceCurrent(replaced),
+		"missing source did not produce an invalid descriptor that fails freshness validation");
+	Expect(files.RefreshSourceDescriptor(replaced.Key(), missing) &&
+		files.DescriptorAt(0)->Key() == missing.Key() &&
+		!files.DescriptorAt(0)->Key().Valid(),
+		"missing-source refresh did not replace the prior cache identity with an invalid key");
+
+	const std::string newlineName = "legal-line\nbreak.png";
+	const std::string nonUtf8Name = std::string("legal-") + static_cast<char>(0xff) + "-name.png";
+	const fs::path newlinePath = directory / newlineName;
+	const fs::path nonUtf8Path = directory / nonUtf8Name;
+	WriteBytes(newlinePath, {1});
+	WriteBytes(nonUtf8Path, {2});
+	const jpegview_linux::SourceDescriptor newlineDescriptor =
+		jpegview_linux::DescribeImageSource(newlinePath);
+	const jpegview_linux::SourceDescriptor nonUtf8Descriptor =
+		jpegview_linux::DescribeImageSource(nonUtf8Path);
+	Expect(newlineDescriptor.Valid() && nonUtf8Descriptor.Valid() &&
+		newlineDescriptor.Key().logicalPath.find('\n') != std::string::npos &&
+		nonUtf8Descriptor.Key().logicalPath.find(static_cast<char>(0xff)) != std::string::npos &&
+		newlineDescriptor.Key() != nonUtf8Descriptor.Key(),
+		"legal newline or non-UTF-8 filename bytes were lost or conflated in source keys");
+	FileList unusualFiles({directory.string()}, FileList::SortMode::FileName, true, false);
+	Expect(unusualFiles.ContainsPath(newlinePath) && unusualFiles.ContainsPath(nonUtf8Path) &&
+		unusualFiles.DescriptorAt(*unusualFiles.IndexOf(newlinePath))->Key() ==
+			newlineDescriptor.Key() &&
+		unusualFiles.DescriptorAt(*unusualFiles.IndexOf(nonUtf8Path))->Key() ==
+			nonUtf8Descriptor.Key(),
+		"background enumeration did not preserve legal unusual filename bytes in descriptors");
+}
+
+void TestProvisionalSourceDescriptorSurvivesStartupReplacement() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "startup.jpg";
+	const fs::path replacement = temporary.path() / "startup-next.tmp";
+	WriteBytes(source, {0xff, 0xd8, 0xff, 0xd9});
+	FileList files;
+	files.SetProvisionalInputs({source.string()});
+	Expect(files.Size() == 1 && files.DescriptorAt(0) != nullptr &&
+		files.DescriptorAt(0)->Valid(),
+		"provisional direct-image startup did not capture a valid backing identity");
+	const jpegview_linux::SourceDescriptor original = *files.DescriptorAt(0);
+	const auto directRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		original, 100, 50, 50, 25, false);
+	Expect(directRequest.Valid(),
+		"provisional JPEG descriptor did not admit the startup reduced-display request");
+
+	WriteBytes(replacement, {0xff, 0xd8, 0, 0, 0xff, 0xd9});
+	SetModificationTimeNanoseconds(replacement,
+		original.BackingIdentity().modifiedSeconds,
+		static_cast<long>(original.BackingIdentity().modifiedNanoseconds));
+	std::ifstream keepOriginalInode(source, std::ios::binary);
+	Expect(static_cast<bool>(keepOriginalInode),
+		"could not keep the original startup source inode alive during replacement");
+	std::error_code renameError;
+	fs::rename(replacement, source, renameError);
+	Expect(!renameError, "could not stage same-path startup replacement: " +
+		renameError.message());
+	FileListPreparedScan scan = FileList::PrepareScan(
+		files.MakeScanRequest(FileList::ScanOperation::Initialize), [] { return true; });
+	Expect(scan.completed && scan.replacement.Size() == 1 &&
+		scan.replacement.DescriptorAt(0)->Valid() &&
+		scan.replacement.DescriptorAt(0)->Key() != original.Key(),
+		"startup scan did not retain the replacement source identity for the same logical path");
+	const jpegview_linux::SourceKey replacementKey =
+		scan.replacement.DescriptorAt(0)->Key();
+	Expect(files.ApplyPreparedScan(std::move(scan), source) &&
+		files.Current() == source && files.DescriptorAt(0)->Key() == replacementKey &&
+		directRequest.source.Key() != files.DescriptorAt(0)->Key(),
+		"same-path startup scan relabeled the old direct-decode key with the replacement descriptor");
+}
+
+void TestNonCurrentSourceRefreshPreservesSelection() {
+	TemporaryDirectory temporary;
+	const fs::path anchor = temporary.path() / "a-anchor.png";
+	const fs::path middle = temporary.path() / "m-middle.png";
+	const fs::path target = temporary.path() / "z-target.png";
+	WriteBytes(anchor, {1, 2, 3, 4});
+	WriteBytes(middle, {2, 3, 4, 5});
+	WriteBytes(target, {5, 6, 7, 8});
+	constexpr std::int64_t timestampSeconds = 1700000100;
+	SetModificationTimeNanoseconds(target, timestampSeconds, 100000000);
+	SetModificationTimeNanoseconds(middle, timestampSeconds, 200000000);
+	SetModificationTimeNanoseconds(anchor, timestampSeconds, 300000000);
+	FileList files({temporary.path().string()},
+		FileList::SortMode::LastModificationTime, true, false);
+	Expect(files.Current() == target && files.Size() == 3,
+		"noncurrent source refresh fixture did not select its first image");
+	const std::size_t targetIndex = *files.IndexOf(target);
+	const jpegview_linux::SourceKey previous = files.DescriptorAt(targetIndex)->Key();
+	Expect(files.Select(*files.IndexOf(anchor)),
+		"noncurrent source refresh fixture could not select its stable anchor");
+	WriteBytes(target, {8, 7, 6, 5});
+	SetModificationTimeNanoseconds(target, timestampSeconds, 400000000);
+	const jpegview_linux::SourceDescriptor observed =
+		jpegview_linux::DescribeImageSource(target);
+	const jpegview_linux::SourceRefreshOutcome outcome =
+		jpegview_linux::RefreshFileListSource(files, previous, observed);
+	Expect(observed.Valid() && observed.Key() != previous && outcome.applied &&
+		outcome.orderChanged && !outcome.selectedSourceChanged &&
+		outcome.previousIndex == 0 && outcome.currentIndex == 2 &&
+		files.Current() == anchor && files.DescriptorAt(*files.IndexOf(target))->Key() == observed.Key(),
+		"noncurrent refresh sorting changed the selected anchor or retained stale source metadata");
+}
+
+void TestCurrentProcessedSavePreservesMaterializedPixels() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "processed-save.png";
+	WriteBytes(source, {1, 2, 3, 4});
+	FileList files({source.string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.Current() == source,
+		"processed-save refresh fixture did not select its source");
+	const jpegview_linux::SourceKey previous = files.DescriptorAt(0)->Key();
+	WriteBytes(source, {5, 6, 7, 8, 9});
+	const jpegview_linux::SourceDescriptor observed =
+		jpegview_linux::DescribeImageSource(source);
+	const jpegview_linux::SourceRefreshOutcome refresh =
+		jpegview_linux::RefreshFileListSource(files, previous, observed);
+	std::size_t processingApplications = 1;
+	const jpegview_linux::SourceRefreshDisplayAction action =
+		jpegview_linux::ResolveSourceRefreshDisplayAction(refresh, true);
+	if (action == jpegview_linux::SourceRefreshDisplayAction::ReloadCurrent) {
+		++processingApplications;
+	}
+	Expect(refresh.applied && refresh.selectedSourceChanged && observed.Valid() &&
+		observed.Key() != previous && files.DescriptorAt(0)->Key() == observed.Key() &&
+		action == jpegview_linux::SourceRefreshDisplayAction::PreserveCurrentPixels &&
+		processingApplications == 1,
+		"processed save refreshed the source descriptor but reapplied processing instead of preserving its materialized pixels");
+	Expect(jpegview_linux::ResolveSourceRefreshDisplayAction(refresh, false) ==
+		jpegview_linux::SourceRefreshDisplayAction::ReloadCurrent,
+		"ordinary current-source changes stopped selecting the reload path");
+}
+
+void TestFileDialogSourceRefreshRequiresExactDescriptor() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "dialog-image.png";
+	WriteBytes(source, {1, 2, 3, 4});
+	const jpegview_linux::SourceDescriptor placeholder(source, {}, {});
+	const jpegview_linux::SourceDescriptor first =
+		jpegview_linux::DescribeImageSource(source);
+	jpegview_linux::FileDialogEntry entry{source};
+	entry.sourceDescriptor = placeholder;
+	jpegview_linux::FileDialogModel model;
+	model.SetEntries({entry});
+	Expect(first.Valid() && model.RefreshSourceDescriptor(placeholder.Key(), first),
+		"file-dialog model did not replace its path placeholder with captured metadata");
+
+	WriteBytes(source, {4, 3, 2, 1, 0});
+	const jpegview_linux::SourceDescriptor replacement =
+		jpegview_linux::DescribeImageSource(source);
+	Expect(replacement.Valid() && replacement.Key() != first.Key() &&
+		model.RefreshSourceDescriptor(first.Key(), replacement),
+		"file-dialog model did not accept a fresh descriptor for the expected source");
+	Expect(!model.RefreshSourceDescriptor(placeholder.Key(), first) &&
+		model.AllEntries().front().sourceDescriptor.Key() == replacement.Key(),
+		"late placeholder metadata relabeled a newer file-dialog source descriptor");
+}
+
+void TestFileDialogPreviewRefreshPolicy() {
+	const fs::path source = "/missing/recent-image.png";
+	const jpegview_linux::SourceDescriptor missing(source, {}, {});
+	jpegview_linux::SourceIdentity firstIdentity;
+	firstIdentity.device = 7;
+	firstIdentity.inode = 11;
+	firstIdentity.size = 128;
+	firstIdentity.modifiedSeconds = 1700000000;
+	firstIdentity.modifiedNanoseconds = 123000000;
+	firstIdentity.valid = true;
+	const jpegview_linux::SourceDescriptor present(source, firstIdentity, {});
+	jpegview_linux::SourceIdentity replacementIdentity = firstIdentity;
+	++replacementIdentity.inode;
+	const jpegview_linux::SourceDescriptor replacement(source, replacementIdentity, {});
+
+	Expect(!jpegview_linux::ShouldRefreshFileDialogPreviewSource(missing.Key(), missing),
+		"an unchanged invalid preview source requested another load or invalidation");
+	Expect(jpegview_linux::ShouldRefreshFileDialogPreviewSource(missing.Key(), present),
+		"a recreated preview source did not request descriptor refresh and invalidation");
+	Expect(jpegview_linux::ShouldRefreshFileDialogPreviewSource(present.Key(), missing),
+		"a deleted preview source did not request descriptor refresh and invalidation");
+	Expect(jpegview_linux::ShouldRefreshFileDialogPreviewSource(present.Key(), replacement),
+		"a replaced preview source did not request descriptor refresh and invalidation");
+}
+
+void TestArchiveDescriptorIdentityAndReplacement() {
+	TemporaryDirectory temporary;
+	const fs::path image = temporary.path() / "payload.bin";
+	const fs::path archive = temporary.path() / "members.zip";
+	const fs::path replacementArchive = temporary.path() / "members-next.zip";
+	WriteBytes(image, {1, 3, 5, 7});
+	WriteZipArchive(archive, {{"root.png", image}, {"nested/child.png", image}});
+	const fs::path rootMember = archive / "root.png";
+	const fs::path childMember = archive / "nested" / "child.png";
+	FileList files({archive.string()}, FileList::SortMode::FileName, true, false);
+	const auto rootIndex = files.IndexOf(rootMember);
+	Expect(rootIndex.has_value(),
+		"archive descriptor fixture did not enumerate its root image member");
+	const jpegview_linux::SourceDescriptor originalRoot = *files.DescriptorAt(*rootIndex);
+	const jpegview_linux::SourceDescriptor originalChild =
+		jpegview_linux::DescribeImageSource(childMember);
+	Expect(originalRoot.Valid() && originalChild.Valid() &&
+		originalRoot.Metadata().archiveMember && originalChild.Metadata().archiveMember &&
+		originalRoot.BackingIdentity() == originalChild.BackingIdentity() &&
+		originalRoot.Key().logicalPath != originalChild.Key().logicalPath &&
+		originalRoot.Key() != originalChild.Key() &&
+		originalRoot.Metadata().fileSize == originalChild.Metadata().fileSize,
+		"archive member descriptors did not share container identity while retaining distinct member keys and sizes");
+
+	const jpegview_linux::SourceIdentity originalContainer =
+		jpegview_linux::DescribeImageSource(archive).BackingIdentity();
+	std::vector<jpegview_linux::ArchiveEntryInfo> originalListing;
+	std::string listingError;
+	Expect(jpegview_linux::ListArchiveDirectoryCancellable(archive, originalListing,
+		[] { return true; }, listingError),
+		"could not list the original archive catalog: " + listingError);
+	const auto originalListingRoot = std::find_if(originalListing.begin(),
+		originalListing.end(), [&](const auto& entry) { return entry.path == rootMember; });
+	Expect(originalListingRoot != originalListing.end() &&
+		originalListingRoot->backingIdentity == originalContainer,
+		"archive entry metadata did not retain the identity used to build its catalog");
+	SetModificationTimeNanoseconds(archive, originalContainer.modifiedSeconds,
+		static_cast<long>(originalContainer.modifiedNanoseconds));
+	const jpegview_linux::SourceDescriptor normalizedContainer =
+		jpegview_linux::DescribeImageSource(archive);
+	std::error_code copyError;
+	fs::copy_file(archive, replacementArchive, fs::copy_options::overwrite_existing,
+		copyError);
+	Expect(!copyError && fs::file_size(replacementArchive) ==
+		normalizedContainer.BackingIdentity().size,
+		"archive replacement fixture could not retain the original bytes and size");
+	SetModificationTimeNanoseconds(replacementArchive,
+		normalizedContainer.BackingIdentity().modifiedSeconds,
+		static_cast<long>(normalizedContainer.BackingIdentity().modifiedNanoseconds));
+	std::error_code renameError;
+	fs::rename(replacementArchive, archive, renameError);
+	Expect(!renameError,
+		"could not atomically replace archive fixture: " + renameError.message());
+	const jpegview_linux::SourceDescriptor replacementRoot =
+		jpegview_linux::DescribeImageSource(rootMember);
+	Expect(replacementRoot.Valid() &&
+		replacementRoot.BackingIdentity().size == originalRoot.BackingIdentity().size &&
+		replacementRoot.BackingIdentity().modifiedSeconds ==
+			originalRoot.BackingIdentity().modifiedSeconds &&
+		replacementRoot.BackingIdentity().modifiedNanoseconds ==
+			originalRoot.BackingIdentity().modifiedNanoseconds &&
+		replacementRoot.BackingIdentity().inode != originalRoot.BackingIdentity().inode &&
+		replacementRoot.Key() != originalRoot.Key() &&
+		!jpegview_linux::IsImageSourceCurrent(originalRoot),
+		"same-size, same-time archive replacement did not invalidate its old member descriptor by inode");
+	Expect(files.Reload(rootMember), "file list could not refresh its replaced archive catalog");
+	const auto refreshedRootIndex = files.IndexOf(rootMember);
+	std::vector<jpegview_linux::ArchiveEntryInfo> replacementListing;
+	Expect(jpegview_linux::ListArchiveDirectoryCancellable(archive, replacementListing,
+		[] { return true; }, listingError),
+		"could not list the replacement archive catalog: " + listingError);
+	const auto replacementListingRoot = std::find_if(replacementListing.begin(),
+		replacementListing.end(), [&](const auto& entry) { return entry.path == rootMember; });
+	Expect(refreshedRootIndex.has_value() &&
+		files.DescriptorAt(*refreshedRootIndex)->Key() == replacementRoot.Key() &&
+		files.DescriptorAt(*refreshedRootIndex)->Metadata().fileSize ==
+			replacementRoot.Metadata().fileSize &&
+		replacementListingRoot != replacementListing.end() &&
+		replacementListingRoot->backingIdentity == replacementRoot.BackingIdentity() &&
+		replacementListingRoot->backingIdentity != originalListingRoot->backingIdentity &&
+		originalListingRoot->backingIdentity == originalContainer,
+		"archive reload did not publish replacement identity and uncompressed member metadata");
+}
+
 void TestFileListFilteringAndLogicalSorting() {
 	TemporaryDirectory temporary;
 	const fs::path directory = temporary.path() / "images";
@@ -704,8 +1063,13 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 		previews.front().sourceWidth == 2 && previews.front().sourceHeight == 2 &&
 		previews.front().fileSizeKnown && previews.front().fileSize == memberInfo.size,
 		"recent-image preview did not decode a virtual archive member");
+	const jpegview_linux::SourceDescriptor archivePlaceholder(rootImage, {}, {});
+	jpegview_linux::FileDialogEntry recentArchiveEntry{rootImage, false, false, {}, false, true};
+	recentArchiveEntry.sourceDescriptor = archivePlaceholder;
+	jpegview_linux::FileDialogModel recentArchiveModel;
+	recentArchiveModel.SetEntries({recentArchiveEntry});
 	jpegview_linux::FileDialogFileSizeLoader archiveSizeLoader;
-	archiveSizeLoader.Request({rootImage}, 1);
+	archiveSizeLoader.RequestSources({archivePlaceholder}, 1);
 	std::vector<jpegview_linux::FileDialogFileSizeResult> archiveSizes;
 	const auto archiveSizeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
 	while (archiveSizes.empty() && std::chrono::steady_clock::now() < archiveSizeDeadline) {
@@ -713,7 +1077,14 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 		archiveSizes = archiveSizeLoader.TakeReady();
 	}
 	Expect(archiveSizes.size() == 1 && archiveSizes.front().path == rootImage &&
-		archiveSizes.front().size == fs::file_size(image),
+		archiveSizes.front().size == fs::file_size(image) &&
+		archiveSizes.front().requestedSource.Key() == archivePlaceholder.Key() &&
+		archiveSizes.front().observedSource.Valid() &&
+		archiveSizes.front().observedSource.Metadata().archiveMember &&
+		recentArchiveModel.RefreshSourceDescriptor(archivePlaceholder.Key(),
+			archiveSizes.front().observedSource) &&
+		recentArchiveModel.AllEntries().front().fileSizeKnown &&
+		recentArchiveModel.AllEntries().front().fileSize == fs::file_size(image),
 		"background file-size lookup used the ZIP container size instead of the uncompressed member size");
 
 	const fs::path comicArchive = temporary.path() / "comic.CBZ";
@@ -1026,10 +1397,23 @@ void TestTarAndTgzBrowsingDecodingAndSafety() {
 		Expect(jpegview_linux::GetArchiveMemberInfo(rootImage, memberInfo, error) &&
 			memberInfo.size == fs::file_size(image) && memberInfo.modificationTime == 1700000000,
 			"TAR member metadata did not preserve size and timestamp");
+		const jpegview_linux::SourceDescriptor memberDescriptor =
+			jpegview_linux::DescribeImageSource(rootImage);
+		std::error_code memberTimeError;
+		Expect(memberDescriptor.Valid() &&
+			memberDescriptor.Metadata().modificationTimeNanoseconds ==
+				1700000000ll * 1000000000ll &&
+			jpegview_linux::ArchiveFileModificationTime(memberInfo.modificationTime) ==
+				jpegview_linux::ImageSourceModificationTime(rootImage, memberTimeError) &&
+			!memberTimeError,
+			"archive source metadata mixed Unix epoch nanoseconds with file-clock nanoseconds");
 
 		FileList files({archive.string()}, FileList::SortMode::FileName, true, false);
 		Expect(files.Size() == 1 && files.Current() == rootImage && files.IsArchiveMember(0),
 			"opening a TAR container did not initialize its root image list");
+		Expect(files.DescriptorAt(0)->Metadata().modificationTimeNanoseconds ==
+			1700000000ll * 1000000000ll,
+			"file-list archive sort metadata did not retain the shared Unix epoch domain");
 		files.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
 		Expect(files.Next() && files.Current() == nestedImage && files.IsArchiveMember(0),
 			"recursive file-list navigation did not enter a TAR subdirectory");
@@ -1825,6 +2209,127 @@ void TestDoublePagePresentationCommitsSpreadAtomically() {
 		"failed spread texture did not release the single-page fallback");
 }
 
+void TestDoublePageRefreshInvalidatesVisiblePartnerGeometry() {
+	const jpegview_linux::PageDimensions anchor{600, 900};
+	const jpegview_linux::PageDimensions oldPartner{600, 1200};
+	const jpegview_linux::PageDimensions replacementPartner{900, 1800};
+	const auto oldSpread = jpegview_linux::BuildDoublePageSpread(1, 4,
+		anchor, oldPartner, {true, false});
+	const auto replacementSpread = jpegview_linux::BuildDoublePageSpread(1, 4,
+		anchor, replacementPartner, {true, false});
+	Expect(oldSpread.has_value() && replacementSpread.has_value() &&
+		oldSpread->secondIndex == replacementSpread->secondIndex &&
+		oldSpread->canvasWidth != replacementSpread->canvasWidth &&
+		oldSpread->canvasHeight != replacementSpread->canvasHeight &&
+		jpegview_linux::DoublePageSpreadAffectedBySourceRefresh(*oldSpread, 2, false) &&
+		!jpegview_linux::DoublePageSpreadAffectedBySourceRefresh(*oldSpread, 3, false) &&
+		jpegview_linux::DoublePageSpreadAffectedBySourceRefresh(*oldSpread, 3, true),
+		"visible partner identity or list reorder did not invalidate its captured spread geometry");
+}
+
+void TestFullListReplacementRebuildsSpreadFromNewNeighbor() {
+	TemporaryDirectory temporary;
+	const fs::path coverPath = temporary.path() / "00-cover.png";
+	const fs::path anchorPath = temporary.path() / "10-anchor.png";
+	const fs::path partnerPath = temporary.path() / "20-partner.png";
+	const fs::path reorderedPath = temporary.path() / "30-reordered.png";
+	const auto writeSizedImage = [](const fs::path& path, int width, int height) {
+		std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4, 255);
+		ImageWriteOptions options;
+		std::string error;
+		Expect(jpegview_linux::WriteImage(path, pixels.data(), width, height,
+			options, error), "could not create spread rescan fixture: " + error);
+	};
+	const auto readDimensions = [](const fs::path& path) {
+		DecodedImage decoded;
+		std::string error;
+		Expect(jpegview_linux::DecodeImage(path, decoded, error) &&
+			!decoded.frames.empty(), "could not read spread rescan fixture: " + error);
+		return jpegview_linux::PageDimensions{
+			decoded.frames.front().width, decoded.frames.front().height};
+	};
+	writeSizedImage(coverPath, 4, 3);
+	writeSizedImage(anchorPath, 2, 4);
+	writeSizedImage(partnerPath, 3, 6);
+	writeSizedImage(reorderedPath, 4, 8);
+	constexpr std::int64_t timestamp = 1700000400;
+	SetModificationTimeNanoseconds(coverPath, timestamp, 100000000);
+	SetModificationTimeNanoseconds(anchorPath, timestamp, 200000000);
+	SetModificationTimeNanoseconds(partnerPath, timestamp, 300000000);
+	SetModificationTimeNanoseconds(reorderedPath, timestamp, 400000000);
+	FileList files({temporary.path().string()},
+		FileList::SortMode::LastModificationTime, true, false);
+	const auto originalAnchorIndex = files.IndexOf(anchorPath);
+	const auto originalPartnerIndex = files.IndexOf(partnerPath);
+	Expect(originalAnchorIndex == std::optional<std::size_t>(1) &&
+		originalPartnerIndex == std::optional<std::size_t>(2) &&
+		files.Select(*originalAnchorIndex),
+		"spread rescan fixture did not establish its selected anchor and visible partner");
+	const jpegview_linux::SourceKey anchorKey = files.DescriptorAt(*originalAnchorIndex)->Key();
+	const jpegview_linux::SourceKey oldPartnerKey =
+		files.DescriptorAt(*originalPartnerIndex)->Key();
+	const jpegview_linux::PageDimensions anchorDimensions = readDimensions(anchorPath);
+	const jpegview_linux::PageDimensions oldPartnerDimensions = readDimensions(partnerPath);
+	constexpr int rotationQuarterTurns = 1;
+	const auto oldSpread = jpegview_linux::BuildDoublePageSpread(*originalAnchorIndex,
+		files.Size(), anchorDimensions, oldPartnerDimensions, {true, false}, true,
+		rotationQuarterTurns);
+	Expect(oldSpread.has_value(), "spread rescan fixture did not form its original spread");
+	jpegview_linux::DoublePagePresentationModel presentation;
+	Expect(presentation.BeginSpread(*originalAnchorIndex, *originalAnchorIndex + 1,
+		"original-anchor", "original-partner") &&
+		presentation.MarkTextureReady("original-anchor") &&
+		presentation.MarkTextureReady("original-partner") &&
+		presentation.MarkSpreadPresented(*originalAnchorIndex),
+		"spread rescan fixture did not commit its original presentation generation");
+	const std::uint64_t oldGeneration = presentation.Generation();
+	jpegview_linux::Viewport viewport;
+	viewport.ActualSize();
+	viewport.ZoomAt(1.25, 40, 30, oldSpread->canvasWidth,
+		oldSpread->canvasHeight, 100, 80);
+	viewport.Pan(7.0, -3.0);
+	const jpegview_linux::ViewportSnapshot viewportBefore = viewport.Snapshot();
+	const double offsetXBefore = viewport.OffsetX();
+	const double offsetYBefore = viewport.OffsetY();
+
+	writeSizedImage(partnerPath, 5, 10);
+	SetModificationTimeNanoseconds(partnerPath, timestamp, 500000000);
+	const fs::path selectedPath = files.Current();
+	const FileList::ScanRequest scanRequest =
+		files.MakeScanRequest(FileList::ScanOperation::Reload);
+	jpegview_linux::FileListPreparedScan scan = jpegview_linux::FileList::PrepareScan(
+		scanRequest, [] { return true; });
+	Expect(scan.completed && files.ApplyPreparedScan(std::move(scan), selectedPath),
+		"accepted full-list scan did not publish its replacement descriptors");
+	const auto refreshedAnchorIndex = files.IndexOf(anchorPath);
+	const auto refreshedPartnerIndex = files.IndexOf(partnerPath);
+	const auto newNeighborIndex = files.IndexOf(reorderedPath);
+	Expect(refreshedAnchorIndex.has_value() && refreshedPartnerIndex.has_value() &&
+		newNeighborIndex == std::optional<std::size_t>(*refreshedAnchorIndex + 1) &&
+		refreshedPartnerIndex != originalPartnerIndex && files.Current() == selectedPath &&
+		files.DescriptorAt(*refreshedAnchorIndex)->Key() == anchorKey &&
+		files.DescriptorAt(*refreshedPartnerIndex)->Key() !=
+			oldPartnerKey,
+		"full-list replacement did not reorder the replaced partner while retaining the selected anchor identity");
+
+	presentation.InvalidateForFileListReplacement(*refreshedAnchorIndex);
+	const jpegview_linux::PageDimensions newNeighborDimensions = readDimensions(reorderedPath);
+	const auto rebuiltSpread = jpegview_linux::BuildDoublePageSpread(*refreshedAnchorIndex,
+		files.Size(), anchorDimensions, newNeighborDimensions, {true, false}, true,
+		rotationQuarterTurns);
+	Expect(presentation.Generation() > oldGeneration &&
+		presentation.Phase() == jpegview_linux::DoublePagePresentationPhase::SinglePage &&
+		!presentation.SpreadReady(*refreshedAnchorIndex) &&
+		!presentation.MarkTextureReady("original-partner") && rebuiltSpread.has_value() &&
+		rebuiltSpread->secondIndex == *newNeighborIndex &&
+		rebuiltSpread->nextPage.width != oldSpread->nextPage.width &&
+		rebuiltSpread->canvasHeight != oldSpread->canvasHeight &&
+		rebuiltSpread->clockwiseQuarterTurns == rotationQuarterTurns &&
+		viewport.Snapshot().zoom == viewportBefore.zoom &&
+		viewport.OffsetX() == offsetXBefore && viewport.OffsetY() == offsetYBefore,
+		"whole-list replacement retained stale spread geometry or changed the anchor viewport/rotation state");
+}
+
 void TestHeldNavigationCoalescesKeyRepeats() {
 	jpegview_linux::HeldNavigationController navigation;
 	Expect(navigation.KeyDown(1, 79, false) == 1 && navigation.Scancode() == 79,
@@ -2358,6 +2863,64 @@ void TestFileListAsynchronousScanning() {
 		"shutdown did not release and join a worker paused for foreground activity");
 }
 
+void TestPreparedScansRejectDescriptorRefreshRace() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "images";
+	fs::create_directories(directory);
+	const fs::path selected = directory / "a-selected.png";
+	WriteBytes(selected, {1, 2, 3, 4});
+	SetModificationTimeNanoseconds(selected, 1700000000, 123456000);
+	WriteBytes(directory / "z-other.png", {4, 3, 2, 1});
+
+	FileList files({directory.string()}, FileList::SortMode::FileName, true, false);
+	const auto selectedIndex = files.IndexOf(selected);
+	Expect(selectedIndex.has_value() && files.Current() == selected,
+		"scan freshness fixture did not select the first filename-sorted entry");
+	jpegview_linux::SourceKey currentKey = files.DescriptorAt(*selectedIndex)->Key();
+	const std::vector<fs::path> originalOrder = files.Files();
+
+	const FileList::ScanRequest reloadRequest = files.MakeScanRequest(
+		FileList::ScanOperation::Reload);
+	FileListPreparedScan staleReload = FileList::PrepareScan(reloadRequest, [] { return true; });
+	Expect(staleReload.completed && staleReload.replacement.DescriptorAt(*selectedIndex)->Key() == currentKey,
+		"reload fixture did not capture the selected file's old source identity");
+
+	const auto refreshSelected = [&](std::uint8_t firstByte, std::int64_t modificationNanoseconds) {
+		WriteBytes(selected, {firstByte, 2, 3, 4});
+		SetModificationTimeNanoseconds(selected, 1700000000, modificationNanoseconds);
+		const jpegview_linux::SourceDescriptor observed =
+			jpegview_linux::DescribeImageSource(selected);
+		Expect(observed.Key() != currentKey,
+			"source refresh fixture did not produce a different file identity");
+		const std::uint64_t mutationRevision = files.MutationRevision();
+		Expect(files.RefreshSourceDescriptor(currentKey, observed) &&
+			files.MutationRevision() == mutationRevision && files.Files() == originalOrder,
+			"filename-sorted source refresh unexpectedly changed list membership or order");
+		currentKey = observed.Key();
+	};
+	refreshSelected(9, 123457000);
+	const fs::path selectedAtApply = files.Current();
+	Expect(!files.ApplyPreparedScan(std::move(staleReload), selectedAtApply) &&
+		files.Current() == selectedAtApply && files.DescriptorAt(*selectedIndex)->Key() == currentKey,
+		"a reload captured before an exact descriptor refresh replaced the refreshed identity");
+
+	FileList::ScanRequest droppedRequest = FileList::InitialScanRequest(
+		{selected.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory);
+	droppedRequest.expectedRevision = files.MutationRevision();
+	droppedRequest.expectedDescriptorRevision = files.DescriptorRevision();
+	FileListPreparedScan staleDroppedInputs = FileList::PrepareScan(droppedRequest,
+		[] { return true; });
+	Expect(staleDroppedInputs.completed &&
+		staleDroppedInputs.replacement.DescriptorAt(0)->Key() == currentKey,
+		"dropped-input fixture did not capture its source identity before refresh");
+	refreshSelected(8, 123458000);
+	Expect(!files.ApplyPreparedScan(std::move(staleDroppedInputs)) &&
+		files.Size() == originalOrder.size() && files.Current() == selectedAtApply &&
+		files.DescriptorAt(*selectedIndex)->Key() == currentKey,
+		"a stale dropped-input replacement bypassed descriptor freshness validation");
+}
+
 void ExpectDecoded(const fs::path& filename, const std::vector<std::uint8_t>& expected,
 	bool exactRgb, bool exactAlpha, bool expectedTransparency = false) {
 	DecodedImage decoded;
@@ -2731,6 +3294,10 @@ void TestJpegDisplayDecodeScaling() {
 		prepared->width == 10 && prepared->height == 8 &&
 		prepared->bgra.size() == 10u * 8u * 4u,
 		"file-backed JPEG preparation did not produce exact display-size pixels");
+	const jpegview_linux::SourceMetadata& preparedMetadata = prepared->source.Metadata();
+	Expect(preparedMetadata.hasDimensions && preparedMetadata.width == width &&
+		preparedMetadata.height == height,
+		"reduced-DCT JPEG preparation replaced source metadata dimensions with decoded dimensions");
 	const jpegview_linux::DisplayImageRequest rotatedRequest =
 		jpegview_linux::MakeJpegDisplayImageRequest(filename, width, height,
 			8, 10, false, 1, {}, 1);
@@ -3552,6 +4119,101 @@ void TestActiveSpreadPartnerReplacementCancelsObsoleteRequests() {
 		"partner replacement did not retire active and queued obsolete source work before preparing the current partner");
 }
 
+void TestActiveSpreadCancellationUsesSubmittedSourceIdentity() {
+	TemporaryDirectory temporary;
+	const fs::path activePath = temporary.path() / "active-partner.png";
+	const fs::path queuedPath = temporary.path() / "queued-partner.png";
+	const fs::path activeReplacement = temporary.path() / "active-replacement.tmp";
+	const fs::path queuedReplacement = temporary.path() / "queued-replacement.tmp";
+	WriteBytes(activePath, {1, 2, 3, 4});
+	WriteBytes(queuedPath, {5, 6, 7, 8});
+	const jpegview_linux::SourceDescriptor submittedActive =
+		jpegview_linux::DescribeImageSource(activePath);
+	const jpegview_linux::SourceDescriptor submittedQueued =
+		jpegview_linux::DescribeImageSource(queuedPath);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool decodeStarted = false;
+	bool releaseDecode = false;
+	std::atomic<int> callbacks{0};
+	std::atomic<int> decoderReads{0};
+	jpegview_linux::DecodedImageCache cache(64,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			++decoderReads;
+			if (filename == activePath) {
+				std::unique_lock<std::mutex> lock(mutex);
+				decodeStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseDecode; });
+			}
+			image = *CachedTestImage(4);
+			return true;
+		}, {}, 1);
+	ScopedConditionRelease releaseOnExit(mutex, changed, releaseDecode);
+	const auto completion = [&](const fs::path&,
+		const jpegview_linux::DecodedImageCache::ImagePtr&) { ++callbacks; };
+	cache.RequestBackground(submittedActive, completion,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return decodeStarted;
+		});
+	}
+	cache.RequestBackground(submittedQueued, completion,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	WriteBytes(activeReplacement, {1, 2, 3, 4});
+	WriteBytes(queuedReplacement, {5, 6, 7, 8});
+	SetModificationTimeNanoseconds(activeReplacement,
+		submittedActive.BackingIdentity().modifiedSeconds,
+		static_cast<long>(submittedActive.BackingIdentity().modifiedNanoseconds));
+	SetModificationTimeNanoseconds(queuedReplacement,
+		submittedQueued.BackingIdentity().modifiedSeconds,
+		static_cast<long>(submittedQueued.BackingIdentity().modifiedNanoseconds));
+	std::ifstream keepActiveInode(activePath, std::ios::binary);
+	std::ifstream keepQueuedInode(queuedPath, std::ios::binary);
+	Expect(static_cast<bool>(keepActiveInode) && static_cast<bool>(keepQueuedInode),
+		"could not retain submitted spread source inodes during replacement");
+	std::error_code activeRenameError;
+	std::error_code queuedRenameError;
+	fs::rename(activeReplacement, activePath, activeRenameError);
+	fs::rename(queuedReplacement, queuedPath, queuedRenameError);
+	const jpegview_linux::SourceDescriptor refreshedActive =
+		jpegview_linux::DescribeImageSource(activePath);
+	const jpegview_linux::SourceDescriptor refreshedQueued =
+		jpegview_linux::DescribeImageSource(queuedPath);
+	const auto beforeCancel = cache.GetDiagnostics();
+	const bool wrongActiveKeyCanceled =
+		cache.CancelActiveSpreadRequest(refreshedActive);
+	const bool wrongQueuedKeyCanceled =
+		cache.CancelActiveSpreadRequest(refreshedQueued);
+	const auto afterWrongKeyCancel = cache.GetDiagnostics();
+	const bool originalActiveCanceled =
+		cache.CancelActiveSpreadRequest(submittedActive);
+	const bool originalQueuedCanceled =
+		cache.CancelActiveSpreadRequest(submittedQueued);
+	const auto afterOriginalKeyCancel = cache.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseDecode = true;
+	}
+	changed.notify_all();
+	const bool becameIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	Expect(reachedBarrier && !activeRenameError && !queuedRenameError &&
+		refreshedActive.Valid() && refreshedQueued.Valid() &&
+		refreshedActive.Key() != submittedActive.Key() &&
+		refreshedQueued.Key() != submittedQueued.Key() &&
+		beforeCancel.activeSpreadActive == 1 && beforeCancel.activeSpreadQueued == 1 &&
+		!wrongActiveKeyCanceled && !wrongQueuedKeyCanceled &&
+		afterWrongKeyCancel.activeSpreadActive == 1 &&
+		afterWrongKeyCancel.activeSpreadQueued == 1 && originalActiveCanceled &&
+		originalQueuedCanceled && afterOriginalKeyCancel.activeSpreadActive == 0 &&
+		afterOriginalKeyCancel.activeSpreadQueued == 0 && becameIdle &&
+		decoderReads == 1 && callbacks == 0,
+		"active spread cancellation lost the submitted identity after its path descriptor was replaced");
+}
+
 void TestDisablingDoublePageCancelsBlockedAndQueuedPartnerDimensions() {
 	TemporaryDirectory temporary;
 	const fs::path blockedPartner = temporary.path() / "blocked-old-partner.jpg";
@@ -3630,6 +4292,8 @@ void TestDisplayImageCachePromotedSpreadSurvivesPause() {
 			}
 			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			image->key = request.key;
+			image->source = request.source;
+			image->cacheKey = request.cacheKey;
 			image->width = image->height = 2;
 			image->workClass = request.workClass;
 			image->bgra.assign(16, 255);
@@ -3784,6 +4448,8 @@ void TestDisplayImageCacheForegroundActiveClassification() {
 			}
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = result->height = 2;
 			result->bgra.assign(16, 255);
 			return result;
@@ -3825,6 +4491,8 @@ void TestDisplayImageCacheForegroundActiveClassification() {
 			}
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = result->height = 2;
 			result->bgra.assign(16, 255);
 			return result;
@@ -3859,6 +4527,8 @@ void TestDisplayImageCacheForegroundActiveClassification() {
 			previewContext = jpegview_linux::CurrentPerfContext();
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = result->height = 1;
 			result->bgra.assign(4, 255);
 			return result;
@@ -3900,6 +4570,8 @@ void TestDisplayImageCachePrefetchPreservesActiveForeground() {
 			}
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = pending.key;
+			result->source = pending.source;
+			result->cacheKey = pending.cacheKey;
 			result->width = result->height = 2;
 			result->bgra.assign(16, 255);
 			return result;
@@ -3978,6 +4650,8 @@ void TestDisplayImageCacheEmptyPrefetchPreservesForegroundAndSpread() {
 		}
 		auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 		image->key = request.key;
+		image->source = request.source;
+		image->cacheKey = request.cacheKey;
 		image->width = image->height = 2;
 		image->workClass = request.workClass;
 		image->bgra.assign(16, 255);
@@ -4039,6 +4713,8 @@ void TestDisplayCacheCanceledSpreadStaysCanceledAcrossEmptyPrefetch() {
 			}
 			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			image->key = activeRequest.key;
+			image->source = activeRequest.source;
+			image->cacheKey = activeRequest.cacheKey;
 			image->width = image->height = 2;
 			image->workClass = activeRequest.workClass;
 			image->bgra.assign(16, 255);
@@ -4164,6 +4840,8 @@ void TestDisplayCacheRetirementIdentityAccounting() {
 		[](const jpegview_linux::DisplayImageRequest& request) {
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = result->height = 2;
 			result->bgra.assign(16, 255);
 			return result;
@@ -4217,6 +4895,8 @@ void TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker() {
 		return [probe](const jpegview_linux::DisplayImageRequest& request) {
 			auto* image = new jpegview_linux::PreparedDisplayImage;
 			image->key = request.key;
+			image->source = request.source;
+			image->cacheKey = request.cacheKey;
 			image->width = image->height = 2;
 			image->bgra.assign(16, 0);
 			return jpegview_linux::DisplayImageCache::ImagePtr(image,
@@ -4392,6 +5072,8 @@ void TestDisplayImageCacheBackgroundPreparation() {
 			}
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = request.targetWidth;
 			result->height = request.targetHeight;
 			result->bgra.assign(static_cast<std::size_t>(result->width) *
@@ -4437,6 +5119,8 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		[](const jpegview_linux::DisplayImageRequest& request) {
 			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			image->key = request.key;
+			image->source = request.source;
+			image->cacheKey = request.cacheKey;
 			image->width = image->height = 2;
 			image->workClass = request.workClass;
 			image->bgra.assign(16, 255);
@@ -4475,6 +5159,8 @@ void TestDisplayImageCacheBackgroundPreparation() {
 			neighborCancelChanged.wait(lock, [&] { return releaseNeighbor; });
 			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			image->key = request.key;
+			image->source = request.source;
+			image->cacheKey = request.cacheKey;
 			image->width = image->height = 2;
 			image->workClass = request.workClass;
 			image->bgra.assign(16, 255);
@@ -4512,6 +5198,22 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false, 0, adjustedLevels);
 	Expect(adjusted.Valid() && adjusted.key != scaled.key,
 		"display cache key omitted image processing parameters");
+	jpegview_linux::ImageProcessingParams subEpsilonAdjustment;
+	subEpsilonAdjustment.contrast = 0.0000000005;
+	const auto subEpsilonRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, subEpsilonAdjustment);
+	Expect(jpegview_linux::EqualImageProcessing(subEpsilonAdjustment,
+		jpegview_linux::ImageProcessingParams{}) &&
+		subEpsilonRequest.cacheKey != scaled.cacheKey,
+		"display cache key used tolerant processing equality and conflated pixel-affecting values");
+	jpegview_linux::ImageProcessingParams negativeZeroAdjustment;
+	negativeZeroAdjustment.contrast = -0.0;
+	const auto negativeZeroRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, negativeZeroAdjustment);
+	Expect(negativeZeroRequest.cacheKey == scaled.cacheKey &&
+		negativeZeroRequest.key == scaled.key &&
+		!std::signbit(negativeZeroRequest.cacheKey.processing.contrast),
+		"signed zero split structured and renderer cache identities");
 	jpegview_linux::ImageProcessingParams inactiveLevels;
 	inactiveLevels.colorCorrection = 0.25;
 	inactiveLevels.contrastCorrection = 0.5;
@@ -4522,11 +5224,67 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		firstFile, decoded, 0, 2, 2, false, 0, inactiveLevels);
 	Expect(inactiveRequest.key == scaled.key,
 		"display cache key changed for controls that are disabled or have no effect");
+	Expect(inactiveRequest.cacheKey == scaled.cacheKey &&
+		jpegview_linux::DisplayImageCacheKeyHash{}(inactiveRequest.cacheKey) ==
+			jpegview_linux::DisplayImageCacheKeyHash{}(scaled.cacheKey),
+		"disabled processing controls changed structured-key equality or its hash");
 	inactiveLevels.unsharpAmount = 1.0;
 	const auto activeUnsharpRequest = jpegview_linux::MakeDisplayImageRequest(
 		firstFile, decoded, 0, 2, 2, false, 0, inactiveLevels);
-	Expect(activeUnsharpRequest.key != scaled.key,
+	Expect(activeUnsharpRequest.key != scaled.key &&
+		activeUnsharpRequest.cacheKey != scaled.cacheKey,
 		"display cache key omitted an enabled unsharp-mask adjustment");
+	jpegview_linux::ImageProcessingParams nonFiniteProcessing;
+	nonFiniteProcessing.gamma = std::numeric_limits<double>::quiet_NaN();
+	nonFiniteProcessing.colorCorrection = std::numeric_limits<double>::infinity();
+	const auto nonFiniteRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, nonFiniteProcessing);
+	Expect(!nonFiniteRequest.Valid() && !nonFiniteRequest.cacheKey.Valid() &&
+		nonFiniteRequest.key.empty(),
+		"non-finite processing values were admitted to a display cache key");
+	jpegview_linux::ImageProcessingParams inactiveLocalDensity;
+	inactiveLocalDensity.lightenShadows = 0.6;
+	inactiveLocalDensity.darkenHighlights = 0.3;
+	inactiveLocalDensity.deepShadows = 0.2;
+	const auto disabledLocalDensity = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, inactiveLocalDensity);
+	inactiveLocalDensity.localDensityEnabled = true;
+	jpegview_linux::ImageProcessingParams enabledLocalDensityWithoutEffect;
+	enabledLocalDensityWithoutEffect.localDensityEnabled = true;
+	enabledLocalDensityWithoutEffect.deepShadows = 0.2;
+	const auto controlsEnabledWithoutEffect = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, enabledLocalDensityWithoutEffect);
+	Expect(disabledLocalDensity.cacheKey == scaled.cacheKey &&
+		controlsEnabledWithoutEffect.cacheKey == scaled.cacheKey,
+		"disabled local-density controls or an enabled zero-effect control changed the key");
+	inactiveLocalDensity.lightenShadows = 0.6;
+	const auto activeLocalDensity = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, false, 0, inactiveLocalDensity);
+	Expect(activeLocalDensity.cacheKey != scaled.cacheKey &&
+		activeLocalDensity.cacheKey.processing.localDensityEnabled &&
+		activeLocalDensity.cacheKey.processing.lightenShadows == 0.6,
+		"enabled local-density processing was omitted from the structured key");
+	const auto autoContrastBase = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, true);
+	const auto autoContrastAdjusted = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 2, 2, true, 0, inactiveLevels);
+	Expect(autoContrastBase.cacheKey != scaled.cacheKey &&
+		autoContrastAdjusted.cacheKey != autoContrastBase.cacheKey &&
+		autoContrastAdjusted.cacheKey.processing.colorCorrection ==
+			inactiveLevels.colorCorrection,
+		"auto-contrast or its enabled correction controls were omitted from structured identity");
+	const auto adjustedTarget = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 3, 2, false);
+	Expect(adjustedTarget.cacheKey != scaled.cacheKey,
+		"display structured key omitted target geometry");
+	auto twoFrames = std::make_shared<DecodedImage>(*decoded);
+	twoFrames->frames.push_back(twoFrames->frames.front());
+	const auto firstFrame = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, twoFrames, 0, 2, 2, false);
+	const auto secondFrame = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, twoFrames, 1, 2, 2, false);
+	Expect(firstFrame.cacheKey != secondFrame.cacheKey,
+		"display structured key omitted animation frame identity");
 
 	std::mutex coalesceMutex;
 	std::condition_variable coalesceChanged;
@@ -4554,6 +5312,8 @@ void TestDisplayImageCacheBackgroundPreparation() {
 			}
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = 2;
 			result->height = 2;
 			result->bgra.assign(16, 255);
@@ -4605,7 +5365,9 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	Expect(rotatedClockwiseRequest.Valid() && rotatedCounterClockwiseRequest.Valid() &&
 		unrotatedRequest.Valid() && halfTurnRequest.Valid() &&
 		rotatedClockwiseRequest.key != rotatedCounterClockwiseRequest.key &&
-		unrotatedRequest.key != halfTurnRequest.key,
+		unrotatedRequest.key != halfTurnRequest.key &&
+		rotatedClockwiseRequest.cacheKey != rotatedCounterClockwiseRequest.cacheKey &&
+		unrotatedRequest.cacheKey != halfTurnRequest.cacheKey,
 		"display cache keys did not distinguish quarter-turn orientation");
 	jpegview_linux::DisplayImageCache rotationProcessor(256, 1);
 	const auto rotatedClockwise = rotationProcessor.RequestAndWait(rotatedClockwiseRequest);
@@ -4664,6 +5426,8 @@ void TestDisplayImageCacheBackgroundPreparation() {
 			}
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = request.targetWidth;
 			result->height = 1;
 			result->bgra.assign(16, static_cast<std::uint8_t>(request.targetWidth));
@@ -4704,6 +5468,8 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		}
 		auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 		result->key = request.key;
+		result->source = request.source;
+		result->cacheKey = request.cacheKey;
 		result->width = request.targetWidth;
 		result->height = 1;
 		result->bgra.assign(static_cast<std::size_t>(request.targetWidth) * 4, 255);
@@ -4750,6 +5516,8 @@ void TestDisplayImageCacheBackgroundPreparation() {
 			}
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = request.targetWidth;
 			result->height = 1;
 			result->bgra.assign(static_cast<std::size_t>(request.targetWidth) * 4, 255);
@@ -4782,8 +5550,14 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		"foreground display preparation did not evict the least-recently-used entry");
 
 	WriteText(firstFile, "first-file-was-modified");
-	Expect(ordered.Find(requests[0]) == nullptr,
-		"display cache served prepared pixels after the source file changed");
+	const jpegview_linux::SourceDescriptor refreshedSource =
+		jpegview_linux::DescribeImageSource(firstFile);
+	const auto refreshedRequest = jpegview_linux::MakeDisplayImageRequest(
+		refreshedSource, decoded, 0, 11, 1, false, 3);
+	Expect(refreshedSource.Valid() &&
+		refreshedSource.Key() != requests[0].source.Key() &&
+		ordered.Find(refreshedRequest) == nullptr,
+		"display cache served old prepared pixels for the refreshed source identity");
 	ordered.Clear();
 	Expect(ordered.CachedImages() == 0 && ordered.CachedBytes() == 0 &&
 		ordered.TakeCompleted(10).empty(),
@@ -4801,6 +5575,8 @@ void TestDisplayImageCacheBackgroundPreparation() {
 			}
 			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 			result->key = request.key;
+			result->source = request.source;
+			result->cacheKey = request.cacheKey;
 			result->width = 1;
 			result->height = 1;
 			result->priority = request.priority;
@@ -4880,9 +5656,11 @@ void TestSharedCacheBudgetAccounting() {
 	decodedCache.Store(decodedFile, CachedTestImage(16));
 	jpegview_linux::DisplayImageCache displayCache(64, 1,
 		[](const jpegview_linux::DisplayImageRequest& request) {
-			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
-			result->key = request.key;
-			result->width = 2;
+				auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+				result->key = request.key;
+				result->source = request.source;
+				result->cacheKey = request.cacheKey;
+				result->width = 2;
 			result->height = 2;
 			result->bgra.assign(16, 0);
 			return result;
@@ -5156,6 +5934,18 @@ void TestCropSelectionModelGeometryAndManipulation() {
 	selection.SetImageSize(0, 0);
 	Expect(!selection.StartNew(0, 0) && !selection.HasSelection(),
 		"selection accepted an empty source image");
+}
+
+void TestLosslessJpegCropAvailabilityPolicy() {
+	using jpegview_linux::CanOfferLosslessJpegCrop;
+	Expect(CanOfferLosslessJpegCrop(true, false, false),
+		"unmodified source-backed JPEG did not offer lossless crop");
+	Expect(!CanOfferLosslessJpegCrop(true, true, false),
+		"modified pixels offered lossless crop");
+	Expect(!CanOfferLosslessJpegCrop(true, false, true),
+		"detached source pixels offered lossless crop");
+	Expect(!CanOfferLosslessJpegCrop(false, false, false),
+		"unavailable JPEG source offered lossless crop");
 }
 
 void TestCropSelectionViewMappingAndHitTesting() {
@@ -8422,6 +9212,387 @@ void TestThumbnailCatalogReplacementIdentity() {
 		"thumbnail scheduler did not serve the replacement catalog with the same mutation revision");
 }
 
+void TestThumbnailSourceIdentityReplacementInvalidates() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "same-path.png";
+	const fs::path replacement = temporary.path() / "replacement.tmp";
+	WriteBytes(source, {1, 2, 3, 4});
+	FileList files({temporary.path().string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.Current() == source,
+		"same-path thumbnail replacement fixture did not enter the file list");
+	const jpegview_linux::SourceKey originalKey = files.DescriptorAt(0)->Key();
+
+	jpegview_linux::ThumbnailCacheScheduler scheduler;
+	scheduler.SetSourceCatalog({originalKey});
+	scheduler.SetCurrent(0);
+	scheduler.SetGeometry(100, 60);
+	Expect(scheduler.Store(originalKey).empty() && scheduler.IsCached(originalKey),
+		"same-path thumbnail replacement fixture could not retain its initial thumbnail");
+
+	WriteBytes(replacement, {4, 3, 2, 1});
+	std::error_code renameError;
+	fs::rename(replacement, source, renameError);
+	Expect(!renameError && fs::file_size(source) == 4,
+		"same-size file replacement fixture could not replace its inode");
+	Expect(files.Reload(source), "same-path file replacement could not reload its file list");
+	const jpegview_linux::SourceKey replacementKey = files.DescriptorAt(0)->Key();
+	Expect(replacementKey != originalKey,
+		"same-size file replacement did not change the file-list source key");
+	scheduler.SetSourceCatalog({replacementKey});
+	Expect(!scheduler.IsCached(originalKey) && !scheduler.IsCached(replacementKey),
+		"thumbnail cache retained old pixels after a same-size inode replacement and reload");
+}
+
+void TestThumbnailBulkEvictionUsesExactKeys() {
+	constexpr std::size_t entryCount = 15000;
+	std::vector<jpegview_linux::SourceKey> original;
+	original.reserve(entryCount);
+	for (std::size_t index = 0; index < entryCount; ++index) {
+		jpegview_linux::SourceIdentity identity;
+		identity.device = 1;
+		identity.inode = index + 1;
+		identity.size = 128;
+		identity.modifiedSeconds = 1700000000;
+		identity.modifiedNanoseconds = static_cast<std::int64_t>(index);
+		identity.valid = true;
+		original.emplace_back("/bulk/thumb-" + std::to_string(index) + ".png", identity);
+	}
+	jpegview_linux::ThumbnailCacheScheduler scheduler;
+	scheduler.SetSourceCatalog(original, entryCount);
+	scheduler.SetSourceCurrent(0);
+	scheduler.SetGeometry(100, 60);
+	std::unordered_map<jpegview_linux::SourceKey, std::size_t,
+		jpegview_linux::SourceKeyHash> rendererCache;
+	rendererCache.reserve(entryCount * 2);
+	for (std::size_t index = 0; index < entryCount; ++index) {
+		Expect(scheduler.Store(original[index]).empty(),
+			"bulk eviction fixture unexpectedly trimmed its scheduled thumbnail keys");
+		rendererCache.emplace(original[index], index);
+	}
+
+	std::vector<jpegview_linux::SourceKey> replacement;
+	replacement.reserve(entryCount);
+	std::vector<jpegview_linux::SourceKey> replacementByIndex(entryCount);
+	std::unordered_set<jpegview_linux::SourceKey, jpegview_linux::SourceKeyHash> expectedOld;
+	for (std::size_t index = 0; index < entryCount; ++index) {
+		if ((index % 2) != 0) {
+			replacement.push_back(original[index]);
+			continue;
+		}
+		expectedOld.insert(original[index]);
+		auto identity = original[index].backingIdentity;
+		identity.inode += entryCount;
+		const jpegview_linux::SourceKey newIdentity(original[index].logicalPath, identity);
+		replacement.push_back(newIdentity);
+		replacementByIndex[index] = newIdentity;
+		rendererCache.emplace(newIdentity, index + entryCount);
+	}
+	const std::vector<jpegview_linux::SourceKey> evicted =
+		scheduler.SetSourceCatalog(std::move(replacement), entryCount);
+	std::unordered_set<jpegview_linux::SourceKey, jpegview_linux::SourceKeyHash> actualOld(
+		evicted.begin(), evicted.end());
+	Expect(actualOld == expectedOld,
+		"source catalog replacement did not return the exact old identities for changed paths");
+	const jpegview_linux::ThumbnailCacheEvictionCounts counts =
+		jpegview_linux::EraseThumbnailCacheEntries(rendererCache, evicted,
+			[](std::size_t&) {});
+	Expect(counts.keyLookups == evicted.size() &&
+		counts.entriesErased == evicted.size() && rendererCache.size() == entryCount &&
+		actualOld.size() == entryCount / 2,
+		"bulk thumbnail invalidation work scaled with cache entries instead of evicted keys");
+	for (std::size_t index = 0; index < entryCount; ++index) {
+		const bool changed = (index % 2) == 0;
+		const bool staleKeyPresent = rendererCache.find(original[index]) != rendererCache.end();
+		Expect(staleKeyPresent == !changed,
+			"bulk eviction did not remove exactly the stale source identities");
+		if (changed) {
+			Expect(rendererCache.find(replacementByIndex[index]) != rendererCache.end(),
+				"same-path replacement texture was erased with the stale identity");
+		}
+	}
+}
+
+void TestDisplayCacheReportsDeletedSourceIdentity() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "deleted-source.png";
+	WriteBytes(source, {1, 2, 3, 4});
+	FileList files({temporary.path().string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.Current() == source,
+		"deleted-source worker fixture did not enter its file list");
+	const jpegview_linux::SourceDescriptor descriptor = *files.DescriptorAt(0);
+	const fs::path stagedRecreation = temporary.path() / "recreated-source.tmp";
+	WriteBytes(stagedRecreation, {5, 6, 7, 8});
+	const auto request = jpegview_linux::MakeDisplayImageRequest(descriptor,
+		DisplayCacheTestImage(4, 4), 0, 2, 2, false);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool started = false;
+	bool release = false;
+	const auto processor = [&](const jpegview_linux::DisplayImageRequest&) {
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			started = true;
+			changed.notify_all();
+			changed.wait(lock, [&] { return release; });
+		}
+		return jpegview_linux::DisplayImageCache::ImagePtr{};
+	};
+	jpegview_linux::DisplayImageCache cache(64, 1, processor);
+	ScopedConditionRelease releaseProcessor(mutex, changed, release);
+	cache.RequestBackground(request);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return started;
+		});
+	}
+	std::error_code removeError;
+	const bool removed = fs::remove(source, removeError);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		release = true;
+	}
+	changed.notify_all();
+	Expect(reachedBarrier && removed && !removeError &&
+		cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"deleted-source cache worker did not reach and leave its deterministic barrier");
+	const auto notices = cache.TakeChangedSources();
+	Expect(notices.size() == 1 && notices.front().previous == descriptor.Key() &&
+		notices.front().observed.LogicalPath() == descriptor.LogicalPath() &&
+		!notices.front().observed.Valid() &&
+		!notices.front().observed.BackingIdentity().valid &&
+		cache.TakeCompleted(1).empty(),
+		"deleted source did not evict its prior cache identity with an invalid descriptor notice");
+	const jpegview_linux::SourceChangeNotice notice = notices.front();
+	Expect(files.RefreshSourceDescriptor(notice.previous, notice.observed) &&
+		!files.DescriptorAt(0)->Key().Valid(),
+		"file list did not apply a worker notice for its exact deleted-source key");
+	std::error_code recreateError;
+	fs::rename(stagedRecreation, source, recreateError);
+	Expect(!recreateError && fs::file_size(source) == 4,
+		"deleted-source fixture could not atomically install a distinct replacement inode");
+	const jpegview_linux::SourceDescriptor recreated =
+		jpegview_linux::DescribeImageSource(source);
+	const jpegview_linux::SourceKey missingKey = files.DescriptorAt(0)->Key();
+	Expect(recreated.Valid() && recreated.Key() != notice.previous,
+		"recreated source did not produce a distinct valid descriptor");
+	Expect(files.RefreshSourceDescriptor(missingKey, recreated) &&
+		files.DescriptorAt(0)->Key() == recreated.Key(),
+		"file list did not accept an exact refresh from its invalid missing-source key");
+	Expect(!files.RefreshSourceDescriptor(notice.previous, notice.observed) &&
+		files.DescriptorAt(0)->Key() == recreated.Key(),
+		"delayed worker notice overwrote a newer descriptor for the same logical path");
+}
+
+void TestDecodedCacheReportsDeletedSourceAfterDecodeFailure() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "deleted-during-decode.png";
+	WriteBytes(source, {1, 2, 3, 4});
+	const jpegview_linux::SourceDescriptor descriptor =
+		jpegview_linux::DescribeImageSource(source);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool started = false;
+	bool release = false;
+	const auto decoder = [&](const fs::path&, DecodedImage&, std::string& error) {
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			started = true;
+			changed.notify_all();
+			changed.wait(lock, [&] { return release; });
+		}
+		error = "source disappeared during decode";
+		return false;
+	};
+	jpegview_linux::DecodedImageCache cache(64, decoder);
+	ScopedConditionRelease releaseDecoder(mutex, changed, release);
+	cache.RequestBackground(descriptor, {});
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return started;
+		});
+	}
+	std::error_code removeError;
+	const bool removed = fs::remove(source, removeError);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		release = true;
+	}
+	changed.notify_all();
+	Expect(reachedBarrier && removed && !removeError &&
+		cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"decoded-cache worker did not reach and leave its deterministic deletion barrier");
+	const std::vector<jpegview_linux::SourceChangeNotice> notices =
+		cache.TakeChangedSources();
+	Expect(notices.size() == 1 && notices.front().previous == descriptor.Key() &&
+		notices.front().observed.LogicalPath() == descriptor.LogicalPath() &&
+		!notices.front().observed.Valid() && cache.CachedImages() == 0,
+		"failed decode after source deletion did not report its invalid observed identity");
+}
+
+void TestThumbnailSourceNoticeRoutesThroughCurrentRefresh() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "current-thumbnail-source.png";
+	const fs::path replacement = temporary.path() / "current-thumbnail-replacement.tmp";
+	WriteBytes(source, {1, 2, 3, 4});
+	FileList files({temporary.path().string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.Current() == source,
+		"thumbnail notice fixture did not select its source image");
+	const jpegview_linux::SourceDescriptor original = *files.DescriptorAt(0);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool started = false;
+	bool release = false;
+	const auto processor = [&](const jpegview_linux::ThumbnailPreparationRequest&) {
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			started = true;
+			changed.notify_all();
+			changed.wait(lock, [&] { return release; });
+		}
+		return jpegview_linux::ThumbnailPreparationWorker::ImagePtr{};
+	};
+	jpegview_linux::ThumbnailPreparationWorker worker(processor);
+	jpegview_linux::ThumbnailPreparationRequest request;
+	request.key = original.Key();
+	request.maximumWidth = 32;
+	request.maximumHeight = 24;
+	request.logicalSource = source;
+	request.sourceDescriptor = original;
+	Expect(worker.Request(request), "thumbnail notice worker rejected its current source");
+	ScopedConditionRelease releaseProcessor(mutex, changed, release);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return started;
+		});
+	}
+	WriteBytes(replacement, {9, 8, 7, 6});
+	std::ifstream keepOriginalInode(source, std::ios::binary);
+	Expect(static_cast<bool>(keepOriginalInode),
+		"could not keep the old current source inode during thumbnail replacement");
+	std::error_code renameError;
+	fs::rename(replacement, source, renameError);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		release = true;
+	}
+	changed.notify_all();
+	Expect(reachedBarrier && !renameError && worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not observe a staged current-source replacement");
+	const auto results = worker.TakeCompleted(1);
+	Expect(results.size() == 1 && results.front().key == original.Key() &&
+		results.front().observedSource.Valid() &&
+		results.front().observedSource.Key() != original.Key() && !results.front().image,
+		"thumbnail worker did not emit the exact stale-source notice for the replaced file");
+	const jpegview_linux::SourceRefreshOutcome outcome = jpegview_linux::RefreshFileListSource(
+		files, results.front().key, results.front().observedSource);
+	Expect(outcome.applied && outcome.selectedSourceChanged && files.Current() == source &&
+		files.DescriptorAt(files.CurrentIndex())->Key() ==
+			results.front().observedSource.Key(),
+		"thumbnail current-source notice was not routed into the current-image reload path");
+}
+
+void TestThumbnailInvalidDescriptorRecapturesRecreatedSource() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "recreated-thumbnail.png";
+	WriteTinyImage(source);
+	FileList files({temporary.path().string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.Current() == source,
+		"invalid-thumbnail-descriptor fixture did not select its image");
+	const jpegview_linux::SourceDescriptor original = *files.DescriptorAt(0);
+	std::error_code removeError;
+	fs::remove(source, removeError);
+	Expect(!removeError, "could not remove the thumbnail source before descriptor invalidation");
+	const jpegview_linux::SourceDescriptor missing =
+		jpegview_linux::DescribeImageSource(source);
+	const jpegview_linux::SourceRefreshOutcome missingRefresh =
+		jpegview_linux::RefreshFileListSource(files, original.Key(), missing);
+	Expect(!missing.Valid() && !missing.LogicalPath().empty() &&
+		missingRefresh.applied && missingRefresh.selectedSourceChanged &&
+		files.DescriptorAt(0)->Key() == missing.Key(),
+		"file list did not retain the exact invalid descriptor after deletion");
+
+	std::atomic<int> processorCalls{0};
+	const auto processor = [&processorCalls](
+		const jpegview_linux::ThumbnailPreparationRequest& request) {
+			++processorCalls;
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = request.key;
+			image->width = 1;
+			image->height = 1;
+			image->bgra = {1, 2, 3, 255};
+			return image;
+		};
+	jpegview_linux::ThumbnailPreparationWorker worker(processor);
+	jpegview_linux::ThumbnailPreparationRequest request;
+	request.key = missing.Key();
+	request.maximumWidth = 16;
+	request.maximumHeight = 16;
+	request.logicalSource = source;
+	request.sourceDescriptor = missing;
+	Expect(worker.Request(request),
+		"thumbnail worker rejected a nonempty invalid source descriptor");
+	Expect(worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not finish the still-missing source check");
+	const auto stillMissingResults = worker.TakeCompleted(1);
+	Expect(stillMissingResults.size() == 1 &&
+		stillMissingResults.front().key == missing.Key() &&
+		stillMissingResults.front().observedSource.LogicalPath().empty() &&
+		!stillMissingResults.front().image && processorCalls == 0,
+		"still-missing source published pixels under its invalid thumbnail key");
+	WriteTinyImage(source);
+	const jpegview_linux::SourceDescriptor recreated =
+		jpegview_linux::DescribeImageSource(source);
+	Expect(recreated.Valid() && recreated.Key() != missing.Key(),
+		"thumbnail source was not recreated with a fresh valid identity");
+	Expect(worker.Request(request) && worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not finish invalid-descriptor recapture after recreation");
+	const auto results = worker.TakeCompleted(1);
+	Expect(results.size() == 1 && results.front().key == missing.Key() &&
+		results.front().observedSource.Valid() &&
+		results.front().observedSource.Key() == recreated.Key() &&
+		results.front().observedSource.LogicalPath() == source &&
+		!results.front().image && processorCalls == 0,
+		"recreated source was decoded or published under the old invalid thumbnail key");
+	const jpegview_linux::SourceRefreshOutcome recreatedRefresh =
+		jpegview_linux::RefreshFileListSource(files, results.front().key,
+			results.front().observedSource);
+	Expect(recreatedRefresh.applied && recreatedRefresh.selectedSourceChanged &&
+		files.DescriptorAt(files.CurrentIndex())->Key() == recreated.Key() &&
+		!files.RefreshSourceDescriptor(missing.Key(), results.front().observedSource),
+		"exact-key refresh did not move the active list from invalid to recreated source identity");
+
+	std::atomic<int> syntheticProcessorCalls{0};
+	jpegview_linux::ThumbnailPreparationWorker syntheticWorker(
+		[&syntheticProcessorCalls](const jpegview_linux::ThumbnailPreparationRequest& synthetic) {
+			++syntheticProcessorCalls;
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = synthetic.key;
+			image->width = 1;
+			image->height = 1;
+			image->bgra = {4, 3, 2, 255};
+			return image;
+		});
+	jpegview_linux::ThumbnailPreparationRequest syntheticRequest;
+	syntheticRequest.key = jpegview_linux::SourceKey("synthetic-thumbnail");
+	syntheticRequest.maximumWidth = 1;
+	syntheticRequest.maximumHeight = 1;
+	syntheticRequest.logicalSource = "/virtual/synthetic-thumbnail";
+	Expect(syntheticWorker.Request(syntheticRequest) &&
+		syntheticWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker changed behavior for a truly empty synthetic descriptor");
+	const auto syntheticResults = syntheticWorker.TakeCompleted(1);
+	Expect(syntheticResults.size() == 1 && syntheticResults.front().image &&
+		syntheticResults.front().observedSource.LogicalPath().empty() &&
+		syntheticProcessorCalls == 1,
+		"empty synthetic descriptor was incorrectly recaptured or rejected");
+}
+
 void TestThumbnailBackgroundPreparation() {
 	Expect(jpegview_linux::CanReuseDisplayPixelsForThumbnail(1920, 1080, 4u * 1024u * 1024u) &&
 		!jpegview_linux::CanReuseDisplayPixelsForThumbnail(8000, 6000, 4u * 1024u * 1024u) &&
@@ -8434,13 +9605,14 @@ void TestThumbnailBackgroundPreparation() {
 	source->bgra[3] = 0;
 	source->hasTransparency = true;
 	jpegview_linux::ThumbnailPreparationWorker realWorker;
-	Expect(realWorker.Request({"scaled", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::DistantSpeculation, {}, 0, 0, {}}),
+	Expect(realWorker.Request({jpegview_linux::SourceKey("scaled"), source, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::DistantSpeculation, {}, 0, 0, {}, 0, {}}),
 		"thumbnail worker rejected valid display-ready pixels");
 	Expect(realWorker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not finish source-area downsampling");
 	const auto scaled = realWorker.TakeCompleted(1);
-	const std::string scaledResultKey = scaled.empty() ? "<empty>" : scaled[0].key;
+	const std::string scaledResultKey = scaled.empty() ? "<empty>" :
+		scaled[0].key.logicalPath;
 	const bool hasScaledPixels = !scaled.empty() && static_cast<bool>(scaled[0].image);
 	Expect(scaled.size() == 1 && scaled[0].image && scaled[0].key == "scaled",
 		"thumbnail worker did not return its display-source request (count=" +
@@ -8454,8 +9626,8 @@ void TestThumbnailBackgroundPreparation() {
 		scaled[0].workClass ==
 		jpegview_linux::PerfWorkClass::DistantSpeculation,
 		"thumbnail worker lost transparency or work-class metadata");
-	Expect(realWorker.Request({"scaled-visible", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}) &&
+	Expect(realWorker.Request({jpegview_linux::SourceKey("scaled-visible"), source, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}, 0, {}}) &&
 		realWorker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not process the visible-row attribution fixture");
 	const auto visibleScaled = realWorker.TakeCompleted(1);
@@ -8473,7 +9645,7 @@ void TestThumbnailBackgroundPreparation() {
 		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
 			{
 				std::unique_lock<std::mutex> lock(orderMutex);
-				order.push_back(request.key);
+				order.push_back(request.key.logicalPath);
 				if (request.key == "blocker") {
 					blockerStarted = true;
 					orderChanged.notify_all();
@@ -8486,8 +9658,8 @@ void TestThumbnailBackgroundPreparation() {
 			result->bgra.assign(4, 255);
 			return result;
 		});
-	Expect(prioritized.Request({"blocker", source, 2, 2, 9,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}),
+		Expect(prioritized.Request({jpegview_linux::SourceKey("blocker"), source, 2, 2, 9,
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}, 0, {}}),
 		"thumbnail worker rejected its blocking request");
 	bool blockerStartedInTime = false;
 	{
@@ -8496,10 +9668,10 @@ void TestThumbnailBackgroundPreparation() {
 			[&] { return blockerStarted; });
 	}
 	const bool queuedNeighbors = blockerStartedInTime &&
-		prioritized.Request({"far", source, 2, 2, 5,
-			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}) &&
-		prioritized.Request({"near", source, 2, 2, 1,
-			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}});
+		prioritized.Request({jpegview_linux::SourceKey("far"), source, 2, 2, 5,
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}, 0, {}}) &&
+		prioritized.Request({jpegview_linux::SourceKey("near"), source, 2, 2, 1,
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}, 0, {}});
 	{
 		std::lock_guard<std::mutex> lock(orderMutex);
 		releaseBlocker = true;
@@ -8545,10 +9717,10 @@ void TestThumbnailBackgroundPreparation() {
 			result->bgra.assign(4, 255);
 			return result;
 		});
-	Expect(retainedWorker.Request({"active-source", activeSource, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}) &&
-		retainedWorker.Request({"queued-source", queuedSource, 2, 2, 1,
-			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}),
+	Expect(retainedWorker.Request({jpegview_linux::SourceKey("active-source"), activeSource, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}, 0, {}}) &&
+		retainedWorker.Request({jpegview_linux::SourceKey("queued-source"), queuedSource, 2, 2, 1,
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}, 0, {}}),
 		"thumbnail worker rejected retained-source accounting fixtures");
 	bool retainedWorkerReachedBarrier = false;
 	{
@@ -8587,8 +9759,8 @@ void TestThumbnailBackgroundPreparation() {
 			result->key = request.key;
 			return result;
 		});
-	Expect(cancellable.Request({"stale", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 1, 4, {}}),
+	Expect(cancellable.Request({jpegview_linux::SourceKey("stale"), source, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 1, 4, {}, 0, {}}),
 		"thumbnail worker rejected cancellation fixture");
 	bool staleStartedInTime = false;
 	{
@@ -8606,8 +9778,8 @@ void TestThumbnailBackgroundPreparation() {
 	Expect(cancellable.WaitUntilIdle(std::chrono::seconds(2)) &&
 		cancellable.TakeCompleted(1).empty(),
 		"cleared thumbnail work published a stale result");
-	Expect(cancellable.Request({"stale", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 2, 5, {}}) &&
+	Expect(cancellable.Request({jpegview_linux::SourceKey("stale"), source, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 2, 5, {}, 0, {}}) &&
 		cancellable.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker rejected replacement work after cancellation");
 	const auto replaced = cancellable.TakeCompleted(1);
@@ -8762,7 +9934,7 @@ void TestThumbnailQueueDisplacementReturnsSchedulerWork() {
 		retirementMutex, retirementChanged, releaseRetirement);
 
 	jpegview_linux::ThumbnailPreparationRequest warmup;
-	warmup.key = "retirement-warmup";
+	warmup.key = jpegview_linux::SourceKey("retirement-warmup");
 	warmup.source = retiringSource;
 	warmup.maximumWidth = warmup.maximumHeight = 100;
 	Expect(worker.Request(warmup).accepted,
@@ -8795,7 +9967,7 @@ void TestThumbnailQueueDisplacementReturnsSchedulerWork() {
 	const auto makeFileRequest = [](const jpegview_linux::ThumbnailLoadRequest& load) {
 		jpegview_linux::ThumbnailPreparationRequest request;
 		request.key = load.key;
-		request.logicalSource = load.key;
+		request.logicalSource = load.key.logicalPath;
 		request.maximumWidth = load.maximumWidth;
 		request.maximumHeight = load.maximumHeight;
 		request.priority = 6;
@@ -8957,8 +10129,8 @@ void TestThumbnailFileBackedPreparationAndShutdown() {
 			image->bgra.assign(4, 255);
 			return image;
 		});
-	Expect(activeWorker->Request({"shutdown-active", nullptr, 1, 1, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, "/virtual/shutdown-active", 1, 1, {}}),
+	Expect(activeWorker->Request({jpegview_linux::SourceKey("shutdown-active"), nullptr, 1, 1, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, "/virtual/shutdown-active", 1, 1, {}, 0, {}}),
 		"thumbnail worker rejected the active-shutdown fixture");
 	{
 		std::unique_lock<std::mutex> lock(shutdownMutex);
@@ -9793,6 +10965,94 @@ void TestFileDialogDirectorySummaries() {
 		"background directory summary loader published stale work after a replacement request");
 }
 
+void TestColdArchiveRowDescriptorsAreCapturedOffThread() {
+	TemporaryDirectory temporary;
+	const fs::path browseFile = temporary.path() / "browse-row.png";
+	const fs::path archivePayload = temporary.path() / "payload.bin";
+	const fs::path recentArchive = temporary.path() / "recent-cold.zip";
+	WriteBytes(browseFile, {1, 2, 3, 4});
+	WriteBytes(archivePayload, {9, 8, 7, 6, 5});
+	WriteZipArchive(recentArchive, {{"recent.png", archivePayload}});
+	const fs::path recentMember = recentArchive / "recent.png";
+	const jpegview_linux::SourceDescriptor browsePlaceholder(browseFile, {}, {});
+	const jpegview_linux::SourceDescriptor recentPlaceholder(recentMember, {}, {});
+	Expect(!browsePlaceholder.Valid() && !recentPlaceholder.Valid(),
+		"file-dialog rows were not left as uncaptured placeholders on the event thread");
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool archiveCaptureStarted = false;
+	bool releaseArchiveCapture = false;
+	bool requestReturned = false;
+	std::thread::id requestThread;
+	std::thread::id archiveCaptureThread;
+	const auto capture = [&](const jpegview_linux::SourceDescriptor& requested) {
+		if (requested.LogicalPath() == recentMember) {
+			std::unique_lock<std::mutex> lock(mutex);
+			archiveCaptureThread = std::this_thread::get_id();
+			archiveCaptureStarted = true;
+			changed.notify_all();
+			changed.wait(lock, [&] { return releaseArchiveCapture; });
+		}
+		return jpegview_linux::DescribeImageSource(requested.LogicalPath());
+	};
+	jpegview_linux::FileDialogFileSizeLoader loader(capture);
+	auto requestCall = std::async(std::launch::async, [&] {
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			requestThread = std::this_thread::get_id();
+		}
+		loader.RequestSources({browsePlaceholder, recentPlaceholder}, 82);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			requestReturned = true;
+		}
+		changed.notify_all();
+	});
+	bool requestReturnedWhileArchiveCaptureBlocked = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		requestReturnedWhileArchiveCaptureBlocked =
+			changed.wait_for(lock, std::chrono::seconds(2), [&] {
+				return archiveCaptureStarted && requestReturned;
+		});
+	}
+	bool archiveCaptureReached = false;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		archiveCaptureReached = archiveCaptureStarted;
+	}
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseArchiveCapture = true;
+	}
+	changed.notify_all();
+	const bool requestCallCompleted =
+		requestCall.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+	if (requestCallCompleted) requestCall.get();
+	Expect(archiveCaptureReached && requestReturnedWhileArchiveCaptureBlocked &&
+		requestCallCompleted && archiveCaptureThread != requestThread,
+		"cold archive catalog capture blocked or ran on the file-dialog request thread");
+	std::vector<jpegview_linux::FileDialogFileSizeResult> results;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.size() < 2 && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		auto ready = loader.TakeReady();
+		results.insert(results.end(), std::make_move_iterator(ready.begin()),
+			std::make_move_iterator(ready.end()));
+	}
+	const auto browseResult = std::find_if(results.begin(), results.end(),
+		[&](const auto& result) { return result.path == browseFile; });
+	const auto recentResult = std::find_if(results.begin(), results.end(),
+		[&](const auto& result) { return result.path == recentMember; });
+	Expect(results.size() == 2 && browseResult != results.end() &&
+		recentResult != results.end() && browseResult->observedSource.Valid() &&
+		recentResult->observedSource.Valid() &&
+		recentResult->observedSource.Metadata().archiveMember &&
+		recentResult->size == fs::file_size(archivePayload),
+		"Browse/Recents row placeholders did not receive worker-captured source metadata");
+}
+
 void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 	TemporaryDirectory temporary;
 	const fs::path album = temporary.path() / "album";
@@ -10015,8 +11275,10 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 		results[0].hasTransparency && results[0].error.empty(),
 		"file-dialog preview lost transparent PNG metadata");
 
+	const jpegview_linux::SourceDescriptor previewPlaceholder(ppm, {}, {});
 	const std::uint64_t resizedGeneration = loader.Request(ppm, false,
-		jpegview_linux::FileDialogSortMode::Name, widerPreviewSize.width, widerPreviewSize.height);
+		jpegview_linux::FileDialogSortMode::Name, widerPreviewSize.width,
+		widerPreviewSize.height, previewPlaceholder);
 	Expect(resizedGeneration > currentGeneration,
 		"changing the preview target size did not replace its request");
 	results.clear();
@@ -10026,11 +11288,97 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 		results = loader.TakeReady();
 	}
 	Expect(results.size() == 1 && results[0].generation == resizedGeneration &&
-		results[0].width == 304 && results[0].height == 228 && results[0].error.empty(),
+		results[0].width == 304 && results[0].height == 228 && results[0].error.empty() &&
+		results[0].requestedSourceDescriptor.Key() == previewPlaceholder.Key() &&
+		results[0].sourceDescriptor.Valid(),
 		"resized preview request did not return the source image at its new target size");
 
 	loader.Clear();
 	Expect(loader.TakeReady().empty(), "clearing the preview loader retained a completed image");
+}
+
+void TestFileDialogPreviewRecapturesRecreatedSource() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "recreated-preview.png";
+	const jpegview_linux::SourceDescriptor missing(source, {}, {});
+	Expect(!missing.Valid(), "preview recreation fixture unexpectedly exists before its worker request");
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool captureStarted = false;
+	bool releaseCapture = false;
+	std::thread::id captureThread;
+	const std::thread::id requestThread = std::this_thread::get_id();
+	const auto capture = [&](const jpegview_linux::SourceDescriptor& requested) {
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			if (!captureStarted) {
+				captureThread = std::this_thread::get_id();
+				captureStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseCapture; });
+			}
+		}
+		return jpegview_linux::DescribeImageSource(requested.LogicalPath());
+	};
+	jpegview_linux::FileDialogPreviewLoader loader({}, capture);
+	const std::uint64_t generation = loader.Request(source, false,
+		jpegview_linux::FileDialogSortMode::Name, 2, 2, missing);
+	ScopedConditionRelease release(mutex, changed, releaseCapture);
+	bool recaptureReached = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		recaptureReached = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return captureStarted;
+		});
+	}
+	if (recaptureReached) WriteTinyImage(source);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseCapture = true;
+	}
+	changed.notify_all();
+	std::vector<jpegview_linux::FileDialogPreviewResult> results;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+		results = loader.TakeReady();
+		if (results.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	Expect(recaptureReached && captureThread != requestThread && results.size() == 1 &&
+		results.front().generation == generation &&
+		results.front().requestedSourceDescriptor.Key() == missing.Key() &&
+		results.front().sourceDescriptor.Valid() &&
+		results.front().sourceDescriptor.Key() != missing.Key() &&
+		results.front().observedSource.Key() == results.front().sourceDescriptor.Key() &&
+		results.front().error.empty() && results.front().width == 1 &&
+		results.front().height == 1 && !results.front().bgra.empty(),
+		"preview did not recapture a missing source after recreation before decoding its pixels");
+
+	const fs::path stillMissingPath = temporary.path() / "still-missing.png";
+	const jpegview_linux::SourceDescriptor stillMissing(stillMissingPath, {}, {});
+	std::atomic<int> customProcessorCalls{0};
+	jpegview_linux::FileDialogPreviewLoader customLoader(
+		[&](const fs::path& path, bool, jpegview_linux::FileDialogSortMode,
+			int, int, const std::function<bool()>&) {
+			++customProcessorCalls;
+			jpegview_linux::FileDialogPreviewResult result;
+			result.source = path;
+			result.width = result.height = 1;
+			result.bgra.assign(4, 255);
+			return result;
+		});
+	const std::uint64_t missingGeneration = customLoader.Request(stillMissingPath,
+		false, jpegview_linux::FileDialogSortMode::Name, 1, 1, stillMissing);
+	results.clear();
+	const auto missingDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < missingDeadline) {
+		results = customLoader.TakeReady();
+		if (results.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	Expect(results.size() == 1 && results.front().generation == missingGeneration &&
+		customProcessorCalls == 0 && results.front().sourceDescriptor.Key() == stillMissing.Key() &&
+		!results.front().sourceDescriptor.Valid() && results.front().bgra.empty() &&
+		results.front().error == "Image changed while preparing preview",
+		"custom preview processor decoded a nonempty path without a valid recaptured source identity");
 }
 
 void TestEmbeddedApplicationIcon() {
@@ -10070,8 +11418,22 @@ void RunTest(const char* name, void (*test)(), int& failures) {
 int main() {
 	int failures = 0;
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
+	RunTest("source-descriptor-identity-and-unusual-paths",
+		TestSourceDescriptorIdentityAndUnusualPaths, failures);
+	RunTest("provisional-source-descriptor-survives-startup-replacement",
+		TestProvisionalSourceDescriptorSurvivesStartupReplacement, failures);
+	RunTest("noncurrent-source-refresh-preserves-selection",
+		TestNonCurrentSourceRefreshPreservesSelection, failures);
+	RunTest("current-processed-save-preserves-materialized-pixels",
+		TestCurrentProcessedSavePreservesMaterializedPixels, failures);
+	RunTest("file-dialog-source-refresh-requires-exact-descriptor",
+		TestFileDialogSourceRefreshRequiresExactDescriptor, failures);
+	RunTest("file-dialog-preview-refresh-policy",
+		TestFileDialogPreviewRefreshPolicy, failures);
 	RunTest("archive-browsing-decoding-and-recent-preview",
 		TestArchiveBrowsingDecodingAndRecentPreview, failures);
+	RunTest("archive-descriptor-identity-and-replacement",
+		TestArchiveDescriptorIdentityAndReplacement, failures);
 	RunTest("encrypted-zip-browsing-and-session-passwords",
 		TestEncryptedZipBrowsingAndSessionPasswords, failures);
 	RunTest("encrypted-7z-browsing-and-session-passwords",
@@ -10089,6 +11451,10 @@ int main() {
 		TestDoublePagePairingNavigationAndReadingOrder, failures);
 	RunTest("double-page-presentation-atomic-commit",
 		TestDoublePagePresentationCommitsSpreadAtomically, failures);
+	RunTest("double-page-refresh-invalidates-visible-partner-geometry",
+		TestDoublePageRefreshInvalidatesVisiblePartnerGeometry, failures);
+	RunTest("full-list-replacement-rebuilds-spread-from-new-neighbor",
+		TestFullListReplacementRebuildsSpreadFromNewNeighbor, failures);
 	RunTest("held-navigation-repeat-coalescing", TestHeldNavigationCoalescesKeyRepeats, failures);
 	RunTest("interaction-work-policy-idle-deadline-and-capture",
 		TestInteractionWorkPolicyIdleDeadlineAndCapture, failures);
@@ -10099,6 +11465,8 @@ int main() {
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);
 	RunTest("file-list-multiple-inputs", TestFileListMultipleInputs, failures);
 	RunTest("file-list-asynchronous-scanning", TestFileListAsynchronousScanning, failures);
+	RunTest("prepared-scans-reject-descriptor-refresh-race",
+		TestPreparedScansRejectDescriptorRefreshRace, failures);
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
 	RunTest("pnm-variants", TestPnmVariants, failures);
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
@@ -10122,6 +11490,8 @@ int main() {
 		TestJpegActiveSpreadDimensionsSurvivePause, failures);
 	RunTest("active-spread-partner-replacement-cancels-obsolete-source-work",
 		TestActiveSpreadPartnerReplacementCancelsObsoleteRequests, failures);
+	RunTest("active-spread-cancellation-uses-submitted-source-identity",
+		TestActiveSpreadCancellationUsesSubmittedSourceIdentity, failures);
 	RunTest("double-page-disable-cancels-active-and-queued-partner-dimensions",
 		TestDisablingDoublePageCancelsBlockedAndQueuedPartnerDimensions, failures);
 	RunTest("display-cache-foreground-active-classification",
@@ -10146,6 +11516,8 @@ int main() {
 	RunTest("image-crop-copies-half-open-rectangle", TestImageCropCopiesHalfOpenRectangle, failures);
 	RunTest("crop-selection-model-geometry-and-manipulation",
 		TestCropSelectionModelGeometryAndManipulation, failures);
+	RunTest("lossless-jpeg-crop-availability-policy",
+		TestLosslessJpegCropAvailabilityPolicy, failures);
 	RunTest("crop-selection-view-mapping-and-hit-testing",
 		TestCropSelectionViewMappingAndHitTesting, failures);
 	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
@@ -10190,6 +11562,18 @@ int main() {
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("thumbnail-cache-scheduling-and-eviction", TestThumbnailCacheSchedulingAndEviction, failures);
 	RunTest("thumbnail-catalog-replacement-identity", TestThumbnailCatalogReplacementIdentity, failures);
+	RunTest("thumbnail-source-identity-replacement-invalidates",
+		TestThumbnailSourceIdentityReplacementInvalidates, failures);
+	RunTest("thumbnail-bulk-eviction-uses-exact-keys",
+		TestThumbnailBulkEvictionUsesExactKeys, failures);
+	RunTest("display-cache-reports-deleted-source-identity",
+		TestDisplayCacheReportsDeletedSourceIdentity, failures);
+	RunTest("decoded-cache-reports-deleted-source-after-decode-failure",
+		TestDecodedCacheReportsDeletedSourceAfterDecodeFailure, failures);
+	RunTest("thumbnail-source-notice-routes-through-current-refresh",
+		TestThumbnailSourceNoticeRoutesThroughCurrentRefresh, failures);
+	RunTest("thumbnail-invalid-descriptor-recaptures-recreated-source",
+		TestThumbnailInvalidDescriptorRecapturesRecreatedSource, failures);
 	RunTest("thumbnail-background-preparation", TestThumbnailBackgroundPreparation, failures);
 	RunTest("thumbnail-queue-displacement-returns-scheduler-work",
 		TestThumbnailQueueDisplacementReturnsSchedulerWork, failures);
@@ -10206,8 +11590,12 @@ int main() {
 	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
 	RunTest("file-dialog-model-state-and-navigation", TestFileDialogModelStateAndNavigation, failures);
 	RunTest("file-dialog-directory-summaries", TestFileDialogDirectorySummaries, failures);
+	RunTest("cold-archive-row-descriptors-are-captured-off-thread",
+		TestColdArchiveRowDescriptorsAreCapturedOffThread, failures);
 	RunTest("file-dialog-preview-selection-and-background-loading",
 		TestFileDialogPreviewSelectionAndBackgroundLoading, failures);
+	RunTest("file-dialog-preview-recaptures-recreated-source",
+		TestFileDialogPreviewRecapturesRecreatedSource, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
