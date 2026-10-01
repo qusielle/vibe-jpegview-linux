@@ -44,6 +44,21 @@ std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
 	return slots;
 }
 
+bool ThumbnailIndexVisible(std::size_t fileCount, std::size_t currentIndex,
+	std::size_t fileIndex, int windowHeight, int rowHeight) {
+	if (fileCount == 0 || currentIndex >= fileCount || fileIndex >= fileCount ||
+		windowHeight <= 0 || rowHeight <= 0) return false;
+	const std::size_t maximumOffset =
+		static_cast<std::size_t>(windowHeight / rowHeight) + 2;
+	const bool afterCurrent = fileIndex >= currentIndex;
+	const std::size_t distance = afterCurrent ? fileIndex - currentIndex : currentIndex - fileIndex;
+	if (distance > maximumOffset) return false;
+	const std::int64_t offset = static_cast<std::int64_t>(distance) * (afterCurrent ? 1 : -1);
+	const std::int64_t currentY = (windowHeight - rowHeight) / 2;
+	const std::int64_t rowY = currentY + offset * rowHeight;
+	return rowY < windowHeight && rowY + rowHeight > 0;
+}
+
 std::vector<std::size_t> ThumbnailPreloadOrder(std::size_t fileCount,
 	std::size_t currentIndex, std::size_t maximumCount) {
 	std::vector<std::size_t> order;

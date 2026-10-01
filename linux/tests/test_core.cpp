@@ -29,6 +29,7 @@
 #include "viewer_chrome.h"
 #include "thumbnail_panel_model.h"
 #include "thumbnail_resampler.h"
+#include "perf_diagnostics.h"
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "spectrum_model.h"
@@ -168,6 +169,46 @@ void WriteBytes(const fs::path& filename, const std::vector<std::uint8_t>& bytes
 	if (!output) throw TestFailure("cannot create " + filename.string());
 	output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 	if (!output) throw TestFailure("cannot write " + filename.string());
+}
+
+bool HasCodecSourceReadTrace(const char* codec, std::uint64_t maximumBytes) {
+	const char* tracePath = std::getenv("JPEGVIEW_PERF_TRACE");
+	if (tracePath == nullptr || *tracePath == '\0') return true;
+	const std::string expectedDetail = std::string("\"") + codec + "\"";
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	do {
+		std::ifstream trace(tracePath);
+		std::string line;
+		while (std::getline(trace, line)) {
+			std::array<std::string, 13> fields{};
+			std::size_t start = 0;
+			bool complete = true;
+			for (std::size_t index = 0; index < fields.size(); ++index) {
+				const std::size_t comma = line.find(',', start);
+				if (index + 1 == fields.size()) {
+					fields[index] = line.substr(start);
+				} else if (comma != std::string::npos) {
+					fields[index] = line.substr(start, comma - start);
+					start = comma + 1;
+				} else {
+					complete = false;
+					break;
+				}
+			}
+			if (!complete || fields[1] != "source_read" || fields[3] != "worker_thread" ||
+				fields[5] != "focused_preview" || fields[12] != expectedDetail) continue;
+			try {
+				const std::uint64_t durationUs = std::stoull(fields[2]);
+				const std::uint64_t bytes = std::stoull(fields[6]);
+				const std::uint64_t calls = std::stoull(fields[7]);
+				if (durationUs > 0 && bytes > 0 && bytes <= maximumBytes && calls > 0 &&
+					fields[4] != "0") return true;
+			} catch (const std::exception&) {
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	} while (std::chrono::steady_clock::now() < deadline);
+	return false;
 }
 
 std::uint32_t ReadBigEndian32(const std::vector<std::uint8_t>& bytes, std::size_t position) {
@@ -2293,6 +2334,35 @@ void TestPnmVariants() {
 		{0, 0, 255, 255, 0, 255, 0, 128});
 }
 
+void TestDirectCodecSourceReadAttribution() {
+	TemporaryDirectory temporary;
+	const fs::path bitmap = temporary.path() / "tracked-bitmap.bmp";
+	const std::vector<std::uint8_t> pixels = {
+		10, 20, 30, 255, 40, 50, 60, 255,
+		70, 80, 90, 255, 100, 110, 120, 255};
+	ImageWriteOptions options;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(bitmap, pixels.data(), 2, 2, options, error),
+		"cannot create direct-reader BMP fixture: " + error);
+	std::error_code sizeError;
+	const std::uint64_t bitmapSize = fs::file_size(bitmap, sizeError);
+	Expect(!sizeError && bitmapSize > 0, "cannot determine direct-reader BMP fixture size");
+	DecodedImage decoded;
+	bool decodedSuccessfully = false;
+	std::thread worker([&] {
+		jpegview_linux::PerfContextScope attribution(
+			jpegview_linux::PerfWorkClass::FocusedPreview,
+			jpegview_linux::PerfExecution::WorkerThread);
+		decodedSuccessfully = jpegview_linux::DecodeImage(bitmap, decoded, error);
+	});
+	worker.join();
+	Expect(decodedSuccessfully && decoded.frames.size() == 1 &&
+		decoded.frames.front().width == 2 && decoded.frames.front().height == 2,
+		"cannot decode direct-reader BMP fixture: " + error);
+	Expect(HasCodecSourceReadTrace("stb", bitmapSize),
+		"stb direct-read trace did not report timed bytes under the focused-preview worker class");
+}
+
 void TestAnimatedImageDecoders() {
 	TemporaryDirectory temporary;
 	ImageWriteOptions options;
@@ -2335,7 +2405,17 @@ void TestAnimatedImageDecoders() {
 	WriteBytes(gifFile, gif);
 	error.clear();
 	decoded = {};
-	Expect(jpegview_linux::DecodeImage(gifFile, decoded, error), "cannot decode GIF: " + error);
+	bool decodedGif = false;
+	std::thread gifWorker([&] {
+		jpegview_linux::PerfContextScope attribution(
+			jpegview_linux::PerfWorkClass::FocusedPreview,
+			jpegview_linux::PerfExecution::WorkerThread);
+		decodedGif = jpegview_linux::DecodeImage(gifFile, decoded, error);
+	});
+	gifWorker.join();
+	Expect(decodedGif, "cannot decode GIF: " + error);
+	Expect(HasCodecSourceReadTrace("giflib", gif.size()),
+		"giflib direct-read trace did not report timed bytes under the focused-preview worker class");
 	Expect(decoded.animation && decoded.frames.size() == 2 && decoded.loopCount == 1,
 		"GIF animation metadata is incorrect");
 	Expect(decoded.frames[0].delayMs == 100 && decoded.frames[1].delayMs == 100,
@@ -2445,6 +2525,107 @@ std::shared_ptr<DecodedImage> CachedTestImage(std::size_t bytes) {
 	frame.bgra.assign(bytes, 127);
 	image->frames.push_back(std::move(frame));
 	return image;
+}
+
+void TestPerfContextAndPendingInputDiagnostics() {
+	using jpegview_linux::PerfExecution;
+	using jpegview_linux::PerfWorkClass;
+	const std::array<PerfWorkClass, 5> workClasses = {{
+		PerfWorkClass::ActiveImageSpread,
+		PerfWorkClass::FocusedPreview,
+		PerfWorkClass::VisibleThumbnail,
+		PerfWorkClass::NearestNavigationNeighbor,
+		PerfWorkClass::DistantSpeculation,
+	}};
+	const std::array<const char*, 5> workClassNames = {{
+		"active_image_spread", "focused_preview", "visible_thumbnail",
+		"nearest_navigation_neighbor", "distant_speculation",
+	}};
+	for (std::size_t index = 0; index < workClasses.size(); ++index) {
+		Expect(std::string(jpegview_linux::PerfWorkClassName(workClasses[index])) ==
+			workClassNames[index], "performance trace used an unexpected work-class label");
+	}
+	Expect(std::string(jpegview_linux::PerfExecutionName(PerfExecution::EventThread)) ==
+		"event_thread" && std::string(jpegview_linux::PerfExecutionName(PerfExecution::WorkerThread)) ==
+		"worker_thread", "performance trace did not distinguish event and worker execution");
+
+	{
+		jpegview_linux::PerfContextScope active(PerfWorkClass::ActiveImageSpread,
+			PerfExecution::EventThread);
+		const jpegview_linux::PerfContext eventContext = jpegview_linux::CurrentPerfContext();
+		Expect(eventContext.workClass == PerfWorkClass::ActiveImageSpread &&
+			eventContext.execution == PerfExecution::EventThread,
+			"event-thread active-image context was not installed");
+		{
+			jpegview_linux::PerfContextScope thumbnail(PerfWorkClass::VisibleThumbnail,
+				PerfExecution::WorkerThread);
+			const jpegview_linux::PerfContext workerContext =
+				jpegview_linux::CurrentPerfContext();
+			Expect(workerContext.workClass == PerfWorkClass::VisibleThumbnail &&
+				workerContext.execution == PerfExecution::WorkerThread,
+				"worker thumbnail context did not distinguish its execution thread");
+		}
+		const jpegview_linux::PerfContext restored = jpegview_linux::CurrentPerfContext();
+		Expect(restored.workClass == PerfWorkClass::ActiveImageSpread &&
+			restored.execution == PerfExecution::EventThread,
+			"nested performance context did not restore its caller's work attribution");
+	}
+	const jpegview_linux::PerfContext cleared = jpegview_linux::CurrentPerfContext();
+	Expect(cleared.workClass == PerfWorkClass::Unspecified &&
+		cleared.execution == PerfExecution::Unspecified,
+		"performance context leaked past its stack scope");
+
+	jpegview_linux::PendingInputPresentation pending;
+	Expect(pending.PendingSince() == 0 && pending.TakeLatency(900) == 0,
+		"input-to-presentation diagnostics produced a latency without a pending input");
+	pending.Mark(1000);
+	pending.Mark(1500);
+	Expect(pending.PendingSince() == 1000 && pending.TakeLatency(1650) == 650 &&
+		pending.PendingSince() == 0,
+		"a later queued input replaced the oldest unpresented dispatch latency");
+	pending.Mark(2000);
+	Expect(pending.TakeLatency(1900) == 0 && pending.PendingSince() == 0,
+		"input-to-presentation diagnostics retained a consumed or out-of-order timestamp");
+}
+
+void TestDecodedPrefetchWorkClassAttribution() {
+	TemporaryDirectory temporary;
+	std::vector<fs::path> files;
+	for (int index = 0; index < 5; ++index) {
+		const fs::path filename = temporary.path() /
+			("work-class-" + std::to_string(index) + ".ppm");
+		WriteText(filename, "P3\n1 1\n255\n10 20 30\n");
+		files.push_back(filename);
+	}
+	std::mutex contextsMutex;
+	std::vector<jpegview_linux::PerfContext> contexts;
+	jpegview_linux::DecodedImageCache cache(256,
+		[&](const fs::path& filename, DecodedImage& image, std::string& error) {
+			{
+				std::lock_guard<std::mutex> lock(contextsMutex);
+				contexts.push_back(jpegview_linux::CurrentPerfContext());
+			}
+			return jpegview_linux::DecodeImage(filename, image, error);
+		});
+	cache.Prefetch(files, 2, 1, 4, {}, {}, 1);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"decoded work-class fixtures did not finish before their bounded deadline");
+	std::size_t nearest = 0;
+	std::size_t distant = 0;
+	{
+		std::lock_guard<std::mutex> lock(contextsMutex);
+		for (const jpegview_linux::PerfContext& context : contexts) {
+			Expect(context.execution == jpegview_linux::PerfExecution::WorkerThread,
+				"decoded speculative work was not attributed to its worker thread");
+			if (context.workClass == jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) {
+				++nearest;
+			} else if (context.workClass == jpegview_linux::PerfWorkClass::DistantSpeculation) {
+				++distant;
+			}
+		}
+	}
+	Expect(nearest == 1 && distant == 3,
+		"decoded prefetch did not separate nearest navigation work from distant speculation");
 }
 
 void TestDecodedImageCacheAndBackgroundPrefetch() {
@@ -2660,6 +2841,394 @@ std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height) {
 	return image;
 }
 
+void TestDisplayImageCacheForegroundActiveClassification() {
+	TemporaryDirectory temporary;
+	const fs::path foregroundFile = temporary.path() / "fresh-foreground.jpg";
+	const fs::path neighborFile = temporary.path() / "promoted-neighbor.jpg";
+	WriteText(foregroundFile, "fresh foreground");
+	WriteText(neighborFile, "promoted neighbor");
+	const auto decoded = DisplayCacheTestImage(4, 4);
+	const auto freshRequest = jpegview_linux::MakeDisplayImageRequest(
+		foregroundFile, decoded, 0, 2, 2, false);
+	const auto promotedRequest = jpegview_linux::MakeDisplayImageRequest(
+		neighborFile, decoded, 0, 2, 2, false, 1);
+
+	std::mutex freshMutex;
+	std::condition_variable freshChanged;
+	bool freshStarted = false;
+	bool releaseFresh = false;
+	jpegview_linux::PerfContext freshContext;
+	jpegview_linux::DisplayImageCache fresh(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			{
+				std::unique_lock<std::mutex> lock(freshMutex);
+				freshContext = jpegview_linux::CurrentPerfContext();
+				freshStarted = true;
+				freshChanged.notify_all();
+				freshChanged.wait(lock, [&] { return releaseFresh; });
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = result->height = 2;
+			result->bgra.assign(16, 255);
+			return result;
+		});
+	fresh.Request(freshRequest);
+	bool freshReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(freshMutex);
+		freshReachedBarrier = freshChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return freshStarted; });
+	}
+	for (int repeat = 0; repeat < 10; ++repeat) fresh.Request(freshRequest);
+	const auto freshStats = fresh.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(freshMutex);
+		releaseFresh = true;
+	}
+	freshChanged.notify_all();
+	Expect(freshReachedBarrier && fresh.WaitUntilIdle(std::chrono::seconds(2)),
+		"fresh foreground display work did not reach and leave its bounded barrier");
+	Expect(freshStats.foregroundActive == 1 && freshStats.backgroundActive == 0 &&
+		freshContext.workClass == jpegview_linux::PerfWorkClass::ActiveImageSpread &&
+		freshContext.execution == jpegview_linux::PerfExecution::WorkerThread,
+		"fresh foreground display request was not classified from active Work state");
+
+	std::mutex promoteMutex;
+	std::condition_variable promoteChanged;
+	bool promoteStarted = false;
+	bool releasePromoted = false;
+	jpegview_linux::PerfContext promotedContext;
+	jpegview_linux::DisplayImageCache promoted(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			{
+				std::unique_lock<std::mutex> lock(promoteMutex);
+				promotedContext = jpegview_linux::CurrentPerfContext();
+				promoteStarted = true;
+				promoteChanged.notify_all();
+				promoteChanged.wait(lock, [&] { return releasePromoted; });
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = result->height = 2;
+			result->bgra.assign(16, 255);
+			return result;
+		});
+	promoted.RequestBackground(promotedRequest);
+	bool promotionReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(promoteMutex);
+		promotionReachedBarrier = promoteChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return promoteStarted; });
+	}
+	if (promotionReachedBarrier) promoted.Request(promotedRequest);
+	const auto promotedStats = promoted.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(promoteMutex);
+		releasePromoted = true;
+	}
+	promoteChanged.notify_all();
+	Expect(promotionReachedBarrier && promoted.WaitUntilIdle(std::chrono::seconds(2)),
+		"promoted speculative display work did not leave its bounded barrier");
+	Expect(promotedStats.foregroundActive == 1 && promotedStats.backgroundActive == 0 &&
+		promotedContext.workClass == jpegview_linux::PerfWorkClass::NearestNavigationNeighbor &&
+		promotedContext.execution == jpegview_linux::PerfExecution::WorkerThread,
+		"in-flight foreground promotion was not reflected in active diagnostics");
+
+	auto previewRequest = jpegview_linux::MakeDisplayImageRequest(
+		foregroundFile, decoded, 0, 1, 1, false, 1000000);
+	previewRequest.workClass = jpegview_linux::PerfWorkClass::FocusedPreview;
+	jpegview_linux::PerfContext previewContext;
+	jpegview_linux::DisplayImageCache preview(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			previewContext = jpegview_linux::CurrentPerfContext();
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = result->height = 1;
+			result->bgra.assign(4, 255);
+			return result;
+		});
+	preview.RequestBackground(previewRequest);
+	Expect(preview.WaitUntilIdle(std::chrono::seconds(2)) &&
+		previewContext.workClass == jpegview_linux::PerfWorkClass::FocusedPreview &&
+		previewContext.execution == jpegview_linux::PerfExecution::WorkerThread,
+		"focused preview work-class context did not reach its display worker");
+}
+
+void TestDisplayImageCachePrefetchPreservesActiveForeground() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "active-foreground-prefetch.jpg";
+	WriteText(filename, "active foreground");
+	const fs::path neighborFilename = temporary.path() / "closer-neighbor.jpg";
+	WriteText(neighborFilename, "closer neighbor");
+	const auto decoded = DisplayCacheTestImage(4, 4);
+	const auto request = jpegview_linux::MakeDisplayImageRequest(
+		filename, decoded, 0, 2, 2, false);
+	const auto neighborRequest = jpegview_linux::MakeDisplayImageRequest(
+		neighborFilename, decoded, 0, 2, 2, false, 1);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool started = false;
+	bool release = false;
+	bool neighborFinished = false;
+	jpegview_linux::DisplayImageCache cache(64, 2,
+		[&](const jpegview_linux::DisplayImageRequest& pending) {
+			if (pending.key == request.key) {
+				std::unique_lock<std::mutex> lock(mutex);
+				started = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return release; });
+			} else {
+				std::lock_guard<std::mutex> lock(mutex);
+				neighborFinished = true;
+				changed.notify_all();
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = pending.key;
+			result->width = result->height = 2;
+			result->bgra.assign(16, 255);
+			return result;
+		});
+	cache.Request(request);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return started;
+		});
+	}
+	cache.RequestBackground(neighborRequest);
+	bool neighborReachedCompletion = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		neighborReachedCompletion = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return neighborFinished;
+		});
+	}
+	bool neighborPublished = false;
+	const auto neighborDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (neighborReachedCompletion && std::chrono::steady_clock::now() < neighborDeadline) {
+		if (cache.GetDiagnostics().preparedImages == 1) {
+			neighborPublished = true;
+			break;
+		}
+		std::this_thread::yield();
+	}
+	const auto blockedNeighbor = cache.TakeCompleted(1);
+	const auto beforePrefetch = cache.GetDiagnostics();
+	cache.Prefetch({request});
+	const auto afterPrefetch = cache.GetDiagnostics();
+	const auto blockedAfterPrefetch = cache.TakeCompleted(1);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		release = true;
+	}
+	changed.notify_all();
+	Expect(reachedBarrier && cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"foreground-prefetch fixture did not leave its bounded worker barrier");
+	Expect(neighborPublished && blockedNeighbor.empty() && blockedAfterPrefetch.empty(),
+		"prefetch weakened the zero-priority foreground barrier ahead of a closer ready neighbor");
+	Expect(beforePrefetch.foregroundActive == 1 && beforePrefetch.backgroundActive == 0 &&
+		afterPrefetch.foregroundActive == 1 && afterPrefetch.backgroundActive == 0,
+		"prefetch changed active foreground/background classification or lowered foreground priority");
+}
+
+void TestDisplayCacheRetirementIdentityAccounting() {
+	TemporaryDirectory temporary;
+	const fs::path fileA = temporary.path() / "borrowed.jpg";
+	const fs::path fileB = temporary.path() / "find-retire.jpg";
+	const fs::path fileC = temporary.path() / "wait-retire.jpg";
+	WriteText(fileA, "borrowed");
+	WriteText(fileB, "find-retire");
+	WriteText(fileC, "wait-retire");
+	const auto decoded = DisplayCacheTestImage(4, 4);
+	const auto requestA = jpegview_linux::MakeDisplayImageRequest(fileA, decoded, 0, 2, 2, false, 1);
+	const auto requestB = jpegview_linux::MakeDisplayImageRequest(fileB, decoded, 0, 2, 2, false);
+	const auto requestC = jpegview_linux::MakeDisplayImageRequest(fileC, decoded, 0, 2, 2, false);
+	jpegview_linux::DisplayImageCache cache(128, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			auto result = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			result->key = request.key;
+			result->width = result->height = 2;
+			result->bgra.assign(16, 255);
+			return result;
+		});
+	cache.RequestBackground(requestA);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"borrowed-image fixture did not finish before its bounded deadline");
+	const auto completed = cache.TakeCompleted(1);
+	Expect(completed.size() == 1 && completed.front(),
+		"display cache did not return one completed allocation for borrowing");
+	const jpegview_linux::DisplayImageCache::ImagePtr borrowedA = completed.front();
+	const jpegview_linux::DisplayImageCache::ImagePtr requestedB = cache.RequestAndWait(requestB);
+	const jpegview_linux::DisplayImageCache::ImagePtr foundB = cache.Find(requestB);
+	Expect(requestedB && foundB && requestedB.get() == foundB.get(),
+		"Find and RequestAndWait did not resolve to the same retained display allocation");
+	cache.Release(requestB.key);
+	cache.Retire(foundB);
+	cache.Retire(requestedB);
+	const auto afterB = cache.GetDiagnostics();
+	Expect(afterB.borrowedBytes == 16 && afterB.borrowedImages == 1 &&
+		afterB.retiredBytes == 16 && afterB.retiredImages == 1,
+		"retiring a looked-up image changed another allocation's borrow or counted twice");
+
+	const jpegview_linux::DisplayImageCache::ImagePtr requestedC = cache.RequestAndWait(requestC);
+	Expect(requestedC != nullptr, "RequestAndWait did not return its prepared display allocation");
+	cache.Release(requestC.key);
+	cache.Retire(requestedC);
+	cache.Retire(requestedC);
+	const auto afterC = cache.GetDiagnostics();
+	Expect(afterC.borrowedBytes == 16 && afterC.borrowedImages == 1 &&
+		afterC.retiredBytes == 32 && afterC.retiredImages == 2,
+		"duplicate release/retirement counted one allocation more than once");
+
+	cache.Retire(borrowedA);
+	cache.Release(requestA.key);
+	cache.Retire(borrowedA);
+	const auto afterA = cache.GetDiagnostics();
+	Expect(afterA.borrowedBytes == 0 && afterA.borrowedImages == 0 &&
+		afterA.retiredImages == 3 && afterA.retiredBytes == 48,
+		"retiring a borrowed allocation did not reconcile bytes by image identity");
+}
+
+void TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker() {
+	struct DestructionProbe {
+		std::mutex mutex;
+		std::condition_variable changed;
+		std::thread::id thread;
+		bool destroyed = false;
+	};
+	const auto makeProcessor = [](const std::shared_ptr<DestructionProbe>& probe) {
+		return [probe](const jpegview_linux::DisplayImageRequest& request) {
+			auto* image = new jpegview_linux::PreparedDisplayImage;
+			image->key = request.key;
+			image->width = image->height = 2;
+			image->bgra.assign(16, 0);
+			return jpegview_linux::DisplayImageCache::ImagePtr(image,
+				[probe](const jpegview_linux::PreparedDisplayImage* retired) {
+					{
+						std::lock_guard<std::mutex> lock(probe->mutex);
+						probe->thread = std::this_thread::get_id();
+						probe->destroyed = true;
+					}
+					delete retired;
+					probe->changed.notify_all();
+				});
+		};
+	};
+	const auto wasDestroyed = [](const std::shared_ptr<DestructionProbe>& probe) {
+		std::unique_lock<std::mutex> lock(probe->mutex);
+		return probe->changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return probe->destroyed;
+		});
+	};
+
+	TemporaryDirectory temporary;
+	const fs::path uploadRaceFile = temporary.path() / "retire-after-drain.jpg";
+	WriteText(uploadRaceFile, "retirement race");
+	const auto uploadRaceRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		uploadRaceFile, 4, 4, 2, 2, false);
+	const std::thread::id eventThread = std::this_thread::get_id();
+	auto uploadRaceProbe = std::make_shared<DestructionProbe>();
+	jpegview_linux::DisplayImageCache uploadRace(64, 1, makeProcessor(uploadRaceProbe));
+	uploadRace.Request(uploadRaceRequest);
+	Expect(uploadRace.WaitUntilIdle(std::chrono::seconds(2)),
+		"retirement-race fixture did not finish preparing before its bounded deadline");
+	auto completed = uploadRace.TakeCompleted(1);
+	Expect(completed.size() == 1 && completed.front(),
+		"retirement-race fixture did not publish its prepared image");
+	jpegview_linux::DisplayImageCache::ImagePtr pixels = std::move(completed.front());
+	completed.clear();
+	uploadRace.Release(uploadRaceRequest.key);
+	bool queueDrained = false;
+	const auto retirementDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (std::chrono::steady_clock::now() < retirementDeadline) {
+		const auto stats = uploadRace.GetDiagnostics();
+		if (stats.activeRetiredBytes == 16 && stats.retiredImages == 1) {
+			queueDrained = true;
+			break;
+		}
+		std::this_thread::yield();
+	}
+	Expect(queueDrained && pixels.use_count() == 2,
+		"retirement worker did not retain the final owner after draining the upload queue");
+	uploadRace.Retire(pixels);
+	uploadRace.Retire(pixels);
+	const auto duplicateStats = uploadRace.GetDiagnostics();
+	Expect(duplicateStats.retiredImages == 1 && duplicateStats.retiredBytes == 16 &&
+		duplicateStats.activeRetiredBytes == 16,
+		"retiring again after the queue drained duplicated its active owner or byte count");
+	pixels.reset();
+	Expect(wasDestroyed(uploadRaceProbe),
+		"the retired display pixels were not destroyed before the bounded deadline");
+	{
+		std::lock_guard<std::mutex> lock(uploadRaceProbe->mutex);
+		Expect(uploadRaceProbe->thread != eventThread,
+			"the final prepared-pixel owner was destroyed on the event thread after upload retirement");
+	}
+
+	const fs::path shutdownFile = temporary.path() / "retire-on-shutdown.jpg";
+	WriteText(shutdownFile, "retirement shutdown");
+	const auto shutdownRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		shutdownFile, 4, 4, 2, 2, false);
+	auto shutdownProbe = std::make_shared<DestructionProbe>();
+	auto shutdownCache = std::make_unique<jpegview_linux::DisplayImageCache>(
+		64, 1, makeProcessor(shutdownProbe));
+	shutdownCache->Request(shutdownRequest);
+	Expect(shutdownCache->WaitUntilIdle(std::chrono::seconds(2)),
+		"shutdown-retirement fixture did not finish before cache teardown");
+	shutdownCache.reset();
+	Expect(wasDestroyed(shutdownProbe),
+		"cache shutdown returned before draining its prepared-pixel retirement");
+	{
+		std::lock_guard<std::mutex> lock(shutdownProbe->mutex);
+		Expect(shutdownProbe->thread != eventThread,
+			"cache shutdown destroyed its final prepared pixels on the event thread");
+	}
+
+	const fs::path outlivingFile = temporary.path() / "handle-outlives-cache.jpg";
+	WriteText(outlivingFile, "handle outlives cache");
+	const auto outlivingRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		outlivingFile, 4, 4, 2, 2, false);
+	auto outlivingProbe = std::make_shared<DestructionProbe>();
+	auto cache = std::make_unique<jpegview_linux::DisplayImageCache>(
+		64, 1, makeProcessor(outlivingProbe));
+	jpegview_linux::DisplayImageCache::ImagePtr outlivingPixels =
+		cache->RequestAndWait(outlivingRequest);
+	Expect(outlivingPixels != nullptr,
+		"RequestAndWait did not return the handle used for the cache-lifetime regression");
+	std::mutex teardownMutex;
+	std::condition_variable teardownChanged;
+	bool teardownFinished = false;
+	std::thread teardown([ownedCache = std::move(cache), &teardownMutex,
+		&teardownChanged, &teardownFinished]() mutable {
+		ownedCache.reset();
+		{
+			std::lock_guard<std::mutex> lock(teardownMutex);
+			teardownFinished = true;
+		}
+		teardownChanged.notify_all();
+	});
+	const std::thread::id teardownThread = teardown.get_id();
+	bool cacheReturnedBeforeHandleRelease = false;
+	{
+		std::unique_lock<std::mutex> lock(teardownMutex);
+		cacheReturnedBeforeHandleRelease = teardownChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return teardownFinished; });
+	}
+	outlivingPixels.reset();
+	teardown.join();
+	Expect(cacheReturnedBeforeHandleRelease,
+		"cache destruction waited for a valid ImagePtr that outlived the cache");
+	Expect(wasDestroyed(outlivingProbe),
+		"outliving display pixels were not destroyed after the external handle was released");
+	{
+		std::lock_guard<std::mutex> lock(outlivingProbe->mutex);
+		Expect(outlivingProbe->thread != eventThread && outlivingProbe->thread != teardownThread,
+			"outliving display pixels were not destroyed by the retirement worker");
+	}
+}
+
 void TestDisplayImageCacheBackgroundPreparation() {
 	Expect(jpegview_linux::DisplayPrefetchCount(1024, 10, 10, 100) == 1,
 		"display prefetch sizing did not reserve one texture slot for the current image");
@@ -2729,10 +3298,20 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	}
 	pairChanged.notify_all();
 	Expect(pairedWorkersStartedTogether &&
-		pairedPreparation.WaitUntilIdle(std::chrono::seconds(2)) &&
-		pairedPreparation.TakeCompleted(3).size() == 3 &&
-		pairedPreparation.HasPendingOrCached(scaled.key),
+		pairedPreparation.WaitUntilIdle(std::chrono::seconds(2)),
 		"paired display requests were not made available to workers together with later neighbors");
+	const jpegview_linux::DisplayImageCacheDiagnostics preparedStats =
+		pairedPreparation.GetDiagnostics();
+	Expect(preparedStats.preparedImages == 3 && preparedStats.preparedBytes == 48 &&
+		pairedPreparation.HasPendingOrCached(scaled.key),
+		"display cache diagnostics did not count its completed prepared frames");
+	const auto pairedFrames = pairedPreparation.TakeCompleted(3);
+	Expect(pairedFrames.size() == 3 &&
+		pairedPreparation.GetDiagnostics().borrowedBytes == preparedStats.preparedBytes,
+		"display cache diagnostics did not account for frames borrowed for upload");
+	for (const auto& frame : pairedFrames) pairedPreparation.Retire(frame);
+	Expect(pairedPreparation.GetDiagnostics().borrowedBytes == 0,
+		"display cache diagnostics retained borrowed bytes after retirement");
 	jpegview_linux::DisplayImageCache failedPreparation(64, 1,
 		[](const jpegview_linux::DisplayImageRequest&) {
 			return jpegview_linux::DisplayImageCache::ImagePtr{};
@@ -6304,6 +6883,16 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 	Expect(std::count_if(spreadSlots.begin(), spreadSlots.end(), [](const auto& slot) {
 		return slot.current || slot.doublePagePartner;
 	}) == 2, "thumbnail panel did not highlight exactly both pages in the spread");
+	Expect(jpegview_linux::ThumbnailIndexVisible(100, 5, 2, 520, 100) &&
+		jpegview_linux::ThumbnailIndexVisible(100, 5, 8, 520, 100) &&
+		!jpegview_linux::ThumbnailIndexVisible(100, 5, 1, 520, 100) &&
+		!jpegview_linux::ThumbnailIndexVisible(100, 5, 9, 520, 100),
+		"thumbnail visibility did not include clipped edge rows and exclude offscreen retained rows");
+	Expect(!jpegview_linux::ThumbnailIndexVisible(0, 0, 0, 500, 100) &&
+		!jpegview_linux::ThumbnailIndexVisible(4, 4, 0, 500, 100) &&
+		!jpegview_linux::ThumbnailIndexVisible(4, 0, 4, 500, 100) &&
+		!jpegview_linux::ThumbnailIndexVisible(4, 0, 0, 0, 100),
+		"thumbnail visibility accepted an empty, invalid, or hidden panel request");
 	const std::vector<jpegview_linux::ThumbnailSlot> markedSlots =
 		jpegview_linux::ThumbnailPanelSlots(10, 5, 500, 100, 7);
 	Expect(markedSlots[2].current && !markedSlots[2].marked && markedSlots[4].fileIndex == 7 &&
@@ -6452,15 +7041,25 @@ void TestThumbnailBackgroundPreparation() {
 	source->bgra[3] = 0;
 	source->hasTransparency = true;
 	jpegview_linux::ThumbnailPreparationWorker realWorker;
-	Expect(realWorker.Request({"scaled", source, 2, 2, 0}),
+	Expect(realWorker.Request({"scaled", source, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::DistantSpeculation}),
 		"thumbnail worker rejected valid display-ready pixels");
 	Expect(realWorker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not finish source-area downsampling");
 	const auto scaled = realWorker.TakeCompleted(1);
 	Expect(scaled.size() == 1 && scaled[0]->key == "scaled" &&
 		scaled[0]->width == 2 && scaled[0]->height == 2 && scaled[0]->bgra.size() == 16 &&
-		scaled[0]->hasTransparency,
+		scaled[0]->hasTransparency && scaled[0]->workClass ==
+			jpegview_linux::PerfWorkClass::DistantSpeculation,
 		"thumbnail worker returned incorrect derived pixels");
+	Expect(realWorker.Request({"scaled-visible", source, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail}) &&
+		realWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not process the visible-row attribution fixture");
+	const auto visibleScaled = realWorker.TakeCompleted(1);
+	Expect(visibleScaled.size() == 1 && visibleScaled[0]->workClass ==
+		jpegview_linux::PerfWorkClass::VisibleThumbnail,
+		"thumbnail worker did not retain visible-row attribution through resampling");
 
 	std::mutex orderMutex;
 	std::condition_variable orderChanged;
@@ -6511,6 +7110,60 @@ void TestThumbnailBackgroundPreparation() {
 	}
 	Expect(prioritized.TakeCompleted(3).size() == 3,
 		"thumbnail worker did not publish every prepared neighbor");
+
+	auto activeSource = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+	activeSource->width = 4;
+	activeSource->height = 4;
+	activeSource->bgra.assign(4u * 4u * 4u, 12);
+	auto queuedSource = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+	queuedSource->width = 3;
+	queuedSource->height = 2;
+	queuedSource->bgra.assign(3u * 2u * 4u, 24);
+	std::mutex retainedMutex;
+	std::condition_variable retainedChanged;
+	bool retainedWorkerStarted = false;
+	bool releaseRetainedWorker = false;
+	jpegview_linux::PerfContext retainedContext;
+	jpegview_linux::ThumbnailPreparationWorker retainedWorker(
+		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			retainedContext = jpegview_linux::CurrentPerfContext();
+			if (request.key == "active-source") {
+				std::unique_lock<std::mutex> lock(retainedMutex);
+				retainedWorkerStarted = true;
+				retainedChanged.notify_all();
+				retainedChanged.wait(lock, [&] { return releaseRetainedWorker; });
+			}
+			auto result = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			result->key = request.key;
+			result->width = result->height = 1;
+			result->bgra.assign(4, 255);
+			return result;
+		});
+	Expect(retainedWorker.Request({"active-source", activeSource, 2, 2, 0}) &&
+		retainedWorker.Request({"queued-source", queuedSource, 2, 2, 1}),
+		"thumbnail worker rejected retained-source accounting fixtures");
+	bool retainedWorkerReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(retainedMutex);
+		retainedWorkerReachedBarrier = retainedChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return retainedWorkerStarted; });
+	}
+	const jpegview_linux::ThumbnailPreparationDiagnostics retainedStats =
+		retainedWorker.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(retainedMutex);
+		releaseRetainedWorker = true;
+	}
+	retainedChanged.notify_all();
+	Expect(retainedWorkerReachedBarrier &&
+		retainedWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"active thumbnail source did not leave its bounded retained-byte barrier");
+	Expect(retainedStats.active == 1 && retainedStats.queued == 1 &&
+		retainedStats.retainedSourceBytes == 4u * 4u * 4u + 3u * 2u * 4u,
+		"thumbnail diagnostics omitted a source retained by active or queued work");
+	Expect(retainedContext.workClass == jpegview_linux::PerfWorkClass::VisibleThumbnail &&
+		retainedContext.execution == jpegview_linux::PerfExecution::WorkerThread,
+		"visible-thumbnail work did not retain worker-thread attribution while processing");
 
 	std::mutex staleMutex;
 	std::condition_variable staleChanged;
@@ -7390,6 +8043,113 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 	}
 	WriteBytes(ppm, ppmBytes);
 
+	std::mutex controlledMutex;
+	std::condition_variable controlledChanged;
+	bool activePreviewStarted = false;
+	bool releaseActivePreview = false;
+	std::vector<fs::path> controlledPaths;
+	std::vector<jpegview_linux::PerfContext> controlledContexts;
+	jpegview_linux::FileDialogPreviewLoader controlledLoader(
+		[&](const fs::path& path, bool, jpegview_linux::FileDialogSortMode, int, int,
+			const std::function<bool()>&) {
+			const jpegview_linux::PerfContext context = jpegview_linux::CurrentPerfContext();
+			std::unique_lock<std::mutex> lock(controlledMutex);
+			controlledPaths.push_back(path);
+			controlledContexts.push_back(context);
+			if (path.filename() == "active.png") {
+				activePreviewStarted = true;
+				controlledChanged.notify_all();
+				controlledChanged.wait(lock, [&] { return releaseActivePreview; });
+			}
+			jpegview_linux::FileDialogPreviewResult result;
+			result.source = path;
+			result.width = result.height = 1;
+			result.bgra.assign(4, 255);
+			return result;
+		});
+	for (int index = 0; index < 512; ++index) {
+		(void)controlledLoader.Request({}, false,
+			jpegview_linux::FileDialogSortMode::Name, 0, 0);
+	}
+	const std::uint64_t activeGeneration = controlledLoader.Request(
+		"active.png", false, jpegview_linux::FileDialogSortMode::Name, 2, 2);
+	bool activePreviewReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(controlledMutex);
+		activePreviewReachedBarrier = controlledChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return activePreviewStarted; });
+	}
+	const std::uint64_t pendingGeneration = controlledLoader.Request(
+		"pending.png", false, jpegview_linux::FileDialogSortMode::Name, 2, 2);
+	const std::uint64_t barrierCurrentGeneration = controlledLoader.Request(
+		"current.png", false, jpegview_linux::FileDialogSortMode::Name, 2, 2);
+	{
+		std::lock_guard<std::mutex> lock(controlledMutex);
+		releaseActivePreview = true;
+	}
+	controlledChanged.notify_all();
+	std::vector<jpegview_linux::FileDialogPreviewResult> controlledResults;
+	const auto controlledDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (controlledResults.empty() && std::chrono::steady_clock::now() < controlledDeadline) {
+		controlledResults = controlledLoader.TakeReady();
+		if (controlledResults.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(activePreviewReachedBarrier && activeGeneration < pendingGeneration &&
+		pendingGeneration < barrierCurrentGeneration && controlledResults.size() == 1 &&
+		controlledResults.front().generation == barrierCurrentGeneration &&
+		controlledResults.front().source == "current.png",
+		"preview replacement published a pending or active stale result instead of the latest request");
+	{
+		std::lock_guard<std::mutex> lock(controlledMutex);
+		Expect(controlledPaths == std::vector<fs::path>({"active.png", "current.png"}),
+			"preview replacement ran a displaced pending task or omitted the latest task");
+		Expect(std::all_of(controlledContexts.begin(), controlledContexts.end(), [](const auto& context) {
+			return context.workClass == jpegview_linux::PerfWorkClass::FocusedPreview &&
+				context.execution == jpegview_linux::PerfExecution::WorkerThread;
+		}), "preview processor did not keep focused-preview worker attribution");
+	}
+	const char* tracePath = std::getenv("JPEGVIEW_PERF_TRACE");
+	if (tracePath != nullptr && *tracePath != '\0') {
+		const auto countCancellationRows = [&](std::uint64_t generation,
+			std::uint64_t reason, const char* execution) {
+			std::ifstream trace(tracePath);
+			std::string line;
+			std::size_t count = 0;
+			while (std::getline(trace, line)) {
+				std::array<std::string, 13> fields{};
+				std::size_t start = 0;
+				for (std::size_t index = 0; index < fields.size(); ++index) {
+					const std::size_t comma = line.find(',', start);
+					if (index + 1 == fields.size()) {
+						fields[index] = line.substr(start);
+					} else if (comma != std::string::npos) {
+						fields[index] = line.substr(start, comma - start);
+						start = comma + 1;
+					} else {
+						break;
+					}
+				}
+				if (fields[1] == "cancellation" && fields[3] == execution &&
+					fields[5] == "focused_preview" &&
+					fields[6] == std::to_string(generation) &&
+					fields[7] == std::to_string(reason) &&
+					fields[12] == "\"file_dialog_preview\"") ++count;
+			}
+			return count;
+		};
+		std::size_t pendingCancellationRows = 0;
+		std::size_t staleCancellationRows = 0;
+		const auto traceDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+		do {
+			pendingCancellationRows = countCancellationRows(pendingGeneration, 1, "event_thread");
+			staleCancellationRows = countCancellationRows(activeGeneration, 3, "worker_thread");
+			if (pendingCancellationRows == 1 && staleCancellationRows == 1) break;
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		} while (std::chrono::steady_clock::now() < traceDeadline);
+		Expect(pendingCancellationRows == 1 && staleCancellationRows == 1,
+			"preview pending replacement or stale active result was not traced exactly once in its owning thread");
+	}
+
 	jpegview_linux::FileDialogPreviewLoader loader;
 	const std::uint64_t staleGeneration = loader.Request(ppm, false,
 		jpegview_linux::FileDialogSortMode::Name, 2, 2);
@@ -7531,9 +8291,23 @@ int main() {
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
 	RunTest("pnm-variants", TestPnmVariants, failures);
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
+	RunTest("direct-codec-source-read-attribution",
+		TestDirectCodecSourceReadAttribution, failures);
 	RunTest("decoder-failures", TestDecoderFailures, failures);
 	RunTest("jpeg-display-decode-scaling", TestJpegDisplayDecodeScaling, failures);
+	RunTest("perf-context-and-pending-input-diagnostics",
+		TestPerfContextAndPendingInputDiagnostics, failures);
+	RunTest("decoded-prefetch-work-class-attribution",
+		TestDecodedPrefetchWorkClassAttribution, failures);
 	RunTest("decoded-image-cache-and-background-prefetch", TestDecodedImageCacheAndBackgroundPrefetch, failures);
+	RunTest("display-cache-foreground-active-classification",
+		TestDisplayImageCacheForegroundActiveClassification, failures);
+	RunTest("display-cache-prefetch-preserves-active-foreground",
+		TestDisplayImageCachePrefetchPreservesActiveForeground, failures);
+	RunTest("display-cache-retirement-identity-accounting",
+		TestDisplayCacheRetirementIdentityAccounting, failures);
+	RunTest("display-cache-final-pixels-retirement-thread",
+		TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker, failures);
 	RunTest("display-image-cache-background-preparation", TestDisplayImageCacheBackgroundPreparation, failures);
 	RunTest("shared-cache-budget-accounting", TestSharedCacheBudgetAccounting, failures);
 	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);

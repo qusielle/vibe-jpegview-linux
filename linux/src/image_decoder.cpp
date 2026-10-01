@@ -1,9 +1,11 @@
 #include "image_decoder.h"
 #include "archive_source.h"
+#include "perf_diagnostics.h"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <csetjmp>
 #include <cmath>
 #include <cstdio>
@@ -75,6 +77,8 @@ extern "C" {
 
 #if JPEGVIEW_HAVE_RAW
 #include <libraw/libraw.h>
+#include <libraw/libraw_datastream.h>
+#include <libraw/libraw_version.h>
 #endif
 
 #if JPEGVIEW_HAVE_LCMS2
@@ -218,6 +222,7 @@ bool AppendRGBA(DecodedImage& image, int width, int height, const std::uint8_t* 
 
 bool ReadFile(const std::filesystem::path& filename, std::vector<std::uint8_t>& data,
 	std::string& errorMessage) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::SourceRead);
 	std::ifstream input(filename, std::ios::binary);
 	if (!input) {
 		errorMessage = "cannot open file";
@@ -244,14 +249,109 @@ bool ReadFile(const std::filesystem::path& filename, std::vector<std::uint8_t>& 
 	return true;
 }
 
+class CodecSourceReadTracker {
+public:
+	explicit CodecSourceReadTracker(const char* codec)
+		: diagnostics_(PerfDiagnostics::Instance()), enabled_(diagnostics_.Enabled()), codec_(codec) {}
+
+	using Clock = std::chrono::steady_clock;
+	using TimePoint = Clock::time_point;
+
+	bool Enabled() const {
+		return enabled_;
+	}
+
+	TimePoint BeginRead() const {
+		return enabled_ ? Clock::now() : TimePoint{};
+	}
+
+	void CompleteRead(TimePoint start, std::uint64_t bytes) {
+		CompleteRead(start, bytes, Clock::now());
+	}
+
+	void CompleteRead(TimePoint start, std::uint64_t bytes, TimePoint finish) {
+		if (!enabled_) return;
+		if (start != TimePoint{} && finish >= start) {
+			readDurationNs_ += static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::nanoseconds>(finish - start).count());
+		}
+		bytesRead_ += bytes;
+		++readCalls_;
+	}
+
+	std::size_t Read(std::FILE* file, void* destination, std::size_t requested) {
+		if (!enabled_) return std::fread(destination, 1, requested, file);
+		const TimePoint start = BeginRead();
+		const std::size_t bytes = std::fread(destination, 1, requested, file);
+		CompleteRead(start, bytes);
+		return bytes;
+	}
+
+	~CodecSourceReadTracker() {
+		if (!enabled_ || bytesRead_ == 0 || readCalls_ == 0) return;
+		const std::uint64_t durationUs = readDurationNs_ == 0 ? 0 :
+			(readDurationNs_ + 999) / 1000;
+		diagnostics_.RecordText(PerfMetric::SourceRead, durationUs,
+			bytesRead_, readCalls_, 0, 0, 0, 0, codec_);
+	}
+
+	CodecSourceReadTracker(const CodecSourceReadTracker&) = delete;
+	CodecSourceReadTracker& operator=(const CodecSourceReadTracker&) = delete;
+
+private:
+	PerfDiagnostics& diagnostics_;
+	bool enabled_;
+	const char* codec_;
+	std::uint64_t readDurationNs_ = 0;
+	std::uint64_t bytesRead_ = 0;
+	std::uint64_t readCalls_ = 0;
+};
+
+struct StbInput {
+	std::FILE* file = nullptr;
+	CodecSourceReadTracker* reads = nullptr;
+};
+
+int ReadStb(void* user, char* destination, int requested) {
+	StbInput* input = static_cast<StbInput*>(user);
+	if (input == nullptr || requested <= 0) return 0;
+	return static_cast<int>(input->reads->Read(input->file, destination,
+		static_cast<std::size_t>(requested)));
+}
+
+void SkipStb(void* user, int bytes) {
+	StbInput* input = static_cast<StbInput*>(user);
+	if (input != nullptr) (void)std::fseek(input->file, bytes, SEEK_CUR);
+}
+
+int IsEofStb(void* user) {
+	const StbInput* input = static_cast<const StbInput*>(user);
+	return input == nullptr || std::feof(input->file) != 0 || std::ferror(input->file) != 0;
+}
+
+std::unique_ptr<std::FILE, int (*)(std::FILE*)> OpenSourceFile(
+	const std::filesystem::path& filename) {
+	return std::unique_ptr<std::FILE, int (*)(std::FILE*)>(
+		std::fopen(filename.string().c_str(), "rb"), &std::fclose);
+}
+
 bool DecodeStb(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
+	CodecSourceReadTracker sourceReads("stb");
+	std::unique_ptr<std::FILE, int (*)(std::FILE*)> file = sourceReads.Enabled() ?
+		OpenSourceFile(filename) : std::unique_ptr<std::FILE, int (*)(std::FILE*)>(nullptr, &std::fclose);
+	StbInput input{file.get(), &sourceReads};
+	const stbi_io_callbacks callbacks = {ReadStb, SkipStb, IsEofStb};
 	int channels = 0;
 	int width = 0;
 	int height = 0;
-	unsigned char* rgba = stbi_load(filename.string().c_str(), &width, &height, &channels, 4);
+	unsigned char* rgba = sourceReads.Enabled() ?
+		(file == nullptr ? nullptr : stbi_load_from_callbacks(&callbacks, &input,
+			&width, &height, &channels, 4)) :
+		stbi_load(filename.string().c_str(), &width, &height, &channels, 4);
 	if (rgba == nullptr) {
-		errorMessage = stbi_failure_reason() == nullptr ? "unknown decoder error" : stbi_failure_reason();
+		errorMessage = sourceReads.Enabled() && file == nullptr ? "can't fopen" :
+			(stbi_failure_reason() == nullptr ? "unknown decoder error" : stbi_failure_reason());
 		return false;
 	}
 	const std::string extension = Lower(filename.extension().string());
@@ -270,6 +370,8 @@ struct MappedInput {
 
 bool MapInput(const std::filesystem::path& filename, MappedInput& input,
 	bool sequentialRead, std::string& errorMessage) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::SourceMap);
+	PerfDiagnostics::Instance().Record(PerfMetric::SourceRead);
 	const int descriptor = ::open(filename.c_str(), O_RDONLY | O_CLOEXEC);
 	if (descriptor < 0) {
 		errorMessage = "cannot open file";
@@ -1245,11 +1347,30 @@ int GifLoopCount(const GifFileType* gif) {
 	return 0;
 }
 
+struct GifInput {
+	std::FILE* file = nullptr;
+	CodecSourceReadTracker* reads = nullptr;
+};
+
+int ReadGif(GifFileType* gif, GifByteType* destination, int requested) {
+	GifInput* input = gif == nullptr ? nullptr : static_cast<GifInput*>(gif->UserData);
+	if (input == nullptr || requested <= 0) return 0;
+	return static_cast<int>(input->reads->Read(input->file, destination,
+		static_cast<std::size_t>(requested)));
+}
+
 bool DecodeGif(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
+	CodecSourceReadTracker sourceReads("giflib");
+	std::unique_ptr<std::FILE, int (*)(std::FILE*)> file = sourceReads.Enabled() ?
+		OpenSourceFile(filename) : std::unique_ptr<std::FILE, int (*)(std::FILE*)>(nullptr, &std::fclose);
+	GifInput input{file.get(), &sourceReads};
 	int gifError = 0;
-	GifFileType* gif = DGifOpenFileName(filename.string().c_str(), &gifError);
+	GifFileType* gif = sourceReads.Enabled() ?
+		(file == nullptr ? nullptr : DGifOpen(&input, ReadGif, &gifError)) :
+		DGifOpenFileName(filename.string().c_str(), &gifError);
 	if (gif == nullptr) {
+		if (sourceReads.Enabled() && file == nullptr) gifError = D_GIF_ERR_OPEN_FAILED;
 		errorMessage = GifErrorString(gifError) == nullptr ? "cannot open GIF" : GifErrorString(gifError);
 		return false;
 	}
@@ -1383,9 +1504,60 @@ bool DecodeWebP(const std::filesystem::path& filename, DecodedImage& image,
 #endif
 
 #if JPEGVIEW_HAVE_TIFF
+struct TiffInput {
+	std::FILE* file = nullptr;
+	CodecSourceReadTracker* reads = nullptr;
+};
+
+tmsize_t ReadTiff(thandle_t handle, void* destination, tmsize_t requested) {
+	TiffInput* input = static_cast<TiffInput*>(handle);
+	if (input == nullptr || requested <= 0) return 0;
+	return static_cast<tmsize_t>(input->reads->Read(input->file, destination,
+		static_cast<std::size_t>(requested)));
+}
+
+tmsize_t WriteTiff(thandle_t, void*, tmsize_t) {
+	return 0;
+}
+
+toff_t SeekTiff(thandle_t handle, toff_t offset, int origin) {
+	TiffInput* input = static_cast<TiffInput*>(handle);
+	if (input == nullptr || ::fseeko(input->file, static_cast<off_t>(offset), origin) != 0) {
+		return static_cast<toff_t>(-1);
+	}
+	const off_t position = ::ftello(input->file);
+	return position < 0 ? static_cast<toff_t>(-1) : static_cast<toff_t>(position);
+}
+
+int CloseTiff(thandle_t) {
+	return 0;
+}
+
+toff_t SizeTiff(thandle_t handle) {
+	const TiffInput* input = static_cast<const TiffInput*>(handle);
+	struct stat status{};
+	return input != nullptr && ::fstat(::fileno(input->file), &status) == 0 && status.st_size >= 0 ?
+		static_cast<toff_t>(status.st_size) : 0;
+}
+
 bool DecodeTiff(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
-	TIFF* tiff = TIFFOpen(filename.string().c_str(), "r");
+	CodecSourceReadTracker sourceReads("libtiff");
+	std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(nullptr, &std::fclose);
+	TiffInput input;
+	TIFF* tiff = nullptr;
+	if (sourceReads.Enabled()) {
+		file = OpenSourceFile(filename);
+		if (file == nullptr) {
+			errorMessage = "cannot open TIFF";
+			return false;
+		}
+		input = {file.get(), &sourceReads};
+		tiff = TIFFClientOpen(filename.string().c_str(), "r", &input,
+			ReadTiff, WriteTiff, SeekTiff, CloseTiff, SizeTiff, nullptr, nullptr);
+	} else {
+		tiff = TIFFOpen(filename.string().c_str(), "r");
+	}
 	if (tiff == nullptr) {
 		errorMessage = "cannot open TIFF";
 		return false;
@@ -1435,14 +1607,67 @@ bool DecodeTiff(const std::filesystem::path& filename, DecodedImage& image,
 #endif
 
 #if JPEGVIEW_HAVE_HEIF
+struct HeifInput {
+	std::FILE* file = nullptr;
+	CodecSourceReadTracker* reads = nullptr;
+	std::uint64_t fileSize = 0;
+};
+
+std::int64_t PositionHeif(void* user) {
+	const HeifInput* input = static_cast<const HeifInput*>(user);
+	if (input == nullptr) return -1;
+	const off_t position = ::ftello(input->file);
+	return position < 0 ? -1 : static_cast<std::int64_t>(position);
+}
+
+int ReadHeif(void* destination, std::size_t requested, void* user) {
+	HeifInput* input = static_cast<HeifInput*>(user);
+	if (input == nullptr) return 1;
+	return input->reads->Read(input->file, destination, requested) == requested ?
+		0 : static_cast<int>(heif_error_Invalid_input);
+}
+
+int SeekHeif(std::int64_t position, void* user) {
+	HeifInput* input = static_cast<HeifInput*>(user);
+	if (input == nullptr || position < 0 ||
+		static_cast<std::uint64_t>(position) > input->fileSize ||
+		::fseeko(input->file, static_cast<off_t>(position), SEEK_SET) != 0) return 1;
+	return 0;
+}
+
+enum heif_reader_grow_status WaitForHeifFileSize(std::int64_t targetSize, void* user) {
+	const HeifInput* input = static_cast<const HeifInput*>(user);
+	return input != nullptr && targetSize >= 0 &&
+		static_cast<std::uint64_t>(targetSize) <= input->fileSize ?
+		heif_reader_grow_status_size_reached : heif_reader_grow_status_size_beyond_eof;
+}
+
 bool DecodeHeif(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
+	CodecSourceReadTracker sourceReads("libheif");
+	std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(nullptr, &std::fclose);
+	HeifInput input;
+	const heif_reader reader = {
+		1, PositionHeif, ReadHeif, SeekHeif, WaitForHeifFileSize};
 	heif_context* context = heif_context_alloc();
 	if (context == nullptr) {
 		errorMessage = "HEIF decoder unavailable";
 		return false;
 	}
-	const heif_error readError = heif_context_read_from_file(context, filename.string().c_str(), nullptr);
+	heif_error readError{};
+	if (sourceReads.Enabled()) {
+		file = OpenSourceFile(filename);
+		struct stat status{};
+		if (file == nullptr || ::fstat(::fileno(file.get()), &status) != 0 || status.st_size < 0) {
+			heif_context_free(context);
+			errorMessage = "HEIF read failed";
+			return false;
+		}
+		input = {file.get(), &sourceReads, static_cast<std::uint64_t>(status.st_size)};
+		readError = heif_context_read_from_reader(context, &reader, &input, nullptr);
+	} else {
+		readError = heif_context_read_from_file(context, filename.string().c_str(), nullptr);
+	}
 	if (readError.code != heif_error_Ok) {
 		errorMessage = readError.message == nullptr ? "HEIF read failed" : readError.message;
 		heif_context_free(context);
@@ -1515,6 +1740,47 @@ bool DecodeHeif(const std::filesystem::path& filename, DecodedImage& image,
 #endif
 
 #if JPEGVIEW_HAVE_AVIF
+struct AvifInput {
+	avifIO io{};
+	std::FILE* file = nullptr;
+	CodecSourceReadTracker* reads = nullptr;
+	std::uint64_t fileSize = 0;
+	std::vector<std::uint8_t> buffer;
+};
+
+avifResult ReadAvif(avifIO* io, std::uint32_t, std::uint64_t offset,
+	std::size_t requested, avifROData* output) {
+	if (output == nullptr) return AVIF_RESULT_INVALID_ARGUMENT;
+	output->data = nullptr;
+	output->size = 0;
+	AvifInput* input = io == nullptr ? nullptr : static_cast<AvifInput*>(io->data);
+	if (input == nullptr || offset > input->fileSize) return AVIF_RESULT_IO_ERROR;
+	const std::uint64_t remaining = input->fileSize - offset;
+	const std::size_t bytesRequested = static_cast<std::size_t>(std::min<std::uint64_t>(
+		requested, remaining));
+	if (bytesRequested == 0) return AVIF_RESULT_OK;
+	if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) ||
+		::fseeko(input->file, static_cast<off_t>(offset), SEEK_SET) != 0) {
+		return AVIF_RESULT_IO_ERROR;
+	}
+	try {
+		input->buffer.resize(bytesRequested);
+	} catch (const std::exception&) {
+		return AVIF_RESULT_UNKNOWN_ERROR;
+	}
+	const std::size_t bytesRead = input->reads->Read(
+		input->file, input->buffer.data(), bytesRequested);
+	if (bytesRead != bytesRequested) {
+		input->buffer.resize(bytesRead);
+		output->data = input->buffer.data();
+		output->size = bytesRead;
+		return AVIF_RESULT_IO_ERROR;
+	}
+	output->data = input->buffer.data();
+	output->size = bytesRead;
+	return AVIF_RESULT_OK;
+}
+
 bool AllocateAvifRgbPixels(avifRGBImage& rgb) {
 	// libavif 1.0 changed this helper from void to avifResult.
 #if AVIF_VERSION >= 1000000
@@ -1527,13 +1793,33 @@ bool AllocateAvifRgbPixels(avifRGBImage& rgb) {
 
 bool DecodeAvif(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
+	CodecSourceReadTracker sourceReads("libavif");
+	std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(nullptr, &std::fclose);
+	AvifInput input{};
+	if (sourceReads.Enabled()) {
+		file = OpenSourceFile(filename);
+		struct stat status{};
+		if (file == nullptr || ::fstat(::fileno(file.get()), &status) != 0 || status.st_size < 0) {
+			errorMessage = "invalid AVIF image";
+			return false;
+		}
+		input.file = file.get();
+		input.reads = &sourceReads;
+		input.fileSize = static_cast<std::uint64_t>(status.st_size);
+		input.io.read = ReadAvif;
+		input.io.sizeHint = input.fileSize;
+		input.io.persistent = AVIF_FALSE;
+		input.io.data = &input;
+	}
 	avifDecoder* decoder = avifDecoderCreate();
 	if (decoder == nullptr) {
 		errorMessage = "AVIF decoder unavailable";
 		return false;
 	}
-	if (avifDecoderSetIOFile(decoder, filename.string().c_str()) != AVIF_RESULT_OK ||
-		avifDecoderParse(decoder) != AVIF_RESULT_OK || decoder->imageCount == 0) {
+	const bool ioReady = sourceReads.Enabled() ?
+		(avifDecoderSetIO(decoder, &input.io), true) :
+		avifDecoderSetIOFile(decoder, filename.string().c_str()) == AVIF_RESULT_OK;
+	if (!ioReady || avifDecoderParse(decoder) != AVIF_RESULT_OK || decoder->imageCount == 0) {
 		errorMessage = "invalid AVIF image";
 		avifDecoderDestroy(decoder);
 		return false;
@@ -1728,10 +2014,15 @@ bool DecodeJxl(const std::filesystem::path& filename, DecodedImage& image,
 #if JPEGVIEW_HAVE_JXR
 bool DecodeJxr(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
+	CodecSourceReadTracker sourceReads("jxr");
 	PKImageDecode* decoder = nullptr;
 	if (PKCodecFactory_CreateDecoderFromFile(filename.string().c_str(), &decoder) != WMP_errSuccess || decoder == nullptr) {
 		errorMessage = "JPEG XR decoder unavailable or invalid image";
 		return false;
+	}
+	if (sourceReads.Enabled()) {
+		PerfDiagnostics::Instance().RecordText(PerfMetric::SourceRead,
+			0, 0, 0, 0, 0, 0, 0, "jxr_unmeasured_read");
 	}
 	PKFormatConverter* converter = nullptr;
 	I32 width = 0;
@@ -1767,10 +2058,106 @@ bool DecodeJxr(const std::filesystem::path& filename, DecodedImage& image,
 #endif
 
 #if JPEGVIEW_HAVE_RAW
+class TrackedRawFileDatastream : public LibRaw_bigfile_datastream {
+public:
+	TrackedRawFileDatastream(const char* filename, CodecSourceReadTracker& reads)
+		: LibRaw_bigfile_datastream(filename), reads_(reads) {}
+
+	int read(void* destination, size_t size, size_t count) override {
+		#if LIBRAW_VERSION < LIBRAW_MAKE_VERSION(0, 20, 0)
+		if (substream != nullptr) return LibRaw_bigfile_datastream::read(destination, size, count);
+		#endif
+		const INT64 before = LibRaw_bigfile_datastream::tell();
+		const CodecSourceReadTracker::TimePoint start = reads_.BeginRead();
+		const int result = LibRaw_bigfile_datastream::read(destination, size, count);
+		const CodecSourceReadTracker::TimePoint finish = CodecSourceReadTracker::Clock::now();
+		const INT64 after = LibRaw_bigfile_datastream::tell();
+		reads_.CompleteRead(start, before >= 0 && after > before ?
+			static_cast<std::uint64_t>(after - before) : 0, finish);
+		return result;
+	}
+
+	int get_char() override {
+		#if LIBRAW_VERSION < LIBRAW_MAKE_VERSION(0, 20, 0)
+		if (substream != nullptr) return LibRaw_bigfile_datastream::get_char();
+		#endif
+		const INT64 before = LibRaw_bigfile_datastream::tell();
+		const CodecSourceReadTracker::TimePoint start = reads_.BeginRead();
+		const int result = LibRaw_bigfile_datastream::get_char();
+		const CodecSourceReadTracker::TimePoint finish = CodecSourceReadTracker::Clock::now();
+		const INT64 after = LibRaw_bigfile_datastream::tell();
+		reads_.CompleteRead(start, before >= 0 && after > before ?
+			static_cast<std::uint64_t>(after - before) : 0, finish);
+		return result;
+	}
+
+	char* gets(char* destination, int capacity) override {
+		#if LIBRAW_VERSION < LIBRAW_MAKE_VERSION(0, 20, 0)
+		if (substream != nullptr) return LibRaw_bigfile_datastream::gets(destination, capacity);
+		#endif
+		const INT64 before = LibRaw_bigfile_datastream::tell();
+		const CodecSourceReadTracker::TimePoint start = reads_.BeginRead();
+		char* result = LibRaw_bigfile_datastream::gets(destination, capacity);
+		const CodecSourceReadTracker::TimePoint finish = CodecSourceReadTracker::Clock::now();
+		const INT64 after = LibRaw_bigfile_datastream::tell();
+		reads_.CompleteRead(start, before >= 0 && after > before ?
+			static_cast<std::uint64_t>(after - before) : 0, finish);
+		return result;
+	}
+
+	int scanf_one(const char* format, void* value) override {
+		#if LIBRAW_VERSION < LIBRAW_MAKE_VERSION(0, 20, 0)
+		if (substream != nullptr) return LibRaw_bigfile_datastream::scanf_one(format, value);
+		#endif
+		const INT64 before = LibRaw_bigfile_datastream::tell();
+		const CodecSourceReadTracker::TimePoint start = reads_.BeginRead();
+		const int result = LibRaw_bigfile_datastream::scanf_one(format, value);
+		const CodecSourceReadTracker::TimePoint finish = CodecSourceReadTracker::Clock::now();
+		const INT64 after = LibRaw_bigfile_datastream::tell();
+		reads_.CompleteRead(start, before >= 0 && after > before ?
+			static_cast<std::uint64_t>(after - before) : 0, finish);
+		return result;
+	}
+
+	int jpeg_src(void* jpegdata) override {
+		const int result = LibRaw_bigfile_datastream::jpeg_src(jpegdata);
+#if LIBRAW_VERSION < LIBRAW_MAKE_VERSION(0, 20, 0)
+		if (result == 0 && reads_.Enabled()) {
+			PerfDiagnostics::Instance().RecordText(PerfMetric::SourceRead,
+				0, 0, 0, 0, 0, 0, 0, "libraw_jpeg_handoff_unmeasured");
+		}
+#endif
+		return result;
+	}
+
+#if LIBRAW_VERSION < LIBRAW_MAKE_VERSION(0, 21, 0) || defined(LIBRAW_OLD_VIDEO_SUPPORT)
+	void* make_jas_stream() override {
+		void* stream = LibRaw_bigfile_datastream::make_jas_stream();
+		if (stream != nullptr && reads_.Enabled()) {
+			PerfDiagnostics::Instance().RecordText(PerfMetric::SourceRead,
+				0, 0, 0, 0, 0, 0, 0, "libraw_jasper_handoff_unmeasured");
+		}
+		return stream;
+	}
+#endif
+
+private:
+	CodecSourceReadTracker& reads_;
+};
+
 bool DecodeRaw(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
+	CodecSourceReadTracker sourceReads("libraw");
+	// LibRaw uses this caller-owned stream during decoding; declare it before raw
+	// so LibRaw is destroyed first and the stream stays alive through cleanup.
+	std::unique_ptr<TrackedRawFileDatastream> input;
 	LibRaw raw;
-	if (raw.open_file(filename.string().c_str()) != LIBRAW_SUCCESS) {
+	const int openResult = sourceReads.Enabled() ?
+		([&]() {
+			input = std::make_unique<TrackedRawFileDatastream>(filename.string().c_str(), sourceReads);
+			return raw.open_datastream(input.get());
+		})() : raw.open_file(filename.string().c_str());
+	if (openResult != LIBRAW_SUCCESS) {
 		errorMessage = "unsupported or invalid RAW image";
 		return false;
 	}
@@ -1818,6 +2205,7 @@ bool IsJpegPath(const std::filesystem::path& filename) {
 
 bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
 	width = 0;
 	height = 0;
 	errorMessage.clear();
@@ -1836,6 +2224,7 @@ bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& 
 
 bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
 	width = 0;
 	height = 0;
 	errorMessage.clear();
@@ -1881,6 +2270,7 @@ bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& hei
 bool DecodeJpegForDisplay(const std::filesystem::path& filename,
 	int minimumWidth, int minimumHeight, DecodedImage& image,
 	int& sourceWidth, int& sourceHeight, std::string& errorMessage) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Decode);
 	image = {};
 	sourceWidth = 0;
 	sourceHeight = 0;
@@ -1903,6 +2293,7 @@ bool DecodeJpegForDisplay(const std::filesystem::path& filename,
 
 bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Decode);
 	image = {};
 	errorMessage.clear();
 	if (IsArchiveMemberLocation(filename)) {

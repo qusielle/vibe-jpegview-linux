@@ -2,6 +2,7 @@
 
 #include "image_decoder.h"
 #include "cache_budget.h"
+#include "perf_diagnostics.h"
 
 #include <chrono>
 #include <cstddef>
@@ -17,6 +18,17 @@ namespace jpegview_linux {
 // compared with the BGRA buffers and is intentionally excluded from the
 // configured cache budget.
 std::size_t DecodedImageBytes(const DecodedImage& image);
+
+struct DecodedImageCacheDiagnostics {
+	std::size_t cachedBytes = 0;
+	std::size_t cachedImages = 0;
+	std::size_t foregroundQueued = 0;
+	std::size_t backgroundQueued = 0;
+	std::size_t foregroundActive = 0;
+	std::size_t backgroundActive = 0;
+	std::size_t retiredBytes = 0;
+	std::size_t retiredImages = 0;
+};
 
 // Returns neighboring indices in likely-use order. The preferred direction
 // is visited first at each distance, and folder-loop wraparound is included.
@@ -51,11 +63,13 @@ public:
 		const std::shared_ptr<DecodedImage>& image);
 	void Prefetch(const std::vector<std::filesystem::path>& files,
 		std::size_t currentIndex, int preferredDirection,
-		std::size_t maximumCount, Completion completion = {}, Filter filter = {});
+		std::size_t maximumCount, Completion completion = {}, Filter filter = {},
+		std::size_t nearestCount = 2);
 	void Clear();
 
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;
+	DecodedImageCacheDiagnostics GetDiagnostics() const;
 	std::size_t EvictLeastRecentlyUsed();
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);
 

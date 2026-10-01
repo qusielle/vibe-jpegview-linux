@@ -52,6 +52,11 @@ std::vector<ThumbnailSlot> ThumbnailPanelSlots(std::size_t fileCount,
 	std::optional<std::size_t> markedIndex = std::nullopt,
 	std::optional<std::size_t> doublePagePartnerIndex = std::nullopt);
 
+// Whether a file-list index intersects the visible strip, including partially
+// clipped rows at the top and bottom of the panel.
+bool ThumbnailIndexVisible(std::size_t fileCount, std::size_t currentIndex,
+	std::size_t fileIndex, int windowHeight, int rowHeight);
+
 // Returns file indices nearest to the current file first. Equal-distance
 // entries prefer the preceding file, matching their top-to-bottom placement.
 std::vector<std::size_t> ThumbnailPreloadOrder(std::size_t fileCount,

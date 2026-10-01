@@ -7,6 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 BINARY=${1:-./build/jpegview-linux}
 ARCHIVE_FIXTURE_WRITER=${2:-}
 RAR_FIXTURE_WRITER=${3:-}
+perf_trace_path=${JPEGVIEW_TEST_PERF_TRACE:-}
 if [ ! -x "$BINARY" ]; then
 	echo "UI smoke test: binary not found: $BINARY" >&2
 	exit 2
@@ -30,6 +31,9 @@ done
 temporary=$(mktemp -d)
 XDG_STATE_HOME="$temporary/state"
 export XDG_STATE_HOME
+perf_trace_pending=0
+perf_trace_active=0
+if [ -n "$perf_trace_path" ]; then perf_trace_pending=1; fi
 xvfb_pid=''
 window_manager_pid=''
 viewer_pid=''
@@ -198,10 +202,20 @@ launch_viewer() {
 	viewer_input=${1:-$temporary/images}
 	viewer_home=${VIEWER_TEST_HOME:-$temporary/home}
 	viewer_config=${VIEWER_TEST_CONFIG_HOME:-$temporary/config}
-	DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
-		XDG_STATE_HOME="$XDG_STATE_HOME" \
-		PATH="$temporary/bin:$PATH" JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
-		"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
+	if [ "$perf_trace_pending" -eq 1 ]; then
+		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
+			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
+			JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
+			JPEGVIEW_PERF_TRACE="$perf_trace_path" \
+			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
+		perf_trace_pending=0
+		perf_trace_active=1
+	else
+		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
+			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
+			JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
+			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
+	fi
 	viewer_pid=$!
 	window_id=''
 	for _ in $(seq 1 50); do
@@ -221,6 +235,25 @@ stop_viewer() {
 	DISPLAY=":$display_number" xdotool key q || true
 	wait "$viewer_pid" || true
 	viewer_pid=''
+	if [ "$perf_trace_active" -eq 1 ]; then
+		if ! awk -F, '
+			NR == 1 { if ($6 != "work_class") exit 1; next }
+			$2 == "source_read" && $4 == "event_thread" &&
+				$6 == "active_image_spread" { source_read = 1 }
+			$2 == "processing" && $4 == "worker_thread" &&
+				$6 == "active_image_spread" { worker_processing = 1 }
+			$2 == "decode" && $4 == "worker_thread" &&
+				$6 == "focused_preview" { preview_decode = 1 }
+			$2 == "texture_upload" && $4 == "event_thread" &&
+				$6 == "focused_preview" { preview_upload = 1 }
+			END { exit !(source_read && worker_processing && preview_decode && preview_upload) }
+		' "$perf_trace_path"; then
+			echo "UI smoke test: trace omitted event-thread source reads, worker processing, or focused-preview decode/upload attribution" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		perf_trace_active=0
+	fi
 }
 
 assert_title_prefix() {
@@ -400,7 +433,166 @@ if [ "$visual_assertions" -eq 1 ]; then
 		exit 1
 	fi
 fi
+if [ -n "$perf_trace_path" ]; then
+	# Opening Browse for the active file must attribute preview decode to its
+	# worker and the resulting SDL texture upload to the renderer thread.
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	preview_trace_seen=0
+	for _ in $(seq 1 40); do
+		if awk -F, '
+			$2 == "decode" && $4 == "worker_thread" && $6 == "focused_preview" { preview_decode = 1 }
+			$2 == "texture_upload" && $4 == "event_thread" && $6 == "focused_preview" { preview_upload = 1 }
+			END { exit !(preview_decode && preview_upload) }
+		' "$perf_trace_path" 2>/dev/null; then
+			preview_trace_seen=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$preview_trace_seen" -ne 1 ]; then
+		echo "UI smoke test: Browse preview decode/upload trace rows did not arrive before the bounded deadline" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key Escape
+	sleep 0.1
+fi
 stop_viewer
+
+if [ -n "$perf_trace_path" ]; then
+	# Exercise per-row work classes with a generated 100-entry collection. The
+	# trace must distinguish independent reads/resampling for rows in the strip
+	# from retained thumbnails generated beyond its visible range.
+	thumbnail_trace_directory="$temporary/thumbnail-trace-images"
+	thumbnail_trace_config="$temporary/thumbnail-trace-config/jpegview-linux"
+	thumbnail_trace="$perf_trace_path.thumbnails"
+	mkdir -p "$thumbnail_trace_directory" "$thumbnail_trace_config"
+	for index in $(seq 0 99); do
+		filename=$(printf '%03d' "$index")
+		write_ppm "$thumbnail_trace_directory/$filename.ppm" \
+			$((index % 256)) $(((index * 3) % 256)) $(((index * 7) % 256))
+	done
+	printf 'thumbnail_panel_visible=1\nthumbnail_panel_width=164\ncache_size_mb=0\ndouble_page_mode_enabled=0\n' \
+		> "$thumbnail_trace_config/settings.conf"
+	DISPLAY=":$display_number" HOME="$temporary/thumbnail-trace-home" \
+		XDG_CONFIG_HOME="$temporary/thumbnail-trace-config" \
+		XDG_STATE_HOME="$temporary/thumbnail-trace-state" \
+		JPEGVIEW_PERF_TRACE="$thumbnail_trace" \
+		"$BINARY" "$thumbnail_trace_directory" \
+		>"$temporary/thumbnail-trace-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: thumbnail attribution fixture did not open" >&2
+		cat "$temporary/thumbnail-trace-viewer.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	thumbnail_trace_seen=0
+	for _ in $(seq 1 240); do
+		if awk -F, '
+			$2 == "source_read" && $4 == "event_thread" && $6 == "visible_thumbnail" { visible_read = 1 }
+			$2 == "source_read" && $4 == "event_thread" && $6 == "distant_speculation" { distant_read = 1 }
+			$2 == "resampling" && $4 == "event_thread" && $6 == "visible_thumbnail" { visible_resample = 1 }
+			$2 == "resampling" && $4 == "event_thread" && $6 == "distant_speculation" { distant_resample = 1 }
+			$2 == "texture_upload" && $4 == "event_thread" && $6 == "visible_thumbnail" { visible_upload = 1 }
+			$2 == "texture_upload" && $4 == "event_thread" && $6 == "distant_speculation" { distant_upload = 1 }
+			END { exit !(visible_read && distant_read && visible_resample && distant_resample && visible_upload && distant_upload) }
+		' "$thumbnail_trace" 2>/dev/null; then
+			thumbnail_trace_seen=1
+			break
+		fi
+		sleep 0.05
+	done
+	DISPLAY=":$display_number" xdotool key q || true
+	wait "$viewer_pid" || true
+	viewer_pid=''
+	if [ "$thumbnail_trace_seen" -ne 1 ]; then
+		echo "UI smoke test: 100-entry thumbnail trace did not attribute visible and offscreen source reads/resampling separately" >&2
+		cat "$temporary/thumbnail-trace-viewer.log" >&2
+		if [ -f "$thumbnail_trace" ]; then cat "$thumbnail_trace" >&2; fi
+		exit 1
+	fi
+
+	# Disable prepared display frames, then rotate an oversized source so the
+	# renderer-thread fallback must exercise foreground resizing and texture upload.
+	mkdir -p "$temporary/perf-sync-config/jpegview-linux"
+	printf 'scale_mode=fit\ncache_size_mb=0\ndouble_page_mode_enabled=0\n' \
+		> "$temporary/perf-sync-config/jpegview-linux/settings.conf"
+	perf_sync_image="$temporary/perf-sync-source.ppm"
+	perf_sync_trace="$perf_trace_path.sync"
+	{
+		printf 'P6\n1600 1200\n255\n'
+		head -c "$((1600 * 1200 * 3))" /dev/zero
+	} > "$perf_sync_image"
+	DISPLAY=":$display_number" HOME="$temporary/perf-sync-home" \
+		XDG_CONFIG_HOME="$temporary/perf-sync-config" \
+		XDG_STATE_HOME="$temporary/perf-sync-state" \
+		JPEGVIEW_PERF_TRACE="$perf_sync_trace" \
+		"$BINARY" "$perf_sync_image" >"$temporary/perf-sync-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: foreground performance fixture did not open" >&2
+		cat "$temporary/perf-sync-viewer.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	DISPLAY=":$display_number" xdotool key Down
+	sync_fallback_seen=0
+	for _ in $(seq 1 100); do
+		if awk -F, '
+			$2 == "resampling" && $4 == "event_thread" && \
+				$6 == "active_image_spread" { resampling_time = $1 }
+			$2 == "texture_upload" && $4 == "event_thread" && \
+				$6 == "active_image_spread" && resampling_time != "" && \
+				$1 >= resampling_time { found = 1 }
+			END { exit !found }
+		' \
+			"$perf_sync_trace" 2>/dev/null; then
+			sync_fallback_seen=1
+			break
+		fi
+		sleep 0.05
+	done
+	stop_viewer
+	if [ "$sync_fallback_seen" -ne 1 ]; then
+		echo "UI smoke test: synchronous foreground resize/upload rows did not both retain active-image attribution" >&2
+		cat "$temporary/perf-sync-viewer.log" >&2
+		exit 1
+	fi
+	read -r sync_processing_count sync_resampling_count sync_upload_count <<EOF
+$(awk -F, '
+	$2 == "processing" && $4 == "event_thread" && $6 == "active_image_spread" { processing++ }
+	$2 == "resampling" && $4 == "event_thread" && $6 == "active_image_spread" {
+		resampling++
+		awaiting_upload = 1
+	}
+	$2 == "texture_upload" && $4 == "event_thread" && $6 == "active_image_spread" && awaiting_upload {
+		upload++
+		awaiting_upload = 0
+	}
+	END { print processing + 0, resampling + 0, upload + 0 }
+' "$perf_sync_trace")
+EOF
+	if [ "$sync_processing_count" -ne 1 ] || [ "$sync_resampling_count" -ne 1 ] || \
+		[ "$sync_upload_count" -ne 1 ]; then
+		echo "UI smoke test: synchronous foreground processing/resampling/upload trace counts were not one ($sync_processing_count/$sync_resampling_count/$sync_upload_count)" >&2
+		exit 1
+	fi
+fi
 
 # A reopened file must recover its own two mode flags even when the current
 # global defaults differ; navigating from Recents exposes both settings.
@@ -559,15 +751,30 @@ fi
 stop_viewer
 
 if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
-	# Delay the decoder's memory map of a known JPEG. The final viewer window
-	# must already be mapped and painted while that initial load is blocked.
+	# Hold the decoder's memory map until the harness has observed the visible
+	# loading window, then release it through an explicit file signal.
 	cc -shared -fPIC "$SCRIPT_DIR/delay_mmap.c" -o "$temporary/slow_map.so" -ldl
 	convert "$temporary/images/01-red.ppm" "$temporary/startup-delay.jpg"
+	startup_map_started="$temporary/startup-map.started"
+	startup_map_release="$temporary/startup-map.release"
 	DISPLAY=":$display_number" HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/startup-config" \
 		LD_PRELOAD="$temporary/slow_map.so" \
 		JPEGVIEW_TEST_SLOW_MAP="$temporary/startup-delay.jpg" \
+		JPEGVIEW_TEST_SLOW_MAP_STARTED="$startup_map_started" \
+		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$startup_map_release" \
 		"$BINARY" "$temporary/startup-delay.jpg" >"$temporary/startup-viewer.log" 2>&1 &
 	viewer_pid=$!
+	map_started=0
+	for _ in $(seq 1 100); do
+		if [ -f "$startup_map_started" ]; then map_started=1; break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.1
+	done
+	if [ "$map_started" -ne 1 ]; then
+		echo "UI smoke test: decoder did not reach the controlled memory-map barrier" >&2
+		cat "$temporary/startup-viewer.log" >&2
+		exit 1
+	fi
 	window_id=''
 	for _ in $(seq 1 20); do
 		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
@@ -584,6 +791,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		*Loading*) ;;
 		*) echo "UI smoke test: startup window did not show loading state" >&2; exit 1 ;;
 	esac
+	: > "$startup_map_release"
 	loaded_title=''
 	for _ in $(seq 1 50); do
 		loaded_title=$(DISPLAY=":$display_number" window_title_without_position)

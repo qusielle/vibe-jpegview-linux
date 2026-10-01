@@ -1,5 +1,6 @@
 #include "thumbnail_resampler.h"
 
+#include "perf_diagnostics.h"
 #include "thumbnail_panel_model.h"
 
 #include <algorithm>
@@ -19,9 +20,22 @@
 
 namespace jpegview_linux {
 
+namespace {
+
+void RecordThumbnailCancellation(PerfWorkClass workClass,
+	PerfExecution execution = PerfExecution::EventThread) {
+	PerfContextScope context(workClass, execution);
+	PerfDiagnostics::Instance().Record(PerfMetric::Cancellation);
+}
+
+} // namespace
+
 bool DownsampleThumbnailBgra(const std::vector<std::uint8_t>& source,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	std::vector<std::uint8_t>& target) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Resampling,
+		static_cast<std::uint64_t>(sourceWidth) * static_cast<std::uint64_t>(sourceHeight),
+		static_cast<std::uint64_t>(targetWidth) * static_cast<std::uint64_t>(targetHeight));
 	if (sourceWidth <= 0 || sourceHeight <= 0 || targetWidth <= 0 || targetHeight <= 0 ||
 		targetWidth > sourceWidth || targetHeight > sourceHeight) return false;
 	const std::size_t maximum = std::numeric_limits<std::size_t>::max();
@@ -119,6 +133,7 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 	prepared->width = size.width;
 	prepared->height = size.height;
 	prepared->hasTransparency = request.source->hasTransparency;
+	prepared->workClass = request.workClass;
 	if (!DownsampleThumbnailBgra(request.source->bgra, request.source->width,
 		request.source->height, size.width, size.height, prepared->bgra)) return {};
 	return prepared;
@@ -151,6 +166,7 @@ struct ThumbnailPreparationWorker::Impl {
 		for (;;) {
 			Work work;
 			DisplayImageCache::ImagePtr retiredSource;
+			DisplayImageCache::ImagePtr completedSource;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
 				workAvailable.wait(lock, [this] {
@@ -174,19 +190,29 @@ struct ThumbnailPreparationWorker::Impl {
 				work = std::move(*nearest);
 				queue.erase(nearest);
 				inFlightKeys.insert(work.request.key);
+				activeSource = work.request.source;
 				++activeWorkers;
 			}
 
+			PerfContextScope context(work.request.workClass, PerfExecution::WorkerThread);
 			ImagePtr image = processor(work.request);
+			work.request.source.reset();
 			retiredSource.reset();
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				inFlightKeys.erase(work.request.key);
 				--activeWorkers;
 				if (!stopping && work.generation == generation && image &&
-					image->key == work.request.key) completed.push_back(std::move(image));
+					image->key == work.request.key) {
+					completed.push_back(std::move(image));
+				} else if (!stopping && work.generation != generation) {
+					RecordThumbnailCancellation(work.request.workClass,
+						PerfExecution::WorkerThread);
+				}
+				completedSource = std::move(activeSource);
 				idle.notify_all();
 			}
+			completedSource.reset();
 		}
 	}
 
@@ -203,6 +229,7 @@ struct ThumbnailPreparationWorker::Impl {
 	std::deque<ImagePtr> completed;
 	std::deque<DisplayImageCache::ImagePtr> retired;
 	std::unordered_set<std::string> inFlightKeys;
+	DisplayImageCache::ImagePtr activeSource;
 	std::size_t activeWorkers = 0;
 	std::uint64_t generation = 0;
 	bool stopping = false;
@@ -236,6 +263,7 @@ bool ThumbnailPreparationWorker::Request(const ThumbnailPreparationRequest& requ
 				});
 			if (farthest == impl_->queue.end() ||
 				farthest->request.priority <= request.priority) return false;
+			RecordThumbnailCancellation(farthest->request.workClass);
 			impl_->retired.push_back(std::move(farthest->request.source));
 			impl_->queue.erase(farthest);
 		}
@@ -264,6 +292,7 @@ void ThumbnailPreparationWorker::Clear() {
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		++impl_->generation;
 		while (!impl_->queue.empty()) {
+			RecordThumbnailCancellation(impl_->queue.front().request.workClass);
 			impl_->retired.push_back(std::move(impl_->queue.front().request.source));
 			impl_->queue.pop_front();
 		}
@@ -276,6 +305,31 @@ void ThumbnailPreparationWorker::Clear() {
 bool ThumbnailPreparationWorker::HasPendingWork() const {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	return !impl_->queue.empty() || impl_->activeWorkers != 0 || !impl_->completed.empty();
+}
+
+ThumbnailPreparationDiagnostics ThumbnailPreparationWorker::GetDiagnostics() const {
+	ThumbnailPreparationDiagnostics diagnostics;
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	diagnostics.queued = impl_->queue.size();
+	diagnostics.active = impl_->activeWorkers;
+	diagnostics.completedImages = impl_->completed.size();
+	for (const ImagePtr& image : impl_->completed) {
+		if (image) diagnostics.completedBytes += image->bgra.size();
+	}
+	diagnostics.retiredSources = impl_->retired.size();
+	for (const DisplayImageCache::ImagePtr& source : impl_->retired) {
+		if (source) diagnostics.retiredSourceBytes += PreparedDisplayImageBytes(*source);
+	}
+	std::unordered_set<const PreparedDisplayImage*> retainedSources;
+	for (const Impl::Work& work : impl_->queue) {
+		if (work.request.source && retainedSources.insert(work.request.source.get()).second) {
+			diagnostics.retainedSourceBytes += PreparedDisplayImageBytes(*work.request.source);
+		}
+	}
+	if (impl_->activeSource && retainedSources.insert(impl_->activeSource.get()).second) {
+		diagnostics.retainedSourceBytes += PreparedDisplayImageBytes(*impl_->activeSource);
+	}
+	return diagnostics;
 }
 
 bool ThumbnailPreparationWorker::WaitUntilIdle(std::chrono::milliseconds timeout) {

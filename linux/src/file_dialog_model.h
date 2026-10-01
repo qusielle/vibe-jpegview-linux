@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -247,7 +248,11 @@ struct FileDialogPreviewResult {
 // pixels are returned to the UI and are deliberately not added to image caches.
 class FileDialogPreviewLoader {
 public:
-	FileDialogPreviewLoader();
+	using Processor = std::function<FileDialogPreviewResult(
+		const std::filesystem::path&, bool, FileDialogSortMode, int, int,
+		const std::function<bool()>&)>;
+
+	explicit FileDialogPreviewLoader(Processor processor = {});
 	~FileDialogPreviewLoader();
 	FileDialogPreviewLoader(const FileDialogPreviewLoader&) = delete;
 	FileDialogPreviewLoader& operator=(const FileDialogPreviewLoader&) = delete;

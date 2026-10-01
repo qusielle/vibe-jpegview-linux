@@ -50,6 +50,12 @@ std::string CacheKey(const fs::path& filename) {
 	return (error ? filename : absolute).lexically_normal().string();
 }
 
+void RecordQueuedCancellation(PerfWorkClass workClass,
+	PerfExecution execution = PerfExecution::EventThread) {
+	PerfContextScope context(workClass, execution);
+	PerfDiagnostics::Instance().Record(PerfMetric::Cancellation);
+}
+
 } // namespace
 
 std::size_t DecodedImageBytes(const DecodedImage& image) {
@@ -100,6 +106,7 @@ struct DecodedImageCache::Impl {
 		std::string key;
 		FileIdentity identity;
 		std::uint64_t generation = 0;
+		PerfWorkClass workClass = PerfWorkClass::Unspecified;
 		Completion completion;
 	};
 
@@ -191,6 +198,7 @@ struct DecodedImageCache::Impl {
 				++activeWorkers;
 			}
 
+			PerfContextScope context(work.workClass, PerfExecution::WorkerThread);
 			auto image = std::make_shared<DecodedImage>();
 			std::string errorMessage;
 			const bool decoded = decoder(work.filename, *image, errorMessage) && !image->frames.empty();
@@ -207,6 +215,10 @@ struct DecodedImageCache::Impl {
 					// already viewed. Stop this generation once the free budget
 					// cannot hold its next nearest neighbor.
 					if (!Insert(work.key, work.identity, image, foreground)) {
+						for (const Work& queued : queue) {
+							RecordQueuedCancellation(queued.workClass,
+								PerfExecution::WorkerThread);
+						}
 						queue.clear();
 						queuedKeys.clear();
 					} else {
@@ -306,10 +318,12 @@ DecodedImageCache::ImagePtr DecodedImageCache::FindOrWait(const fs::path& filena
 	const bool inFlight = impl_->inFlightKeys.find(key) != impl_->inFlightKeys.end();
 	if (queued == impl_->queue.end() && !inFlight) return {};
 	impl_->foregroundKeys.insert(key);
+	if (queued != impl_->queue.end()) queued->workClass = PerfWorkClass::ActiveImageSpread;
 	if (queued != impl_->queue.end() && queued != impl_->queue.begin()) {
-		Impl::Work promoted = std::move(*queued);
-		impl_->queue.erase(queued);
-		impl_->queue.push_front(std::move(promoted));
+			Impl::Work promoted = std::move(*queued);
+			impl_->queue.erase(queued);
+			promoted.workClass = PerfWorkClass::ActiveImageSpread;
+			impl_->queue.push_front(std::move(promoted));
 	}
 	impl_->workAvailable.notify_one();
 	impl_->idle.wait(lock, [&] {
@@ -333,22 +347,29 @@ void DecodedImageCache::Store(const fs::path& filename,
 
 void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 	std::size_t currentIndex, int preferredDirection, std::size_t maximumCount,
-	Completion completion, Filter filter) {
+	Completion completion, Filter filter, std::size_t nearestCount) {
 	std::vector<Impl::Work> prepared;
 	std::vector<std::pair<fs::path, ImagePtr>> alreadyCached;
-	for (const std::size_t index : ImagePrefetchOrder(files.size(), currentIndex,
-		preferredDirection, maximumCount)) {
+	const std::vector<std::size_t> order = ImagePrefetchOrder(files.size(), currentIndex,
+		preferredDirection, maximumCount);
+	for (std::size_t position = 0; position < order.size(); ++position) {
+		const std::size_t index = order[position];
 		Impl::Work work;
 		work.filename = files[index];
 		if (filter && !filter(work.filename)) continue;
 		work.key = CacheKey(work.filename);
 		work.identity = Identify(work.filename);
+		work.workClass = position < nearestCount ?
+			PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
 		work.completion = completion;
 		if (work.identity.valid) prepared.push_back(std::move(work));
 	}
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		++impl_->generation;
+		for (const Impl::Work& work : impl_->queue) {
+			RecordQueuedCancellation(work.workClass);
+		}
 		impl_->queue.clear();
 		impl_->queuedKeys.clear();
 		impl_->desiredWork.clear();
@@ -376,6 +397,9 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 void DecodedImageCache::Clear() {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	++impl_->generation;
+	for (const Impl::Work& work : impl_->queue) {
+		RecordQueuedCancellation(work.workClass);
+	}
 	impl_->queue.clear();
 	impl_->queuedKeys.clear();
 	impl_->desiredWork.clear();
@@ -393,6 +417,32 @@ std::size_t DecodedImageCache::CachedBytes() const {
 std::size_t DecodedImageCache::CachedImages() const {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	return impl_->entries.size();
+}
+
+DecodedImageCacheDiagnostics DecodedImageCache::GetDiagnostics() const {
+	DecodedImageCacheDiagnostics diagnostics;
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	diagnostics.cachedBytes = impl_->cachedBytes;
+	diagnostics.cachedImages = impl_->entries.size();
+	for (const Impl::Work& work : impl_->queue) {
+		if (impl_->foregroundKeys.find(work.key) != impl_->foregroundKeys.end()) {
+			++diagnostics.foregroundQueued;
+		} else {
+			++diagnostics.backgroundQueued;
+		}
+	}
+	for (const std::string& key : impl_->inFlightKeys) {
+		if (impl_->foregroundKeys.find(key) != impl_->foregroundKeys.end()) {
+			++diagnostics.foregroundActive;
+		} else {
+			++diagnostics.backgroundActive;
+		}
+	}
+	diagnostics.retiredImages = impl_->retired.size();
+	for (const ImagePtr& image : impl_->retired) {
+		if (image) diagnostics.retiredBytes += DecodedImageBytes(*image);
+	}
+	return diagnostics;
 }
 
 std::size_t DecodedImageCache::EvictLeastRecentlyUsed() {

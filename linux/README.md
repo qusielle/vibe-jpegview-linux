@@ -340,6 +340,13 @@ they support.
     packages where available and build only codecs missing from that Ubuntu release; independent
     codec stages and the viewer/tests compile in parallel.
 
+16. **Opt-in performance traces.** Set `JPEGVIEW_PERF_TRACE=/path/to/trace.csv` to record event,
+    frame, presentation, input-to-presentation, decoder-stage, upload, cache, and renderer data for
+    a reproducible workload. The trace writer uses a bounded queue and a background thread; cache
+    occupancy is sampled once per second. See [Performance diagnostics](#performance-diagnostics)
+    and the ignored `out/PERF_WORKLOAD_TEMPLATE.md` for the workload matrix and current baseline
+    availability.
+
 ## Build
 
 The runtime framework dependencies are SDL2, Pango/FreeType, libzip for ZIP/CBZ browsing, and libarchive
@@ -389,6 +396,63 @@ uses libarchive, while encrypted RAR uses the separate `librar_backend.so` plugi
 
 The default link statically includes libstdc++ and libgcc. Set `STATIC_RUNTIME=` if a local
 toolchain does not provide those static runtime archives.
+
+## Performance diagnostics
+
+Diagnostics are disabled by default. Set `JPEGVIEW_PERF_TRACE` to a new CSV path when launching the
+viewer to enable them:
+
+```sh
+JPEGVIEW_PERF_TRACE="$PWD/out/perf-run.csv" \
+  linux/build/jpegview-linux /path/to/representative/photos
+```
+
+The trace records per-event handling time, frame construction time before SDL presentation,
+`SDL_RenderPresent` time, dispatch-to-presentation latency after keyboard/mouse input, metadata and
+source-read/map/decode timing, image processing, resampling, and `SDL_UpdateTexture` time. Each row
+includes execution (`event_thread` or `worker_thread`) and an opaque numeric thread identifier.
+Resource-work rows use one of five classes: `active_image_spread`, `focused_preview`,
+`visible_thumbnail`, `nearest_navigation_neighbor`, or `distant_speculation`; generic event, frame,
+presentation, renderer, and snapshot rows use `unspecified`. These classes describe the purpose of work;
+foreground/background queue and active counts remain separate urgency diagnostics. Browse and Recents
+preview decoding and resampling are marked as worker-thread `focused_preview` work, and their SDL texture
+uploads carry the same class on the event thread. Preview requests canceled while queued or ready are
+recorded on the event thread; stale active results are recorded by the worker. Thumbnail requests for
+rows intersecting the strip use `visible_thumbnail`; offscreen rows retained for the active file list
+use `distant_speculation`. The class follows source reads, decode, resampling, worker reuse, and renderer
+upload on both the event-thread loader and background resampler paths.
+`source_read` rows identify the class that initiated each read, and each
+`cancellation` row is one canceled queued or stale result attributed to the class and thread that
+observed it. Count rows by class when comparing workloads.
+
+The trace also records the SDL version, renderer backend and flags, maximum texture dimensions, and
+cache/queue snapshots. Display lifetime rows report borrowed bytes by image identity and retired bytes
+from the pending queue plus active retirement owner; thumbnail queue rows include source display pixels
+retained by active and queued requests. Cache snapshots run at most once per second; the cache-snapshot
+row includes its own duration. The event thread enqueues fixed-size records into a 4,096-row bounded
+buffer, and a writer thread formats and flushes CSV batches. Overflow is reported as `trace_dropped`.
+With the variable unset, no writer thread or trace buffer is created; context scopes use stack and
+thread-local enum state without allocating.
+
+Rows use monotonic microseconds and do not include image paths. `metadata` measures source identity
+queries and JPEG dimension/MCU reads. `source_read` measures shared read-into-memory and archive
+extraction paths. For direct decoder readers, it emits one aggregate row per decode, summing time
+inside the source read callbacks, actual bytes returned (`value_a`), and callback count (`value_b`);
+the detail field names `stb`, `giflib`, `libtiff`, `libheif`, `libavif`, or `libraw`. These callback
+durations can overlap `decode` time. LibRaw totals exclude compressed-DNG JPEG handoffs on LibRaw
+0.19, where `jpeg_src` gives libjpeg a separate stdio source; a successful handoff emits
+`libraw_jpeg_handoff_unmeasured` with zero duration and byte count. Supported legacy JasPer handoffs
+similarly emit `libraw_jasper_handoff_unmeasured`, since the JasPer stream reads outside the callbacks.
+JPEG XR still uses the JXR decoder's owned filename stream, which exposes no stable Ubuntu 20
+read-callback seam. After a successful JXR decoder open, `jxr_unmeasured_read` marks the direct read
+path with zero duration and byte count; its file I/O remains combined with `decode`. `source_map`
+measures opening and mapping inputs. JPEG data page faults can happen later
+during decoding, so the `decode` duration may include storage wait for mapped JPEGs. The first input
+dispatch still waiting for presentation supplies `input_to_present`; later queued inputs do not reset
+that timestamp. Synchronous foreground pixel processing and resampling are timed alongside their
+worker equivalents, with each timer placed around the operation it measures. The workload template
+describes the CSV class mapping and deterministic trace checks; target-host measurements remain blank
+until the original HDD, GPU, and photo set are available.
 
 ## Isolated Docker build
 

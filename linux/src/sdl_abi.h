@@ -19,6 +19,23 @@ struct SDL_Texture;
 struct SDL_Surface;
 struct SDL_Cursor;
 
+// Public SDL2 renderer metadata layout (SDL_RendererInfo from SDL_render.h).
+// This ABI subset is used only to record the active renderer's capabilities.
+struct SDL_RendererInfo {
+	const char* name;
+	Uint32 flags;
+	Uint32 num_texture_formats;
+	Uint32 texture_formats[16];
+	int max_texture_width;
+	int max_texture_height;
+};
+
+struct SDL_version {
+	Uint8 major;
+	Uint8 minor;
+	Uint8 patch;
+};
+
 struct SDL_Rect {
 	int x;
 	int y;
@@ -134,6 +151,12 @@ static_assert(offsetof(SDL_KeyboardEvent, keysym) == 16, "unexpected SDL keyboar
 static_assert(offsetof(SDL_MouseMotionEvent, x) == 20, "unexpected SDL motion offset");
 static_assert(offsetof(SDL_MouseWheelEvent, y) == 20, "unexpected SDL wheel offset");
 static_assert(sizeof(SDL_Event) == 56, "unexpected SDL_Event layout");
+static_assert(offsetof(SDL_RendererInfo, flags) == sizeof(void*),
+	"unexpected SDL_RendererInfo flags offset");
+static_assert(offsetof(SDL_RendererInfo, texture_formats) == sizeof(void*) + 8,
+	"unexpected SDL_RendererInfo format offset");
+static_assert(offsetof(SDL_RendererInfo, max_texture_width) == sizeof(void*) + 72,
+	"unexpected SDL_RendererInfo width offset");
 
 enum : Uint32 {
 	SDL_BLENDMODE_NONE = 0u,
@@ -236,6 +259,7 @@ extern "C" {
 int SDL_Init(Uint32 flags);
 void SDL_Quit();
 const char* SDL_GetError();
+void SDL_GetVersion(SDL_version* version);
 SDL_Window* SDL_CreateWindow(const char* title, int x, int y, int w, int h, Uint32 flags);
 void SDL_DestroyWindow(SDL_Window* window);
 void SDL_ShowWindow(SDL_Window* window);
@@ -266,6 +290,7 @@ SDL_Surface* SDL_CreateRGBSurfaceFrom(void* pixels, int width, int height, int d
 	int pitch, Uint32 redMask, Uint32 greenMask, Uint32 blueMask, Uint32 alphaMask);
 void SDL_FreeSurface(SDL_Surface* surface);
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, int index, Uint32 flags);
+int SDL_GetRendererInfo(SDL_Renderer* renderer, SDL_RendererInfo* info);
 int SDL_SetHint(const char* name, const char* value);
 void SDL_DestroyRenderer(SDL_Renderer* renderer);
 SDL_Texture* SDL_CreateTexture(SDL_Renderer* renderer, Uint32 format, int access, int w, int h);

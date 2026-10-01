@@ -3,6 +3,7 @@
 #include "image_decoder.h"
 #include "cache_budget.h"
 #include "image_processing.h"
+#include "perf_diagnostics.h"
 
 #include <chrono>
 #include <cstddef>
@@ -28,6 +29,7 @@ struct DisplayImageRequest {
 	bool autoContrast = false;
 	ImageProcessingParams processing;
 	std::size_t priority = 0;
+	PerfWorkClass workClass = PerfWorkClass::Unspecified;
 	std::string key;
 
 	bool Valid() const;
@@ -41,6 +43,7 @@ struct PreparedDisplayImage {
 	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
 	std::size_t priority = 0;
+	PerfWorkClass workClass = PerfWorkClass::Unspecified;
 	int rotationQuarterTurns = 0;
 };
 
@@ -57,6 +60,22 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const std::filesystem::path& fil
 	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
+
+struct DisplayImageCacheDiagnostics {
+	std::size_t cachedBytes = 0;
+	std::size_t cachedImages = 0;
+	std::size_t foregroundQueued = 0;
+	std::size_t backgroundQueued = 0;
+	std::size_t foregroundActive = 0;
+	std::size_t backgroundActive = 0;
+	std::size_t preparedBytes = 0;
+	std::size_t preparedImages = 0;
+	std::size_t borrowedBytes = 0;
+	std::size_t borrowedImages = 0;
+	std::size_t retiredBytes = 0;
+	std::size_t retiredImages = 0;
+	std::size_t activeRetiredBytes = 0;
+};
 
 // Conservative number of neighboring full-viewport textures that fit beside
 // the current image. The cap prevents a very large configured budget from
@@ -105,6 +124,7 @@ public:
 
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;
+	DisplayImageCacheDiagnostics GetDiagnostics() const;
 	bool HasPendingWork() const;
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);
 

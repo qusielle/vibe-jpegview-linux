@@ -78,7 +78,15 @@ should normally be added to one of these focused modules and covered by `tests/t
   Rotated spread partners are oriented on the worker before final slot-size resampling; unrotated
   image requests retain the same processing path. JPEG display requests use native reduced DCT
   decode with swapped target axes for quarter-turns before exact scaling, without requiring a
-  retained full-resolution source frame.
+  retained full-resolution source frame. Active display-work diagnostics use each in-flight request's
+  current priority, so a newly queued foreground request and a promoted neighbor are both counted as
+  active foreground work. Borrowed-image identity bookkeeping is enabled only when performance
+  tracing is active. Retirement deduplication uses the pending queue and active worker owner; the
+  worker keeps each active frame alive until all external pixel handles are released, then performs
+  the final destruction itself. Retired byte totals come from queue and active-worker metadata, so
+  diagnostics never acquire a temporary pixel owner. Shutdown stops preparation workers before
+  retirement; it joins after draining when no external handles remain, and returns while the shared
+  retirement state finishes later when a valid handle survives.
 - `input_commands`: SDL key chords to shared JPEGView command IDs, the configurable Space/Shift+Space
   image-navigation direction, and held-navigation repeat state (including when Shift is permitted).
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
@@ -132,8 +140,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   file-size lookup for Browse and Recents rows, encrypted-row marking, caller-preserved row order for
   recent MRU entries, and replaceable previews for a focused image or a directory's first image.
   Preview results carry original source dimensions and byte size; archive-member sizes come from
-  uncompressed member metadata. Image-dimension and archive-member size lookups stay off the SDL
-  event thread.
+  uncompressed member metadata. Replacing queued or ready previews records cancellation on the event
+  thread; a stale active result records cancellation on its worker, once per discarded task.
+  Image-dimension and archive-member size lookups stay off the SDL event thread.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, fit-relative scale labels, dynamic labels, and tooltip placement.
@@ -142,7 +151,11 @@ should normally be added to one of these focused modules and covered by `tests/t
   cancellation/LRU policy, memory sizing, alpha-preserving antialiased source-area reduction, and
   low-priority derivation from completed neighbor display frames. The viewer supplies the active
   double-page partner index so both displayed spread pages receive active-row styling without
-  moving the panel's centering or changing which row represents the navigation index.
+  moving the panel's centering or changing which row represents the navigation index. Thumbnail
+  diagnostics include unique display-source bytes held by queued and active requests. Synchronous
+  event-thread requests use `visible_thumbnail` for rows intersecting the strip and
+  `distant_speculation` for offscreen retained rows. The selected class follows the request through
+  source reads, decode, resampling, worker source-pixel reuse, and renderer upload.
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
   validation and single-pass expansion for the configurable window-title pattern. Viewer supplies
   image context—including active spread position, path, original dimensions, source size, and build
@@ -159,6 +172,29 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `external_commands`: pure argv plans and fallback order for printing, wallpaper, clipboard,
   desktop opening, trash, lossless JPEG crop, and lossless JPEG transforms.
 - `exif_reader`: JPEG metadata parsing.
+- `perf_diagnostics`: opt-in monotonic timing and cache/queue snapshots. It is inactive unless
+  `JPEGVIEW_PERF_TRACE` names a CSV output file; enabled samples enter a fixed-capacity ring and a
+  writer thread handles formatting and file I/O. A stack-only `PerfContextScope` carries one of five
+  resource-work classes plus event-thread/worker-thread execution through existing synchronous and
+  worker paths; generic event, frame, presentation, renderer, and snapshot rows use `unspecified`.
+  Source-read and cancellation rows inherit that context, and rows include an opaque numeric thread
+  identifier. Direct source readers aggregate callback I/O duration and actual bytes returned for
+  stb, giflib, libtiff, libheif, libavif, and LibRaw. LibRaw totals omit legacy compressed-DNG JPEG
+  and JasPer handoffs that read through codec-owned streams; successful handoffs receive explicit
+  zero-duration `libraw_jpeg_handoff_unmeasured` or `libraw_jasper_handoff_unmeasured` rows. JXR
+  retains its decoder-owned filename stream; a count-only `jxr_unmeasured_read` row marks successful
+  opens, while actual byte counts and read duration remain combined with decode timing. The work
+  classes are active image/spread, focused preview, visible thumbnail,
+  nearest navigation neighbor, and distant speculation. Browse/Recents preview decode and resampling
+  use worker-thread focused-preview context; replacement cancellations are attributed to the event
+  thread for queued/ready work and to the worker for stale active results, while preview texture upload
+  uses the same event-thread class. Thumbnail attribution follows current row visibility through its
+  event-thread and background-resampler paths. Queue urgency counts remain separate.
+  Input-to-presentation latency keeps the oldest dispatch until a frame is presented, so a later
+  queued input cannot hide an earlier slow one. Synchronous foreground processing/resampling and
+  worker operations time the pixel operation once. Event/frame/presentation timings remain in the
+  SDL adapter, while decoder and image-preparation stages report their own timings. Cache snapshots
+  are sampled once per second to keep their thumbnail accounting scan out of the ordinary frame path.
 
 `main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
 and invoking desktop integrations. It assembles current viewer state for the pure title-pattern
@@ -374,7 +410,10 @@ renderer thread because SDL renderer objects are not thread-safe. Decoded pixels
 reserve from one configured cache budget. Prepared
 frames are uploaded at most once per event-loop iteration, after the current frame is presented;
 unfinished closer neighbors block farther uploads. Expensive CPU-buffer destruction is handed back to
-cache workers. When the thumbnail panel is visible, completed display frames also feed one bounded,
+the retirement worker, which keeps its active strong owner until renderer-thread upload handles have
+released the pixels. Its shared retirement state can outlive the cache while a valid pixel handle does,
+so cache destruction returns and the worker performs final destruction after that handle releases.
+When the thumbnail panel is visible, completed display frames also feed one bounded,
 very-low-priority thumbnail-resampling queue before their CPU pixels are retired; this avoids a
 second large-file decode while leaving renderer upload and display preparation ahead of thumbnail
 work. Static images backed by a ready display texture defer full-pixel materialization

@@ -1,4 +1,6 @@
 #include "archive_source.h"
+
+#include "perf_diagnostics.h"
 #include "rar_backend.h"
 #include "seven_zip_backend.h"
 
@@ -1800,6 +1802,9 @@ bool WithArchiveMemberFile(const fs::path& path,
 	if (member->second.size > kMaximumArchiveMemberBytes) {
 		return fail("archive image exceeds the 128 MiB member limit");
 	}
+	// Count the backing-container read separately from any mapped read of the
+	// short-lived member file used by the codec callback.
+	PerfDiagnostics::Instance().Record(PerfMetric::SourceRead);
 	if (member->second.backend == ArchiveBackend::Libarchive) {
 		if (member->second.encrypted) {
 			return fail("encrypted archive format is not supported", ArchiveErrorKind::UnsupportedEncryption);
@@ -1916,6 +1921,7 @@ bool WithArchiveMemberFile(const fs::path& path,
 bool IdentifyImageSourceBackingFile(const fs::path& path, std::uint64_t& device,
 	std::uint64_t& inode, std::uint64_t& size, std::int64_t& modifiedSeconds,
 	std::int64_t& modifiedNanoseconds) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
 	BackingIdentity identity;
 	if (!StatIdentity(ArchiveBackingFile(path), identity)) return false;
 	device = identity.device;
