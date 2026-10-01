@@ -133,6 +133,8 @@ they support.
    current-image highlight. A gold outline identifies the image marked with Ctrl+M, distinct from
    the current-spread highlight. The panel reserves image space instead of covering the picture,
    preloads nearest files first, and retains every generated thumbnail for the active file list.
+   Moving between images changes nearest-row priority without rebuilding the catalog or invalidating
+   useful in-flight thumbnails for unchanged files.
    Completed neighbor display frames feed a very-low-priority thumbnail worker when available.
    Remaining thumbnails are read, decoded, and resampled by that same single background worker;
    JPEG thumbnails retain reduced-DCT decoding. The SDL thread validates results and uploads their

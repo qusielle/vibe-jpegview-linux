@@ -563,6 +563,11 @@ void TestFileListFilteringAndLogicalSorting() {
 	Expect(FileNames(files) == std::vector<std::string>({"photo1.png", "photo2.png", "photo10.png"}),
 		"logical filename ordering or extension filtering is incorrect");
 	Expect(files.Current().filename() == "photo1.png", "file list did not start at the first sorted image");
+	Expect(files.IndexOf(directory / "photo1.png") == std::optional<std::size_t>(0) &&
+		files.IndexOf(directory / "photo10.png") == std::optional<std::size_t>(2) &&
+		!files.IndexOf(directory / "missing.png").has_value() &&
+		!files.IndexOf({}).has_value(),
+		"file-list exact path lookup did not distinguish present and missing paths");
 	Expect(files.Next(), "next image should advance");
 	Expect(files.Current().filename() == "photo2.png", "next image selected the wrong file");
 	Expect(files.Previous(), "previous image should advance backwards");
@@ -576,6 +581,8 @@ void TestFileListFilteringAndLogicalSorting() {
 	FileList descending({directory.string()}, FileList::SortMode::FileName, false, false);
 	Expect(FileNames(descending) == std::vector<std::string>({"photo10.png", "photo2.png", "photo1.png"}),
 		"descending logical filename ordering is incorrect");
+	Expect(descending.IndexOf(directory / "photo1.png") == std::optional<std::size_t>(2),
+		"file-list exact path lookup did not follow the active sort order");
 }
 
 void TestArchiveBrowsingDecodingAndRecentPreview() {
@@ -3693,8 +3700,10 @@ void TestActiveSpreadDecodeDemandGatesBackgroundWork() {
 	jpegview_linux::InteractionWorkPolicy policy;
 	const auto plan = policy.Plan(foregroundPending, {0, 1});
 	jpegview_linux::ThumbnailCacheScheduler thumbnails;
-	thumbnails.Prepare({"current", "visible", "distant"}, 0, 3);
-	const auto thumbnail = thumbnails.Next(0, [&](const auto& request) {
+	thumbnails.SetCatalog({"current", "visible", "distant"});
+	thumbnails.SetCurrent(0);
+	thumbnails.SetGeometry(100, 60);
+	const auto thumbnail = thumbnails.TakeNext(0, 1, [&](const auto& request) {
 		return plan.AllowsThumbnail(request.fileIndex) ||
 			plan.Allows(jpegview_linux::PerfWorkClass::DistantSpeculation);
 	});
@@ -3725,7 +3734,7 @@ void TestActiveSpreadDecodeDemandGatesBackgroundWork() {
 	const bool decodeIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
 	Expect(reachedBarrier && diagnostics.foregroundActive == 0 &&
 		diagnostics.backgroundActive == 1 && diagnostics.activeSpreadActive == 1 &&
-		plan.foregroundPending && !plan.AllowsThumbnail(1) && !thumbnail &&
+		plan.foregroundPending && !plan.AllowsThumbnail(1) && thumbnail.empty() &&
 		thumbnails.PendingCount() == 3 && scanYielded && scanResults.size() == 1 &&
 		scanResults.front().generation == scanGeneration && decodeIdle,
 		"pending active-spread decode did not pause thumbnail admission and yield list scanning");
@@ -8134,110 +8143,283 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 }
 
 void TestThumbnailCacheSchedulingAndEviction() {
+	const auto Configure = [](jpegview_linux::ThumbnailCacheScheduler& scheduler,
+		const std::vector<std::string>& keys, std::size_t current, std::size_t capacity) {
+		scheduler.SetCatalog(keys, capacity);
+		scheduler.SetCurrent(current);
+		scheduler.SetGeometry(100, 60);
+	};
+	const auto TakeOne = [](jpegview_linux::ThumbnailCacheScheduler& scheduler,
+		std::uint32_t now, const std::function<bool(
+			const jpegview_linux::ThumbnailLoadRequest&)>& permitted = {})
+		-> std::optional<jpegview_linux::ThumbnailLoadRequest> {
+		auto requests = scheduler.TakeNext(now, 1, permitted);
+		if (requests.empty()) return std::nullopt;
+		return requests.front();
+	};
+
 	jpegview_linux::ThumbnailCacheScheduler gated;
-	gated.Prepare({"current", "visible", "distant"}, 0, 3);
-	Expect(!gated.Next(0, [](const jpegview_linux::ThumbnailLoadRequest&) {
+	Configure(gated, {"current", "visible", "distant"}, 0, 3);
+	Expect(gated.TakeNext(0, 1, [](const jpegview_linux::ThumbnailLoadRequest&) {
 		return false;
-	}).has_value() && gated.PendingCount() == 3,
+	}).empty() && gated.PendingCount() == 3,
 		"a blocked thumbnail admission consumed its pending request");
-	const auto visibleRequest = gated.Next(0, [](const auto& request) {
+	const auto visibleRequest = TakeOne(gated, 0, [](const auto& request) {
 		return request.fileIndex < 2;
 	});
 	Expect(visibleRequest.has_value() && visibleRequest->key == "current" &&
 		gated.Complete(*visibleRequest, 0, 0).empty(),
 		"a permitted visible thumbnail could not pass the interaction admission gate");
-	const auto nextVisible = gated.Next(0, [](const auto& request) {
+	const auto nextVisible = TakeOne(gated, 0, [](const auto& request) {
 		return request.fileIndex < 2;
 	});
 	Expect(nextVisible.has_value() && nextVisible->key == "visible" &&
 		gated.Complete(*nextVisible, 0, 0).empty() &&
-		!gated.Next(0, [](const auto& request) { return request.fileIndex < 2; }).has_value() &&
+		!TakeOne(gated, 0, [](const auto& request) { return request.fileIndex < 2; }).has_value() &&
 		gated.PendingCount() == 1,
 		"distant thumbnail admission bypassed the visible-index policy or consumed its queue row");
 
-	jpegview_linux::ThumbnailCacheScheduler scheduler;
 	const std::vector<std::string> keys = {"a", "b", "c", "d", "e"};
 	jpegview_linux::ThumbnailCacheScheduler retained;
-	Expect(retained.Prepare(keys, 2, keys.size()).empty(),
+	Configure(retained, keys, 2, keys.size());
+	Expect(retained.PendingCount() == keys.size(),
 		"full-list thumbnail retention unexpectedly evicted an entry");
 	for (std::size_t completed = 0; completed < keys.size(); ++completed) {
-		const auto retainedRequest = retained.Next(0);
+		const auto retainedRequest = TakeOne(retained, 0);
 		Expect(retainedRequest.has_value(),
 			"full-list thumbnail retention stopped before every file was cached");
 		Expect(retained.Complete(*retainedRequest, 0, 0).empty(),
 			"full-list thumbnail retention evicted a completed thumbnail");
 	}
-	Expect(retained.CacheSize() == keys.size() &&
-		retained.Prepare(keys, 4, keys.size()).empty() &&
-		retained.CacheSize() == keys.size(),
-		"navigation dropped thumbnails retained for the active file list");
+	retained.SetCurrent(4);
+	const std::vector<std::string> reverseKeys(keys.rbegin(), keys.rend());
+	Expect(retained.SetCatalog(reverseKeys).empty(),
+		"sorting evicted thumbnail pixels for sources retained in the catalog");
+	retained.SetCurrent(0);
+	Expect(retained.CacheSize() == keys.size() && retained.PendingCount() == 0,
+		"navigation or sorting dropped thumbnails retained for the active file list");
 
-	Expect(scheduler.Prepare(keys, 2, 3).empty() && scheduler.PendingCount() == 3,
-		"thumbnail scheduler did not prepare a capacity-limited queue");
-	auto request = scheduler.Next(100);
+	jpegview_linux::ThumbnailCacheScheduler boundaries;
+	Configure(boundaries, {"first", "second", "middle", "last"}, 0, 4);
+	auto boundaryBatch = boundaries.TakeNext(0, 4);
+	Expect(boundaryBatch.size() == 4 && boundaryBatch[0].fileIndex == 0 &&
+		boundaryBatch[1].fileIndex == 1 && boundaryBatch[2].fileIndex == 2 &&
+		boundaryBatch[3].fileIndex == 3,
+		"thumbnail scheduling did not advance inward from the first catalog boundary");
+	jpegview_linux::ThumbnailCacheScheduler lastBoundary;
+	Configure(lastBoundary, {"first", "second", "middle", "last"}, 3, 4);
+	boundaryBatch = lastBoundary.TakeNext(0, 4);
+	Expect(boundaryBatch.size() == 4 && boundaryBatch[0].fileIndex == 3 &&
+		boundaryBatch[1].fileIndex == 2 && boundaryBatch[2].fileIndex == 1 &&
+		boundaryBatch[3].fileIndex == 0,
+		"thumbnail scheduling did not advance inward from the last catalog boundary");
+
+	jpegview_linux::ThumbnailCacheScheduler scheduler;
+	Configure(scheduler, keys, 2, 3);
+	Expect(scheduler.PendingCount() == 3,
+		"thumbnail scheduler did not bound its work set to cache capacity");
+	auto request = TakeOne(scheduler, 100);
 	Expect(request.has_value() && request->fileIndex == 2 && request->key == "c",
 		"thumbnail scheduler did not start with the current image");
 	Expect(scheduler.Complete(*request, 100).empty() && scheduler.IsCached("c"),
 		"thumbnail scheduler did not record completed work");
-	Expect(!scheduler.Next(124).has_value(), "thumbnail scheduler ignored its decode pacing deadline");
-	request = scheduler.Next(125);
+	Expect(!TakeOne(scheduler, 124).has_value(), "thumbnail scheduler ignored its decode pacing deadline");
+	request = TakeOne(scheduler, 125);
 	Expect(request.has_value() && request->key == "b",
 		"thumbnail scheduler did not prefer the preceding equidistant image");
 	scheduler.Complete(*request, 125);
-	request = scheduler.Next(150);
+	request = TakeOne(scheduler, 150);
 	Expect(request.has_value() && request->key == "d",
 		"thumbnail scheduler did not continue in nearest-first order");
 	scheduler.Complete(*request, 150);
-	Expect(scheduler.CacheSize() == 3 && scheduler.PendingCount() == 0,
+	Expect(scheduler.CacheSize() == 3 && scheduler.PendingCount() == 0 &&
+		scheduler.TakeNext(175, keys.size()).empty(),
 		"thumbnail scheduler cache/work accounting is incorrect");
 
-	const std::vector<std::string> evicted = scheduler.Prepare(keys, 2, 2);
-	Expect(evicted == std::vector<std::string>({"b"}) && scheduler.IsCached("c") &&
-		scheduler.IsCached("d") && !scheduler.IsCached("b"),
-		"thumbnail scheduler did not evict the least-recently-used non-current image");
-	request = scheduler.Next(151);
-	Expect(request.has_value() && request->key == "b",
-		"thumbnail scheduler did not skip retained cache entries and reload an evicted neighbor");
+	const auto beforeCatalogShrink = scheduler.OperationCounts();
+	const std::vector<std::string> evicted = scheduler.SetCatalog(keys, 2);
+	scheduler.SetCurrent(2);
+	Expect(evicted == std::vector<std::string>({"d"}) && scheduler.IsCached("c") &&
+		scheduler.IsCached("b") && !scheduler.IsCached("d") && scheduler.PendingCount() == 0 &&
+		scheduler.TakeNext(175, keys.size()).empty() &&
+		scheduler.OperationCounts().trimEntriesVisited > beforeCatalogShrink.trimEntriesVisited,
+		"shrinking the thumbnail window requeued a source outside the eligible neighborhood");
+	scheduler.SetCatalog(keys, 3);
+	request = TakeOne(scheduler, 175);
+	Expect(request.has_value() && request->key == "d",
+		"growing the thumbnail window did not admit its newly eligible neighbor");
 	const jpegview_linux::ThumbnailLoadRequest stale = *request;
-	scheduler.Prepare(keys, 4, 2);
-	Expect(scheduler.Complete(stale, 151).empty() && !scheduler.IsCached("b"),
-		"thumbnail scheduler accepted work from a cancelled generation");
+	const std::vector<std::string> reorderedKeys(keys.rbegin(), keys.rend());
+	scheduler.SetCatalog(reorderedKeys, 3);
+	scheduler.SetCurrent(4);
+	Expect(scheduler.Complete(stale, 151).empty() && !scheduler.IsCached("d"),
+		"thumbnail scheduler accepted work from an obsolete catalog order");
+
+	jpegview_linux::ThumbnailCacheScheduler finiteWindow;
+	Configure(finiteWindow, keys, 2, 3);
+	const auto initialWindow = finiteWindow.TakeNext(0, keys.size());
+	Expect(initialWindow.size() == 3 && initialWindow[0].key == "c" &&
+		initialWindow[1].key == "b" && initialWindow[2].key == "d",
+		"finite thumbnail capacity did not select the nearest-first working window");
+	for (const auto& item : initialWindow) finiteWindow.Complete(item, 0, 0);
+	Expect(finiteWindow.CacheSize() == 3 && finiteWindow.PendingCount() == 0 &&
+		!finiteWindow.IsCached("a") && !finiteWindow.IsCached("e") &&
+		finiteWindow.TakeNext(0, keys.size()).empty(),
+		"finite thumbnail window did not quiesce after filling its nearest eligible entries");
+	const auto beforeWindowMove = finiteWindow.OperationCounts();
+	const std::vector<std::string> navigationEvictions = finiteWindow.SetCurrent(4);
+	Expect(navigationEvictions == std::vector<std::string>({"b"}) &&
+		finiteWindow.PendingCount() == 1 &&
+		finiteWindow.OperationCounts().trimEntriesVisited > beforeWindowMove.trimEntriesVisited,
+		"navigation did not replace an out-of-window cache entry with newly eligible work");
+	request = TakeOne(finiteWindow, 0);
+	Expect(request.has_value() && request->key == "e" &&
+		finiteWindow.Complete(*request, 0, 0).empty() && finiteWindow.PendingCount() == 0,
+		"moving the current image did not make farther thumbnail work progress");
+	finiteWindow.SetCatalog(keys, 4);
+	request = TakeOne(finiteWindow, 0);
+	Expect(request.has_value() && request->key == "b" &&
+		finiteWindow.Complete(*request, 0, 0).empty(),
+		"increasing thumbnail capacity did not admit the next nearest file");
+	finiteWindow.SetCatalog(keys, 5);
+	request = TakeOne(finiteWindow, 0);
+	Expect(request.has_value() && request->key == "a" &&
+		finiteWindow.Complete(*request, 0, 0).empty() && finiteWindow.PendingCount() == 0,
+		"increasing thumbnail capacity did not make the farthest file eligible");
 
 	scheduler.Clear();
 	Expect(scheduler.CacheSize() == 0 && scheduler.PendingCount() == 0,
 		"thumbnail scheduler clear retained cache or work state");
-	scheduler.Prepare({"wrap-a", "wrap-b"}, 0, 2);
-	request = scheduler.Next(0xfffffffau);
+	Configure(scheduler, {"wrap-a", "wrap-b"}, 0, 2);
+	request = TakeOne(scheduler, 0xfffffffau);
 	Expect(request.has_value() && request->key == "wrap-a", "wraparound pacing fixture did not start");
 	scheduler.Complete(*request, 0xfffffffau, 10);
-	Expect(!scheduler.Next(3).has_value(), "thumbnail pacing deadline fired early across tick wraparound");
-	request = scheduler.Next(4);
+	Expect(!TakeOne(scheduler, 3).has_value(), "thumbnail pacing deadline fired early across tick wraparound");
+	request = TakeOne(scheduler, 4);
 	Expect(request.has_value() && request->key == "wrap-b",
 		"thumbnail pacing deadline did not fire at tick wraparound");
 	scheduler.Complete(*request, 4);
-	const std::vector<std::string> zeroCapacityEvictions = scheduler.Prepare({"wrap-a"}, 0, 0);
+	const std::vector<std::string> zeroCapacityEvictions =
+		scheduler.SetCatalog({"wrap-a"}, 0);
 	Expect(zeroCapacityEvictions.size() == 2 && scheduler.CacheSize() == 0,
 		"zero-capacity thumbnail cache retained its protected entry");
 
 	jpegview_linux::ThumbnailCacheScheduler external;
-	external.Prepare(keys, 2, 2);
+	Configure(external, keys, 2, 2);
 	Expect(external.Store("c").empty() && external.Store("b").empty() &&
-		external.Store("e") == std::vector<std::string>({"b"}) && external.IsCached("c") &&
-		external.IsCached("e"),
-		"thumbnail scheduler did not account for externally prepared pixels");
+		external.Store("e").empty() && external.IsCached("c") && external.IsCached("b") &&
+		!external.IsCached("e"),
+		"thumbnail scheduler retained externally prepared pixels outside its working window");
 
 	jpegview_linux::ThumbnailCacheScheduler failed;
-	failed.Prepare({"bad", "good"}, 0, 2);
-	const auto failedRequest = failed.Next(0);
+	Configure(failed, {"bad", "good"}, 0, 2);
+	const auto failedRequest = TakeOne(failed, 0);
 	Expect(failedRequest.has_value() && failedRequest->key == "bad",
 		"thumbnail failure fixture did not select its first source");
 	failed.Fail(*failedRequest, 0, 0);
 	Expect(failed.IsFailed("bad") && !failed.IsCached("bad") &&
-		failed.Next(0).has_value() && !failed.Next(0).has_value(),
+		TakeOne(failed, 0).has_value() && !TakeOne(failed, 0).has_value(),
 		"thumbnail decode failure was recorded as cached pixels or retried in the same plan");
-	failed.Prepare({"good"}, 0, 2);
-	Expect(!failed.IsFailed("bad") && failed.Next(0).has_value(),
+	failed.SetCatalog({"good"});
+	failed.SetCurrent(0);
+	Expect(!failed.IsFailed("bad") && TakeOne(failed, 0).has_value(),
 		"thumbnail failure state retained a source removed from the active list");
+
+	jpegview_linux::ThumbnailCacheScheduler geometry;
+	Configure(geometry, {"unchanged", "removed"}, 0, 2);
+	const auto survivesNavigation = TakeOne(geometry, 0);
+	Expect(survivesNavigation.has_value(), "navigation fixture did not admit its first thumbnail");
+	geometry.SetCurrent(1);
+	Expect(geometry.IsCurrent(*survivesNavigation) &&
+		geometry.Complete(*survivesNavigation, 0, 0).empty() &&
+		geometry.IsCached("unchanged"),
+		"navigation invalidated useful in-flight work for an unchanged catalog");
+	const auto cancelledGeometry = TakeOne(geometry, 0);
+	Expect(cancelledGeometry.has_value(), "geometry fixture did not admit its remaining thumbnail");
+	geometry.Retry(*cancelledGeometry);
+	const auto staleGeometry = TakeOne(geometry, 0);
+	Expect(staleGeometry.has_value() && staleGeometry->key == cancelledGeometry->key,
+		"cancelled thumbnail work was not returned to the pending cursor");
+	geometry.SetGeometry(200, 120);
+	Expect(!geometry.IsCurrent(*staleGeometry) &&
+		geometry.Complete(*staleGeometry, 0, 0).empty() && geometry.CacheSize() == 0,
+		"thumbnail scheduler accepted completion from obsolete geometry");
+	const auto staleRemoval = TakeOne(geometry, 0);
+	Expect(staleRemoval.has_value(), "catalog-removal fixture did not admit a thumbnail");
+	Expect(geometry.Store("removed").empty(),
+		"catalog-removal fixture could not retain its completed source");
+	const std::vector<std::string> deletedTexture = geometry.SetCatalog({"unchanged"});
+	Expect(!geometry.IsCurrent(*staleRemoval) &&
+		geometry.Complete(*staleRemoval, 0, 0).empty() &&
+		!geometry.IsCached("removed") && deletedTexture == std::vector<std::string>({"removed"}),
+		"thumbnail scheduler accepted a deleted catalog entry");
+
+	std::vector<std::string> largeCatalog;
+	largeCatalog.reserve(15000);
+	for (std::size_t index = 0; index < 15000; ++index) {
+		largeCatalog.push_back("large-" + std::to_string(index));
+	}
+	jpegview_linux::ThumbnailCacheScheduler large;
+	large.SetCatalog(std::move(largeCatalog));
+	large.SetCurrent(0);
+	large.SetGeometry(100, 60);
+	const auto beforeCurrentUpdates = large.OperationCounts();
+	for (std::size_t index = 0; index < 1000; ++index) large.SetCurrent(index);
+	const auto afterCurrentUpdates = large.OperationCounts();
+	Expect(afterCurrentUpdates.catalogEntriesVisited == beforeCurrentUpdates.catalogEntriesVisited &&
+		afterCurrentUpdates.currentEntriesVisited == 0 &&
+		afterCurrentUpdates.currentUpdates == beforeCurrentUpdates.currentUpdates + 1000 &&
+		large.PendingCount() == 15000,
+		"thumbnail navigation inspected or rebuilt the large catalog");
+	const auto boundedBatch = large.TakeNext(0, 3);
+	Expect(boundedBatch.size() == 3 && boundedBatch[0].fileIndex == 999 &&
+		boundedBatch[1].fileIndex == 998 && boundedBatch[2].fileIndex == 1000 &&
+		large.PendingCount() == 14997,
+		"large-catalog nearest-first cursor did not produce only the requested bounded batch");
+	const auto beforeLargeFill = large.OperationCounts();
+	for (std::size_t index = 0; index < 15000; ++index) {
+		Expect(large.Store("large-" + std::to_string(index)).empty(),
+			"whole-catalog thumbnail retention evicted an entry while filling its cache");
+	}
+	const auto afterLargeFill = large.OperationCounts();
+	Expect(large.CacheSize() == 15000 &&
+		afterLargeFill.trimEntriesVisited == beforeLargeFill.trimEntriesVisited,
+		"filling an in-capacity whole-catalog cache scanned cached entries during Trim");
+	const auto beforeLargeNavigation = large.OperationCounts();
+	for (std::size_t index = 0; index < 1000; ++index) large.SetCurrent(index);
+	const auto afterLargeNavigation = large.OperationCounts();
+	Expect(afterLargeNavigation.trimEntriesVisited == beforeLargeNavigation.trimEntriesVisited &&
+		afterLargeNavigation.currentUpdates == beforeLargeNavigation.currentUpdates + 1000 &&
+		large.CacheSize() == 15000,
+		"navigation scanned or evicted entries from a populated whole-catalog cache");
+}
+
+void TestThumbnailCatalogReplacementIdentity() {
+	jpegview_linux::ThumbnailCatalogRevisionTracker revisions;
+	jpegview_linux::ThumbnailCacheScheduler scheduler;
+	constexpr std::uint64_t equalMutationRevision = 0;
+	if (revisions.NeedsUpdate(equalMutationRevision)) {
+		scheduler.SetCatalog({"old-a", "old-b"});
+		revisions.MarkUpdated(equalMutationRevision);
+	}
+	scheduler.SetCurrent(0);
+	scheduler.SetGeometry(100, 60);
+	const auto oldRequest = scheduler.TakeNext(0, 1);
+	Expect(oldRequest.size() == 1 && oldRequest.front().key == "old-a",
+		"initial thumbnail catalog fixture did not serve its first source");
+
+	revisions.NoteReplacement();
+	Expect(revisions.NeedsUpdate(equalMutationRevision),
+		"whole-list replacement with an equal per-instance mutation revision was not detected");
+	if (revisions.NeedsUpdate(equalMutationRevision)) {
+		scheduler.SetCatalog({"new-a", "new-b"});
+		revisions.MarkUpdated(equalMutationRevision);
+	}
+	scheduler.SetCurrent(1);
+	const auto replacementRequest = scheduler.TakeNext(0, 1);
+	Expect(replacementRequest.size() == 1 && replacementRequest.front().key == "new-b" &&
+		!scheduler.IsCurrent(oldRequest.front()) && scheduler.IsCurrent(replacementRequest.front()),
+		"thumbnail scheduler did not serve the replacement catalog with the same mutation revision");
 }
 
 void TestThumbnailBackgroundPreparation() {
@@ -8431,14 +8613,16 @@ void TestThumbnailBackgroundPreparation() {
 	const auto replaced = cancellable.TakeCompleted(1);
 	Expect(replaced.size() == 1 && replaced.front().image &&
 		jpegview_linux::ThumbnailPreparationResultMatches(
-			replaced.front(), 2, 5, "stale", 2, 2) &&
+			replaced.front(), 2, 5, 0, "stale", 2, 2) &&
 		!jpegview_linux::ThumbnailPreparationResultMatches(
-			replaced.front(), 1, 5, "stale", 2, 2) &&
+			replaced.front(), 1, 5, 0, "stale", 2, 2) &&
 		!jpegview_linux::ThumbnailPreparationResultMatches(
-			replaced.front(), 2, 4, "stale", 2, 2) &&
+			replaced.front(), 2, 4, 0, "stale", 2, 2) &&
 		!jpegview_linux::ThumbnailPreparationResultMatches(
-			replaced.front(), 2, 5, "stale", 3, 2),
-		"thumbnail worker result did not preserve request/list/geometry identity");
+			replaced.front(), 2, 5, 1, "stale", 2, 2) &&
+		!jpegview_linux::ThumbnailPreparationResultMatches(
+			replaced.front(), 2, 5, 0, "stale", 3, 2),
+		"thumbnail worker result did not preserve index/catalog/geometry identity");
 
 	std::mutex selectiveMutex;
 	std::condition_variable selectiveChanged;
@@ -8549,6 +8733,148 @@ void TestThumbnailBackgroundPreparation() {
 		"cooperatively canceled thumbnail published a duplicate retry result");
 }
 
+void TestThumbnailQueueDisplacementReturnsSchedulerWork() {
+	std::mutex retirementMutex;
+	std::condition_variable retirementChanged;
+	bool retirementStarted = false;
+	bool releaseRetirement = false;
+	jpegview_linux::ThumbnailPreparationWorker worker(
+		[](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = request.key;
+			image->width = image->height = 1;
+			image->bgra.assign(4, 255);
+			return image;
+		});
+	auto retiringSource = std::shared_ptr<jpegview_linux::PreparedDisplayImage>(
+		new jpegview_linux::PreparedDisplayImage,
+		[&](jpegview_linux::PreparedDisplayImage* image) {
+			std::unique_lock<std::mutex> lock(retirementMutex);
+			retirementStarted = true;
+			retirementChanged.notify_all();
+			retirementChanged.wait_for(lock, std::chrono::seconds(3),
+				[&] { return releaseRetirement; });
+			delete image;
+		});
+	retiringSource->width = retiringSource->height = 1;
+	retiringSource->bgra.assign(4, 255);
+	ScopedConditionRelease releaseRetirementOnExit(
+		retirementMutex, retirementChanged, releaseRetirement);
+
+	jpegview_linux::ThumbnailPreparationRequest warmup;
+	warmup.key = "retirement-warmup";
+	warmup.source = retiringSource;
+	warmup.maximumWidth = warmup.maximumHeight = 100;
+	Expect(worker.Request(warmup).accepted,
+		"retirement fixture worker rejected its warmup request");
+	warmup.source.reset();
+	retiringSource.reset();
+	bool retirementReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(retirementMutex);
+		retirementReachedBarrier = retirementChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return retirementStarted; });
+	}
+	Expect(retirementReachedBarrier,
+		"thumbnail source retirement did not reach its bounded barrier");
+	const auto warmupResult = worker.TakeCompleted(1);
+	Expect(warmupResult.size() == 1 && warmupResult.front().image &&
+		warmupResult.front().key == "retirement-warmup",
+		"thumbnail worker did not finish warmup before entering source retirement");
+
+	const std::vector<std::string> keys = {"a", "b", "c", "d", "e", "f"};
+	jpegview_linux::ThumbnailCacheScheduler scheduler;
+	scheduler.SetCatalog(keys);
+	scheduler.SetCurrent(0);
+	scheduler.SetGeometry(100, 60);
+	for (const char* key : {"a", "b", "c"}) scheduler.Store(key);
+	const auto admittedFiles = scheduler.TakeNext(0, 1);
+	Expect(admittedFiles.size() == 1 && admittedFiles.front().key == "d",
+		"displacement fixture did not select d as its first file-backed request");
+	const jpegview_linux::ThumbnailLoadRequest dLoad = admittedFiles.front();
+	const auto makeFileRequest = [](const jpegview_linux::ThumbnailLoadRequest& load) {
+		jpegview_linux::ThumbnailPreparationRequest request;
+		request.key = load.key;
+		request.logicalSource = load.key;
+		request.maximumWidth = load.maximumWidth;
+		request.maximumHeight = load.maximumHeight;
+		request.priority = 6;
+		request.workClass = jpegview_linux::PerfWorkClass::VisibleThumbnail;
+		request.catalogRevision = load.catalogRevision;
+		request.geometryRevision = load.geometryRevision;
+		request.fileIndex = load.fileIndex;
+		return request;
+	};
+	const jpegview_linux::ThumbnailPreparationAdmission queuedD =
+		worker.Request(makeFileRequest(dLoad));
+	Expect(queuedD.accepted && !queuedD.displaced &&
+		worker.GetDiagnostics().queued == 1,
+		"scheduler-admitted d did not remain in the bounded worker queue");
+	scheduler.SetCurrent(5);
+	auto reuseSource = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+	reuseSource->width = reuseSource->height = 1;
+	reuseSource->bgra.assign(4, 255);
+	const auto requestFromPreparedFrame = [&](const std::string& key,
+		std::size_t fileIndex, std::size_t priority) {
+		auto request = makeFileRequest(dLoad);
+		request.key = key;
+		request.logicalSource.clear();
+		request.source = reuseSource;
+		request.fileIndex = fileIndex;
+		request.priority = priority;
+		return request;
+	};
+	const jpegview_linux::ThumbnailPreparationAdmission queuedF =
+		worker.Request(requestFromPreparedFrame("f", 5, 0));
+	const jpegview_linux::ThumbnailPreparationAdmission queuedE =
+		worker.Request(requestFromPreparedFrame("e", 4, 2));
+	Expect(queuedF.accepted && !queuedF.displaced && queuedE.accepted &&
+		queuedE.displaced && queuedE.displaced->cancelled &&
+		queuedE.displaced->key == "d" && queuedE.displaced->fileIndex == dLoad.fileIndex &&
+		queuedE.displaced->catalogRevision == dLoad.catalogRevision &&
+		queuedE.displaced->geometryRevision == dLoad.geometryRevision &&
+		worker.GetDiagnostics().queued == 2,
+		"prepared-frame requests did not report the displaced queued d identity");
+	scheduler.Retry({queuedE.displaced->fileIndex, queuedE.displaced->key,
+		queuedE.displaced->catalogRevision, queuedE.displaced->geometryRevision,
+		queuedE.displaced->maximumWidth, queuedE.displaced->maximumHeight});
+	Expect(scheduler.PendingCount() == 3,
+		"displaced d was not returned to the scheduler's pending work set");
+	{
+		std::lock_guard<std::mutex> lock(retirementMutex);
+		releaseRetirement = true;
+	}
+	retirementChanged.notify_all();
+	Expect(worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"prepared-frame requests did not finish after source retirement resumed");
+	auto preparedResults = worker.TakeCompleted(10);
+	Expect(preparedResults.size() == 2 && std::all_of(preparedResults.begin(),
+		preparedResults.end(), [](const auto& result) {
+			return !result.cancelled && result.image &&
+				(result.key == "e" || result.key == "f");
+		}),
+		"prepared-frame displacement fixture did not complete e and f");
+	for (const auto& result : preparedResults) scheduler.Store(result.key);
+	scheduler.SetCurrent(dLoad.fileIndex);
+	const auto returnedToD = scheduler.TakeNext(0, 1);
+	Expect(returnedToD.size() == 1 && returnedToD.front().key == "d" &&
+		scheduler.IsCurrent(returnedToD.front()),
+		"returning to d did not make its displaced request retryable");
+	const jpegview_linux::ThumbnailPreparationAdmission retriedD =
+		worker.Request(makeFileRequest(returnedToD.front()));
+	Expect(retriedD.accepted && !retriedD.displaced &&
+		worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"scheduler could not resubmit displaced d to the thumbnail worker");
+	const auto completedD = worker.TakeCompleted(1);
+	Expect(completedD.size() == 1 && completedD.front().key == "d" &&
+		completedD.front().image && !completedD.front().cancelled &&
+		jpegview_linux::ThumbnailPreparationResultMatches(completedD.front(),
+			scheduler.CatalogRevision(), scheduler.GeometryRevision(), dLoad.fileIndex,
+			"d", dLoad.maximumWidth, dLoad.maximumHeight) &&
+		scheduler.Store("d").empty() && scheduler.IsCached("d"),
+		"retried d did not complete and enter the thumbnail cache");
+}
+
 void TestThumbnailFileBackedPreparationAndShutdown() {
 	TemporaryDirectory temporary;
 	const fs::path jpeg = temporary.path() / "file-backed.jpg";
@@ -8572,19 +8898,21 @@ void TestThumbnailFileBackedPreparationAndShutdown() {
 	WriteText(invalid, "not an image");
 
 	const auto fileRequest = [](const fs::path& source, int maximumWidth,
-		int maximumHeight, std::uint64_t generation, std::uint64_t listIdentity) {
+		int maximumHeight, std::uint64_t geometryRevision,
+		std::uint64_t catalogRevision, std::size_t fileIndex) {
 		jpegview_linux::ThumbnailPreparationRequest request;
 		request.key = source.string();
 		request.maximumWidth = maximumWidth;
 		request.maximumHeight = maximumHeight;
 		request.workClass = jpegview_linux::PerfWorkClass::VisibleThumbnail;
 		request.logicalSource = source;
-		request.requestGeneration = generation;
-		request.fileListIdentity = listIdentity;
+		request.geometryRevision = geometryRevision;
+		request.catalogRevision = catalogRevision;
+		request.fileIndex = fileIndex;
 		return request;
 	};
 	jpegview_linux::ThumbnailPreparationWorker worker;
-	Expect(worker.Request(fileRequest(jpeg, 2, 2, 11, 7)) &&
+	Expect(worker.Request(fileRequest(jpeg, 2, 2, 11, 7, 3)) &&
 		worker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not decode a file-backed JPEG request");
 	auto result = worker.TakeCompleted(1);
@@ -8592,9 +8920,9 @@ void TestThumbnailFileBackedPreparationAndShutdown() {
 		result.front().image->width == 2 && result.front().image->height == 2 &&
 		result.front().image->bgra.size() == 16 &&
 		jpegview_linux::ThumbnailPreparationResultMatches(
-			result.front(), 11, 7, jpeg.string(), 2, 2),
+			result.front(), 7, 11, 3, jpeg.string(), 2, 2),
 		"file-backed JPEG thumbnail lost its reduced decode or request identity");
-	Expect(worker.Request(fileRequest(ppm, 2, 1, 12, 7)) &&
+	Expect(worker.Request(fileRequest(ppm, 2, 1, 12, 7, 4)) &&
 		worker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not decode a file-backed non-JPEG request");
 	result = worker.TakeCompleted(1);
@@ -8602,13 +8930,13 @@ void TestThumbnailFileBackedPreparationAndShutdown() {
 		result.front().image->width == 2 && result.front().image->height == 1 &&
 		result.front().image->bgra.size() == 8,
 		"file-backed non-JPEG thumbnail was not resampled to its target geometry");
-	Expect(worker.Request(fileRequest(invalid, 2, 2, 13, 7)) &&
+	Expect(worker.Request(fileRequest(invalid, 2, 2, 13, 7, 5)) &&
 		worker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker rejected an invalid-source request before reporting failure");
 	result = worker.TakeCompleted(1);
 	Expect(result.size() == 1 && !result.front().image &&
 		jpegview_linux::ThumbnailPreparationResultMatches(
-			result.front(), 13, 7, invalid.string(), 2, 2),
+			result.front(), 7, 13, 5, invalid.string(), 2, 2),
 		"invalid source was not returned as a distinct decode failure");
 
 	std::mutex shutdownMutex;
@@ -9861,7 +10189,10 @@ int main() {
 	RunTest("viewer-chrome-paint-plans", TestViewerChromePaintPlans, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("thumbnail-cache-scheduling-and-eviction", TestThumbnailCacheSchedulingAndEviction, failures);
+	RunTest("thumbnail-catalog-replacement-identity", TestThumbnailCatalogReplacementIdentity, failures);
 	RunTest("thumbnail-background-preparation", TestThumbnailBackgroundPreparation, failures);
+	RunTest("thumbnail-queue-displacement-returns-scheduler-work",
+		TestThumbnailQueueDisplacementReturnsSchedulerWork, failures);
 	RunTest("thumbnail-file-backed-preparation-and-shutdown",
 		TestThumbnailFileBackedPreparationAndShutdown, failures);
 	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);

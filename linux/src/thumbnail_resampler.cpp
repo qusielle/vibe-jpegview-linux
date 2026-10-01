@@ -130,10 +130,12 @@ bool ThumbnailPreparationRequest::Valid() const {
 }
 
 bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
-	std::uint64_t requestGeneration, std::uint64_t fileListIdentity,
-	const std::string& sourceKey, int maximumWidth, int maximumHeight) {
-	return result.requestGeneration == requestGeneration &&
-		result.fileListIdentity == fileListIdentity && result.key == sourceKey &&
+	std::uint64_t catalogRevision, std::uint64_t geometryRevision,
+	std::size_t fileIndex, const std::string& sourceKey,
+	int maximumWidth, int maximumHeight) {
+	return result.catalogRevision == catalogRevision &&
+		result.geometryRevision == geometryRevision && result.fileIndex == fileIndex &&
+		result.key == sourceKey &&
 		result.maximumWidth == maximumWidth && result.maximumHeight == maximumHeight;
 }
 
@@ -280,8 +282,9 @@ struct ThumbnailPreparationWorker::Impl {
 					if (!wasCancelled || !activeCancellationReported) {
 						Result result;
 						result.key = work.request.key;
-						result.requestGeneration = work.request.requestGeneration;
-						result.fileListIdentity = work.request.fileListIdentity;
+						result.fileIndex = work.request.fileIndex;
+						result.catalogRevision = work.request.catalogRevision;
+						result.geometryRevision = work.request.geometryRevision;
 						result.maximumWidth = work.request.maximumWidth;
 						result.maximumHeight = work.request.maximumHeight;
 						result.workClass = work.request.workClass;
@@ -336,8 +339,10 @@ ThumbnailPreparationWorker::ThumbnailPreparationWorker(Processor processor)
 
 ThumbnailPreparationWorker::~ThumbnailPreparationWorker() = default;
 
-bool ThumbnailPreparationWorker::Request(const ThumbnailPreparationRequest& request) {
-	if (!request.Valid()) return false;
+ThumbnailPreparationAdmission ThumbnailPreparationWorker::Request(
+	const ThumbnailPreparationRequest& request) {
+	ThumbnailPreparationAdmission admission;
+	if (!request.Valid()) return admission;
 	ThumbnailPreparationRequest prepared = request;
 	if (!prepared.cancellation || prepared.cancellation->load()) {
 		prepared.cancellation = std::make_shared<std::atomic<bool>>(false);
@@ -346,12 +351,13 @@ bool ThumbnailPreparationWorker::Request(const ThumbnailPreparationRequest& requ
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		if (impl_->stopping || impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end() ||
 			std::any_of(impl_->completed.begin(), impl_->completed.end(),
-				[&request](const Result& result) {
+			[&request](const Result& result) {
 					return result.key == request.key &&
-						result.requestGeneration == request.requestGeneration &&
-						result.fileListIdentity == request.fileListIdentity;
-				})) {
-			return false;
+						result.catalogRevision == request.catalogRevision &&
+						result.geometryRevision == request.geometryRevision &&
+						result.fileIndex == request.fileIndex;
+			})) {
+			return admission;
 		}
 		const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
 			[&request](const Impl::Work& work) { return work.request.key == request.key; });
@@ -364,31 +370,44 @@ bool ThumbnailPreparationWorker::Request(const ThumbnailPreparationRequest& requ
 			}
 			queued->request.priority = request.priority;
 			queued->request.workClass = request.workClass;
-			queued->request.requestGeneration = request.requestGeneration;
-			queued->request.fileListIdentity = request.fileListIdentity;
+			queued->request.catalogRevision = request.catalogRevision;
+			queued->request.geometryRevision = request.geometryRevision;
+			queued->request.fileIndex = request.fileIndex;
 			queued->request.maximumWidth = request.maximumWidth;
 			queued->request.maximumHeight = request.maximumHeight;
 			queued->request.logicalSource = request.logicalSource;
 			queued->request.cancellation = prepared.cancellation;
+			admission.accepted = true;
 			impl_->workAvailable.notify_one();
-			return true;
+			return admission;
 		}
 		if (impl_->queue.size() >= Impl::kMaximumQueuedSources) {
 			const auto farthest = std::max_element(impl_->queue.begin(), impl_->queue.end(),
 				[](const Impl::Work& left, const Impl::Work& right) {
 					return left.request.priority < right.request.priority;
-				});
+			});
 			if (farthest == impl_->queue.end() ||
-				farthest->request.priority <= request.priority) return false;
+				farthest->request.priority <= request.priority) return admission;
+			ThumbnailPreparationResult displaced;
+			displaced.key = farthest->request.key;
+			displaced.fileIndex = farthest->request.fileIndex;
+			displaced.catalogRevision = farthest->request.catalogRevision;
+			displaced.geometryRevision = farthest->request.geometryRevision;
+			displaced.maximumWidth = farthest->request.maximumWidth;
+			displaced.maximumHeight = farthest->request.maximumHeight;
+			displaced.workClass = farthest->request.workClass;
+			displaced.cancelled = true;
+			admission.displaced = std::move(displaced);
 			RecordThumbnailCancellation(farthest->request.workClass);
 			impl_->retired.push_back(std::move(farthest->request.source));
 			impl_->queue.erase(farthest);
 		}
 		impl_->StartWorkerLocked();
 		impl_->queue.push_back({std::move(prepared), impl_->generation});
+		admission.accepted = true;
 	}
 	impl_->workAvailable.notify_one();
-	return true;
+	return admission;
 }
 
 std::vector<ThumbnailPreparationWorker::Result>
@@ -433,8 +452,9 @@ ThumbnailPreparationWorker::Cancel(const std::set<PerfWorkClass>& workClasses) {
 		}
 		Result result;
 		result.key = queued->request.key;
-		result.requestGeneration = queued->request.requestGeneration;
-		result.fileListIdentity = queued->request.fileListIdentity;
+		result.fileIndex = queued->request.fileIndex;
+		result.catalogRevision = queued->request.catalogRevision;
+		result.geometryRevision = queued->request.geometryRevision;
 		result.maximumWidth = queued->request.maximumWidth;
 		result.maximumHeight = queued->request.maximumHeight;
 		result.workClass = queued->request.workClass;
@@ -460,8 +480,9 @@ ThumbnailPreparationWorker::Cancel(const std::set<PerfWorkClass>& workClasses) {
 		if (!impl_->activeCancellationReported) {
 			Result result;
 			result.key = impl_->activeRequest.key;
-			result.requestGeneration = impl_->activeRequest.requestGeneration;
-			result.fileListIdentity = impl_->activeRequest.fileListIdentity;
+			result.fileIndex = impl_->activeRequest.fileIndex;
+			result.catalogRevision = impl_->activeRequest.catalogRevision;
+			result.geometryRevision = impl_->activeRequest.geometryRevision;
 			result.maximumWidth = impl_->activeRequest.maximumWidth;
 			result.maximumHeight = impl_->activeRequest.maximumHeight;
 			result.workClass = impl_->activeRequest.workClass;

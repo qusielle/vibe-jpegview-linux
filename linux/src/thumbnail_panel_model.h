@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -82,17 +83,47 @@ ThumbnailRect ThumbnailImageRect(int sourceWidth, int sourceHeight,
 struct ThumbnailLoadRequest {
 	std::size_t fileIndex = 0;
 	std::string key;
-	std::uint64_t generation = 0;
+	std::uint64_t catalogRevision = 0;
+	std::uint64_t geometryRevision = 0;
+	int maximumWidth = 0;
+	int maximumHeight = 0;
+};
+
+struct ThumbnailSchedulerOperationCounts {
+	std::size_t catalogEntriesVisited = 0;
+	std::size_t currentEntriesVisited = 0;
+	std::size_t currentUpdates = 0;
+	std::size_t trimEntriesVisited = 0;
+};
+
+// Tracks both per-instance FileList mutations and whole-list owner replacement.
+class ThumbnailCatalogRevisionTracker {
+public:
+	bool NeedsUpdate(std::uint64_t mutationRevision) const;
+	void MarkUpdated(std::uint64_t mutationRevision);
+	void NoteReplacement();
+	void Reset();
+
+private:
+	std::uint64_t ownerRevision_ = 0;
+	std::uint64_t appliedOwnerRevision_ = 0;
+	std::uint64_t appliedMutationRevision_ = 0;
+	bool hasApplied_ = false;
 };
 
 // Owns nearest-first work, cancellation generations, LRU usage, and cache
 // capacity. Pixel decoding and renderer textures stay in the SDL adapter.
 class ThumbnailCacheScheduler {
 public:
-	std::vector<std::string> Prepare(const std::vector<std::string>& fileKeys,
-		std::size_t currentIndex, std::size_t capacity);
-	std::optional<ThumbnailLoadRequest> Next(std::uint32_t now);
-	std::optional<ThumbnailLoadRequest> Next(std::uint32_t now,
+	std::vector<std::string> SetCatalog(std::vector<std::string> fileKeys);
+	std::vector<std::string> SetCatalog(std::vector<std::string> fileKeys,
+		std::size_t capacity);
+	std::vector<std::string> SetCurrent(std::size_t currentIndex);
+	std::vector<std::string> SetGeometry(int maximumWidth, int maximumHeight);
+	std::vector<ThumbnailLoadRequest> TakeNext(std::uint32_t now,
+		std::size_t maximumCount = 1);
+	std::vector<ThumbnailLoadRequest> TakeNext(std::uint32_t now,
+		std::size_t maximumCount,
 		const std::function<bool(const ThumbnailLoadRequest&)>& permitted);
 	std::vector<std::string> Complete(const ThumbnailLoadRequest& request,
 		std::uint32_t now, std::uint32_t delayMs = 25);
@@ -106,25 +137,42 @@ public:
 
 	bool IsCached(const std::string& key) const;
 	bool IsFailed(const std::string& key) const;
+	bool IsCurrent(const ThumbnailLoadRequest& request) const;
 	std::size_t CacheSize() const { return cache_.size(); }
-	std::size_t PendingCount() const { return queue_.size() - queuePosition_; }
-	std::uint64_t Generation() const { return generation_; }
+	std::size_t PendingCount() const { return pendingIndices_.size(); }
+	std::uint64_t CatalogRevision() const { return catalogRevision_; }
+	std::uint64_t GeometryRevision() const { return geometryRevision_; }
+	ThumbnailSchedulerOperationCounts OperationCounts() const { return operationCounts_; }
 
 private:
+	bool IsEligible(std::size_t fileIndex) const;
+	void RebuildWorkingSet();
+	std::optional<std::size_t> NearestPendingIndex() const;
+	void RebuildPendingIndices();
 	std::vector<std::string> Trim();
 
 	struct CacheRecord {
 		std::uint64_t lastUsed = 0;
 	};
-	std::vector<ThumbnailLoadRequest> queue_;
-	std::size_t queuePosition_ = 0;
+	std::vector<std::string> catalog_;
+	std::unordered_map<std::string, std::size_t> catalogIndices_;
+	std::vector<std::size_t> catalogPositions_;
+	std::set<std::size_t> workingIndices_;
+	std::set<std::size_t> pendingIndices_;
 	std::unordered_map<std::string, CacheRecord> cache_;
 	std::unordered_set<std::string> failed_;
+	std::unordered_set<std::string> inFlight_;
 	std::string protectedKey_;
+	std::size_t currentIndex_ = 0;
 	std::size_t capacity_ = 0;
+	bool wholeCatalogWorking_ = false;
 	std::uint64_t useCounter_ = 0;
-	std::uint64_t generation_ = 0;
+	std::uint64_t catalogRevision_ = 0;
+	std::uint64_t geometryRevision_ = 0;
+	int maximumWidth_ = 0;
+	int maximumHeight_ = 0;
 	std::uint32_t nextLoadTick_ = 0;
+	ThumbnailSchedulerOperationCounts operationCounts_;
 };
 
 } // namespace jpegview_linux

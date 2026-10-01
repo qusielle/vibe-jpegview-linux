@@ -6,7 +6,10 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, configurable
   folder-boundary wrap-around, current-file preservation, and the transient marked-image toggle pair
   used for A/B comparison. The marked path's index in the active ordered list is cached for
-  constant-time thumbnail rendering.
+  constant-time thumbnail rendering. `IndexOf(path)` uses the same sorted path index for an exact
+  optional result; unlike the internal selection lookup, a missing path never falls back to the last
+  entry. `MutationRevision()` changes when membership or ordering changes, not for ordinary current-
+  image navigation.
 - `file_list_scan_worker`: one lazy, low-priority worker for viewer-list initialization, reloads,
   recursive/sibling transitions, dropped inputs, cross-folder marked-image toggles, and
   multiple-input scope changes. Requests carry
@@ -159,14 +162,25 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, fit-relative scale labels, dynamic labels, and tooltip placement.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
-  nearest-first cache scheduling,
+  nearest-first cache scheduling from a catalog captured only when membership or order changes. The
+  viewer pairs each `FileList::MutationRevision()` with a monotonically increasing owner revision
+  whenever it replaces the whole `FileList`, including dropped inputs and clipboard transitions.
+  `SetCurrent` updates priority without visiting a full catalog; finite cache capacities select a
+  nearest-first working window, while the viewer's full-list capacity keeps every active source
+  eligible. `TakeNext` emits a bounded batch, and evictions outside the working window are not
+  requeued until navigation or capacity makes them eligible. Navigation keeps useful in-flight work
+  valid. Completion identities carry the source index, catalog revision, and target-geometry
+  revision, so removed or reordered entries and old-size pixels cannot be published through a stale
+  index.
   cancellation/LRU and decode-failure policy, memory sizing, alpha-preserving antialiased
   source-area reduction, and low-priority thumbnail preparation from either completed neighbor
   display frames or file-backed requests. One worker performs file reads, JPEG dimension lookup,
   reduced-DCT JPEG or ordinary image decode, and resampling; its prepared-frame reuse queue remains
-  bounded to two queued requests. `TickThumbnailPreload` only admits requests, consumes one completion
-  at a time, validates request generation, active list identity, source key, and target geometry,
-  and uploads textures on the renderer thread. Failed decodes are tracked separately from cached
+  bounded to two queued requests. When a prepared-frame request displaces farther queued file work,
+  the admission returns that file request's identity to the scheduler for retry. `TickThumbnailPreload`
+  only admits requests, consumes one completion
+  at a time, validates the catalog revision, file index, source key, and target geometry, and uploads
+  textures on the renderer thread. Failed decodes are tracked separately from cached
   pixels, while failed texture uploads retain their prepared pixels for retry. The viewer supplies
   the active double-page partner index so both displayed spread pages receive active-row styling
   without moving the panel's centering or changing which row represents the navigation index.

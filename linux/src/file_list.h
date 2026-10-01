@@ -54,6 +54,7 @@ public:
 	bool MarkCurrentForToggle();
 	bool ToggleBetweenMarkedAndCurrent();
 	std::filesystem::path MarkedToggleTarget() const;
+	std::optional<std::size_t> IndexOf(const std::filesystem::path& path) const;
 	bool ContainsPath(const std::filesystem::path& path) const;
 	bool CompleteMarkedToggle(const std::filesystem::path& previousPath);
 	bool HasMarkedFile() const { return !markedFile_.empty(); }

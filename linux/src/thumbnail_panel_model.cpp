@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 namespace jpegview_linux {
 
@@ -111,54 +112,158 @@ ThumbnailRect ThumbnailImageRect(int sourceWidth, int sourceHeight,
 	};
 }
 
-std::vector<std::string> ThumbnailCacheScheduler::Prepare(
-	const std::vector<std::string>& fileKeys, std::size_t currentIndex,
-	std::size_t capacity) {
-	++generation_;
-	queue_.clear();
-	queuePosition_ = 0;
+bool ThumbnailCatalogRevisionTracker::NeedsUpdate(std::uint64_t mutationRevision) const {
+	return !hasApplied_ || appliedOwnerRevision_ != ownerRevision_ ||
+		appliedMutationRevision_ != mutationRevision;
+}
+
+void ThumbnailCatalogRevisionTracker::MarkUpdated(std::uint64_t mutationRevision) {
+	appliedOwnerRevision_ = ownerRevision_;
+	appliedMutationRevision_ = mutationRevision;
+	hasApplied_ = true;
+}
+
+void ThumbnailCatalogRevisionTracker::NoteReplacement() {
+	++ownerRevision_;
+	if (ownerRevision_ == 0) ++ownerRevision_;
+}
+
+void ThumbnailCatalogRevisionTracker::Reset() {
+	hasApplied_ = false;
+}
+
+std::vector<std::string> ThumbnailCacheScheduler::SetCatalog(
+	std::vector<std::string> fileKeys) {
+	const std::size_t capacity = fileKeys.size();
+	return SetCatalog(std::move(fileKeys), capacity);
+}
+
+std::vector<std::string> ThumbnailCacheScheduler::SetCatalog(
+	std::vector<std::string> fileKeys, std::size_t capacity) {
+	if (catalog_ == fileKeys) {
+		if (capacity_ == capacity) return {};
+		capacity_ = capacity;
+		RebuildWorkingSet();
+		RebuildPendingIndices();
+		return Trim();
+	}
+	++catalogRevision_;
+	if (catalogRevision_ == 0) ++catalogRevision_;
+	const std::string previousCurrent = protectedKey_;
+	catalog_ = std::move(fileKeys);
 	capacity_ = capacity;
-	protectedKey_ = currentIndex < fileKeys.size() ? fileKeys[currentIndex] : std::string();
-	const std::unordered_set<std::string> activeKeys(fileKeys.begin(), fileKeys.end());
+	catalogIndices_.clear();
+	catalogIndices_.reserve(catalog_.size());
+	catalogPositions_.clear();
+	catalogPositions_.reserve(catalog_.size());
+	for (std::size_t index = 0; index < catalog_.size(); ++index) {
+		++operationCounts_.catalogEntriesVisited;
+		if (!catalog_[index].empty() &&
+			catalogIndices_.emplace(catalog_[index], index).second) {
+			catalogPositions_.push_back(index);
+		}
+	}
+
+	std::vector<std::string> evicted;
+	for (auto cached = cache_.begin(); cached != cache_.end();) {
+		if (catalogIndices_.find(cached->first) == catalogIndices_.end()) {
+			evicted.push_back(cached->first);
+			cached = cache_.erase(cached);
+		} else {
+			++cached;
+		}
+	}
 	for (auto failed = failed_.begin(); failed != failed_.end();) {
-		if (activeKeys.find(*failed) == activeKeys.end()) failed = failed_.erase(failed);
+		if (catalogIndices_.find(*failed) == catalogIndices_.end()) failed = failed_.erase(failed);
 		else ++failed;
 	}
-	const std::vector<std::size_t> order = ThumbnailPreloadOrder(
-		fileKeys.size(), currentIndex, capacity);
-	queue_.reserve(order.size());
-	for (const std::size_t index : order) {
-		queue_.push_back({index, fileKeys[index], generation_});
+	inFlight_.clear();
+	const auto activeCurrent = catalogIndices_.find(previousCurrent);
+	if (activeCurrent == catalogIndices_.end()) {
+		currentIndex_ = catalog_.size();
+		protectedKey_.clear();
+	} else {
+		currentIndex_ = activeCurrent->second;
+		protectedKey_ = previousCurrent;
 	}
+	RebuildWorkingSet();
+	RebuildPendingIndices();
 	nextLoadTick_ = 0;
+	const std::vector<std::string> capacityEvictions = Trim();
+	evicted.insert(evicted.end(), capacityEvictions.begin(), capacityEvictions.end());
+	return evicted;
+}
+
+std::vector<std::string> ThumbnailCacheScheduler::SetCurrent(std::size_t currentIndex) {
+	++operationCounts_.currentUpdates;
+	const std::size_t previousIndex = currentIndex_;
+	if (currentIndex >= catalog_.size()) {
+		currentIndex_ = catalog_.size();
+		protectedKey_.clear();
+	} else {
+		currentIndex_ = currentIndex;
+		protectedKey_ = catalog_[currentIndex];
+	}
+	if (currentIndex_ != previousIndex) {
+		RebuildWorkingSet();
+		if (!wholeCatalogWorking_) RebuildPendingIndices();
+	}
 	return Trim();
 }
 
-std::optional<ThumbnailLoadRequest> ThumbnailCacheScheduler::Next(std::uint32_t now) {
-	return Next(now, {});
+std::vector<std::string> ThumbnailCacheScheduler::SetGeometry(
+	int maximumWidth, int maximumHeight) {
+	maximumWidth = std::max(0, maximumWidth);
+	maximumHeight = std::max(0, maximumHeight);
+	if (maximumWidth_ == maximumWidth && maximumHeight_ == maximumHeight) return {};
+	maximumWidth_ = maximumWidth;
+	maximumHeight_ = maximumHeight;
+	++geometryRevision_;
+	if (geometryRevision_ == 0) ++geometryRevision_;
+	std::vector<std::string> evicted;
+	evicted.reserve(cache_.size());
+	for (const auto& cached : cache_) evicted.push_back(cached.first);
+	cache_.clear();
+	failed_.clear();
+	inFlight_.clear();
+	RebuildPendingIndices();
+	nextLoadTick_ = 0;
+	return evicted;
 }
 
-std::optional<ThumbnailLoadRequest> ThumbnailCacheScheduler::Next(std::uint32_t now,
+std::vector<ThumbnailLoadRequest> ThumbnailCacheScheduler::TakeNext(
+	std::uint32_t now, std::size_t maximumCount) {
+	return TakeNext(now, maximumCount, {});
+}
+
+std::vector<ThumbnailLoadRequest> ThumbnailCacheScheduler::TakeNext(
+	std::uint32_t now, std::size_t maximumCount,
 	const std::function<bool(const ThumbnailLoadRequest&)>& permitted) {
-	if (nextLoadTick_ != 0 && static_cast<std::int32_t>(now - nextLoadTick_) < 0) return std::nullopt;
-	while (queuePosition_ < queue_.size()) {
-		const ThumbnailLoadRequest request = queue_[queuePosition_];
-		if (IsCached(request.key) || IsFailed(request.key)) {
-			++queuePosition_;
-			if (IsCached(request.key)) Touch(request.key);
-			continue;
-		}
-		if (permitted && !permitted(request)) return std::nullopt;
-		++queuePosition_;
-		return request;
+	std::vector<ThumbnailLoadRequest> requests;
+	if (maximumCount == 0 || maximumWidth_ <= 0 || maximumHeight_ <= 0 ||
+		(nextLoadTick_ != 0 && static_cast<std::int32_t>(now - nextLoadTick_) < 0)) return requests;
+	requests.reserve(std::min(maximumCount, pendingIndices_.size()));
+	while (requests.size() < maximumCount) {
+		const std::optional<std::size_t> nextIndex = NearestPendingIndex();
+		if (!nextIndex.has_value()) break;
+		const std::size_t index = *nextIndex;
+		ThumbnailLoadRequest request{index, catalog_[index], catalogRevision_,
+			geometryRevision_, maximumWidth_, maximumHeight_};
+		if (permitted && !permitted(request)) break;
+		pendingIndices_.erase(index);
+		inFlight_.insert(request.key);
+		requests.push_back(std::move(request));
 	}
-	return std::nullopt;
+	return requests;
 }
 
 std::vector<std::string> ThumbnailCacheScheduler::Complete(
 	const ThumbnailLoadRequest& request, std::uint32_t now, std::uint32_t delayMs) {
-	if (request.generation != generation_) return {};
+	if (!IsCurrent(request)) return {};
+	inFlight_.erase(request.key);
 	failed_.erase(request.key);
+	pendingIndices_.erase(request.fileIndex);
+	if (!IsEligible(request.fileIndex)) return {};
 	cache_[request.key].lastUsed = ++useCounter_;
 	nextLoadTick_ = now + delayMs;
 	return Trim();
@@ -166,23 +271,26 @@ std::vector<std::string> ThumbnailCacheScheduler::Complete(
 
 void ThumbnailCacheScheduler::Fail(const ThumbnailLoadRequest& request,
 	std::uint32_t now, std::uint32_t delayMs) {
-	if (request.generation != generation_) return;
+	if (!IsCurrent(request)) return;
+	inFlight_.erase(request.key);
+	pendingIndices_.erase(request.fileIndex);
 	failed_.insert(request.key);
 	nextLoadTick_ = now + delayMs;
 }
 
 void ThumbnailCacheScheduler::Retry(const ThumbnailLoadRequest& request) {
-	if (request.generation != generation_ || IsCached(request.key) ||
-		IsFailed(request.key)) return;
-	for (std::size_t index = queuePosition_; index < queue_.size(); ++index) {
-		if (queue_[index].key == request.key) return;
-	}
-	queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(queuePosition_), request);
+	if (!IsCurrent(request) || IsCached(request.key) || IsFailed(request.key)) return;
+	inFlight_.erase(request.key);
+	if (IsEligible(request.fileIndex)) pendingIndices_.insert(request.fileIndex);
 }
 
 std::vector<std::string> ThumbnailCacheScheduler::Store(const std::string& key) {
 	if (key.empty()) return {};
+	const auto index = catalogIndices_.find(key);
+	if (index == catalogIndices_.end() || !IsEligible(index->second)) return {};
 	failed_.erase(key);
+	inFlight_.erase(key);
+	pendingIndices_.erase(index->second);
 	cache_[key].lastUsed = ++useCounter_;
 	return Trim();
 }
@@ -193,13 +301,24 @@ void ThumbnailCacheScheduler::Touch(const std::string& key) {
 }
 
 void ThumbnailCacheScheduler::Clear() {
-	++generation_;
-	queue_.clear();
-	queuePosition_ = 0;
+	++catalogRevision_;
+	if (catalogRevision_ == 0) ++catalogRevision_;
+	++geometryRevision_;
+	if (geometryRevision_ == 0) ++geometryRevision_;
+	catalog_.clear();
+	catalogIndices_.clear();
+	catalogPositions_.clear();
+	workingIndices_.clear();
+	pendingIndices_.clear();
 	cache_.clear();
 	failed_.clear();
+	inFlight_.clear();
 	protectedKey_.clear();
+	currentIndex_ = 0;
 	capacity_ = 0;
+	wholeCatalogWorking_ = false;
+	maximumWidth_ = 0;
+	maximumHeight_ = 0;
 	nextLoadTick_ = 0;
 }
 
@@ -211,21 +330,124 @@ bool ThumbnailCacheScheduler::IsFailed(const std::string& key) const {
 	return failed_.find(key) != failed_.end();
 }
 
+bool ThumbnailCacheScheduler::IsCurrent(const ThumbnailLoadRequest& request) const {
+	if (request.catalogRevision != catalogRevision_ ||
+		request.geometryRevision != geometryRevision_ ||
+		request.maximumWidth != maximumWidth_ ||
+		request.maximumHeight != maximumHeight_ ||
+		request.fileIndex >= catalog_.size() || catalog_[request.fileIndex] != request.key) return false;
+	const auto found = catalogIndices_.find(request.key);
+	return found != catalogIndices_.end() && found->second == request.fileIndex;
+}
+
+std::optional<std::size_t> ThumbnailCacheScheduler::NearestPendingIndex() const {
+	if (pendingIndices_.empty()) return std::nullopt;
+	if (currentIndex_ >= catalog_.size()) return *pendingIndices_.begin();
+	auto after = pendingIndices_.lower_bound(currentIndex_);
+	if (after != pendingIndices_.end() && *after == currentIndex_) return *after;
+	if (after == pendingIndices_.begin()) return *after;
+	if (after == pendingIndices_.end()) return *std::prev(after);
+	const auto before = std::prev(after);
+	const std::size_t beforeDistance = currentIndex_ - *before;
+	const std::size_t afterDistance = *after - currentIndex_;
+	return beforeDistance <= afterDistance ? *before : *after;
+}
+
+bool ThumbnailCacheScheduler::IsEligible(std::size_t fileIndex) const {
+	if (fileIndex >= catalog_.size()) return false;
+	const auto found = catalogIndices_.find(catalog_[fileIndex]);
+	if (found == catalogIndices_.end() || found->second != fileIndex) return false;
+	return wholeCatalogWorking_ || workingIndices_.find(fileIndex) != workingIndices_.end();
+}
+
+void ThumbnailCacheScheduler::RebuildWorkingSet() {
+	workingIndices_.clear();
+	wholeCatalogWorking_ = capacity_ >= catalogPositions_.size();
+	if (wholeCatalogWorking_ || capacity_ == 0 || catalogPositions_.empty()) return;
+
+	const std::size_t workingCount = std::min(capacity_, catalogPositions_.size());
+	if (currentIndex_ >= catalog_.size()) {
+		for (std::size_t offset = 0; offset < workingCount; ++offset) {
+			++operationCounts_.catalogEntriesVisited;
+			workingIndices_.insert(catalogPositions_[offset]);
+		}
+		return;
+	}
+
+	auto after = std::lower_bound(catalogPositions_.begin(), catalogPositions_.end(), currentIndex_);
+	auto before = after;
+	bool hasBefore = before != catalogPositions_.begin();
+	if (hasBefore) --before;
+	for (std::size_t selected = 0; selected < workingCount; ++selected) {
+		bool selectBefore = false;
+		if (!hasBefore) {
+			if (after == catalogPositions_.end()) break;
+		} else if (after == catalogPositions_.end()) {
+			selectBefore = true;
+		} else {
+			const std::size_t beforeDistance = currentIndex_ - *before;
+			const std::size_t afterDistance = *after - currentIndex_;
+			selectBefore = beforeDistance <= afterDistance;
+		}
+		if (selectBefore) {
+			++operationCounts_.catalogEntriesVisited;
+			workingIndices_.insert(*before);
+			if (before == catalogPositions_.begin()) hasBefore = false;
+			else --before;
+		} else {
+			++operationCounts_.catalogEntriesVisited;
+			workingIndices_.insert(*after);
+			++after;
+		}
+	}
+}
+
+void ThumbnailCacheScheduler::RebuildPendingIndices() {
+	pendingIndices_.clear();
+	const auto addPending = [this](std::size_t index) {
+		++operationCounts_.catalogEntriesVisited;
+		const std::string& key = catalog_[index];
+		if (!IsCached(key) && !IsFailed(key) && inFlight_.find(key) == inFlight_.end()) {
+			pendingIndices_.insert(index);
+		}
+	};
+	if (wholeCatalogWorking_) {
+		for (const std::size_t index : catalogPositions_) addPending(index);
+	} else {
+		for (const std::size_t index : workingIndices_) addPending(index);
+	}
+}
+
 std::vector<std::string> ThumbnailCacheScheduler::Trim() {
 	std::vector<std::string> evicted;
-	while (cache_.size() > capacity_) {
+	if (wholeCatalogWorking_ && cache_.size() <= capacity_) return evicted;
+	while (true) {
 		auto oldest = cache_.end();
+		bool foundIneligible = false;
 		for (auto candidate = cache_.begin(); candidate != cache_.end(); ++candidate) {
+			++operationCounts_.trimEntriesVisited;
+			const auto active = catalogIndices_.find(candidate->first);
+			const bool ineligible = active == catalogIndices_.end() || !IsEligible(active->second);
+			if (ineligible) {
+				if (!foundIneligible || candidate->second.lastUsed < oldest->second.lastUsed) {
+					oldest = candidate;
+					foundIneligible = true;
+				}
+				continue;
+			}
+			if (foundIneligible || cache_.size() <= capacity_) continue;
 			if (candidate->first == protectedKey_) continue;
 			if (oldest == cache_.end() || candidate->second.lastUsed < oldest->second.lastUsed) {
 				oldest = candidate;
 			}
 		}
-		if (oldest == cache_.end()) {
-			if (capacity_ != 0 || cache_.empty()) break;
-			oldest = cache_.begin();
-		}
-		evicted.push_back(oldest->first);
+		if (oldest == cache_.end()) break;
+		const std::string key = oldest->first;
+		const auto active = catalogIndices_.find(key);
+		if (active != catalogIndices_.end() && IsEligible(active->second) && !IsFailed(key) &&
+			inFlight_.find(key) == inFlight_.end()) pendingIndices_.insert(active->second);
+		else if (active != catalogIndices_.end()) pendingIndices_.erase(active->second);
+		evicted.push_back(key);
 		cache_.erase(oldest);
 	}
 	return evicted;
