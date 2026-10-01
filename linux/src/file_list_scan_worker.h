@@ -25,8 +25,12 @@ public:
 	FileListScanWorker(const FileListScanWorker&) = delete;
 	FileListScanWorker& operator=(const FileListScanWorker&) = delete;
 
+	// Cancels pending work and joins the worker. Safe to call before destruction.
+	void Stop();
 	std::uint64_t Request(FileList::ScanRequest request);
 	void Clear();
+	void SetForegroundPending(bool pending);
+	bool IsYieldingForForeground() const;
 	std::vector<FileListScanResult> TakeReady();
 
 private:

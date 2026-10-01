@@ -14,6 +14,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   catalog reads, file metadata, sorting, and replacement-list construction. It checks a generation
   cancellation predicate while traversing and publishes only the newest complete result. The SDL
   thread applies that result only after generation, revision, and navigation-source checks pass.
+  While foreground image or spread work is pending, enumeration pauses at the existing continuation
+  checkpoints and resumes the same scan when foreground work clears; the active list is never rebuilt or
+  replaced early. Foreground-state and generation changes share the pause mutex with its wait predicate,
+  so resume, replacement, clear, and shutdown cannot lose a wakeup.
   The active `FileList` remains main-thread-owned, so ordinary next/previous steps within its loaded
   entries stay lock-free and do not copy the list. A compact path-sorted vector of entry indices
   preserves logarithmic path selection regardless of the active metadata sort, without duplicating
@@ -79,8 +83,16 @@ should normally be added to one of these focused modules and covered by `tests/t
   image requests retain the same processing path. JPEG display requests use native reduced DCT
   decode with swapped target axes for quarter-turns before exact scaling, without requiring a
   retained full-resolution source frame. Active display-work diagnostics use each in-flight request's
-  current priority, so a newly queued foreground request and a promoted neighbor are both counted as
-  active foreground work. Borrowed-image identity bookkeeping is enabled only when performance
+  current priority and effective work class, so a promoted neighbor keeps its active-spread upload
+  eligibility across an empty prefetch cancellation. Explicit display-work cancellation retires the
+  active background class as well as its desired-key membership, so empty prefetch preserves only
+  still-desired spread requests and cannot revive a retired partner. Decoded-image promotions
+  likewise use the effective class for cache admission; header-only JPEG dimension requests use
+  the decoded worker without retaining full-resolution pixels. A decoded insertion that cannot fit prunes queued
+  speculation only; foreground and active-spread work continues draining, including metadata-only
+  partner requests. Active-spread queued and active requests count as foreground source demand so
+  visible thumbnails and list scans yield until the partner is ready.
+  Borrowed-image identity bookkeeping is enabled only when performance
   tracing is active. Retirement deduplication uses the pending queue and active worker owner; the
   worker keeps each active frame alive until all external pixel handles are released, then performs
   the final destruction itself. Retired byte totals come from queue and active-worker metadata, so
@@ -162,6 +174,14 @@ should normally be added to one of these focused modules and covered by `tests/t
   Work intersecting the strip uses `visible_thumbnail`; offscreen retained rows use
   `distant_speculation`. The selected class follows requests through source reads, decode,
   resampling, worker source-pixel reuse, and renderer upload.
+- `interaction_work_policy`: pure foreground-demand aggregation and monotonic-clock policy that maps
+  pan, zoom, resize, crop/navigator
+  drag, held navigation, wheel activity, capture state, foreground demand, and visible thumbnail indices
+  to permitted work classes. It holds distant work for 250 ms after the last activity or capture release,
+  keeps active image/spread work eligible, and permits visible thumbnails only when they cannot compete
+  with pending foreground source work.
+- `work_batch_gate`: serializes completion publication with batch deactivation. Once an owner deactivates
+  a prefetch batch, callbacks already copied by a worker cannot enqueue new work after cache cancellation.
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
   validation and single-pass expansion for the configurable window-title pattern. Viewer supplies
   image context—including active spread position, path, original dimensions, source size, and build
@@ -203,7 +223,15 @@ should normally be added to one of these focused modules and covered by `tests/t
   are sampled once per second to keep their thumbnail accounting scan out of the ordinary frame path.
 
 `main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
-and invoking desktop integrations. It assembles current viewer state for the pure title-pattern
+and invoking desktop integrations. It forwards relevant input and capture changes to
+`InteractionWorkPolicy`, then applies its work-class plan to neighbor admission, thumbnail scheduling,
+completed-frame uploads, and the low-priority scan worker. Speculative display and thumbnail work is
+cooperatively canceled when it becomes irrelevant; active image and spread preparation retains priority.
+Pending active-spread work counts as foreground source demand, pausing visible-thumbnail preparation
+and yielding list scans. When neighbor speculation is suspended, a cold JPEG partner receives an
+`active_image_spread` header-dimension read; a cold non-JPEG partner receives an
+`active_image_spread` decode. Both resolve pair eligibility without admitting adjacent neighbors.
+It assembles current viewer state for the pure title-pattern
 formatter and passes the result to SDL; transient loading and error titles remain direct status
 messages. It reads the persisted transparency pattern and, for frames
 marked as containing alpha, paints the matching background beneath the image before alpha-blended
@@ -352,8 +380,12 @@ Double-page behavior is modeled by `double_page_model` and adapted by Viewer. Th
 entry remains the navigation anchor; a visible partner is a separate page texture prepared through
 `display_image_cache` at the partner's current spread-slot size. Pairing uses only already-available
 dimensions and only strict portrait neighbors (the first cover is single), so checking the mode does
-not decode a neighbor on the event thread. Non-JPEG neighbor dimensions discovered by background
-prefetch are published to the Viewer thread before the layout is resolved. `DoublePagePresentationModel`
+not decode a neighbor on the event thread. A known landscape anchor resolves to single-page
+presentation before its partner dimensions are queried, so a cold partner cannot suppress the
+landscape image while interaction pauses discovery. Neighbor dimensions discovered by background
+work are published to the Viewer thread before the layout is resolved. A cold JPEG partner gets a
+header-only dimension request; a cold non-JPEG partner gets an active-spread decode while interaction
+pauses neighbor work. `DoublePagePresentationModel`
 tracks the exact final-size texture keys and suppresses the single-page fallback while dimensions or
 either texture are pending. Once a spread is known, Viewer submits both page requests with one
 `RequestBackgroundBatch` call; while that pair is pending, the renderer uploads up to two completed
@@ -362,7 +394,11 @@ partner cannot shift a page that was already shown. The model records the first 
 presented, so held-key repeat cannot skip a spread between texture upload and its first draw. A failed
 preparation/upload releases the single-page path instead of leaving the viewport waiting forever.
 Later non-JPEG neighbor completions append display work without replacing the active spread batch;
-callbacks from an obsolete prefetch batch are ignored after the Viewer replaces it.
+deactivation waits for an already-publishing completion before clearing queued neighbors, and callbacks
+from an obsolete prefetch batch are ignored after the Viewer replaces it.
+Viewer tracks the exact cold partner source request. Replacing or retiring that partner removes queued
+active-spread reads and sets the in-flight cancellation token, suppressing publication after a blocked
+source operation returns; policy suspension preserves and rebinds the same partner request.
 Up/Down rotates the current image as before while rotating the spread canvas and page placements as
 a unit. The partner's matching orientation is prepared off the renderer thread; the already
 transformed anchor texture counts as ready, but both pages remain hidden until the partner is ready.

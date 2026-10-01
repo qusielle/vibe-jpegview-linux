@@ -90,6 +90,10 @@ std::string RequestKey(const fs::path& filename, const FileIdentity& identity,
 
 DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& request) {
 	if (!request.Valid()) return {};
+	const auto cancelled = [&request] {
+		return request.cancellation && request.cancellation->load();
+	};
+	if (cancelled()) return {};
 	DecodedImage displayDecoded;
 	const DecodedFrame* decodedFrame = nullptr;
 	if (request.decoded) {
@@ -104,7 +108,7 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		if (!DecodeJpegForDisplay(request.filename, decodeTargetWidth, decodeTargetHeight,
 			displayDecoded, sourceWidth, sourceHeight, errorMessage) ||
 			displayDecoded.frames.empty() || sourceWidth != request.sourceWidth ||
-			sourceHeight != request.sourceHeight) return {};
+			sourceHeight != request.sourceHeight || cancelled()) return {};
 		decodedFrame = &displayDecoded.frames.front();
 	}
 	Image image;
@@ -122,7 +126,7 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	}
 	{
 		PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Processing);
-		if (!image.ApplyProcessing(request.processing, request.autoContrast)) return {};
+		if (!image.ApplyProcessing(request.processing, request.autoContrast) || cancelled()) return {};
 	}
 	switch (request.rotationQuarterTurns) {
 	case 1:
@@ -137,9 +141,10 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	default:
 		break;
 	}
+	if (cancelled()) return {};
 	if (request.targetWidth < image.width || request.targetHeight < image.height) {
 		PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Resampling);
-		if (!image.Resize(request.targetWidth, request.targetHeight)) return {};
+		if (!image.Resize(request.targetWidth, request.targetHeight) || cancelled()) return {};
 	}
 
 	auto prepared = std::make_shared<PreparedDisplayImage>();
@@ -259,6 +264,7 @@ struct DisplayImageCache::Impl {
 	struct Completion {
 		ImagePtr image;
 		std::size_t priority = 0;
+		PerfWorkClass workClass = PerfWorkClass::Unspecified;
 	};
 
 	explicit Impl(std::size_t budget, std::size_t requestedWorkers, Processor prepare,
@@ -286,6 +292,9 @@ struct DisplayImageCache::Impl {
 			stopping = true;
 			++generation;
 			++epoch;
+			for (const auto& active : inFlightCancellation) {
+				if (const auto cancellation = active.second.lock()) cancellation->store(true);
+			}
 			for (const Work& work : queue) RecordDisplayCancellation(work.request.workClass);
 			queue.clear();
 			queuedKeys.clear();
@@ -400,6 +409,8 @@ struct DisplayImageCache::Impl {
 				queue.pop_front();
 				queuedKeys.erase(work.request.key);
 				inFlightKeys.insert(work.request.key);
+				inFlightCancellation[work.request.key] = work.request.cancellation;
+				inFlightWorkClasses[work.request.key] = work.request.workClass;
 				inFlightPriorities[work.request.key] =
 					work.foreground ? 0 : work.request.priority;
 				++activeWorkers;
@@ -417,6 +428,13 @@ struct DisplayImageCache::Impl {
 				std::lock_guard<std::mutex> lock(mutex);
 				inFlightKeys.erase(work.request.key);
 				inFlightPriorities.erase(work.request.key);
+				inFlightCancellation.erase(work.request.key);
+				PerfWorkClass effectiveWorkClass = work.request.workClass;
+				const auto activeWorkClass = inFlightWorkClasses.find(work.request.key);
+				if (activeWorkClass != inFlightWorkClasses.end()) {
+					effectiveWorkClass = activeWorkClass->second;
+					inFlightWorkClasses.erase(activeWorkClass);
+				}
 				--activeWorkers;
 				const bool foreground = work.foreground ||
 					foregroundKeys.erase(work.request.key) != 0;
@@ -433,7 +451,7 @@ struct DisplayImageCache::Impl {
 					// even if retained-cache space is currently occupied by decoded data.
 					// The completion queue is transient and bounded by worker throughput.
 					Insert(image, foreground);
-					completed.push_back({image, completionPriority});
+					completed.push_back({image, completionPriority, effectiveWorkClass});
 				} else if (image) {
 					if (!stopping) {
 						RecordDisplayCancellation(work.request.workClass,
@@ -494,6 +512,8 @@ struct DisplayImageCache::Impl {
 	std::unordered_set<std::string> queuedKeys;
 	std::unordered_set<std::string> inFlightKeys;
 	std::unordered_map<std::string, std::size_t> inFlightPriorities;
+	std::unordered_map<std::string, std::weak_ptr<std::atomic<bool>>> inFlightCancellation;
+	std::unordered_map<std::string, PerfWorkClass> inFlightWorkClasses;
 	std::unordered_set<std::string> desiredPrefetchKeys;
 	std::unordered_map<std::string, std::size_t> desiredPrefetchPriorities;
 	std::unordered_set<std::string> foregroundKeys;
@@ -547,6 +567,12 @@ bool DisplayImageCache::HasPendingOrCached(const std::string& key) const {
 
 void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	if (!request.Valid()) return;
+	DisplayImageRequest foregroundRequest = request;
+	if (!foregroundRequest.cancellation) {
+		foregroundRequest.cancellation = std::make_shared<std::atomic<bool>>(false);
+	} else {
+		foregroundRequest.cancellation->store(false);
+	}
 	const PerfWorkClass foregroundWorkClass = request.workClass == PerfWorkClass::Unspecified ?
 		PerfWorkClass::ActiveImageSpread : request.workClass;
 	bool removedQueuedForeground = false;
@@ -581,28 +607,35 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 			});
 		if (completed != impl_->completed.end()) {
 			completed->priority = 0;
+			completed->workClass = foregroundWorkClass;
 		} else if (const auto cached = impl_->entries.find(request.key); cached != impl_->entries.end()) {
 			// A speculative frame can become the foreground between worker
 			// completion and renderer upload. Promote the shared completion object
 			// so it cannot wait behind any neighboring frame.
-			impl_->completed.push_front({cached->second.image, 0});
+			impl_->completed.push_front({cached->second.image, 0, foregroundWorkClass});
 		} else if (impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end()) {
 			impl_->foregroundKeys.insert(request.key);
 			impl_->inFlightPriorities[request.key] = 0;
+			impl_->inFlightWorkClasses[request.key] = foregroundWorkClass;
+			const auto cancellation = impl_->inFlightCancellation.find(request.key);
+			if (cancellation != impl_->inFlightCancellation.end()) {
+				if (const auto token = cancellation->second.lock()) token->store(false);
+			}
 		} else if (impl_->queuedKeys.find(request.key) != impl_->queuedKeys.end()) {
 			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
 				[&request](const Impl::Work& work) { return work.request.key == request.key; });
 			if (queued != impl_->queue.end()) {
 				Impl::Work promoted = std::move(*queued);
 				impl_->queue.erase(queued);
+				if (promoted.request.cancellation) promoted.request.cancellation->store(false);
 				promoted.foreground = true;
 				promoted.epoch = impl_->epoch;
 				promoted.request.workClass = foregroundWorkClass;
+				promoted.request.cancellation = foregroundRequest.cancellation;
 				impl_->queue.push_front(std::move(promoted));
 				hasQueuedWork = true;
 			}
 		} else {
-			DisplayImageRequest foregroundRequest = request;
 			foregroundRequest.workClass = foregroundWorkClass;
 			impl_->queue.push_front(Impl::Work{
 				std::move(foregroundRequest), 0, impl_->epoch, true});
@@ -626,6 +659,11 @@ void DisplayImageCache::RequestBackgroundBatch(
 		for (const DisplayImageRequest& request : requests) {
 			if (!request.Valid()) continue;
 			DisplayImageRequest classifiedRequest = request;
+			if (!classifiedRequest.cancellation) {
+				classifiedRequest.cancellation = std::make_shared<std::atomic<bool>>(false);
+			} else {
+				classifiedRequest.cancellation->store(false);
+			}
 			const std::size_t priority = std::max<std::size_t>(1, request.priority);
 			if (classifiedRequest.workClass == PerfWorkClass::Unspecified) {
 				classifiedRequest.workClass = priority <= 2 ?
@@ -642,11 +680,13 @@ void DisplayImageCache::RequestBackgroundBatch(
 				const auto completion = std::find_if(impl_->completed.begin(), impl_->completed.end(),
 					[&request](const Impl::Completion& candidate) {
 						return candidate.image && candidate.image->key == request.key;
-					});
+				});
 				if (completion == impl_->completed.end()) {
-					impl_->completed.push_back({cached->second.image, priority});
+					impl_->completed.push_back({cached->second.image, priority,
+						classifiedRequest.workClass});
 				} else {
 					completion->priority = std::min(completion->priority, priority);
+					completion->workClass = classifiedRequest.workClass;
 				}
 				continue;
 			}
@@ -654,15 +694,21 @@ void DisplayImageCache::RequestBackgroundBatch(
 			const auto completion = std::find_if(impl_->completed.begin(), impl_->completed.end(),
 				[&request](const Impl::Completion& candidate) {
 					return candidate.image && candidate.image->key == request.key;
-				});
+			});
 			if (completion != impl_->completed.end()) {
 				completion->priority = std::min(completion->priority, priority);
+				completion->workClass = classifiedRequest.workClass;
 				continue;
 			}
 
 			const auto inFlight = impl_->inFlightPriorities.find(request.key);
 			if (inFlight != impl_->inFlightPriorities.end()) {
 				inFlight->second = std::min(inFlight->second, priority);
+				impl_->inFlightWorkClasses[request.key] = classifiedRequest.workClass;
+				const auto cancellation = impl_->inFlightCancellation.find(request.key);
+				if (cancellation != impl_->inFlightCancellation.end()) {
+					if (const auto token = cancellation->second.lock()) token->store(false);
+				}
 				continue;
 			}
 
@@ -672,6 +718,7 @@ void DisplayImageCache::RequestBackgroundBatch(
 				if (queued->foreground) continue;
 				Impl::Work work = std::move(*queued);
 				impl_->queue.erase(queued);
+				if (work.request.cancellation) work.request.cancellation->store(false);
 				work.request.priority = std::min(work.request.priority, priority);
 				work.request.workClass = classifiedRequest.workClass;
 				auto insertion = std::find_if(impl_->queue.begin(), impl_->queue.end(),
@@ -683,7 +730,7 @@ void DisplayImageCache::RequestBackgroundBatch(
 				continue;
 			}
 
-			Impl::Work work{request, impl_->generation, impl_->epoch, false};
+			Impl::Work work{classifiedRequest, impl_->generation, impl_->epoch, false};
 			work.request = classifiedRequest;
 			work.request.priority = priority;
 			auto insertion = std::find_if(impl_->queue.begin(), impl_->queue.end(),
@@ -702,8 +749,18 @@ void DisplayImageCache::RequestBackgroundBatch(
 void DisplayImageCache::CancelBackground(const std::string& key) {
 	if (key.empty()) return;
 	std::lock_guard<std::mutex> lock(impl_->mutex);
+	const auto activePriority = impl_->inFlightPriorities.find(key);
+	const bool foreground = impl_->foregroundKeys.find(key) != impl_->foregroundKeys.end() ||
+		(activePriority != impl_->inFlightPriorities.end() && activePriority->second == 0);
 	impl_->desiredPrefetchKeys.erase(key);
 	impl_->desiredPrefetchPriorities.erase(key);
+	if (!foreground) {
+		const auto active = impl_->inFlightCancellation.find(key);
+		if (active != impl_->inFlightCancellation.end()) {
+			if (const auto cancellation = active->second.lock()) cancellation->store(true);
+		}
+		impl_->inFlightWorkClasses.erase(key);
+	}
 	for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
 		if (!queued->foreground && queued->request.key == key) {
 			RecordDisplayCancellation(queued->request.workClass);
@@ -757,6 +814,9 @@ DisplayImageCache::ImagePtr DisplayImageCache::RequestAndWait(
 void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& requests) {
 	std::vector<DisplayImageRequest> prioritizedRequests = requests;
 	for (DisplayImageRequest& request : prioritizedRequests) {
+		if (!request.cancellation || request.cancellation->load()) {
+			request.cancellation = std::make_shared<std::atomic<bool>>(false);
+		}
 		if (request.workClass == PerfWorkClass::Unspecified) {
 			request.workClass = request.priority <= 2 ?
 				PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
@@ -768,15 +828,29 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 		});
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		const auto previouslyDesiredKeys = impl_->desiredPrefetchKeys;
+		const auto previouslyDesiredPriorities = impl_->desiredPrefetchPriorities;
 		++impl_->generation;
 		if (requests.empty()) {
-			while (!impl_->completed.empty()) {
-				impl_->QueueRetirement(std::move(impl_->completed.front().image));
-				impl_->completed.pop_front();
+			for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
+				const bool stillDesiredSpread = completed->image &&
+					completed->workClass == PerfWorkClass::ActiveImageSpread &&
+					previouslyDesiredKeys.find(completed->image->key) !=
+						previouslyDesiredKeys.end();
+				if (completed->priority == 0 || stillDesiredSpread) {
+					++completed;
+					continue;
+				}
+				impl_->QueueRetirement(std::move(completed->image));
+				completed = impl_->completed.erase(completed);
 			}
 		}
 		for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
-			if (!queued->foreground) {
+			const bool stillDesiredSpread =
+				queued->request.workClass == PerfWorkClass::ActiveImageSpread &&
+				previouslyDesiredKeys.find(queued->request.key) !=
+					previouslyDesiredKeys.end();
+			if (!queued->foreground && !stillDesiredSpread) {
 				RecordDisplayCancellation(queued->request.workClass);
 				queued = impl_->queue.erase(queued);
 			} else {
@@ -786,7 +860,49 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 		impl_->queuedKeys.clear();
 		impl_->desiredPrefetchKeys.clear();
 		impl_->desiredPrefetchPriorities.clear();
-		for (const Impl::Work& work : impl_->queue) impl_->queuedKeys.insert(work.request.key);
+		for (const auto& active : impl_->inFlightCancellation) {
+			const auto priority = impl_->inFlightPriorities.find(active.first);
+			const auto workClass = impl_->inFlightWorkClasses.find(active.first);
+			const bool keepForeground = impl_->foregroundKeys.find(active.first) !=
+				impl_->foregroundKeys.end() || (priority != impl_->inFlightPriorities.end() &&
+				priority->second == 0);
+			const bool keepActiveSpread = workClass != impl_->inFlightWorkClasses.end() &&
+				workClass->second == PerfWorkClass::ActiveImageSpread &&
+				previouslyDesiredKeys.find(active.first) != previouslyDesiredKeys.end();
+			if (keepForeground || keepActiveSpread) {
+				impl_->desiredPrefetchKeys.insert(active.first);
+				impl_->desiredPrefetchPriorities[active.first] = keepForeground ? 0 :
+					(priority == impl_->inFlightPriorities.end() ? 1 : priority->second);
+				if (const auto cancellation = active.second.lock()) cancellation->store(false);
+				continue;
+			}
+			const bool remainsDesired = std::any_of(prioritizedRequests.begin(),
+				prioritizedRequests.end(), [&active](const DisplayImageRequest& request) {
+					return request.key == active.first;
+				});
+			if (const auto cancellation = active.second.lock()) {
+				cancellation->store(!remainsDesired);
+			}
+		}
+		for (const Impl::Completion& completion : impl_->completed) {
+			if (!completion.image || completion.priority == 0 ||
+				completion.workClass != PerfWorkClass::ActiveImageSpread ||
+				previouslyDesiredKeys.find(completion.image->key) ==
+					previouslyDesiredKeys.end()) continue;
+			impl_->desiredPrefetchKeys.insert(completion.image->key);
+			const auto priority = previouslyDesiredPriorities.find(completion.image->key);
+			impl_->desiredPrefetchPriorities[completion.image->key] =
+				priority == previouslyDesiredPriorities.end() ? completion.priority :
+					priority->second;
+		}
+		for (const Impl::Work& work : impl_->queue) {
+			impl_->queuedKeys.insert(work.request.key);
+			if (work.foreground || work.request.workClass == PerfWorkClass::ActiveImageSpread) {
+				impl_->desiredPrefetchKeys.insert(work.request.key);
+				impl_->desiredPrefetchPriorities[work.request.key] = work.foreground ? 0 :
+					std::max<std::size_t>(1, work.request.priority);
+			}
+		}
 		for (const DisplayImageRequest& request : prioritizedRequests) {
 			if (!request.Valid()) continue;
 			const std::size_t requestPriority = std::max<std::size_t>(1, request.priority);
@@ -799,9 +915,11 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 						return completion.image && completion.image->key == request.key;
 					});
 				if (completion == impl_->completed.end()) {
-					impl_->completed.push_back({retained->second.image, requestPriority});
+					impl_->completed.push_back({retained->second.image, requestPriority,
+						request.workClass});
 				} else {
 					completion->priority = requestPriority;
+					completion->workClass = request.workClass;
 				}
 				continue;
 			}
@@ -810,6 +928,7 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 				if (impl_->foregroundKeys.find(request.key) == impl_->foregroundKeys.end()) {
 					impl_->inFlightPriorities[request.key] = std::min(
 						impl_->inFlightPriorities[request.key], requestPriority);
+					impl_->inFlightWorkClasses[request.key] = request.workClass;
 				}
 				continue;
 			}
@@ -824,20 +943,41 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 }
 
 std::vector<DisplayImageCache::ImagePtr> DisplayImageCache::TakeCompleted(std::size_t maximumCount) {
+	static const std::set<PerfWorkClass> allWorkClasses{
+		PerfWorkClass::Unspecified,
+		PerfWorkClass::ActiveImageSpread,
+		PerfWorkClass::FocusedPreview,
+		PerfWorkClass::VisibleThumbnail,
+		PerfWorkClass::NearestNavigationNeighbor,
+		PerfWorkClass::DistantSpeculation};
+	return TakeCompleted(maximumCount, allWorkClasses);
+}
+
+std::vector<DisplayImageCache::ImagePtr> DisplayImageCache::TakeCompleted(
+	std::size_t maximumCount, const std::set<PerfWorkClass>& permittedWorkClasses) {
 	std::vector<ImagePtr> result;
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	result.reserve(std::min(maximumCount, impl_->completed.size()));
 	while (result.size() < maximumCount && !impl_->completed.empty()) {
-		const auto next = std::min_element(impl_->completed.begin(), impl_->completed.end(),
-			[](const Impl::Completion& left, const Impl::Completion& right) {
-				return left.priority < right.priority;
-			});
+		auto next = impl_->completed.end();
+		for (auto candidate = impl_->completed.begin(); candidate != impl_->completed.end(); ++candidate) {
+			if (!candidate->image || (candidate->priority != 0 &&
+				permittedWorkClasses.find(candidate->workClass) ==
+					permittedWorkClasses.end())) continue;
+			if (next == impl_->completed.end() || candidate->priority < next->priority) next = candidate;
+		}
+		if (next == impl_->completed.end()) break;
 		std::size_t outstandingPriority = std::numeric_limits<std::size_t>::max();
 		for (const Impl::Work& work : impl_->queue) {
+			if (!work.foreground && permittedWorkClasses.find(work.request.workClass) ==
+				permittedWorkClasses.end()) continue;
 			outstandingPriority = std::min(outstandingPriority,
 				work.foreground ? 0 : work.request.priority);
 		}
 		for (const auto& inFlight : impl_->inFlightPriorities) {
+			const auto workClass = impl_->inFlightWorkClasses.find(inFlight.first);
+			if (inFlight.second != 0 && (workClass == impl_->inFlightWorkClasses.end() ||
+				permittedWorkClasses.find(workClass->second) == permittedWorkClasses.end())) continue;
 			outstandingPriority = std::min(outstandingPriority, inFlight.second);
 		}
 		if (outstandingPriority < next->priority) break;
@@ -877,6 +1017,9 @@ void DisplayImageCache::Clear() {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	++impl_->generation;
 	++impl_->epoch;
+	for (const auto& active : impl_->inFlightCancellation) {
+		if (const auto cancellation = active.second.lock()) cancellation->store(true);
+	}
 	for (const Impl::Work& work : impl_->queue) {
 		RecordDisplayCancellation(work.request.workClass);
 	}

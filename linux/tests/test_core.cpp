@@ -29,6 +29,8 @@
 #include "viewer_chrome.h"
 #include "thumbnail_panel_model.h"
 #include "thumbnail_resampler.h"
+#include "interaction_work_policy.h"
+#include "work_batch_gate.h"
 #include "perf_diagnostics.h"
 #include "app_icon.h"
 #include "image_info_model.h"
@@ -100,6 +102,27 @@ public:
 void Expect(bool condition, const std::string& message) {
 	if (!condition) throw TestFailure(message);
 }
+
+template <typename Mutex, typename Condition, typename Flag>
+class ScopedConditionRelease {
+public:
+	ScopedConditionRelease(Mutex& mutex, Condition& condition, Flag& flag)
+		: mutex_(mutex), condition_(condition), flag_(flag) {}
+	~ScopedConditionRelease() {
+		{
+			std::lock_guard<Mutex> lock(mutex_);
+			flag_ = true;
+		}
+		condition_.notify_all();
+	}
+	ScopedConditionRelease(const ScopedConditionRelease&) = delete;
+	ScopedConditionRelease& operator=(const ScopedConditionRelease&) = delete;
+
+private:
+	Mutex& mutex_;
+	Condition& condition_;
+	Flag& flag_;
+};
 
 void ExpectNear(double actual, double expected, double tolerance, const std::string& message) {
 	if (std::abs(actual - expected) > tolerance) {
@@ -1714,6 +1737,18 @@ void TestDoublePagePairingNavigationAndReadingOrder() {
 	Expect(!jpegview_linux::BuildDoublePageSpread(1, 4, landscape, pageTwo, modes).has_value() &&
 		!jpegview_linux::BuildDoublePageSpread(1, 4, pageOne, landscape, modes).has_value(),
 		"double-page mode paired a non-portrait page");
+	Expect(!jpegview_linux::CanAnchorDoublePageSpread(1, 4, landscape) &&
+		jpegview_linux::CanAnchorDoublePageSpread(1, 4, pageOne),
+		"double-page anchor eligibility did not resolve known landscape pages before partner lookup");
+	jpegview_linux::DoublePagePresentationModel landscapePresentation;
+	landscapePresentation.AwaitDimensions(1, 2);
+	if (!jpegview_linux::CanAnchorDoublePageSpread(1, 4, landscape)) {
+		landscapePresentation.UseSinglePage(1);
+	}
+	Expect(landscapePresentation.Phase() ==
+			jpegview_linux::DoublePagePresentationPhase::SinglePage &&
+		!landscapePresentation.SuppressSinglePage(1),
+		"cold partner dimensions suppressed a known landscape anchor instead of presenting it alone");
 	Expect(!jpegview_linux::BuildDoublePageSpread(1, 4, pageOne, std::nullopt, modes).has_value(),
 		"double-page mode paired before neighbor dimensions were available");
 
@@ -1819,6 +1854,95 @@ void TestHeldNavigationCoalescesKeyRepeats() {
 	navigation.Reset();
 	Expect(navigation.AfterImageShown(true) == 0 && navigation.Scancode() == -1,
 		"reset navigation state retained a pending repeat");
+}
+
+void TestInteractionWorkPolicyIdleDeadlineAndCapture() {
+	using Clock = std::chrono::steady_clock;
+	Clock::time_point now{};
+	jpegview_linux::InteractionWorkPolicy policy([&now] { return now; });
+	const std::vector<std::size_t> visible = {4, 5, 6};
+	const auto initial = policy.Plan(false, visible);
+	Expect(!initial.interactionActive && initial.Allows(jpegview_linux::PerfWorkClass::ActiveImageSpread) &&
+		initial.Allows(jpegview_linux::PerfWorkClass::FocusedPreview) &&
+		initial.Allows(jpegview_linux::PerfWorkClass::VisibleThumbnail) &&
+		initial.Allows(jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) &&
+		initial.Allows(jpegview_linux::PerfWorkClass::DistantSpeculation),
+		"idle work policy did not allow normal work classes");
+	Expect(initial.AllowsThumbnail(5) && !initial.AllowsThumbnail(3),
+		"visible-thumbnail permissions did not use the supplied indices");
+
+	policy.NotifyActivity(jpegview_linux::InteractionActivity::Pan);
+	const auto panning = policy.Plan(false, visible);
+	Expect(panning.interactionActive && panning.Allows(jpegview_linux::PerfWorkClass::ActiveImageSpread) &&
+		panning.Allows(jpegview_linux::PerfWorkClass::FocusedPreview) &&
+		panning.AllowsThumbnail(5) && !panning.AllowsThumbnail(3) &&
+		!panning.Allows(jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) &&
+		!panning.Allows(jpegview_linux::PerfWorkClass::DistantSpeculation) &&
+		panning.cancelQueuedSpeculation && panning.requestActiveSpeculationCancellation &&
+		panning.suspendSpeculativeUploads,
+		"active panning did not preserve foreground/visible work while suspending speculation");
+
+	// Repeated wheel activity restarts the quiet interval instead of allowing
+	// speculation based on the first event in a burst.
+	now += std::chrono::milliseconds(200);
+	policy.NotifyActivity(jpegview_linux::InteractionActivity::Wheel);
+	now += std::chrono::milliseconds(200);
+	Expect(policy.Plan(false, visible).interactionActive,
+		"a later wheel event did not restart the idle deadline");
+	now += std::chrono::milliseconds(50);
+	const auto resumed = policy.Plan(false, visible);
+	Expect(!resumed.interactionActive &&
+		resumed.Allows(jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) &&
+		resumed.Allows(jpegview_linux::PerfWorkClass::DistantSpeculation),
+		"speculation did not resume exactly 250 ms after the last wheel event");
+
+	// Every activity source uses the same deadline, including held navigation.
+	const std::array<jpegview_linux::InteractionActivity, 5> activities = {{
+		jpegview_linux::InteractionActivity::Zoom,
+		jpegview_linux::InteractionActivity::Resize,
+		jpegview_linux::InteractionActivity::CropDrag,
+		jpegview_linux::InteractionActivity::NavigatorDrag,
+		jpegview_linux::InteractionActivity::HeldNavigation,
+	}};
+	for (const auto activity : activities) {
+		policy.NotifyActivity(activity);
+		now += std::chrono::milliseconds(249);
+		Expect(policy.Plan(false, visible).interactionActive,
+			"continuous interaction resumed speculative work before the idle deadline");
+	}
+	now += std::chrono::milliseconds(1);
+	Expect(!policy.Plan(false, visible).interactionActive,
+		"work policy remained active after all interaction input stopped");
+
+	policy.SetCaptureActive(true);
+	now += std::chrono::seconds(2);
+	Expect(policy.Plan(false, visible).interactionActive,
+		"explicit drag capture expired while the pointer was stationary");
+	policy.SetCaptureActive(false);
+	now += std::chrono::milliseconds(249);
+	Expect(policy.Plan(false, visible).interactionActive,
+		"capture release did not start a fresh idle interval");
+	now += std::chrono::milliseconds(1);
+	Expect(!policy.Plan(false, visible).interactionActive,
+		"capture release did not resume work after the idle interval");
+
+	policy.NotifyActivity(jpegview_linux::InteractionActivity::Pan);
+	now += std::chrono::milliseconds(249);
+	policy.NotifyActivity(jpegview_linux::InteractionActivity::Zoom);
+	now += std::chrono::milliseconds(249);
+	Expect(policy.Plan(false, visible).interactionActive,
+		"a new gesture did not restart the deadline before the previous deadline");
+	now += std::chrono::milliseconds(1);
+	Expect(!policy.Plan(false, visible).interactionActive,
+		"restarted gesture deadline did not expire at 250 ms");
+
+	const auto foregroundPending = policy.Plan(true, visible);
+	Expect(foregroundPending.Allows(jpegview_linux::PerfWorkClass::ActiveImageSpread) &&
+		foregroundPending.Allows(jpegview_linux::PerfWorkClass::FocusedPreview) &&
+		!foregroundPending.Allows(jpegview_linux::PerfWorkClass::VisibleThumbnail) &&
+		!foregroundPending.Allows(jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) &&
+		!foregroundPending.Allows(jpegview_linux::PerfWorkClass::DistantSpeculation),
+		"pending foreground source work did not suppress background admission");
 }
 
 void TestFileListDateSortingAndSelectionPreservation() {
@@ -2125,6 +2249,106 @@ void TestFileListAsynchronousScanning() {
 	Expect(results.size() == 1 && results.front().generation == current &&
 		results.front().prepared.replacement.Current().filename() == "latest.png",
 		"a superseded directory scan published stale files instead of the latest request");
+
+	worker.SetForegroundPending(true);
+	const std::uint64_t yieldedGeneration = worker.Request(FileList::InitialScanRequest(
+		{root.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	const auto yieldDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (!worker.IsYieldingForForeground() &&
+		std::chrono::steady_clock::now() < yieldDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	const bool yieldedForForeground = worker.IsYieldingForForeground();
+	const bool withheldResultWhileForegroundPending = worker.TakeReady().empty();
+	worker.SetForegroundPending(false);
+	results.clear();
+	const auto resumeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < resumeDeadline) {
+		results = worker.TakeReady();
+		if (results.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(yieldedForForeground && withheldResultWhileForegroundPending,
+		"the directory scan did not yield before publishing while foreground work was pending");
+	Expect(results.size() == 1 && results.front().generation == yieldedGeneration &&
+		results.front().prepared.completed,
+		"the directory scan did not resume after foreground work completed");
+
+	const auto waitForYield = [](FileListScanWorker& scanWorker) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+		while (!scanWorker.IsYieldingForForeground() &&
+			std::chrono::steady_clock::now() < deadline) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		return scanWorker.IsYieldingForForeground();
+	};
+	FileListScanWorker replacementWhileYielding;
+	replacementWhileYielding.SetForegroundPending(true);
+	replacementWhileYielding.Request(FileList::InitialScanRequest(
+		{root.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	const bool oldGenerationYielded = waitForYield(replacementWhileYielding);
+	const std::uint64_t replacementGeneration = replacementWhileYielding.Request(
+		FileList::InitialScanRequest({latest.string()}, FileList::SortMode::FileName,
+			true, false, FileList::NavigationMode::LoopDirectory));
+	replacementWhileYielding.SetForegroundPending(false);
+	std::vector<FileListScanResult> replacementResults;
+	const auto replacementDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (replacementResults.empty() &&
+		std::chrono::steady_clock::now() < replacementDeadline) {
+		replacementResults = replacementWhileYielding.TakeReady();
+		if (replacementResults.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(oldGenerationYielded && replacementResults.size() == 1 &&
+		replacementResults.front().generation == replacementGeneration &&
+		replacementResults.front().prepared.replacement.Current().filename() == "latest.png",
+		"a replacement scan did not supersede a generation paused for foreground work");
+
+	FileListScanWorker canceledWhileYielding;
+	canceledWhileYielding.SetForegroundPending(true);
+	canceledWhileYielding.Request(FileList::InitialScanRequest(
+		{root.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	const bool canceledGenerationYielded = waitForYield(canceledWhileYielding);
+	canceledWhileYielding.Clear();
+	const auto cancelDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (canceledWhileYielding.IsYieldingForForeground() &&
+		std::chrono::steady_clock::now() < cancelDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	const bool clearWokeYieldedWorker = !canceledWhileYielding.IsYieldingForForeground();
+	canceledWhileYielding.SetForegroundPending(false);
+	Expect(canceledGenerationYielded && clearWokeYieldedWorker &&
+		canceledWhileYielding.TakeReady().empty(),
+		"clearing a foreground-yielded scan did not wake and cancel its generation");
+
+	FileListScanWorker stoppingWhileYielding;
+	stoppingWhileYielding.SetForegroundPending(true);
+	stoppingWhileYielding.Request(FileList::InitialScanRequest(
+		{root.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	const bool shutdownGenerationYielded = waitForYield(stoppingWhileYielding);
+	std::mutex shutdownMutex;
+	std::condition_variable shutdownChanged;
+	bool shutdownReturned = false;
+	std::thread shutdownThread([&] {
+		stoppingWhileYielding.Stop();
+		{
+			std::lock_guard<std::mutex> lock(shutdownMutex);
+			shutdownReturned = true;
+		}
+		shutdownChanged.notify_all();
+	});
+	bool shutdownBeforeCleanup = false;
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		shutdownBeforeCleanup = shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return shutdownReturned; });
+	}
+	if (!shutdownBeforeCleanup) stoppingWhileYielding.SetForegroundPending(false);
+	shutdownThread.join();
+	Expect(shutdownGenerationYielded && shutdownBeforeCleanup,
+		"shutdown did not release and join a worker paused for foreground activity");
 }
 
 void ExpectDecoded(const fs::path& filename, const std::vector<std::uint8_t>& expected,
@@ -2789,6 +3013,108 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 		reprioritized.Find(files[3]) != nullptr,
 		"direction change discarded, duplicated, or misdelivered a useful in-flight decode");
 
+	std::mutex obsoleteMutex;
+	std::condition_variable obsoleteChanged;
+	bool obsoleteDecodeStarted = false;
+	bool releaseObsoleteDecode = false;
+	std::atomic<int> obsoleteCallbacks{0};
+	jpegview_linux::DecodedImageCache obsolete(64,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			if (filename == files[3]) {
+				std::unique_lock<std::mutex> lock(obsoleteMutex);
+				obsoleteDecodeStarted = true;
+				obsoleteChanged.notify_all();
+				obsoleteChanged.wait(lock, [&] { return releaseObsoleteDecode; });
+			}
+			image = *CachedTestImage(4);
+			return true;
+		});
+	ScopedConditionRelease obsoleteDecodeRelease(
+		obsoleteMutex, obsoleteChanged, releaseObsoleteDecode);
+	obsolete.Prefetch(files, 2, 1, 1,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
+			++obsoleteCallbacks;
+		});
+	{
+		std::unique_lock<std::mutex> lock(obsoleteMutex);
+		Expect(obsoleteChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return obsoleteDecodeStarted; }),
+			"obsolete decoded prefetch did not start its blocked source read");
+	}
+	obsolete.Prefetch({}, 0, 0, 0);
+	{
+		std::lock_guard<std::mutex> lock(obsoleteMutex);
+		releaseObsoleteDecode = true;
+	}
+	obsoleteChanged.notify_all();
+	Expect(obsolete.WaitUntilIdle(std::chrono::seconds(2)),
+		"canceled decoded prefetch did not become idle after its source read returned");
+	Expect(obsolete.CachedImages() == 0 && obsoleteCallbacks == 0,
+		"canceled active decoded work was cached or published after its batch was replaced");
+
+	std::mutex spreadMutex;
+	std::condition_variable spreadChanged;
+	const fs::path coldPartner = temporary.path() / "cold-spread-partner.png";
+	WriteText(coldPartner, "cold non-JPEG partner source");
+	bool spreadBlockerStarted = false;
+	bool releaseSpreadBlocker = false;
+	bool spreadCallbackCompleted = false;
+	std::shared_ptr<const DecodedImage> spreadDecoded;
+	jpegview_linux::PerfWorkClass spreadDecodeClass =
+		jpegview_linux::PerfWorkClass::Unspecified;
+	jpegview_linux::DecodedImageCache activeSpreadDecode(64,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			if (filename == files[3]) {
+				std::unique_lock<std::mutex> lock(spreadMutex);
+				spreadBlockerStarted = true;
+				spreadChanged.notify_all();
+				spreadChanged.wait(lock, [&] { return releaseSpreadBlocker; });
+			} else if (filename == coldPartner) {
+				spreadDecodeClass = jpegview_linux::CurrentPerfContext().workClass;
+			}
+			image = *CachedTestImage(4);
+			return true;
+		});
+	ScopedConditionRelease spreadBlockerRelease(
+		spreadMutex, spreadChanged, releaseSpreadBlocker);
+	activeSpreadDecode.RequestBackground(files[3], {},
+		jpegview_linux::PerfWorkClass::DistantSpeculation);
+	bool spreadBlockerReached = false;
+	{
+		std::unique_lock<std::mutex> lock(spreadMutex);
+		spreadBlockerReached = spreadChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return spreadBlockerStarted; });
+	}
+	activeSpreadDecode.RequestBackground(coldPartner,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& decoded) {
+			{
+				std::lock_guard<std::mutex> lock(spreadMutex);
+				spreadDecoded = decoded;
+				spreadCallbackCompleted = true;
+			}
+			spreadChanged.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	const auto spreadBeforePause = activeSpreadDecode.GetDiagnostics();
+	activeSpreadDecode.Prefetch({}, 0, 0, 0);
+	const auto spreadDuringPause = activeSpreadDecode.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(spreadMutex);
+		releaseSpreadBlocker = true;
+	}
+	spreadChanged.notify_all();
+	bool spreadCallbackReached = false;
+	{
+		std::unique_lock<std::mutex> lock(spreadMutex);
+		spreadCallbackReached = spreadChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return spreadCallbackCompleted; });
+	}
+	Expect(spreadBlockerReached && spreadCallbackReached && spreadDecoded &&
+		spreadBeforePause.activeSpreadQueued == 1 &&
+		spreadDuringPause.activeSpreadQueued == 1 &&
+		spreadDecodeClass == jpegview_linux::PerfWorkClass::ActiveImageSpread &&
+		activeSpreadDecode.Find(coldPartner) != nullptr,
+		"cold non-JPEG spread partner decode did not survive paused neighbor prefetch as active-spread work");
+
 	std::mutex joinMutex;
 	std::condition_variable joinChanged;
 	bool blockerStarted = false;
@@ -2823,6 +3149,586 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	foreground.join();
 	Expect(joinedImage != nullptr && joinedDecodeCount == 1,
 		"foreground cache miss did not join its promoted speculative decode");
+}
+
+void TestDecodedActiveSpreadBudgetPressure() {
+	TemporaryDirectory temporary;
+	const fs::path foregroundFile = temporary.path() / "recent-foreground.ppm";
+	const fs::path speculativeFile = temporary.path() / "older-speculation.ppm";
+	const fs::path spreadPartner = temporary.path() / "active-spread-partner.png";
+	WriteText(foregroundFile, "foreground source");
+	WriteText(speculativeFile, "speculative source");
+	WriteText(spreadPartner, "spread partner source");
+
+	std::mutex completionMutex;
+	std::condition_variable completionChanged;
+	bool spreadCompleted = false;
+	jpegview_linux::DecodedImageCache cache(8,
+		[](const fs::path&, DecodedImage& image, std::string&) {
+			image = *CachedTestImage(4);
+			return true;
+		});
+	cache.Prefetch({foregroundFile, speculativeFile}, 0, 1, 1);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"budget-pressure fixture speculation did not finish before its deadline");
+	cache.Store(foregroundFile, CachedTestImage(4));
+	Expect(cache.Find(foregroundFile) != nullptr,
+		"foreground fixture could not be retained beside older speculation");
+	Expect(cache.CachedBytes() == 8,
+		"budget-pressure fixture did not fill the decoded image budget");
+
+	cache.RequestBackground(spreadPartner,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(completionMutex);
+				spreadCompleted = image != nullptr;
+			}
+			completionChanged.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool callbackReached = false;
+	{
+		std::unique_lock<std::mutex> lock(completionMutex);
+		callbackReached = completionChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return spreadCompleted; });
+	}
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"active spread partner decode did not become idle under budget pressure");
+	Expect(callbackReached && cache.Find(foregroundFile) != nullptr &&
+		cache.Find(spreadPartner) != nullptr && cache.Find(speculativeFile) == nullptr,
+		"active spread partner could not use the full budget while preserving the most-recent foreground image");
+}
+
+void TestDecodedPromotedSpreadBudgetPressure() {
+	TemporaryDirectory temporary;
+	const fs::path foregroundFile = temporary.path() / "retained-foreground.ppm";
+	const fs::path speculativeFile = temporary.path() / "older-speculation.ppm";
+	const fs::path promotedFile = temporary.path() / "promoted-active-spread.ppm";
+	WriteText(foregroundFile, "foreground source");
+	WriteText(speculativeFile, "speculative source");
+	WriteText(promotedFile, "promoted spread source");
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool decodeStarted = false;
+	bool releaseDecode = false;
+	bool promotedCallbackCompleted = false;
+	jpegview_linux::DecodedImageCache cache(8,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			if (filename == promotedFile) {
+				std::unique_lock<std::mutex> lock(mutex);
+				decodeStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseDecode; });
+			}
+			image = *CachedTestImage(4);
+			return true;
+		});
+	ScopedConditionRelease decodeRelease(mutex, changed, releaseDecode);
+	cache.Prefetch({foregroundFile, speculativeFile}, 0, 1, 1);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"promoted-spread budget fixture did not finish initial speculation");
+	cache.Store(foregroundFile, CachedTestImage(4));
+	Expect(cache.Find(foregroundFile) != nullptr && cache.CachedBytes() == 8,
+		"promoted-spread budget fixture did not retain foreground plus speculation");
+
+	std::atomic<int> obsoleteCallbacks{0};
+	std::shared_ptr<const DecodedImage> promotedDecoded;
+	cache.RequestBackground(promotedFile,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
+			++obsoleteCallbacks;
+		}, jpegview_linux::PerfWorkClass::DistantSpeculation);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decodeStarted; });
+	}
+	cache.RequestBackground(promotedFile,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				promotedDecoded = image;
+				promotedCallbackCompleted = true;
+			}
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	const auto promotedDiagnostics = cache.GetDiagnostics();
+	cache.Prefetch({}, 0, 0, 0);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseDecode = true;
+	}
+	changed.notify_all();
+	bool callbackReached = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		callbackReached = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return promotedCallbackCompleted; });
+	}
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"promoted active-spread decode did not become idle under cache pressure");
+	Expect(reachedBarrier && callbackReached && promotedDiagnostics.activeSpreadActive == 1 &&
+		obsoleteCallbacks == 0 && promotedDecoded && cache.Find(promotedFile) != nullptr &&
+		cache.Find(foregroundFile) != nullptr && cache.Find(speculativeFile) == nullptr,
+		"in-flight promotion lost ActiveImageSpread cache admission or evicted the retained foreground image");
+}
+
+void TestDecodedBudgetRejectionPreservesQueuedActiveSpreadWork() {
+	TemporaryDirectory temporary;
+	const fs::path foregroundFile = temporary.path() / "retained-foreground.ppm";
+	const fs::path oversizedFile = temporary.path() / "oversized-active-spread.ppm";
+	const fs::path dimensionsFile = temporary.path() / "queued-partner.jpg";
+	WriteText(foregroundFile, "foreground source");
+	WriteText(oversizedFile, "oversized active spread source");
+	constexpr int width = 4;
+	constexpr int height = 8;
+	std::vector<std::uint8_t> pixels(width * height * 4, 255);
+	ImageWriteOptions options;
+	options.jpegQuality = 95;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(dimensionsFile, pixels.data(), width, height,
+		options, error), "could not create queued JPEG dimensions fixture: " + error);
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool oversizedStarted = false;
+	bool releaseOversized = false;
+	bool oversizedCallbackComplete = false;
+	bool oversizedCallbackRejected = false;
+	bool dimensionsCallbackComplete = false;
+	bool dimensionsSucceeded = false;
+	int decodedWidth = 0;
+	int decodedHeight = 0;
+	std::atomic<int> pixelDecodeCount{0};
+	std::atomic<int> dimensionsReadCount{0};
+	jpegview_linux::DecodedImageCache cache(8,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			++pixelDecodeCount;
+			if (filename == oversizedFile) {
+				std::unique_lock<std::mutex> lock(mutex);
+				oversizedStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseOversized; });
+			}
+			image = *CachedTestImage(filename == oversizedFile ? 12 : 4);
+			return true;
+		}, {}, 1,
+		[&](const fs::path& filename, int& imageWidth, int& imageHeight,
+			std::string& message) {
+			++dimensionsReadCount;
+			return jpegview_linux::ReadJpegDimensions(filename, imageWidth,
+				imageHeight, message);
+		});
+	ScopedConditionRelease releaseOnExit(mutex, changed, releaseOversized);
+	cache.Store(foregroundFile, CachedTestImage(4));
+	Expect(cache.Find(foregroundFile) != nullptr && cache.CachedBytes() == 4,
+		"budget-rejection fixture did not retain its foreground image");
+
+	cache.RequestBackground(oversizedFile,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				oversizedCallbackComplete = true;
+				oversizedCallbackRejected = !image;
+			}
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return oversizedStarted; });
+	}
+	Expect(reachedBarrier,
+		"oversized active-spread decode did not reach its bounded barrier");
+
+	cache.RequestJpegDimensions(dimensionsFile,
+		[&](const fs::path&, bool succeeded, int imageWidth, int imageHeight) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				dimensionsCallbackComplete = true;
+				dimensionsSucceeded = succeeded;
+				decodedWidth = imageWidth;
+				decodedHeight = imageHeight;
+			}
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	cache.Prefetch({}, 0, 0, 0);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseOversized = true;
+	}
+	changed.notify_all();
+	bool callbacksComplete = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		callbacksComplete = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return oversizedCallbackComplete && dimensionsCallbackComplete;
+		});
+	}
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"cache did not drain active spread work after an oversized admission rejection");
+	Expect(callbacksComplete && oversizedCallbackRejected && dimensionsSucceeded &&
+		decodedWidth == width && decodedHeight == height && dimensionsReadCount == 1 &&
+		pixelDecodeCount == 1 && cache.Find(foregroundFile) != nullptr &&
+		cache.Find(oversizedFile) == nullptr,
+		"oversized active-spread rejection dropped queued JPEG dimensions work or evicted foreground pixels");
+}
+
+void TestJpegActiveSpreadDimensionsSurvivePause() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "cold-active-spread.jpg";
+	constexpr int sourceWidth = 4;
+	constexpr int sourceHeight = 8;
+	std::vector<std::uint8_t> pixels(sourceWidth * sourceHeight * 4, 255);
+	for (std::size_t offset = 0; offset < pixels.size(); offset += 4) {
+		pixels[offset] = static_cast<std::uint8_t>((offset / 4) * 7);
+		pixels[offset + 1] = 80;
+		pixels[offset + 2] = 150;
+	}
+	ImageWriteOptions options;
+	options.jpegQuality = 95;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(filename, pixels.data(), sourceWidth,
+		sourceHeight, options, error), "could not create JPEG spread fixture: " + error);
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool readStarted = false;
+	bool releaseRead = false;
+	bool callbackCompleted = false;
+	bool dimensionsSucceeded = false;
+	int decodedWidth = 0;
+	int decodedHeight = 0;
+	std::atomic<int> pixelDecodes{0};
+	jpegview_linux::DecodedImageCache cache(64,
+		[&](const fs::path&, DecodedImage&, std::string&) {
+			++pixelDecodes;
+			return false;
+		}, {}, 1,
+		[&](const fs::path& path, int& width, int& height, std::string& message) {
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				readStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseRead; });
+			}
+			return jpegview_linux::ReadJpegDimensions(path, width, height, message);
+		});
+	ScopedConditionRelease readRelease(mutex, changed, releaseRead);
+	cache.RequestJpegDimensions(filename,
+		[&](const fs::path&, bool succeeded, int width, int height) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				dimensionsSucceeded = succeeded;
+				decodedWidth = width;
+				decodedHeight = height;
+				callbackCompleted = true;
+			}
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return readStarted; });
+	}
+	const auto pending = cache.GetDiagnostics();
+	cache.Prefetch({}, 0, 0, 0);
+	const auto paused = cache.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseRead = true;
+	}
+	changed.notify_all();
+	bool callbackReached = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		callbackReached = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return callbackCompleted; });
+	}
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"JPEG dimensions worker did not become idle before its deadline");
+	Expect(reachedBarrier && callbackReached && dimensionsSucceeded &&
+		decodedWidth == sourceWidth && decodedHeight == sourceHeight && pixelDecodes == 0 &&
+		pending.activeSpreadActive == 1 && paused.activeSpreadActive == 1 &&
+		cache.CachedImages() == 0,
+		"cold JPEG spread dimensions did not survive paused prefetch as metadata-only active-spread work");
+}
+
+void TestActiveSpreadPartnerReplacementCancelsObsoleteRequests() {
+	TemporaryDirectory temporary;
+	const fs::path blockedPartner = temporary.path() / "blocked-old-partner.png";
+	const fs::path queuedPartner = temporary.path() / "queued-obsolete-partner.png";
+	const fs::path currentPartner = temporary.path() / "current-partner.png";
+	for (const fs::path& path : {blockedPartner, queuedPartner, currentPartner}) {
+		WriteText(path, path.filename().string());
+	}
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool decodeStarted = false;
+	bool releaseDecode = false;
+	bool currentCompleted = false;
+	std::atomic<int> blockedCallbacks{0};
+	std::atomic<int> queuedCallbacks{0};
+	std::atomic<int> staleDecodeCalls{0};
+	std::atomic<int> currentDecodeCalls{0};
+	jpegview_linux::DecodedImageCache cache(64,
+		[&](const fs::path& filename, DecodedImage& image, std::string&) {
+			if (filename == blockedPartner) {
+				std::unique_lock<std::mutex> lock(mutex);
+				decodeStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseDecode; });
+			} else if (filename == queuedPartner) {
+				++staleDecodeCalls;
+			} else if (filename == currentPartner) {
+				++currentDecodeCalls;
+			}
+			image = *CachedTestImage(4);
+			return true;
+		}, {}, 1);
+	ScopedConditionRelease releaseOnExit(mutex, changed, releaseDecode);
+	cache.RequestBackground(blockedPartner,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
+			++blockedCallbacks;
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decodeStarted; });
+	}
+	cache.RequestBackground(queuedPartner,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
+			++queuedCallbacks;
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	const auto beforeReplace = cache.GetDiagnostics();
+	const bool canceledInFlight = cache.CancelActiveSpreadRequest(blockedPartner);
+	const bool canceledQueued = cache.CancelActiveSpreadRequest(queuedPartner);
+	const auto afterReplace = cache.GetDiagnostics();
+	const bool obsoleteForegroundDemand = jpegview_linux::ForegroundSourceWorkPending({
+		false, false,
+		afterReplace.foregroundQueued != 0,
+		afterReplace.foregroundActive != 0,
+		afterReplace.activeSpreadQueued != 0,
+		afterReplace.activeSpreadActive != 0,
+		false});
+	cache.RequestBackground(currentPartner,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& decoded) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				currentCompleted = decoded != nullptr;
+			}
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseDecode = true;
+	}
+	changed.notify_all();
+	bool currentCallbackReached = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		currentCallbackReached = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return currentCompleted; });
+	}
+	const bool becameIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	Expect(reachedBarrier && beforeReplace.activeSpreadActive == 1 &&
+		beforeReplace.activeSpreadQueued == 1 && canceledInFlight && canceledQueued &&
+		afterReplace.activeSpreadActive == 0 && afterReplace.activeSpreadQueued == 0 &&
+		!obsoleteForegroundDemand && currentCallbackReached && becameIdle &&
+		blockedCallbacks == 0 && queuedCallbacks == 0 && staleDecodeCalls == 0 &&
+		currentDecodeCalls == 1 && cache.CachedImages() == 1 &&
+		cache.Find(currentPartner) != nullptr && cache.Find(blockedPartner) == nullptr &&
+		cache.Find(queuedPartner) == nullptr,
+		"partner replacement did not retire active and queued obsolete source work before preparing the current partner");
+}
+
+void TestDisablingDoublePageCancelsBlockedAndQueuedPartnerDimensions() {
+	TemporaryDirectory temporary;
+	const fs::path blockedPartner = temporary.path() / "blocked-old-partner.jpg";
+	const fs::path queuedPartner = temporary.path() / "queued-old-partner.jpg";
+	WriteText(blockedPartner, "blocked JPEG metadata source");
+	WriteText(queuedPartner, "queued JPEG metadata source");
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool readStarted = false;
+	bool releaseRead = false;
+	std::atomic<int> reads{0};
+	std::atomic<int> callbacks{0};
+	jpegview_linux::DecodedImageCache cache(64,
+		[](const fs::path&, DecodedImage&, std::string&) { return false; }, {}, 1,
+		[&](const fs::path&, int& width, int& height, std::string&) {
+			++reads;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				readStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseRead; });
+			}
+			width = 4;
+			height = 8;
+			return true;
+		});
+	ScopedConditionRelease releaseOnExit(mutex, changed, releaseRead);
+	const auto completion = [&](const fs::path&, bool, int, int) { ++callbacks; };
+	cache.RequestJpegDimensions(blockedPartner, completion,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return readStarted; });
+	}
+	cache.RequestJpegDimensions(queuedPartner, completion,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	const auto beforeDisable = cache.GetDiagnostics();
+	const bool canceledActive = cache.CancelActiveSpreadRequest(blockedPartner, true);
+	const bool canceledQueued = cache.CancelActiveSpreadRequest(queuedPartner, true);
+	const auto afterDisable = cache.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseRead = true;
+	}
+	changed.notify_all();
+	const bool becameIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	Expect(reachedBarrier && beforeDisable.activeSpreadActive == 1 &&
+		beforeDisable.activeSpreadQueued == 1 && canceledActive && canceledQueued &&
+		afterDisable.activeSpreadActive == 0 && afterDisable.activeSpreadQueued == 0 &&
+		becameIdle && reads == 1 && callbacks == 0 && cache.CachedImages() == 0,
+		"disabling double-page work did not cancel its active and queued JPEG partner-dimension requests");
+}
+
+std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height);
+
+void TestDisplayImageCachePromotedSpreadSurvivesPause() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "promoted-spread.png";
+	WriteText(filename, "active spread source");
+	auto neighborRequest = jpegview_linux::MakeDisplayImageRequest(
+		filename, DisplayCacheTestImage(4, 4), 0, 2, 2, false, 1);
+	neighborRequest.workClass = jpegview_linux::PerfWorkClass::NearestNavigationNeighbor;
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool processorStarted = false;
+	bool releaseProcessor = false;
+	jpegview_linux::DisplayImageCache cache(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				processorStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseProcessor; });
+			}
+			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			image->key = request.key;
+			image->width = image->height = 2;
+			image->workClass = request.workClass;
+			image->bgra.assign(16, 255);
+			return image;
+		});
+	ScopedConditionRelease processorRelease(mutex, changed, releaseProcessor);
+	cache.RequestBackground(neighborRequest);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return processorStarted; });
+	}
+	auto activeSpreadRequest = neighborRequest;
+	activeSpreadRequest.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	cache.RequestBackgroundBatch({activeSpreadRequest});
+	cache.Prefetch({});
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseProcessor = true;
+	}
+	changed.notify_all();
+	const bool becameIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	const auto activeSpreadOnly = cache.TakeCompleted(1, {
+		jpegview_linux::PerfWorkClass::ActiveImageSpread});
+	Expect(reachedBarrier && becameIdle && activeSpreadOnly.size() == 1 &&
+		activeSpreadOnly.front()->key == neighborRequest.key,
+		"in-flight neighbor promotion lost active-spread completion eligibility during paused prefetch");
+	cache.Retire(activeSpreadOnly.front());
+}
+
+void TestActiveSpreadDecodeDemandGatesBackgroundWork() {
+	TemporaryDirectory temporary;
+	const fs::path partner = temporary.path() / "active-partner.png";
+	WriteText(partner, "active spread partner");
+	std::mutex decodeMutex;
+	std::condition_variable decodeChanged;
+	bool decodeStarted = false;
+	bool releaseDecode = false;
+	jpegview_linux::DecodedImageCache cache(64,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			{
+				std::unique_lock<std::mutex> lock(decodeMutex);
+				decodeStarted = true;
+				decodeChanged.notify_all();
+				decodeChanged.wait(lock, [&] { return releaseDecode; });
+			}
+			image = *CachedTestImage(4);
+			return true;
+		});
+	ScopedConditionRelease decodeRelease(decodeMutex, decodeChanged, releaseDecode);
+	cache.RequestBackground(partner, {}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(decodeMutex);
+		reachedBarrier = decodeChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decodeStarted; });
+	}
+	const auto diagnostics = cache.GetDiagnostics();
+	const bool foregroundPending = jpegview_linux::ForegroundSourceWorkPending({
+		false,
+		false,
+		diagnostics.foregroundQueued != 0,
+		diagnostics.foregroundActive != 0,
+		diagnostics.activeSpreadQueued != 0,
+		diagnostics.activeSpreadActive != 0,
+		false});
+	jpegview_linux::InteractionWorkPolicy policy;
+	const auto plan = policy.Plan(foregroundPending, {0, 1});
+	jpegview_linux::ThumbnailCacheScheduler thumbnails;
+	thumbnails.Prepare({"current", "visible", "distant"}, 0, 3);
+	const auto thumbnail = thumbnails.Next(0, [&](const auto& request) {
+		return plan.AllowsThumbnail(request.fileIndex) ||
+			plan.Allows(jpegview_linux::PerfWorkClass::DistantSpeculation);
+	});
+
+	FileListScanWorker scanner;
+	scanner.SetForegroundPending(plan.foregroundPending);
+	const std::uint64_t scanGeneration = scanner.Request(FileList::InitialScanRequest(
+		{temporary.path().string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	const auto yieldDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!scanner.IsYieldingForForeground() &&
+		std::chrono::steady_clock::now() < yieldDeadline) {
+		std::this_thread::yield();
+	}
+	const bool scanYielded = scanner.IsYieldingForForeground();
+	scanner.SetForegroundPending(false);
+	std::vector<FileListScanResult> scanResults;
+	const auto scanDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (scanResults.empty() && std::chrono::steady_clock::now() < scanDeadline) {
+		scanResults = scanner.TakeReady();
+		if (scanResults.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	{
+		std::lock_guard<std::mutex> lock(decodeMutex);
+		releaseDecode = true;
+	}
+	decodeChanged.notify_all();
+	const bool decodeIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	Expect(reachedBarrier && diagnostics.foregroundActive == 0 &&
+		diagnostics.backgroundActive == 1 && diagnostics.activeSpreadActive == 1 &&
+		plan.foregroundPending && !plan.AllowsThumbnail(1) && !thumbnail &&
+		thumbnails.PendingCount() == 3 && scanYielded && scanResults.size() == 1 &&
+		scanResults.front().generation == scanGeneration && decodeIdle,
+		"pending active-spread decode did not pause thumbnail admission and yield list scanning");
 }
 
 std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height) {
@@ -3031,6 +3937,206 @@ void TestDisplayImageCachePrefetchPreservesActiveForeground() {
 	Expect(beforePrefetch.foregroundActive == 1 && beforePrefetch.backgroundActive == 0 &&
 		afterPrefetch.foregroundActive == 1 && afterPrefetch.backgroundActive == 0,
 		"prefetch changed active foreground/background classification or lowered foreground priority");
+}
+
+void TestDisplayImageCacheEmptyPrefetchPreservesForegroundAndSpread() {
+	TemporaryDirectory temporary;
+	const auto makeRequest = [&](const char* leaf, std::size_t priority,
+		jpegview_linux::PerfWorkClass workClass) {
+		const fs::path filename = temporary.path() / leaf;
+		WriteText(filename, leaf);
+		auto request = jpegview_linux::MakeDisplayImageRequest(filename,
+			DisplayCacheTestImage(4, 4), 0, 2, 2, false, priority);
+		request.workClass = workClass;
+		return request;
+	};
+	const auto inFlightSpread = makeRequest("in-flight-spread.png", 1,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	const auto directForeground = makeRequest("direct-foreground.png", 0,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	const auto queuedSpread = makeRequest("queued-spread.png", 1,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool spreadStarted = false;
+	bool releaseSpread = false;
+	const auto processor = [&](const jpegview_linux::DisplayImageRequest& request) {
+		if (request.key == inFlightSpread.key) {
+			std::unique_lock<std::mutex> lock(mutex);
+			spreadStarted = true;
+			changed.notify_all();
+			changed.wait(lock, [&] { return releaseSpread; });
+		}
+		auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+		image->key = request.key;
+		image->width = image->height = 2;
+		image->workClass = request.workClass;
+		image->bgra.assign(16, 255);
+		return image;
+	};
+	jpegview_linux::DisplayImageCache cache(128, 1, processor);
+	ScopedConditionRelease spreadRelease(mutex, changed, releaseSpread);
+	cache.RequestBackground(inFlightSpread);
+	bool inFlightReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		inFlightReachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return spreadStarted; });
+	}
+	cache.Request(directForeground);
+	cache.RequestBackgroundBatch({queuedSpread});
+	const auto queuedStats = cache.GetDiagnostics();
+	cache.Prefetch({});
+	const auto retainedStats = cache.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseSpread = true;
+	}
+	changed.notify_all();
+	const bool cacheIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	const auto completed = cache.TakeCompleted(3);
+	std::set<std::string> completedKeys;
+	for (const auto& image : completed) {
+		if (image) completedKeys.insert(image->key);
+	}
+	Expect(inFlightReachedBarrier && cacheIdle &&
+		queuedStats.foregroundQueued == 1 && queuedStats.backgroundQueued == 1 &&
+		retainedStats.foregroundQueued == 1 && retainedStats.backgroundQueued == 1 &&
+		completedKeys == std::set<std::string>{inFlightSpread.key,
+			directForeground.key, queuedSpread.key},
+		"empty neighbor prefetch canceled foreground or active-spread display work");
+}
+
+void TestDisplayCacheCanceledSpreadStaysCanceledAcrossEmptyPrefetch() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "retired-spread-partner.png";
+	WriteText(filename, "retired spread partner source");
+	auto request = jpegview_linux::MakeDisplayImageRequest(
+		filename, DisplayCacheTestImage(4, 4), 0, 2, 2, false, 1);
+	request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool processorStarted = false;
+	bool releaseProcessor = false;
+	std::shared_ptr<std::atomic<bool>> cancellation;
+	jpegview_linux::DisplayImageCache cache(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& activeRequest) {
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				cancellation = activeRequest.cancellation;
+				processorStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseProcessor; });
+			}
+			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			image->key = activeRequest.key;
+			image->width = image->height = 2;
+			image->workClass = activeRequest.workClass;
+			image->bgra.assign(16, 255);
+			return image;
+		});
+	ScopedConditionRelease releaseOnExit(mutex, changed, releaseProcessor);
+	cache.RequestBackground(request);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return processorStarted; });
+	}
+	const auto beforeCancel = cache.GetDiagnostics();
+	cache.CancelBackground(request.key);
+	const bool canceledBeforePrefetch = cancellation && cancellation->load();
+	const auto afterCancel = cache.GetDiagnostics();
+	cache.Prefetch({});
+	const bool stayedCanceled = cancellation && cancellation->load();
+	const auto afterEmptyPrefetch = cache.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseProcessor = true;
+	}
+	changed.notify_all();
+	const bool becameIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	const bool canceledAfterCompletion = cancellation && cancellation->load();
+	const auto completed = cache.TakeCompleted(1, {
+		jpegview_linux::PerfWorkClass::ActiveImageSpread});
+	Expect(reachedBarrier && beforeCancel.backgroundActive == 1 &&
+		canceledBeforePrefetch && afterCancel.backgroundActive == 1 && stayedCanceled &&
+		afterEmptyPrefetch.backgroundActive == 1 && becameIdle && completed.empty() &&
+		canceledAfterCompletion && cache.Find(request) == nullptr && cache.CachedImages() == 0,
+		"empty prefetch resurrected explicitly canceled in-flight active-spread display work");
+}
+
+void TestWorkBatchGateSerializesDeactivateAndPublish() {
+	jpegview_linux::WorkBatchGate delayedGate;
+	std::mutex delayedMutex;
+	std::condition_variable delayedChanged;
+	bool completionCopied = false;
+	bool releaseCompletion = false;
+	bool cacheCleared = false;
+	int delayedEnqueues = 0;
+	std::thread delayedCompletion([&] {
+		{
+			std::unique_lock<std::mutex> lock(delayedMutex);
+			completionCopied = true;
+			delayedChanged.notify_all();
+			delayedChanged.wait(lock, [&] { return releaseCompletion; });
+		}
+		(void)delayedGate.Publish([&] { ++delayedEnqueues; });
+	});
+	bool copied = false;
+	{
+		std::unique_lock<std::mutex> lock(delayedMutex);
+		copied = delayedChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return completionCopied; });
+	}
+	delayedGate.Deactivate();
+	cacheCleared = true;
+	{
+		std::lock_guard<std::mutex> lock(delayedMutex);
+		releaseCompletion = true;
+	}
+	delayedChanged.notify_all();
+	delayedCompletion.join();
+	const bool lateCompletionRejected = copied && cacheCleared && delayedEnqueues == 0;
+
+	jpegview_linux::WorkBatchGate publishingGate;
+	std::mutex publishingMutex;
+	std::condition_variable publishingChanged;
+	bool publicationEntered = false;
+	bool releasePublication = false;
+	std::vector<int> ordering;
+	std::thread inFlightCompletion([&] {
+		publishingGate.Publish([&] {
+			std::unique_lock<std::mutex> lock(publishingMutex);
+			publicationEntered = true;
+			publishingChanged.notify_all();
+			publishingChanged.wait(lock, [&] { return releasePublication; });
+			ordering.push_back(1);
+		});
+	});
+	bool entered = false;
+	{
+		std::unique_lock<std::mutex> lock(publishingMutex);
+		entered = publishingChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return publicationEntered; });
+	}
+	bool deactivated = false;
+	std::thread deactivation([&] {
+		publishingGate.Deactivate();
+		std::lock_guard<std::mutex> lock(publishingMutex);
+		ordering.push_back(2);
+		deactivated = true;
+	});
+	{
+		std::lock_guard<std::mutex> lock(publishingMutex);
+		releasePublication = true;
+	}
+	publishingChanged.notify_all();
+	inFlightCompletion.join();
+	deactivation.join();
+	Expect(lateCompletionRejected && entered && deactivated &&
+		ordering == std::vector<int>{1, 2},
+		"batch deactivation raced a copied or already-publishing completion");
 }
 
 void TestDisplayCacheRetirementIdentityAccounting() {
@@ -3312,6 +4418,77 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	for (const auto& frame : pairedFrames) pairedPreparation.Retire(frame);
 	Expect(pairedPreparation.GetDiagnostics().borrowedBytes == 0,
 		"display cache diagnostics retained borrowed bytes after retirement");
+	auto nearestRequest = scaled;
+	nearestRequest.priority = 1;
+	nearestRequest.workClass = jpegview_linux::PerfWorkClass::NearestNavigationNeighbor;
+	auto distantRequest = secondScaled;
+	distantRequest.priority = 2;
+	distantRequest.workClass = jpegview_linux::PerfWorkClass::DistantSpeculation;
+	jpegview_linux::DisplayImageCache gatedUploads(64, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			image->key = request.key;
+			image->width = image->height = 2;
+			image->workClass = request.workClass;
+			image->bgra.assign(16, 255);
+			return image;
+		});
+	gatedUploads.RequestBackgroundBatch({nearestRequest, distantRequest});
+	Expect(gatedUploads.WaitUntilIdle(std::chrono::seconds(2)),
+		"display frames did not reach the interaction upload gate");
+	const std::set<jpegview_linux::PerfWorkClass> foregroundOnly{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread,
+		jpegview_linux::PerfWorkClass::FocusedPreview};
+	const std::set<jpegview_linux::PerfWorkClass> nearestOnly{
+		jpegview_linux::PerfWorkClass::NearestNavigationNeighbor};
+	const std::set<jpegview_linux::PerfWorkClass> distantOnly{
+		jpegview_linux::PerfWorkClass::DistantSpeculation};
+	const auto deniedUploads = gatedUploads.TakeCompleted(2, foregroundOnly);
+	const auto nearestUpload = gatedUploads.TakeCompleted(1, nearestOnly);
+	const auto distantUpload = gatedUploads.TakeCompleted(1, distantOnly);
+	Expect(deniedUploads.empty() && nearestUpload.size() == 1 &&
+		nearestUpload.front()->key == nearestRequest.key && distantUpload.size() == 1 &&
+		distantUpload.front()->key == distantRequest.key,
+		"class-filtered uploads discarded permitted frames or uploaded paused speculation");
+	for (const auto& image : nearestUpload) gatedUploads.Retire(image);
+	for (const auto& image : distantUpload) gatedUploads.Retire(image);
+	std::mutex neighborCancelMutex;
+	std::condition_variable neighborCancelChanged;
+	bool neighborStarted = false;
+	bool releaseNeighbor = false;
+	std::shared_ptr<std::atomic<bool>> neighborCancellation;
+	jpegview_linux::DisplayImageCache canceledNeighbor(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			std::unique_lock<std::mutex> lock(neighborCancelMutex);
+			neighborCancellation = request.cancellation;
+			neighborStarted = true;
+			neighborCancelChanged.notify_all();
+			neighborCancelChanged.wait(lock, [&] { return releaseNeighbor; });
+			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			image->key = request.key;
+			image->width = image->height = 2;
+			image->workClass = request.workClass;
+			image->bgra.assign(16, 255);
+			return image;
+		});
+	canceledNeighbor.RequestBackground(nearestRequest);
+	bool neighborReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(neighborCancelMutex);
+		neighborReachedBarrier = neighborCancelChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return neighborStarted; });
+	}
+	if (neighborReachedBarrier) canceledNeighbor.Prefetch({});
+	const bool cancellationWasRequested = neighborCancellation && neighborCancellation->load();
+	{
+		std::lock_guard<std::mutex> lock(neighborCancelMutex);
+		releaseNeighbor = true;
+	}
+	neighborCancelChanged.notify_all();
+	Expect(neighborReachedBarrier && cancellationWasRequested &&
+		canceledNeighbor.WaitUntilIdle(std::chrono::seconds(2)) &&
+		canceledNeighbor.TakeCompleted(1).empty() && !canceledNeighbor.Find(nearestRequest),
+		"obsolete active neighbor work was not canceled or uploaded after interaction began");
 	jpegview_linux::DisplayImageCache failedPreparation(64, 1,
 		[](const jpegview_linux::DisplayImageRequest&) {
 			return jpegview_linux::DisplayImageCache::ImagePtr{};
@@ -6957,6 +8134,27 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 }
 
 void TestThumbnailCacheSchedulingAndEviction() {
+	jpegview_linux::ThumbnailCacheScheduler gated;
+	gated.Prepare({"current", "visible", "distant"}, 0, 3);
+	Expect(!gated.Next(0, [](const jpegview_linux::ThumbnailLoadRequest&) {
+		return false;
+	}).has_value() && gated.PendingCount() == 3,
+		"a blocked thumbnail admission consumed its pending request");
+	const auto visibleRequest = gated.Next(0, [](const auto& request) {
+		return request.fileIndex < 2;
+	});
+	Expect(visibleRequest.has_value() && visibleRequest->key == "current" &&
+		gated.Complete(*visibleRequest, 0, 0).empty(),
+		"a permitted visible thumbnail could not pass the interaction admission gate");
+	const auto nextVisible = gated.Next(0, [](const auto& request) {
+		return request.fileIndex < 2;
+	});
+	Expect(nextVisible.has_value() && nextVisible->key == "visible" &&
+		gated.Complete(*nextVisible, 0, 0).empty() &&
+		!gated.Next(0, [](const auto& request) { return request.fileIndex < 2; }).has_value() &&
+		gated.PendingCount() == 1,
+		"distant thumbnail admission bypassed the visible-index policy or consumed its queue row");
+
 	jpegview_linux::ThumbnailCacheScheduler scheduler;
 	const std::vector<std::string> keys = {"a", "b", "c", "d", "e"};
 	jpegview_linux::ThumbnailCacheScheduler retained;
@@ -7055,7 +8253,7 @@ void TestThumbnailBackgroundPreparation() {
 	source->hasTransparency = true;
 	jpegview_linux::ThumbnailPreparationWorker realWorker;
 	Expect(realWorker.Request({"scaled", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::DistantSpeculation, {}, 0, 0}),
+		jpegview_linux::PerfWorkClass::DistantSpeculation, {}, 0, 0, {}}),
 		"thumbnail worker rejected valid display-ready pixels");
 	Expect(realWorker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not finish source-area downsampling");
@@ -7075,7 +8273,7 @@ void TestThumbnailBackgroundPreparation() {
 		jpegview_linux::PerfWorkClass::DistantSpeculation,
 		"thumbnail worker lost transparency or work-class metadata");
 	Expect(realWorker.Request({"scaled-visible", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}) &&
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}) &&
 		realWorker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not process the visible-row attribution fixture");
 	const auto visibleScaled = realWorker.TakeCompleted(1);
@@ -7107,7 +8305,7 @@ void TestThumbnailBackgroundPreparation() {
 			return result;
 		});
 	Expect(prioritized.Request({"blocker", source, 2, 2, 9,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}),
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}),
 		"thumbnail worker rejected its blocking request");
 	bool blockerStartedInTime = false;
 	{
@@ -7117,9 +8315,9 @@ void TestThumbnailBackgroundPreparation() {
 	}
 	const bool queuedNeighbors = blockerStartedInTime &&
 		prioritized.Request({"far", source, 2, 2, 5,
-			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}) &&
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}) &&
 		prioritized.Request({"near", source, 2, 2, 1,
-			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0});
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}});
 	{
 		std::lock_guard<std::mutex> lock(orderMutex);
 		releaseBlocker = true;
@@ -7166,9 +8364,9 @@ void TestThumbnailBackgroundPreparation() {
 			return result;
 		});
 	Expect(retainedWorker.Request({"active-source", activeSource, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}) &&
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}) &&
 		retainedWorker.Request({"queued-source", queuedSource, 2, 2, 1,
-			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}),
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0, {}}),
 		"thumbnail worker rejected retained-source accounting fixtures");
 	bool retainedWorkerReachedBarrier = false;
 	{
@@ -7208,7 +8406,7 @@ void TestThumbnailBackgroundPreparation() {
 			return result;
 		});
 	Expect(cancellable.Request({"stale", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 1, 4}),
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 1, 4, {}}),
 		"thumbnail worker rejected cancellation fixture");
 	bool staleStartedInTime = false;
 	{
@@ -7227,7 +8425,7 @@ void TestThumbnailBackgroundPreparation() {
 		cancellable.TakeCompleted(1).empty(),
 		"cleared thumbnail work published a stale result");
 	Expect(cancellable.Request({"stale", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 2, 5}) &&
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 2, 5, {}}) &&
 		cancellable.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker rejected replacement work after cancellation");
 	const auto replaced = cancellable.TakeCompleted(1);
@@ -7241,6 +8439,114 @@ void TestThumbnailBackgroundPreparation() {
 		!jpegview_linux::ThumbnailPreparationResultMatches(
 			replaced.front(), 2, 5, "stale", 3, 2),
 		"thumbnail worker result did not preserve request/list/geometry identity");
+
+	std::mutex selectiveMutex;
+	std::condition_variable selectiveChanged;
+	bool visibleStarted = false;
+	bool releaseVisible = false;
+	const auto thumbnailRequest = [&](const std::string& key,
+		jpegview_linux::PerfWorkClass workClass, std::size_t priority) {
+		jpegview_linux::ThumbnailPreparationRequest request;
+		request.key = key;
+		request.source = source;
+		request.maximumWidth = request.maximumHeight = 2;
+		request.priority = priority;
+		request.workClass = workClass;
+		return request;
+	};
+	jpegview_linux::ThumbnailPreparationWorker selective(
+		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			if (request.key == "visible-blocker") {
+				std::unique_lock<std::mutex> lock(selectiveMutex);
+				visibleStarted = true;
+				selectiveChanged.notify_all();
+				selectiveChanged.wait(lock, [&] { return releaseVisible; });
+			}
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = request.key;
+			image->width = image->height = 1;
+			image->bgra.assign(4, 255);
+			return image;
+		});
+	Expect(selective.Request(thumbnailRequest("visible-blocker",
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, 0)),
+		"selective thumbnail worker rejected its visible blocker");
+	bool visibleReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(selectiveMutex);
+		visibleReachedBarrier = selectiveChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return visibleStarted; });
+	}
+	const bool selectiveQueued = visibleReachedBarrier &&
+		selective.Request(thumbnailRequest("queued-distant",
+			jpegview_linux::PerfWorkClass::DistantSpeculation, 2)) &&
+		selective.Request(thumbnailRequest("queued-visible",
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, 1));
+	const auto removedDistant = selective.Cancel({
+		jpegview_linux::PerfWorkClass::DistantSpeculation});
+	{
+		std::lock_guard<std::mutex> lock(selectiveMutex);
+		releaseVisible = true;
+	}
+	selectiveChanged.notify_all();
+	Expect(selectiveQueued && removedDistant.size() == 1 &&
+		removedDistant.front().key == "queued-distant" && removedDistant.front().cancelled,
+		"interaction cancellation removed visible thumbnail work or retained queued distant work");
+	Expect(selective.WaitUntilIdle(std::chrono::seconds(2)),
+		"selectively retained visible thumbnail requests did not finish");
+	const std::set<jpegview_linux::PerfWorkClass> visibleOnly{
+		jpegview_linux::PerfWorkClass::VisibleThumbnail};
+	const auto visibleResults = selective.TakeCompleted(3, visibleOnly);
+	Expect(visibleResults.size() == 2 && std::all_of(visibleResults.begin(),
+		visibleResults.end(), [](const auto& result) {
+			return !result.cancelled && result.image;
+		}),
+		"visible thumbnail completions did not pass the interaction upload gate");
+
+	std::mutex activeCancelMutex;
+	std::condition_variable activeCancelChanged;
+	bool distantStarted = false;
+	bool releaseDistant = false;
+	std::shared_ptr<std::atomic<bool>> activeCancellation;
+	jpegview_linux::ThumbnailPreparationWorker activeDistant(
+		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			std::unique_lock<std::mutex> lock(activeCancelMutex);
+			activeCancellation = request.cancellation;
+			distantStarted = true;
+			activeCancelChanged.notify_all();
+			activeCancelChanged.wait(lock, [&] { return releaseDistant; });
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = request.key;
+			return image;
+		});
+	ScopedConditionRelease activeDistantRelease(
+		activeCancelMutex, activeCancelChanged, releaseDistant);
+	Expect(activeDistant.Request(thumbnailRequest("active-distant",
+		jpegview_linux::PerfWorkClass::DistantSpeculation, 0)),
+		"active distant thumbnail cancellation fixture was rejected");
+	{
+		std::unique_lock<std::mutex> lock(activeCancelMutex);
+		Expect(activeCancelChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return distantStarted; }),
+			"active distant thumbnail did not reach its cancellation barrier");
+	}
+	const auto activeCancellationResult = activeDistant.Cancel({
+		jpegview_linux::PerfWorkClass::DistantSpeculation});
+	const bool activeCancelRequested = activeCancellation && activeCancellation->load();
+	{
+		std::lock_guard<std::mutex> lock(activeCancelMutex);
+		releaseDistant = true;
+	}
+	activeCancelChanged.notify_all();
+	Expect(activeCancellationResult.size() == 1 &&
+		activeCancellationResult.front().key == "active-distant" &&
+		activeCancellationResult.front().cancelled && activeCancelRequested &&
+		activeDistant.WaitUntilIdle(std::chrono::seconds(2)),
+		"active distant thumbnail did not receive cooperative cancellation");
+	const auto canceledActiveResult = activeDistant.TakeCompleted(1, {
+		jpegview_linux::PerfWorkClass::DistantSpeculation});
+	Expect(canceledActiveResult.empty(),
+		"cooperatively canceled thumbnail published a duplicate retry result");
 }
 
 void TestThumbnailFileBackedPreparationAndShutdown() {
@@ -7324,7 +8630,7 @@ void TestThumbnailFileBackedPreparationAndShutdown() {
 			return image;
 		});
 	Expect(activeWorker->Request({"shutdown-active", nullptr, 1, 1, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail, "/virtual/shutdown-active", 1, 1}),
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, "/virtual/shutdown-active", 1, 1, {}}),
 		"thumbnail worker rejected the active-shutdown fixture");
 	{
 		std::unique_lock<std::mutex> lock(shutdownMutex);
@@ -7399,6 +8705,11 @@ void TestThumbnailDownsamplingAntialiasing() {
 
 	Expect(jpegview_linux::DownsampleThumbnailBgra(transparentEdge, 2, 1, 2, 1, filtered) &&
 		filtered == transparentEdge, "same-size thumbnails were modified");
+	int cancellationChecks = 0;
+	Expect(!jpegview_linux::DownsampleThumbnailBgra(checkerboard, 8, 8, 2, 2,
+		filtered, [&cancellationChecks] { return ++cancellationChecks < 1; }) &&
+		filtered.empty(),
+		"thumbnail downsampling did not stop at a cooperative row boundary");
 	Expect(!jpegview_linux::DownsampleThumbnailBgra(transparentEdge, 2, 1, 3, 1, filtered),
 		"thumbnail-only downsampler accepted enlargement");
 	Expect(!jpegview_linux::DownsampleThumbnailBgra({1, 2, 3, 4}, 2, 2, 1, 1, filtered),
@@ -8451,6 +9762,10 @@ int main() {
 	RunTest("double-page-presentation-atomic-commit",
 		TestDoublePagePresentationCommitsSpreadAtomically, failures);
 	RunTest("held-navigation-repeat-coalescing", TestHeldNavigationCoalescesKeyRepeats, failures);
+	RunTest("interaction-work-policy-idle-deadline-and-capture",
+		TestInteractionWorkPolicyIdleDeadlineAndCapture, failures);
+	RunTest("work-batch-gate-serializes-deactivate-and-publish",
+		TestWorkBatchGateSerializesDeactivateAndPublish, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
 	RunTest("file-list-size-and-random-sorting", TestFileListSizeAndRandomSorting, failures);
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);
@@ -8467,11 +9782,32 @@ int main() {
 		TestPerfContextAndPendingInputDiagnostics, failures);
 	RunTest("decoded-prefetch-work-class-attribution",
 		TestDecodedPrefetchWorkClassAttribution, failures);
-	RunTest("decoded-image-cache-and-background-prefetch", TestDecodedImageCacheAndBackgroundPrefetch, failures);
+	RunTest("decoded-image-cache-and-background-prefetch-cold-spread-retention",
+		TestDecodedImageCacheAndBackgroundPrefetch, failures);
+	RunTest("decoded-active-spread-budget-pressure-preserves-foreground",
+		TestDecodedActiveSpreadBudgetPressure, failures);
+	RunTest("decoded-promoted-spread-budget-pressure-preserves-foreground",
+		TestDecodedPromotedSpreadBudgetPressure, failures);
+	RunTest("decoded-budget-rejection-preserves-queued-active-spread-work",
+		TestDecodedBudgetRejectionPreservesQueuedActiveSpreadWork, failures);
+	RunTest("jpeg-active-spread-dimensions-survive-paused-prefetch",
+		TestJpegActiveSpreadDimensionsSurvivePause, failures);
+	RunTest("active-spread-partner-replacement-cancels-obsolete-source-work",
+		TestActiveSpreadPartnerReplacementCancelsObsoleteRequests, failures);
+	RunTest("double-page-disable-cancels-active-and-queued-partner-dimensions",
+		TestDisablingDoublePageCancelsBlockedAndQueuedPartnerDimensions, failures);
 	RunTest("display-cache-foreground-active-classification",
 		TestDisplayImageCacheForegroundActiveClassification, failures);
 	RunTest("display-cache-prefetch-preserves-active-foreground",
 		TestDisplayImageCachePrefetchPreservesActiveForeground, failures);
+	RunTest("display-cache-empty-prefetch-preserves-foreground-and-spread",
+		TestDisplayImageCacheEmptyPrefetchPreservesForegroundAndSpread, failures);
+	RunTest("display-cache-cancelled-spread-stays-cancelled-across-empty-prefetch",
+		TestDisplayCacheCanceledSpreadStaysCanceledAcrossEmptyPrefetch, failures);
+	RunTest("display-cache-promoted-spread-survives-paused-prefetch",
+		TestDisplayImageCachePromotedSpreadSurvivesPause, failures);
+	RunTest("active-spread-decode-demand-gates-background-work",
+		TestActiveSpreadDecodeDemandGatesBackgroundWork, failures);
 	RunTest("display-cache-retirement-identity-accounting",
 		TestDisplayCacheRetirementIdentityAccounting, failures);
 	RunTest("display-cache-final-pixels-retirement-thread",

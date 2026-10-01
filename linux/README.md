@@ -52,7 +52,19 @@ they support.
    `400% (100%)`). The option is off by default and is also available under Advanced configuration's
    Behavior category. Ctrl+wheel zooms around
    the pointer, mouse dragging pans, and repeatable Shift+Arrow commands pan an actual-size image in
-   the original 48-pixel steps. When magnified beyond the viewport, a transient upper-right zoom
+   the original 48-pixel steps. Pan, zoom, fit-to-window and actual-size commands, wheel bursts, crop or
+   navigator drags, held navigation, and window or thumbnail-panel resizing pause distant thumbnail and
+   neighbor preparation and speculative texture uploads while the active image or spread remains available.
+   Cold JPEG spread partners get asynchronous header-only dimension reads, while cold non-JPEG partners
+   may be decoded; both remain eligible during navigation pauses. Pending active-spread work also
+   pauses visible-thumbnail preparation and lets file-list scanning yield between enumeration units.
+   Replacing the pending partner or disabling double-page mode cancels that partner's queued source
+   work and suppresses publication from a blocked read when it returns.
+   Missing thumbnails in the visible strip may still load when no foreground source work is pending.
+   Background work resumes 250 ms after
+   interaction settles, including after a drag capture is released. A pending foreground image or spread
+   also pauses visible-thumbnail preparation and lets the active file-list scan yield between enumeration
+   units. When magnified beyond the viewport, a transient upper-right zoom
    navigator shows the whole image and the visible area; click or drag it to pan. Its visibility
    can be toggled from the context menu and persists between runs. A transient
    pointer-following magnifying-glass lens is also available: press
@@ -66,7 +78,8 @@ they support.
    Crop selection mode is off by default and can be enabled from the new navigation-panel button,
    either context menu, or with Ctrl+E; the explicit mode choice is saved between runs. Double-page
    mode (`D`) shows adjacent portrait pages together at a shared display height, leaving the first
-   cover page on its own. Double-page manga mode (`J`) swaps their left/right placement.
+   cover page on its own. Double-page manga mode (`J`) swaps their left/right placement. A known
+   landscape page stays single and is shown without waiting for its neighbor's dimensions.
    Up/Down rotation turns the open spread as one unit: both pages stay visible and stack vertically
    after a quarter-turn, then return to a horizontal spread when rotated back. The spread remains
    paired if double-page mode is switched off and on while the rotation is applied.

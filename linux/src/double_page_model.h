@@ -36,6 +36,9 @@ struct DoublePageSpread {
 
 // YACReader pairs only two adjacent portrait pages. Page zero is treated as a
 // standalone cover by default, so page one starts the first spread.
+bool CanAnchorDoublePageSpread(std::size_t firstIndex, std::size_t pageCount,
+	const PageDimensions& first, bool coverSingle = true);
+
 bool IsDoublePagePair(std::size_t firstIndex, std::size_t pageCount,
 	const PageDimensions& first, const PageDimensions& second,
 	bool coverSingle = true);

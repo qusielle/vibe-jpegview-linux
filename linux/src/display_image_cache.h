@@ -6,10 +6,12 @@
 #include "perf_diagnostics.h"
 
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -31,6 +33,7 @@ struct DisplayImageRequest {
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::Unspecified;
 	std::string key;
+	std::shared_ptr<std::atomic<bool>> cancellation;
 
 	bool Valid() const;
 };
@@ -112,12 +115,16 @@ public:
 	// This lets a multi-image presentation start both sides without a sequential
 	// request-publication gap, while preserving ordinary foreground work.
 	void RequestBackgroundBatch(const std::vector<DisplayImageRequest>& requests);
-	// Removes queued/completed background work for a key. In-flight work is
-	// allowed to finish but its result is discarded unless another request needs it.
+	// Removes queued/completed background work for a key and retires its active
+	// background classification. In-flight work may finish, but its result is
+	// discarded unless a later explicit request needs it; empty prefetch will not
+	// revive it.
 	void CancelBackground(const std::string& key);
 	ImagePtr RequestAndWait(const DisplayImageRequest& request);
 	void Prefetch(const std::vector<DisplayImageRequest>& requests);
 	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount);
+	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount,
+		const std::set<PerfWorkClass>& permittedWorkClasses);
 	void Release(const std::string& key);
 	void Retire(const ImagePtr& image);
 	void Clear();

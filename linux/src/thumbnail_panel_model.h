@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -91,6 +92,8 @@ public:
 	std::vector<std::string> Prepare(const std::vector<std::string>& fileKeys,
 		std::size_t currentIndex, std::size_t capacity);
 	std::optional<ThumbnailLoadRequest> Next(std::uint32_t now);
+	std::optional<ThumbnailLoadRequest> Next(std::uint32_t now,
+		const std::function<bool(const ThumbnailLoadRequest&)>& permitted);
 	std::vector<std::string> Complete(const ThumbnailLoadRequest& request,
 		std::uint32_t now, std::uint32_t delayMs = 25);
 	void Fail(const ThumbnailLoadRequest& request, std::uint32_t now,
