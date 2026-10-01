@@ -41,7 +41,11 @@ they support.
    textures. The closest next and previous files take
    preparation and upload priority, and an already prepared static image is presented without first
    copying its full decoded pixels on the UI thread; navigation therefore avoids CPU resizing and
-   normally avoids texture upload as well. Fit mode
+   normally avoids texture upload as well. Decoded images, prepared frames, thumbnails, and previews
+   share a source identity based on the logical path and backing file's device, inode, size, and
+   nanosecond modification time. After a source refresh, cache lookups use its new identity and miss
+   pixels retained under the old one.
+   Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
    Fit, fill, actual-size, and manual modes survive navigation appropriately. Temporary zoom on one
    image resets to the selected mode by default. The opt-in `fit_relative_zoom_mode=1` instead defines
@@ -113,11 +117,21 @@ they support.
    and replacement-list construction stay off the SDL event thread. A directly named image is
    displayed from a provisional one-image list while the rest of its folder is scanned; a
    directory-only launch stays responsive and opens Browse if its completed scan is empty. New
-   requests cancel obsolete scans, while generation and
-   list-revision checks prevent stale results from replacing the current folder or restoring a
-   removed file. Moving within the already-loaded list remains a constant-time index change without
-   scanner locks or copies of the active list. The Open-dialog Browse listing remains on its
-   separate refresh path; this worker covers the viewer's active file list.
+   requests cancel obsolete scans, while generation, membership/order revision, and descriptor
+   revision checks prevent stale results from replacing the current folder, restoring a removed file,
+   or rolling back a refreshed source identity. Moving within the already-loaded list remains a constant-time index
+   change without scanner locks or copies of the active list. Each entry retains the identity and file metadata
+   captured during scanning, so painting, cache lookup, and thumbnail scheduling reuse that descriptor
+   instead of restatting every path. Explicit reloads, application-owned writes, and worker-detected
+   changes refresh the descriptor; outside edits are picked up by reload or when background work
+   detects them, without a filesystem watcher. Archive-member identity combines the member's logical
+   path with its archive container identity, so members stay distinct and replacing an archive
+   invalidates its members. An edit to the selected picture reloads its pixels, while an edit to a
+   visible double-page partner refreshes the spread dimensions and keeps the selected page anchored.
+   Metadata-based reordering also keeps the selected file in place. A full-list reload rebuilds visible
+   spread geometry against the refreshed order while keeping the selected page and its current pixels.
+   The Open-dialog Browse listing remains on its separate refresh path; this worker covers the viewer's
+   active file list.
 
 5. **Responsive keyboard and mouse navigation.** Left/Right image navigation and menu/browser
    selection repeat while held. The open browser supports repeating Up/Down, PageUp/PageDown, and
@@ -134,7 +148,9 @@ they support.
    the current-spread highlight. The panel reserves image space instead of covering the picture,
    preloads nearest files first, and retains every generated thumbnail for the active file list.
    Moving between images changes nearest-row priority without rebuilding the catalog or invalidating
-   useful in-flight thumbnails for unchanged files.
+   useful in-flight thumbnails for unchanged files. Retained thumbnails are keyed by source identity
+   and required geometry, so a source replacement or incompatible size invalidates its old pixels
+   while sorting and navigation preserve unchanged thumbnails.
    Completed neighbor display frames feed a very-low-priority thumbnail worker when available.
    Remaining thumbnails are read, decoded, and resampled by that same single background worker;
    JPEG thumbnails retain reduced-DCT decoding. The SDL thread validates results and uploads their
@@ -182,7 +198,9 @@ they support.
    original pixel dimensions and file size beside its filename on one footer row, including when a
    directory is selected; the freed row gives the preview image more height. File-size
    metadata and preview decoding run in the background so large images and cold archive catalogs do
-   not require metadata lookup on the UI thread.
+   not require metadata lookup on the UI thread. Preview workers check the image before and after
+   decoding; if it changes, the dialog discards that result and requests a fresh preview. Archive-member
+   file sizes describe uncompressed member data and use the container identity for freshness.
    Dialog dimensions and the preview/list proportion are preserved between runs. The preview image
    is resampled to the pane's usable area
    after resizing, using the thumbnail panel's source-area antialiasing. Preview decoding runs in
@@ -1010,9 +1028,11 @@ to move it and its border handles to resize it; right-click reopens the menu and
 selection. The menu can crop the processed image in memory, copy the selection at source resolution,
 or zoom to it. A lossless JPEG crop opens the save
 browser and aligns the requested rectangle to the JPEG's actual MCU grid; the displayed dimensions are
-the aligned dimensions and the source is not replaced unless explicitly chosen. Crop recalculates
-active picture-level/automatic corrections on the cropped source pixels. Cropping an animated image
-flattens the currently displayed frame.
+the aligned dimensions and the source is not replaced unless explicitly chosen. If **Save processed**
+overwrites the selected source, the viewer keeps its already materialized pixels detached from the
+refreshed file; source-coordinate lossless JPEG crop stays unavailable for that picture until it is
+reloaded. Crop recalculates active picture-level/automatic corrections on the cropped source pixels.
+Cropping an animated image flattens the currently displayed frame.
 
 `Fixed size...` opens a dialog for width, height, and screen-pixel versus image-pixel units. Screen-pixel
 sizes track the current zoom, while image-pixel sizes remain in source pixels; while drawing, the
@@ -1073,8 +1093,9 @@ Linux equivalent.
 `Ctrl+S` opens the native save dialog for a full-size processed image; `Ctrl+Shift+S` saves the
 displayed screen-size result. The additional output formats listed above are selected by their
 filename extension, with the default filename following Windows JPEGView's `<name>_proc.jpg`
-convention. Existing files require a second Enter to confirm replacement. The source file itself
-remains unchanged unless a lossless JPEG transform or confirmed delete is explicitly selected.
+convention. Existing files require a second Enter to confirm replacement. Saving over the selected
+source refreshes its cache identity while keeping the already processed image in the viewer, so its
+picture-level adjustments are not applied to the saved pixels a second time.
 
 The Linux command dispatcher uses the original numeric `IDM_*` values from
 `src/JPEGView/resource.h`, and the supported keyboard bindings follow the corresponding entries

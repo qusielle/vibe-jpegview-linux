@@ -36,6 +36,12 @@ SpreadPagePlacement RotatePlacement(const SpreadPagePlacement& page,
 
 } // namespace
 
+bool DoublePageSpreadAffectedBySourceRefresh(const DoublePageSpread& spread,
+	std::size_t changedIndex, bool listOrderChanged) {
+	return listOrderChanged || changedIndex == spread.firstIndex ||
+		changedIndex == spread.secondIndex;
+}
+
 bool CanAnchorDoublePageSpread(std::size_t firstIndex, std::size_t pageCount,
 	const PageDimensions& first, bool coverSingle) {
 	if (pageCount < 2 || firstIndex >= pageCount - 1 ||
@@ -144,6 +150,11 @@ void DoublePagePresentationModel::UseSinglePage(std::size_t anchorIndex) {
 	if (phase_ == DoublePagePresentationPhase::SinglePage &&
 		anchorIndex_ == anchorIndex) return;
 	Reset(anchorIndex, anchorIndex, DoublePagePresentationPhase::SinglePage);
+}
+
+void DoublePagePresentationModel::InvalidateForFileListReplacement(
+	std::size_t selectedIndex) {
+	Reset(selectedIndex, selectedIndex, DoublePagePresentationPhase::SinglePage);
 }
 
 bool DoublePagePresentationModel::BeginSpread(std::size_t anchorIndex,

@@ -22,33 +22,24 @@ namespace fs = std::filesystem;
 namespace jpegview_linux {
 namespace {
 
-struct FileIdentity {
-	std::uint64_t device = 0;
-	std::uint64_t inode = 0;
-	std::uint64_t size = 0;
-	std::int64_t modifiedSeconds = 0;
-	std::int64_t modifiedNanoseconds = 0;
-	bool valid = false;
+struct DecodedImageWorkKey {
+	SourceKey source;
+	bool dimensionsOnly = false;
 };
 
-bool operator==(const FileIdentity& left, const FileIdentity& right) {
-	return left.valid && right.valid && left.device == right.device &&
-		left.inode == right.inode && left.size == right.size &&
-		left.modifiedSeconds == right.modifiedSeconds &&
-		left.modifiedNanoseconds == right.modifiedNanoseconds;
+bool operator==(const DecodedImageWorkKey& left, const DecodedImageWorkKey& right) {
+	return left.dimensionsOnly == right.dimensionsOnly && left.source == right.source;
 }
 
-FileIdentity Identify(const fs::path& filename) {
-	FileIdentity result;
-	result.valid = IdentifyImageSourceBackingFile(filename, result.device, result.inode,
-		result.size, result.modifiedSeconds, result.modifiedNanoseconds);
-	return result;
-}
+struct DecodedImageWorkKeyHash {
+	std::size_t operator()(const DecodedImageWorkKey& key) const {
+	return SourceKeyHash{}(key.source) ^
+		(static_cast<std::size_t>(key.dimensionsOnly) + 0x9e3779b9u);
+	}
+};
 
-std::string CacheKey(const fs::path& filename) {
-	std::error_code error;
-	const fs::path absolute = fs::absolute(filename, error);
-	return (error ? filename : absolute).lexically_normal().string();
+DecodedImageWorkKey WorkKey(const SourceDescriptor& source, bool dimensionsOnly = false) {
+	return DecodedImageWorkKey{source.Key(), dimensionsOnly};
 }
 
 void RecordQueuedCancellation(PerfWorkClass workClass,
@@ -97,15 +88,15 @@ std::vector<std::size_t> ImagePrefetchOrder(std::size_t fileCount,
 struct DecodedImageCache::Impl {
 	struct Entry {
 		ImagePtr image;
-		FileIdentity identity;
 		std::size_t bytes = 0;
 		std::uint64_t lastUsed = 0;
 	};
+	using EntryMap = std::unordered_map<SourceKey, Entry, SourceKeyHash>;
 
 	struct Work {
 		fs::path filename;
-		std::string key;
-		FileIdentity identity;
+		DecodedImageWorkKey key;
+		SourceDescriptor source;
 		std::uint64_t generation = 0;
 		PerfWorkClass workClass = PerfWorkClass::Unspecified;
 		bool dimensionsOnly = false;
@@ -152,7 +143,7 @@ struct DecodedImageCache::Impl {
 		if (sharedBudget) sharedBudget->Release(cachedBytes);
 	}
 
-	void Erase(std::unordered_map<std::string, Entry>::iterator entry) {
+	void Erase(EntryMap::iterator entry) {
 		const std::size_t bytes = entry->second.bytes;
 		ImagePtr retiredImage = std::move(entry->second.image);
 		entries.erase(entry);
@@ -164,7 +155,19 @@ struct DecodedImageCache::Impl {
 		}
 	}
 
-	std::unordered_map<std::string, Entry>::iterator Oldest() {
+	void EraseOtherSourceIdentities(const SourceKey& current) {
+		if (current.logicalPath.empty()) return;
+		for (auto entry = entries.begin(); entry != entries.end();) {
+			if (entry->first.logicalPath == current.logicalPath && entry->first != current) {
+				auto stale = entry++;
+				Erase(stale);
+			} else {
+				++entry;
+			}
+		}
+	}
+
+	EntryMap::iterator Oldest() {
 		if (entries.empty()) return entries.end();
 		auto oldest = entries.begin();
 		for (auto candidate = std::next(entries.begin()); candidate != entries.end(); ++candidate) {
@@ -173,9 +176,9 @@ struct DecodedImageCache::Impl {
 		return oldest;
 	}
 
-	bool Insert(const std::string& key, const FileIdentity& identity,
+	bool Insert(const SourceKey& key,
 		const std::shared_ptr<DecodedImage>& image, bool mayEvict) {
-		if (!image || image->frames.empty() || !identity.valid) return false;
+		if (!image || image->frames.empty() || !key.Valid()) return false;
 		const std::size_t bytes = DecodedImageBytes(*image);
 		if (bytes == 0 || bytes > byteBudget) return false;
 		const auto existing = entries.find(key);
@@ -191,7 +194,7 @@ struct DecodedImageCache::Impl {
 				Erase(Oldest());
 			}
 		}
-		entries.emplace(key, Entry{image, identity, bytes, ++useCounter});
+		entries.emplace(key, Entry{image, bytes, ++useCounter});
 		cachedBytes += bytes;
 		return true;
 	}
@@ -220,7 +223,12 @@ struct DecodedImageCache::Impl {
 			std::string errorMessage;
 			int sourceWidth = 0;
 			int sourceHeight = 0;
-			bool completed = !work.cancellation || !work.cancellation->load();
+			bool sourceChanged = false;
+			const bool sourceCurrentBeforeOpen = (!work.cancellation ||
+				!work.cancellation->load()) && IsImageSourceCurrent(work.source);
+			sourceChanged = !sourceCurrentBeforeOpen &&
+				(!work.cancellation || !work.cancellation->load());
+			bool completed = sourceCurrentBeforeOpen;
 			if (completed && work.dimensionsOnly) {
 				completed = dimensionsReader(work.filename, sourceWidth, sourceHeight,
 					errorMessage) && sourceWidth > 0 && sourceHeight > 0 &&
@@ -230,7 +238,12 @@ struct DecodedImageCache::Impl {
 				completed = decoder(work.filename, *image, errorMessage) &&
 					!image->frames.empty() && (!work.cancellation || !work.cancellation->load());
 			}
-			const FileIdentity currentIdentity = completed ? Identify(work.filename) : FileIdentity{};
+			const bool cancelledAfterWork = work.cancellation && work.cancellation->load();
+			const bool currentSource = !cancelledAfterWork && IsImageSourceCurrent(work.source);
+			if (!cancelledAfterWork && !currentSource) sourceChanged = true;
+			SourceDescriptor changedSource;
+			if (sourceChanged) changedSource = DescribeImageSource(work.source.LogicalPath());
+			const SourceChangeNotice sourceChange{work.source.Key(), changedSource};
 
 			ImagePtr completedImage;
 			Completion completion;
@@ -238,6 +251,14 @@ struct DecodedImageCache::Impl {
 			PerfWorkClass effectiveWorkClass = work.workClass;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
+				if (sourceChanged) {
+					const auto existing = std::find_if(changedSources.begin(), changedSources.end(),
+					[&sourceChange](const SourceChangeNotice& notice) {
+							return notice.previous == sourceChange.previous;
+						});
+					if (existing == changedSources.end()) changedSources.push_back(sourceChange);
+					else *existing = sourceChange;
+				}
 				inFlightKeys.erase(work.key);
 				const auto activeWorkClass = inFlightWorkClasses.find(work.key);
 				if (activeWorkClass != inFlightWorkClasses.end()) {
@@ -249,15 +270,15 @@ struct DecodedImageCache::Impl {
 				const auto desired = desiredWork.find(work.key);
 				const bool stillDesired = desired != desiredWork.end() &&
 					desired->second.generation >= work.generation &&
-					desired->second.identity == work.identity;
+					desired->second.source.Key() == work.source.Key();
 				if (!stopping && (foreground || stillDesired) && completed &&
-					currentIdentity == work.identity && !work.dimensionsOnly) {
+					currentSource && !work.dimensionsOnly) {
 					// Speculative work must never evict an image the user has
 					// already viewed. Stop this generation once the free budget
 					// cannot hold its next nearest neighbor.
 					const bool mayEvict = foreground ||
 						effectiveWorkClass == PerfWorkClass::ActiveImageSpread;
-					if (!Insert(work.key, work.identity, image, mayEvict)) {
+					if (!Insert(work.key.source, image, mayEvict)) {
 						for (auto queued = queue.begin(); queued != queue.end();) {
 							if (queued->workClass == PerfWorkClass::ActiveImageSpread ||
 								foregroundKeys.find(queued->key) != foregroundKeys.end()) {
@@ -271,7 +292,7 @@ struct DecodedImageCache::Impl {
 							const auto desiredQueued = desiredWork.find(queued->key);
 							if (desiredQueued != desiredWork.end() &&
 								desiredQueued->second.generation == queued->generation &&
-								desiredQueued->second.identity == queued->identity) {
+								desiredQueued->second.source.Key() == queued->source.Key()) {
 								desiredWork.erase(desiredQueued);
 							}
 							queued = queue.erase(queued);
@@ -292,7 +313,7 @@ struct DecodedImageCache::Impl {
 			}
 			if (completion) completion(work.filename, completedImage);
 			if (dimensionsCompletion) dimensionsCompletion(work.filename,
-				completed && currentIdentity == work.identity, sourceWidth, sourceHeight);
+				completed && currentSource, sourceWidth, sourceHeight);
 		}
 	}
 
@@ -321,15 +342,17 @@ struct DecodedImageCache::Impl {
 	std::condition_variable idle;
 	std::vector<std::thread> workers;
 	std::thread retirementWorker;
-	std::unordered_map<std::string, Entry> entries;
+	EntryMap entries;
 	std::deque<Work> queue;
 	std::deque<ImagePtr> retired;
-	std::unordered_set<std::string> queuedKeys;
-	std::unordered_set<std::string> inFlightKeys;
-	std::unordered_map<std::string, std::weak_ptr<std::atomic<bool>>> inFlightCancellation;
-	std::unordered_map<std::string, PerfWorkClass> inFlightWorkClasses;
-	std::unordered_set<std::string> foregroundKeys;
-	std::unordered_map<std::string, Work> desiredWork;
+	std::vector<SourceChangeNotice> changedSources;
+	std::unordered_set<DecodedImageWorkKey, DecodedImageWorkKeyHash> queuedKeys;
+	std::unordered_set<DecodedImageWorkKey, DecodedImageWorkKeyHash> inFlightKeys;
+	std::unordered_map<DecodedImageWorkKey, std::weak_ptr<std::atomic<bool>>,
+		DecodedImageWorkKeyHash> inFlightCancellation;
+	std::unordered_map<DecodedImageWorkKey, PerfWorkClass, DecodedImageWorkKeyHash> inFlightWorkClasses;
+	std::unordered_set<DecodedImageWorkKey, DecodedImageWorkKeyHash> foregroundKeys;
+	std::unordered_map<DecodedImageWorkKey, Work, DecodedImageWorkKeyHash> desiredWork;
 	std::size_t cachedBytes = 0;
 	std::size_t activeWorkers = 0;
 	std::uint64_t useCounter = 0;
@@ -346,47 +369,50 @@ DecodedImageCache::DecodedImageCache(std::size_t byteBudget, Decoder decoder,
 DecodedImageCache::~DecodedImageCache() = default;
 
 DecodedImageCache::ImagePtr DecodedImageCache::Find(const fs::path& filename) {
-	const std::string key = CacheKey(filename);
-	const FileIdentity identity = Identify(filename);
+	return Find(DescribeImageSource(filename));
+}
+
+DecodedImageCache::ImagePtr DecodedImageCache::Find(const SourceDescriptor& source) {
+	const SourceKey key = source.Key();
 	std::lock_guard<std::mutex> lock(impl_->mutex);
+	impl_->EraseOtherSourceIdentities(key);
+	if (!key.Valid()) return {};
 	const auto found = impl_->entries.find(key);
 	if (found == impl_->entries.end()) return {};
-	if (!(found->second.identity == identity)) {
-		impl_->Erase(found);
-		return {};
-	}
 	found->second.lastUsed = ++impl_->useCounter;
 	return found->second.image;
 }
 
 DecodedImageCache::ImagePtr DecodedImageCache::FindOrWait(const fs::path& filename) {
-	const std::string key = CacheKey(filename);
-	const FileIdentity identity = Identify(filename);
+	return FindOrWait(DescribeImageSource(filename));
+}
+
+DecodedImageCache::ImagePtr DecodedImageCache::FindOrWait(const SourceDescriptor& source) {
+	const SourceKey key = source.Key();
 	std::unique_lock<std::mutex> lock(impl_->mutex);
+	impl_->EraseOtherSourceIdentities(key);
+	if (!key.Valid()) return {};
+	const DecodedImageWorkKey workKey = WorkKey(source);
 	const auto findValid = [&]() -> ImagePtr {
 		const auto found = impl_->entries.find(key);
 		if (found == impl_->entries.end()) return {};
-		if (!(found->second.identity == identity)) {
-			impl_->Erase(found);
-			return {};
-		}
 		found->second.lastUsed = ++impl_->useCounter;
 		return found->second.image;
 	};
 	if (ImagePtr cached = findValid()) return cached;
 
 	const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
-		[&key](const Impl::Work& work) { return work.key == key; });
-	const bool inFlight = impl_->inFlightKeys.find(key) != impl_->inFlightKeys.end();
+		[&workKey](const Impl::Work& work) { return work.key == workKey; });
+	const bool inFlight = impl_->inFlightKeys.find(workKey) != impl_->inFlightKeys.end();
 	if (queued == impl_->queue.end() && !inFlight) return {};
-	impl_->foregroundKeys.insert(key);
+	impl_->foregroundKeys.insert(workKey);
 	if (queued != impl_->queue.end()) {
 		queued->workClass = PerfWorkClass::ActiveImageSpread;
 		if (queued->cancellation) queued->cancellation->store(false);
 	}
 	if (inFlight) {
-		impl_->inFlightWorkClasses[key] = PerfWorkClass::ActiveImageSpread;
-		const auto cancellation = impl_->inFlightCancellation.find(key);
+		impl_->inFlightWorkClasses[workKey] = PerfWorkClass::ActiveImageSpread;
+		const auto cancellation = impl_->inFlightCancellation.find(workKey);
 		if (cancellation != impl_->inFlightCancellation.end()) {
 			if (const auto token = cancellation->second.lock()) token->store(false);
 		}
@@ -401,33 +427,47 @@ DecodedImageCache::ImagePtr DecodedImageCache::FindOrWait(const fs::path& filena
 	impl_->workAvailable.notify_one();
 	impl_->idle.wait(lock, [&] {
 		return impl_->stopping || impl_->entries.find(key) != impl_->entries.end() ||
-			(impl_->queuedKeys.find(key) == impl_->queuedKeys.end() &&
-			 impl_->inFlightKeys.find(key) == impl_->inFlightKeys.end());
+			(impl_->queuedKeys.find(workKey) == impl_->queuedKeys.end() &&
+			 impl_->inFlightKeys.find(workKey) == impl_->inFlightKeys.end());
 	});
 	return findValid();
 }
 
 void DecodedImageCache::Store(const fs::path& filename,
 	const std::shared_ptr<DecodedImage>& image) {
-	const std::string key = CacheKey(filename);
-	const FileIdentity identity = Identify(filename);
+	Store(DescribeImageSource(filename), image);
+}
+
+void DecodedImageCache::Store(const SourceDescriptor& source,
+	const std::shared_ptr<DecodedImage>& image) {
+	const SourceKey key = source.Key();
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		impl_->Insert(key, identity, image, true);
+		impl_->EraseOtherSourceIdentities(key);
+		impl_->Insert(key, image, true);
 	}
 	impl_->workAvailable.notify_one();
 }
 
 void DecodedImageCache::RequestBackground(const fs::path& filename,
 	Completion completion, PerfWorkClass workClass) {
+	RequestBackground(DescribeImageSource(filename), std::move(completion), workClass);
+}
+
+void DecodedImageCache::RequestBackground(const SourceDescriptor& source,
+	Completion completion, PerfWorkClass workClass) {
 	Impl::Work work;
-	work.filename = filename;
-	work.key = CacheKey(filename);
-	work.identity = Identify(filename);
+	work.filename = source.LogicalPath();
+	work.key = WorkKey(source);
+	work.source = source;
 	work.workClass = workClass;
 	work.completion = std::move(completion);
 	work.cancellation = std::make_shared<std::atomic<bool>>(false);
-	if (!work.identity.valid) return;
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->EraseOtherSourceIdentities(work.key.source);
+	}
+	if (!work.key.source.Valid()) return;
 
 	ImagePtr alreadyCached;
 	bool queuedWork = false;
@@ -435,12 +475,11 @@ void DecodedImageCache::RequestBackground(const fs::path& filename,
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		if (impl_->stopping) return;
 		work.generation = impl_->generation;
-		const auto cached = impl_->entries.find(work.key);
-		if (cached != impl_->entries.end() && cached->second.identity == work.identity) {
+		const auto cached = impl_->entries.find(work.key.source);
+		if (cached != impl_->entries.end()) {
 			cached->second.lastUsed = ++impl_->useCounter;
 			alreadyCached = cached->second.image;
 		} else {
-			if (cached != impl_->entries.end()) impl_->Erase(cached);
 			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
 				[&work](const Impl::Work& candidate) { return candidate.key == work.key; });
 			if (queued != impl_->queue.end()) {
@@ -465,21 +504,26 @@ void DecodedImageCache::RequestBackground(const fs::path& filename,
 		}
 	}
 	if (queuedWork) impl_->workAvailable.notify_one();
-	if (alreadyCached && work.completion) work.completion(filename, alreadyCached);
+	if (alreadyCached && work.completion) work.completion(work.filename, alreadyCached);
 }
 
 void DecodedImageCache::RequestJpegDimensions(const fs::path& filename,
 	DimensionsCompletion completion, PerfWorkClass workClass) {
-	if (!completion || !IsJpegPath(filename)) return;
+	RequestJpegDimensions(DescribeImageSource(filename), std::move(completion), workClass);
+}
+
+void DecodedImageCache::RequestJpegDimensions(const SourceDescriptor& source,
+	DimensionsCompletion completion, PerfWorkClass workClass) {
+	if (!completion || !IsJpegPath(source.LogicalPath())) return;
 	Impl::Work work;
-	work.filename = filename;
-	work.key = "jpeg-dimensions:" + CacheKey(filename);
-	work.identity = Identify(filename);
+	work.filename = source.LogicalPath();
+	work.key = WorkKey(source, true);
+	work.source = source;
 	work.workClass = workClass;
 	work.dimensionsOnly = true;
 	work.dimensionsCompletion = std::move(completion);
 	work.cancellation = std::make_shared<std::atomic<bool>>(false);
-	if (!work.identity.valid) return;
+	if (!work.key.source.Valid()) return;
 
 	bool queuedWork = false;
 	{
@@ -513,8 +557,12 @@ void DecodedImageCache::RequestJpegDimensions(const fs::path& filename,
 
 bool DecodedImageCache::CancelActiveSpreadRequest(const fs::path& filename,
 	bool dimensionsOnly) {
-	const std::string key = dimensionsOnly ?
-		"jpeg-dimensions:" + CacheKey(filename) : CacheKey(filename);
+	return CancelActiveSpreadRequest(DescribeImageSource(filename), dimensionsOnly);
+}
+
+bool DecodedImageCache::CancelActiveSpreadRequest(const SourceDescriptor& source,
+	bool dimensionsOnly) {
+	const DecodedImageWorkKey key = WorkKey(source, dimensionsOnly);
 	bool canceled = false;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -552,7 +600,8 @@ bool DecodedImageCache::CancelActiveSpreadRequest(const fs::path& filename,
 
 void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 	std::size_t currentIndex, int preferredDirection, std::size_t maximumCount,
-	Completion completion, Filter filter, std::size_t nearestCount) {
+	Completion completion, Filter filter, std::size_t nearestCount,
+	DescriptorProvider descriptorProvider) {
 	std::vector<Impl::Work> prepared;
 	std::vector<std::pair<fs::path, ImagePtr>> alreadyCached;
 	const std::vector<std::size_t> order = ImagePrefetchOrder(files.size(), currentIndex,
@@ -560,15 +609,18 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 	for (std::size_t position = 0; position < order.size(); ++position) {
 		const std::size_t index = order[position];
 		Impl::Work work;
-		work.filename = files[index];
+		const SourceDescriptor* suppliedSource = descriptorProvider ?
+			descriptorProvider(index) : nullptr;
+		work.source = suppliedSource != nullptr ? *suppliedSource :
+			DescribeImageSource(files[index]);
+		work.filename = work.source.LogicalPath();
 		if (filter && !filter(work.filename)) continue;
-		work.key = CacheKey(work.filename);
-		work.identity = Identify(work.filename);
+		work.key = WorkKey(work.source);
 		work.workClass = position < nearestCount ?
 			PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
 		work.completion = completion;
 		work.cancellation = std::make_shared<std::atomic<bool>>(false);
-		if (work.identity.valid) prepared.push_back(std::move(work));
+		if (work.key.source.Valid()) prepared.push_back(std::move(work));
 	}
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -601,7 +653,8 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 			}
 		}
 		impl_->queuedKeys.clear();
-		std::unordered_map<std::string, Impl::Work> preservedSpreadWork;
+		std::unordered_map<DecodedImageWorkKey, Impl::Work,
+			DecodedImageWorkKeyHash> preservedSpreadWork;
 		for (const auto& active : impl_->inFlightWorkClasses) {
 			if (active.second != PerfWorkClass::ActiveImageSpread) continue;
 			const auto desired = impl_->desiredWork.find(active.first);
@@ -631,12 +684,11 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 		for (Impl::Work& work : prepared) {
 			work.generation = impl_->generation;
 			impl_->desiredWork[work.key] = work;
-			const auto cached = impl_->entries.find(work.key);
-			if (cached != impl_->entries.end() && cached->second.identity == work.identity) {
+			const auto cached = impl_->entries.find(work.key.source);
+			if (cached != impl_->entries.end()) {
 				if (completion) alreadyCached.emplace_back(work.filename, cached->second.image);
 				continue;
 			}
-			if (cached != impl_->entries.end()) impl_->Erase(cached);
 			if (impl_->inFlightKeys.find(work.key) != impl_->inFlightKeys.end()) {
 				const auto cancellation = impl_->inFlightCancellation.find(work.key);
 				if (cancellation != impl_->inFlightCancellation.end()) {
@@ -698,7 +750,7 @@ DecodedImageCacheDiagnostics DecodedImageCache::GetDiagnostics() const {
 			++diagnostics.backgroundQueued;
 		}
 	}
-	for (const std::string& key : impl_->inFlightKeys) {
+	for (const DecodedImageWorkKey& key : impl_->inFlightKeys) {
 		const auto workClass = impl_->inFlightWorkClasses.find(key);
 		if (workClass != impl_->inFlightWorkClasses.end() &&
 			workClass->second == PerfWorkClass::ActiveImageSpread) {
@@ -715,6 +767,13 @@ DecodedImageCacheDiagnostics DecodedImageCache::GetDiagnostics() const {
 		if (image) diagnostics.retiredBytes += DecodedImageBytes(*image);
 	}
 	return diagnostics;
+}
+
+std::vector<SourceChangeNotice> DecodedImageCache::TakeChangedSources() {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	std::vector<SourceChangeNotice> changed;
+	changed.swap(impl_->changedSources);
+	return changed;
 }
 
 std::size_t DecodedImageCache::EvictLeastRecentlyUsed() {

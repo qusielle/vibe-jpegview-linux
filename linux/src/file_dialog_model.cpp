@@ -92,12 +92,13 @@ std::filesystem::path FirstImageInDirectoryWhile(
 		for (const ArchiveEntryInfo& entry : archiveEntries) {
 			if (!shouldContinue()) return {};
 			if (!entry.directory && IsSupportedImagePath(entry.path)) {
-				std::error_code modificationError;
-				const std::filesystem::file_time_type modificationTime =
-					ImageSourceModificationTime(entry.path, modificationError);
-				images.push_back({entry.path, false, false,
-					modificationError ? std::filesystem::file_time_type{} : modificationTime,
-					false, true, entry.encrypted});
+				FileDialogEntry image{entry.path, false, false,
+					ArchiveFileModificationTime(entry.modificationTime), false, true,
+					entry.encrypted, entry.size, true};
+				image.sourceDescriptor = DescribeArchiveMember(entry.path,
+					entry.backingIdentity, entry.size, entry.modificationTime,
+					entry.encrypted);
+				images.push_back(std::move(image));
 			}
 		}
 		SortFileDialogEntries(images, mode);
@@ -123,8 +124,14 @@ std::filesystem::path FirstImageInDirectoryWhile(
 			std::error_code modificationError;
 			const std::filesystem::file_time_type modificationTime =
 				iterator->last_write_time(modificationError);
-			images.push_back({iterator->path(), false, false,
-				modificationError ? std::filesystem::file_time_type{} : modificationTime});
+			FileDialogEntry image{iterator->path(), false, false,
+				modificationError ? std::filesystem::file_time_type{} : modificationTime};
+			image.sourceDescriptor = DescribeImageSource(iterator->path());
+			if (image.sourceDescriptor.Metadata().hasFileSize) {
+				image.fileSize = image.sourceDescriptor.Metadata().fileSize;
+				image.fileSizeKnown = true;
+			}
+			images.push_back(std::move(image));
 		}
 		iterator.increment(iteratorError);
 	}
@@ -224,6 +231,11 @@ FileDialogPreviewFooterLayout CalculateFileDialogPreviewFooterLayout(
 	layout.filenameWidth = std::max(0, width - gap - layout.detailsWidth);
 	layout.detailsOffsetX = width - layout.detailsWidth;
 	return layout;
+}
+
+bool ShouldRefreshFileDialogPreviewSource(const SourceKey& requested,
+	const SourceDescriptor& observed) {
+	return requested != observed.Key();
 }
 
 FileDialogScrollbarGeometry CalculateFileDialogScrollbarGeometry(
@@ -401,6 +413,27 @@ bool FileDialogModel::SetFileSize(const std::filesystem::path& path, std::uintma
 	return updated;
 }
 
+bool FileDialogModel::RefreshSourceDescriptor(const SourceKey& expected,
+	const SourceDescriptor& observed) {
+	bool updated = false;
+	const std::filesystem::path normalizedPath = observed.LogicalPath().lexically_normal();
+	const auto update = [&expected, &observed, &normalizedPath, &updated](
+		FileDialogEntry& entry) {
+		if (entry.path.lexically_normal() != normalizedPath ||
+			entry.sourceDescriptor.Key() != expected) return;
+		entry.sourceDescriptor = observed;
+		entry.archiveMember = observed.Metadata().archiveMember;
+		entry.encrypted = observed.Metadata().archiveMemberEncrypted;
+		entry.fileSizeKnown = observed.Metadata().hasFileSize;
+		entry.fileSize = observed.Metadata().hasFileSize ?
+			static_cast<std::uintmax_t>(observed.Metadata().fileSize) : 0;
+		updated = true;
+	};
+	for (FileDialogEntry& entry : allEntries_) update(entry);
+	for (FileDialogEntry& entry : entries_) update(entry);
+	return updated;
+}
+
 void FileDialogModel::ClearSelection() {
 	selected_ = -1;
 }
@@ -549,11 +582,18 @@ std::vector<ArchiveDirectoryResult> ArchiveDirectoryLoader::TakeReady() {
 
 struct FileDialogFileSizeLoader::Impl {
 	struct Task {
-		std::vector<std::filesystem::path> paths;
+		std::vector<SourceDescriptor> sources;
 		std::uint64_t generation = 0;
 	};
 
-	Impl() = default;
+	explicit Impl(FileDialogFileSizeLoader::SourceCapture capture)
+		: sourceCapture(std::move(capture)) {
+		if (!sourceCapture) {
+			sourceCapture = [](const SourceDescriptor& requested) {
+				return DescribeImageSource(requested.LogicalPath());
+			};
+		}
+	}
 
 	~Impl() {
 		stopping.store(true);
@@ -588,13 +628,16 @@ struct FileDialogFileSizeLoader::Impl {
 
 			std::vector<FileDialogFileSizeResult> batch;
 			batch.reserve(32);
-			for (const std::filesystem::path& path : task.paths) {
+			for (const SourceDescriptor& requestedSource : task.sources) {
 				if (!IsCurrent(task.generation)) break;
-				std::error_code error;
-				const std::uintmax_t size = ImageSourceFileSize(path, error);
-				if (!error) {
-					batch.push_back(FileDialogFileSizeResult{task.generation, path, size});
-				}
+				const SourceDescriptor observedSource = sourceCapture(requestedSource);
+				FileDialogFileSizeResult result;
+				result.generation = task.generation;
+				result.path = requestedSource.LogicalPath();
+				result.size = observedSource.Metadata().fileSize;
+				result.requestedSource = requestedSource;
+				result.observedSource = observedSource;
+				batch.push_back(std::move(result));
 				if (batch.size() >= 32) Publish(batch, task.generation);
 			}
 			Publish(batch, task.generation);
@@ -607,6 +650,7 @@ struct FileDialogFileSizeLoader::Impl {
 
 	std::mutex mutex;
 	std::condition_variable condition;
+	FileDialogFileSizeLoader::SourceCapture sourceCapture;
 	std::optional<Task> pending;
 	std::vector<FileDialogFileSizeResult> ready;
 	std::atomic<std::uint64_t> currentGeneration{0};
@@ -614,22 +658,33 @@ struct FileDialogFileSizeLoader::Impl {
 	std::thread worker;
 };
 
-FileDialogFileSizeLoader::FileDialogFileSizeLoader() : impl_(std::make_unique<Impl>()) {}
+FileDialogFileSizeLoader::FileDialogFileSizeLoader(SourceCapture sourceCapture)
+	: impl_(std::make_unique<Impl>(std::move(sourceCapture))) {}
 FileDialogFileSizeLoader::~FileDialogFileSizeLoader() = default;
 
 void FileDialogFileSizeLoader::Request(
 	const std::vector<std::filesystem::path>& paths, std::uint64_t generation) {
+	std::vector<SourceDescriptor> sources;
+	sources.reserve(paths.size());
+	for (const std::filesystem::path& path : paths) {
+		sources.emplace_back(path, SourceIdentity{}, SourceMetadata{});
+	}
+	RequestSources(sources, generation);
+}
+
+void FileDialogFileSizeLoader::RequestSources(
+	const std::vector<SourceDescriptor>& sources, std::uint64_t generation) {
 	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		impl_->pending.reset();
 		impl_->ready.clear();
-		if (!paths.empty()) {
+		if (!sources.empty()) {
 			impl_->StartWorkerLocked();
-			impl_->pending = Impl::Task{paths, generation};
+			impl_->pending = Impl::Task{sources, generation};
 		}
 	}
-	if (!paths.empty()) impl_->condition.notify_one();
+	if (!sources.empty()) impl_->condition.notify_one();
 }
 
 void FileDialogFileSizeLoader::Clear(std::uint64_t generation) {
@@ -744,7 +799,9 @@ void RecordPreviewCancellation(std::uint64_t generation,
 
 FileDialogPreviewResult LoadFileDialogPreview(
 	const std::filesystem::path& path, bool directory, FileDialogSortMode mode,
-	int maximumWidth, int maximumHeight, const std::function<bool()>& shouldContinue) {
+	int maximumWidth, int maximumHeight, const std::function<bool()>& shouldContinue,
+	const SourceDescriptor& providedSource,
+	const FileDialogPreviewLoader::SourceCapture& sourceCapture) {
 	FileDialogPreviewResult result;
 	result.source = directory ? FirstImageInDirectoryWhile(path, mode, shouldContinue,
 		&result.error, &result.errorKind, &result.encryptedArchive) : path;
@@ -758,9 +815,31 @@ FileDialogPreviewResult LoadFileDialogPreview(
 	} else if (result.source.empty()) {
 		result.error = "No images in this folder";
 	} else {
-		std::error_code sizeError;
-		result.fileSize = ImageSourceFileSize(result.source, sizeError);
-		result.fileSizeKnown = !sizeError;
+		const bool providedPathMatches = providedSource.Valid() &&
+			!providedSource.LogicalPath().empty() &&
+			providedSource.LogicalPath().lexically_normal() == result.source.lexically_normal();
+		result.sourceDescriptor = providedPathMatches ? providedSource :
+			sourceCapture(SourceDescriptor(result.source, {}, {}));
+		if (!result.sourceDescriptor.Valid()) {
+			const SourceDescriptor recaptured = sourceCapture(result.sourceDescriptor);
+			if (recaptured.Valid() && recaptured.LogicalPath().lexically_normal() ==
+				result.source.lexically_normal()) {
+				result.sourceDescriptor = recaptured;
+			} else {
+				result.observedSource = recaptured;
+				result.error = "Image changed while preparing preview";
+				return result;
+			}
+		}
+		if (result.sourceDescriptor.Valid() &&
+			!IsImageSourceCurrent(result.sourceDescriptor)) {
+			result.observedSource = DescribeImageSource(result.source);
+			result.error = "Image changed while preparing preview";
+			return result;
+		}
+		const SourceMetadata& metadata = result.sourceDescriptor.Metadata();
+		result.fileSize = metadata.fileSize;
+		result.fileSizeKnown = metadata.hasFileSize;
 		DecodedImage decoded;
 		bool success = false;
 		if (IsJpegPath(result.source)) {
@@ -785,7 +864,7 @@ FileDialogPreviewResult LoadFileDialogPreview(
 			const int height = std::max(1,
 				static_cast<int>(std::floor(frame.height * scale + 0.5)));
 			if (!DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
-				width, height, result.bgra)) {
+				width, height, result.bgra, shouldContinue)) {
 				result.error = "Cannot resize preview";
 			} else {
 				result.width = width;
@@ -793,6 +872,14 @@ FileDialogPreviewResult LoadFileDialogPreview(
 			}
 		} else if (success) {
 			result.error = "Image has no preview frame";
+		}
+		if (result.sourceDescriptor.Valid() &&
+			!IsImageSourceCurrent(result.sourceDescriptor)) {
+			result.observedSource = DescribeImageSource(result.source);
+			result.bgra.clear();
+			result.width = 0;
+			result.height = 0;
+			result.error = "Image changed while preparing preview";
 		}
 	}
 	return result;
@@ -808,10 +895,17 @@ struct FileDialogPreviewLoader::Impl {
 		int maximumWidth = 0;
 		int maximumHeight = 0;
 		std::uint64_t generation = 0;
+		SourceDescriptor source;
 	};
 
-	explicit Impl(Processor previewProcessor) : processor(std::move(previewProcessor)) {
-		if (!processor) processor = LoadFileDialogPreview;
+	explicit Impl(Processor previewProcessor, SourceCapture capture)
+		: processor(std::move(previewProcessor)), sourceCapture(std::move(capture)) {
+		useDefaultProcessor = !processor;
+		if (!sourceCapture) {
+			sourceCapture = [](const SourceDescriptor& requested) {
+				return DescribeImageSource(requested.LogicalPath());
+			};
+		}
 	}
 
 	~Impl() {
@@ -851,12 +945,74 @@ struct FileDialogPreviewLoader::Impl {
 			PerfContextScope workContext(PerfWorkClass::FocusedPreview,
 				PerfExecution::WorkerThread);
 			FileDialogPreviewResult result;
-			try {
-				result = processor(task.path, task.directory, task.mode,
-					task.maximumWidth, task.maximumHeight,
-					[this, &task] { return IsCurrent(task.generation); });
-			} catch (const std::exception& error) {
-				result.error = error.what();
+			const auto shouldContinue = [this, &task] {
+				return IsCurrent(task.generation);
+			};
+			const bool hasInvalidRequestedImageSource = !task.directory &&
+				!task.source.LogicalPath().empty() && !task.source.Valid() &&
+				task.source.LogicalPath().lexically_normal() == task.path.lexically_normal();
+			SourceDescriptor recapturedRequestedSource;
+			if (hasInvalidRequestedImageSource) {
+				recapturedRequestedSource = sourceCapture(task.source);
+				if (!recapturedRequestedSource.Valid()) {
+					recapturedRequestedSource = sourceCapture(task.source);
+				}
+				if (!recapturedRequestedSource.Valid()) {
+					result.source = task.path;
+					result.sourceDescriptor = task.source;
+					result.observedSource = recapturedRequestedSource;
+					result.error = "Image changed while preparing preview";
+				}
+			}
+		if (!hasInvalidRequestedImageSource && task.source.Valid() &&
+			!IsImageSourceCurrent(task.source)) {
+				result.source = task.source.LogicalPath();
+				result.sourceDescriptor = task.source;
+				result.observedSource = DescribeImageSource(task.source.LogicalPath());
+				result.error = "Image changed while preparing preview";
+			} else if (!hasInvalidRequestedImageSource ||
+				recapturedRequestedSource.Valid()) {
+				try {
+				result = useDefaultProcessor ?
+					LoadFileDialogPreview(task.path, task.directory, task.mode,
+						task.maximumWidth, task.maximumHeight, shouldContinue,
+						recapturedRequestedSource.Valid() ? recapturedRequestedSource : task.source,
+						sourceCapture) :
+					processor(task.path, task.directory, task.mode,
+						task.maximumWidth, task.maximumHeight, shouldContinue);
+				} catch (const std::exception& error) {
+					result.error = error.what();
+				}
+			}
+			if (hasInvalidRequestedImageSource && recapturedRequestedSource.Valid() &&
+				shouldContinue()) {
+				if (result.source.empty()) result.source = task.path;
+				if (result.source.lexically_normal() == task.path.lexically_normal()) {
+					result.sourceDescriptor = recapturedRequestedSource;
+					result.observedSource = recapturedRequestedSource;
+					const SourceDescriptor observed = sourceCapture(recapturedRequestedSource);
+					if (!IsImageSourceCurrent(recapturedRequestedSource) ||
+						observed.Key() != recapturedRequestedSource.Key()) {
+						result.observedSource = observed;
+						result.bgra.clear();
+						result.width = 0;
+						result.height = 0;
+						result.error = "Image changed while preparing preview";
+					}
+				}
+			}
+			if (result.sourceDescriptor.LogicalPath().empty() &&
+				task.source.Valid() && !task.directory) {
+				result.sourceDescriptor = task.source;
+			}
+			result.requestedSourceDescriptor = task.source;
+			if (task.source.Valid() && shouldContinue() &&
+				!IsImageSourceCurrent(task.source)) {
+				result.observedSource = DescribeImageSource(task.source.LogicalPath());
+				result.bgra.clear();
+				result.width = 0;
+				result.height = 0;
+				result.error = "Image changed while preparing preview";
 			}
 			result.generation = task.generation;
 
@@ -876,6 +1032,8 @@ struct FileDialogPreviewLoader::Impl {
 	}
 
 	Processor processor;
+	bool useDefaultProcessor = false;
+	SourceCapture sourceCapture;
 	std::mutex mutex;
 	std::condition_variable condition;
 	std::optional<Task> pending;
@@ -885,12 +1043,14 @@ struct FileDialogPreviewLoader::Impl {
 	std::thread worker;
 };
 
-FileDialogPreviewLoader::FileDialogPreviewLoader(Processor processor)
-	: impl_(std::make_unique<Impl>(std::move(processor))) {}
+FileDialogPreviewLoader::FileDialogPreviewLoader(Processor processor,
+	SourceCapture sourceCapture)
+	: impl_(std::make_unique<Impl>(std::move(processor), std::move(sourceCapture))) {}
 FileDialogPreviewLoader::~FileDialogPreviewLoader() = default;
 
 std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path,
-	bool directory, FileDialogSortMode mode, int maximumWidth, int maximumHeight) {
+	bool directory, FileDialogSortMode mode, int maximumWidth, int maximumHeight,
+	SourceDescriptor source) {
 	const std::uint64_t requestedGeneration = impl_->generation.fetch_add(1) + 1;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -907,7 +1067,7 @@ std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path
 		if (!path.empty() && maximumWidth > 0 && maximumHeight > 0) {
 			impl_->StartWorkerLocked();
 			impl_->pending = Impl::Task{path, directory, mode,
-				maximumWidth, maximumHeight, requestedGeneration};
+				maximumWidth, maximumHeight, requestedGeneration, std::move(source)};
 		}
 	}
 	impl_->condition.notify_one();

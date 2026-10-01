@@ -42,6 +42,11 @@ bool ShouldStartNewCropSelection(bool selectionModeEnabled,
 	return forcedByModifier || (selectionModeEnabled && !imageNeedsPanning);
 }
 
+bool CanOfferLosslessJpegCrop(bool losslessJpegAvailable, bool imageModified,
+	bool pixelsDetachedFromSource) {
+	return losslessJpegAvailable && !imageModified && !pixelsDetachedFromSource;
+}
+
 void CropSelectionModel::SetImageSize(int width, int height) {
 	width = std::max(0, width);
 	height = std::max(0, height);

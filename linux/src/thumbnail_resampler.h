@@ -33,7 +33,7 @@ bool CanReuseDisplayPixelsForThumbnail(int width, int height,
 	std::size_t maximumPixels);
 
 struct ThumbnailPreparationRequest {
-	std::string key;
+	SourceKey key;
 	DisplayImageCache::ImagePtr source;
 	int maximumWidth = 0;
 	int maximumHeight = 0;
@@ -44,12 +44,14 @@ struct ThumbnailPreparationRequest {
 	std::uint64_t geometryRevision = 0;
 	std::shared_ptr<std::atomic<bool>> cancellation;
 	std::size_t fileIndex = 0;
+	SourceDescriptor sourceDescriptor;
 
 	bool Valid() const;
 };
 
 struct PreparedThumbnailImage {
-	std::string key;
+	SourceKey key;
+	SourceDescriptor sourceDescriptor;
 	int width = 0;
 	int height = 0;
 	bool hasTransparency = false;
@@ -58,7 +60,8 @@ struct PreparedThumbnailImage {
 };
 
 struct ThumbnailPreparationResult {
-	std::string key;
+	SourceKey key;
+	SourceDescriptor observedSource;
 	std::size_t fileIndex = 0;
 	std::uint64_t catalogRevision = 0;
 	std::uint64_t geometryRevision = 0;
@@ -79,6 +82,10 @@ struct ThumbnailPreparationAdmission {
 };
 
 // Verifies that a completed result still belongs to the active preload plan.
+bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
+	std::uint64_t catalogRevision, std::uint64_t geometryRevision,
+	std::size_t fileIndex, const SourceKey& sourceKey,
+	int maximumWidth, int maximumHeight);
 bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
 	std::uint64_t catalogRevision, std::uint64_t geometryRevision,
 	std::size_t fileIndex, const std::string& sourceKey,

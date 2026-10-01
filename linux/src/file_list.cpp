@@ -23,6 +23,21 @@ bool ContinueScan(const std::function<bool()>& shouldContinue) {
 	return !shouldContinue || shouldContinue();
 }
 
+bool SameSourceMetadata(const SourceMetadata& left, const SourceMetadata& right) {
+	return left.fileSize == right.fileSize &&
+		left.modificationTimeNanoseconds == right.modificationTimeNanoseconds &&
+		left.creationTimeNanoseconds == right.creationTimeNanoseconds &&
+		left.width == right.width && left.height == right.height &&
+		left.hasFileSize == right.hasFileSize &&
+		left.hasModificationTime == right.hasModificationTime &&
+		left.hasCreationTime == right.hasCreationTime &&
+		left.hasDimensions == right.hasDimensions &&
+		left.hasTransparency == right.hasTransparency &&
+		left.transparencyKnown == right.transparencyKnown &&
+		left.archiveMember == right.archiveMember &&
+		left.archiveMemberEncrypted == right.archiveMemberEncrypted;
+}
+
 } // namespace
 
 FileList::FileList(const std::vector<std::string>& inputs, SortMode sortMode, bool sortAscending,
@@ -90,44 +105,14 @@ FileList::Entry FileList::DescribeFile(const fs::path& path,
 	result.path = Normalize(path);
 	result.randomOrder = std::hash<std::string>{}(result.path.string());
 	if (!ContinueScan(shouldContinue)) return result;
-	if (IsArchiveMemberLocation(result.path)) {
-		ArchiveMemberInfo archiveInfo;
-		std::string errorMessage;
-		if (GetArchiveMemberInfo(result.path, archiveInfo, errorMessage)) {
-			result.lastModificationTime = ArchiveTimestampNanoseconds(archiveInfo.modificationTime);
-			result.creationTime = result.lastModificationTime;
-			result.fileSize = archiveInfo.size;
-			result.archiveMember = true;
-		}
-		return result;
-	}
-	std::error_code error;
-	if (!ContinueScan(shouldContinue)) return result;
-	const fs::file_time_type fallbackModificationTime = fs::last_write_time(result.path, error);
-	if (!error) {
-		result.lastModificationTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
-			fallbackModificationTime.time_since_epoch()).count();
-	}
-	result.creationTime = result.lastModificationTime;
-
-	// CFileDesc stores both timestamps.  Linux's statx API exposes the birth
-	// time on filesystems that support it; older kernels/filesystems fall back
-	// to the modification timestamp, which is the only portable C++17 option.
-	struct statx status{};
-	const int statxMask = STATX_BTIME | STATX_MTIME | STATX_SIZE;
-	if (!ContinueScan(shouldContinue)) return result;
-	if (syscall(SYS_statx, AT_FDCWD, result.path.c_str(), AT_STATX_SYNC_AS_STAT,
-		statxMask, &status) == 0) {
-		result.lastModificationTime = static_cast<std::int64_t>(status.stx_mtime.tv_sec) * 1000000000ll + status.stx_mtime.tv_nsec;
-		if ((status.stx_mask & STATX_BTIME) != 0) {
-			result.creationTime = static_cast<std::int64_t>(status.stx_btime.tv_sec) * 1000000000ll + status.stx_btime.tv_nsec;
-		}
-		result.fileSize = status.stx_size;
-		return result;
-	}
-	result.creationTime = result.lastModificationTime;
-	result.fileSize = fs::file_size(result.path, error);
-	if (error) result.fileSize = 0;
+	result.source = DescribeImageSource(result.path);
+	const SourceMetadata& metadata = result.source.Metadata();
+	result.lastModificationTime = metadata.hasModificationTime ?
+		metadata.modificationTimeNanoseconds : 0;
+	result.creationTime = metadata.hasCreationTime ?
+		metadata.creationTimeNanoseconds : result.lastModificationTime;
+	result.fileSize = metadata.hasFileSize ? metadata.fileSize : 0;
+	result.archiveMember = metadata.archiveMember;
 	return result;
 }
 
@@ -144,8 +129,11 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 			if (!ContinueScan(shouldContinue)) return {};
 			if (!archiveEntry.directory && IsSupportedImagePath(archiveEntry.path)) {
 				Entry entry;
-				entry.path = Normalize(archiveEntry.path);
-				entry.lastModificationTime = ArchiveTimestampNanoseconds(archiveEntry.modificationTime);
+				entry.source = DescribeArchiveMember(archiveEntry.path,
+					archiveEntry.backingIdentity, archiveEntry.size,
+					archiveEntry.modificationTime, archiveEntry.encrypted);
+				entry.path = entry.source.LogicalPath();
+				entry.lastModificationTime = entry.source.Metadata().modificationTimeNanoseconds;
 				entry.creationTime = entry.lastModificationTime;
 				entry.fileSize = archiveEntry.size;
 				entry.randomOrder = std::hash<std::string>{}(entry.path.string());
@@ -354,6 +342,7 @@ FileList::ScanRequest FileList::MakeScanRequest(ScanOperation operation, int dir
 	request.sortMode = sortMode_;
 	request.navigationMode = navigationMode_;
 	request.expectedRevision = mutationRevision_;
+	request.expectedDescriptorRevision = descriptorRevision_;
 	request.sortAscending = sortAscending_;
 	request.wrapAroundFolder = wrapAroundFolder_;
 	request.multipleInputMode = multipleInputMode_;
@@ -366,6 +355,7 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 	FileListPreparedScan result;
 	result.operation = request.operation;
 	result.expectedRevision = request.expectedRevision;
+	result.expectedDescriptorRevision = request.expectedDescriptorRevision;
 	result.sourceSelectedPath = request.selectedPath;
 	FileList& replacement = result.replacement;
 	replacement.inputs_ = request.inputs ? request.inputs :
@@ -515,7 +505,8 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 
 bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 	const fs::path& preferredPathAtApply) {
-	if (!scan.completed || scan.expectedRevision != mutationRevision_) return false;
+	if (!scan.completed || scan.expectedRevision != mutationRevision_ ||
+		scan.expectedDescriptorRevision != descriptorRevision_) return false;
 	const ScanOperation operation = scan.operation;
 	if (operation == ScanOperation::PrepareDirectoryScope &&
 		!preferredPathAtApply.empty() &&
@@ -676,6 +667,9 @@ void FileList::SetProvisionalInputs(const std::vector<std::string>& inputs) {
 		if (IsSupportedImagePath(input)) {
 			Entry provisional;
 			provisional.path = input;
+			SourceIdentity identity;
+			(void)CaptureImageSourceIdentity(input, identity);
+			provisional.source = SourceDescriptor(input, identity, {});
 			provisional.randomOrder = std::hash<std::string>{}(input.string());
 			provisional.archiveMember = IsArchiveMemberLocation(input);
 			entries_.push_back(std::move(provisional));
@@ -700,6 +694,84 @@ void FileList::RebuildPaths() {
 	for (const Entry& entry : entries_) paths_.push_back(entry.path);
 	if (currentIndex_ >= paths_.size()) currentIndex_ = paths_.empty() ? 0 : paths_.size() - 1;
 	UpdateMarkedIndex();
+}
+
+bool FileList::RefreshSourceDescriptor(const fs::path& path) {
+	if (entries_.empty()) return false;
+	const fs::path normalized = Normalize(path);
+	return RefreshSourceDescriptor(DescribeImageSource(normalized));
+}
+
+bool FileList::RefreshSourceDescriptor(const SourceDescriptor& refreshed) {
+	if (entries_.empty() || refreshed.LogicalPath().empty()) return false;
+	const fs::path normalized = Normalize(refreshed.LogicalPath());
+	const std::size_t index = FindEntry(normalized);
+	if (entries_[index].path != normalized) return false;
+	Entry& entry = entries_[index];
+	if (entry.source.Key() == refreshed.Key() &&
+		SameSourceMetadata(entry.source.Metadata(), refreshed.Metadata())) return false;
+
+	const SourceMetadata metadata = refreshed.Metadata();
+	const bool sortKeyChanged =
+		(sortMode_ == SortMode::LastModificationTime && entry.lastModificationTime !=
+			(metadata.hasModificationTime ? metadata.modificationTimeNanoseconds : 0)) ||
+		(sortMode_ == SortMode::CreationTime && entry.creationTime !=
+			(metadata.hasCreationTime ? metadata.creationTimeNanoseconds : 0)) ||
+		(sortMode_ == SortMode::FileSize && entry.fileSize !=
+			(metadata.hasFileSize ? metadata.fileSize : 0));
+	const fs::path selected = Current();
+	entry.source = refreshed;
+	entry.archiveMember = metadata.archiveMember;
+	entry.lastModificationTime = metadata.hasModificationTime ?
+		metadata.modificationTimeNanoseconds : 0;
+	entry.creationTime = metadata.hasCreationTime ?
+		metadata.creationTimeNanoseconds : entry.lastModificationTime;
+	entry.fileSize = metadata.hasFileSize ? metadata.fileSize : 0;
+	++descriptorRevision_;
+	if (sortKeyChanged) {
+		const std::vector<fs::path> previousOrder = paths_;
+		SortEntries();
+		RebuildPaths();
+		if (paths_ != previousOrder) ++mutationRevision_;
+	}
+	return true;
+}
+
+bool FileList::RefreshSourceDescriptor(const SourceKey& expected,
+	const SourceDescriptor& observed) {
+	if (expected.logicalPath.empty() || expected.logicalPath != observed.Key().logicalPath) return false;
+	const fs::path normalized = Normalize(observed.LogicalPath());
+	if (entries_.empty()) return false;
+	const std::size_t index = FindEntry(normalized);
+	if (entries_[index].path != normalized || entries_[index].source.Key() != expected) return false;
+	return RefreshSourceDescriptor(observed);
+}
+
+SourceRefreshOutcome RefreshFileListSource(FileList& files,
+	const SourceKey& expected, const SourceDescriptor& observed) {
+	SourceRefreshOutcome outcome;
+	if (files.Empty()) return outcome;
+	const std::filesystem::path selectedPath = files.Current();
+	const std::size_t selectedIndexBefore = files.CurrentIndex();
+	outcome.previousIndex = files.IndexOf(observed.LogicalPath());
+	const std::uint64_t mutationRevision = files.MutationRevision();
+	if (!files.RefreshSourceDescriptor(expected, observed)) return outcome;
+	outcome.applied = true;
+	outcome.orderChanged = files.MutationRevision() != mutationRevision;
+	outcome.currentIndex = files.IndexOf(observed.LogicalPath());
+	outcome.selectedSourceChanged = outcome.previousIndex.has_value() &&
+		*outcome.previousIndex == selectedIndexBefore && !files.Empty() &&
+		files.Current() == selectedPath;
+	return outcome;
+}
+
+SourceRefreshDisplayAction ResolveSourceRefreshDisplayAction(
+	const SourceRefreshOutcome& refresh, bool preserveCurrentPixels) {
+	if (!refresh.applied || !refresh.selectedSourceChanged) {
+		return SourceRefreshDisplayAction::NoCurrentChange;
+	}
+	return preserveCurrentPixels ? SourceRefreshDisplayAction::PreserveCurrentPixels :
+		SourceRefreshDisplayAction::ReloadCurrent;
 }
 
 void FileList::UpdateMarkedIndex() {

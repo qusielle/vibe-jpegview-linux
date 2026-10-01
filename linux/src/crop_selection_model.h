@@ -37,6 +37,8 @@ enum class CropSelectionMode {
 
 bool ShouldStartNewCropSelection(bool selectionModeEnabled,
 	bool forcedByModifier, bool imageNeedsPanning);
+bool CanOfferLosslessJpegCrop(bool losslessJpegAvailable, bool imageModified,
+	bool pixelsDetachedFromSource);
 
 enum class CropSelectionHandle {
 	None,

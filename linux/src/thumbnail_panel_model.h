@@ -1,5 +1,7 @@
 #pragma once
 
+#include "archive_source.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -82,7 +84,7 @@ ThumbnailRect ThumbnailImageRect(int sourceWidth, int sourceHeight,
 
 struct ThumbnailLoadRequest {
 	std::size_t fileIndex = 0;
-	std::string key;
+	SourceKey key;
 	std::uint64_t catalogRevision = 0;
 	std::uint64_t geometryRevision = 0;
 	int maximumWidth = 0;
@@ -96,11 +98,33 @@ struct ThumbnailSchedulerOperationCounts {
 	std::size_t trimEntriesVisited = 0;
 };
 
+struct ThumbnailCacheEvictionCounts {
+	std::size_t keyLookups = 0;
+	std::size_t entriesErased = 0;
+};
+
+template <typename Cache, typename OnErase>
+ThumbnailCacheEvictionCounts EraseThumbnailCacheEntries(
+	Cache& cache, const std::vector<SourceKey>& keys, OnErase&& onErase) {
+	ThumbnailCacheEvictionCounts counts;
+	for (const SourceKey& key : keys) {
+		++counts.keyLookups;
+		const auto cached = cache.find(key);
+		if (cached == cache.end()) continue;
+		onErase(cached->second);
+		cache.erase(cached);
+		++counts.entriesErased;
+	}
+	return counts;
+}
+
 // Tracks both per-instance FileList mutations and whole-list owner replacement.
 class ThumbnailCatalogRevisionTracker {
 public:
-	bool NeedsUpdate(std::uint64_t mutationRevision) const;
-	void MarkUpdated(std::uint64_t mutationRevision);
+	bool NeedsUpdate(std::uint64_t mutationRevision,
+		std::uint64_t descriptorRevision = 0) const;
+	void MarkUpdated(std::uint64_t mutationRevision,
+		std::uint64_t descriptorRevision = 0);
 	void NoteReplacement();
 	void Reset();
 
@@ -108,6 +132,7 @@ private:
 	std::uint64_t ownerRevision_ = 0;
 	std::uint64_t appliedOwnerRevision_ = 0;
 	std::uint64_t appliedMutationRevision_ = 0;
+	std::uint64_t appliedDescriptorRevision_ = 0;
 	bool hasApplied_ = false;
 };
 
@@ -118,7 +143,11 @@ public:
 	std::vector<std::string> SetCatalog(std::vector<std::string> fileKeys);
 	std::vector<std::string> SetCatalog(std::vector<std::string> fileKeys,
 		std::size_t capacity);
+	std::vector<SourceKey> SetSourceCatalog(std::vector<SourceKey> sourceKeys);
+	std::vector<SourceKey> SetSourceCatalog(std::vector<SourceKey> sourceKeys,
+		std::size_t capacity);
 	std::vector<std::string> SetCurrent(std::size_t currentIndex);
+	std::vector<SourceKey> SetSourceCurrent(std::size_t currentIndex);
 	std::vector<std::string> SetGeometry(int maximumWidth, int maximumHeight);
 	std::vector<ThumbnailLoadRequest> TakeNext(std::uint32_t now,
 		std::size_t maximumCount = 1);
@@ -132,11 +161,15 @@ public:
 	void Retry(const ThumbnailLoadRequest& request);
 	// Records pixels prepared outside the sequential idle-time loader.
 	std::vector<std::string> Store(const std::string& key);
+	std::vector<SourceKey> Store(const SourceKey& key);
 	void Touch(const std::string& key);
+	void Touch(const SourceKey& key);
 	void Clear();
 
 	bool IsCached(const std::string& key) const;
+	bool IsCached(const SourceKey& key) const;
 	bool IsFailed(const std::string& key) const;
+	bool IsFailed(const SourceKey& key) const;
 	bool IsCurrent(const ThumbnailLoadRequest& request) const;
 	std::size_t CacheSize() const { return cache_.size(); }
 	std::size_t PendingCount() const { return pendingIndices_.size(); }
@@ -149,20 +182,20 @@ private:
 	void RebuildWorkingSet();
 	std::optional<std::size_t> NearestPendingIndex() const;
 	void RebuildPendingIndices();
-	std::vector<std::string> Trim();
+	std::vector<SourceKey> Trim();
 
 	struct CacheRecord {
 		std::uint64_t lastUsed = 0;
 	};
-	std::vector<std::string> catalog_;
-	std::unordered_map<std::string, std::size_t> catalogIndices_;
+	std::vector<SourceKey> catalog_;
+	std::unordered_map<SourceKey, std::size_t, SourceKeyHash> catalogIndices_;
 	std::vector<std::size_t> catalogPositions_;
 	std::set<std::size_t> workingIndices_;
 	std::set<std::size_t> pendingIndices_;
-	std::unordered_map<std::string, CacheRecord> cache_;
-	std::unordered_set<std::string> failed_;
-	std::unordered_set<std::string> inFlight_;
-	std::string protectedKey_;
+	std::unordered_map<SourceKey, CacheRecord, SourceKeyHash> cache_;
+	std::unordered_set<SourceKey, SourceKeyHash> failed_;
+	std::unordered_set<SourceKey, SourceKeyHash> inFlight_;
+	SourceKey protectedKey_;
 	std::size_t currentIndex_ = 0;
 	std::size_t capacity_ = 0;
 	bool wholeCatalogWorking_ = false;

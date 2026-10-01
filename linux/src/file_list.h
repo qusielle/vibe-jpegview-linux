@@ -1,5 +1,7 @@
 #pragma once
 
+#include "archive_source.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -44,6 +46,9 @@ public:
 	const std::filesystem::path& Current() const;
 	const std::filesystem::path& BrowseLocationOnEmpty() const { return browseLocationOnEmpty_; }
 	const std::vector<std::filesystem::path>& Files() const { return paths_; }
+	const SourceDescriptor* DescriptorAt(std::size_t index) const {
+		return index < entries_.size() ? &entries_[index].source : nullptr;
+	}
 	bool IsArchiveMember(std::size_t index) const {
 		return index < entries_.size() && entries_[index].archiveMember;
 	}
@@ -90,6 +95,7 @@ public:
 		SortMode sortMode = SortMode::LastModificationTime;
 		NavigationMode navigationMode = NavigationMode::LoopDirectory;
 		std::uint64_t expectedRevision = 0;
+		std::uint64_t expectedDescriptorRevision = 0;
 		bool sortAscending = true;
 		bool wrapAroundFolder = true;
 		bool multipleInputMode = false;
@@ -108,6 +114,14 @@ public:
 	LoadedNavigationResult NextLoaded();
 	LoadedNavigationResult PreviousLoaded();
 	std::uint64_t MutationRevision() const { return mutationRevision_; }
+	std::uint64_t DescriptorRevision() const { return descriptorRevision_; }
+	// Refreshes one descriptor after an application-owned write or a worker
+	// reports that the backing source changed. The list order is rebuilt only
+	// when the active metadata sort key changed.
+	bool RefreshSourceDescriptor(const std::filesystem::path& path);
+	bool RefreshSourceDescriptor(const SourceDescriptor& source);
+	bool RefreshSourceDescriptor(const SourceKey& expected,
+		const SourceDescriptor& observed);
 
 	void SetSorting(SortMode sortMode, bool sortAscending);
 	SortMode GetSorting() const { return sortMode_; }
@@ -125,6 +139,7 @@ public:
 private:
 	struct Entry {
 		std::filesystem::path path;
+		SourceDescriptor source;
 		std::int64_t lastModificationTime = 0;
 		std::int64_t creationTime = 0;
 		std::uintmax_t fileSize = 0;
@@ -191,15 +206,40 @@ private:
 	NavigationMode navigationMode_ = NavigationMode::LoopDirectory;
 	bool multipleInputMode_ = false;
 	std::uint64_t mutationRevision_ = 0;
+	std::uint64_t descriptorRevision_ = 0;
 	std::filesystem::path emptyPath_;
 };
 
+struct SourceRefreshOutcome {
+	bool applied = false;
+	bool selectedSourceChanged = false;
+	bool orderChanged = false;
+	std::optional<std::size_t> previousIndex;
+	std::optional<std::size_t> currentIndex;
+};
+
+enum class SourceRefreshDisplayAction {
+	NoCurrentChange,
+	ReloadCurrent,
+	PreserveCurrentPixels,
+};
+
+// Applies an exact-key worker/application refresh and reports the effects that
+// determine whether renderer work tied to a list index or selected source must
+// be rebuilt.
+SourceRefreshOutcome RefreshFileListSource(FileList& files,
+	const SourceKey& expected, const SourceDescriptor& observed);
+SourceRefreshDisplayAction ResolveSourceRefreshDisplayAction(
+	const SourceRefreshOutcome& refresh, bool preserveCurrentPixels);
+
 // A complete, already sorted replacement list. The worker builds this object
-// privately; Viewer accepts it by moving its vectors after checking the source
-// revision, so no active-list copy or sorting occurs on the event thread.
+// privately; Viewer accepts it by moving its vectors after checking the list
+// and descriptor revisions, so no active-list copy or sorting occurs on the
+// event thread.
 struct FileListPreparedScan {
 	FileList::ScanOperation operation = FileList::ScanOperation::Reload;
 	std::uint64_t expectedRevision = 0;
+	std::uint64_t expectedDescriptorRevision = 0;
 	std::filesystem::path sourceSelectedPath;
 	FileList replacement;
 	bool completed = false;
