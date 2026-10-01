@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -39,9 +40,10 @@ struct ThumbnailPreparationRequest {
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::VisibleThumbnail;
 	std::filesystem::path logicalSource;
-	std::uint64_t requestGeneration = 0;
-	std::uint64_t fileListIdentity = 0;
+	std::uint64_t catalogRevision = 0;
+	std::uint64_t geometryRevision = 0;
 	std::shared_ptr<std::atomic<bool>> cancellation;
+	std::size_t fileIndex = 0;
 
 	bool Valid() const;
 };
@@ -57,8 +59,9 @@ struct PreparedThumbnailImage {
 
 struct ThumbnailPreparationResult {
 	std::string key;
-	std::uint64_t requestGeneration = 0;
-	std::uint64_t fileListIdentity = 0;
+	std::size_t fileIndex = 0;
+	std::uint64_t catalogRevision = 0;
+	std::uint64_t geometryRevision = 0;
 	int maximumWidth = 0;
 	int maximumHeight = 0;
 	PerfWorkClass workClass = PerfWorkClass::VisibleThumbnail;
@@ -66,10 +69,20 @@ struct ThumbnailPreparationResult {
 	bool cancelled = false;
 };
 
+// One farther queued request may be displaced when an admitted request enters
+// the bounded worker queue. The caller returns that identity to its scheduler.
+struct ThumbnailPreparationAdmission {
+	bool accepted = false;
+	std::optional<ThumbnailPreparationResult> displaced;
+
+	operator bool() const { return accepted; }
+};
+
 // Verifies that a completed result still belongs to the active preload plan.
 bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
-	std::uint64_t requestGeneration, std::uint64_t fileListIdentity,
-	const std::string& sourceKey, int maximumWidth, int maximumHeight);
+	std::uint64_t catalogRevision, std::uint64_t geometryRevision,
+	std::size_t fileIndex, const std::string& sourceKey,
+	int maximumWidth, int maximumHeight);
 
 struct ThumbnailPreparationDiagnostics {
 	std::size_t queued = 0;
@@ -95,7 +108,7 @@ public:
 	ThumbnailPreparationWorker(const ThumbnailPreparationWorker&) = delete;
 	ThumbnailPreparationWorker& operator=(const ThumbnailPreparationWorker&) = delete;
 
-	bool Request(const ThumbnailPreparationRequest& request);
+	ThumbnailPreparationAdmission Request(const ThumbnailPreparationRequest& request);
 	std::vector<Result> TakeCompleted(std::size_t maximumCount);
 	std::vector<Result> TakeCompleted(std::size_t maximumCount,
 		const std::set<PerfWorkClass>& permittedWorkClasses);

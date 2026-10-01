@@ -989,9 +989,18 @@ fs::path FileList::MarkedToggleTarget() const {
 }
 
 bool FileList::ContainsPath(const fs::path& path) const {
-	if (Empty() || path.empty()) return false;
-	const std::size_t index = FindEntry(path);
-	return entries_[index].path == Normalize(path);
+	return IndexOf(path).has_value();
+}
+
+std::optional<std::size_t> FileList::IndexOf(const fs::path& path) const {
+	if (Empty() || path.empty()) return std::nullopt;
+	const fs::path normalized = Normalize(path);
+	const auto found = std::lower_bound(pathIndices_.begin(), pathIndices_.end(), normalized,
+		[this](std::size_t index, const fs::path& target) {
+			return entries_[index].path.native() < target.native();
+		});
+	if (found == pathIndices_.end() || entries_[*found].path != normalized) return std::nullopt;
+	return *found;
 }
 
 bool FileList::CompleteMarkedToggle(const fs::path& previousPath) {
