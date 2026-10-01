@@ -135,13 +135,21 @@ std::vector<std::string> ThumbnailCacheScheduler::Prepare(
 }
 
 std::optional<ThumbnailLoadRequest> ThumbnailCacheScheduler::Next(std::uint32_t now) {
+	return Next(now, {});
+}
+
+std::optional<ThumbnailLoadRequest> ThumbnailCacheScheduler::Next(std::uint32_t now,
+	const std::function<bool(const ThumbnailLoadRequest&)>& permitted) {
 	if (nextLoadTick_ != 0 && static_cast<std::int32_t>(now - nextLoadTick_) < 0) return std::nullopt;
 	while (queuePosition_ < queue_.size()) {
-		const ThumbnailLoadRequest request = queue_[queuePosition_++];
+		const ThumbnailLoadRequest request = queue_[queuePosition_];
 		if (IsCached(request.key) || IsFailed(request.key)) {
+			++queuePosition_;
 			if (IsCached(request.key)) Touch(request.key);
 			continue;
 		}
+		if (permitted && !permitted(request)) return std::nullopt;
+		++queuePosition_;
 		return request;
 	}
 	return std::nullopt;

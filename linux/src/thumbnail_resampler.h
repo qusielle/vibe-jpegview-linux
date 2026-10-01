@@ -4,11 +4,13 @@
 #include "perf_diagnostics.h"
 
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -21,7 +23,8 @@ namespace jpegview_linux {
 // fringes around transparent image edges.
 bool DownsampleThumbnailBgra(const std::vector<std::uint8_t>& source,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
-	std::vector<std::uint8_t>& target);
+	std::vector<std::uint8_t>& target,
+	const std::function<bool()>& shouldContinue = {});
 
 // Bounds the display-sized source retained while a background thumbnail is
 // derived, including overflow-safe handling of invalid dimensions.
@@ -38,6 +41,7 @@ struct ThumbnailPreparationRequest {
 	std::filesystem::path logicalSource;
 	std::uint64_t requestGeneration = 0;
 	std::uint64_t fileListIdentity = 0;
+	std::shared_ptr<std::atomic<bool>> cancellation;
 
 	bool Valid() const;
 };
@@ -59,6 +63,7 @@ struct ThumbnailPreparationResult {
 	int maximumHeight = 0;
 	PerfWorkClass workClass = PerfWorkClass::VisibleThumbnail;
 	std::shared_ptr<const PreparedThumbnailImage> image;
+	bool cancelled = false;
 };
 
 // Verifies that a completed result still belongs to the active preload plan.
@@ -92,6 +97,9 @@ public:
 
 	bool Request(const ThumbnailPreparationRequest& request);
 	std::vector<Result> TakeCompleted(std::size_t maximumCount);
+	std::vector<Result> TakeCompleted(std::size_t maximumCount,
+		const std::set<PerfWorkClass>& permittedWorkClasses);
+	std::vector<Result> Cancel(const std::set<PerfWorkClass>& workClasses);
 	void Clear();
 	bool HasPendingWork() const;
 	ThumbnailPreparationDiagnostics GetDiagnostics() const;

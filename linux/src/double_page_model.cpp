@@ -36,11 +36,17 @@ SpreadPagePlacement RotatePlacement(const SpreadPagePlacement& page,
 
 } // namespace
 
-bool IsDoublePagePair(std::size_t firstIndex, std::size_t pageCount,
-	const PageDimensions& first, const PageDimensions& second, bool coverSingle) {
+bool CanAnchorDoublePageSpread(std::size_t firstIndex, std::size_t pageCount,
+	const PageDimensions& first, bool coverSingle) {
 	if (pageCount < 2 || firstIndex >= pageCount - 1 ||
 		(coverSingle && firstIndex == 0)) return false;
-	return IsPortrait(first) && IsPortrait(second);
+	return IsPortrait(first);
+}
+
+bool IsDoublePagePair(std::size_t firstIndex, std::size_t pageCount,
+	const PageDimensions& first, const PageDimensions& second, bool coverSingle) {
+	return CanAnchorDoublePageSpread(firstIndex, pageCount, first, coverSingle) &&
+		IsPortrait(second);
 }
 
 std::optional<DoublePageSpread> BuildDoublePageSpread(std::size_t currentIndex,

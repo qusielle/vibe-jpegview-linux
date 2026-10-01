@@ -26,6 +26,8 @@ struct DecodedImageCacheDiagnostics {
 	std::size_t backgroundQueued = 0;
 	std::size_t foregroundActive = 0;
 	std::size_t backgroundActive = 0;
+	std::size_t activeSpreadQueued = 0;
+	std::size_t activeSpreadActive = 0;
 	std::size_t retiredBytes = 0;
 	std::size_t retiredImages = 0;
 };
@@ -41,14 +43,18 @@ class DecodedImageCache {
 public:
 	using ImagePtr = std::shared_ptr<const DecodedImage>;
 	using Decoder = std::function<bool(const std::filesystem::path&, DecodedImage&, std::string&)>;
+	using DimensionsReader = std::function<bool(const std::filesystem::path&, int&, int&,
+		std::string&)>;
 	// Called when this generation's requested decode completes. A null image
 	// reports a decode failure or a result that could not be retained.
 	using Completion = std::function<void(const std::filesystem::path&, const ImagePtr&)>;
+	using DimensionsCompletion = std::function<void(const std::filesystem::path&,
+		bool, int, int)>;
 	using Filter = std::function<bool(const std::filesystem::path&)>;
 
 	explicit DecodedImageCache(std::size_t byteBudget, Decoder decoder = {},
 		std::shared_ptr<SharedCacheBudget> sharedBudget = {},
-		std::size_t workerCount = 1);
+		std::size_t workerCount = 1, DimensionsReader dimensionsReader = {});
 	~DecodedImageCache();
 
 	DecodedImageCache(const DecodedImageCache&) = delete;
@@ -61,6 +67,18 @@ public:
 	ImagePtr FindOrWait(const std::filesystem::path& filename);
 	void Store(const std::filesystem::path& filename,
 		const std::shared_ptr<DecodedImage>& image);
+	// Adds one non-speculative decode without replacing the current neighbor set.
+	void RequestBackground(const std::filesystem::path& filename,
+		Completion completion, PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
+	// Reads only JPEG header dimensions on the existing worker, without retaining
+	// or materializing full-resolution decoded pixels.
+	void RequestJpegDimensions(const std::filesystem::path& filename,
+		DimensionsCompletion completion,
+		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
+	// Cancels only a matching active-spread source request. Foreground requests
+	// promoted by FindOrWait are protected, even when they share the same key.
+	bool CancelActiveSpreadRequest(const std::filesystem::path& filename,
+		bool dimensionsOnly = false);
 	void Prefetch(const std::vector<std::filesystem::path>& files,
 		std::size_t currentIndex, int preferredDirection,
 		std::size_t maximumCount, Completion completion = {}, Filter filter = {},
