@@ -120,12 +120,14 @@ they support.
    current-image highlight. A gold outline identifies the image marked with Ctrl+M, distinct from
    the current-spread highlight. The panel reserves image space instead of covering the picture,
    preloads nearest files first, and retains every generated thumbnail for the active file list.
-   Completed neighbor display frames feed a very-low-priority thumbnail worker, so nearby thumbnails
-   appear during display prefetch without decoding the large source file again. Its divider is
-   mouse-resizable,
-   its width and visibility persist, and thumbnail row height follows panel width so a narrow panel
-   fits more images without large fixed gaps. Thumbnails have no forced horizontal inset and only a
-   one-pixel vertical margin plus separator; source-area antialiasing keeps reduced images smooth.
+   Completed neighbor display frames feed a very-low-priority thumbnail worker when available.
+   Remaining thumbnails are read, decoded, and resampled by that same single background worker;
+   JPEG thumbnails retain reduced-DCT decoding. The SDL thread validates results and uploads their
+   textures, so an unrelated slow thumbnail read does not block input or presentation. Its divider
+   is mouse-resizable, its width and visibility persist, and thumbnail row height follows panel width
+   so a narrow panel fits more images without large fixed gaps. Thumbnails have no forced horizontal
+   inset and only a one-pixel vertical margin plus separator; source-area antialiasing keeps reduced
+   images smooth.
 
 7. **Native navigation panel with automatic reveal.** The lower panel provides first/previous/next/
    last, ordering, fit/actual, rotate, fullscreen, double-page, and manga-order controls with action tooltips. By default it
@@ -420,7 +422,8 @@ uploads carry the same class on the event thread. Preview requests canceled whil
 recorded on the event thread; stale active results are recorded by the worker. Thumbnail requests for
 rows intersecting the strip use `visible_thumbnail`; offscreen rows retained for the active file list
 use `distant_speculation`. The class follows source reads, decode, resampling, worker reuse, and renderer
-upload on both the event-thread loader and background resampler paths.
+upload: thumbnail preparation now runs on its worker, and only renderer-thread texture upload runs on
+the event thread.
 `source_read` rows identify the class that initiated each read, and each
 `cancellation` row is one canceled queued or stale result attributed to the class and thread that
 observed it. Count rows by class when comparing workloads.
@@ -916,8 +919,11 @@ outline when it is in the displayed list, even when it is not the current image.
 opens that file.
 Thumbnails are loaded incrementally in nearest-to-current order and kept for the active file list.
 Display-ready neighbor pixels are reused for thumbnail preparation when available; remaining
-entries are decoded during idle time. The panel reserves its own space on the left instead of
-covering the image. Drag its right
+entries are decoded and resampled on one low-priority background worker. JPEG thumbnails use
+reduced-DCT decoding. The SDL thread checks that results still match the active list and panel
+geometry before uploading them. Invalid sources are skipped without being marked as cached; a
+renderer upload failure retains prepared pixels for retry without rereading the source. The panel
+reserves its own space on the left instead of covering the image. Drag its right
 separator to adjust its width; row height follows the width, so narrower panels display more
 thumbnails without large fixed vertical gaps. The width and visibility are preserved between runs.
 

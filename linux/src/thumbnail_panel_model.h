@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace jpegview_linux {
@@ -92,12 +93,16 @@ public:
 	std::optional<ThumbnailLoadRequest> Next(std::uint32_t now);
 	std::vector<std::string> Complete(const ThumbnailLoadRequest& request,
 		std::uint32_t now, std::uint32_t delayMs = 25);
+	void Fail(const ThumbnailLoadRequest& request, std::uint32_t now,
+		std::uint32_t delayMs = 25);
+	void Retry(const ThumbnailLoadRequest& request);
 	// Records pixels prepared outside the sequential idle-time loader.
 	std::vector<std::string> Store(const std::string& key);
 	void Touch(const std::string& key);
 	void Clear();
 
 	bool IsCached(const std::string& key) const;
+	bool IsFailed(const std::string& key) const;
 	std::size_t CacheSize() const { return cache_.size(); }
 	std::size_t PendingCount() const { return queue_.size() - queuePosition_; }
 	std::uint64_t Generation() const { return generation_; }
@@ -111,6 +116,7 @@ private:
 	std::vector<ThumbnailLoadRequest> queue_;
 	std::size_t queuePosition_ = 0;
 	std::unordered_map<std::string, CacheRecord> cache_;
+	std::unordered_set<std::string> failed_;
 	std::string protectedKey_;
 	std::size_t capacity_ = 0;
 	std::uint64_t useCounter_ = 0;

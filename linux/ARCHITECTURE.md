@@ -148,14 +148,20 @@ should normally be added to one of these focused modules and covered by `tests/t
   primitives, hit regions, fit-relative scale labels, dynamic labels, and tooltip placement.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
   nearest-first cache scheduling,
-  cancellation/LRU policy, memory sizing, alpha-preserving antialiased source-area reduction, and
-  low-priority derivation from completed neighbor display frames. The viewer supplies the active
-  double-page partner index so both displayed spread pages receive active-row styling without
-  moving the panel's centering or changing which row represents the navigation index. Thumbnail
-  diagnostics include unique display-source bytes held by queued and active requests. Synchronous
-  event-thread requests use `visible_thumbnail` for rows intersecting the strip and
-  `distant_speculation` for offscreen retained rows. The selected class follows the request through
-  source reads, decode, resampling, worker source-pixel reuse, and renderer upload.
+  cancellation/LRU and decode-failure policy, memory sizing, alpha-preserving antialiased
+  source-area reduction, and low-priority thumbnail preparation from either completed neighbor
+  display frames or file-backed requests. One worker performs file reads, JPEG dimension lookup,
+  reduced-DCT JPEG or ordinary image decode, and resampling; its prepared-frame reuse queue remains
+  bounded to two queued requests. `TickThumbnailPreload` only admits requests, consumes one completion
+  at a time, validates request generation, active list identity, source key, and target geometry,
+  and uploads textures on the renderer thread. Failed decodes are tracked separately from cached
+  pixels, while failed texture uploads retain their prepared pixels for retry. The viewer supplies
+  the active double-page partner index so both displayed spread pages receive active-row styling
+  without moving the panel's centering or changing which row represents the navigation index.
+  Thumbnail diagnostics include unique display-source bytes held by queued and active requests.
+  Work intersecting the strip uses `visible_thumbnail`; offscreen retained rows use
+  `distant_speculation`. The selected class follows requests through source reads, decode,
+  resampling, worker source-pixel reuse, and renderer upload.
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
   validation and single-pass expansion for the configurable window-title pattern. Viewer supplies
   image context—including active spread position, path, original dimensions, source size, and build
@@ -414,9 +420,13 @@ the retirement worker, which keeps its active strong owner until renderer-thread
 released the pixels. Its shared retirement state can outlive the cache while a valid pixel handle does,
 so cache destruction returns and the worker performs final destruction after that handle releases.
 When the thumbnail panel is visible, completed display frames also feed one bounded,
-very-low-priority thumbnail-resampling queue before their CPU pixels are retired; this avoids a
-second large-file decode while leaving renderer upload and display preparation ahead of thumbnail
-work. Static images backed by a ready display texture defer full-pixel materialization
+very-low-priority thumbnail-resampling queue before their CPU pixels are retired. File-backed
+thumbnail requests use that same worker when no display frame is available, so independent thumbnail
+reads, JPEG dimension lookup, decode, and resampling do not run on the event thread. The worker keeps
+at most one request active and two queued requests; thumbnail results carry generation, file
+list, source-key, and target-geometry identities for validation before renderer-thread upload. This
+leaves renderer upload and display preparation ahead of thumbnail work. Static images backed by a
+ready display texture defer full-pixel materialization
 until an edit, copy, save, histogram, or another pixel-consuming operation actually needs it.
 For fitted JPEGs, header dimensions are cached by file size and modification time and workers decode
 the smallest native libjpeg scale that covers the stable viewport. This makes renderer-ready textures,

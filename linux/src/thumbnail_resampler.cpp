@@ -1,5 +1,6 @@
 #include "thumbnail_resampler.h"
 
+#include "image_decoder.h"
 #include "perf_diagnostics.h"
 #include "thumbnail_panel_model.h"
 
@@ -116,8 +117,18 @@ bool CanReuseDisplayPixelsForThumbnail(int width, int height,
 }
 
 bool ThumbnailPreparationRequest::Valid() const {
-	return !key.empty() && source && source->width > 0 && source->height > 0 &&
+	const bool validDisplaySource = source && source->width > 0 && source->height > 0;
+	const bool validFileSource = !logicalSource.empty();
+	return !key.empty() && (validDisplaySource || validFileSource) &&
 		maximumWidth > 0 && maximumHeight > 0;
+}
+
+bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
+	std::uint64_t requestGeneration, std::uint64_t fileListIdentity,
+	const std::string& sourceKey, int maximumWidth, int maximumHeight) {
+	return result.requestGeneration == requestGeneration &&
+		result.fileListIdentity == fileListIdentity && result.key == sourceKey &&
+		result.maximumWidth == maximumWidth && result.maximumHeight == maximumHeight;
 }
 
 namespace {
@@ -125,17 +136,57 @@ namespace {
 ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 	const ThumbnailPreparationRequest& request) {
 	if (!request.Valid()) return {};
-	const ThumbnailSize size = FitThumbnailSize(request.source->width,
-		request.source->height, request.maximumWidth, request.maximumHeight);
+	DecodedImage decoded;
+	const std::vector<std::uint8_t>* sourcePixels = nullptr;
+	int sourceWidth = 0;
+	int sourceHeight = 0;
+	bool hasTransparency = false;
+	ThumbnailSize size;
+	if (request.source) {
+		sourceWidth = request.source->width;
+		sourceHeight = request.source->height;
+		hasTransparency = request.source->hasTransparency;
+		sourcePixels = &request.source->bgra;
+		size = FitThumbnailSize(sourceWidth, sourceHeight,
+			request.maximumWidth, request.maximumHeight);
+	} else {
+		std::string errorMessage;
+		if (IsJpegPath(request.logicalSource)) {
+			int jpegWidth = 0;
+			int jpegHeight = 0;
+			if (!ReadJpegDimensions(request.logicalSource, jpegWidth, jpegHeight,
+				errorMessage)) return {};
+			size = FitThumbnailSize(jpegWidth, jpegHeight,
+				request.maximumWidth, request.maximumHeight);
+			int decodedSourceWidth = 0;
+			int decodedSourceHeight = 0;
+			if (size.width <= 0 || size.height <= 0 ||
+				!DecodeJpegForDisplay(request.logicalSource, size.width, size.height,
+					decoded, decodedSourceWidth, decodedSourceHeight, errorMessage) ||
+				decoded.frames.empty()) return {};
+		} else if (!DecodeImage(request.logicalSource, decoded, errorMessage) ||
+			decoded.frames.empty()) {
+			return {};
+		}
+		const DecodedFrame& frame = decoded.frames.front();
+		sourceWidth = frame.width;
+		sourceHeight = frame.height;
+		hasTransparency = frame.hasTransparency;
+		sourcePixels = &frame.bgra;
+		if (size.width <= 0 || size.height <= 0) {
+			size = FitThumbnailSize(sourceWidth, sourceHeight,
+				request.maximumWidth, request.maximumHeight);
+		}
+	}
 	if (size.width <= 0 || size.height <= 0) return {};
 	auto prepared = std::make_shared<PreparedThumbnailImage>();
 	prepared->key = request.key;
 	prepared->width = size.width;
 	prepared->height = size.height;
-	prepared->hasTransparency = request.source->hasTransparency;
+	prepared->hasTransparency = hasTransparency;
 	prepared->workClass = request.workClass;
-	if (!DownsampleThumbnailBgra(request.source->bgra, request.source->width,
-		request.source->height, size.width, size.height, prepared->bgra)) return {};
+	if (!DownsampleThumbnailBgra(*sourcePixels, sourceWidth, sourceHeight,
+		size.width, size.height, prepared->bgra)) return {};
 	return prepared;
 }
 
@@ -195,16 +246,28 @@ struct ThumbnailPreparationWorker::Impl {
 			}
 
 			PerfContextScope context(work.request.workClass, PerfExecution::WorkerThread);
-			ImagePtr image = processor(work.request);
+			ImagePtr image;
+			try {
+				image = processor(work.request);
+			} catch (const std::exception&) {
+				image.reset();
+			}
 			work.request.source.reset();
 			retiredSource.reset();
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				inFlightKeys.erase(work.request.key);
 				--activeWorkers;
-				if (!stopping && work.generation == generation && image &&
-					image->key == work.request.key) {
-					completed.push_back(std::move(image));
+				if (!stopping && work.generation == generation) {
+					Result result;
+					result.key = work.request.key;
+					result.requestGeneration = work.request.requestGeneration;
+					result.fileListIdentity = work.request.fileListIdentity;
+					result.maximumWidth = work.request.maximumWidth;
+					result.maximumHeight = work.request.maximumHeight;
+					result.workClass = work.request.workClass;
+					if (image && image->key == work.request.key) result.image = std::move(image);
+					completed.push_back(std::move(result));
 				} else if (!stopping && work.generation != generation) {
 					RecordThumbnailCancellation(work.request.workClass,
 						PerfExecution::WorkerThread);
@@ -226,7 +289,7 @@ struct ThumbnailPreparationWorker::Impl {
 	std::condition_variable workAvailable;
 	std::condition_variable idle;
 	std::deque<Work> queue;
-	std::deque<ImagePtr> completed;
+	std::deque<Result> completed;
 	std::deque<DisplayImageCache::ImagePtr> retired;
 	std::unordered_set<std::string> inFlightKeys;
 	DisplayImageCache::ImagePtr activeSource;
@@ -247,13 +310,30 @@ bool ThumbnailPreparationWorker::Request(const ThumbnailPreparationRequest& requ
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		if (impl_->stopping || impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end() ||
 			std::any_of(impl_->completed.begin(), impl_->completed.end(),
-				[&request](const ImagePtr& image) { return image && image->key == request.key; })) {
+				[&request](const Result& result) {
+					return result.key == request.key &&
+						result.requestGeneration == request.requestGeneration &&
+						result.fileListIdentity == request.fileListIdentity;
+				})) {
 			return false;
 		}
 		const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
 			[&request](const Impl::Work& work) { return work.request.key == request.key; });
 		if (queued != impl_->queue.end()) {
+			if (queued->request.source != request.source) {
+				DisplayImageCache::ImagePtr retiredSource =
+					std::move(queued->request.source);
+				queued->request.source = request.source;
+				if (retiredSource) impl_->retired.push_back(std::move(retiredSource));
+			}
 			queued->request.priority = request.priority;
+			queued->request.workClass = request.workClass;
+			queued->request.requestGeneration = request.requestGeneration;
+			queued->request.fileListIdentity = request.fileListIdentity;
+			queued->request.maximumWidth = request.maximumWidth;
+			queued->request.maximumHeight = request.maximumHeight;
+			queued->request.logicalSource = request.logicalSource;
+			impl_->workAvailable.notify_one();
 			return true;
 		}
 		if (impl_->queue.size() >= Impl::kMaximumQueuedSources) {
@@ -274,9 +354,9 @@ bool ThumbnailPreparationWorker::Request(const ThumbnailPreparationRequest& requ
 	return true;
 }
 
-std::vector<ThumbnailPreparationWorker::ImagePtr>
+std::vector<ThumbnailPreparationWorker::Result>
 ThumbnailPreparationWorker::TakeCompleted(std::size_t maximumCount) {
-	std::vector<ImagePtr> images;
+	std::vector<Result> images;
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	images.reserve(std::min(maximumCount, impl_->completed.size()));
 	while (images.size() < maximumCount && !impl_->completed.empty()) {
@@ -312,9 +392,11 @@ ThumbnailPreparationDiagnostics ThumbnailPreparationWorker::GetDiagnostics() con
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	diagnostics.queued = impl_->queue.size();
 	diagnostics.active = impl_->activeWorkers;
-	diagnostics.completedImages = impl_->completed.size();
-	for (const ImagePtr& image : impl_->completed) {
-		if (image) diagnostics.completedBytes += image->bgra.size();
+	for (const Result& result : impl_->completed) {
+		if (result.image) {
+			diagnostics.completedBytes += result.image->bgra.size();
+			++diagnostics.completedImages;
+		}
 	}
 	diagnostics.retiredSources = impl_->retired.size();
 	for (const DisplayImageCache::ImagePtr& source : impl_->retired) {

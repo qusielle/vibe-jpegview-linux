@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -34,6 +35,9 @@ struct ThumbnailPreparationRequest {
 	int maximumHeight = 0;
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::VisibleThumbnail;
+	std::filesystem::path logicalSource;
+	std::uint64_t requestGeneration = 0;
+	std::uint64_t fileListIdentity = 0;
 
 	bool Valid() const;
 };
@@ -47,6 +51,21 @@ struct PreparedThumbnailImage {
 	std::vector<std::uint8_t> bgra;
 };
 
+struct ThumbnailPreparationResult {
+	std::string key;
+	std::uint64_t requestGeneration = 0;
+	std::uint64_t fileListIdentity = 0;
+	int maximumWidth = 0;
+	int maximumHeight = 0;
+	PerfWorkClass workClass = PerfWorkClass::VisibleThumbnail;
+	std::shared_ptr<const PreparedThumbnailImage> image;
+};
+
+// Verifies that a completed result still belongs to the active preload plan.
+bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
+	std::uint64_t requestGeneration, std::uint64_t fileListIdentity,
+	const std::string& sourceKey, int maximumWidth, int maximumHeight);
+
 struct ThumbnailPreparationDiagnostics {
 	std::size_t queued = 0;
 	std::size_t active = 0;
@@ -57,13 +76,13 @@ struct ThumbnailPreparationDiagnostics {
 	std::size_t retainedSourceBytes = 0;
 };
 
-// Derives thumbnails from display-ready neighbors on one very-low-priority
-// worker. This reuses pixels already decoded for navigation and never performs
-// file I/O. The bounded queue protects the display cache from accumulating
-// large source buffers when thumbnail preparation falls behind.
+// Prepares thumbnails from display-ready neighbors or file sources on one
+// very-low-priority worker. The bounded queue protects the display cache from
+// accumulating large source buffers when thumbnail preparation falls behind.
 class ThumbnailPreparationWorker {
 public:
 	using ImagePtr = std::shared_ptr<const PreparedThumbnailImage>;
+	using Result = ThumbnailPreparationResult;
 	using Processor = std::function<ImagePtr(const ThumbnailPreparationRequest&)>;
 
 	explicit ThumbnailPreparationWorker(Processor processor = {});
@@ -72,7 +91,7 @@ public:
 	ThumbnailPreparationWorker& operator=(const ThumbnailPreparationWorker&) = delete;
 
 	bool Request(const ThumbnailPreparationRequest& request);
-	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount);
+	std::vector<Result> TakeCompleted(std::size_t maximumCount);
 	void Clear();
 	bool HasPendingWork() const;
 	ThumbnailPreparationDiagnostics GetDiagnostics() const;
