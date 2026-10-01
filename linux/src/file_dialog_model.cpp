@@ -2,6 +2,7 @@
 #include "archive_source.h"
 #include "image_formats.h"
 #include "image_decoder.h"
+#include "perf_diagnostics.h"
 #include "thumbnail_resampler.h"
 
 #include <algorithm>
@@ -723,6 +724,82 @@ std::vector<DirectorySummaryResult> DirectorySummaryLoader::TakeReady() {
 	return results;
 }
 
+namespace {
+
+enum class PreviewCancellationReason : std::uint64_t {
+	PendingReplaced = 1,
+	ReadyReplaced = 2,
+	StaleWorkerResult = 3,
+	PendingShutdown = 4,
+	ReadyShutdown = 5,
+};
+
+void RecordPreviewCancellation(std::uint64_t generation,
+	PreviewCancellationReason reason, PerfExecution execution) {
+	PerfContextScope workContext(PerfWorkClass::FocusedPreview, execution);
+	PerfDiagnostics::Instance().RecordText(PerfMetric::Cancellation,
+		generation, static_cast<std::uint64_t>(reason), 0, 0, 0, 0,
+		"file_dialog_preview");
+}
+
+FileDialogPreviewResult LoadFileDialogPreview(
+	const std::filesystem::path& path, bool directory, FileDialogSortMode mode,
+	int maximumWidth, int maximumHeight, const std::function<bool()>& shouldContinue) {
+	FileDialogPreviewResult result;
+	result.source = directory ? FirstImageInDirectoryWhile(path, mode, shouldContinue,
+		&result.error, &result.errorKind, &result.encryptedArchive) : path;
+	if (directory && result.source.empty() &&
+		result.errorKind == ArchiveErrorKind::PasswordRequired) {
+		result.source = path;
+	}
+	if (!shouldContinue()) return result;
+	if (!result.error.empty()) {
+		// Preserve archive errors for the UI; previews never request credentials.
+	} else if (result.source.empty()) {
+		result.error = "No images in this folder";
+	} else {
+		std::error_code sizeError;
+		result.fileSize = ImageSourceFileSize(result.source, sizeError);
+		result.fileSizeKnown = !sizeError;
+		DecodedImage decoded;
+		bool success = false;
+		if (IsJpegPath(result.source)) {
+			success = DecodeJpegForDisplay(result.source, maximumWidth,
+				maximumHeight, decoded, result.sourceWidth,
+				result.sourceHeight, result.error);
+		} else {
+			success = DecodeImage(result.source, decoded, result.error);
+		}
+		if (success && !decoded.frames.empty()) {
+			DecodedFrame frame = std::move(decoded.frames.front());
+			if (result.sourceWidth <= 0 || result.sourceHeight <= 0) {
+				result.sourceWidth = frame.width;
+				result.sourceHeight = frame.height;
+			}
+			result.hasTransparency = frame.hasTransparency;
+			const double scale = std::min({1.0,
+				static_cast<double>(maximumWidth) / frame.width,
+				static_cast<double>(maximumHeight) / frame.height});
+			const int width = std::max(1,
+				static_cast<int>(std::floor(frame.width * scale + 0.5)));
+			const int height = std::max(1,
+				static_cast<int>(std::floor(frame.height * scale + 0.5)));
+			if (!DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
+				width, height, result.bgra)) {
+				result.error = "Cannot resize preview";
+			} else {
+				result.width = width;
+				result.height = height;
+			}
+		} else if (success) {
+			result.error = "Image has no preview frame";
+		}
+	}
+	return result;
+}
+
+} // namespace
+
 struct FileDialogPreviewLoader::Impl {
 	struct Task {
 		std::filesystem::path path;
@@ -733,10 +810,25 @@ struct FileDialogPreviewLoader::Impl {
 		std::uint64_t generation = 0;
 	};
 
-	Impl() = default;
+	explicit Impl(Processor previewProcessor) : processor(std::move(previewProcessor)) {
+		if (!processor) processor = LoadFileDialogPreview;
+	}
 
 	~Impl() {
-		stopping.store(true);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			stopping.store(true);
+			if (pending) {
+				RecordPreviewCancellation(pending->generation,
+					PreviewCancellationReason::PendingShutdown, PerfExecution::EventThread);
+				pending.reset();
+			}
+			for (const FileDialogPreviewResult& result : ready) {
+				RecordPreviewCancellation(result.generation,
+					PreviewCancellationReason::ReadyShutdown, PerfExecution::EventThread);
+			}
+			ready.clear();
+		}
 		condition.notify_one();
 		if (worker.joinable()) worker.join();
 	}
@@ -756,69 +848,25 @@ struct FileDialogPreviewLoader::Impl {
 				pending.reset();
 			}
 
+			PerfContextScope workContext(PerfWorkClass::FocusedPreview,
+				PerfExecution::WorkerThread);
 			FileDialogPreviewResult result;
-			result.generation = task.generation;
 			try {
-				result.source = task.directory ? FirstImageInDirectoryWhile(task.path, task.mode,
-					[this, &task] { return IsCurrent(task.generation); },
-					&result.error, &result.errorKind, &result.encryptedArchive) : task.path;
-				if (task.directory && result.source.empty() &&
-					result.errorKind == ArchiveErrorKind::PasswordRequired) {
-					result.source = task.path;
-				}
-				if (IsCurrent(task.generation)) {
-					if (!result.error.empty()) {
-						// Preserve archive errors for the UI; previews never request credentials.
-					} else if (result.source.empty()) {
-						result.error = "No images in this folder";
-					} else {
-						std::error_code sizeError;
-						result.fileSize = ImageSourceFileSize(result.source, sizeError);
-						result.fileSizeKnown = !sizeError;
-						DecodedImage decoded;
-						bool success = false;
-						if (IsJpegPath(result.source)) {
-							success = DecodeJpegForDisplay(result.source, task.maximumWidth,
-								task.maximumHeight, decoded, result.sourceWidth,
-								result.sourceHeight, result.error);
-						} else {
-							success = DecodeImage(result.source, decoded, result.error);
-						}
-						if (success && !decoded.frames.empty()) {
-							DecodedFrame frame = std::move(decoded.frames.front());
-							if (result.sourceWidth <= 0 || result.sourceHeight <= 0) {
-								result.sourceWidth = frame.width;
-								result.sourceHeight = frame.height;
-							}
-							result.hasTransparency = frame.hasTransparency;
-							const double scale = std::min({1.0,
-								static_cast<double>(task.maximumWidth) / frame.width,
-								static_cast<double>(task.maximumHeight) / frame.height});
-							const int width = std::max(1,
-								static_cast<int>(std::floor(frame.width * scale + 0.5)));
-							const int height = std::max(1,
-								static_cast<int>(std::floor(frame.height * scale + 0.5)));
-							if (!DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
-								width, height, result.bgra)) {
-								result.error = "Cannot resize preview";
-							} else {
-								result.width = width;
-								result.height = height;
-							}
-						} else if (success) {
-							result.error = "Image has no preview frame";
-						}
-					}
-				}
+				result = processor(task.path, task.directory, task.mode,
+					task.maximumWidth, task.maximumHeight,
+					[this, &task] { return IsCurrent(task.generation); });
 			} catch (const std::exception& error) {
 				result.error = error.what();
 			}
-			if (!IsCurrent(task.generation)) continue;
+			result.generation = task.generation;
 
 			std::lock_guard<std::mutex> lock(mutex);
 			if (IsCurrent(task.generation)) {
 				ready.clear();
 				ready.push_back(std::move(result));
+			} else {
+				RecordPreviewCancellation(task.generation,
+					PreviewCancellationReason::StaleWorkerResult, PerfExecution::WorkerThread);
 			}
 		}
 	}
@@ -827,6 +875,7 @@ struct FileDialogPreviewLoader::Impl {
 		if (!worker.joinable()) worker = std::thread([this] { Run(); });
 	}
 
+	Processor processor;
 	std::mutex mutex;
 	std::condition_variable condition;
 	std::optional<Task> pending;
@@ -836,7 +885,8 @@ struct FileDialogPreviewLoader::Impl {
 	std::thread worker;
 };
 
-FileDialogPreviewLoader::FileDialogPreviewLoader() : impl_(std::make_unique<Impl>()) {}
+FileDialogPreviewLoader::FileDialogPreviewLoader(Processor processor)
+	: impl_(std::make_unique<Impl>(std::move(processor))) {}
 FileDialogPreviewLoader::~FileDialogPreviewLoader() = default;
 
 std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path,
@@ -844,8 +894,16 @@ std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path
 	const std::uint64_t requestedGeneration = impl_->generation.fetch_add(1) + 1;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->pending) {
+			RecordPreviewCancellation(impl_->pending->generation,
+				PreviewCancellationReason::PendingReplaced, PerfExecution::EventThread);
+			impl_->pending.reset();
+		}
+		for (const FileDialogPreviewResult& result : impl_->ready) {
+			RecordPreviewCancellation(result.generation,
+				PreviewCancellationReason::ReadyReplaced, PerfExecution::EventThread);
+		}
 		impl_->ready.clear();
-		impl_->pending.reset();
 		if (!path.empty() && maximumWidth > 0 && maximumHeight > 0) {
 			impl_->StartWorkerLocked();
 			impl_->pending = Impl::Task{path, directory, mode,

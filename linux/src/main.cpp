@@ -41,6 +41,7 @@
 #include "bitmap_font.h"
 #include "spectrum_model.h"
 #include "desktop_association.h"
+#include "perf_diagnostics.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -357,6 +358,10 @@ public:
 		  startFullscreen_(startFullscreen) {}
 
 	int Run() {
+		jpegview_linux::PerfContextScope mainThreadContext(
+			jpegview_linux::PerfWorkClass::Unspecified,
+			jpegview_linux::PerfExecution::EventThread);
+		jpegview_linux::PerfDiagnostics::Instance();
 		LoadSettings();
 		if (SDL_Init(SDL_INIT_VIDEO) != 0) {
 			std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
@@ -397,6 +402,20 @@ public:
 				SDL_Quit();
 				return 1;
 			}
+		}
+		jpegview_linux::PerfDiagnostics& diagnostics =
+			jpegview_linux::PerfDiagnostics::Instance();
+		if (diagnostics.Enabled()) {
+			SDL_RendererInfo rendererInfo{};
+			SDL_version sdlVersion{};
+			SDL_GetVersion(&sdlVersion);
+			const bool hasRendererInfo = SDL_GetRendererInfo(renderer_, &rendererInfo) == 0;
+			diagnostics.RecordText(jpegview_linux::PerfMetric::Renderer,
+				hasRendererInfo ? rendererInfo.flags : 0,
+				hasRendererInfo ? static_cast<std::uint64_t>(rendererInfo.max_texture_width) : 0,
+				hasRendererInfo ? static_cast<std::uint64_t>(rendererInfo.max_texture_height) : 0,
+				sdlVersion.major, sdlVersion.minor, sdlVersion.patch,
+				hasRendererInfo && rendererInfo.name != nullptr ? rendererInfo.name : "unknown");
 		}
 		thumbnailResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
 		fileDialogResizeCursor_ = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE);
@@ -918,15 +937,21 @@ private:
 		const DoublePagePartnerSpec& spec, const jpegview_linux::PageDimensions& nextPage) {
 		const fs::path& filename = spec.filename;
 		if (jpegview_linux::IsJpegPath(filename)) {
-			return jpegview_linux::MakeJpegDisplayImageRequest(filename, nextPage.width,
+			jpegview_linux::DisplayImageRequest request =
+				jpegview_linux::MakeJpegDisplayImageRequest(filename, nextPage.width,
 				nextPage.height, spec.targetWidth, spec.targetHeight,
 				spec.autoContrast, 1, spec.processing, spec.rotationQuarterTurns);
+			request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+			return request;
 		}
 		const auto decoded = imageCache_.Find(filename);
 		if (!decoded || decoded->frames.empty()) return std::nullopt;
-		return jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
+		jpegview_linux::DisplayImageRequest request =
+			jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
 			spec.targetWidth, spec.targetHeight, spec.autoContrast, 1, spec.processing,
 			spec.rotationQuarterTurns);
+		request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+		return request;
 	}
 
 	std::string ModifiedSpreadAnchorKey() const {
@@ -957,6 +982,9 @@ private:
 	}
 
 	void RefreshDoublePageRenderState() {
+		jpegview_linux::PerfContextScope workContext(
+			jpegview_linux::PerfWorkClass::ActiveImageSpread,
+			jpegview_linux::PerfExecution::EventThread);
 		const SDL_Rect area = ImageAreaRect();
 		const auto deactivate = [this, &area] {
 			displayTextureProtectedKeys_.erase(doublePagePartnerDisplayKey_);
@@ -1142,11 +1170,16 @@ private:
 	}
 
 	bool MaterializeCurrentPixels() {
+		jpegview_linux::PerfContextScope workContext(
+			jpegview_linux::PerfWorkClass::ActiveImageSpread,
+			jpegview_linux::PerfExecution::EventThread);
 		if (currentPixelsMaterialized_ &&
 			jpegview_linux::EqualImageProcessing(materializedProcessing_, imageProcessing_) &&
 			materializedAutoContrast_ == autoContrastEnabled_) return true;
 		if (currentPixelsMaterialized_ && correctionBaseValid_) {
 			image_ = correctionBase_;
+			jpegview_linux::PerfScopedTimer processingTimer(
+				jpegview_linux::PerfDiagnostics::Instance(), jpegview_linux::PerfMetric::Processing);
 			if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) return false;
 			materializedProcessing_ = imageProcessing_;
 			materializedAutoContrast_ = autoContrastEnabled_;
@@ -1189,6 +1222,8 @@ private:
 		}
 		correctionBase_ = image_;
 		correctionBaseValid_ = true;
+		jpegview_linux::PerfScopedTimer processingTimer(
+			jpegview_linux::PerfDiagnostics::Instance(), jpegview_linux::PerfMetric::Processing);
 		if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) {
 			SetTitle(fileList_.Current().filename().string() + " — picture-level processing failed");
 			return false;
@@ -1216,6 +1251,9 @@ private:
 
 	bool LoadCurrent(int prefetchDirection = 0,
 		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent) {
+		jpegview_linux::PerfContextScope workContext(
+			jpegview_linux::PerfWorkClass::ActiveImageSpread,
+			jpegview_linux::PerfExecution::EventThread);
 		if (fileList_.Empty()) {
 			return false;
 		}
@@ -1311,6 +1349,8 @@ private:
 				currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
 					fileList_.Current(), sourceWidth, sourceHeight, destination.width,
 					destination.height, autoContrastEnabled_, 0, imageProcessing_);
+				currentDisplayRequest_->workClass =
+					jpegview_linux::PerfWorkClass::ActiveImageSpread;
 				if (currentDisplayRequest_->Valid()) {
 					displayTextureProtectedKeys_.insert(currentDisplayRequest_->key);
 					cachedDisplay = FindDisplayTexture(currentDisplayRequest_->key) != nullptr;
@@ -1444,6 +1484,10 @@ private:
 			jpegview_linux::DisplayPrefetchCount(cacheBudget_->Capacity(), imageArea.w,
 				imageArea.h, fileList_.Files().size()));
 		for (std::size_t position = 0; position < prefetchOrder.size(); ++position) {
+			jpegview_linux::PerfContextScope workContext(
+				position < 2 ? jpegview_linux::PerfWorkClass::NearestNavigationNeighbor :
+					jpegview_linux::PerfWorkClass::DistantSpeculation,
+				jpegview_linux::PerfExecution::EventThread);
 			const std::size_t fileIndex = prefetchOrder[position];
 			const fs::path& filename = fileList_.Files()[fileIndex];
 			batch->priorityByFilename.emplace(filename.string(), position + 1);
@@ -1488,6 +1532,9 @@ private:
 				jpegview_linux::MakeJpegDisplayImageRequest(filename, sourceWidth, sourceHeight,
 					target.width, target.height, filePreset.autoContrast, position + 1,
 					fileProcessing);
+			request.workClass = position < 2 ?
+				jpegview_linux::PerfWorkClass::NearestNavigationNeighbor :
+				jpegview_linux::PerfWorkClass::DistantSpeculation;
 			if (!request.Valid()) continue;
 			displayTextureProtectedKeys_.insert(request.key);
 			if (batch->retainedTextureKeys.find(request.key) ==
@@ -1525,6 +1572,9 @@ private:
 					jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
 						target.width, target.height, autoContrast->second,
 						priority->second, processing->second);
+				request.workClass = priority->second <= 2 ?
+					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor :
+					jpegview_linux::PerfWorkClass::DistantSpeculation;
 				if (batch->context.currentPageDimensions.has_value()) {
 					const auto index = batch->indexByFilename.find(filename.string());
 					if (index != batch->indexByFilename.end() &&
@@ -1552,6 +1602,9 @@ private:
 	}
 
 	bool UpdateTexture() {
+		jpegview_linux::PerfContextScope workContext(
+			jpegview_linux::PerfWorkClass::ActiveImageSpread,
+			jpegview_linux::PerfExecution::EventThread);
 		SDL_Texture* newTexture = CreateTexture(image_);
 		if (newTexture == nullptr) {
 			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
@@ -1577,7 +1630,15 @@ private:
 		SDL_Texture* result = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC,
 			width, height);
 		if (result == nullptr) return nullptr;
-		if (SDL_UpdateTexture(result, nullptr, bgra.data(), width * 4) != 0) {
+		int updateResult = 0;
+		{
+			jpegview_linux::PerfScopedTimer uploadTimer(
+				jpegview_linux::PerfDiagnostics::Instance(),
+				jpegview_linux::PerfMetric::TextureUpload, bgra.size(),
+				static_cast<std::uint64_t>(width), static_cast<std::uint64_t>(height));
+			updateResult = SDL_UpdateTexture(result, nullptr, bgra.data(), width * 4);
+		}
+		if (updateResult != 0) {
 			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
 			SDL_DestroyTexture(result);
 			return nullptr;
@@ -1641,6 +1702,8 @@ private:
 
 	bool CacheDisplayTexture(const jpegview_linux::DisplayImageCache::ImagePtr& prepared) {
 		if (!prepared || prepared->key.empty()) return false;
+		jpegview_linux::PerfContextScope workContext(prepared->workClass,
+			jpegview_linux::PerfExecution::EventThread);
 		if (prepared->rotationQuarterTurns == 0) QueuePreparedThumbnail(prepared);
 		if (FindDisplayTexture(prepared->key) != nullptr) {
 			displayImageCache_.Release(prepared->key);
@@ -1730,6 +1793,8 @@ private:
 					fileList_.Current(), image_.originalWidth, image_.originalHeight, width, height,
 					autoContrastEnabled_, 0, imageProcessing_);
 			}
+			currentDisplayRequest_->workClass =
+				jpegview_linux::PerfWorkClass::ActiveImageSpread;
 		}
 		return currentDisplayRequest_->Valid() ? &*currentDisplayRequest_ : nullptr;
 	}
@@ -1748,8 +1813,12 @@ private:
 				previousDisplayKey != request->key) {
 				if (SDL_Texture* previous = FindDisplayTexture(previousDisplayKey)) return previous;
 			}
-			if (texture_ == nullptr && !deferredCurrentDisplayPreparation_ &&
-				MaterializeCurrentPixels()) texture_ = CreateTexture(image_);
+			if (texture_ == nullptr && !deferredCurrentDisplayPreparation_) {
+				jpegview_linux::PerfContextScope workContext(
+					jpegview_linux::PerfWorkClass::ActiveImageSpread,
+					jpegview_linux::PerfExecution::EventThread);
+				if (MaterializeCurrentPixels()) texture_ = CreateTexture(image_);
+			}
 			// The fallback lets SDL scale the source texture while workers prepare
 			// the high-quality frame. No CPU resize runs on the renderer thread.
 			return texture_;
@@ -1761,10 +1830,17 @@ private:
 		}
 
 		ClearDisplayTexture();
+		jpegview_linux::PerfContextScope workContext(
+			jpegview_linux::PerfWorkClass::ActiveImageSpread,
+			jpegview_linux::PerfExecution::EventThread);
 		displayImage_ = image_;
-		if (!displayImage_.Resize(width, height)) {
-			displayImage_ = {};
-			return texture_;
+		{
+			jpegview_linux::PerfScopedTimer resamplingTimer(
+				jpegview_linux::PerfDiagnostics::Instance(), jpegview_linux::PerfMetric::Resampling);
+			if (!displayImage_.Resize(width, height)) {
+				displayImage_ = {};
+				return texture_;
+			}
 		}
 		displayTexture_ = CreateTexture(displayImage_);
 		if (displayTexture_ == nullptr) {
@@ -1839,8 +1915,12 @@ private:
 		const SDL_Rect panel = ThumbnailPanelRect();
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(
 			panel.w, kThumbnailVerticalMargin);
+		const jpegview_linux::PerfWorkClass workClass =
+			jpegview_linux::ThumbnailIndexVisible(fileList_.Size(), current, index,
+				panel.h, rowHeight) ? jpegview_linux::PerfWorkClass::VisibleThumbnail :
+				jpegview_linux::PerfWorkClass::DistantSpeculation;
 		(void)thumbnailPreparation_.Request({key, prepared, panel.w,
-			rowHeight - kThumbnailVerticalMargin * 2 - 1, priority});
+			rowHeight - kThumbnailVerticalMargin * 2 - 1, priority, workClass});
 	}
 
 	void TickThumbnailPreload(bool allowIndependentDecode) {
@@ -1852,6 +1932,8 @@ private:
 			const auto active = std::find_if(fileList_.Files().begin(), fileList_.Files().end(),
 				[&prepared](const fs::path& path) { return path.string() == prepared->key; });
 			if (active == fileList_.Files().end()) continue;
+			jpegview_linux::PerfContextScope workContext(prepared->workClass,
+				jpegview_linux::PerfExecution::EventThread);
 			ThumbnailCacheEntry cached;
 			cached.texture = CreateTexture(prepared->bgra, prepared->width,
 				prepared->height, prepared->hasTransparency);
@@ -1866,9 +1948,16 @@ private:
 		if (!request.has_value() || request->fileIndex >= fileList_.Files().size() ||
 			fileList_.Files()[request->fileIndex].string() != request->key) return;
 		const fs::path& path = fileList_.Files()[request->fileIndex];
-		ThumbnailCacheEntry cached;
 		const SDL_Rect panel = ThumbnailPanelRect();
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
+		const jpegview_linux::PerfWorkClass workClass =
+			jpegview_linux::ThumbnailIndexVisible(fileList_.Size(), fileList_.CurrentIndex(),
+				request->fileIndex, panel.h, rowHeight) ?
+				jpegview_linux::PerfWorkClass::VisibleThumbnail :
+				jpegview_linux::PerfWorkClass::DistantSpeculation;
+		jpegview_linux::PerfContextScope workContext(workClass,
+			jpegview_linux::PerfExecution::EventThread);
+		ThumbnailCacheEntry cached;
 		jpegview_linux::DecodedImageCache::ImagePtr decoded;
 		jpegview_linux::ThumbnailSize size;
 		if (jpegview_linux::IsJpegPath(path)) {
@@ -6127,6 +6216,9 @@ private:
 				fileDialogPreviewMessage_ = "Encrypted image — open to enter password";
 			}
 			if (!result.bgra.empty()) {
+				jpegview_linux::PerfContextScope previewUploadContext(
+					jpegview_linux::PerfWorkClass::FocusedPreview,
+					jpegview_linux::PerfExecution::EventThread);
 				SDL_Texture* previewTexture = CreateTexture(result.bgra, result.width,
 					result.height, result.hasTransparency);
 				if (previewTexture == nullptr) {
@@ -7535,6 +7627,7 @@ private:
 				base.sourceWidth, base.sourceHeight, targetWidth, targetHeight,
 				base.autoContrast, kMagnifyingGlassDisplayPriority, base.processing);
 		}
+		magnifyingGlassRequest_->workClass = jpegview_linux::PerfWorkClass::FocusedPreview;
 		magnifyingGlassRequestBaseKey_ = base.key;
 		return magnifyingGlassRequest_;
 	}
@@ -8333,6 +8426,27 @@ private:
 	void HandleEvents(bool& running) {
 		SDL_Event event{};
 		while (SDL_PollEvent(&event) != 0) {
+			auto& diagnostics = jpegview_linux::PerfDiagnostics::Instance();
+			jpegview_linux::PerfScopedTimer eventTimer(diagnostics,
+				jpegview_linux::PerfMetric::EventHandling, event.type);
+			if (diagnostics.Enabled()) {
+				switch (event.type) {
+				case SDL_KEYDOWN:
+				case SDL_KEYUP:
+				case SDL_TEXTINPUT:
+				case SDL_MOUSEMOTION:
+				case SDL_MOUSEBUTTONDOWN:
+				case SDL_MOUSEBUTTONUP:
+				case SDL_MOUSEWHEEL:
+				case SDL_DROPBEGIN:
+				case SDL_DROPFILE:
+				case SDL_DROPCOMPLETE:
+					diagnostics.MarkInput();
+					break;
+				default:
+					break;
+				}
+			}
 			playback_.NotifyInteraction(SDL_GetTicks());
 			if (pendingMenuMnemonicTextInput_ != '\0') {
 				if (event.type == SDL_KEYDOWN) {
@@ -8716,6 +8830,8 @@ private:
 	}
 
 	void RenderFrame() {
+		auto& diagnostics = jpegview_linux::PerfDiagnostics::Instance();
+		const std::uint64_t frameStart = diagnostics.Begin();
 		RefreshDoublePageRenderState();
 		const SDL_Rect imageArea = ImageAreaRect();
 		imageCenterX_ = imageArea.x + imageArea.w / 2;
@@ -8792,8 +8908,67 @@ private:
 		RenderHelp();
 		RenderArchivePasswordDialog();
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
-		SDL_RenderPresent(renderer_);
+		diagnostics.End(jpegview_linux::PerfMetric::FrameBuild, frameStart);
+		{
+			jpegview_linux::PerfScopedTimer presentTimer(diagnostics,
+				jpegview_linux::PerfMetric::Present);
+			SDL_RenderPresent(renderer_);
+		}
+		diagnostics.RecordPresentation();
 		if (spreadTexturesReady) doublePagePresentation_.MarkSpreadPresented(currentIndex);
+		if (diagnostics.Enabled()) {
+			const std::uint64_t sampleStart = diagnostics.Begin();
+			if (sampleStart - lastPerfSnapshotUs_ >= 1000000u) {
+				lastPerfSnapshotUs_ = sampleStart;
+				std::uint64_t thumbnailBytes = 0;
+				for (const auto& cached : thumbnailCache_) {
+					if (cached.second.texture != nullptr) {
+						thumbnailBytes += static_cast<std::uint64_t>(cached.second.width) *
+							static_cast<std::uint64_t>(cached.second.height) * 4;
+					}
+				}
+				const jpegview_linux::DecodedImageCacheDiagnostics decodedStats =
+					imageCache_.GetDiagnostics();
+				const jpegview_linux::DisplayImageCacheDiagnostics displayStats =
+					displayImageCache_.GetDiagnostics();
+				const jpegview_linux::ThumbnailPreparationDiagnostics thumbnailStats =
+					thumbnailPreparation_.GetDiagnostics();
+				diagnostics.End(jpegview_linux::PerfMetric::CacheSnapshot, sampleStart,
+					cacheBudget_->Used(), cacheBudget_->Capacity(), imageCache_.CachedBytes(),
+					displayImageCache_.CachedBytes(), displayTextureCacheBytes_, thumbnailBytes);
+				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+					decodedStats.cachedBytes, decodedStats.cachedImages, decodedStats.retiredBytes,
+					decodedStats.retiredImages, decodedStats.foregroundQueued,
+					decodedStats.backgroundQueued, "decoded");
+				diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
+					decodedStats.foregroundActive, decodedStats.backgroundActive, 0, 0, 0, 0,
+					"decoded_active");
+				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+					displayStats.cachedBytes, displayStats.preparedBytes,
+					displayStats.borrowedBytes, displayStats.retiredBytes,
+					displayStats.cachedImages, displayStats.preparedImages, "display");
+				diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
+					displayStats.foregroundQueued, displayStats.backgroundQueued,
+					displayStats.foregroundActive, displayStats.backgroundActive,
+					displayStats.retiredImages, displayStats.borrowedImages, "display");
+				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+					displayStats.borrowedBytes, displayStats.borrowedImages,
+					displayStats.retiredBytes, displayStats.retiredImages,
+					displayStats.activeRetiredBytes, 0, "display_lifetime");
+				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+					thumbnailBytes, thumbnailCache_.size(), thumbnailStats.completedBytes,
+					thumbnailStats.completedImages, thumbnailStats.retiredSourceBytes,
+					thumbnailStats.retiredSources, "thumbnail");
+				diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
+					thumbnailStats.queued, thumbnailStats.active,
+					thumbnailStats.retainedSourceBytes, thumbnailStats.retiredSourceBytes,
+					thumbnailStats.completedImages, thumbnailStats.retiredSources,
+					"thumbnail");
+				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+					cacheBudget_->Used(), cacheBudget_->Capacity(), displayTextureCacheBytes_,
+					thumbnailBytes, displayTextureCache_.size(), thumbnailCache_.size(), "viewer");
+			}
+		}
 	}
 
 	void Render() {
@@ -8875,6 +9050,7 @@ private:
 	std::unordered_map<std::string, JpegDimensionCacheEntry> jpegDimensionCache_;
 	std::size_t displayTextureCacheBytes_ = 0;
 	std::uint64_t displayTextureUseCounter_ = 0;
+	std::uint64_t lastPerfSnapshotUs_ = 0;
 	jpegview_linux::DecodedImageCache::ImagePtr currentDecoded_;
 	std::size_t currentAnimationFrame_ = 0;
 	std::optional<jpegview_linux::DisplayImageRequest> currentDisplayRequest_;

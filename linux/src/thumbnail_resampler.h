@@ -1,6 +1,7 @@
 #pragma once
 
 #include "display_image_cache.h"
+#include "perf_diagnostics.h"
 
 #include <chrono>
 #include <cstddef>
@@ -32,6 +33,7 @@ struct ThumbnailPreparationRequest {
 	int maximumWidth = 0;
 	int maximumHeight = 0;
 	std::size_t priority = 0;
+	PerfWorkClass workClass = PerfWorkClass::VisibleThumbnail;
 
 	bool Valid() const;
 };
@@ -41,7 +43,18 @@ struct PreparedThumbnailImage {
 	int width = 0;
 	int height = 0;
 	bool hasTransparency = false;
+	PerfWorkClass workClass = PerfWorkClass::VisibleThumbnail;
 	std::vector<std::uint8_t> bgra;
+};
+
+struct ThumbnailPreparationDiagnostics {
+	std::size_t queued = 0;
+	std::size_t active = 0;
+	std::size_t completedBytes = 0;
+	std::size_t completedImages = 0;
+	std::size_t retiredSourceBytes = 0;
+	std::size_t retiredSources = 0;
+	std::size_t retainedSourceBytes = 0;
 };
 
 // Derives thumbnails from display-ready neighbors on one very-low-priority
@@ -62,6 +75,7 @@ public:
 	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount);
 	void Clear();
 	bool HasPendingWork() const;
+	ThumbnailPreparationDiagnostics GetDiagnostics() const;
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);
 
 private:
