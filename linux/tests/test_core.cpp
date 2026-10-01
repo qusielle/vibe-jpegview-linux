@@ -7027,6 +7027,19 @@ void TestThumbnailCacheSchedulingAndEviction() {
 		external.Store("e") == std::vector<std::string>({"b"}) && external.IsCached("c") &&
 		external.IsCached("e"),
 		"thumbnail scheduler did not account for externally prepared pixels");
+
+	jpegview_linux::ThumbnailCacheScheduler failed;
+	failed.Prepare({"bad", "good"}, 0, 2);
+	const auto failedRequest = failed.Next(0);
+	Expect(failedRequest.has_value() && failedRequest->key == "bad",
+		"thumbnail failure fixture did not select its first source");
+	failed.Fail(*failedRequest, 0, 0);
+	Expect(failed.IsFailed("bad") && !failed.IsCached("bad") &&
+		failed.Next(0).has_value() && !failed.Next(0).has_value(),
+		"thumbnail decode failure was recorded as cached pixels or retried in the same plan");
+	failed.Prepare({"good"}, 0, 2);
+	Expect(!failed.IsFailed("bad") && failed.Next(0).has_value(),
+		"thumbnail failure state retained a source removed from the active list");
 }
 
 void TestThumbnailBackgroundPreparation() {
@@ -7042,22 +7055,32 @@ void TestThumbnailBackgroundPreparation() {
 	source->hasTransparency = true;
 	jpegview_linux::ThumbnailPreparationWorker realWorker;
 	Expect(realWorker.Request({"scaled", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::DistantSpeculation}),
+		jpegview_linux::PerfWorkClass::DistantSpeculation, {}, 0, 0}),
 		"thumbnail worker rejected valid display-ready pixels");
 	Expect(realWorker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not finish source-area downsampling");
 	const auto scaled = realWorker.TakeCompleted(1);
-	Expect(scaled.size() == 1 && scaled[0]->key == "scaled" &&
-		scaled[0]->width == 2 && scaled[0]->height == 2 && scaled[0]->bgra.size() == 16 &&
-		scaled[0]->hasTransparency && scaled[0]->workClass ==
-			jpegview_linux::PerfWorkClass::DistantSpeculation,
-		"thumbnail worker returned incorrect derived pixels");
+	const std::string scaledResultKey = scaled.empty() ? "<empty>" : scaled[0].key;
+	const bool hasScaledPixels = !scaled.empty() && static_cast<bool>(scaled[0].image);
+	Expect(scaled.size() == 1 && scaled[0].image && scaled[0].key == "scaled",
+		"thumbnail worker did not return its display-source request (count=" +
+		std::to_string(scaled.size()) + ", key=" + scaledResultKey + ", pixels=" +
+		(hasScaledPixels ? "yes" : "no") + ")");
+	Expect(scaled.size() == 1 && scaled[0].image &&
+		scaled[0].image->width == 2 && scaled[0].image->height == 2 &&
+		scaled[0].image->bgra.size() == 16,
+		"thumbnail worker returned incorrect derived pixel dimensions");
+	Expect(scaled.size() == 1 && scaled[0].image && scaled[0].image->hasTransparency &&
+		scaled[0].workClass ==
+		jpegview_linux::PerfWorkClass::DistantSpeculation,
+		"thumbnail worker lost transparency or work-class metadata");
 	Expect(realWorker.Request({"scaled-visible", source, 2, 2, 0,
-		jpegview_linux::PerfWorkClass::VisibleThumbnail}) &&
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}) &&
 		realWorker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not process the visible-row attribution fixture");
 	const auto visibleScaled = realWorker.TakeCompleted(1);
-	Expect(visibleScaled.size() == 1 && visibleScaled[0]->workClass ==
+	Expect(visibleScaled.size() == 1 && visibleScaled[0].image &&
+		visibleScaled[0].workClass ==
 		jpegview_linux::PerfWorkClass::VisibleThumbnail,
 		"thumbnail worker did not retain visible-row attribution through resampling");
 
@@ -7083,7 +7106,8 @@ void TestThumbnailBackgroundPreparation() {
 			result->bgra.assign(4, 255);
 			return result;
 		});
-	Expect(prioritized.Request({"blocker", source, 2, 2, 9}),
+	Expect(prioritized.Request({"blocker", source, 2, 2, 9,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}),
 		"thumbnail worker rejected its blocking request");
 	bool blockerStartedInTime = false;
 	{
@@ -7092,8 +7116,10 @@ void TestThumbnailBackgroundPreparation() {
 			[&] { return blockerStarted; });
 	}
 	const bool queuedNeighbors = blockerStartedInTime &&
-		prioritized.Request({"far", source, 2, 2, 5}) &&
-		prioritized.Request({"near", source, 2, 2, 1});
+		prioritized.Request({"far", source, 2, 2, 5,
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}) &&
+		prioritized.Request({"near", source, 2, 2, 1,
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0});
 	{
 		std::lock_guard<std::mutex> lock(orderMutex);
 		releaseBlocker = true;
@@ -7139,8 +7165,10 @@ void TestThumbnailBackgroundPreparation() {
 			result->bgra.assign(4, 255);
 			return result;
 		});
-	Expect(retainedWorker.Request({"active-source", activeSource, 2, 2, 0}) &&
-		retainedWorker.Request({"queued-source", queuedSource, 2, 2, 1}),
+	Expect(retainedWorker.Request({"active-source", activeSource, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}) &&
+		retainedWorker.Request({"queued-source", queuedSource, 2, 2, 1,
+			jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 0, 0}),
 		"thumbnail worker rejected retained-source accounting fixtures");
 	bool retainedWorkerReachedBarrier = false;
 	{
@@ -7179,7 +7207,8 @@ void TestThumbnailBackgroundPreparation() {
 			result->key = request.key;
 			return result;
 		});
-	Expect(cancellable.Request({"stale", source, 2, 2, 0}),
+	Expect(cancellable.Request({"stale", source, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 1, 4}),
 		"thumbnail worker rejected cancellation fixture");
 	bool staleStartedInTime = false;
 	{
@@ -7197,6 +7226,145 @@ void TestThumbnailBackgroundPreparation() {
 	Expect(cancellable.WaitUntilIdle(std::chrono::seconds(2)) &&
 		cancellable.TakeCompleted(1).empty(),
 		"cleared thumbnail work published a stale result");
+	Expect(cancellable.Request({"stale", source, 2, 2, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, {}, 2, 5}) &&
+		cancellable.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker rejected replacement work after cancellation");
+	const auto replaced = cancellable.TakeCompleted(1);
+	Expect(replaced.size() == 1 && replaced.front().image &&
+		jpegview_linux::ThumbnailPreparationResultMatches(
+			replaced.front(), 2, 5, "stale", 2, 2) &&
+		!jpegview_linux::ThumbnailPreparationResultMatches(
+			replaced.front(), 1, 5, "stale", 2, 2) &&
+		!jpegview_linux::ThumbnailPreparationResultMatches(
+			replaced.front(), 2, 4, "stale", 2, 2) &&
+		!jpegview_linux::ThumbnailPreparationResultMatches(
+			replaced.front(), 2, 5, "stale", 3, 2),
+		"thumbnail worker result did not preserve request/list/geometry identity");
+}
+
+void TestThumbnailFileBackedPreparationAndShutdown() {
+	TemporaryDirectory temporary;
+	const fs::path jpeg = temporary.path() / "file-backed.jpg";
+	std::vector<std::uint8_t> pixels(4u * 4u * 4u, 255);
+	for (int y = 0; y < 4; ++y) {
+		for (int x = 0; x < 4; ++x) {
+			const std::size_t offset = (static_cast<std::size_t>(y) * 4 + x) * 4;
+			pixels[offset] = static_cast<std::uint8_t>(x * 40);
+			pixels[offset + 1] = static_cast<std::uint8_t>(y * 40);
+		}
+	}
+	ImageWriteOptions options;
+	options.jpegQuality = 100;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(jpeg, pixels.data(), 4, 4, options, error),
+		"cannot create file-backed thumbnail JPEG fixture: " + error);
+	const fs::path ppm = temporary.path() / "file-backed.ppm";
+	WriteText(ppm, "P3\n4 2\n255\n255 0 0 0 255 0 0 0 255 255 255 0\n"
+		"0 255 255 255 0 255 128 128 128 0 0 0\n");
+	const fs::path invalid = temporary.path() / "invalid.png";
+	WriteText(invalid, "not an image");
+
+	const auto fileRequest = [](const fs::path& source, int maximumWidth,
+		int maximumHeight, std::uint64_t generation, std::uint64_t listIdentity) {
+		jpegview_linux::ThumbnailPreparationRequest request;
+		request.key = source.string();
+		request.maximumWidth = maximumWidth;
+		request.maximumHeight = maximumHeight;
+		request.workClass = jpegview_linux::PerfWorkClass::VisibleThumbnail;
+		request.logicalSource = source;
+		request.requestGeneration = generation;
+		request.fileListIdentity = listIdentity;
+		return request;
+	};
+	jpegview_linux::ThumbnailPreparationWorker worker;
+	Expect(worker.Request(fileRequest(jpeg, 2, 2, 11, 7)) &&
+		worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not decode a file-backed JPEG request");
+	auto result = worker.TakeCompleted(1);
+	Expect(result.size() == 1 && result.front().image &&
+		result.front().image->width == 2 && result.front().image->height == 2 &&
+		result.front().image->bgra.size() == 16 &&
+		jpegview_linux::ThumbnailPreparationResultMatches(
+			result.front(), 11, 7, jpeg.string(), 2, 2),
+		"file-backed JPEG thumbnail lost its reduced decode or request identity");
+	Expect(worker.Request(fileRequest(ppm, 2, 1, 12, 7)) &&
+		worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not decode a file-backed non-JPEG request");
+	result = worker.TakeCompleted(1);
+	Expect(result.size() == 1 && result.front().image &&
+		result.front().image->width == 2 && result.front().image->height == 1 &&
+		result.front().image->bgra.size() == 8,
+		"file-backed non-JPEG thumbnail was not resampled to its target geometry");
+	Expect(worker.Request(fileRequest(invalid, 2, 2, 13, 7)) &&
+		worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker rejected an invalid-source request before reporting failure");
+	result = worker.TakeCompleted(1);
+	Expect(result.size() == 1 && !result.front().image &&
+		jpegview_linux::ThumbnailPreparationResultMatches(
+			result.front(), 13, 7, invalid.string(), 2, 2),
+		"invalid source was not returned as a distinct decode failure");
+
+	std::mutex shutdownMutex;
+	std::condition_variable shutdownChanged;
+	bool activeReadStarted = false;
+	bool releaseActiveRead = false;
+	bool destroyStarted = false;
+	bool destroyFinished = false;
+	auto activeWorker = std::make_unique<jpegview_linux::ThumbnailPreparationWorker>(
+		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			std::unique_lock<std::mutex> lock(shutdownMutex);
+			activeReadStarted = true;
+			shutdownChanged.notify_all();
+			shutdownChanged.wait(lock, [&] { return releaseActiveRead; });
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = request.key;
+			image->width = image->height = 1;
+			image->bgra.assign(4, 255);
+			return image;
+		});
+	Expect(activeWorker->Request({"shutdown-active", nullptr, 1, 1, 0,
+		jpegview_linux::PerfWorkClass::VisibleThumbnail, "/virtual/shutdown-active", 1, 1}),
+		"thumbnail worker rejected the active-shutdown fixture");
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		Expect(shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return activeReadStarted; }),
+			"active thumbnail request did not reach its shutdown barrier");
+	}
+	std::thread destroyer([&] {
+		{
+			std::lock_guard<std::mutex> lock(shutdownMutex);
+			destroyStarted = true;
+		}
+		shutdownChanged.notify_all();
+		activeWorker.reset();
+		{
+			std::lock_guard<std::mutex> lock(shutdownMutex);
+			destroyFinished = true;
+		}
+		shutdownChanged.notify_all();
+	});
+	bool destroyStartedInTime = false;
+	bool destroyReturnedBeforeRelease = false;
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		destroyStartedInTime = shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return destroyStarted; });
+		destroyReturnedBeforeRelease = shutdownChanged.wait_for(lock,
+			std::chrono::milliseconds(100), [&] { return destroyFinished; });
+		releaseActiveRead = true;
+	}
+	shutdownChanged.notify_all();
+	bool destroyFinishedInTime = false;
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		destroyFinishedInTime = shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return destroyFinished; });
+	}
+	destroyer.join();
+	Expect(destroyStartedInTime && !destroyReturnedBeforeRelease && destroyFinishedInTime,
+		"thumbnail worker destruction did not join an active request without event-loop work");
 }
 
 void TestThumbnailDownsamplingAntialiasing() {
@@ -8358,6 +8526,8 @@ int main() {
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
 	RunTest("thumbnail-cache-scheduling-and-eviction", TestThumbnailCacheSchedulingAndEviction, failures);
 	RunTest("thumbnail-background-preparation", TestThumbnailBackgroundPreparation, failures);
+	RunTest("thumbnail-file-backed-preparation-and-shutdown",
+		TestThumbnailFileBackedPreparationAndShutdown, failures);
 	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);
 	RunTest("grayscale-spectrum-calculation-and-scaling", TestGrayscaleSpectrumCalculationAndScaling, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);

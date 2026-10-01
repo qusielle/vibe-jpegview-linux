@@ -1863,6 +1863,7 @@ private:
 
 	void ClearThumbnailCache() {
 		thumbnailPreparation_.Clear();
+		thumbnailUploadRetry_.reset();
 		for (auto& cached : thumbnailCache_) {
 			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
 		}
@@ -1881,7 +1882,13 @@ private:
 
 	void PrepareThumbnailPreload() {
 		if (!thumbnailPanelVisible_ || fileList_.Empty()) {
+			if (fileList_.Empty() && !thumbnailActiveFileKeys_.empty()) {
+				thumbnailActiveFileKeys_.clear();
+				++thumbnailFileListIdentity_;
+				if (thumbnailFileListIdentity_ == 0) ++thumbnailFileListIdentity_;
+			}
 			thumbnailPreparation_.Clear();
+			thumbnailUploadRetry_.reset();
 			EvictThumbnails(thumbnailScheduler_.Prepare({}, 0, thumbnailCache_.size()));
 			return;
 		}
@@ -1889,6 +1896,23 @@ private:
 		keys.reserve(fileList_.Files().size());
 		for (const fs::path& path : fileList_.Files()) {
 			keys.push_back(path.string());
+		}
+		if (keys != thumbnailActiveFileKeys_) {
+			thumbnailActiveFileKeys_ = keys;
+			++thumbnailFileListIdentity_;
+			if (thumbnailFileListIdentity_ == 0) ++thumbnailFileListIdentity_;
+			thumbnailPreparation_.Clear();
+			thumbnailUploadRetry_.reset();
+		}
+		const SDL_Rect panel = ThumbnailPanelRect();
+		const int rowHeight = jpegview_linux::ThumbnailRowHeight(
+			panel.w, kThumbnailVerticalMargin);
+		const int targetWidth = panel.w;
+		const int targetHeight = rowHeight - kThumbnailVerticalMargin * 2 - 1;
+		if (targetWidth != thumbnailTargetWidth_ || targetHeight != thumbnailTargetHeight_) {
+			ClearThumbnailCache();
+			thumbnailTargetWidth_ = targetWidth;
+			thumbnailTargetHeight_ = targetHeight;
 		}
 		// Thumbnails are intentionally outside the large-image cache budget and
 		// are retained for every file in the active list once generated.
@@ -1919,95 +1943,124 @@ private:
 			jpegview_linux::ThumbnailIndexVisible(fileList_.Size(), current, index,
 				panel.h, rowHeight) ? jpegview_linux::PerfWorkClass::VisibleThumbnail :
 				jpegview_linux::PerfWorkClass::DistantSpeculation;
-		(void)thumbnailPreparation_.Request({key, prepared, panel.w,
-			rowHeight - kThumbnailVerticalMargin * 2 - 1, priority, workClass});
+		jpegview_linux::ThumbnailPreparationRequest request;
+		request.key = key;
+		request.source = prepared;
+		request.maximumWidth = panel.w;
+		request.maximumHeight = rowHeight - kThumbnailVerticalMargin * 2 - 1;
+		request.priority = priority;
+		request.workClass = workClass;
+		request.requestGeneration = thumbnailScheduler_.Generation();
+		request.fileListIdentity = thumbnailFileListIdentity_;
+		(void)thumbnailPreparation_.Request(request);
 	}
 
 	void TickThumbnailPreload(bool allowIndependentDecode) {
 		if (!thumbnailPanelVisible_) return;
 		const Uint32 now = SDL_GetTicks();
-		for (const auto& prepared : thumbnailPreparation_.TakeCompleted(1)) {
-			if (!prepared || prepared->key.empty() ||
-				thumbnailCache_.find(prepared->key) != thumbnailCache_.end()) continue;
-			const auto active = std::find_if(fileList_.Files().begin(), fileList_.Files().end(),
-				[&prepared](const fs::path& path) { return path.string() == prepared->key; });
-			if (active == fileList_.Files().end()) continue;
-			jpegview_linux::PerfContextScope workContext(prepared->workClass,
-				jpegview_linux::PerfExecution::EventThread);
-			ThumbnailCacheEntry cached;
-			cached.texture = CreateTexture(prepared->bgra, prepared->width,
-				prepared->height, prepared->hasTransparency);
-			cached.width = prepared->width;
-			cached.height = prepared->height;
-			cached.hasTransparency = prepared->hasTransparency;
-			thumbnailCache_.emplace(prepared->key, std::move(cached));
-			EvictThumbnails(thumbnailScheduler_.Store(prepared->key));
-		}
-		if (!allowIndependentDecode || thumbnailPreparation_.HasPendingWork()) return;
-		const std::optional<jpegview_linux::ThumbnailLoadRequest> request = thumbnailScheduler_.Next(now);
-		if (!request.has_value() || request->fileIndex >= fileList_.Files().size() ||
-			fileList_.Files()[request->fileIndex].string() != request->key) return;
-		const fs::path& path = fileList_.Files()[request->fileIndex];
 		const SDL_Rect panel = ThumbnailPanelRect();
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
-		const jpegview_linux::PerfWorkClass workClass =
-			jpegview_linux::ThumbnailIndexVisible(fileList_.Size(), fileList_.CurrentIndex(),
-				request->fileIndex, panel.h, rowHeight) ?
-				jpegview_linux::PerfWorkClass::VisibleThumbnail :
-				jpegview_linux::PerfWorkClass::DistantSpeculation;
-		jpegview_linux::PerfContextScope workContext(workClass,
-			jpegview_linux::PerfExecution::EventThread);
-		ThumbnailCacheEntry cached;
-		jpegview_linux::DecodedImageCache::ImagePtr decoded;
-		jpegview_linux::ThumbnailSize size;
-		if (jpegview_linux::IsJpegPath(path)) {
-			int sourceWidth = 0;
-			int sourceHeight = 0;
-			std::string errorMessage;
-			if (JpegDimensions(path, sourceWidth, sourceHeight, errorMessage)) {
-				size = jpegview_linux::FitThumbnailSize(sourceWidth, sourceHeight, panel.w,
-					rowHeight - kThumbnailVerticalMargin * 2 - 1);
-				auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
-				int decodedSourceWidth = 0;
-				int decodedSourceHeight = 0;
-				if (size.width > 0 && size.height > 0 &&
-					jpegview_linux::DecodeJpegForDisplay(path, size.width, size.height, *loaded,
-						decodedSourceWidth, decodedSourceHeight, errorMessage) &&
-					!loaded->frames.empty()) decoded = std::move(loaded);
+		const int targetWidth = panel.w;
+		const int targetHeight = rowHeight - kThumbnailVerticalMargin * 2 - 1;
+		if (targetWidth != thumbnailTargetWidth_ || targetHeight != thumbnailTargetHeight_) {
+			PrepareThumbnailPreload();
+			return;
+		}
+		const auto resultIsCurrent = [&](const jpegview_linux::ThumbnailPreparationResult& result,
+			std::size_t* activeIndex = nullptr) {
+			if (result.key.empty() || !jpegview_linux::ThumbnailPreparationResultMatches(result,
+				thumbnailScheduler_.Generation(), thumbnailFileListIdentity_, result.key,
+				targetWidth, targetHeight)) return false;
+			const auto active = std::find_if(fileList_.Files().begin(), fileList_.Files().end(),
+				[&result](const fs::path& path) { return path.string() == result.key; });
+			if (active == fileList_.Files().end()) return false;
+			if (activeIndex != nullptr) {
+				*activeIndex = static_cast<std::size_t>(
+					std::distance(fileList_.Files().begin(), active));
 			}
-		} else {
-			decoded = imageCache_.Find(path);
-			if (!decoded) {
-				auto loaded = std::make_shared<jpegview_linux::DecodedImage>();
-				std::string errorMessage;
-				if (jpegview_linux::DecodeImage(path, *loaded, errorMessage) &&
-					!loaded->frames.empty()) {
-					imageCache_.Store(path, loaded);
-					decoded = std::move(loaded);
+			return true;
+		};
+		const auto tryUploadPending = [&]() {
+			if (!thumbnailUploadRetry_) return false;
+			if (!resultIsCurrent(*thumbnailUploadRetry_) || !thumbnailUploadRetry_->image ||
+				thumbnailUploadRetry_->image->key != thumbnailUploadRetry_->key) {
+				thumbnailUploadRetry_.reset();
+				return false;
+			}
+			if (static_cast<std::int32_t>(now - thumbnailUploadRetryTick_) < 0) return true;
+			const jpegview_linux::PreparedThumbnailImage& prepared =
+				*thumbnailUploadRetry_->image;
+			jpegview_linux::PerfContextScope workContext(prepared.workClass,
+				jpegview_linux::PerfExecution::EventThread);
+			ThumbnailCacheEntry cached;
+			cached.texture = CreateTexture(prepared.bgra, prepared.width,
+				prepared.height, prepared.hasTransparency);
+			if (cached.texture == nullptr) {
+				thumbnailUploadRetryTick_ = now + 50;
+				return true;
+			}
+			cached.width = prepared.width;
+			cached.height = prepared.height;
+			cached.hasTransparency = prepared.hasTransparency;
+			thumbnailCache_.insert_or_assign(thumbnailUploadRetry_->key, std::move(cached));
+			EvictThumbnails(thumbnailScheduler_.Store(thumbnailUploadRetry_->key));
+			thumbnailUploadRetry_.reset();
+			return true;
+		};
+		if (thumbnailUploadRetry_) {
+			(void)tryUploadPending();
+			return;
+		}
+		const auto completed = thumbnailPreparation_.TakeCompleted(1);
+		if (!completed.empty()) {
+			const jpegview_linux::ThumbnailPreparationResult& result = completed.front();
+			std::size_t activeIndex = 0;
+			if (resultIsCurrent(result, &activeIndex)) {
+				if (!result.image) {
+					thumbnailScheduler_.Fail({activeIndex, result.key,
+						result.requestGeneration}, now);
+				} else if (thumbnailCache_.find(result.key) != thumbnailCache_.end()) {
+					EvictThumbnails(thumbnailScheduler_.Store(result.key));
+				} else {
+					thumbnailUploadRetry_ = result;
+					thumbnailUploadRetryTick_ = now;
+					(void)tryUploadPending();
+					return;
 				}
 			}
 		}
-		if (decoded && !decoded->frames.empty()) {
-			const jpegview_linux::DecodedFrame& frame = decoded->frames.front();
-			if (size.width <= 0 || size.height <= 0) {
-				size = jpegview_linux::FitThumbnailSize(frame.width, frame.height, panel.w,
-					rowHeight - kThumbnailVerticalMargin * 2 - 1);
-			}
-			Image thumbnail;
-			std::vector<std::uint8_t> thumbnailPixels;
-			if (size.width > 0 && size.height > 0 &&
-				jpegview_linux::DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
-					size.width, size.height, thumbnailPixels) &&
-				thumbnail.StoreBGRA(thumbnailPixels.data(), size.width, size.height,
-					frame.hasTransparency)) {
-				cached.texture = CreateTexture(thumbnail);
-				cached.width = size.width;
-				cached.height = size.height;
-				cached.hasTransparency = frame.hasTransparency;
-			}
+		if (!allowIndependentDecode || thumbnailPreparation_.HasPendingWork()) return;
+		const std::optional<jpegview_linux::ThumbnailLoadRequest> request =
+			thumbnailScheduler_.Next(now);
+		if (!request.has_value() || request->fileIndex >= fileList_.Files().size() ||
+			fileList_.Files()[request->fileIndex].string() != request->key) return;
+		const auto cached = thumbnailCache_.find(request->key);
+		if (cached != thumbnailCache_.end() && cached->second.texture != nullptr) {
+			EvictThumbnails(thumbnailScheduler_.Store(request->key));
+			return;
 		}
-		thumbnailCache_.emplace(request->key, std::move(cached));
-		EvictThumbnails(thumbnailScheduler_.Complete(*request, now));
+		const fs::path& path = fileList_.Files()[request->fileIndex];
+		const std::size_t current = fileList_.CurrentIndex();
+		const std::size_t distance = request->fileIndex > current ?
+			request->fileIndex - current : current - request->fileIndex;
+		const std::size_t priority = distance * 2 + (request->fileIndex > current ? 1 : 0);
+		const jpegview_linux::PerfWorkClass workClass =
+			jpegview_linux::ThumbnailIndexVisible(fileList_.Size(), current,
+				request->fileIndex, panel.h, rowHeight) ?
+			jpegview_linux::PerfWorkClass::VisibleThumbnail :
+			jpegview_linux::PerfWorkClass::DistantSpeculation;
+		jpegview_linux::ThumbnailPreparationRequest fileRequest;
+		fileRequest.key = request->key;
+		fileRequest.maximumWidth = targetWidth;
+		fileRequest.maximumHeight = targetHeight;
+		fileRequest.priority = priority;
+		fileRequest.workClass = workClass;
+		fileRequest.logicalSource = path;
+		fileRequest.requestGeneration = request->generation;
+		fileRequest.fileListIdentity = thumbnailFileListIdentity_;
+		if (!thumbnailPreparation_.Request(fileRequest)) {
+			thumbnailScheduler_.Retry(*request);
+		}
 	}
 
 	void StartTransition(const Image& previousImage) {
@@ -9153,6 +9206,12 @@ private:
 	std::unordered_map<std::string, ThumbnailCacheEntry> thumbnailCache_;
 	jpegview_linux::ThumbnailCacheScheduler thumbnailScheduler_;
 	jpegview_linux::ThumbnailPreparationWorker thumbnailPreparation_;
+	std::optional<jpegview_linux::ThumbnailPreparationResult> thumbnailUploadRetry_;
+	std::vector<std::string> thumbnailActiveFileKeys_;
+	std::uint64_t thumbnailFileListIdentity_ = 0;
+	int thumbnailTargetWidth_ = 0;
+	int thumbnailTargetHeight_ = 0;
+	Uint32 thumbnailUploadRetryTick_ = 0;
 	std::unordered_map<std::string, TextTextureCacheEntry> textTextureCache_;
 	std::uint64_t textTextureUseCounter_ = 0;
 	std::vector<jpegview_linux::OpenWithApplication> openWithApplications_;

@@ -119,6 +119,11 @@ std::vector<std::string> ThumbnailCacheScheduler::Prepare(
 	queuePosition_ = 0;
 	capacity_ = capacity;
 	protectedKey_ = currentIndex < fileKeys.size() ? fileKeys[currentIndex] : std::string();
+	const std::unordered_set<std::string> activeKeys(fileKeys.begin(), fileKeys.end());
+	for (auto failed = failed_.begin(); failed != failed_.end();) {
+		if (activeKeys.find(*failed) == activeKeys.end()) failed = failed_.erase(failed);
+		else ++failed;
+	}
 	const std::vector<std::size_t> order = ThumbnailPreloadOrder(
 		fileKeys.size(), currentIndex, capacity);
 	queue_.reserve(order.size());
@@ -133,8 +138,8 @@ std::optional<ThumbnailLoadRequest> ThumbnailCacheScheduler::Next(std::uint32_t 
 	if (nextLoadTick_ != 0 && static_cast<std::int32_t>(now - nextLoadTick_) < 0) return std::nullopt;
 	while (queuePosition_ < queue_.size()) {
 		const ThumbnailLoadRequest request = queue_[queuePosition_++];
-		if (IsCached(request.key)) {
-			Touch(request.key);
+		if (IsCached(request.key) || IsFailed(request.key)) {
+			if (IsCached(request.key)) Touch(request.key);
 			continue;
 		}
 		return request;
@@ -145,13 +150,31 @@ std::optional<ThumbnailLoadRequest> ThumbnailCacheScheduler::Next(std::uint32_t 
 std::vector<std::string> ThumbnailCacheScheduler::Complete(
 	const ThumbnailLoadRequest& request, std::uint32_t now, std::uint32_t delayMs) {
 	if (request.generation != generation_) return {};
+	failed_.erase(request.key);
 	cache_[request.key].lastUsed = ++useCounter_;
 	nextLoadTick_ = now + delayMs;
 	return Trim();
 }
 
+void ThumbnailCacheScheduler::Fail(const ThumbnailLoadRequest& request,
+	std::uint32_t now, std::uint32_t delayMs) {
+	if (request.generation != generation_) return;
+	failed_.insert(request.key);
+	nextLoadTick_ = now + delayMs;
+}
+
+void ThumbnailCacheScheduler::Retry(const ThumbnailLoadRequest& request) {
+	if (request.generation != generation_ || IsCached(request.key) ||
+		IsFailed(request.key)) return;
+	for (std::size_t index = queuePosition_; index < queue_.size(); ++index) {
+		if (queue_[index].key == request.key) return;
+	}
+	queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(queuePosition_), request);
+}
+
 std::vector<std::string> ThumbnailCacheScheduler::Store(const std::string& key) {
 	if (key.empty()) return {};
+	failed_.erase(key);
 	cache_[key].lastUsed = ++useCounter_;
 	return Trim();
 }
@@ -166,6 +189,7 @@ void ThumbnailCacheScheduler::Clear() {
 	queue_.clear();
 	queuePosition_ = 0;
 	cache_.clear();
+	failed_.clear();
 	protectedKey_.clear();
 	capacity_ = 0;
 	nextLoadTick_ = 0;
@@ -173,6 +197,10 @@ void ThumbnailCacheScheduler::Clear() {
 
 bool ThumbnailCacheScheduler::IsCached(const std::string& key) const {
 	return cache_.find(key) != cache_.end();
+}
+
+bool ThumbnailCacheScheduler::IsFailed(const std::string& key) const {
+	return failed_.find(key) != failed_.end();
 }
 
 std::vector<std::string> ThumbnailCacheScheduler::Trim() {

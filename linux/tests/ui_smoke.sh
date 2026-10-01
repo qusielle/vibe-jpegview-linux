@@ -497,10 +497,10 @@ if [ -n "$perf_trace_path" ]; then
 	thumbnail_trace_seen=0
 	for _ in $(seq 1 240); do
 		if awk -F, '
-			$2 == "source_read" && $4 == "event_thread" && $6 == "visible_thumbnail" { visible_read = 1 }
-			$2 == "source_read" && $4 == "event_thread" && $6 == "distant_speculation" { distant_read = 1 }
-			$2 == "resampling" && $4 == "event_thread" && $6 == "visible_thumbnail" { visible_resample = 1 }
-			$2 == "resampling" && $4 == "event_thread" && $6 == "distant_speculation" { distant_resample = 1 }
+			$2 == "source_read" && $4 == "worker_thread" && $6 == "visible_thumbnail" { visible_read = 1 }
+			$2 == "source_read" && $4 == "worker_thread" && $6 == "distant_speculation" { distant_read = 1 }
+			$2 == "resampling" && $4 == "worker_thread" && $6 == "visible_thumbnail" { visible_resample = 1 }
+			$2 == "resampling" && $4 == "worker_thread" && $6 == "distant_speculation" { distant_resample = 1 }
 			$2 == "texture_upload" && $4 == "event_thread" && $6 == "visible_thumbnail" { visible_upload = 1 }
 			$2 == "texture_upload" && $4 == "event_thread" && $6 == "distant_speculation" { distant_upload = 1 }
 			END { exit !(visible_read && distant_read && visible_resample && distant_resample && visible_upload && distant_upload) }
@@ -2751,5 +2751,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 	grep -q '^transparency_pattern=white$' \
 		"$transparency_config/jpegview-linux/settings.conf"
 fi
+
+"$SCRIPT_DIR/thumbnail_panning_smoke.sh" "$BINARY"
 
 echo "UI smoke tests passed"
