@@ -91,6 +91,12 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   work. Source or owner replacement still cancels that work.
 - Do not make worker destruction depend on the renderer or event loop continuing to run. Join workers
   safely during owner destruction.
+- Every transition that can make a worker condition-variable predicate true must update state under
+  its mutex and notify waiters. Cover promotion, capacity release, cancellation, clear, and shutdown;
+  test admission and shutdown without renderer polling or event-loop progress.
+- Bounded completion admission and delivery must use compatible priority rules. Capacity-blocked work
+  must not prevent ready results from releasing capacity, and cached refills must yield to startable
+  queued work of equal or higher priority.
 - Preserve the single configured large-image cache budget. Thumbnail retention is independent and all
   thumbnails for the active file list should remain available; invalidate them only when their source
   identity or required geometry changes.

@@ -1769,10 +1769,16 @@ private:
 		}
 	}
 
+	void DiscardThumbnailUploadRetry() {
+		if (!thumbnailUploadRetry_) return;
+		thumbnailPreparation_.Retire(thumbnailUploadRetry_->image);
+		thumbnailUploadRetry_.reset();
+	}
+
 	void PauseThumbnailPreparation() {
 		if (thumbnailUploadRetry_) {
 			RetryThumbnail(*thumbnailUploadRetry_);
-			thumbnailUploadRetry_.reset();
+			DiscardThumbnailUploadRetry();
 		}
 		RetryCancelledThumbnails(thumbnailPreparation_.Cancel({
 			jpegview_linux::PerfWorkClass::VisibleThumbnail,
@@ -2506,7 +2512,7 @@ private:
 
 	void ClearThumbnailCache() {
 		thumbnailPreparation_.Clear();
-		thumbnailUploadRetry_.reset();
+		DiscardThumbnailUploadRetry();
 		DestroyThumbnailTextures();
 		thumbnailScheduler_.Clear();
 		thumbnailCatalogRevisionTracker_.Reset();
@@ -2534,7 +2540,7 @@ private:
 			thumbnailCatalogRevisionTracker_.MarkUpdated(listRevision, descriptorRevision);
 			if (thumbnailScheduler_.CatalogRevision() != previousCatalogRevision) {
 				thumbnailPreparation_.Clear();
-				thumbnailUploadRetry_.reset();
+				DiscardThumbnailUploadRetry();
 			}
 		}
 		EvictThumbnails(thumbnailScheduler_.SetSourceCurrent(fileList_.CurrentIndex()));
@@ -2549,7 +2555,7 @@ private:
 		const int targetHeight = rowHeight - kThumbnailVerticalMargin * 2 - 1;
 		if (targetWidth != thumbnailTargetWidth_ || targetHeight != thumbnailTargetHeight_) {
 			thumbnailPreparation_.Clear();
-			thumbnailUploadRetry_.reset();
+			DiscardThumbnailUploadRetry();
 			DestroyThumbnailTextures();
 			(void)thumbnailScheduler_.SetGeometry(targetWidth, targetHeight);
 			thumbnailTargetWidth_ = targetWidth;
@@ -2625,7 +2631,7 @@ private:
 			if (!thumbnailUploadRetry_) return false;
 			std::size_t activeIndex = 0;
 			if (!resultIsCurrent(*thumbnailUploadRetry_, &activeIndex)) {
-				thumbnailUploadRetry_.reset();
+				DiscardThumbnailUploadRetry();
 				return false;
 			}
 			const bool uploadPermitted = thumbnailUploadRetry_->workClass ==
@@ -2634,7 +2640,7 @@ private:
 				workPlan.Allows(thumbnailUploadRetry_->workClass);
 			if (!uploadPermitted) {
 				RetryThumbnail(*thumbnailUploadRetry_);
-				thumbnailUploadRetry_.reset();
+				DiscardThumbnailUploadRetry();
 				return false;
 			}
 			if (thumbnailUploadRetry_->cancelled) {
@@ -2643,12 +2649,12 @@ private:
 					thumbnailUploadRetry_->geometryRevision,
 					thumbnailUploadRetry_->maximumWidth,
 					thumbnailUploadRetry_->maximumHeight});
-				thumbnailUploadRetry_.reset();
+				DiscardThumbnailUploadRetry();
 				return true;
 			}
 			if (!thumbnailUploadRetry_->image ||
 				thumbnailUploadRetry_->image->key != thumbnailUploadRetry_->key) {
-				thumbnailUploadRetry_.reset();
+				DiscardThumbnailUploadRetry();
 				return false;
 			}
 			if (static_cast<std::int32_t>(now - thumbnailUploadRetryTick_) < 0) return true;
@@ -2668,7 +2674,7 @@ private:
 			cached.hasTransparency = prepared.hasTransparency;
 			thumbnailCache_.insert_or_assign(thumbnailUploadRetry_->key, std::move(cached));
 			EvictThumbnails(thumbnailScheduler_.Store(thumbnailUploadRetry_->key));
-			thumbnailUploadRetry_.reset();
+			DiscardThumbnailUploadRetry();
 			return true;
 		};
 		if (thumbnailUploadRetry_ && tryUploadPending()) return;
@@ -2698,6 +2704,7 @@ private:
 					return;
 				}
 			}
+			thumbnailPreparation_.Retire(result.image);
 		}
 		if (!allowIndependentDecode || thumbnailPreparation_.HasPendingWork()) return;
 		const std::vector<jpegview_linux::ThumbnailLoadRequest> requests =

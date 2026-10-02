@@ -29,6 +29,25 @@ void RecordThumbnailCancellation(PerfWorkClass workClass,
 	PerfDiagnostics::Instance().Record(PerfMetric::Cancellation);
 }
 
+template <typename Left, typename Right>
+bool SameSharedOwnership(const Left& left, const Right& right) {
+	return !left.owner_before(right) && !right.owner_before(left);
+}
+
+bool EstimateThumbnailBytes(const ThumbnailPreparationRequest& request,
+	std::size_t& bytes) {
+	bytes = 0;
+	if (request.maximumWidth <= 0 || request.maximumHeight <= 0) return false;
+	const std::size_t width = static_cast<std::size_t>(request.maximumWidth);
+	const std::size_t height = static_cast<std::size_t>(request.maximumHeight);
+	const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+	if (width > maximum / height) return false;
+	const std::size_t pixels = width * height;
+	if (pixels > maximum / 4) return false;
+	bytes = pixels * 4;
+	return true;
+}
+
 } // namespace
 
 bool DownsampleThumbnailBgra(const std::vector<std::uint8_t>& source,
@@ -218,9 +237,26 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 } // namespace
 
 struct ThumbnailPreparationWorker::Impl {
+	using ImagePtr = ThumbnailPreparationWorker::ImagePtr;
+	using Result = ThumbnailPreparationWorker::Result;
+
 	struct Work {
 		ThumbnailPreparationRequest request;
 		std::uint64_t generation = 0;
+		std::size_t reservedBytes = 0;
+	};
+
+	struct Completion {
+		Result result;
+		std::size_t reservedBytes = 0;
+	};
+
+	struct RetirementState {
+		std::mutex mutex;
+		std::condition_variable available;
+		std::deque<ImagePtr> images;
+		std::weak_ptr<const PreparedThumbnailImage> retiringOwner;
+		bool stopping = false;
 	};
 
 	explicit Impl(Processor prepare) : processor(std::move(prepare)) {
@@ -236,6 +272,101 @@ struct ThumbnailPreparationWorker::Impl {
 		}
 		workAvailable.notify_one();
 		if (worker.joinable()) worker.join();
+		bool externallyOwnedRetirement = false;
+		{
+			std::lock_guard<std::mutex> lock(retirementState->mutex);
+			for (const ImagePtr& image : retirementState->images) {
+				if (image.use_count() > 1) externallyOwnedRetirement = true;
+			}
+			retirementState->stopping = true;
+		}
+		retirementState->available.notify_all();
+		if (retirementWorker.joinable()) {
+			if (externallyOwnedRetirement) retirementWorker.detach();
+			else retirementWorker.join();
+		}
+	}
+
+	static void Retire(const std::shared_ptr<RetirementState>& state) {
+		(void)::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 19);
+		for (;;) {
+			ImagePtr image;
+			{
+				std::unique_lock<std::mutex> lock(state->mutex);
+				const auto ready = std::find_if(state->images.begin(), state->images.end(),
+					[](const ImagePtr& candidate) { return candidate.use_count() == 1; });
+				if (ready == state->images.end()) {
+					if (state->images.empty()) {
+						if (state->stopping) return;
+						state->available.wait(lock, [&state] {
+							return state->stopping || !state->images.empty();
+						});
+					} else {
+						state->available.wait_for(lock, std::chrono::milliseconds(2));
+					}
+					continue;
+				}
+				image = std::move(*ready);
+				state->images.erase(ready);
+				state->retiringOwner = image;
+			}
+			image.reset();
+			{
+				std::lock_guard<std::mutex> lock(state->mutex);
+				state->retiringOwner.reset();
+			}
+		}
+	}
+
+	void QueueRetirement(ImagePtr image) noexcept {
+		if (!image) return;
+		const PreparedThumbnailImage* identity = image.get();
+		try {
+			{
+				std::lock_guard<std::mutex> lock(retirementState->mutex);
+				if (SameSharedOwnership(image, retirementState->retiringOwner) ||
+					std::any_of(retirementState->images.begin(), retirementState->images.end(),
+						[identity](const ImagePtr& queued) { return queued.get() == identity; })) return;
+				if (!retirementWorker.joinable()) {
+					retirementWorker = std::thread([state = retirementState] { Retire(state); });
+				}
+				retirementState->images.push_back(image);
+			}
+			retirementState->available.notify_one();
+		} catch (...) {
+			// Keep allocation failures from killing a worker. The source queue lock
+			// has been released before this last-owner fallback runs.
+			image.reset();
+		}
+	}
+
+	bool CanStart(const Work& work) const {
+		std::size_t bytes = 0;
+		return EstimateThumbnailBytes(work.request, bytes) &&
+			reservedCompletionBytes <= ThumbnailPreparationWorker::kMaximumCompletedBytes &&
+			bytes <= ThumbnailPreparationWorker::kMaximumCompletedBytes -
+				reservedCompletionBytes &&
+			reservedCompletionImages < ThumbnailPreparationWorker::kMaximumCompletedResults;
+	}
+
+	bool HasStartableWork() const {
+		return std::any_of(queue.begin(), queue.end(), [this](const Work& work) {
+			return CanStart(work);
+		});
+	}
+
+	std::deque<Work>::iterator FindStartableWork() {
+		auto best = queue.end();
+		for (auto work = queue.begin(); work != queue.end(); ++work) {
+			if (CanStart(*work) && (best == queue.end() ||
+				work->request.priority < best->request.priority)) best = work;
+		}
+		return best;
+	}
+
+	void ReleaseReservation(std::size_t bytes, bool releaseImage) {
+		reservedCompletionBytes -= std::min(reservedCompletionBytes, bytes);
+		if (releaseImage && reservedCompletionImages != 0) --reservedCompletionImages;
 	}
 
 	void Run() {
@@ -244,99 +375,164 @@ struct ThumbnailPreparationWorker::Impl {
 			Work work;
 			DisplayImageCache::ImagePtr retiredSource;
 			DisplayImageCache::ImagePtr completedSource;
+			std::deque<Work> abandonedWork;
+			std::deque<Completion> abandonedCompletions;
+			std::deque<DisplayImageCache::ImagePtr> abandonedSources;
+			bool stopNow = false;
+			bool hasWork = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
 				workAvailable.wait(lock, [this] {
-					return stopping || !queue.empty() || !retired.empty();
+					return stopping || !retired.empty() || HasStartableWork();
 				});
 				if (stopping) {
-					queue.clear();
-					retired.clear();
-					completed.clear();
-					return;
+					stopNow = true;
+					abandonedWork.swap(queue);
+					abandonedCompletions.swap(completed);
+					abandonedSources.swap(retired);
+					for (Completion& pending : abandonedCompletions) {
+						ReleaseReservation(pending.reservedBytes, true);
+					}
+					idle.notify_all();
+				} else {
+					if (!retired.empty()) {
+						retiredSource = std::move(retired.front());
+						retired.pop_front();
+					}
+					if (!retiredSource) {
+						auto selected = FindStartableWork();
+						if (selected == queue.end()) continue;
+						std::size_t reservedBytes = 0;
+						if (!EstimateThumbnailBytes(selected->request, reservedBytes) ||
+							reservedBytes > ThumbnailPreparationWorker::kMaximumCompletedBytes ||
+							!CanStart(*selected)) continue;
+						work = std::move(*selected);
+						queue.erase(selected);
+						hasWork = true;
+						work.reservedBytes = reservedBytes;
+						reservedCompletionBytes += work.reservedBytes;
+						++reservedCompletionImages;
+						activeCancellation = work.request.cancellation;
+						activeWorkClass = work.request.workClass;
+						activeRequest = &work.request;
+						activeCancellationReported = false;
+						activeSource = work.request.source;
+						++activeWorkers;
+					}
 				}
-				if (!retired.empty()) {
-					retiredSource = std::move(retired.front());
-					retired.pop_front();
-				}
-				if (queue.empty()) continue;
-				const auto nearest = std::min_element(queue.begin(), queue.end(),
-					[](const Work& left, const Work& right) {
-						return left.request.priority < right.request.priority;
-					});
-				work = std::move(*nearest);
-				queue.erase(nearest);
-				inFlightKeys.insert(work.request.key);
-				activeCancellation = work.request.cancellation;
-				activeWorkClass = work.request.workClass;
-				activeRequest = work.request;
-				activeCancellationReported = false;
-				activeSource = work.request.source;
-				++activeWorkers;
 			}
+			if (stopNow) {
+				for (auto& source : abandonedSources) source.reset();
+				for (auto& pending : abandonedWork) pending.request.source.reset();
+				for (auto& pending : abandonedCompletions) {
+					QueueRetirement(std::move(pending.result.image));
+				}
+				return;
+			}
+			retiredSource.reset();
+			if (!hasWork) continue;
 
 			PerfContextScope context(work.request.workClass, PerfExecution::WorkerThread);
 			ImagePtr image;
 			SourceDescriptor observedSource;
-			const SourceDescriptor& sourceDescriptor = work.request.sourceDescriptor;
-			const bool hasDescriptorPath = !sourceDescriptor.LogicalPath().empty();
-			if (hasDescriptorPath && !sourceDescriptor.Valid()) {
-				SourceDescriptor recaptured =
-					DescribeImageSource(sourceDescriptor.LogicalPath());
-				if (recaptured.Valid()) observedSource = std::move(recaptured);
-			} else {
-				if (sourceDescriptor.Valid() && !IsImageSourceCurrent(sourceDescriptor)) {
-					observedSource = DescribeImageSource(sourceDescriptor.LogicalPath());
+			try {
+				const SourceDescriptor& sourceDescriptor = work.request.sourceDescriptor;
+				const bool hasDescriptorPath = !sourceDescriptor.LogicalPath().empty();
+				if (hasDescriptorPath && !sourceDescriptor.Valid()) {
+					SourceDescriptor recaptured =
+						DescribeImageSource(sourceDescriptor.LogicalPath());
+					if (recaptured.Valid()) observedSource = std::move(recaptured);
 				} else {
-					try {
-						image = processor(work.request);
-					} catch (const std::exception&) {
-						image.reset();
-					}
 					if (sourceDescriptor.Valid() && !IsImageSourceCurrent(sourceDescriptor)) {
-						image.reset();
 						observedSource = DescribeImageSource(sourceDescriptor.LogicalPath());
+					} else {
+						image = processor(work.request);
+						if (sourceDescriptor.Valid() && !IsImageSourceCurrent(sourceDescriptor)) {
+							image.reset();
+							observedSource = DescribeImageSource(sourceDescriptor.LogicalPath());
+						}
 					}
 				}
+			} catch (...) {
+				image.reset();
 			}
 			work.request.source.reset();
 			retiredSource.reset();
+			ImagePtr retiredResult;
+			Result result;
+			result.observedSource = std::move(observedSource);
+			result.fileIndex = work.request.fileIndex;
+			result.catalogRevision = work.request.catalogRevision;
+			result.geometryRevision = work.request.geometryRevision;
+			result.maximumWidth = work.request.maximumWidth;
+			result.maximumHeight = work.request.maximumHeight;
+			result.workClass = work.request.workClass;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
-				inFlightKeys.erase(work.request.key);
 				--activeWorkers;
 				const bool wasCancelled = work.request.cancellation &&
 					work.request.cancellation->load();
 				if (!stopping && work.generation == generation) {
 					if (!wasCancelled || !activeCancellationReported) {
-						Result result;
-						result.key = work.request.key;
-						result.observedSource = std::move(observedSource);
-						result.fileIndex = work.request.fileIndex;
-						result.catalogRevision = work.request.catalogRevision;
-						result.geometryRevision = work.request.geometryRevision;
-						result.maximumWidth = work.request.maximumWidth;
-						result.maximumHeight = work.request.maximumHeight;
-						result.workClass = work.request.workClass;
 						result.cancelled = wasCancelled;
 						if (!wasCancelled && image && image->key == work.request.key) {
-							result.image = std::move(image);
+							const std::size_t actualBytes = image->bgra.size();
+							const std::size_t extraBytes = actualBytes > work.reservedBytes ?
+								actualBytes - work.reservedBytes : 0;
+							const bool fitsReservation = actualBytes <=
+								ThumbnailPreparationWorker::kMaximumCompletedBytes &&
+								extraBytes <= ThumbnailPreparationWorker::kMaximumCompletedBytes -
+									reservedCompletionBytes;
+							if (fitsReservation) {
+								reservedCompletionBytes += extraBytes;
+								reservedCompletionBytes -= work.reservedBytes -
+									std::min(work.reservedBytes, actualBytes);
+								work.reservedBytes = actualBytes;
+								result.image = std::move(image);
+							} else {
+								retiredResult = std::move(image);
+								ReleaseReservation(work.reservedBytes, false);
+								work.reservedBytes = 0;
+							}
+						} else {
+							if (image) retiredResult = std::move(image);
+							ReleaseReservation(work.reservedBytes, false);
+							work.reservedBytes = 0;
 						}
-						completed.push_back(std::move(result));
+						activeRequest = nullptr;
+						result.key = std::move(work.request.key);
+						ImagePtr publicationGuard = result.image;
+						try {
+							completed.push_back({std::move(result), work.reservedBytes});
+						} catch (...) {
+							ReleaseReservation(work.reservedBytes, true);
+							retiredResult = std::move(publicationGuard);
+							work.reservedBytes = 0;
+						}
+					} else {
+						ReleaseReservation(work.reservedBytes, true);
+						retiredResult = std::move(image);
 					}
 					if (wasCancelled) RecordThumbnailCancellation(work.request.workClass,
 						PerfExecution::WorkerThread);
 				} else if (!stopping && work.generation != generation) {
 					RecordThumbnailCancellation(work.request.workClass,
 						PerfExecution::WorkerThread);
+					ReleaseReservation(work.reservedBytes, true);
+					retiredResult = std::move(image);
+				} else {
+					ReleaseReservation(work.reservedBytes, true);
+					retiredResult = std::move(image);
 				}
 				activeCancellation.reset();
-				activeRequest = {};
+				activeRequest = nullptr;
 				activeCancellationReported = false;
 				completedSource = std::move(activeSource);
 				idle.notify_all();
 			}
+			QueueRetirement(std::move(retiredResult));
 			completedSource.reset();
+			workAvailable.notify_all();
 		}
 	}
 
@@ -350,18 +546,22 @@ struct ThumbnailPreparationWorker::Impl {
 	std::condition_variable workAvailable;
 	std::condition_variable idle;
 	std::deque<Work> queue;
-	std::deque<Result> completed;
+	std::deque<Completion> completed;
 	std::deque<DisplayImageCache::ImagePtr> retired;
-	std::unordered_set<SourceKey, SourceKeyHash> inFlightKeys;
+	std::shared_ptr<RetirementState> retirementState =
+		std::make_shared<RetirementState>();
 	DisplayImageCache::ImagePtr activeSource;
 	std::shared_ptr<std::atomic<bool>> activeCancellation;
 	PerfWorkClass activeWorkClass = PerfWorkClass::Unspecified;
-	ThumbnailPreparationRequest activeRequest;
+	const ThumbnailPreparationRequest* activeRequest = nullptr;
 	bool activeCancellationReported = false;
 	std::size_t activeWorkers = 0;
+	std::size_t reservedCompletionBytes = 0;
+	std::size_t reservedCompletionImages = 0;
 	std::uint64_t generation = 0;
 	bool stopping = false;
 	std::thread worker;
+	std::thread retirementWorker;
 };
 
 ThumbnailPreparationWorker::ThumbnailPreparationWorker(Processor processor)
@@ -373,15 +573,20 @@ ThumbnailPreparationAdmission ThumbnailPreparationWorker::Request(
 	const ThumbnailPreparationRequest& request) {
 	ThumbnailPreparationAdmission admission;
 	if (!request.Valid()) return admission;
+	std::size_t estimatedBytes = 0;
+	if (!EstimateThumbnailBytes(request, estimatedBytes) || estimatedBytes >
+		kMaximumCompletedBytes) return admission;
 	ThumbnailPreparationRequest prepared = request;
 	if (!prepared.cancellation || prepared.cancellation->load()) {
 		prepared.cancellation = std::make_shared<std::atomic<bool>>(false);
 	}
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		if (impl_->stopping || impl_->inFlightKeys.find(request.key) != impl_->inFlightKeys.end() ||
+		if (impl_->stopping || (impl_->activeRequest != nullptr &&
+			impl_->activeRequest->key == request.key) ||
 			std::any_of(impl_->completed.begin(), impl_->completed.end(),
-			[&request](const Result& result) {
+			[&request](const Impl::Completion& completion) {
+				const Result& result = completion.result;
 					return result.key == request.key &&
 						result.catalogRevision == request.catalogRevision &&
 						result.geometryRevision == request.geometryRevision &&
@@ -393,10 +598,10 @@ ThumbnailPreparationAdmission ThumbnailPreparationWorker::Request(
 			[&request](const Impl::Work& work) { return work.request.key == request.key; });
 		if (queued != impl_->queue.end()) {
 			if (queued->request.source != request.source) {
-				DisplayImageCache::ImagePtr retiredSource =
-					std::move(queued->request.source);
+				if (queued->request.source) {
+					impl_->retired.push_back(queued->request.source);
+				}
 				queued->request.source = request.source;
-				if (retiredSource) impl_->retired.push_back(std::move(retiredSource));
 			}
 			queued->request.priority = request.priority;
 			queued->request.workClass = request.workClass;
@@ -460,28 +665,34 @@ ThumbnailPreparationWorker::TakeCompleted(std::size_t maximumCount,
 	images.reserve(std::min(maximumCount, impl_->completed.size()));
 	while (images.size() < maximumCount) {
 		const auto next = std::find_if(impl_->completed.begin(), impl_->completed.end(),
-			[&permittedWorkClasses](const Result& result) {
-				return permittedWorkClasses.find(result.workClass) != permittedWorkClasses.end();
+			[&permittedWorkClasses](const Impl::Completion& completion) {
+				return permittedWorkClasses.find(completion.result.workClass) !=
+					permittedWorkClasses.end();
 			});
 		if (next == impl_->completed.end()) break;
-		images.push_back(std::move(*next));
+		images.push_back(std::move(next->result));
+		impl_->ReleaseReservation(next->reservedBytes, true);
 		impl_->completed.erase(next);
 	}
 	impl_->idle.notify_all();
+	impl_->workAvailable.notify_all();
 	return images;
 }
 
 std::vector<ThumbnailPreparationWorker::Result>
 ThumbnailPreparationWorker::Cancel(const std::set<PerfWorkClass>& workClasses) {
 	std::vector<Result> cancelled;
-	std::lock_guard<std::mutex> lock(impl_->mutex);
+	cancelled.reserve(Impl::kMaximumQueuedSources +
+		ThumbnailPreparationWorker::kMaximumCompletedResults + 1);
+	std::unique_lock<std::mutex> lock(impl_->mutex);
 	for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
 		if (workClasses.find(queued->request.workClass) == workClasses.end()) {
 			++queued;
 			continue;
 		}
+		if (queued->request.source) impl_->retired.push_back(queued->request.source);
 		Result result;
-		result.key = queued->request.key;
+		result.key = std::move(queued->request.key);
 		result.fileIndex = queued->request.fileIndex;
 		result.catalogRevision = queued->request.catalogRevision;
 		result.geometryRevision = queued->request.geometryRevision;
@@ -491,56 +702,81 @@ ThumbnailPreparationWorker::Cancel(const std::set<PerfWorkClass>& workClasses) {
 		result.cancelled = true;
 		cancelled.push_back(std::move(result));
 		RecordThumbnailCancellation(queued->request.workClass);
-		impl_->retired.push_back(std::move(queued->request.source));
 		queued = impl_->queue.erase(queued);
 	}
 	for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
-		if (workClasses.find(completed->workClass) == workClasses.end()) {
+		if (workClasses.find(completed->result.workClass) == workClasses.end()) {
 			++completed;
 			continue;
 		}
-		completed->image.reset();
-		completed->cancelled = true;
-		cancelled.push_back(std::move(*completed));
+		completed->result.cancelled = true;
+		cancelled.push_back(std::move(completed->result));
+		impl_->ReleaseReservation(completed->reservedBytes, true);
 		completed = impl_->completed.erase(completed);
 	}
-	if (impl_->activeCancellation &&
+	if (impl_->activeCancellation && impl_->activeRequest != nullptr &&
 		workClasses.find(impl_->activeWorkClass) != workClasses.end()) {
 		impl_->activeCancellation->store(true);
 		if (!impl_->activeCancellationReported) {
 			Result result;
-			result.key = impl_->activeRequest.key;
-			result.fileIndex = impl_->activeRequest.fileIndex;
-			result.catalogRevision = impl_->activeRequest.catalogRevision;
-			result.geometryRevision = impl_->activeRequest.geometryRevision;
-			result.maximumWidth = impl_->activeRequest.maximumWidth;
-			result.maximumHeight = impl_->activeRequest.maximumHeight;
-			result.workClass = impl_->activeRequest.workClass;
-			result.cancelled = true;
-			cancelled.push_back(std::move(result));
-			impl_->activeCancellationReported = true;
-			RecordThumbnailCancellation(impl_->activeWorkClass);
+			try {
+				result.key = impl_->activeRequest->key;
+				result.fileIndex = impl_->activeRequest->fileIndex;
+				result.catalogRevision = impl_->activeRequest->catalogRevision;
+				result.geometryRevision = impl_->activeRequest->geometryRevision;
+				result.maximumWidth = impl_->activeRequest->maximumWidth;
+				result.maximumHeight = impl_->activeRequest->maximumHeight;
+				result.workClass = impl_->activeRequest->workClass;
+				result.cancelled = true;
+				cancelled.push_back(std::move(result));
+				impl_->activeCancellationReported = true;
+				RecordThumbnailCancellation(impl_->activeWorkClass);
+			} catch (...) {
+				// If reporting needs memory that is unavailable, the worker emits the
+				// cancellation result later by moving its original key.
+			}
 		}
 	}
 	impl_->idle.notify_all();
-	impl_->workAvailable.notify_one();
+	impl_->workAvailable.notify_all();
+	lock.unlock();
+	for (Result& result : cancelled) {
+		impl_->QueueRetirement(std::move(result.image));
+	}
 	return cancelled;
 }
 
+void ThumbnailPreparationWorker::Retire(const ImagePtr& image) {
+	impl_->QueueRetirement(image);
+}
+
 void ThumbnailPreparationWorker::Clear() {
+	std::deque<Impl::Work> abandonedWork;
+	std::deque<Impl::Completion> abandonedCompletions;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		for (const Impl::Work& pending : impl_->queue) {
+			if (pending.request.source) impl_->retired.push_back(pending.request.source);
+		}
 		++impl_->generation;
 		if (impl_->activeCancellation) impl_->activeCancellation->store(true);
-		while (!impl_->queue.empty()) {
-			RecordThumbnailCancellation(impl_->queue.front().request.workClass);
-			impl_->retired.push_back(std::move(impl_->queue.front().request.source));
-			impl_->queue.pop_front();
+		for (const Impl::Work& pending : impl_->queue) {
+			RecordThumbnailCancellation(pending.request.workClass);
 		}
-		impl_->completed.clear();
+		abandonedWork.swap(impl_->queue);
+		abandonedCompletions.swap(impl_->completed);
+		for (const Impl::Completion& completion : abandonedCompletions) {
+			impl_->ReleaseReservation(completion.reservedBytes, true);
+		}
+		// Each queued source also has an owner in impl_->retired, so dropping
+		// these local copies cannot run a large destructor under the mutex.
+		for (Impl::Work& pending : abandonedWork) pending.request.source.reset();
 		impl_->idle.notify_all();
 	}
-	impl_->workAvailable.notify_one();
+	for (Impl::Completion& completion : abandonedCompletions) {
+		impl_->QueueRetirement(std::move(completion.result.image));
+	}
+	impl_->workAvailable.notify_all();
 }
 
 bool ThumbnailPreparationWorker::HasPendingWork() const {
@@ -553,15 +789,27 @@ ThumbnailPreparationDiagnostics ThumbnailPreparationWorker::GetDiagnostics() con
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	diagnostics.queued = impl_->queue.size();
 	diagnostics.active = impl_->activeWorkers;
-	for (const Result& result : impl_->completed) {
-		if (result.image) {
-			diagnostics.completedBytes += result.image->bgra.size();
+	diagnostics.completedResults = impl_->completed.size();
+	diagnostics.reservedCompletionBytes = impl_->reservedCompletionBytes;
+	diagnostics.reservedCompletionImages = impl_->reservedCompletionImages;
+	for (const Impl::Completion& completion : impl_->completed) {
+		if (completion.result.image) {
+			diagnostics.completedBytes += completion.result.image->bgra.size();
 			++diagnostics.completedImages;
 		}
 	}
 	diagnostics.retiredSources = impl_->retired.size();
 	for (const DisplayImageCache::ImagePtr& source : impl_->retired) {
 		if (source) diagnostics.retiredSourceBytes += PreparedDisplayImageBytes(*source);
+	}
+	{
+		std::lock_guard<std::mutex> retirementLock(impl_->retirementState->mutex);
+		for (const ImagePtr& image : impl_->retirementState->images) {
+			if (image) {
+				diagnostics.retiredThumbnailBytes += image->bgra.size();
+				++diagnostics.retiredThumbnailImages;
+			}
+		}
 	}
 	std::unordered_set<const PreparedDisplayImage*> retainedSources;
 	for (const Impl::Work& work : impl_->queue) {

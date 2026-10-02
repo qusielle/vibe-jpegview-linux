@@ -108,6 +108,10 @@ struct DisplayImageCacheDiagnostics {
 	std::size_t backgroundActive = 0;
 	std::size_t preparedBytes = 0;
 	std::size_t preparedImages = 0;
+	std::size_t speculativePreparedBytes = 0;
+	std::size_t speculativePreparedImages = 0;
+	std::size_t speculativeReservedBytes = 0;
+	std::size_t speculativeReservedImages = 0;
 	std::size_t borrowedBytes = 0;
 	std::size_t borrowedImages = 0;
 	std::size_t retiredBytes = 0;
@@ -128,6 +132,8 @@ class DisplayImageCache {
 public:
 	using ImagePtr = std::shared_ptr<const PreparedDisplayImage>;
 	using Processor = std::function<ImagePtr(const DisplayImageRequest&)>;
+	static constexpr std::size_t kMaximumSpeculativeCompletions = 2;
+	static constexpr std::size_t kMaximumSpeculativeCompletionBytes = 64u * 1024u * 1024u;
 
 	explicit DisplayImageCache(std::size_t byteBudget,
 		std::size_t workerCount = 0, Processor processor = {},
