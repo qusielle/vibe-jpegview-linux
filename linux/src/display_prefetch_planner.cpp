@@ -34,6 +34,7 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 	const std::size_t count = std::min(request.maximumCount, request.neighbors.size());
 	result.requests.reserve(count);
 	result.protectedTextureKeys.reserve(count);
+	result.protectedTextureCacheKeys.reserve(count);
 	result.dimensions.reserve(count);
 	const auto shouldContinue = [&] {
 		return !canceled || !canceled->load(std::memory_order_relaxed);
@@ -72,7 +73,10 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 		displayRequest.workClass = candidate.priority <= 2 ?
 			PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
 		if (!displayRequest.Valid()) continue;
-		result.protectedTextureKeys.push_back(displayRequest.key);
+		if (candidate.priority <= 2) {
+			result.protectedTextureKeys.push_back(displayRequest.key);
+			result.protectedTextureCacheKeys.push_back(displayRequest.cacheKey);
+		}
 		if (request.retainedTextureKeys.find(displayRequest.key) !=
 			request.retainedTextureKeys.end()) continue;
 
@@ -103,6 +107,13 @@ bool ShouldDeactivateDisplayPrefetchBatch(DisplayPrefetchBatchOwner owner,
 	DisplayPrefetchBatchInvalidation invalidation, bool activeSpreadRequestStillCurrent) {
 	return invalidation != DisplayPrefetchBatchInvalidation::ViewportChanged ||
 		owner != DisplayPrefetchBatchOwner::ActiveSpread || !activeSpreadRequestStillCurrent;
+}
+
+std::shared_ptr<const DecodedImage> RetainDisplayPrefetchDecodedImage(
+	DisplayPrefetchBatchOwner owner,
+	const std::shared_ptr<const DecodedImage>& decoded) {
+	return owner == DisplayPrefetchBatchOwner::ActiveSpread ? decoded :
+		std::shared_ptr<const DecodedImage>{};
 }
 
 void AppendDisplayPrefetchRequests(std::vector<DisplayImageRequest>& requests,

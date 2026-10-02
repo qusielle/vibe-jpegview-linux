@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace jpegview_linux {
@@ -71,7 +72,8 @@ public:
 	using DimensionsReader = std::function<bool(const std::filesystem::path&, int&, int&,
 		std::string&)>;
 	// Called when this generation's requested decode completes. A null image
-	// reports a decode failure or a result that could not be retained.
+	// reports a decode failure; decoded pixels are delivered even when retention
+	// is refused.
 	using Completion = std::function<void(const std::filesystem::path&, const ImagePtr&)>;
 	using DimensionsCompletion = std::function<void(const std::filesystem::path&,
 		bool, int, int)>;
@@ -96,6 +98,11 @@ public:
 		const std::shared_ptr<DecodedImage>& image);
 	void Store(const SourceDescriptor& source,
 		const std::shared_ptr<DecodedImage>& image);
+	// Moves a selected source's retained decoded pixels into active working
+	// accounting while the Viewer keeps them available for current-image work.
+	void PromoteToActiveUse(const SourceKey& source);
+	void SetProtectionSnapshot(
+		const std::vector<std::pair<SourceKey, CacheProtectionTier>>& protections);
 	// Adds one non-speculative decode without replacing the current neighbor set.
 	void RequestBackground(const std::filesystem::path& filename,
 		Completion completion, PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
@@ -126,7 +133,8 @@ public:
 	std::size_t CachedImages() const;
 	DecodedImageCacheDiagnostics GetDiagnostics() const;
 	std::vector<SourceChangeNotice> TakeChangedSources();
-	std::size_t EvictLeastRecentlyUsed();
+	std::size_t EvictLeastRecentlyUsed(
+		CacheProtectionTier maximumTier = CacheProtectionTier::Neighbor);
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);
 
 private:

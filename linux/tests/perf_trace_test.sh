@@ -46,16 +46,21 @@ NR == 1 {
 		$13 == "\"file_dialog_preview\"") preview_stale_cancellation = 1
 	if ($2 == "cancellation" && $4 == "event_thread" &&
 		$6 == "active_image_spread") active_cancellation = 1
+	if ($2 == "cache_snapshot" && $7 > 0 && $10 > 0 &&
+		$13 == "\"upload_overlap\"") upload_overlap = 1
+	if ($2 == "cache_snapshot" && $7 > 0 && $10 > 0 &&
+		$13 == "\"active_working_charge\"") active_working_charge = 1
 }
 END {
 	if (!nearest_read || !distant_read || !stb_direct_read || !giflib_direct_read || !worker_processing ||
 		!worker_resampling || !active_cancellation || !preview_decode ||
 		!visible_thumbnail_resampling || !distant_thumbnail_resampling ||
-		!preview_pending_cancellation || !preview_stale_cancellation) {
-		print "performance trace test: missing direct codec read, attributed source, cancellation, processing, resampling, thumbnail, or focused-preview rows" > "/dev/stderr"
+		!preview_pending_cancellation || !preview_stale_cancellation ||
+		!upload_overlap || !active_working_charge) {
+		print "performance trace test: missing codec, cancellation, processing, resampling, thumbnail, focused-preview, upload-overlap, or active-working rows" > "/dev/stderr"
 		exit 1
 	}
 }
 ' "$trace_file"
 
-echo "performance trace test: callback-timed stb/GIF reads, attributed source, cancellation, processing, resampling, thumbnail visibility, and focused-preview rows passed"
+echo "performance trace test: codec reads, source attribution, cancellation, processing, resampling, thumbnails, focused preview, upload overlap, and active working data passed"

@@ -2,14 +2,18 @@
 
 #include "archive_source.h"
 #include "image.h"
+#include "image_cache.h"
+#include "cache_policy.h"
 #include "perf_diagnostics.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <iterator>
+#include <list>
 #include <limits>
 #include <locale>
 #include <mutex>
@@ -49,6 +53,12 @@ bool EstimateDisplayBytes(const DisplayImageRequest& request, std::size_t& bytes
 
 bool IsSpeculativeDisplayWork(bool foreground, PerfWorkClass workClass) {
 	return !foreground && workClass != PerfWorkClass::ActiveImageSpread;
+}
+
+std::shared_ptr<const void> PreparedAllocationIdentity(
+	const std::shared_ptr<const PreparedDisplayImage>& image) {
+	return image ? std::shared_ptr<const void>(image, image.get()) :
+		std::shared_ptr<const void>{};
 }
 
 template <typename Left, typename Right>
@@ -375,11 +385,16 @@ std::size_t DisplayPrefetchCount(std::size_t cacheBytes, int viewportWidth,
 
 struct DisplayImageCache::Impl {
 	using ImagePtr = DisplayImageCache::ImagePtr;
+	using LruList = std::list<DisplayImageCacheKey>;
 
 	struct RetirementState {
 		std::mutex mutex;
 		std::condition_variable available;
-		std::deque<ImagePtr> retired;
+		struct RetiredImage {
+			ImagePtr image;
+			CacheReservation reservation;
+		};
+		std::deque<RetiredImage> retired;
 		std::deque<std::shared_ptr<const DecodedImage>> retiredDecoded;
 		std::weak_ptr<const void> retiringOwner;
 		std::size_t retiringBytes = 0;
@@ -391,7 +406,9 @@ struct DisplayImageCache::Impl {
 	struct Entry {
 		ImagePtr image;
 		std::size_t bytes = 0;
-		std::uint64_t lastUsed = 0;
+		CacheProtectionTier protection = CacheProtectionTier::DistantSpeculation;
+		CacheReservation reservation;
+		LruList::iterator lru;
 	};
 	using EntryMap = std::unordered_map<DisplayImageCacheKey, Entry,
 		DisplayImageCacheKeyHash>;
@@ -409,6 +426,7 @@ struct DisplayImageCache::Impl {
 		PerfWorkClass workClass = PerfWorkClass::Unspecified;
 		bool speculative = false;
 		std::size_t reservedBytes = 0;
+		CacheReservation temporaryReservation;
 	};
 
 	struct Reservation {
@@ -420,6 +438,29 @@ struct DisplayImageCache::Impl {
 		std::size_t priority = 0;
 		PerfWorkClass workClass = PerfWorkClass::Unspecified;
 	};
+
+	struct BorrowedAllocation {
+		std::size_t bytes = 0;
+		CacheReservation reservation;
+	};
+
+	static std::size_t TierIndex(CacheProtectionTier tier) {
+		return static_cast<std::size_t>(tier);
+	}
+
+	void Touch(EntryMap::iterator entry) {
+		LruList& list = lru[TierIndex(entry->second.protection)];
+		list.splice(list.end(), list, entry->second.lru);
+	}
+
+	void SetProtection(EntryMap::iterator entry, CacheProtectionTier protection) {
+		if (entry->second.protection == protection) return;
+		lru[TierIndex(entry->second.protection)].erase(entry->second.lru);
+		LruList& list = lru[TierIndex(protection)];
+		list.push_back(entry->first);
+		entry->second.lru = std::prev(list.end());
+		entry->second.protection = protection;
+	}
 
 	enum class CachedCompletionPriorityMode {
 		PreserveBest,
@@ -496,7 +537,8 @@ struct DisplayImageCache::Impl {
 			pendingCachedCompletions.erase(image->cacheKey);
 			if (existing != completed.end()) {
 				ReleaseCompletionReservation(*existing);
-				QueueRetirement(std::move(existing->image));
+				QueueRetirement(std::move(existing->image),
+					std::move(existing->temporaryReservation));
 				completed.erase(existing);
 			}
 			return;
@@ -508,7 +550,8 @@ struct DisplayImageCache::Impl {
 				if (!CanReserveSpeculative(bytes)) {
 					pendingCachedCompletions[image->cacheKey] = {
 						effectivePriority, effectiveWorkClass};
-					QueueRetirement(std::move(existing->image));
+					QueueRetirement(std::move(existing->image),
+						std::move(existing->temporaryReservation));
 					completed.erase(existing);
 					return;
 				}
@@ -527,7 +570,7 @@ struct DisplayImageCache::Impl {
 		}
 		if (speculative) ReserveSpeculative(bytes);
 		completed.push_back({image, effectivePriority, effectiveWorkClass, speculative,
-			speculative ? bytes : 0});
+			speculative ? bytes : 0, {}});
 		pendingCachedCompletions.erase(image->cacheKey);
 	}
 
@@ -603,7 +646,8 @@ struct DisplayImageCache::Impl {
 			queuedKeys.clear();
 			while (!completed.empty()) {
 				ReleaseCompletionReservation(completed.front());
-				QueueRetirement(std::move(completed.front().image));
+				QueueRetirement(std::move(completed.front().image),
+					std::move(completed.front().temporaryReservation));
 				completed.pop_front();
 			}
 			pendingCachedCompletions.clear();
@@ -619,8 +663,8 @@ struct DisplayImageCache::Impl {
 			retirementState->stopping = true;
 			externalRetirementOwner = retirementState->retiring &&
 				retirementState->retiringOwner.use_count() > 1;
-			for (const ImagePtr& image : retirementState->retired) {
-				if (image.use_count() > 1) externalRetirementOwner = true;
+			for (const RetirementState::RetiredImage& retired : retirementState->retired) {
+				if (retired.image && retired.image.use_count() > 1) externalRetirementOwner = true;
 			}
 			for (const std::shared_ptr<const DecodedImage>& image :
 				retirementState->retiredDecoded) {
@@ -636,34 +680,74 @@ struct DisplayImageCache::Impl {
 				retirementWorker.join();
 			}
 		}
-		if (sharedBudget) sharedBudget->Release(cachedBytes);
 	}
 
-	void ForgetBorrowed(const ImagePtr& image) {
-		if (!diagnosticsEnabled || !image) return;
+	CacheReservation ForgetBorrowed(const ImagePtr& image) {
+		if (!image) return {};
 		const auto borrowedImage = borrowedAllocations.find(image.get());
-		if (borrowedImage == borrowedAllocations.end()) return;
-		borrowedBytes -= borrowedImage->second;
+		if (borrowedImage == borrowedAllocations.end()) return {};
+		borrowedBytes -= borrowedImage->second.bytes;
+		CacheReservation reservation = std::move(borrowedImage->second.reservation);
 		borrowedAllocations.erase(borrowedImage);
+		return reservation;
 	}
 
-	void QueueRetirement(ImagePtr image) {
+	void QueueRetirement(ImagePtr image, CacheReservation reservation = {}) {
 		if (!image) return;
-		ForgetBorrowed(image);
+		CacheReservation borrowed = ForgetBorrowed(image);
+		if (!reservation) reservation = std::move(borrowed);
 		const auto cached = entries.find(image->cacheKey);
 		if (cached != entries.end() && cached->second.image.get() == image.get()) return;
-		const PreparedDisplayImage* identity = image.get();
+		reservation.RelinquishRetainedOwnership();
+		if (!reservation && sharedBudget) {
+			reservation = sharedBudget->TrackTemporary(PreparedDisplayImageBytes(*image),
+				CacheMemoryCategory::ActiveWorkingData,
+				PreparedAllocationIdentity(image));
+		}
 		std::lock_guard<std::mutex> retirementLock(retirementState->mutex);
 		if (SameSharedOwnership(image, retirementState->retiringOwner) ||
-			std::any_of(retirementState->retired.begin(), retirementState->retired.end(), [identity](const ImagePtr& queued) {
-				return queued.get() == identity;
+			std::any_of(retirementState->retired.begin(), retirementState->retired.end(), [&image](const auto& queued) {
+				return SameSharedOwnership(image, queued.image);
 			})) return;
-		retirementState->retired.push_back(std::move(image));
+		retirementState->retired.push_back({std::move(image), std::move(reservation)});
 		retirementState->available.notify_one();
+	}
+
+	void ReleaseForUse(const ImagePtr& image, CacheMemoryCategory category) {
+		if (!image) return;
+		std::lock_guard<std::mutex> lock(mutex);
+		CacheReservation reservation = ForgetBorrowed(image);
+		auto found = entries.find(image->cacheKey);
+		if (found != entries.end() && found->second.image.get() == image.get()) {
+			const std::size_t bytes = found->second.bytes;
+			reservation = std::move(found->second.reservation);
+			lru[TierIndex(found->second.protection)].erase(found->second.lru);
+			pendingCachedCompletions.erase(found->first);
+			entries.erase(found);
+			cachedBytes -= bytes;
+		}
+		if (reservation && !reservation.Reclassify(category)) {
+			reservation.RelinquishRetainedOwnership();
+			(void)reservation.ReclassifyIfNoRetainedOwners(category);
+		}
+		if (!reservation && sharedBudget) {
+			reservation = sharedBudget->TrackTemporary(PreparedDisplayImageBytes(*image),
+				category, PreparedAllocationIdentity(image));
+		}
+		QueueRetirement(image, std::move(reservation));
+		workAvailable.notify_one();
 	}
 
 	void QueueDecodedRetirement(std::shared_ptr<const DecodedImage> image) {
 		if (!image) return;
+		if (sharedBudget) {
+			std::shared_ptr<const void> allocation(image, image.get());
+			CacheReservation working = sharedBudget->TrackTemporary(
+				DecodedImageBytes(*image), CacheMemoryCategory::ActiveWorkingData,
+				allocation);
+			sharedBudget->RetireAllocation(std::move(allocation), std::move(working));
+			return;
+		}
 		const DecodedImage* identity = image.get();
 		std::lock_guard<std::mutex> retirementLock(retirementState->mutex);
 		if (SameSharedOwnership(image, retirementState->retiringOwner) ||
@@ -675,26 +759,28 @@ struct DisplayImageCache::Impl {
 		retirementState->available.notify_one();
 	}
 
-	void Erase(EntryMap::iterator entry) {
+	std::size_t Erase(EntryMap::iterator entry) {
 		const std::size_t bytes = entry->second.bytes;
 		ImagePtr retiredImage = std::move(entry->second.image);
+		CacheReservation reservation = std::move(entry->second.reservation);
+		lru[TierIndex(entry->second.protection)].erase(entry->second.lru);
 		pendingCachedCompletions.erase(entry->first);
 		entries.erase(entry);
 		cachedBytes -= bytes;
-		if (sharedBudget) sharedBudget->Release(bytes);
-		QueueRetirement(std::move(retiredImage));
+		QueueRetirement(std::move(retiredImage), std::move(reservation));
+		return bytes;
 	}
 
-	EntryMap::iterator Oldest() {
-		if (entries.empty()) return entries.end();
-		auto oldest = entries.begin();
-		for (auto candidate = std::next(entries.begin()); candidate != entries.end(); ++candidate) {
-			if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
+	EntryMap::iterator Oldest(CacheProtectionTier maximumTier) {
+		for (std::size_t tier = 0; tier <= TierIndex(maximumTier); ++tier) {
+			if (lru[tier].empty()) continue;
+			const auto entry = entries.find(lru[tier].front());
+			if (entry != entries.end()) return entry;
 		}
-		return oldest;
+		return entries.end();
 	}
 
-	bool Insert(const ImagePtr& image, bool mayEvict) {
+	bool Insert(const ImagePtr& image, bool mayEvict, CacheProtectionTier protection) {
 		if (!image || !image->cacheKey.Valid()) return false;
 		const std::size_t bytes = PreparedDisplayImageBytes(*image);
 		if (bytes == 0 || bytes > byteBudget) return false;
@@ -702,16 +788,41 @@ struct DisplayImageCache::Impl {
 		if (existing != entries.end()) Erase(existing);
 		if (!mayEvict && bytes > byteBudget - cachedBytes) return false;
 		while (bytes > byteBudget - cachedBytes && !entries.empty()) {
-			Erase(Oldest());
+			auto oldest = Oldest(CacheProtectionTier::DistantSpeculation);
+			if (oldest == entries.end() && mayEvict &&
+				protection == CacheProtectionTier::Active) {
+				oldest = Oldest(CacheProtectionTier::Neighbor);
+			}
+			if (oldest == entries.end()) return false;
+			Erase(oldest);
 		}
 		if (bytes > byteBudget - cachedBytes) return false;
+		CacheReservation reservation;
 		if (sharedBudget) {
-			while (!sharedBudget->TryReserve(bytes)) {
-				if (!mayEvict || entries.empty()) return false;
-				Erase(Oldest());
+			reservation = sharedBudget->TryReserve(bytes,
+				CacheMemoryCategory::RetainedPreparedFrames,
+				PreparedAllocationIdentity(image));
+			while (!reservation) {
+				if (!mayEvict) return false;
+				auto oldest = Oldest(CacheProtectionTier::DistantSpeculation);
+				if (oldest == entries.end() && protection == CacheProtectionTier::Active) {
+					oldest = Oldest(CacheProtectionTier::Neighbor);
+				}
+				if (oldest == entries.end()) return false;
+				const std::uint64_t releaseRevision =
+					sharedBudget->RetainedCapacityRevision();
+				Erase(oldest);
+				if (sharedBudget->RetainedCapacityRevision() == releaseRevision) return false;
+				reservation = sharedBudget->TryReserve(bytes,
+					CacheMemoryCategory::RetainedPreparedFrames,
+					PreparedAllocationIdentity(image));
+				if (!reservation) return false;
 			}
 		}
-		entries.emplace(image->cacheKey, Entry{image, bytes, ++useCounter});
+		LruList& list = lru[TierIndex(protection)];
+		list.push_back(image->cacheKey);
+		entries.emplace(image->cacheKey, Entry{image, bytes, protection,
+			std::move(reservation), std::prev(list.end())});
 		cachedBytes += bytes;
 		return true;
 	}
@@ -869,9 +980,21 @@ struct DisplayImageCache::Impl {
 					}
 				}
 			if (publish) {
-					Insert(image, foreground);
+					const CacheProtectionTier protection =
+						CacheProtectionForWorkClass(effectiveWorkClass, foreground);
+					const bool retained = Insert(image,
+						foreground || protection != CacheProtectionTier::DistantSpeculation,
+						protection);
+					CacheReservation temporaryReservation;
+					if (!retained && sharedBudget) {
+						temporaryReservation = sharedBudget->TrackTemporary(
+							PreparedDisplayImageBytes(*image),
+							CacheMemoryCategory::ActiveWorkingData,
+							PreparedAllocationIdentity(image));
+					}
 					completed.push_back({image, completionPriority, effectiveWorkClass,
-						reservation.speculative, reservation.bytes});
+						reservation.speculative, reservation.bytes,
+						std::move(temporaryReservation)});
 				} else {
 					if (reservation.speculative) ReleaseSpeculative(reservation.bytes);
 					if (image) {
@@ -894,11 +1017,12 @@ struct DisplayImageCache::Impl {
 		for (;;) {
 			ImagePtr image;
 			std::shared_ptr<const DecodedImage> decoded;
+			CacheReservation reservation;
 			{
 				std::unique_lock<std::mutex> lock(state->mutex);
 				auto readyDisplay = std::find_if(state->retired.begin(),
-					state->retired.end(), [](const ImagePtr& candidate) {
-						return candidate.use_count() == 1;
+					state->retired.end(), [](const RetirementState::RetiredImage& candidate) {
+						return candidate.image && candidate.image.use_count() == 1;
 					});
 				auto readyDecoded = std::find_if(state->retiredDecoded.begin(),
 					state->retiredDecoded.end(), [](const auto& candidate) {
@@ -918,7 +1042,8 @@ struct DisplayImageCache::Impl {
 					continue;
 				}
 				if (readyDisplay != state->retired.end()) {
-					image = std::move(*readyDisplay);
+					image = std::move(readyDisplay->image);
+					reservation = std::move(readyDisplay->reservation);
 					state->retired.erase(readyDisplay);
 					state->retiringOwner = image;
 					state->retiringBytes = image ? PreparedDisplayImageBytes(*image) : 0;
@@ -934,6 +1059,7 @@ struct DisplayImageCache::Impl {
 			}
 			image.reset();
 			decoded.reset();
+			reservation.Reset();
 			{
 				std::lock_guard<std::mutex> lock(state->mutex);
 				state->retiringOwner.reset();
@@ -955,12 +1081,13 @@ struct DisplayImageCache::Impl {
 	std::thread retirementWorker;
 	std::shared_ptr<RetirementState> retirementState;
 	EntryMap entries;
+	std::array<LruList, 3> lru;
 	std::deque<Work> queue;
 	std::deque<Completion> completed;
 	std::unordered_map<DisplayImageCacheKey, PendingCachedCompletion,
 		DisplayImageCacheKeyHash> pendingCachedCompletions;
 	std::vector<SourceChangeNotice> changedSources;
-	std::unordered_map<const PreparedDisplayImage*, std::size_t> borrowedAllocations;
+	std::unordered_map<const PreparedDisplayImage*, BorrowedAllocation> borrowedAllocations;
 	std::unordered_set<DisplayImageCacheKey, DisplayImageCacheKeyHash> queuedKeys;
 	std::unordered_set<DisplayImageCacheKey, DisplayImageCacheKeyHash> inFlightKeys;
 	std::unordered_map<DisplayImageCacheKey, std::size_t,
@@ -980,7 +1107,6 @@ struct DisplayImageCache::Impl {
 	std::size_t activeWorkers = 0;
 	std::size_t speculativeReservedBytes = 0;
 	std::size_t speculativeReservedImages = 0;
-	std::uint64_t useCounter = 0;
 	std::uint64_t generation = 0;
 	std::uint64_t epoch = 0;
 	std::size_t borrowedBytes = 0;
@@ -1004,7 +1130,7 @@ DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& r
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	const auto found = impl_->entries.find(request.cacheKey);
 	if (found != impl_->entries.end()) {
-		found->second.lastUsed = ++impl_->useCounter;
+		impl_->Touch(found);
 		return found->second.image;
 	}
 	const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
@@ -1067,7 +1193,8 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 			for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
 				if (completed->priority == 0 && completed->image && completed->image->cacheKey != cacheKey) {
 					impl_->ReleaseCompletionReservation(*completed);
-					impl_->QueueRetirement(std::move(completed->image));
+					impl_->QueueRetirement(std::move(completed->image),
+						std::move(completed->temporaryReservation));
 					completed = impl_->completed.erase(completed);
 				} else {
 					++completed;
@@ -1086,8 +1213,8 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 			// completion and renderer upload. Promote the shared completion object
 			// so it cannot wait behind any neighboring frame.
 			impl_->pendingCachedCompletions.erase(cacheKey);
-			impl_->completed.push_front({cached->second.image, 0,
-				foregroundWorkClass, false, 0});
+		impl_->completed.push_front({cached->second.image, 0,
+			foregroundWorkClass, false, 0, {}});
 		} else if (impl_->inFlightKeys.find(cacheKey) != impl_->inFlightKeys.end()) {
 			impl_->foregroundKeys.insert(cacheKey);
 			impl_->inFlightPriorities[cacheKey] = 0;
@@ -1175,9 +1302,11 @@ void DisplayImageCache::RequestBackgroundBatch(
 			if (!desiredPriority.second) desiredPriority.first->second =
 				std::min(desiredPriority.first->second, priority);
 
-			const auto cached = impl_->entries.find(cacheKey);
-			if (cached != impl_->entries.end()) {
-				cached->second.lastUsed = ++impl_->useCounter;
+		const auto cached = impl_->entries.find(cacheKey);
+		if (cached != impl_->entries.end()) {
+				impl_->Touch(cached);
+				impl_->SetProtection(cached,
+					CacheProtectionForWorkClass(classifiedRequest.workClass));
 				impl_->QueueCachedCompletion(cached->second.image, priority,
 					classifiedRequest.workClass);
 				continue;
@@ -1287,7 +1416,8 @@ void DisplayImageCache::CancelBackground(const std::string& key) {
 	for (auto completed = impl_->completed.begin(); completed != impl_->completed.end();) {
 		if (completed->priority != 0 && completed->image && completed->image->cacheKey == cacheKey) {
 			impl_->ReleaseCompletionReservation(*completed);
-			impl_->QueueRetirement(std::move(completed->image));
+			impl_->QueueRetirement(std::move(completed->image),
+				std::move(completed->temporaryReservation));
 			completed = impl_->completed.erase(completed);
 		} else {
 			++completed;
@@ -1307,7 +1437,7 @@ DisplayImageCache::ImagePtr DisplayImageCache::RequestAndWait(
 	const auto findCompleted = [&]() -> ImagePtr {
 		const auto cached = impl_->entries.find(cacheKey);
 		if (cached != impl_->entries.end()) {
-			cached->second.lastUsed = ++impl_->useCounter;
+			impl_->Touch(cached);
 			return cached->second.image;
 		}
 		const auto completed = std::find_if(impl_->completed.begin(), impl_->completed.end(),
@@ -1373,7 +1503,8 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 				continue;
 			}
 			impl_->ReleaseCompletionReservation(*completed);
-			impl_->QueueRetirement(std::move(completed->image));
+			impl_->QueueRetirement(std::move(completed->image),
+				std::move(completed->temporaryReservation));
 			completed = impl_->completed.erase(completed);
 		}
 		for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
@@ -1511,7 +1642,31 @@ std::vector<DisplayImageCache::ImagePtr> DisplayImageCache::TakeCompleted(std::s
 
 std::vector<DisplayImageCache::ImagePtr> DisplayImageCache::TakeCompleted(
 	std::size_t maximumCount, const std::set<PerfWorkClass>& permittedWorkClasses) {
-	std::vector<ImagePtr> result;
+	std::vector<ImagePtr> images;
+	std::vector<DisplayImageCompletionInfo> completions = TakeCompletedWithMetadata(
+		maximumCount, permittedWorkClasses);
+	images.reserve(completions.size());
+	for (DisplayImageCompletionInfo& completion : completions) {
+		images.push_back(std::move(completion.image));
+	}
+	return images;
+}
+
+std::vector<DisplayImageCompletionInfo>
+DisplayImageCache::TakeCompletedWithMetadata(std::size_t maximumCount) {
+	static const std::set<PerfWorkClass> allWorkClasses{
+		PerfWorkClass::Unspecified,
+		PerfWorkClass::ActiveImageSpread,
+		PerfWorkClass::FocusedPreview,
+		PerfWorkClass::VisibleThumbnail,
+		PerfWorkClass::NearestNavigationNeighbor,
+		PerfWorkClass::DistantSpeculation};
+	return TakeCompletedWithMetadata(maximumCount, allWorkClasses);
+}
+
+std::vector<DisplayImageCompletionInfo> DisplayImageCache::TakeCompletedWithMetadata(
+	std::size_t maximumCount, const std::set<PerfWorkClass>& permittedWorkClasses) {
+	std::vector<DisplayImageCompletionInfo> result;
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	result.reserve(std::min(maximumCount, impl_->completed.size()));
 	while (result.size() < maximumCount && !impl_->completed.empty()) {
@@ -1538,12 +1693,16 @@ std::vector<DisplayImageCache::ImagePtr> DisplayImageCache::TakeCompleted(
 			outstandingPriority = std::min(outstandingPriority, inFlight.second);
 		}
 		if (outstandingPriority < next->priority) break;
-		result.push_back(std::move(next->image));
-		if (result.back()) {
-			if (impl_->diagnosticsEnabled) {
+		const std::size_t effectivePriority = next->priority;
+		const PerfWorkClass effectiveWorkClass = next->workClass;
+		result.push_back({std::move(next->image), effectivePriority, effectiveWorkClass});
+		if (result.back().image) {
+			CacheReservation temporary = std::move(next->temporaryReservation);
+			if (impl_->diagnosticsEnabled || temporary) {
+				const std::size_t bytes = PreparedDisplayImageBytes(*result.back().image);
 				const auto inserted = impl_->borrowedAllocations.emplace(
-					result.back().get(), PreparedDisplayImageBytes(*result.back()));
-				if (inserted.second) impl_->borrowedBytes += inserted.first->second;
+					result.back().image.get(), Impl::BorrowedAllocation{bytes, std::move(temporary)});
+				if (inserted.second) impl_->borrowedBytes += inserted.first->second.bytes;
 			}
 		}
 		impl_->ReleaseCompletionReservation(*next);
@@ -1565,15 +1724,69 @@ void DisplayImageCache::Release(const std::string& key) {
 	impl_->workAvailable.notify_one();
 }
 
+void DisplayImageCache::ReleaseForUpload(const ImagePtr& image) {
+	impl_->ReleaseForUse(image, CacheMemoryCategory::TemporaryUploadStaging);
+}
+
+void DisplayImageCache::ReleaseForUpload(const std::vector<ImagePtr>& images) {
+	for (const ImagePtr& image : images) ReleaseForUpload(image);
+}
+
+void DisplayImageCache::ReleaseForActiveUse(const ImagePtr& image) {
+	impl_->ReleaseForUse(image, CacheMemoryCategory::ActiveWorkingData);
+}
+
+void DisplayImageCache::SetProtectionSnapshot(
+	const std::vector<std::pair<DisplayImageCacheKey, CacheProtectionTier>>& protections) {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	std::unordered_map<DisplayImageCacheKey, CacheProtectionTier,
+		DisplayImageCacheKeyHash> strongest;
+	for (const auto& protection : protections) {
+		auto inserted = strongest.emplace(protection.first, protection.second);
+		if (!inserted.second && static_cast<unsigned>(protection.second) >
+			static_cast<unsigned>(inserted.first->second)) {
+			inserted.first->second = protection.second;
+		}
+	}
+	std::vector<std::pair<DisplayImageCacheKey, CacheProtectionTier>> changes;
+	for (std::size_t tier = 0; tier < impl_->lru.size(); ++tier) {
+		const std::vector<DisplayImageCacheKey> keys(impl_->lru[tier].begin(),
+			impl_->lru[tier].end());
+		for (const DisplayImageCacheKey& key : keys) {
+			const auto entry = impl_->entries.find(key);
+			if (entry == impl_->entries.end()) continue;
+			const auto desired = strongest.find(key);
+			const CacheProtectionTier protection = desired == strongest.end() ?
+				CacheProtectionTier::DistantSpeculation : desired->second;
+			if (entry->second.protection != protection) {
+				changes.emplace_back(key, protection);
+			}
+		}
+	}
+	for (const auto& change : changes) {
+		const auto entry = impl_->entries.find(change.first);
+		if (entry != impl_->entries.end()) impl_->SetProtection(entry, change.second);
+	}
+}
+
+std::size_t DisplayImageCache::EvictLeastRecentlyUsed(CacheProtectionTier maximumTier) {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	const auto oldest = impl_->Oldest(maximumTier);
+	if (oldest == impl_->entries.end()) return 0;
+	const std::size_t bytes = impl_->Erase(oldest);
+	impl_->workAvailable.notify_one();
+	return bytes;
+}
+
 void DisplayImageCache::Retire(const ImagePtr& image) {
 	if (!image) return;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		impl_->ForgetBorrowed(image);
+		CacheReservation borrowed = impl_->ForgetBorrowed(image);
 		const auto cached = impl_->entries.find(image->cacheKey);
 		const bool stillCached = cached != impl_->entries.end() &&
 			cached->second.image.get() == image.get();
-		if (!stillCached) impl_->QueueRetirement(image);
+		if (!stillCached) impl_->QueueRetirement(image, std::move(borrowed));
 	}
 }
 
@@ -1591,7 +1804,8 @@ void DisplayImageCache::Clear() {
 	impl_->queue.clear();
 	while (!impl_->completed.empty()) {
 		impl_->ReleaseCompletionReservation(impl_->completed.front());
-		impl_->QueueRetirement(std::move(impl_->completed.front().image));
+		impl_->QueueRetirement(std::move(impl_->completed.front().image),
+			std::move(impl_->completed.front().temporaryReservation));
 		impl_->completed.pop_front();
 	}
 	impl_->pendingCachedCompletions.clear();
@@ -1648,8 +1862,9 @@ DisplayImageCacheDiagnostics DisplayImageCache::GetDiagnostics() const {
 	}
 	std::lock_guard<std::mutex> retirementLock(impl_->retirementState->mutex);
 	diagnostics.retiredImages = impl_->retirementState->retired.size();
-	for (const ImagePtr& image : impl_->retirementState->retired) {
-		if (image) diagnostics.retiredBytes += PreparedDisplayImageBytes(*image);
+	for (const Impl::RetirementState::RetiredImage& retired :
+		impl_->retirementState->retired) {
+		if (retired.image) diagnostics.retiredBytes += PreparedDisplayImageBytes(*retired.image);
 	}
 	if (impl_->retirementState->retiring &&
 		impl_->retirementState->retiringDisplayImage) {
@@ -1678,6 +1893,50 @@ bool DisplayImageCache::WaitUntilIdle(std::chrono::milliseconds timeout) {
 	return impl_->idle.wait_for(lock, timeout, [this] {
 		return impl_->queue.empty() && impl_->activeWorkers == 0;
 	});
+}
+
+DisplayImageCompletionBatch::DisplayImageCompletionBatch(DisplayImageCache& cache,
+	std::vector<ImagePtr> images)
+	: cache_(cache) {
+	completions_.reserve(images.size());
+	for (ImagePtr& image : images) {
+		completions_.push_back({std::move(image), 0,
+			PerfWorkClass::Unspecified});
+	}
+}
+
+DisplayImageCompletionBatch::DisplayImageCompletionBatch(DisplayImageCache& cache,
+	std::vector<CompletionInfo> completions)
+	: cache_(cache), completions_(std::move(completions)) {}
+
+DisplayImageCompletionBatch::~DisplayImageCompletionBatch() {
+	for (const CompletionInfo& completion : completions_) {
+		if (completion.image) cache_.Retire(completion.image);
+	}
+}
+
+std::size_t DisplayImageCompletionBatch::Size() const {
+	return completions_.size();
+}
+
+const DisplayImageCompletionBatch::ImagePtr& DisplayImageCompletionBatch::At(
+	std::size_t index) const {
+	return completions_.at(index).image;
+}
+
+const DisplayImageCompletionBatch::CompletionInfo&
+DisplayImageCompletionBatch::CompletionAt(std::size_t index) const {
+	return completions_.at(index);
+}
+
+DisplayImageCompletionBatch::ImagePtr DisplayImageCompletionBatch::Take(
+	std::size_t index) {
+	return std::move(completions_.at(index).image);
+}
+
+DisplayImageCompletionBatch::CompletionInfo
+DisplayImageCompletionBatch::TakeCompletion(std::size_t index) {
+	return std::move(completions_.at(index));
 }
 
 } // namespace jpegview_linux

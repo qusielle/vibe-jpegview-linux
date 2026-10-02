@@ -90,7 +90,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   decoders resolve archive-member paths through `archive_source` before invoking the existing codec
   path, retaining ordinary-file and reduced-DCT JPEG behavior. Decoded frames carry alpha-presence
   metadata so opaque-image textures can keep blending disabled.
-- `cache_budget`, `image_cache`, `display_image_cache`, and `display_prefetch_planner`: aggregate cache accounting,
+- `cache_budget`, `image_cache`, `display_image_cache`, `display_prefetch_planner`, and
+  `display_upload_scheduler`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
   processing/scaling of renderer-ready frames. Decoded, display, and thumbnail caches use the same
   structured `SourceKey` equality and hashing. Display keys add frame, effective processing controls,
@@ -125,7 +126,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   publication batch for a still-current active-spread dimensions read, while source or mode
   replacement deactivates that request's batch. A decoded insertion that cannot fit prunes queued
   speculation only; foreground and active-spread work continues draining, including metadata-only
-  partner requests. Active-spread queued and active requests count as foreground source demand so
+  partner requests. Neighbor-batch bookkeeping releases decoded aliases after the display cache
+  accepts a request; an active-spread batch may retain its required decoded partner fallback.
+  Active-spread queued and active requests count as foreground source demand so
   visible thumbnails and list scans yield until the partner is ready.
   Speculative display preparation reserves completion capacity before processing: at most two
   in-flight or unconsumed speculative frames and 64 MiB of predicted pixels. Active-image and
@@ -134,8 +137,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   completions wait as metadata until a slot is free. Consuming, promoting, canceling, or rejecting a
   result releases its reservation. Thus a paused renderer cannot let completed speculative pixels
   grow with the neighbor window.
-  Borrowed-image identity bookkeeping is enabled only when performance
-  tracing is active. Retirement deduplication uses the pending queue and active worker owner; the
+  Borrowed-image entries persist whenever needed to carry a temporary reservation through upload;
+  performance tracing also tracks borrowed images without a reservation for byte diagnostics.
+  Retirement deduplication uses the pending queue and active worker owner; the
   worker keeps each active frame alive until all external pixel handles are released, then performs
   the final destruction itself. Retired byte totals come from queue and active-worker metadata, so
   diagnostics never acquire a temporary pixel owner. Shutdown stops preparation workers before
@@ -578,13 +582,64 @@ recaptures an invalid requested descriptor before decoding and publishes pixels 
 still-current source identity. Both reject stale generations, and neither adds image decoding to the
 event thread.
 Display pixels may be prepared on workers, but SDL texture upload and destruction stay on the
-renderer thread because SDL renderer objects are not thread-safe. Decoded pixels, prepared frames, and retained SDL textures
-reserve from one configured cache budget. Prepared
-frames are uploaded at most once per event-loop iteration, after the current frame is presented;
-closer neighbors block farther uploads while they can start. Expensive CPU-buffer destruction is
-handed back to the retirement worker, which keeps its active strong owner until renderer-thread upload handles have
-released the pixels. Its shared retirement state can outlive the cache while a valid pixel handle does,
-so cache destruction returns and the worker performs final destruction after that handle releases.
+renderer thread because SDL renderer objects are not thread-safe. One configured retained large-image
+budget covers decoded pixels, prepared display frames, and retained image textures. It does not cap
+total RSS. Cache-owned active decoded/prepared allocations and CPU upload staging are reported in
+separate categories; materialized `Image::bgra` buffers, processing copies, codec workspaces, external
+renderer allocations, and independent thumbnail storage are outside that accounting boundary. The
+current image stays displayable when the budget is zero or its frame is too large to retain.
+
+The selected source's decoded pixels move from retained-cache accounting to active working data while
+the Viewer needs them for current-image or spread preparation. When that source leaves the active set,
+the cache restores retained accounting only if capacity is available; otherwise it removes the cache
+entry and keeps any still-live source pixels charged as working data until their final owner retires.
+
+Each retained cache entry owns a move-only reservation. Reservations use shared control-block
+identity for pixel allocations, so aliases under multiple keys count once. Removing an entry transfers
+its reservation with the pixels to a shared-budget retirement coordinator. Exactly one worker waits
+for the final alias and releases attached charges after destruction; cancellation in another cache or
+a current-image handle cannot create another sole-owner waiter. Cache-owned active results refused by
+retention remain charged as working data until their final alias retires. Before SDL copies prepared
+pixels, the renderer removes the prepared cache entry and classifies its reservation as upload staging.
+Texture admission gets its own retained reservation while that staging charge remains visible, so
+temporary CPU-to-texture overlap is not mistaken for reclaimed CPU memory. Failed uploads release
+their local texture reservation by scope exit.
+
+Decoded and prepared entries, and SDL textures, keep hash lookup plus O(1) LRU-list iterators in
+separate protection tiers. The active image and active spread stay pinned; immediate forward and
+backward neighbors are evicted only after distant speculation. The renderer-thread admission policy
+receives the incoming protection tier, requests at most one eligible victim per attempt across
+decoded pixels, prepared frames, and image textures, and releases each owner lock before consulting
+the next owner. Removing an aliased victim does not count as reclaimed capacity; deferred texture
+uploads stay in a bounded queue and retry after the shared budget's retained-capacity revision advances.
+Releases of temporary upload or active-working charges do not authorize another retained eviction.
+Decoded protection snapshots reconcile entries targeting the active tier before lower-tier changes,
+because reclassification can release retained capacity needed by another entry in the same snapshot;
+the original LRU order is preserved within both groups.
+Pending and newly completed uploads share one priority plan and current work-class policy. Before
+selected candidates attempt texture admission, every unselected completion kept for later upload has
+its retained prepared-frame reservation transferred to temporary upload staging. The bounded pending
+queue can then hold aliases without letting a lower-priority prepared frame consume retained capacity
+while an active texture is admitted; a selected candidate that defers is staged in its admission
+attempt before it enters the queue. Staging remains charged until the final pixel alias retires. Every
+unclaimed completion is handed to the pending queue or worker retirement before the tick returns.
+An evicted frame can still have its reservation held by retirement while a completion aliases its
+pixels. Staging may reclassify that single allocation only after every retained cache entry has
+relinquished ownership; a retained entry under another key keeps the shared charge in retained
+capacity. The allocation remains charged once across cache, retirement, and upload aliases.
+The completion's effective priority and work class travel beside its prepared pixels through planning,
+texture admission, and every deferred retry because later promotion can make payload metadata stale.
+Texture destruction always remains on the SDL thread. Worker-side CPU admissions may evict only within their
+own thread-safe cache; when shared capacity is held elsewhere they decline retention while still
+delivering the active result. The configured limit therefore governs retained large-image caching,
+not total RSS or required active display data.
+
+Prepared frames are uploaded at most once per event-loop iteration, after the current frame is
+presented; closer neighbors block farther uploads while they can start. Expensive CPU-buffer
+destruction is handed back to the retirement worker, which keeps its active strong owner until
+renderer-thread upload handles have released the pixels. Its shared retirement state can outlive the
+cache while a valid pixel handle does, so cache destruction returns and the worker performs final
+destruction after that handle releases.
 Retirement workers block while their queues are empty and poll only while queued buffers still have
 external owners; the thumbnail retirement thread starts on its first enqueue.
 When the thumbnail panel is visible, completed display frames also feed one bounded,

@@ -97,9 +97,28 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
 - Bounded completion admission and delivery must use compatible priority rules. Capacity-blocked work
   must not prevent ready results from releasing capacity, and cached refills must yield to startable
   queued work of equal or higher priority.
+- Renderer upload scheduling merges deferred and newly completed frames under the current priority and
+  allowed work classes. Effective scheduling metadata travels with a completion through deferred
+  retries; payload metadata may describe an earlier request. Every taken completion is transferred to
+  a texture, pending owner, or worker retirement before the renderer tick returns. Every completion
+  entering the bounded pending-upload queue must transfer its retained prepared-frame reservation to
+  temporary upload staging first; unselected completions must make that transfer before selected
+  foreground texture admission so an aliased lower-priority frame cannot block it. A frame already
+  moved to retirement may transfer to staging only after every live retained cache owner for that
+  allocation has relinquished ownership; aliases still share one charge, and another retained entry
+  for the same allocation keeps it charged against retained capacity.
+- Speculative bookkeeping must release decoded-image aliases once the owning cache accepts the work;
+  active work may retain an explicit fallback owner for as long as its source pixels remain required.
 - Preserve the single configured large-image cache budget. Thumbnail retention is independent and all
   thumbnails for the active file list should remain available; invalidate them only when their source
   identity or required geometry changes.
+- Use one shared retirement coordinator per allocation; do not create independent workers that each
+  wait for sole ownership of the same allocation. Capacity returns only when its reservation is
+  released, not when an entry is removed.
+- Pass incoming priority through cache admission. Eviction must stay nonblocking and bounded; defer
+  and retry when capacity returns instead of waiting synchronously for retired storage.
+- Keep successfully produced active work available when cache retention is refused, and account its
+  allocation as working data for the time it remains owned.
 - Avoid blocking the event thread with image decoding, resizing, directory scans, process waits, or
   destruction of very large buffers.
 - Keep compatibility code explicit. Do not use language or library facilities newer than C++17 or
