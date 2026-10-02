@@ -660,10 +660,19 @@ Catmull-Rom bicubic interpolation. JPEG neighbors are first decoded at the small
 bitmaps on low-priority background workers. This keeps fitted 4000×6000 files out of the
 full-resolution path during ordinary navigation; requesting original pixels still performs and
 caches a full decode. The SDL thread uploads completed frames incrementally—SDL renderer objects are
-thread-confined—and retains the resulting textures under the shared configured LRU budget, keyed by
-source identity, animation frame, correction mode, and target size. If preparation misses, SDL can
-temporarily scale the source texture while the high-quality result is produced; the expensive CPU
-resize never runs in the render loop.
+thread-confined—and retains the resulting textures under the shared configured large-image cache
+budget, keyed by source identity, animation frame, correction mode, and target size. The budget covers
+retained decoded pixels, prepared frames, and image textures. Decoded pixels needed by the selected
+image or spread are accounted as active working data, leaving the retained budget available for the
+spread's display textures. Cache-owned active decoded/prepared buffers and CPU upload staging are
+reported separately; materialized editing pixels, codec workspaces,
+and thumbnail storage are outside that accounting boundary, so the setting does not cap total process
+memory. The current image remains displayable when the cache budget is zero or its frame is too large
+to retain. The active image and spread are
+protected first, followed by the immediate forward and backward neighbors; more distant prefetch work
+is evicted first when room is needed. Thumbnail storage remains independent. If preparation misses,
+SDL can temporarily scale the source texture while the high-quality result is produced; the expensive
+CPU resize never runs in the render loop.
 
 Fit-to-screen mode does not enlarge images that are smaller than the available window; those images
 remain at their native size and are centered. Larger images are reduced to fit as usual.

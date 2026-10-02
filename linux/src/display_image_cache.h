@@ -14,6 +14,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace jpegview_linux {
@@ -75,6 +76,15 @@ struct PreparedDisplayImage {
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::Unspecified;
 	int rotationQuarterTurns = 0;
+};
+
+// Carries the cache's current scheduling classification with a prepared frame.
+// A frame can be promoted after preparation, so its payload fields may describe
+// the original request rather than the work currently being scheduled.
+struct DisplayImageCompletionInfo {
+	std::shared_ptr<const PreparedDisplayImage> image;
+	std::size_t priority = 0;
+	PerfWorkClass workClass = PerfWorkClass::Unspecified;
 };
 
 // Captures the source identity at request time. An invalid request is returned
@@ -166,8 +176,24 @@ public:
 	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount);
 	std::vector<ImagePtr> TakeCompleted(std::size_t maximumCount,
 		const std::set<PerfWorkClass>& permittedWorkClasses);
+	std::vector<DisplayImageCompletionInfo> TakeCompletedWithMetadata(
+		std::size_t maximumCount);
+	std::vector<DisplayImageCompletionInfo> TakeCompletedWithMetadata(
+		std::size_t maximumCount,
+		const std::set<PerfWorkClass>& permittedWorkClasses);
 	void Release(const std::string& key);
+	// Removes the entry while tracking its CPU pixels as temporary upload staging
+	// until the final shared owner releases them on the retirement worker.
+	void ReleaseForUpload(const ImagePtr& image);
+	// Transfers a set of prepared frames before renderer admission processes the
+	// selected uploads, so unselected aliases release retained capacity in time.
+	void ReleaseForUpload(const std::vector<ImagePtr>& images);
+	void ReleaseForActiveUse(const ImagePtr& image);
 	void Retire(const ImagePtr& image);
+	void SetProtectionSnapshot(
+		const std::vector<std::pair<DisplayImageCacheKey, CacheProtectionTier>>& protections);
+	std::size_t EvictLeastRecentlyUsed(
+		CacheProtectionTier maximumTier = CacheProtectionTier::Neighbor);
 	void Clear();
 
 	std::size_t CachedBytes() const;
@@ -180,6 +206,32 @@ public:
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl_;
+};
+
+// Owns every result returned by TakeCompleted until the renderer explicitly
+// transfers it to a texture or a deferred-upload queue. Unclaimed pixels are
+// retired by the cache worker when the batch leaves scope.
+class DisplayImageCompletionBatch {
+public:
+	using ImagePtr = std::shared_ptr<const PreparedDisplayImage>;
+	using CompletionInfo = DisplayImageCompletionInfo;
+
+	DisplayImageCompletionBatch(DisplayImageCache& cache, std::vector<ImagePtr> images);
+	DisplayImageCompletionBatch(DisplayImageCache& cache,
+		std::vector<CompletionInfo> completions);
+	~DisplayImageCompletionBatch();
+	DisplayImageCompletionBatch(const DisplayImageCompletionBatch&) = delete;
+	DisplayImageCompletionBatch& operator=(const DisplayImageCompletionBatch&) = delete;
+
+	std::size_t Size() const;
+	const ImagePtr& At(std::size_t index) const;
+	const CompletionInfo& CompletionAt(std::size_t index) const;
+	ImagePtr Take(std::size_t index);
+	CompletionInfo TakeCompletion(std::size_t index);
+
+private:
+	DisplayImageCache& cache_;
+	std::vector<CompletionInfo> completions_;
 };
 
 } // namespace jpegview_linux

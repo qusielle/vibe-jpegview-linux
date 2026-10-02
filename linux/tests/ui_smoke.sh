@@ -472,6 +472,73 @@ if [ -n "$perf_trace_path" ]; then
 fi
 stop_viewer
 
+# A 4 MiB retained budget must still show both fitted pages even while the
+# selected anchor's decoded source pixels remain available as working data.
+spread_budget_directory="$temporary/spread-budget-fixtures"
+mkdir -p "$spread_budget_directory" \
+	"$temporary/spread-budget-config/jpegview-linux"
+spread_budget_previous_state=$XDG_STATE_HOME
+XDG_STATE_HOME="$temporary/spread-budget-state"
+export XDG_STATE_HOME
+write_solid_png() {
+	python3 - "$1" "$2" "$3" "$4" <<'PY'
+import struct
+import sys
+import zlib
+
+path = sys.argv[1]
+color = bytes(int(value) for value in sys.argv[2:5])
+width, height = 768, 1024
+row = b"\0" + color * width
+def chunk(kind, payload):
+	return (struct.pack(">I", len(payload)) + kind + payload +
+		struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff))
+
+data = (b"\x89PNG\r\n\x1a\n" +
+	chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) +
+	chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
+with open(path, "wb") as output:
+	output.write(data)
+PY
+}
+write_solid_png "$spread_budget_directory/01-cover.png" 35 75 220
+write_solid_png "$spread_budget_directory/02-anchor.png" 30 220 60
+write_solid_png "$spread_budget_directory/03-partner.png" 220 40 30
+printf 'scale_mode=fit\ncache_size_mb=4\ndouble_page_mode_enabled=1\nthumbnail_panel_visible=0\nmanga_reading_order_enabled=0\n' \
+	> "$temporary/spread-budget-config/jpegview-linux/settings.conf"
+VIEWER_TEST_HOME="$temporary/spread-budget-home" \
+	VIEWER_TEST_CONFIG_HOME="$temporary/spread-budget-config" \
+	launch_viewer "$spread_budget_directory"
+assert_title_prefix "01-cover.png" "4 MiB spread fixture did not start on its standalone cover"
+sleep 0.25
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "[2-3/3] " "4 MiB fixture did not select the two-page spread"
+if [ "$visual_assertions" -eq 1 ]; then
+	spread_budget_rendered=0
+	for _ in $(seq 1 50); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/spread-budget.png"
+		spread_budget_left=$(convert "$temporary/spread-budget.png" \
+			-format '%[hex:p{320,400}]' info:)
+		spread_budget_right=$(convert "$temporary/spread-budget.png" \
+			-format '%[hex:p{960,400}]' info:)
+		case "$spread_budget_left:$spread_budget_right" in
+			*1EDC3C*:*DC281E*) spread_budget_rendered=1; break ;;
+		esac
+		sleep 0.1
+	done
+	if [ "$spread_budget_rendered" -ne 1 ]; then
+		echo "UI smoke test: 4 MiB active decoded pixels blocked the fitted spread ($spread_budget_left:$spread_budget_right)" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+else
+	echo "UI smoke test: SKIP (renderer pixel tools missing for the 4 MiB spread assertion)"
+fi
+stop_viewer
+XDG_STATE_HOME=$spread_budget_previous_state
+export XDG_STATE_HOME
+
 if [ -n "$perf_trace_path" ]; then
 	# Exercise per-row work classes with a generated 100-entry collection. The
 	# trace must distinguish independent reads/resampling for rows in the strip

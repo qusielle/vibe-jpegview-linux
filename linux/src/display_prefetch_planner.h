@@ -29,6 +29,13 @@ enum class DisplayPrefetchBatchInvalidation {
 bool ShouldDeactivateDisplayPrefetchBatch(DisplayPrefetchBatchOwner owner,
 	DisplayPrefetchBatchInvalidation invalidation, bool activeSpreadRequestStillCurrent);
 
+// Speculative planner bookkeeping must not keep decoded allocations alive after
+// the display cache accepts their request. Active spreads may retain a source
+// fallback while their partner becomes displayable.
+std::shared_ptr<const DecodedImage> RetainDisplayPrefetchDecodedImage(
+	DisplayPrefetchBatchOwner owner,
+	const std::shared_ptr<const DecodedImage>& decoded);
+
 // An immutable entry from the bounded neighbor window captured by the viewer.
 // Processing and source identity are resolved before the worker sees it.
 struct DisplayPrefetchCandidate {
@@ -77,6 +84,7 @@ struct DisplayPrefetchPlannerResult {
 	int imageAreaHeight = 0;
 	std::vector<DisplayImageRequest> requests;
 	std::vector<std::string> protectedTextureKeys;
+	std::vector<DisplayImageCacheKey> protectedTextureCacheKeys;
 	std::vector<DisplayPrefetchPlannedDimensions> dimensions;
 };
 

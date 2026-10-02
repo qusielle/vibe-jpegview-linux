@@ -1,12 +1,15 @@
 #include "image_cache.h"
 #include "archive_source.h"
+#include "cache_policy.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <iterator>
+#include <list>
 #include <mutex>
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -63,6 +66,17 @@ void RecordQueuedCancellation(PerfWorkClass workClass,
 	PerfDiagnostics::Instance().Record(PerfMetric::Cancellation);
 }
 
+std::shared_ptr<const void> DecodedAllocationIdentity(
+	const std::shared_ptr<const DecodedImage>& image) {
+	return image ? std::shared_ptr<const void>(image, image.get()) :
+		std::shared_ptr<const void>{};
+}
+
+template <typename Left, typename Right>
+bool SameSharedOwnership(const Left& left, const Right& right) {
+	return !left.owner_before(right) && !right.owner_before(left);
+}
+
 } // namespace
 
 std::size_t DecodedImageBytes(const DecodedImage& image) {
@@ -108,12 +122,29 @@ std::vector<std::size_t> ImagePrefetchOrder(std::size_t fileCount,
 }
 
 struct DecodedImageCache::Impl {
+	using ImagePtr = DecodedImageCache::ImagePtr;
+	using LruList = std::list<SourceKey>;
+
 	struct Entry {
 		ImagePtr image;
 		std::size_t bytes = 0;
-		std::uint64_t lastUsed = 0;
+		CacheProtectionTier protection = CacheProtectionTier::DistantSpeculation;
+		CacheReservation reservation;
+		std::list<SourceKey>::iterator lru;
 	};
 	using EntryMap = std::unordered_map<SourceKey, Entry, SourceKeyHash>;
+	struct RetiredImage {
+		ImagePtr image;
+		CacheReservation reservation;
+	};
+	struct RetirementState {
+		std::mutex mutex;
+		std::condition_variable available;
+		std::deque<RetiredImage> retired;
+		std::weak_ptr<const void> retiringOwner;
+		bool retiring = false;
+		bool stopping = false;
+	};
 
 	struct Work {
 		fs::path filename;
@@ -127,6 +158,36 @@ struct DecodedImageCache::Impl {
 		std::shared_ptr<std::atomic<bool>> cancellation;
 	};
 
+	static std::size_t TierIndex(CacheProtectionTier tier) {
+		return static_cast<std::size_t>(tier);
+	}
+
+	void Touch(EntryMap::iterator entry) {
+		LruList& list = lru[TierIndex(entry->second.protection)];
+		list.splice(list.end(), list, entry->second.lru);
+	}
+
+	bool SetProtection(EntryMap::iterator entry, CacheProtectionTier protection) {
+		if (sharedBudget && entry->second.reservation) {
+			if (protection == CacheProtectionTier::Active) {
+				if (!entry->second.reservation.ReclassifyForActiveUse()) return false;
+			} else if (entry->second.reservation.Category() ==
+				CacheMemoryCategory::ActiveWorkingData &&
+				!entry->second.reservation.Reclassify(
+					CacheMemoryCategory::RetainedDecodedPixels)) {
+				return false;
+			}
+		}
+		if (entry->second.protection != protection) {
+			lru[TierIndex(entry->second.protection)].erase(entry->second.lru);
+			LruList& list = lru[TierIndex(protection)];
+			list.push_back(entry->first);
+			entry->second.lru = std::prev(list.end());
+			entry->second.protection = protection;
+		}
+		return true;
+	}
+
 	explicit Impl(std::size_t budget, Decoder decode,
 		std::shared_ptr<SharedCacheBudget> shared, std::size_t workerCount,
 		DimensionsReader readDimensions)
@@ -139,11 +200,12 @@ struct DecodedImageCache::Impl {
 				return ReadJpegDimensions(filename, width, height, errorMessage);
 			};
 		}
+		retirementState = std::make_shared<RetirementState>();
 		workers.reserve(std::max<std::size_t>(1, workerCount));
 		for (std::size_t index = 0; index < std::max<std::size_t>(1, workerCount); ++index) {
 			workers.emplace_back([this] { Run(); });
 		}
-		retirementWorker = std::thread([this] { Retire(); });
+		retirementWorker = std::thread([state = retirementState] { Retire(state); });
 	}
 
 	~Impl() {
@@ -155,26 +217,66 @@ struct DecodedImageCache::Impl {
 				if (const auto cancellation = active.second.lock()) cancellation->store(true);
 			}
 			queue.clear();
+			while (!entries.empty()) Erase(entries.begin());
 		}
 		workAvailable.notify_all();
-		retirementAvailable.notify_all();
 		for (std::thread& worker : workers) {
 			if (worker.joinable()) worker.join();
 		}
-		if (retirementWorker.joinable()) retirementWorker.join();
-		if (sharedBudget) sharedBudget->Release(cachedBytes);
+		bool externalRetirementOwner = false;
+		{
+			std::lock_guard<std::mutex> lock(retirementState->mutex);
+			retirementState->stopping = true;
+			if (retirementState->retiring) {
+				const auto owner = retirementState->retiringOwner.lock();
+				externalRetirementOwner = owner && owner.use_count() > 2;
+			}
+			for (const RetiredImage& retiredImage : retirementState->retired) {
+				if (retiredImage.image && retiredImage.image.use_count() > 1) {
+					externalRetirementOwner = true;
+				}
+			}
+		}
+		retirementState->available.notify_all();
+		if (retirementWorker.joinable()) {
+			if (externalRetirementOwner) retirementWorker.detach();
+			else retirementWorker.join();
+		}
 	}
 
 	void Erase(EntryMap::iterator entry) {
 		const std::size_t bytes = entry->second.bytes;
 		ImagePtr retiredImage = std::move(entry->second.image);
+		CacheReservation reservation = std::move(entry->second.reservation);
+		lru[TierIndex(entry->second.protection)].erase(entry->second.lru);
 		entries.erase(entry);
 		cachedBytes -= bytes;
-		if (sharedBudget) sharedBudget->Release(bytes);
 		if (retiredImage) {
-			retired.push_back(std::move(retiredImage));
-			retirementAvailable.notify_one();
+			QueueRetirement(std::move(retiredImage), std::move(reservation));
 		}
+	}
+
+	void QueueRetirement(ImagePtr image, CacheReservation reservation = {}) {
+		if (!image) return;
+		reservation.RelinquishRetainedOwnership();
+		if (!reservation && sharedBudget) {
+			reservation = sharedBudget->TrackTemporary(DecodedImageBytes(*image),
+				CacheMemoryCategory::ActiveWorkingData,
+				DecodedAllocationIdentity(image));
+		}
+		if (sharedBudget) {
+			sharedBudget->RetireAllocation(DecodedAllocationIdentity(image),
+				std::move(reservation));
+			return;
+		}
+		std::lock_guard<std::mutex> lock(retirementState->mutex);
+		if (SameSharedOwnership(image, retirementState->retiringOwner) ||
+			std::any_of(retirementState->retired.begin(), retirementState->retired.end(),
+				[&image](const RetiredImage& candidate) {
+					return SameSharedOwnership(image, candidate.image);
+				})) return;
+		retirementState->retired.push_back({std::move(image), std::move(reservation)});
+		retirementState->available.notify_one();
 	}
 
 	void EraseOtherSourceIdentities(const SourceKey& current) {
@@ -189,17 +291,19 @@ struct DecodedImageCache::Impl {
 		}
 	}
 
-	EntryMap::iterator Oldest() {
-		if (entries.empty()) return entries.end();
-		auto oldest = entries.begin();
-		for (auto candidate = std::next(entries.begin()); candidate != entries.end(); ++candidate) {
-			if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
+	EntryMap::iterator Oldest(CacheProtectionTier maximumTier) {
+		for (std::size_t tier = 0; tier <= TierIndex(maximumTier); ++tier) {
+			if (lru[tier].empty()) continue;
+			const auto entry = entries.find(lru[tier].front());
+			if (entry != entries.end()) return entry;
 		}
-		return oldest;
+		return entries.end();
 	}
 
 	bool Insert(const SourceKey& key,
-		const std::shared_ptr<DecodedImage>& image, bool mayEvict) {
+		const std::shared_ptr<DecodedImage>& image, bool mayEvict,
+		CacheProtectionTier protection = CacheProtectionTier::Active,
+		bool activeUse = false) {
 		if (!image || image->frames.empty() || !key.Valid()) return false;
 		const std::size_t bytes = DecodedImageBytes(*image);
 		if (bytes == 0 || bytes > byteBudget) return false;
@@ -207,16 +311,45 @@ struct DecodedImageCache::Impl {
 		if (existing != entries.end()) Erase(existing);
 		if (!mayEvict && bytes > byteBudget - cachedBytes) return false;
 		while (bytes > byteBudget - cachedBytes && !entries.empty()) {
-			Erase(Oldest());
+			auto oldest = Oldest(CacheProtectionTier::DistantSpeculation);
+			if (oldest == entries.end() && mayEvict &&
+				protection == CacheProtectionTier::Active) {
+				oldest = Oldest(CacheProtectionTier::Neighbor);
+			}
+			if (oldest == entries.end()) return false;
+			Erase(oldest);
 		}
 		if (bytes > byteBudget - cachedBytes) return false;
+		CacheReservation reservation;
 		if (sharedBudget) {
-			while (!sharedBudget->TryReserve(bytes)) {
-				if (!mayEvict || entries.empty()) return false;
-				Erase(Oldest());
+			const std::shared_ptr<const void> allocation = DecodedAllocationIdentity(image);
+			reservation = activeUse ?
+				sharedBudget->TrackTemporary(bytes,
+					CacheMemoryCategory::ActiveWorkingData, allocation) :
+				sharedBudget->TryReserve(bytes,
+					CacheMemoryCategory::RetainedDecodedPixels, allocation);
+			if (reservation && activeUse &&
+				!reservation.ReclassifyForActiveUse()) return false;
+			while (!reservation) {
+				if (!mayEvict || activeUse) return false;
+				auto oldest = Oldest(CacheProtectionTier::DistantSpeculation);
+				if (oldest == entries.end() && protection == CacheProtectionTier::Active) {
+					oldest = Oldest(CacheProtectionTier::Neighbor);
+				}
+				if (oldest == entries.end()) return false;
+				const std::uint64_t releaseRevision =
+					sharedBudget->RetainedCapacityRevision();
+				Erase(oldest);
+				if (sharedBudget->RetainedCapacityRevision() == releaseRevision) return false;
+				reservation = sharedBudget->TryReserve(bytes,
+					CacheMemoryCategory::RetainedDecodedPixels, allocation);
+				if (!reservation) return false;
 			}
 		}
-		entries.emplace(key, Entry{image, bytes, ++useCounter});
+		LruList& list = lru[TierIndex(protection)];
+		list.push_back(key);
+		entries.emplace(key, Entry{image, bytes, protection, std::move(reservation),
+			std::prev(list.end())});
 		cachedBytes += bytes;
 		return true;
 	}
@@ -299,8 +432,21 @@ struct DecodedImageCache::Impl {
 					// already viewed. Stop this generation once the free budget
 					// cannot hold its next nearest neighbor.
 					const bool mayEvict = foreground ||
-						effectiveWorkClass == PerfWorkClass::ActiveImageSpread;
-					if (!Insert(work.key.source, image, mayEvict)) {
+						effectiveWorkClass == PerfWorkClass::ActiveImageSpread ||
+						effectiveWorkClass == PerfWorkClass::NearestNavigationNeighbor;
+					const CacheProtectionTier protection =
+						CacheProtectionForWorkClass(effectiveWorkClass, foreground);
+					if (!Insert(work.key.source, image, mayEvict, protection,
+						foreground || effectiveWorkClass == PerfWorkClass::ActiveImageSpread)) {
+						QueueRetirement(image);
+						if (sharedBudget) {
+							const CacheBudgetSnapshot snapshot = sharedBudget->Snapshot();
+							PerfDiagnostics::Instance().RecordText(PerfMetric::CacheSnapshot,
+								DecodedImageBytes(*image), snapshot.retainedBytes,
+								snapshot.activeWorkingBytes, snapshot.capacityBytes,
+								static_cast<std::uint64_t>(effectiveWorkClass), 0,
+								"decoded_retention_denied");
+						}
 						for (auto queued = queue.begin(); queued != queue.end();) {
 							if (queued->workClass == PerfWorkClass::ActiveImageSpread ||
 								foregroundKeys.find(queued->key) != foregroundKeys.end()) {
@@ -319,9 +465,8 @@ struct DecodedImageCache::Impl {
 							}
 							queued = queue.erase(queued);
 						}
-					} else {
-						completedImage = image;
 					}
+					completedImage = image;
 				}
 				if (!stopping && stillDesired) {
 					if (work.dimensionsOnly) {
@@ -339,18 +484,41 @@ struct DecodedImageCache::Impl {
 		}
 	}
 
-	void Retire() {
+	static void Retire(const std::shared_ptr<RetirementState>& state) {
 		(void)::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 10);
 		for (;;) {
-			ImagePtr image;
+			RetiredImage retiredImage;
 			{
-				std::unique_lock<std::mutex> lock(mutex);
-				retirementAvailable.wait(lock, [this] { return stopping || !retired.empty(); });
-				if (stopping) return;
-				image = std::move(retired.front());
-				retired.pop_front();
+				std::unique_lock<std::mutex> lock(state->mutex);
+				for (;;) {
+					auto ready = std::find_if(state->retired.begin(), state->retired.end(),
+						[](const RetiredImage& candidate) {
+							return candidate.image && candidate.image.use_count() == 1;
+						});
+					if (ready != state->retired.end()) {
+						retiredImage = std::move(*ready);
+						state->retired.erase(ready);
+						state->retiringOwner = retiredImage.image;
+						state->retiring = true;
+						break;
+					}
+					if (state->stopping && state->retired.empty()) return;
+					if (state->retired.empty()) {
+						state->available.wait(lock, [&state] {
+							return state->stopping || !state->retired.empty();
+						});
+					} else {
+						state->available.wait_for(lock, std::chrono::milliseconds(2));
+					}
+				}
 			}
-			image.reset();
+			retiredImage.image.reset();
+			retiredImage.reservation.Reset();
+			{
+				std::lock_guard<std::mutex> lock(state->mutex);
+				state->retiringOwner.reset();
+				state->retiring = false;
+			}
 		}
 	}
 
@@ -360,13 +528,13 @@ struct DecodedImageCache::Impl {
 	std::shared_ptr<SharedCacheBudget> sharedBudget;
 	mutable std::mutex mutex;
 	std::condition_variable workAvailable;
-	std::condition_variable retirementAvailable;
 	std::condition_variable idle;
 	std::vector<std::thread> workers;
 	std::thread retirementWorker;
+	std::shared_ptr<RetirementState> retirementState;
 	EntryMap entries;
+	std::array<LruList, 3> lru;
 	std::deque<Work> queue;
-	std::deque<ImagePtr> retired;
 	std::vector<SourceChangeNotice> changedSources;
 	std::unordered_set<DecodedImageWorkKey, DecodedImageWorkKeyHash> queuedKeys;
 	std::unordered_set<DecodedImageWorkKey, DecodedImageWorkKeyHash> inFlightKeys;
@@ -377,7 +545,6 @@ struct DecodedImageCache::Impl {
 	std::unordered_map<DecodedImageWorkKey, Work, DecodedImageWorkKeyHash> desiredWork;
 	std::size_t cachedBytes = 0;
 	std::size_t activeWorkers = 0;
-	std::uint64_t useCounter = 0;
 	std::uint64_t generation = 0;
 	bool stopping = false;
 };
@@ -401,7 +568,7 @@ DecodedImageCache::ImagePtr DecodedImageCache::Find(const SourceDescriptor& sour
 	if (!key.Valid()) return {};
 	const auto found = impl_->entries.find(key);
 	if (found == impl_->entries.end()) return {};
-	found->second.lastUsed = ++impl_->useCounter;
+	impl_->Touch(found);
 	return found->second.image;
 }
 
@@ -418,7 +585,7 @@ DecodedImageCache::ImagePtr DecodedImageCache::FindOrWait(const SourceDescriptor
 	const auto findValid = [&]() -> ImagePtr {
 		const auto found = impl_->entries.find(key);
 		if (found == impl_->entries.end()) return {};
-		found->second.lastUsed = ++impl_->useCounter;
+		impl_->Touch(found);
 		return found->second.image;
 	};
 	if (ImagePtr cached = findValid()) return cached;
@@ -464,11 +631,63 @@ void DecodedImageCache::Store(const SourceDescriptor& source,
 	const std::shared_ptr<DecodedImage>& image) {
 	const SourceKey key = source.Key();
 	{
-		std::lock_guard<std::mutex> lock(impl_->mutex);
-		impl_->EraseOtherSourceIdentities(key);
-		impl_->Insert(key, image, true);
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	impl_->EraseOtherSourceIdentities(key);
+	if (!impl_->Insert(key, image, true, CacheProtectionTier::Active)) {
+		impl_->QueueRetirement(image);
+	}
 	}
 	impl_->workAvailable.notify_one();
+}
+
+void DecodedImageCache::PromoteToActiveUse(const SourceKey& source) {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	const auto entry = impl_->entries.find(source);
+	if (entry == impl_->entries.end()) return;
+	if (!impl_->SetProtection(entry, CacheProtectionTier::Active)) {
+		impl_->Erase(entry);
+		impl_->workAvailable.notify_one();
+	}
+}
+
+void DecodedImageCache::SetProtectionSnapshot(
+	const std::vector<std::pair<SourceKey, CacheProtectionTier>>& protections) {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	std::unordered_map<SourceKey, CacheProtectionTier, SourceKeyHash> strongest;
+	for (const auto& protection : protections) {
+		auto inserted = strongest.emplace(protection.first, protection.second);
+		if (!inserted.second && static_cast<unsigned>(protection.second) >
+			static_cast<unsigned>(inserted.first->second)) {
+			inserted.first->second = protection.second;
+		}
+	}
+	std::vector<std::pair<SourceKey, CacheProtectionTier>> changes;
+	for (std::size_t tier = 0; tier < impl_->lru.size(); ++tier) {
+		const std::vector<SourceKey> keys(impl_->lru[tier].begin(),
+			impl_->lru[tier].end());
+		for (const SourceKey& key : keys) {
+			const auto entry = impl_->entries.find(key);
+			if (entry == impl_->entries.end()) continue;
+			const auto desired = strongest.find(key);
+			const CacheProtectionTier protection = desired == strongest.end() ?
+				CacheProtectionTier::DistantSpeculation : desired->second;
+			changes.emplace_back(key, protection);
+		}
+	}
+	// Release retained ownership from all active entries before restoring
+	// retained charges for entries moving to lower tiers. This keeps an
+	// unchanged active entry from temporarily blocking a neighbor transition.
+	std::stable_partition(changes.begin(), changes.end(),
+		[](const auto& change) {
+			return change.second == CacheProtectionTier::Active;
+		});
+	for (const auto& change : changes) {
+		const auto entry = impl_->entries.find(change.first);
+		if (entry != impl_->entries.end() &&
+			!impl_->SetProtection(entry, change.second)) {
+			impl_->Erase(entry);
+		}
+	}
 }
 
 void DecodedImageCache::RequestBackground(const fs::path& filename,
@@ -499,7 +718,9 @@ void DecodedImageCache::RequestBackground(const SourceDescriptor& source,
 		work.generation = impl_->generation;
 		const auto cached = impl_->entries.find(work.key.source);
 		if (cached != impl_->entries.end()) {
-			cached->second.lastUsed = ++impl_->useCounter;
+			impl_->Touch(cached);
+			impl_->SetProtection(cached,
+				CacheProtectionForWorkClass(work.workClass));
 			alreadyCached = cached->second.image;
 		} else {
 			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
@@ -708,6 +929,9 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 			impl_->desiredWork[work.key] = work;
 			const auto cached = impl_->entries.find(work.key.source);
 			if (cached != impl_->entries.end()) {
+				impl_->Touch(cached);
+					impl_->SetProtection(cached,
+						CacheProtectionForWorkClass(work.workClass));
 				if (completion) alreadyCached.emplace_back(work.filename, cached->second.image);
 				continue;
 			}
@@ -784,9 +1008,12 @@ DecodedImageCacheDiagnostics DecodedImageCache::GetDiagnostics() const {
 			++diagnostics.backgroundActive;
 		}
 	}
-	diagnostics.retiredImages = impl_->retired.size();
-	for (const ImagePtr& image : impl_->retired) {
-		if (image) diagnostics.retiredBytes += DecodedImageBytes(*image);
+	{
+		std::lock_guard<std::mutex> retirementLock(impl_->retirementState->mutex);
+		diagnostics.retiredImages = impl_->retirementState->retired.size();
+		for (const Impl::RetiredImage& retired : impl_->retirementState->retired) {
+			if (retired.image) diagnostics.retiredBytes += DecodedImageBytes(*retired.image);
+		}
 	}
 	return diagnostics;
 }
@@ -798,9 +1025,9 @@ std::vector<SourceChangeNotice> DecodedImageCache::TakeChangedSources() {
 	return changed;
 }
 
-std::size_t DecodedImageCache::EvictLeastRecentlyUsed() {
+std::size_t DecodedImageCache::EvictLeastRecentlyUsed(CacheProtectionTier maximumTier) {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
-	const auto oldest = impl_->Oldest();
+	const auto oldest = impl_->Oldest(maximumTier);
 	if (oldest == impl_->entries.end()) return 0;
 	const std::size_t bytes = oldest->second.bytes;
 	impl_->Erase(oldest);

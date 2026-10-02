@@ -8,6 +8,8 @@
 #include "image_cache.h"
 #include "display_image_cache.h"
 #include "cache_budget.h"
+#include "cache_policy.h"
+#include "display_upload_scheduler.h"
 #include "image.h"
 #include "image_processing.h"
 #include "image_processing_store.h"
@@ -58,6 +60,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cerrno>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -90,8 +93,12 @@
 #include <unistd.h>
 #include <zlib.h>
 #include <zip.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
 namespace fs = std::filesystem;
+std::string gTestExecutablePath;
 using jpegview_linux::DecodedImage;
 using jpegview_linux::FileList;
 using jpegview_linux::FileListPreparedScan;
@@ -2520,6 +2527,31 @@ void TestInteractionWorkPolicyIdleDeadlineAndCapture() {
 		"pending foreground source work did not suppress background admission");
 }
 
+void TestDisplayUploadSchedulerPrioritizesPermittedForeground() {
+	using jpegview_linux::DisplayUploadPriority;
+	using jpegview_linux::PerfWorkClass;
+	const std::vector<DisplayUploadPriority> candidates{
+		{PerfWorkClass::NearestNavigationNeighbor, 1}, // blocked pending upload
+		{PerfWorkClass::ActiveImageSpread, 1}, // ready partner
+		{PerfWorkClass::ActiveImageSpread, 0}, // ready anchor
+		{PerfWorkClass::DistantSpeculation, 0},
+		{PerfWorkClass::FocusedPreview, 0},
+	};
+	const std::set<PerfWorkClass> interactionClasses{
+		PerfWorkClass::ActiveImageSpread, PerfWorkClass::FocusedPreview};
+	const std::vector<std::size_t> firstTick =
+		jpegview_linux::PlanDisplayTextureUploads(candidates, interactionClasses, 1);
+	Expect(firstTick == std::vector<std::size_t>{2},
+		"a lower-priority deferred upload blocked a ready active anchor within the tick limit");
+	const std::vector<std::size_t> spreadTick =
+		jpegview_linux::PlanDisplayTextureUploads(candidates, interactionClasses, 2);
+	Expect(spreadTick == std::vector<std::size_t>({2, 1}),
+		"the bounded spread upload plan did not schedule the active anchor and partner first");
+	Expect(std::find(spreadTick.begin(), spreadTick.end(), 0) == spreadTick.end() &&
+		std::find(spreadTick.begin(), spreadTick.end(), 3) == spreadTick.end(),
+		"interaction-time upload planning admitted pending neighbor or distant work");
+}
+
 void TestFileListDateSortingAndSelectionPreservation() {
 	TemporaryDirectory temporary;
 	const fs::path directory = temporary.path() / "images";
@@ -3981,6 +4013,11 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	lru.Store(files[1], CachedTestImage(16));
 	Expect(lru.CachedBytes() == 32 && lru.CachedImages() == 2,
 		"decoded cache did not account for retained BGRA memory");
+	lru.SetProtectionSnapshot({
+		{jpegview_linux::DescribeImageSource(files[0]).Key(),
+			jpegview_linux::CacheProtectionTier::DistantSpeculation},
+		{jpegview_linux::DescribeImageSource(files[1]).Key(),
+			jpegview_linux::CacheProtectionTier::DistantSpeculation}});
 	Expect(lru.Find(files[0]) != nullptr, "decoded cache missed a retained image");
 	lru.Store(files[2], CachedTestImage(16));
 	Expect(lru.Find(files[0]) != nullptr && lru.Find(files[1]) == nullptr &&
@@ -4300,6 +4337,82 @@ void TestDecodedActiveSpreadBudgetPressure() {
 		"active spread partner could not use the full budget while preserving the most-recent foreground image");
 }
 
+void TestDecodedActiveWorkSurvivesRetentionRefusalForSpreadFrames() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "oversized-spread-source.png";
+	WriteText(filename, "oversized decoded source");
+	auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(32);
+	auto retainedOwner = std::make_shared<int>(1);
+	std::shared_ptr<const void> retainedAllocation(retainedOwner, retainedOwner.get());
+	auto otherCache = budget->TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, retainedAllocation);
+	Expect(otherCache && budget->Used() == 16,
+		"spread retention fixture did not reserve its shared-cache pressure");
+	std::mutex mutex;
+	std::condition_variable changed;
+	jpegview_linux::DecodedImageCache::ImagePtr activeDecoded;
+	bool decodedCompleted = false;
+	jpegview_linux::DecodedImageCache decodedCache(128,
+		[](const fs::path&, DecodedImage& image, std::string&) {
+			image = *CachedTestImage(24);
+			return true;
+		}, budget);
+	decodedCache.RequestBackground(filename,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				activeDecoded = image;
+				decodedCompleted = true;
+			}
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decodedCompleted; }),
+			"active spread decode did not complete after cache admission refusal");
+	}
+	Expect(activeDecoded && activeDecoded->frames.front().bgra.size() == 24 &&
+		decodedCache.Find(filename) == activeDecoded &&
+		budget->Snapshot().activeWorkingBytes == 24 && budget->Used() == 16,
+		"retention refusal lost the active decoded source or charged it against retained capacity");
+	jpegview_linux::DisplayImageCache displayCache(64, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			image->filename = request.filename;
+			image->source = request.source;
+			image->cacheKey = request.cacheKey;
+			image->key = request.key;
+			image->width = request.targetWidth;
+			image->height = request.targetHeight;
+			image->bgra.assign(static_cast<std::size_t>(image->width) *
+				static_cast<std::size_t>(image->height) * 4, 255);
+			return image;
+		}, budget);
+	auto request = jpegview_linux::MakeDisplayImageRequest(filename, activeDecoded,
+		0, 2, 2, false, 0);
+	request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	auto prepared = displayCache.RequestAndWait(request);
+	Expect(prepared && prepared->bgra.size() == 16 && displayCache.CachedBytes() == 16 &&
+		budget->Used() == 32 && budget->Snapshot().activeWorkingBytes == 24,
+		"fitted active spread frame could not be prepared from an oversized unretained source");
+	prepared.reset();
+	request.decoded.reset();
+	activeDecoded.reset();
+	decodedCache.Clear();
+	displayCache.Clear();
+	otherCache.Reset();
+	retainedAllocation.reset();
+	retainedOwner.reset();
+	const auto retirementDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while ((budget->Used() != 0 || budget->Snapshot().activeWorkingBytes != 0) &&
+		std::chrono::steady_clock::now() < retirementDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(budget->Used() == 0 && budget->Snapshot().activeWorkingBytes == 0,
+		"active spread working-data charges survived their final allocation owner");
+}
+
 void TestDecodedPromotedSpreadBudgetPressure() {
 	TemporaryDirectory temporary;
 	const fs::path foregroundFile = temporary.path() / "retained-foreground.ppm";
@@ -4396,7 +4509,7 @@ void TestDecodedBudgetRejectionPreservesQueuedActiveSpreadWork() {
 	bool oversizedStarted = false;
 	bool releaseOversized = false;
 	bool oversizedCallbackComplete = false;
-	bool oversizedCallbackRejected = false;
+	bool oversizedCallbackDelivered = false;
 	bool dimensionsCallbackComplete = false;
 	bool dimensionsSucceeded = false;
 	int decodedWidth = 0;
@@ -4431,7 +4544,7 @@ void TestDecodedBudgetRejectionPreservesQueuedActiveSpreadWork() {
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				oversizedCallbackComplete = true;
-				oversizedCallbackRejected = !image;
+				oversizedCallbackDelivered = image != nullptr;
 			}
 			changed.notify_all();
 		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
@@ -4470,11 +4583,11 @@ void TestDecodedBudgetRejectionPreservesQueuedActiveSpreadWork() {
 	}
 	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
 		"cache did not drain active spread work after an oversized admission rejection");
-	Expect(callbacksComplete && oversizedCallbackRejected && dimensionsSucceeded &&
+	Expect(callbacksComplete && oversizedCallbackDelivered && dimensionsSucceeded &&
 		decodedWidth == width && decodedHeight == height && dimensionsReadCount == 1 &&
 		pixelDecodeCount == 1 && cache.Find(foregroundFile) != nullptr &&
 		cache.Find(oversizedFile) == nullptr,
-		"oversized active-spread rejection dropped queued JPEG dimensions work or evicted foreground pixels");
+		"oversized active work was lost, dropped queued JPEG dimensions work, or evicted foreground pixels");
 }
 
 void TestJpegActiveSpreadDimensionsSurvivePause() {
@@ -5071,6 +5184,261 @@ DisplayCachePreparedTestImage(const jpegview_linux::DisplayImageRequest& request
 		static_cast<std::size_t>(image->height) * 4;
 	image->bgra.assign(bytes, 255);
 	return image;
+}
+
+void TestDisplayCachePromotionMetadataReachesUploadScheduler() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "promoted-spread.png";
+	WriteText(filename, "promoted display request");
+	const auto decoded = DisplayCacheTestImage(4, 4);
+	auto neighborRequest = jpegview_linux::MakeDisplayImageRequest(
+		filename, decoded, 0, 2, 2, false, 5);
+	neighborRequest.workClass = jpegview_linux::PerfWorkClass::NearestNavigationNeighbor;
+	jpegview_linux::DisplayImageCache cache(64, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			image->filename = request.filename;
+			image->source = request.source;
+			image->cacheKey = request.cacheKey;
+			image->key = request.key;
+			image->width = image->height = 2;
+			image->priority = request.priority;
+			image->workClass = request.workClass;
+			image->bgra.assign(16, 255);
+			return image;
+		});
+	cache.RequestBackground(neighborRequest);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"neighbor display preparation did not complete before promotion");
+	auto activeSpreadRequest = neighborRequest;
+	activeSpreadRequest.priority = 1;
+	activeSpreadRequest.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	cache.RequestBackgroundBatch({activeSpreadRequest});
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"cached display completion did not become available after active-spread promotion");
+	const std::set<jpegview_linux::PerfWorkClass> activeOnly{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread};
+	jpegview_linux::DisplayImageCompletionBatch completions(cache,
+		cache.TakeCompletedWithMetadata(1, activeOnly));
+	const auto& completion = completions.CompletionAt(0);
+	Expect(completions.Size() == 1 && completion.priority == 1 &&
+		completion.workClass == jpegview_linux::PerfWorkClass::ActiveImageSpread &&
+		completion.image && completion.image->priority == 5 &&
+		completion.image->workClass ==
+			jpegview_linux::PerfWorkClass::NearestNavigationNeighbor,
+		"cached promotion metadata was lost or the prepared payload was unexpectedly rewritten");
+	const std::vector<jpegview_linux::DisplayUploadPriority> activeCandidate{{
+		completion.workClass, completion.priority}};
+	const auto selected = jpegview_linux::PlanDisplayTextureUploads(
+		activeCandidate, activeOnly, 1);
+	Expect(selected == std::vector<std::size_t>{0},
+		"active-only upload scheduling rejected a promoted prepared neighbor");
+	jpegview_linux::DisplayUploadPriority pendingPriority{
+		jpegview_linux::PerfWorkClass::NearestNavigationNeighbor, 5};
+	Expect(jpegview_linux::MergeDisplayUploadPriority(pendingPriority,
+		{completion.workClass, completion.priority}) &&
+		pendingPriority.workClass == jpegview_linux::PerfWorkClass::ActiveImageSpread &&
+		pendingPriority.requestPriority == 1 &&
+		jpegview_linux::PlanDisplayTextureUploads({pendingPriority}, activeOnly, 1) ==
+			std::vector<std::size_t>{0},
+		"a duplicate deferred upload did not adopt the promoted work classification");
+}
+
+void TestDisplayPrefetchDecodedOwnershipPolicy() {
+	auto neighborPixels = DisplayCacheTestImage(4, 4);
+	std::weak_ptr<const DecodedImage> neighborWeak = neighborPixels;
+	auto neighborBatchPixels = jpegview_linux::RetainDisplayPrefetchDecodedImage(
+		jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner, neighborPixels);
+	neighborPixels.reset();
+	Expect(!neighborBatchPixels && neighborWeak.expired(),
+		"neighbor prefetch bookkeeping retained decoded source pixels");
+
+	TemporaryDirectory temporary;
+	const fs::path evictedNeighbor = temporary.path() / "evicted-neighbor.png";
+	const fs::path nearestImage = temporary.path() / "nearest-image.png";
+	WriteText(evictedNeighbor, "neighbor decoded source");
+	WriteText(nearestImage, "nearest decoded source");
+	auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(32);
+	jpegview_linux::DecodedImageCache decodedCache(32,
+		[](const fs::path&, DecodedImage& image, std::string&) {
+			image = *CachedTestImage(32);
+			return true;
+		}, budget);
+	const auto neighborSource = jpegview_linux::DescribeImageSource(evictedNeighbor);
+	decodedCache.Store(neighborSource, CachedTestImage(16));
+	auto neighborCacheAlias = decodedCache.Find(neighborSource);
+	neighborBatchPixels = jpegview_linux::RetainDisplayPrefetchDecodedImage(
+		jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner, neighborCacheAlias);
+	neighborCacheAlias.reset();
+	decodedCache.SetProtectionSnapshot({{neighborSource.Key(),
+		jpegview_linux::CacheProtectionTier::DistantSpeculation}});
+	const std::size_t evictedBytes = decodedCache.EvictLeastRecentlyUsed(
+		jpegview_linux::CacheProtectionTier::DistantSpeculation);
+	const auto capacityDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (budget->Used() != 0 && std::chrono::steady_clock::now() < capacityDeadline) {
+		std::this_thread::yield();
+	}
+	const bool capacityReturnedWhileBatchAlive = budget->Used() == 0 &&
+		!neighborBatchPixels;
+	const auto nearestSource = jpegview_linux::DescribeImageSource(nearestImage);
+	std::mutex completionMutex;
+	std::condition_variable completionChanged;
+	bool nearestCompleted = false;
+	decodedCache.RequestBackground(nearestSource,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(completionMutex);
+				nearestCompleted = image && !image->frames.empty();
+			}
+			completionChanged.notify_all();
+		}, jpegview_linux::PerfWorkClass::NearestNavigationNeighbor);
+	const bool nearestIdle = decodedCache.WaitUntilIdle(std::chrono::seconds(2));
+	bool callbackReceived = false;
+	{
+		std::unique_lock<std::mutex> lock(completionMutex);
+		callbackReceived = completionChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return nearestCompleted; });
+	}
+	Expect(evictedBytes == 16 && capacityReturnedWhileBatchAlive && nearestIdle &&
+		callbackReceived && decodedCache.Find(nearestSource) &&
+		budget->Snapshot().decodedPixelBytes == 32,
+		"live neighbor-batch bookkeeping blocked nearest decoded-cache admission after eviction");
+
+	auto spreadPixels = DisplayCacheTestImage(4, 4);
+	std::weak_ptr<const DecodedImage> spreadWeak = spreadPixels;
+	auto spreadBatchPixels = jpegview_linux::RetainDisplayPrefetchDecodedImage(
+		jpegview_linux::DisplayPrefetchBatchOwner::ActiveSpread, spreadPixels);
+	spreadPixels.reset();
+	Expect(spreadBatchPixels && !spreadWeak.expired(),
+		"active-spread batch lost its required decoded source fallback");
+	spreadBatchPixels.reset();
+	Expect(spreadWeak.expired(),
+		"active-spread source fallback remained owned after its batch released it");
+}
+
+void TestDisplayCacheProtectionSnapshotPreservesNeighborLru() {
+	TemporaryDirectory temporary;
+	const fs::path neighborAFile = temporary.path() / "neighbor-a.png";
+	const fs::path neighborBFile = temporary.path() / "neighbor-b.png";
+	const fs::path activeFile = temporary.path() / "active.png";
+	WriteText(neighborAFile, "neighbor a");
+	WriteText(neighborBFile, "neighbor b");
+	WriteText(activeFile, "active");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	auto neighborA = jpegview_linux::MakeDisplayImageRequest(
+		neighborAFile, decoded, 0, 2, 2, false, 1);
+	auto neighborB = jpegview_linux::MakeDisplayImageRequest(
+		neighborBFile, decoded, 0, 2, 2, false, 1);
+	const std::vector<std::pair<jpegview_linux::DisplayImageCacheKey,
+		jpegview_linux::CacheProtectionTier>> snapshot{
+		{neighborA.cacheKey, jpegview_linux::CacheProtectionTier::Neighbor},
+		{neighborB.cacheKey, jpegview_linux::CacheProtectionTier::Neighbor}};
+
+	const auto evictsLeastRecentlyUsedNeighbor = [&](bool touchAFirst) {
+		jpegview_linux::DisplayImageCache cache(32, 1,
+			[](const jpegview_linux::DisplayImageRequest& request) {
+				return DisplayCachePreparedTestImage(request);
+			});
+		cache.RequestBackgroundBatch({neighborA, neighborB});
+		if (!cache.WaitUntilIdle(std::chrono::seconds(2))) return false;
+		auto initialCompletions = cache.TakeCompleted(2);
+		if (initialCompletions.size() != 2 || cache.CachedBytes() != 32) return false;
+		initialCompletions.clear();
+
+		cache.SetProtectionSnapshot(snapshot);
+		if (touchAFirst) {
+			if (!cache.Find(neighborA) || !cache.Find(neighborB)) return false;
+		} else if (!cache.Find(neighborB) || !cache.Find(neighborA)) {
+			return false;
+		}
+		for (int refresh = 0; refresh < 3; ++refresh) {
+			cache.SetProtectionSnapshot(snapshot);
+		}
+
+		auto activeRequest = jpegview_linux::MakeDisplayImageRequest(
+			activeFile, decoded, 0, 2, 2, false);
+		activeRequest.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+		cache.RequestBackground(activeRequest);
+		if (!cache.WaitUntilIdle(std::chrono::seconds(2))) return false;
+		const auto& leastRecentlyUsed = touchAFirst ? neighborA : neighborB;
+		const auto& mostRecentlyUsed = touchAFirst ? neighborB : neighborA;
+		return cache.CachedBytes() == 32 && cache.CachedImages() == 2 &&
+			!cache.Find(leastRecentlyUsed) && cache.Find(mostRecentlyUsed) &&
+			cache.Find(activeRequest);
+	};
+
+	const bool aWasLeastRecent = evictsLeastRecentlyUsedNeighbor(true);
+	const bool bWasLeastRecent = evictsLeastRecentlyUsedNeighbor(false);
+	Expect(aWasLeastRecent && bWasLeastRecent,
+		"repeated identical protection snapshots changed which touched neighbor was evicted");
+}
+
+void TestDecodedCacheProtectionSnapshotPreservesLruAcrossTierChanges() {
+	TemporaryDirectory temporary;
+	const fs::path imageAFile = temporary.path() / "decoded-a.png";
+	const fs::path imageBFile = temporary.path() / "decoded-b.png";
+	WriteText(imageAFile, "decoded a");
+	WriteText(imageBFile, "decoded b");
+	const auto imageA = jpegview_linux::DescribeImageSource(imageAFile).Key();
+	const auto imageB = jpegview_linux::DescribeImageSource(imageBFile).Key();
+	const auto exerciseTransition = [&](jpegview_linux::CacheProtectionTier initialTier,
+		jpegview_linux::CacheProtectionTier targetTier, bool touchAFirst) {
+		jpegview_linux::DecodedImageCache cache(32);
+		cache.Store(imageAFile, CachedTestImage(16));
+		cache.Store(imageBFile, CachedTestImage(16));
+		cache.SetProtectionSnapshot({{imageA, initialTier}, {imageB, initialTier}});
+		const bool touched = touchAFirst ?
+			static_cast<bool>(cache.Find(imageAFile)) &&
+			static_cast<bool>(cache.Find(imageBFile)) :
+			static_cast<bool>(cache.Find(imageBFile)) &&
+			static_cast<bool>(cache.Find(imageAFile));
+		if (!touched) return false;
+
+		cache.SetProtectionSnapshot({{imageA, targetTier}, {imageB, targetTier}});
+		const auto& leastRecentlyUsed = touchAFirst ? imageAFile : imageBFile;
+		const auto& mostRecentlyUsed = touchAFirst ? imageBFile : imageAFile;
+		return cache.EvictLeastRecentlyUsed(targetTier) == 16 &&
+			!cache.Find(leastRecentlyUsed) && cache.Find(mostRecentlyUsed);
+	};
+	const auto distant = jpegview_linux::CacheProtectionTier::DistantSpeculation;
+	const auto neighbor = jpegview_linux::CacheProtectionTier::Neighbor;
+	Expect(exerciseTransition(distant, neighbor, true) &&
+		exerciseTransition(distant, neighbor, false),
+		"decoded-cache promotion snapshot did not preserve both opposite neighbor touch orders");
+	Expect(exerciseTransition(neighbor, distant, true) &&
+		exerciseTransition(neighbor, distant, false),
+		"decoded-cache demotion snapshot did not preserve both opposite distant touch orders");
+}
+
+void TestDecodedCacheProtectionReconcilesActiveReservationsFirst() {
+	TemporaryDirectory temporary;
+	const fs::path leavingActiveFile = temporary.path() / "leaving-active.png";
+	const fs::path stayingActiveFile = temporary.path() / "staying-active.png";
+	WriteText(leavingActiveFile, "leaving active");
+	WriteText(stayingActiveFile, "staying active");
+	const auto leavingActive = jpegview_linux::DescribeImageSource(leavingActiveFile).Key();
+	const auto stayingActive = jpegview_linux::DescribeImageSource(stayingActiveFile).Key();
+	auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(16);
+	jpegview_linux::DecodedImageCache cache(32, {}, budget);
+
+	cache.Store(leavingActiveFile, CachedTestImage(16));
+	cache.PromoteToActiveUse(leavingActive);
+	cache.Store(stayingActiveFile, CachedTestImage(16));
+	Expect(budget->Snapshot().retainedBytes == 16 &&
+		budget->Snapshot().activeWorkingBytes == 16,
+		"decoded protection ordering fixture did not fill retained capacity with an active entry");
+
+	// The lower-tier transition appears first in active LRU order. Its working
+	// allocation can be retained only after the unchanged active entry releases
+	// its previously retained reservation.
+	cache.SetProtectionSnapshot({
+		{leavingActive, jpegview_linux::CacheProtectionTier::Neighbor},
+		{stayingActive, jpegview_linux::CacheProtectionTier::Active}});
+	const jpegview_linux::CacheBudgetSnapshot snapshot = budget->Snapshot();
+	Expect(cache.CachedImages() == 2 && cache.Find(leavingActiveFile) &&
+		cache.Find(stayingActiveFile) && snapshot.retainedBytes == 16 &&
+		snapshot.activeWorkingBytes == 16,
+		"neighbor promotion ran before active reservation reconciliation released capacity");
 }
 
 void TestDisplayImageCacheForegroundActiveClassification() {
@@ -5674,6 +6042,95 @@ void TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker() {
 		Expect(outlivingProbe->thread != eventThread && outlivingProbe->thread != teardownThread,
 			"outliving display pixels were not destroyed by the retirement worker");
 	}
+}
+
+void TestDisplayCompletionBatchRetiresEveryDeferredPairResultOffCaller() {
+	struct DestructionState {
+		std::mutex mutex;
+		std::condition_variable changed;
+		std::size_t destroyed = 0;
+		bool destroyedOffCaller = true;
+	};
+
+	TemporaryDirectory temporary;
+	const std::thread::id caller = std::this_thread::get_id();
+	auto sharedBudget = std::make_shared<jpegview_linux::SharedCacheBudget>(0);
+	auto destruction = std::make_shared<DestructionState>();
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	const auto makeRequest = [&](const std::string& name, std::size_t priority) {
+		const fs::path filename = temporary.path() / name;
+		WriteText(filename, name);
+		auto request = jpegview_linux::MakeDisplayImageRequest(filename, decoded,
+			0, 512, 512, false, priority);
+		request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+		return request;
+	};
+	const auto first = makeRequest("first.png", 0);
+	const auto second = makeRequest("second.png", 1);
+	const auto processor = [destruction, caller](
+		const jpegview_linux::DisplayImageRequest& request) {
+		auto* image = new jpegview_linux::PreparedDisplayImage;
+		image->filename = request.filename;
+		image->source = request.source;
+		image->cacheKey = request.cacheKey;
+		image->key = request.key;
+		image->width = image->height = 512;
+		image->bgra.assign(512u * 512u * 4u, 96);
+		return jpegview_linux::DisplayImageCache::ImagePtr(image,
+			[destruction, caller](const jpegview_linux::PreparedDisplayImage* retired) {
+				{
+					std::lock_guard<std::mutex> lock(destruction->mutex);
+					++destruction->destroyed;
+					destruction->destroyedOffCaller = destruction->destroyedOffCaller &&
+						std::this_thread::get_id() != caller;
+				}
+				destruction->changed.notify_all();
+				delete retired;
+			});
+	};
+	jpegview_linux::DisplayImageCache cache(0, 2, processor, sharedBudget);
+	cache.RequestBackgroundBatch({first, second});
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"two-page upload completions did not finish before their bounded deadline");
+	const std::set<jpegview_linux::PerfWorkClass> activeOnly{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread};
+	{
+		jpegview_linux::DisplayImageCompletionBatch batch(cache,
+			cache.TakeCompleted(2, activeOnly));
+		Expect(batch.Size() == 2 && sharedBudget->Snapshot().activeWorkingBytes ==
+			2u * 512u * 512u * 4u,
+			"unretained spread completions did not keep both pixel reservations accounted");
+		jpegview_linux::DisplayImageCache::ImagePtr deferred = batch.Take(0);
+		cache.ReleaseForUpload(deferred);
+		jpegview_linux::CacheAdmissionPolicy admission(*sharedBudget);
+		const auto blockedTexture = admission.Reserve(512u * 512u * 4u,
+			jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+			jpegview_linux::CacheProtectionTier::Active, {}, false);
+		Expect(!blockedTexture,
+			"zero retained capacity did not defer the first spread texture upload");
+		cache.Retire(deferred);
+		deferred.reset();
+	}
+	{
+		std::unique_lock<std::mutex> lock(destruction->mutex);
+		Expect(destruction->changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return destruction->destroyed == 2;
+		}), "deferred spread batch did not retire both prepared pixel buffers");
+		Expect(destruction->destroyedOffCaller,
+			"a deferred spread completion destroyed large pixels on the renderer caller");
+	}
+	const auto accountingDeadline = std::chrono::steady_clock::now() +
+		std::chrono::seconds(2);
+	while (std::chrono::steady_clock::now() < accountingDeadline) {
+		const auto snapshot = sharedBudget->Snapshot();
+		if (snapshot.retainedBytes == 0 && snapshot.activeWorkingBytes == 0 &&
+			snapshot.uploadStagingBytes == 0 && cache.GetDiagnostics().borrowedBytes == 0) break;
+		std::this_thread::yield();
+	}
+	const auto snapshot = sharedBudget->Snapshot();
+	Expect(snapshot.retainedBytes == 0 && snapshot.activeWorkingBytes == 0 &&
+		snapshot.uploadStagingBytes == 0 && cache.GetDiagnostics().borrowedBytes == 0,
+		"deferred spread upload left retained, staging, working, or borrowed bytes accounted");
 }
 
 void TestDisplayRetirementDoesNotDeduplicateReusedAddress() {
@@ -7241,6 +7698,7 @@ void TestDisplayRetirementSkipsSharedDecodedOwner() {
 	std::thread::id displayDestroyedOn;
 	std::thread::id decodedDestroyedOn;
 	const std::thread::id caller = std::this_thread::get_id();
+	auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(64);
 	jpegview_linux::DisplayImageCache cache(0, 1,
 		[&](const jpegview_linux::DisplayImageRequest& request) {
 			if (request.filename == activeFile) {
@@ -7265,8 +7723,8 @@ void TestDisplayRetirementSkipsSharedDecodedOwner() {
 				}
 				changed.notify_all();
 			delete image;
-		});
-		});
+			});
+		}, budget);
 	ScopedConditionRelease releaseActiveOnExit(mutex, changed, releaseActive);
 	const auto active = jpegview_linux::MakeDisplayImageRequest(activeFile,
 		activeDecoded, 0, 2, 2, false, 1);
@@ -7292,6 +7750,13 @@ void TestDisplayRetirementSkipsSharedDecodedOwner() {
 	cache.RequestBackground(queued);
 	queued.decoded.reset();
 	cache.CancelBackground(queued.key);
+	const auto workingDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (budget->Snapshot().activeWorkingBytes == 0 &&
+		std::chrono::steady_clock::now() < workingDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(budget->Snapshot().activeWorkingBytes == 16,
+		"uncached current-display pixels were not tracked while a caller alias remained");
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		releaseActive = true;
@@ -7315,9 +7780,105 @@ void TestDisplayRetirementSkipsSharedDecodedOwner() {
 		std::unique_lock<std::mutex> lock(mutex);
 		(void)changed.wait_for(lock, std::chrono::seconds(2), [&] { return decodedDestroyed; });
 	}
-	Expect(displayRetiredBeforeExternalOwner && !decodedStillOwned && decodedDestroyed &&
-		displayDestroyedOn != caller && decodedDestroyedOn != caller,
-		"shared decoded ownership blocked independent prepared-image retirement or destroyed pixels on the caller");
+	Expect(displayRetiredBeforeExternalOwner,
+		"a shared decoded alias blocked independent prepared-image retirement");
+	Expect(!decodedStillOwned,
+		"the retirement coordinator failed to retain the decoded allocation while its alias existed");
+	Expect(decodedDestroyed && displayDestroyedOn != caller && decodedDestroyedOn != caller,
+		"shared decoded or prepared pixels were destroyed on the caller or not destroyed");
+	const auto releasedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (budget->Snapshot().activeWorkingBytes != 0 &&
+		std::chrono::steady_clock::now() < releasedDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(budget->Snapshot().activeWorkingBytes == 0,
+		"retirement workers did not release active working charges after destruction");
+}
+
+void TestCrossCacheDecodedRetirementCancellationAndEviction() {
+	TemporaryDirectory temporary;
+	const fs::path blockerFile = temporary.path() / "cross-retirement-blocker.png";
+	const fs::path queuedFile = temporary.path() / "cross-retirement-queued.png";
+	WriteText(blockerFile, "blocker");
+	WriteText(queuedFile, "queued");
+	auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(64);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool blockerStarted = false;
+	bool releaseBlocker = false;
+	bool decodedDestroyed = false;
+	std::thread::id decodedDestroyedOn;
+	const std::thread::id caller = std::this_thread::get_id();
+	jpegview_linux::DecodedImageCache decodedCache(64, {}, budget);
+	auto* rawDecoded = new DecodedImage(*CachedTestImage(16));
+	auto decodedOwner = std::shared_ptr<DecodedImage>(rawDecoded,
+		[&](DecodedImage* image) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				decodedDestroyed = true;
+				decodedDestroyedOn = std::this_thread::get_id();
+			}
+			changed.notify_all();
+			delete image;
+		});
+	decodedCache.Store(queuedFile, decodedOwner);
+	jpegview_linux::DisplayImageCache displayCache(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			if (request.filename == blockerFile) {
+				std::unique_lock<std::mutex> lock(mutex);
+				blockerStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseBlocker; });
+			}
+			return DisplayCachePreparedTestImage(request);
+		}, budget);
+	ScopedConditionRelease unblock(mutex, changed, releaseBlocker);
+	const auto blocker = jpegview_linux::MakeDisplayImageRequest(blockerFile,
+		DisplayCacheTestImage(2, 2), 0, 2, 2, false, 1);
+	displayCache.RequestBackground(blocker);
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return blockerStarted; }),
+			"cross-cache retirement worker did not reach the blocker");
+	}
+	auto decodedAlias = decodedCache.Find(queuedFile);
+	Expect(decodedAlias != nullptr, "cross-cache queued decoded entry was not available");
+	auto decodedRetirementHold = decodedAlias;
+	auto queued = jpegview_linux::MakeDisplayImageRequest(queuedFile,
+		decodedAlias, 0, 2, 2, false, 2);
+	displayCache.RequestBackground(queued);
+	queued.decoded.reset();
+	decodedAlias.reset();
+	decodedOwner.reset();
+	displayCache.CancelBackground(queued.key);
+	Expect(decodedCache.EvictLeastRecentlyUsed(
+		jpegview_linux::CacheProtectionTier::Active) == 16 && budget->Used() == 16,
+		"decoded cache eviction did not transfer its reservation to shared retirement");
+	decodedRetirementHold.reset();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseBlocker = true;
+	}
+	changed.notify_all();
+	Expect(displayCache.WaitUntilIdle(std::chrono::seconds(2)),
+		"display cancellation did not settle after releasing the blocker");
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decodedDestroyed; }),
+			"cross-cache canceled and evicted pixels remained multiply retired");
+	}
+	displayCache.Clear();
+	decodedCache.Clear();
+	const auto budgetDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (budget->Used() != 0 && std::chrono::steady_clock::now() < budgetDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(decodedDestroyedOn != caller && budget->Used() == 0 &&
+		budget->Snapshot().decodedPixelBytes == 0 &&
+		budget->Snapshot().preparedFrameBytes == 0,
+		"cross-cache retirement destroyed pixels on the caller or kept budget charges alive");
 }
 
 void TestForegroundCompletionKeepsCachedPriorityClass() {
@@ -7345,28 +7906,295 @@ void TestForegroundCompletionKeepsCachedPriorityClass() {
 		"a background batch demoted an already queued foreground completion");
 }
 
+void TestDeferredDisplayUploadStagesAliasedPreparedCompletion() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "pending-neighbor.png";
+	WriteText(filename, "pending prepared image");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	const auto makeNeighborRequest = [&]() {
+		auto request = jpegview_linux::MakeDisplayImageRequest(filename, decoded,
+			0, 2, 2, false, 1);
+		request.workClass = jpegview_linux::PerfWorkClass::NearestNavigationNeighbor;
+		return request;
+	};
+	const std::set<jpegview_linux::PerfWorkClass> permitted{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread,
+		jpegview_linux::PerfWorkClass::NearestNavigationNeighbor};
+	const std::vector<jpegview_linux::DisplayUploadPriority> priorities{
+		{jpegview_linux::PerfWorkClass::NearestNavigationNeighbor, 1},
+		{jpegview_linux::PerfWorkClass::ActiveImageSpread, 0}};
+	const std::vector<std::size_t> selected =
+		jpegview_linux::PlanDisplayTextureUploads(priorities, permitted, 1);
+	Expect(selected == std::vector<std::size_t>{1},
+		"active texture admission test did not leave the lower-priority completion pending");
+
+	// Establish the failure this handoff must prevent: eviction removes the
+	// retained entry, but its queued alias keeps the retained reservation alive.
+	{
+		auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(16);
+		jpegview_linux::DisplayImageCache cache(16, 1, {}, budget);
+		cache.RequestBackground(makeNeighborRequest());
+		Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+			"lower-priority prepared completion did not finish before its deadline");
+		auto queued = cache.TakeCompleted(1);
+		Expect(queued.size() == 1 && cache.CachedBytes() == 16 &&
+			budget->Snapshot().preparedFrameBytes == 16,
+			"pending completion did not retain its prepared-frame reservation");
+		jpegview_linux::CacheAdmissionPolicy admission(*budget);
+		const jpegview_linux::CacheReservation blocked = admission.Reserve(16,
+			jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+			jpegview_linux::CacheProtectionTier::Active,
+			[&cache](jpegview_linux::CacheProtectionTier tier) {
+				return cache.EvictLeastRecentlyUsed(tier) != 0;
+			});
+		Expect(!blocked && cache.CachedBytes() == 0 &&
+			budget->Snapshot().preparedFrameBytes == 16 &&
+			budget->Snapshot().imageTextureBytes == 0,
+			"active admission reclaimed a prepared frame still aliased by a pending upload");
+	}
+
+	// A foreground insert can evict a completed neighbor before either result is
+	// taken. The retired reservation still accounts the pixels until the renderer
+	// stages both returned completions.
+	{
+		const fs::path foregroundFilename = temporary.path() / "foreground-active.png";
+		WriteText(foregroundFilename, "foreground prepared image");
+		auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(16);
+		jpegview_linux::DisplayImageCache cache(16, 1, {}, budget);
+		const auto background = makeNeighborRequest();
+		auto foreground = jpegview_linux::MakeDisplayImageRequest(foregroundFilename,
+			decoded, 0, 2, 2, false, 0);
+		foreground.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+		cache.RequestBackground(background);
+		Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) &&
+			cache.CachedBytes() == 16,
+			"background completion was not retained before foreground replacement");
+		cache.Request(foreground);
+		Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) &&
+			cache.CachedBytes() == 0,
+			"foreground preparation did not evict the still-completed neighbor");
+		auto completed = cache.TakeCompleted(2);
+		const auto active = std::find_if(completed.begin(), completed.end(),
+			[&foreground](const auto& image) {
+				return image && image->cacheKey == foreground.cacheKey;
+			});
+		const auto evicted = std::find_if(completed.begin(), completed.end(),
+			[&background](const auto& image) {
+				return image && image->cacheKey == background.cacheKey;
+			});
+		Expect(completed.size() == 2 && active != completed.end() &&
+			evicted != completed.end() && budget->Snapshot().preparedFrameBytes == 16,
+			"foreground replacement did not preserve both completions and the retired charge");
+		std::vector<jpegview_linux::DisplayImageCache::ImagePtr> stagedImages{
+			*evicted, *active};
+		cache.ReleaseForUpload(stagedImages);
+		const auto staged = budget->Snapshot();
+		Expect(staged.preparedFrameBytes == 0 && staged.uploadStagingBytes == 32 &&
+			staged.retainedBytes == 0,
+			"ownerless retired completion did not transfer its one charge to upload staging");
+
+		jpegview_linux::CacheAdmissionPolicy admission(*budget);
+		auto texture = admission.Reserve(16,
+			jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+			jpegview_linux::CacheProtectionTier::Active, {});
+		Expect(texture && budget->Snapshot().imageTextureBytes == 16 &&
+			budget->Snapshot().retainedBytes == 16,
+			"staged retired neighbor blocked foreground texture admission");
+		texture.Reset();
+		completed.clear();
+		stagedImages.clear();
+		const auto retiredDeadline = std::chrono::steady_clock::now() +
+			std::chrono::seconds(2);
+		while (budget->Snapshot().uploadStagingBytes != 0 &&
+			std::chrono::steady_clock::now() < retiredDeadline) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		Expect(budget->Snapshot().uploadStagingBytes == 0,
+			"staged foreground completions remained charged after their aliases retired");
+	}
+
+	// The renderer stages an unselected completion before it attempts the active
+	// texture reservation. The pending alias remains charged, but no longer uses
+	// retained capacity and therefore cannot block foreground admission.
+	auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(16);
+	{
+		jpegview_linux::DisplayImageCache cache(16, 1, {}, budget);
+		cache.RequestBackground(makeNeighborRequest());
+		Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+			"prepared completion did not finish before staging");
+		auto queued = cache.TakeCompleted(1);
+		Expect(queued.size() == 1,
+			"prepared completion was not available for pending upload staging");
+		std::vector<jpegview_linux::DisplayImageCache::ImagePtr> deferredImages{
+			queued.front()};
+		cache.ReleaseForUpload(deferredImages);
+		const jpegview_linux::CacheBudgetSnapshot staged = budget->Snapshot();
+		Expect(cache.CachedBytes() == 0 && staged.preparedFrameBytes == 0 &&
+			staged.uploadStagingBytes == 16,
+			"pending upload staging did not transfer its retained reservation exactly once");
+
+		jpegview_linux::CacheAdmissionPolicy admission(*budget);
+		bool triedEviction = false;
+		jpegview_linux::CacheReservation active = admission.Reserve(16,
+			jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+			jpegview_linux::CacheProtectionTier::Active,
+			[&cache, &triedEviction](jpegview_linux::CacheProtectionTier tier) {
+				triedEviction = true;
+				return cache.EvictLeastRecentlyUsed(tier) != 0;
+			});
+		const jpegview_linux::CacheBudgetSnapshot admitting = budget->Snapshot();
+		Expect(active && !triedEviction && admitting.imageTextureBytes == 16 &&
+			admitting.preparedFrameBytes == 0 && admitting.uploadStagingBytes == 16 &&
+			admitting.retainedBytes == 16,
+			"staged lower-priority pixels blocked active texture admission or lost accounting");
+		active.Reset();
+		Expect(budget->Snapshot().uploadStagingBytes == 16,
+			"pending staging charge disappeared while its pixel aliases were still live");
+
+		queued.clear();
+		deferredImages.clear();
+		const auto retiredDeadline = std::chrono::steady_clock::now() +
+			std::chrono::seconds(2);
+		while (budget->Snapshot().uploadStagingBytes != 0 &&
+			std::chrono::steady_clock::now() < retiredDeadline) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		Expect(budget->Snapshot().uploadStagingBytes == 0,
+			"pending upload staging remained charged after its final alias retired");
+	}
+}
+
 void TestSharedCacheBudgetAccounting() {
 	jpegview_linux::SharedCacheBudget budget(32);
 	Expect(budget.Capacity() == 32 && budget.Used() == 0 && budget.Available() == 32,
 		"shared cache budget did not expose its initial capacity");
-	Expect(budget.TryReserve(20) && budget.Used() == 20 && budget.Available() == 12,
+	auto firstOwner = std::make_shared<int>(1);
+	std::shared_ptr<const void> firstAllocation(firstOwner, firstOwner.get());
+	auto first = budget.TryReserve(20,
+		jpegview_linux::CacheMemoryCategory::RetainedDecodedPixels, firstAllocation);
+	Expect(first && budget.Used() == 20 && budget.Available() == 12,
 		"shared cache budget did not account for a reservation");
-	Expect(!budget.TryReserve(13) && budget.Used() == 20,
+	Expect(!budget.TryReserve(13,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames) && budget.Used() == 20,
 		"shared cache budget exceeded its total capacity");
-	Expect(budget.TryReserve(12) && budget.Used() == 32 && budget.Available() == 0,
+	auto second = budget.TryReserve(12,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames);
+	Expect(second && budget.Used() == 32 && budget.Available() == 0,
 		"shared cache budget rejected its exact remaining capacity");
-	budget.Release(7);
-	Expect(budget.Used() == 25 && budget.Available() == 7,
-		"shared cache budget did not release retained bytes");
+	first.Reset();
+	Expect(budget.Used() == 12 && budget.Available() == 20,
+		"move-only reservation destruction did not release exactly its bytes");
 	budget.SetCapacity(16);
-	Expect(budget.Capacity() == 16 && budget.Used() == 25 && budget.Available() == 0 &&
-		!budget.TryReserve(1),
+	Expect(budget.Capacity() == 16 && budget.Used() == 12 && budget.Available() == 4 &&
+		!budget.TryReserve(5,
+			jpegview_linux::CacheMemoryCategory::RetainedDecodedPixels),
 		"lowered shared cache capacity incorrectly discarded or admitted reservations");
-	budget.Release(100);
+	second.Reset();
 	Expect(budget.Used() == 0 && budget.Available() == 16,
-		"shared cache budget underflowed while releasing bytes");
+		"move-only reservation rollback did not return the remaining bytes");
 	Expect(jpegview_linux::CacheBytesFromMiB(2) == 2u * 1024u * 1024u,
 		"cache MiB conversion returned the wrong byte count");
+
+	jpegview_linux::SharedCacheBudget aliasBudget(32);
+	auto sharedPixels = std::make_shared<int>(2);
+	std::shared_ptr<const void> sharedPixelOwner(sharedPixels, sharedPixels.get());
+	auto retainedOwner = aliasBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedDecodedPixels, sharedPixelOwner);
+	auto uploadAlias = retainedOwner.ShareAlias();
+	Expect(retainedOwner && uploadAlias && aliasBudget.Used() == 16,
+		"shared allocation aliases charged their bytes more than once");
+	Expect(!uploadAlias.Reclassify(
+		jpegview_linux::CacheMemoryCategory::TemporaryUploadStaging) &&
+		aliasBudget.Snapshot().decodedPixelBytes == 16 &&
+		aliasBudget.Snapshot().uploadStagingBytes == 0,
+		"an upload alias reclassified pixels while a retained cache owner still needed them");
+	retainedOwner.Reset();
+	Expect(aliasBudget.Used() == 16 && uploadAlias.Reclassify(
+		jpegview_linux::CacheMemoryCategory::TemporaryUploadStaging) &&
+		aliasBudget.Used() == 0 &&
+		aliasBudget.Snapshot().uploadStagingBytes == 16,
+		"the final retained owner could not transfer its allocation to staging accounting");
+	uploadAlias.Reset();
+	Expect(aliasBudget.Snapshot().uploadStagingBytes == 0,
+		"temporary alias destruction did not release its accounting charge");
+
+	jpegview_linux::SharedCacheBudget retainedAliasBudget(16);
+	auto retainedAliasPixels = std::make_shared<int>(4);
+	std::shared_ptr<const void> retainedAliasOwner(retainedAliasPixels,
+		retainedAliasPixels.get());
+	auto retainedEntryA = retainedAliasBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames,
+		retainedAliasOwner);
+	auto retainedEntryB = retainedAliasBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames,
+		retainedAliasOwner);
+	retainedEntryA.RelinquishRetainedOwnership();
+	auto firstStagingAlias = retainedAliasBudget.TrackTemporary(16,
+		jpegview_linux::CacheMemoryCategory::TemporaryUploadStaging,
+		retainedAliasOwner);
+	Expect(retainedEntryA && retainedEntryB && firstStagingAlias &&
+		retainedAliasBudget.Used() == 16 &&
+		retainedAliasBudget.Snapshot().preparedFrameBytes == 16 &&
+		retainedAliasBudget.Snapshot().uploadStagingBytes == 0,
+		"one live retained cache alias did not keep the shared allocation retained");
+	retainedEntryB.RelinquishRetainedOwnership();
+	auto secondStagingAlias = retainedAliasBudget.TrackTemporary(16,
+		jpegview_linux::CacheMemoryCategory::TemporaryUploadStaging,
+		retainedAliasOwner);
+	Expect(secondStagingAlias && retainedAliasBudget.Used() == 0 &&
+		retainedAliasBudget.Snapshot().preparedFrameBytes == 0 &&
+		retainedAliasBudget.Snapshot().uploadStagingBytes == 16,
+		"ownerless retained aliases did not transfer their shared charge exactly once");
+	firstStagingAlias.Reset();
+	secondStagingAlias.Reset();
+	retainedEntryA.Reset();
+	retainedEntryB.Reset();
+	Expect(retainedAliasBudget.Snapshot().uploadStagingBytes == 0,
+		"shared staging charge remained after every allocation alias retired");
+
+	// A new control block at the same raw address is a distinct allocation even
+	// while the old reservation keeps the expired control block observable.
+	char sameAddressStorage = 0;
+	jpegview_linux::SharedCacheBudget addressReuseBudget(24);
+	auto oldOwner = std::shared_ptr<const void>(&sameAddressStorage,
+		[](const void*) {});
+	auto oldAddressCharge = addressReuseBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedDecodedPixels, oldOwner);
+	oldOwner.reset();
+	auto newOwner = std::shared_ptr<const void>(&sameAddressStorage,
+		[](const void*) {});
+	Expect(!addressReuseBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames, newOwner) &&
+		addressReuseBudget.Used() == 16,
+		"same-address allocation reuse shared an expired allocation's reservation");
+	oldAddressCharge.Reset();
+	auto newAddressCharge = addressReuseBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames, newOwner);
+	Expect(newAddressCharge && addressReuseBudget.Used() == 16,
+		"new control-block allocation could not reserve after the old charge retired");
+
+	jpegview_linux::SharedCacheBudget rollbackBudget(32);
+	auto stagingPixels = std::make_shared<int>(3);
+	std::shared_ptr<const void> stagingOwner(stagingPixels, stagingPixels.get());
+	auto staging = rollbackBudget.TrackTemporary(16,
+		jpegview_linux::CacheMemoryCategory::TemporaryUploadStaging, stagingOwner);
+	jpegview_linux::CacheAdmissionPolicy admission(rollbackBudget);
+	{
+		auto textureReservation = admission.Reserve(16,
+			jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+			jpegview_linux::CacheProtectionTier::Active, {});
+		Expect(textureReservation && rollbackBudget.Used() == 16 &&
+			rollbackBudget.Snapshot().uploadStagingBytes == 16,
+			"texture upload admission did not account for CPU staging overlap");
+		// Returning from a failed upload path destroys this still-local token.
+	}
+	Expect(rollbackBudget.Used() == 0 &&
+		rollbackBudget.Snapshot().imageTextureBytes == 0 &&
+		rollbackBudget.Snapshot().uploadStagingBytes == 16,
+		"a failed texture upload leaked its retained texture reservation");
+	staging.Reset();
+	Expect(rollbackBudget.Snapshot().uploadStagingBytes == 0,
+		"upload staging charge outlived its final CPU alias");
 
 	TemporaryDirectory temporary;
 	const fs::path decodedFile = temporary.path() / "decoded.jpg";
@@ -7394,13 +8222,751 @@ void TestSharedCacheBudgetAccounting() {
 	Expect(displayCache.WaitUntilIdle(std::chrono::seconds(2)) && shared->Used() == 32 &&
 		decodedCache.CachedBytes() == 16 && displayCache.CachedBytes() == 16,
 		"decoded and display caches did not share one aggregate limit");
-	displayCache.Release(displayRequest.key);
-	Expect(shared->Used() == 16, "display eviction did not return bytes to the shared cache budget");
-	Expect(shared->TryReserve(16) && shared->Used() == 32,
-		"display staging bytes could not be transferred to a texture reservation");
-	shared->Release(16);
+	auto displayAlias = displayCache.TakeCompleted(1);
+	Expect(displayAlias.size() == 1,
+		"prepared cache did not publish an alias for upload accounting");
+	displayCache.ReleaseForUpload(displayAlias.front());
+	Expect(displayCache.CachedBytes() == 0 && shared->Used() == 16 &&
+		shared->Snapshot().uploadStagingBytes == 16,
+		"upload handoff did not expose temporary CPU staging accounting");
+	displayAlias.clear();
+	const auto displayRetiredDeadline = std::chrono::steady_clock::now() +
+		std::chrono::seconds(2);
+	while (shared->Snapshot().uploadStagingBytes != 0 &&
+		std::chrono::steady_clock::now() < displayRetiredDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(shared->Snapshot().uploadStagingBytes == 0 && shared->Used() == 16,
+		"upload staging remained charged after the final prepared-image alias retired");
+	jpegview_linux::CacheAdmissionPolicy sharedAdmission(*shared);
+	auto textureReservation = sharedAdmission.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionTier::Active, {});
+	Expect(textureReservation && shared->Used() == 32,
+		"prepared-cache retirement did not make shared capacity available to textures");
+	textureReservation.Reset();
+	Expect(shared->Used() == 16,
+		"texture reservation rollback failed to return shared capacity");
 	decodedCache.Clear();
-	Expect(shared->Used() == 0, "decoded eviction did not return bytes to the shared cache budget");
+	const auto decodedRetiredDeadline = std::chrono::steady_clock::now() +
+		std::chrono::seconds(2);
+	while (shared->Used() != 0 && std::chrono::steady_clock::now() < decodedRetiredDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(shared->Used() == 0,
+		"decoded eviction did not return its shared cache charge after retirement");
+}
+
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+struct CacheBudgetRaceProbe {
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool resetUnlocked = false;
+	bool chargePromoted = false;
+	bool allowResetDrop = false;
+	bool resetCompleted = false;
+	bool allowReserveReturn = false;
+	bool reserveCompleted = false;
+	bool rejected = false;
+	bool hookTimedOut = false;
+};
+
+void CacheBudgetRaceTestHook(jpegview_linux::detail::CacheBudgetTestHookPoint point,
+	void* context) {
+	auto& probe = *static_cast<CacheBudgetRaceProbe*>(context);
+	std::unique_lock<std::mutex> lock(probe.mutex);
+	if (point == jpegview_linux::detail::CacheBudgetTestHookPoint::ReservationResetUnlocked) {
+		probe.resetUnlocked = true;
+		probe.changed.notify_all();
+		if (!probe.changed.wait_for(lock, std::chrono::seconds(2), [&probe] {
+			return probe.allowResetDrop;
+		})) probe.hookTimedOut = true;
+		return;
+	}
+	probe.chargePromoted = true;
+	probe.changed.notify_all();
+	if (!probe.changed.wait_for(lock, std::chrono::seconds(2), [&probe] {
+		return probe.allowReserveReturn;
+	})) probe.hookTimedOut = true;
+}
+
+bool WaitForCacheBudgetRaceFlag(CacheBudgetRaceProbe& probe, bool CacheBudgetRaceProbe::*flag) {
+	std::unique_lock<std::mutex> lock(probe.mutex);
+	return probe.changed.wait_for(lock, std::chrono::seconds(2), [&probe, flag] {
+		return probe.*flag;
+	});
+}
+
+void SetCacheBudgetRaceFlag(CacheBudgetRaceProbe& probe,
+	bool CacheBudgetRaceProbe::*flag) {
+	{
+		std::lock_guard<std::mutex> lock(probe.mutex);
+		probe.*flag = true;
+	}
+	probe.changed.notify_all();
+}
+
+int RunCacheBudgetReservationRejectionRaceChild(bool mismatch) {
+	jpegview_linux::SharedCacheBudget budget(0);
+	std::shared_ptr<const void> allocationOwner = std::make_shared<int>(42);
+	auto reservation = budget.TrackTemporary(16,
+		jpegview_linux::CacheMemoryCategory::ActiveWorkingData, allocationOwner);
+	if (!reservation || budget.Snapshot().activeWorkingBytes != 16) return 1;
+
+	CacheBudgetRaceProbe probe;
+	budget.SetTestHookForTesting(CacheBudgetRaceTestHook, &probe);
+	std::thread resetThread([reservation = std::move(reservation), &probe]() mutable {
+		reservation.Reset();
+		{
+			std::lock_guard<std::mutex> lock(probe.mutex);
+			probe.resetCompleted = true;
+		}
+		probe.changed.notify_all();
+	});
+	if (!WaitForCacheBudgetRaceFlag(probe, &CacheBudgetRaceProbe::resetUnlocked)) {
+		::_exit(11);
+	}
+
+	std::thread reserveThread([&budget, &allocationOwner, &probe, mismatch] {
+		const auto rejected = !budget.TryReserve(mismatch ? 17 : 16,
+			jpegview_linux::CacheMemoryCategory::RetainedDecodedPixels, allocationOwner);
+		{
+			std::lock_guard<std::mutex> lock(probe.mutex);
+			probe.rejected = static_cast<bool>(rejected);
+			probe.reserveCompleted = true;
+		}
+		probe.changed.notify_all();
+	});
+	if (!WaitForCacheBudgetRaceFlag(probe, &CacheBudgetRaceProbe::chargePromoted)) {
+		::_exit(12);
+	}
+
+	SetCacheBudgetRaceFlag(probe, &CacheBudgetRaceProbe::allowResetDrop);
+	if (!WaitForCacheBudgetRaceFlag(probe, &CacheBudgetRaceProbe::resetCompleted)) {
+		::_exit(13);
+	}
+	SetCacheBudgetRaceFlag(probe, &CacheBudgetRaceProbe::allowReserveReturn);
+	if (!WaitForCacheBudgetRaceFlag(probe, &CacheBudgetRaceProbe::reserveCompleted)) {
+		// The parent process enforces a deadline and can terminate this child if
+		// the rejected final charge recursively locks the budget mutex here.
+		::_exit(14);
+	}
+	resetThread.join();
+	reserveThread.join();
+
+	bool rejected = false;
+	bool hookTimedOut = false;
+	{
+		std::lock_guard<std::mutex> lock(probe.mutex);
+		rejected = probe.rejected;
+		hookTimedOut = probe.hookTimedOut;
+	}
+	const jpegview_linux::CacheBudgetSnapshot snapshot = budget.Snapshot();
+	budget.SetTestHookForTesting(nullptr, nullptr);
+	return rejected && !hookTimedOut && snapshot.capacityBytes == 0 &&
+		snapshot.retainedBytes == 0 && snapshot.decodedPixelBytes == 0 &&
+		snapshot.preparedFrameBytes == 0 && snapshot.imageTextureBytes == 0 &&
+		snapshot.uploadStagingBytes == 0 && snapshot.activeWorkingBytes == 0 &&
+		snapshot.releaseRevision == 1 && snapshot.retainedCapacityRevision == 0 ? 0 : 15;
+}
+
+bool RunCacheBudgetReservationRejectionRace(const std::string& executable,
+	const char* variant) {
+	std::string executableArgument = executable;
+	std::string modeArgument = "--cache-budget-reservation-rejection-race";
+	std::string variantArgument = variant;
+	char* arguments[] = {
+		executableArgument.data(), modeArgument.data(), variantArgument.data(), nullptr};
+	pid_t child = 0;
+	if (::posix_spawnp(&child, executableArgument.c_str(), nullptr, nullptr,
+		arguments, ::environ) != 0) return false;
+
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	int status = 0;
+	while (std::chrono::steady_clock::now() < deadline) {
+		const pid_t waited = ::waitpid(child, &status, WNOHANG);
+		if (waited == child) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+		if (waited < 0 && errno != EINTR) return false;
+		std::this_thread::yield();
+	}
+	(void)::kill(child, SIGKILL);
+	while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+	return false;
+}
+
+void TestSharedCacheBudgetReservationRejectionRaces() {
+	Expect(RunCacheBudgetReservationRejectionRace(gTestExecutablePath, "matching"),
+		"matching-byte rejection racing final Reset deadlocked or corrupted budget accounting");
+	Expect(RunCacheBudgetReservationRejectionRace(gTestExecutablePath, "mismatch"),
+		"mismatch rejection racing final Reset deadlocked or corrupted budget accounting");
+}
+#endif
+
+void TestActiveDecodedPixelsUseWorkingCapacityAndDemoteSafely() {
+	TemporaryDirectory temporary;
+	const fs::path activeFile = temporary.path() / "active-source.png";
+	WriteText(activeFile, "active source");
+	const jpegview_linux::SourceKey source =
+		jpegview_linux::DescribeImageSource(activeFile).Key();
+	auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(64);
+	jpegview_linux::DecodedImageCache cache(64, {}, budget);
+	auto decoded = CachedTestImage(32);
+	cache.Store(activeFile, decoded);
+	decoded.reset();
+	auto activeHandle = cache.Find(source.logicalPath);
+	cache.PromoteToActiveUse(source);
+	Expect(activeHandle && budget->Snapshot().retainedBytes == 0 &&
+		budget->Snapshot().activeWorkingBytes == 32,
+		"selected decoded pixels still consumed retained texture capacity");
+	auto spreadTextureBytes = budget->TryReserve(64,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures);
+	Expect(spreadTextureBytes && budget->Used() == 64,
+		"active decoded pixels prevented retained textures from using the configured budget");
+	cache.SetProtectionSnapshot({
+		{source, jpegview_linux::CacheProtectionTier::Neighbor}});
+	Expect(cache.CachedImages() == 0 && budget->Used() == 64 &&
+		budget->Snapshot().activeWorkingBytes == 32,
+		"a selected source was dropped or under-accounted when retained capacity was full");
+	activeHandle.reset();
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (budget->Snapshot().activeWorkingBytes != 0 &&
+		std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+	Expect(budget->Snapshot().activeWorkingBytes == 0 && budget->Used() == 64,
+		"retired active decoded pixels kept working accounting after their final owner left");
+	spreadTextureBytes.Reset();
+}
+
+void TestRetainedCapacityRevisionIgnoresTemporaryRetirement() {
+	auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(32);
+	auto heldOwner = std::make_shared<int>(1);
+	auto otherOwner = std::make_shared<int>(2);
+	std::shared_ptr<const void> heldAllocation(heldOwner, heldOwner.get());
+	std::shared_ptr<const void> otherAllocation(otherOwner, otherOwner.get());
+	auto heldVictim = budget->TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames, heldAllocation);
+	auto secondVictim = budget->TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, otherAllocation);
+	jpegview_linux::CacheAdmissionPolicy admission(*budget);
+	std::size_t evictions = 0;
+	const std::uint64_t beforeEviction = budget->RetainedCapacityRevision();
+	auto firstAttempt = admission.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionTier::Active,
+		[&](jpegview_linux::CacheProtectionTier) {
+			++evictions;
+			budget->RetireAllocation(heldAllocation, std::move(heldVictim));
+			return true;
+		});
+	Expect(!firstAttempt && evictions == 1 &&
+		budget->RetainedCapacityRevision() == beforeEviction && budget->Used() == 32,
+		"an aliased retained victim was treated as returned capacity before retirement");
+	const std::uint64_t generalReleaseBefore = budget->ReleaseRevision();
+	auto temporaryOwner = std::make_shared<int>(3);
+	std::shared_ptr<const void> temporaryAllocation(temporaryOwner,
+		temporaryOwner.get());
+	auto unrelatedTemporary = budget->TrackTemporary(8,
+		jpegview_linux::CacheMemoryCategory::ActiveWorkingData, temporaryAllocation);
+	unrelatedTemporary.Reset();
+	Expect(budget->ReleaseRevision() > generalReleaseBefore &&
+		budget->RetainedCapacityRevision() == beforeEviction && budget->Used() == 32,
+		"unrelated working-data retirement changed retained-capacity revision");
+	const bool mayEvictAgain = budget->RetainedCapacityRevision() > beforeEviction;
+	const std::size_t evictionsBeforeRetry = evictions;
+	auto secondAttempt = admission.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionTier::Active,
+		[&](jpegview_linux::CacheProtectionTier) {
+			++evictions;
+			return false;
+		}, mayEvictAgain);
+	Expect(!secondAttempt && evictions == evictionsBeforeRetry,
+		"temporary charge retirement triggered another retained-cache eviction");
+
+	heldAllocation.reset();
+	heldOwner.reset();
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (budget->RetainedCapacityRevision() == beforeEviction &&
+		std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+	Expect(budget->RetainedCapacityRevision() > beforeEviction && budget->Used() == 16,
+		"retained capacity did not advance when the held victim finally retired");
+	const std::uint64_t returnedCapacity = budget->RetainedCapacityRevision();
+	auto afterRetirement = admission.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionTier::Active, {},
+		budget->RetainedCapacityRevision() > returnedCapacity);
+	Expect(afterRetirement && budget->Used() == 32,
+		"texture admission did not proceed after retained capacity actually returned");
+	afterRetirement.Reset();
+	secondVictim.Reset();
+}
+
+void TestCachePolicyCrossOwnerProtectionAndAliasLifetime() {
+	TemporaryDirectory temporary;
+	auto aliasBudget = std::make_shared<jpegview_linux::SharedCacheBudget>(32);
+	jpegview_linux::DecodedImageCache aliasCache(64, {}, aliasBudget);
+	const fs::path aliasFileA = temporary.path() / "alias-a.jpg";
+	const fs::path aliasFileB = temporary.path() / "alias-b.jpg";
+	WriteText(aliasFileA, "alias-a");
+	WriteText(aliasFileB, "alias-b");
+	auto sharedPixels = CachedTestImage(16);
+	aliasCache.Store(aliasFileA, sharedPixels);
+	aliasCache.Store(aliasFileB, sharedPixels);
+	Expect(aliasCache.CachedBytes() == 32 && aliasBudget->Used() == 16 &&
+		aliasBudget->Snapshot().decodedPixelBytes == 16,
+		"multiple cache keys charged one shared BGRA allocation more than once");
+	aliasCache.Clear();
+	Expect(aliasBudget->Used() == 16 && aliasCache.CachedBytes() == 0 &&
+		aliasBudget->Snapshot().decodedPixelBytes == 16,
+		"cleared cache entries stopped accounting while a shared pixel alias remained");
+	sharedPixels.reset();
+	const auto aliasDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (aliasBudget->Used() != 0 && std::chrono::steady_clock::now() < aliasDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(aliasBudget->Used() == 0,
+		"shared allocation remained charged after the final image alias retired");
+
+	const fs::path activeFile = temporary.path() / "active.jpg";
+	const fs::path neighborFile = temporary.path() / "active-neighbor.jpg";
+	WriteText(activeFile, "active");
+	WriteText(neighborFile, "active-neighbor");
+	jpegview_linux::DecodedImageCache pinned(64);
+	pinned.Store(activeFile, CachedTestImage(16));
+	pinned.Store(neighborFile, CachedTestImage(16));
+	pinned.SetProtectionSnapshot({
+		{jpegview_linux::DescribeImageSource(activeFile).Key(),
+			jpegview_linux::CacheProtectionTier::Active},
+		{jpegview_linux::DescribeImageSource(neighborFile).Key(),
+			jpegview_linux::CacheProtectionTier::Neighbor}});
+	Expect(pinned.EvictLeastRecentlyUsed(
+		jpegview_linux::CacheProtectionTier::DistantSpeculation) == 0 &&
+		pinned.Find(activeFile) != nullptr && pinned.Find(neighborFile) != nullptr,
+		"distant eviction reclaimed a pinned active image or immediate neighbor");
+	Expect(pinned.EvictLeastRecentlyUsed(jpegview_linux::CacheProtectionTier::Neighbor) == 16 &&
+		pinned.Find(activeFile) != nullptr && pinned.Find(neighborFile) == nullptr,
+		"neighbor-tier eviction did not preserve the active image");
+
+	auto shared = std::make_shared<jpegview_linux::SharedCacheBudget>(32);
+	const fs::path distantFile = temporary.path() / "distant.jpg";
+	const fs::path neighborPreparedFile = temporary.path() / "neighbor-prepared.jpg";
+	WriteText(distantFile, "distant");
+	WriteText(neighborPreparedFile, "neighbor-prepared");
+	jpegview_linux::DecodedImageCache decoded(64, {}, shared);
+	decoded.Store(distantFile, CachedTestImage(16));
+	decoded.SetProtectionSnapshot({
+		{jpegview_linux::DescribeImageSource(distantFile).Key(),
+			jpegview_linux::CacheProtectionTier::DistantSpeculation}});
+	jpegview_linux::DisplayImageCache prepared(64, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			return DisplayCachePreparedTestImage(request);
+		}, shared);
+	const auto neighborRequest = jpegview_linux::MakeDisplayImageRequest(
+		neighborPreparedFile, DisplayCacheTestImage(2, 2), 0, 2, 2, false, 1);
+	prepared.Request(neighborRequest);
+	Expect(prepared.WaitUntilIdle(std::chrono::seconds(2)),
+		"cross-owner prepared frame did not complete");
+	auto completion = prepared.TakeCompleted(1);
+	Expect(completion.size() == 1 && shared->Used() == 32 &&
+		prepared.CachedBytes() == 16,
+		"decoded and prepared caches did not compete for their shared budget");
+	completion.clear();
+	prepared.SetProtectionSnapshot({
+		{neighborRequest.cacheKey, jpegview_linux::CacheProtectionTier::Neighbor}});
+	const fs::path activePressureFile = temporary.path() / "active-under-pressure.jpg";
+	WriteText(activePressureFile, "active-under-pressure");
+	jpegview_linux::DisplayImageCache active(64, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			return DisplayCachePreparedTestImage(request);
+		}, shared);
+	auto activeRequest = jpegview_linux::MakeDisplayImageRequest(
+		activePressureFile, DisplayCacheTestImage(2, 2), 0, 2, 2, false, 0);
+	activeRequest.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	auto activePixels = active.RequestAndWait(activeRequest);
+	Expect(activePixels && activePixels->bgra.size() == 16 && active.CachedBytes() == 0 &&
+		shared->Used() == 32 && shared->Snapshot().activeWorkingBytes == 16,
+		"worker admission evicted another owner or lost the current frame under shared pressure");
+	activePixels.reset();
+	active.Clear();
+	const auto activeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (shared->Snapshot().activeWorkingBytes != 0 &&
+		std::chrono::steady_clock::now() < activeDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(shared->Snapshot().activeWorkingBytes == 0,
+		"active working pixels remained accounted after their final owner retired");
+	jpegview_linux::CacheAdmissionPolicy policy(*shared);
+	auto externalDistant = decoded.Find(distantFile);
+	Expect(externalDistant != nullptr, "external-alias admission victim was not retained");
+	std::vector<jpegview_linux::CacheProtectionTier> evictionOrder;
+	const auto admissionStart = std::chrono::steady_clock::now();
+	auto deferredTexture = policy.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionTier::Active,
+		[&](jpegview_linux::CacheProtectionTier tier) {
+			evictionOrder.push_back(tier);
+			return decoded.EvictLeastRecentlyUsed(tier) != 0;
+		});
+	const auto admissionElapsed = std::chrono::steady_clock::now() - admissionStart;
+	Expect(!deferredTexture && admissionElapsed < std::chrono::milliseconds(750) &&
+		evictionOrder == std::vector<jpegview_linux::CacheProtectionTier>{
+			jpegview_linux::CacheProtectionTier::DistantSpeculation} &&
+		decoded.CachedBytes() == 0 && prepared.CachedBytes() == 16 &&
+		shared->Used() == 32,
+		"aliased-victim admission blocked or continued evicting before capacity returned");
+	externalDistant.reset();
+	const auto distantReleasedDeadline = std::chrono::steady_clock::now() +
+		std::chrono::seconds(2);
+	while (shared->Used() > 16 && std::chrono::steady_clock::now() < distantReleasedDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(shared->Used() == 16,
+		"asynchronous retirement did not return the aliased victim reservation");
+	evictionOrder.clear();
+	auto texture = policy.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionTier::Active,
+		[&](jpegview_linux::CacheProtectionTier tier) {
+			evictionOrder.push_back(tier);
+			return false;
+		});
+	Expect(texture && evictionOrder.empty() && shared->Used() == 32 &&
+		prepared.CachedBytes() == 16,
+		"deferred admission did not retry after its external alias released capacity");
+	texture.Reset();
+	Expect(shared->Used() == 16,
+		"cross-owner texture admission rollback leaked retained bytes");
+	prepared.Clear();
+	const auto preparedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (shared->Used() != 0 && std::chrono::steady_clock::now() < preparedDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(shared->Used() == 0,
+		"prepared owner did not release its reservation after final retirement");
+}
+
+void TestCacheAdmissionPriorityAndMixedProtectionSnapshots() {
+	TemporaryDirectory temporary;
+	const fs::path jpegFile = temporary.path() / "nearest.jpg";
+	const fs::path pngFile = temporary.path() / "retained-neighbor.png";
+	const fs::path webpFile = temporary.path() / "distant.webp";
+	WriteText(jpegFile, "jpeg");
+	WriteText(pngFile, "png");
+	WriteText(webpFile, "webp");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	auto jpegRequest = jpegview_linux::MakeDisplayImageRequest(
+		jpegFile, decoded, 0, 2, 2, false, 1);
+	auto pngRequest = jpegview_linux::MakeDisplayImageRequest(
+		pngFile, decoded, 0, 2, 2, false, 2);
+	auto webpRequest = jpegview_linux::MakeDisplayImageRequest(
+		webpFile, decoded, 0, 2, 2, false, 3);
+	jpegRequest.workClass = pngRequest.workClass = webpRequest.workClass =
+		jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	jpegview_linux::CacheProtectionSnapshot snapshot;
+	jpegview_linux::AddDecodedProtection(snapshot, jpegRequest.source.Key(),
+		jpegview_linux::CacheProtectionTier::Neighbor);
+	jpegview_linux::AddDecodedProtection(snapshot, jpegRequest.source.Key(),
+		jpegview_linux::CacheProtectionTier::DistantSpeculation);
+	jpegview_linux::AddDecodedProtection(snapshot, pngRequest.source.Key(),
+		jpegview_linux::CacheProtectionTier::Neighbor);
+	jpegview_linux::AddDecodedProtection(snapshot, webpRequest.source.Key(),
+		jpegview_linux::CacheProtectionTier::DistantSpeculation);
+	jpegview_linux::AddPreparedProtection(snapshot, jpegRequest.cacheKey,
+		jpegview_linux::CacheProtectionTier::Neighbor);
+	jpegview_linux::AddPreparedProtection(snapshot, jpegRequest.cacheKey,
+		jpegview_linux::CacheProtectionTier::DistantSpeculation);
+	// This key is already retained, so it is absent from the incoming work list.
+	// It must still remain a nearest neighbor in the protection snapshot.
+	jpegview_linux::AddPreparedProtection(snapshot, pngRequest.cacheKey,
+		jpegview_linux::CacheProtectionTier::Neighbor);
+	jpegview_linux::AddPreparedProtection(snapshot, webpRequest.cacheKey,
+		jpegview_linux::CacheProtectionTier::DistantSpeculation);
+	Expect(snapshot.decoded.size() == 3 && snapshot.prepared.size() == 3 &&
+		std::find_if(snapshot.decoded.begin(), snapshot.decoded.end(),
+			[&](const auto& item) { return item.first == jpegRequest.source.Key(); })->second ==
+			jpegview_linux::CacheProtectionTier::Neighbor &&
+		std::find_if(snapshot.prepared.begin(), snapshot.prepared.end(),
+			[&](const auto& item) { return item.first == pngRequest.cacheKey; })->second ==
+			jpegview_linux::CacheProtectionTier::Neighbor,
+		"duplicate protection input demoted a neighbor or omitted the retained candidate");
+
+	jpegview_linux::DecodedImageCache decodedCache(192);
+	decodedCache.Store(jpegFile, DisplayCacheTestImage(4, 4));
+	decodedCache.Store(pngFile, DisplayCacheTestImage(4, 4));
+	decodedCache.Store(webpFile, DisplayCacheTestImage(4, 4));
+	decodedCache.SetProtectionSnapshot(snapshot.decoded);
+	Expect(decodedCache.EvictLeastRecentlyUsed(
+		jpegview_linux::CacheProtectionTier::DistantSpeculation) == 64 &&
+		decodedCache.Find(jpegFile) && decodedCache.Find(pngFile) &&
+		!decodedCache.Find(webpFile),
+		"mixed-format decoded snapshot did not retain immediate neighbors first");
+
+	jpegview_linux::DisplayImageCache preparedCache(64, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			return DisplayCachePreparedTestImage(request);
+		});
+	preparedCache.RequestBackgroundBatch({jpegRequest, pngRequest, webpRequest});
+	Expect(preparedCache.WaitUntilIdle(std::chrono::seconds(2)),
+		"mixed-format prepared entries did not complete");
+	const auto completions = preparedCache.TakeCompleted(3);
+	Expect(completions.size() == 3, "prepared snapshot fixture lost completed entries");
+	preparedCache.SetProtectionSnapshot(snapshot.prepared);
+	Expect(preparedCache.EvictLeastRecentlyUsed(
+		jpegview_linux::CacheProtectionTier::DistantSpeculation) == 16 &&
+		preparedCache.Find(jpegRequest) && preparedCache.Find(pngRequest) &&
+		!preparedCache.Find(webpRequest),
+		"retained-neighbor prepared texture candidate lost protection under distant pressure");
+	preparedCache.Clear();
+	decodedCache.Clear();
+
+	auto protectedBudget = std::make_shared<jpegview_linux::SharedCacheBudget>(32);
+	const fs::path protectedActiveFile = temporary.path() / "protected-active.png";
+	const fs::path protectedNeighborFile = temporary.path() / "protected-neighbor.png";
+	WriteText(protectedActiveFile, "active");
+	WriteText(protectedNeighborFile, "neighbor");
+	jpegview_linux::DecodedImageCache protectedEntries(32, {}, protectedBudget);
+	protectedEntries.Store(protectedActiveFile, CachedTestImage(16));
+	protectedEntries.Store(protectedNeighborFile, CachedTestImage(16));
+	protectedEntries.SetProtectionSnapshot({
+		{jpegview_linux::DescribeImageSource(protectedActiveFile).Key(),
+			jpegview_linux::CacheProtectionTier::Active},
+		{jpegview_linux::DescribeImageSource(protectedNeighborFile).Key(),
+			jpegview_linux::CacheProtectionTier::Neighbor}});
+	jpegview_linux::CacheAdmissionPolicy protectedAdmission(*protectedBudget);
+	std::vector<jpegview_linux::CacheProtectionTier> distantTextureEvictions;
+	auto distantTexture = protectedAdmission.Reserve(24,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionTier::DistantSpeculation,
+		[&](jpegview_linux::CacheProtectionTier tier) {
+			distantTextureEvictions.push_back(tier);
+			return protectedEntries.EvictLeastRecentlyUsed(tier) != 0;
+		});
+	const jpegview_linux::CacheBudgetSnapshot protectedSnapshot =
+		protectedBudget->Snapshot();
+	Expect(!distantTexture && distantTextureEvictions.empty() &&
+		protectedEntries.Find(protectedActiveFile) && protectedEntries.Find(protectedNeighborFile) &&
+		protectedSnapshot.retainedBytes == 16 &&
+		protectedSnapshot.activeWorkingBytes == 16,
+		"distant texture admission evicted a retained neighbor or kept active decoded pixels retained");
+	protectedEntries.Clear();
+
+	jpegview_linux::SharedCacheBudget priorityBudget(32);
+	auto activeOwner = std::make_shared<int>(1);
+	auto distantOwner = std::make_shared<int>(2);
+	std::shared_ptr<const void> activeAllocation(activeOwner, activeOwner.get());
+	std::shared_ptr<const void> distantAllocation(distantOwner, distantOwner.get());
+	auto activeReservation = priorityBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, activeAllocation);
+	auto distantReservation = priorityBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames, distantAllocation);
+	jpegview_linux::CacheAdmissionPolicy admission(priorityBudget);
+	int distantIncomingEvictions = 0;
+	auto distantIncoming = admission.Reserve(1,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames, {},
+		jpegview_linux::CacheProtectionTier::DistantSpeculation,
+		[&](jpegview_linux::CacheProtectionTier) {
+			++distantIncomingEvictions;
+			return true;
+		});
+	Expect(!distantIncoming && distantIncomingEvictions == 0 &&
+		priorityBudget.Used() == 32,
+		"distant incoming work evicted an active or neighbor cache entry");
+	std::vector<jpegview_linux::CacheProtectionTier> neighborEvictionOrder;
+	auto neighborIncoming = admission.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionTier::Neighbor,
+		[&](jpegview_linux::CacheProtectionTier tier) {
+			neighborEvictionOrder.push_back(tier);
+			if (tier != jpegview_linux::CacheProtectionTier::DistantSpeculation) return false;
+			distantReservation.Reset();
+			return true;
+		});
+	Expect(neighborIncoming && neighborEvictionOrder == std::vector<
+		jpegview_linux::CacheProtectionTier>{jpegview_linux::CacheProtectionTier::DistantSpeculation} &&
+		priorityBudget.Used() == 32,
+		"neighbor admission evicted an active texture before distant cache data");
+	activeReservation.Reset();
+	neighborIncoming.Reset();
+	distantAllocation.reset();
+	activeAllocation.reset();
+
+	jpegview_linux::SharedCacheBudget activePriorityBudget(16);
+	auto neighborReservation = activePriorityBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures);
+	jpegview_linux::CacheAdmissionPolicy activeAdmission(activePriorityBudget);
+	std::vector<jpegview_linux::CacheProtectionTier> activeEvictionOrder;
+	auto activeIncoming = activeAdmission.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedPreparedFrames, {},
+		jpegview_linux::CacheProtectionTier::Active,
+		[&](jpegview_linux::CacheProtectionTier tier) {
+			activeEvictionOrder.push_back(tier);
+			if (tier != jpegview_linux::CacheProtectionTier::Neighbor) return false;
+			neighborReservation.Reset();
+			return true;
+		});
+	Expect(activeIncoming && activeEvictionOrder == std::vector<
+		jpegview_linux::CacheProtectionTier>{
+			jpegview_linux::CacheProtectionTier::DistantSpeculation,
+			jpegview_linux::CacheProtectionTier::Neighbor},
+		"active admission did not progress from distant to neighbor protection");
+}
+
+void TestFocusedPreviewProtectionUnderPressure() {
+	TemporaryDirectory temporary;
+	const fs::path currentFile = temporary.path() / "current.png";
+	const fs::path spreadFile = temporary.path() / "spread.png";
+	const fs::path nearestFile = temporary.path() / "nearest.png";
+	const fs::path distantFile = temporary.path() / "distant.png";
+	for (const fs::path& filename : {currentFile, spreadFile, nearestFile, distantFile}) {
+		WriteText(filename, filename.filename().string());
+	}
+	const auto decoded = DisplayCacheTestImage(4, 4);
+	const auto makeRequest = [&](const fs::path& filename, int width, int height,
+		jpegview_linux::PerfWorkClass workClass) {
+		auto request = jpegview_linux::MakeDisplayImageRequest(
+			filename, decoded, 0, width, height, false);
+		request.workClass = workClass;
+		return request;
+	};
+	auto current = makeRequest(currentFile, 2, 2,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	auto spread = makeRequest(spreadFile, 2, 2,
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	auto nearest = makeRequest(nearestFile, 2, 2,
+		jpegview_linux::PerfWorkClass::NearestNavigationNeighbor);
+	auto distant = makeRequest(distantFile, 2, 2,
+		jpegview_linux::PerfWorkClass::DistantSpeculation);
+	auto lens = makeRequest(currentFile, 3, 2,
+		jpegview_linux::PerfWorkClass::FocusedPreview);
+	jpegview_linux::CacheProtectionSnapshot snapshot;
+	jpegview_linux::AddDisplayRequestProtection(snapshot, current,
+		jpegview_linux::CacheProtectionTier::Active);
+	jpegview_linux::AddDisplayRequestProtection(snapshot, spread,
+		jpegview_linux::CacheProtectionTier::Active);
+	jpegview_linux::AddDisplayRequestProtection(snapshot, nearest,
+		jpegview_linux::CacheProtectionTier::Neighbor);
+	jpegview_linux::AddDisplayRequestProtection(snapshot, distant,
+		jpegview_linux::CacheProtectionTier::DistantSpeculation);
+	jpegview_linux::AddMagnifyingGlassProtection(snapshot, lens);
+	const std::size_t preparedCountWithLens = snapshot.prepared.size();
+	const std::size_t textureCountWithLens = snapshot.textures.size();
+	jpegview_linux::CacheProtectionSnapshot clearedSnapshot;
+	jpegview_linux::AddMagnifyingGlassProtection(clearedSnapshot, std::nullopt);
+	auto payloadReleasedSpread = spread;
+	payloadReleasedSpread.decoded.reset();
+	jpegview_linux::CacheProtectionSnapshot payloadReleasedSnapshot;
+	jpegview_linux::AddDisplayRequestProtection(payloadReleasedSnapshot,
+		payloadReleasedSpread, jpegview_linux::CacheProtectionTier::Active);
+	const auto tierFor = [](const auto& entries, const auto& key)
+		-> std::optional<jpegview_linux::CacheProtectionTier> {
+		const auto found = std::find_if(entries.begin(), entries.end(),
+			[&key](const auto& entry) { return entry.first == key; });
+		if (found == entries.end()) return std::nullopt;
+		return found->second;
+	};
+	Expect(jpegview_linux::CacheProtectionForWorkClass(
+		jpegview_linux::PerfWorkClass::FocusedPreview) ==
+			jpegview_linux::CacheProtectionTier::Neighbor &&
+		jpegview_linux::CacheProtectionForWorkClass(
+			jpegview_linux::PerfWorkClass::ActiveImageSpread) ==
+			jpegview_linux::CacheProtectionTier::Active &&
+		tierFor(snapshot.decoded, current.source.Key()) ==
+			jpegview_linux::CacheProtectionTier::Active &&
+		tierFor(snapshot.prepared, lens.cacheKey) ==
+			jpegview_linux::CacheProtectionTier::Neighbor &&
+		tierFor(snapshot.prepared, current.cacheKey) ==
+			jpegview_linux::CacheProtectionTier::Active &&
+		tierFor(snapshot.prepared, nearest.cacheKey) ==
+			jpegview_linux::CacheProtectionTier::Neighbor &&
+		tierFor(snapshot.prepared, distant.cacheKey) ==
+			jpegview_linux::CacheProtectionTier::DistantSpeculation &&
+		tierFor(snapshot.textures, lens.key) ==
+			jpegview_linux::CacheProtectionTier::Neighbor &&
+		preparedCountWithLens == 5 && textureCountWithLens == 5 &&
+		clearedSnapshot.decoded.empty() && clearedSnapshot.prepared.empty() &&
+		clearedSnapshot.textures.empty() &&
+		tierFor(payloadReleasedSnapshot.prepared, spread.cacheKey) ==
+			jpegview_linux::CacheProtectionTier::Active &&
+		tierFor(payloadReleasedSnapshot.textures, spread.key) ==
+			jpegview_linux::CacheProtectionTier::Active,
+		"focused-preview snapshot did not retain its texture at neighbor priority or preserve stronger owners");
+
+	jpegview_linux::DisplayImageCache cache(80, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			return DisplayCachePreparedTestImage(request);
+		});
+	cache.RequestBackgroundBatch({current, spread, nearest, distant});
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) && cache.CachedBytes() == 64,
+		"cache pressure fixture did not retain the active, spread, nearest, and distant frames");
+	const auto initialCompletions = cache.TakeCompletedWithMetadata(4);
+	Expect(initialCompletions.size() == 4,
+		"cache pressure fixture did not consume all initial prepared completions");
+	cache.SetProtectionSnapshot(snapshot.prepared);
+	cache.RequestBackground(lens);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) &&
+		cache.Find(lens) != nullptr && cache.Find(current) != nullptr &&
+		cache.Find(spread) != nullptr && cache.Find(nearest) != nullptr &&
+		cache.Find(distant) == nullptr && cache.CachedBytes() == 72,
+		"focused preview admission did not evict distant work while preserving active and nearest frames");
+
+	jpegview_linux::SharedCacheBudget textureBudget(48);
+	auto activeOwner = std::make_shared<int>(1);
+	auto nearestOwner = std::make_shared<int>(2);
+	auto distantOwner = std::make_shared<int>(3);
+	std::shared_ptr<const void> activeAllocation(activeOwner, activeOwner.get());
+	std::shared_ptr<const void> nearestAllocation(nearestOwner, nearestOwner.get());
+	std::shared_ptr<const void> distantAllocation(distantOwner, distantOwner.get());
+	auto activeTexture = textureBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, activeAllocation);
+	auto nearestTexture = textureBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, nearestAllocation);
+	auto distantTexture = textureBudget.TryReserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, distantAllocation);
+	jpegview_linux::CacheAdmissionPolicy admission(textureBudget);
+	std::vector<jpegview_linux::CacheProtectionTier> evictedTiers;
+	auto lensTexture = admission.Reserve(16,
+		jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
+		jpegview_linux::CacheProtectionForWorkClass(lens.workClass),
+		[&](jpegview_linux::CacheProtectionTier tier) {
+			evictedTiers.push_back(tier);
+			if (tier != jpegview_linux::CacheProtectionTier::DistantSpeculation) return false;
+			distantTexture.Reset();
+			return true;
+		});
+	Expect(lensTexture && activeTexture && nearestTexture && !distantTexture &&
+		textureBudget.Used() == 48 && evictedTiers == std::vector<
+			jpegview_linux::CacheProtectionTier>{
+				jpegview_linux::CacheProtectionTier::DistantSpeculation},
+		"focused preview texture admission did not evict only distant retained work");
+}
+
+void TestDisplayCacheZeroBudgetAndOversizedActiveFrameStayUsable() {
+	TemporaryDirectory temporary;
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	const auto prepare = [](const jpegview_linux::DisplayImageRequest& request) {
+		return DisplayCachePreparedTestImage(request);
+	};
+
+	const fs::path zeroBudgetFile = temporary.path() / "zero-budget.png";
+	WriteText(zeroBudgetFile, "zero budget");
+	jpegview_linux::DisplayImageCache zeroBudget(0, 1, prepare);
+	const auto zeroBudgetRequest = jpegview_linux::MakeDisplayImageRequest(
+		zeroBudgetFile, decoded, 0, 2, 2, false);
+	const auto zeroBudgetFrame = zeroBudget.RequestAndWait(zeroBudgetRequest);
+	Expect(zeroBudgetFrame && zeroBudgetFrame->bgra.size() == 16 &&
+		zeroBudget.CachedBytes() == 0 && zeroBudget.CachedImages() == 0,
+		"zero cache budget prevented an active prepared frame from being produced");
+	zeroBudget.Retire(zeroBudgetFrame);
+
+	const fs::path oversizedFile = temporary.path() / "oversized-active.png";
+	WriteText(oversizedFile, "oversized active");
+	jpegview_linux::DisplayImageCache smallBudget(8, 1, prepare);
+	const auto oversizedRequest = jpegview_linux::MakeDisplayImageRequest(
+		oversizedFile, decoded, 0, 2, 2, false);
+	const auto oversizedFrame = smallBudget.RequestAndWait(oversizedRequest);
+	Expect(oversizedFrame && oversizedFrame->bgra.size() == 16 &&
+		smallBudget.CachedBytes() == 0 && smallBudget.CachedImages() == 0,
+		"an active frame larger than retained capacity was not available for display");
+	smallBudget.Retire(oversizedFrame);
 }
 
 jpegview_linux::Image MakeIndexedImage(int width, int height) {
@@ -14109,7 +15675,21 @@ void RunTest(const char* name, void (*test)(), int& failures) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	if (argc == 3 && std::string(argv[1]) ==
+		"--cache-budget-reservation-rejection-race") {
+		(void)::unsetenv("JPEGVIEW_PERF_TRACE");
+		if (std::string(argv[2]) == "matching") {
+			return RunCacheBudgetReservationRejectionRaceChild(false);
+		}
+		if (std::string(argv[2]) == "mismatch") {
+			return RunCacheBudgetReservationRejectionRaceChild(true);
+		}
+		return 2;
+	}
+#endif
+	gTestExecutablePath = argv[0];
 	int failures = 0;
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
 	RunTest("source-descriptor-identity-and-unusual-paths",
@@ -14156,6 +15736,12 @@ int main() {
 		TestHeldNavigationWaitsForCurrentImageContinuation, failures);
 	RunTest("interaction-work-policy-idle-deadline-and-capture",
 		TestInteractionWorkPolicyIdleDeadlineAndCapture, failures);
+	RunTest("display-upload-scheduler-permitted-foreground-priority",
+		TestDisplayUploadSchedulerPrioritizesPermittedForeground, failures);
+	RunTest("display-cache-promotion-metadata-reaches-upload-scheduler",
+		TestDisplayCachePromotionMetadataReachesUploadScheduler, failures);
+	RunTest("display-prefetch-retains-only-active-spread-decoded-fallback",
+		TestDisplayPrefetchDecodedOwnershipPolicy, failures);
 	RunTest("work-batch-gate-serializes-deactivate-and-publish",
 		TestWorkBatchGateSerializesDeactivateAndPublish, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
@@ -14188,6 +15774,8 @@ int main() {
 		TestDecodedImageCacheAndBackgroundPrefetch, failures);
 	RunTest("decoded-active-spread-budget-pressure-preserves-foreground",
 		TestDecodedActiveSpreadBudgetPressure, failures);
+	RunTest("decoded-active-work-retention-refusal-keeps-fitted-spread-frame",
+		TestDecodedActiveWorkSurvivesRetentionRefusalForSpreadFrames, failures);
 	RunTest("decoded-promoted-spread-budget-pressure-preserves-foreground",
 		TestDecodedPromotedSpreadBudgetPressure, failures);
 	RunTest("decoded-budget-rejection-preserves-queued-active-spread-work",
@@ -14204,6 +15792,12 @@ int main() {
 		TestDisablingDoublePageCancelsBlockedAndQueuedPartnerDimensions, failures);
 	RunTest("display-cache-foreground-active-classification",
 		TestDisplayImageCacheForegroundActiveClassification, failures);
+	RunTest("display-cache-protection-snapshot-preserves-neighbor-lru",
+		TestDisplayCacheProtectionSnapshotPreservesNeighborLru, failures);
+	RunTest("decoded-cache-protection-snapshot-preserves-lru-across-tier-changes",
+		TestDecodedCacheProtectionSnapshotPreservesLruAcrossTierChanges, failures);
+	RunTest("decoded-cache-active-reservations-reconcile-before-retained-tiers",
+		TestDecodedCacheProtectionReconcilesActiveReservationsFirst, failures);
 	RunTest("display-cache-prefetch-preserves-active-foreground",
 		TestDisplayImageCachePrefetchPreservesActiveForeground, failures);
 	RunTest("display-cache-empty-prefetch-preserves-foreground-and-spread",
@@ -14218,6 +15812,8 @@ int main() {
 		TestDisplayCacheRetirementIdentityAccounting, failures);
 	RunTest("display-cache-final-pixels-retirement-thread",
 		TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker, failures);
+	RunTest("display-completion-batch-retires-unprocessed-pair-results",
+		TestDisplayCompletionBatchRetiresEveryDeferredPairResultOffCaller, failures);
 	RunTest("display-retirement-address-reuse-uses-owner-identity",
 		TestDisplayRetirementDoesNotDeduplicateReusedAddress, failures);
 	RunTest("decoded-retirement-address-reuse-uses-owner-identity",
@@ -14249,9 +15845,29 @@ int main() {
 		TestQueuedDecodedImageRetiresOffCaller, failures);
 	RunTest("display-retirement-skips-shared-decoded-owner",
 		TestDisplayRetirementSkipsSharedDecodedOwner, failures);
+	RunTest("cross-cache-decoded-retirement-cancellation-and-eviction",
+		TestCrossCacheDecodedRetirementCancellationAndEviction, failures);
 	RunTest("foreground-completion-keeps-cached-priority-class",
 		TestForegroundCompletionKeepsCachedPriorityClass, failures);
+	RunTest("deferred-display-upload-stages-aliased-prepared-completion",
+		TestDeferredDisplayUploadStagesAliasedPreparedCompletion, failures);
 	RunTest("shared-cache-budget-accounting", TestSharedCacheBudgetAccounting, failures);
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	RunTest("shared-cache-budget-rejection-reset-races",
+		TestSharedCacheBudgetReservationRejectionRaces, failures);
+#endif
+	RunTest("active-decoded-pixels-use-working-capacity",
+		TestActiveDecodedPixelsUseWorkingCapacityAndDemoteSafely, failures);
+	RunTest("retained-capacity-revision-ignores-temporary-retirement",
+		TestRetainedCapacityRevisionIgnoresTemporaryRetirement, failures);
+	RunTest("cache-policy-cross-owner-protection-alias-lifetime",
+		TestCachePolicyCrossOwnerProtectionAndAliasLifetime, failures);
+	RunTest("cache-admission-priority-and-mixed-protection-snapshots",
+		TestCacheAdmissionPriorityAndMixedProtectionSnapshots, failures);
+	RunTest("focused-preview-protection-under-pressure",
+		TestFocusedPreviewProtectionUnderPressure, failures);
+	RunTest("display-cache-zero-budget-and-oversized-active-frame",
+		TestDisplayCacheZeroBudgetAndOversizedActiveFrameStayUsable, failures);
 	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);
 	RunTest("image-crop-copies-half-open-rectangle", TestImageCropCopiesHalfOpenRectangle, failures);
 	RunTest("crop-selection-model-geometry-and-manipulation",
