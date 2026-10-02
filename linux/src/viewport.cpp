@@ -109,7 +109,15 @@ void Viewport::Restore(const ViewportSnapshot& snapshot, int imageWidth, int ima
 
 void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowHeight,
 	bool fillWithCrop, bool noEnlarge) {
-	if (imageWidth <= 0 || imageHeight <= 0) return;
+	fitToWindow_ = true;
+	fillWithCrop_ = fillWithCrop;
+	noEnlarge_ = noEnlarge;
+	offsetX_ = 0.0;
+	offsetY_ = 0.0;
+	if (imageWidth <= 0 || imageHeight <= 0) {
+		navigationState_ = Snapshot();
+		return;
+	}
 	UpdateFitRelativeZoomBase(imageWidth, imageHeight, windowWidth, windowHeight);
 	// Fit against the complete client area. The old calculation reserved an
 	// eight-pixel border on every side, leaving visible bands even when the
@@ -119,11 +127,6 @@ void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowH
 	const double windowScale = fillWithCrop ? std::max(widthScale, heightScale) :
 		std::min(widthScale, heightScale);
 	zoom_ = ClampedZoom(noEnlarge ? std::min(1.0, windowScale) : windowScale);
-	fitToWindow_ = true;
-	fillWithCrop_ = fillWithCrop;
-	noEnlarge_ = noEnlarge;
-	offsetX_ = 0.0;
-	offsetY_ = 0.0;
 	navigationState_ = Snapshot();
 }
 
@@ -202,6 +205,35 @@ void Viewport::SetManualZoom(double zoom) {
 	noEnlarge_ = false;
 	offsetX_ = 0.0;
 	offsetY_ = 0.0;
+}
+
+void ApplyViewportIntent(Viewport& viewport, const ViewportIntent& intent,
+	int imageWidth, int imageHeight, int windowWidth, int windowHeight) {
+	switch (intent.type) {
+	case ViewportIntentType::Fit:
+		viewport.Fit(imageWidth, imageHeight, windowWidth, windowHeight,
+			intent.fillWithCrop, intent.noEnlarge);
+		break;
+	case ViewportIntentType::ActualSize:
+		viewport.ActualSize();
+		break;
+	case ViewportIntentType::ZoomByFactor:
+		viewport.ZoomAt(intent.value, intent.mouseX, intent.mouseY,
+			imageWidth, imageHeight, windowWidth, windowHeight,
+			intent.pauseAtFitRelativeAnchor);
+		break;
+	case ViewportIntentType::ZoomPreset: {
+		const double currentZoom = viewport.Zoom();
+		if (currentZoom <= 0.0) break;
+		const double targetZoom = viewport.ZoomTargetForPreset(intent.value);
+		viewport.ZoomAt(targetZoom / currentZoom, intent.mouseX, intent.mouseY,
+			imageWidth, imageHeight, windowWidth, windowHeight);
+		break;
+	}
+	case ViewportIntentType::Pan:
+		viewport.Pan(intent.deltaX, intent.deltaY);
+		break;
+	}
 }
 
 } // namespace jpegview_linux

@@ -30,6 +30,19 @@ void PlaybackScheduler::NotifyInteraction(std::uint32_t now) {
 	lastInteractionTick_ = now;
 }
 
+void PlaybackScheduler::SetImageReady(bool ready, std::uint32_t now) {
+	imageReady_ = ready;
+	if (!ready) return;
+	lastInteractionTick_ = now;
+	if (mode_ == PlaybackMode::Movie && !animationPlaying_) {
+		nextTick_ = now + MovieFrameInterval();
+	} else if (animationPlaying_) {
+		ScheduleFrame(now);
+	} else {
+		nextTick_ = 0;
+	}
+}
+
 void PlaybackScheduler::StartSlideshow(double seconds, std::uint32_t now) {
 	animationPlaying_ = false;
 	mode_ = PlaybackMode::Slideshow;
@@ -78,6 +91,7 @@ PlaybackAction PlaybackScheduler::Resume(std::uint32_t now) {
 }
 
 PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
+	if (!imageReady_) return {};
 	if (animationPlaying_ && !frameDelaysMs_.empty() && nextTick_ != 0 && Reached(now, nextTick_)) {
 		if (frameIndex_ + 1 < frameDelaysMs_.size()) {
 			++frameIndex_;

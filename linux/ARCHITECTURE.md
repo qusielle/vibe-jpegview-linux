@@ -90,7 +90,7 @@ should normally be added to one of these focused modules and covered by `tests/t
   decoders resolve archive-member paths through `archive_source` before invoking the existing codec
   path, retaining ordinary-file and reduced-DCT JPEG behavior. Decoded frames carry alpha-presence
   metadata so opaque-image textures can keep blending disabled.
-- `cache_budget`, `image_cache`, and `display_image_cache`: aggregate cache accounting,
+- `cache_budget`, `image_cache`, `display_image_cache`, and `display_prefetch_planner`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
   processing/scaling of renderer-ready frames. Decoded, display, and thumbnail caches use the same
   structured `SourceKey` equality and hashing. Display keys add frame, effective processing controls,
@@ -117,7 +117,13 @@ should normally be added to one of these focused modules and covered by `tests/t
   active background class as well as its desired-key membership, so empty prefetch preserves only
   still-desired spread requests and cannot revive a retired partner. Decoded-image promotions
   likewise use the effective class for cache admission; header-only JPEG dimension requests use
-  the decoded worker without retaining full-resolution pixels. A decoded insertion that cannot fit prunes queued
+  the decoded worker without retaining full-resolution pixels. The viewer captures a bounded
+  neighbor window with catalog, descriptor, current-index, direction, viewport, and per-file
+  processing snapshots. `display_prefetch_planner` probes missing JPEG dimensions and builds display
+  requests on a worker; the SDL owner applies results only when those captured revisions and viewport
+  still match. Pan and replacement cancel obsolete planner work. Viewport invalidation retains the
+  publication batch for a still-current active-spread dimensions read, while source or mode
+  replacement deactivates that request's batch. A decoded insertion that cannot fit prunes queued
   speculation only; foreground and active-spread work continues draining, including metadata-only
   partner requests. Active-spread queued and active requests count as foreground source demand so
   visible thumbnails and list scans yield until the partner is ready.
@@ -153,7 +159,32 @@ should normally be added to one of these focused modules and covered by `tests/t
   ordered row removal/restoration for the Recents dialog, plus tolerant atomic persistence in the
   XDG state directory. Virtual archive-member paths remain logical recent identities while source
   validation and cache freshness use the backing container. The recent database is independent from
-  viewer settings and performs no image or directory scans while loading.
+  viewer settings and performs no image or directory scans while loading. `RecentImageLoadState`
+  tracks the selected pending path and its viewport separately from the last successfully loaded
+  history owner. It commits the Recents row and loaded-path ownership only after `LoadCurrent`
+  succeeds; the outgoing owner's viewport and D/J modes are saved once while that owner remains
+  committed, so a cold-image continuation or replacement cannot overwrite them with the pending
+  image's restored modes. Direct snapshot writes require the selected path to remain the committed
+  owner. Viewport restoration resolves the selected identity before retiring its pending request:
+  a matching pending selection keeps its snapshot, while reversing to the committed owner restores
+  that owner's saved snapshot. Viewport mode changes update the pending snapshot so a cold-image
+  continuation applies the latest user intent. Viewport and rotate/mirror actions share one
+  source- and generation-bound sequence and replay in original order from the incoming snapshot
+  after header dimensions arrive, so unknown geometry never substitutes the outgoing image's scale.
+  The queue admits at most 256 actions; at capacity it rejects later actions without altering
+  accepted state and exposes that limit in the pending title. Startup catalog completion keeps a
+  matching provisional cold-header request and its
+  queued input when selected path and source identity still match. Header continuation preserves the
+  effective picture-level processing selected while the request was pending. While the matching
+  header request is pending, generic title refreshes retain its loading status. A successful commit
+  starts snapshot saving for the new owner; canceling or replacing a cold JPEG header request drops
+  only its pending snapshot and intents.
+- `pending_image_intents`: ordered viewport and rotate/mirror actions plus slideshow-transition
+  requests attached to the active cold-header source and load generation, with a 256-action cap and
+  deterministic rejection of overflow, plus deferred EXIF-date actions attached to the
+  metadata generation. Header and metadata work can finish in either order; an EXIF-date update waits
+  for both matching metadata and successful image commit so it cannot invalidate an in-flight header
+  read by changing the source modification time.
 - `viewport`: fit/fill/manual zoom modes, optional fit-relative scale base and
   preset/step/snap calculations, source-pixel plus fit-relative zoom readout formatting, relative
   navigation snapshots, pan state, destination geometry, and panning bounds that keep the viewport
@@ -235,10 +266,15 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `work_batch_gate`: serializes completion publication with batch deactivation. Once an owner deactivates
   a prefetch batch, callbacks already copied by a worker cannot enqueue new work after cache cancellation.
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
-  validation and single-pass expansion for the configurable window-title pattern. Viewer supplies
-  image context—including active spread position, path, original dimensions, source size, and build
-  version—so title formatting remains independent of SDL and spread state. Filename and information
-  overlays also receive the active partner for both visible positions.
+  validation and single-pass expansion for the configurable window-title pattern. It caches title
+  and information-line formatting by the relevant source, catalog, metadata, and display state, and
+  tracks the last title sent to SDL. Archive-member titles and overlays use the uncompressed member
+  size carried by the captured source descriptor, not the backing container size.
+- `exif_metadata_worker`: cancellable, generation-checked optional EXIF/comment reads. Results carry
+  the captured `SourceKey`; Viewer applies metadata only when both source and request generation
+  still match, so slow metadata cannot delay initial image presentation or overwrite another image.
+  Filesystem/archive freshness checks, including the final pre-publication check, run outside the
+  mutex shared with event-facing requests, cancellation, and result polling.
 - `system_font` and `bitmap_font`: desktop-font discovery, UTF-8 shaping, measurement, rasterization,
   and exact embedded-glyph ink bounds for crisp renderer overlays such as menu mnemonics. The SDL
   adapter creates printable-ASCII bitmap-font textures with nearest-neighbor sampling while keeping
@@ -284,13 +320,30 @@ and yielding list scans. When neighbor speculation is suspended, a cold JPEG par
 `active_image_spread` header-dimension read; a cold non-JPEG partner receives an
 `active_image_spread` decode. Both resolve pair eligibility without admitting adjacent neighbors.
 For viewer images, it passes the active `FileList` entry's captured descriptor through decode, display,
-thumbnail, metadata, and preview requests. A changed-source notice refreshes only the matching old key.
+thumbnail, metadata, and preview requests. Cold current-image JPEG dimension probes and EXIF reads run
+on workers; the first presentation does not wait for optional metadata. A pending current-image JPEG
+probe retains the selected per-file or clipboard-return viewport, navigation direction, and startup
+context under its load generation, and replacement or cancellation clears that snapshot. Held image
+navigation waits for this continuation to finish before it can repeat; the event loop presents the
+resumed image before the next repeat. The pending selection remains separate from the last successful
+history owner, and its Recents row is committed only after the continuation succeeds. Replacement or
+cancellation therefore retains the pending target's stored viewport, while a failed cold probe falls
+through to normal decoding and startup failure handling for malformed images.
+Timed playback produces no navigation while the current JPEG header is pending and restarts its
+slideshow or movie interval from the successful display commit. Rotate and mirror commands wait for
+the matching header continuation before materializing pixels; a pending slideshow transition retains
+the outgoing frame and starts when the incoming image is ready.
+Neighbor planning receives a bounded captured source and processing snapshot, including valid cached
+JPEG dimensions, then applies only results matching current catalog, descriptor, and viewport revisions.
+Pan invalidates pending neighbor planning without reading source metadata. A changed-source notice
+refreshes only the matching old key.
 Explicit reloads and list-changing operations, including successful lossless JPEG crop saves, rebuild
 the list. A successful processed-image save refreshes a matching entry's descriptor directly; overwriting
 the current image keeps its materialized pixels detached from the refreshed source.
-It assembles current viewer state for the pure title-pattern
-formatter and passes the result to SDL; transient loading and error titles remain direct status
-messages. It reads the persisted transparency pattern and, for frames
+It assembles current viewer state from the captured descriptor for the pure title-pattern formatter,
+caches the result, and calls SDL only when title text changes; transient loading and error titles
+remain direct status messages. Information-line formatting is likewise cached until its source,
+metadata, or document state changes. It reads the persisted transparency pattern and, for frames
 marked as containing alpha, paints the matching background beneath the image before alpha-blended
 texture rendering. The same renderer-thread helper backs transparent thumbnails and open-dialog
 previews; opaque textures retain the non-blended path. It should translate SDL events into operations
@@ -455,7 +508,12 @@ deactivation waits for an already-publishing completion before clearing queued n
 from an obsolete prefetch batch are ignored after the Viewer replaces it.
 Viewer tracks the exact cold partner source request. Replacing or retiring that partner removes queued
 active-spread reads and sets the in-flight cancellation token, suppressing publication after a blocked
-source operation returns; policy suspension preserves and rebinds the same partner request.
+source operation returns; policy suspension preserves and rebinds the same partner request. If the
+partner becomes the selected image, Viewer deactivates its old batch and retires that tracker before
+submitting the current-image JPEG dimensions request. The cache request identity combines `SourceKey`
+and the dimensions-only flag, matching the key used for coalescing; the current mailbox then owns the
+completion. A subsequent partner replacement therefore cannot cancel the promoted read, while a
+different outgoing partner still follows the normal cancellation path.
 Up/Down rotates the current image as before while rotating the spread canvas and page placements as
 a unit. The partner's matching orientation is prepared off the renderer thread; the already
 transformed anchor texture counts as ready, but both pages remain hidden until the partner is ready.

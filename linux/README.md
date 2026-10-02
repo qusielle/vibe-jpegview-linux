@@ -47,7 +47,12 @@ they support.
    pixels retained under the old one.
    Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
-   Fit, fill, actual-size, and manual modes survive navigation appropriately. Temporary zoom on one
+   Fit, fill, actual-size, and manual modes survive navigation appropriately. While a cold JPEG header
+   is pending, fit, fill, no-enlarge, actual-size, zoom-step, zoom-preset, and pan commands retain
+   their original order across viewport and transform commands and replay against the incoming image;
+   rotate and mirror commands wait for that image to become ready. At most 256 actions are retained
+   while the header is pending; later actions are rejected without changing the accepted sequence,
+   and the window title reports when the limit is reached. Temporary zoom on one
    image resets to the selected mode by default. The opt-in `fit_relative_zoom_mode=1` instead defines
    the window-fit scale as 100%: zoom presets and steps keep the same relative effect on differently
    sized images, a zoom step pauses/snaps at that 100% fit anchor, and the relative zoom is carried
@@ -64,6 +69,8 @@ they support.
    pauses visible-thumbnail preparation and lets file-list scanning yield between enumeration units.
    Replacing the pending partner or disabling double-page mode cancels that partner's queued source
    work and suppresses publication from a blocked read when it returns.
+   Selecting a pending JPEG partner transfers its matching dimensions read to the current-image load,
+   so preparing the next spread partner cannot cancel the selected image's header request.
    Missing thumbnails in the visible strip may still load when no foreground source work is pending.
    Background work resumes 250 ms after
    interaction settles, including after a drag capture is released. A pending foreground image or spread
@@ -209,11 +216,16 @@ they support.
    parent folder, with the folder path on the left and filename on the right; its filter matches
    both path and filename. Browse and Recents keep their own selection and filter while switching.
    A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode when it
-   is opened again. Selecting a picture from Recents also restores its saved double-page and manga
-   modes; those modes then carry through normal image navigation. New paths opened from Browse or
-   dropped onto the viewer inherit the global display-mode defaults. In Recents, Delete or the
-   **Remove** button removes the selected row; Ctrl+Z restores removals in reverse order while the
-   dialog remains open. Closing the dialog clears its undo history. ZIP, CBZ, TAR,
+   is opened again. Images enter Recents after loading succeeds; a cold JPEG that fails or is
+   replaced while its header is checked leaves its saved viewport unchanged. Selecting a picture
+   from Recents also restores its saved double-page and manga
+   modes; those modes then carry through normal image navigation. Actual Size, Fit to Window, and
+   zoom changes made while a cold JPEG header is pending are applied when that image continues
+   loading. Reversing navigation during a pending header read restores the newly selected image's
+   saved viewport instead of carrying over the canceled selection's view. New paths opened from
+   Browse or dropped onto the viewer inherit the global display-mode defaults. In Recents, Delete
+   or the **Remove** button removes the selected row; Ctrl+Z restores removals in reverse order
+   while the dialog remains open. Closing the dialog clears its undo history. ZIP, CBZ, TAR,
    `.tar.gz`, `.tgz`, `.7z`, `.cb7`, and `.rar` files appear as gold `[ZIP]`, `[CBZ]`, `[TAR]`, `[TGZ]`,
    `[.7Z]`, `[CB7]`, or `[RAR]` directory rows in Browse. Entering one lists supported images and
    subfolders.
@@ -291,23 +303,33 @@ they support.
     images without a saved entry, or kept between images. Automatic histogram correction remains
     available with F5. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
-    rates and folder advancement, slideshow transitions are rendered natively, Alt+R resumes, and
+    rates and folder advancement, slideshow transitions are rendered natively after cold images are
+    presented, and slideshow/movie timers resume from each successful display commit. Alt+R resumes, and
     Escape stops active playback before quitting. Decoded pixels, prepared display frames, and
     retained renderer textures share one memory budget with per-layer LRU retention, while a
     low-contention background workers predecode nearby non-JPEG files in both directions. JPEG
     neighbors take the reduced-resolution display path directly, while full pixels remain lazy.
     Decode completions feed a
     separate display-preparation worker pool, and both decoded and display caches reject stale source
-    identities. JPEG metadata parsing stops at the compressed scan instead of reading the full file
-    on every navigation. Large evicted CPU buffers are retired on workers rather than destroyed on the event
-    thread. Previously viewed and prefetched images
+    identities. Cold JPEG header probes and optional EXIF/comment reads run on background workers.
+    Initial JPEG presentation waits asynchronously for its header and keeps its loading title until
+    that request completes; optional EXIF/comment data does not block it. EXIF-date updates wait for
+    both matching metadata and the image display commit so
+    changing the file timestamp cannot stale an active cold-header read. Neighbor plans are
+    invalidated when their captured catalog, descriptor, viewport, or source state no longer matches;
+    EXIF metadata results remain bound to their source identity and request generation and are
+    discarded when either becomes stale. Large evicted CPU buffers are retired on workers rather than
+    destroyed on the event thread. Previously viewed and prefetched images
     therefore avoid repeated synchronous decoding, correction, high-quality scaling, and texture
     creation during navigation.
 
 12. **Information overlays and configurable window title.** F2 picture information and Shift+N/Ctrl+F2 filename
     overlays use compact translucent surfaces sized to their content with small comfortable margins.
-    Filename, EXIF, and counter text remain responsive during navigation. The information popup uses
-    a readable `W X H, Size` line and an unlabeled modification date. The EXIF popup includes a
+    Filename, EXIF, and counter text remain responsive during navigation. Formatted title and
+    information text are cached for the current source and document state, so panning does not
+    repeat metadata formatting or send the same title to SDL. Optional EXIF/comment reads refresh
+    the information overlay when available. The information popup uses a readable `W X H, Size` line
+    and an unlabeled modification date. The EXIF popup includes a
     toggleable grayscale histogram, hidden by default. Overlay visibility persists
     immediately. The window title uses a configurable pattern whose default keeps the current
     position and total before the filename, followed by dimensions and size; double-page mode shows

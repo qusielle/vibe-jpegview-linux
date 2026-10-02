@@ -230,6 +230,93 @@ void RecentFiles::Clear() {
 	displayModes_.clear();
 }
 
+void RecentImageLoadState::SaveCurrentBeforeLoad(const fs::path& target,
+	const ViewportSnapshot& currentViewport, const DoublePageModeState& currentModes,
+	RecentFiles& recentFiles) {
+	const fs::path normalizedTarget = NormalizeAbsolute(target);
+	if (loadedPath_.empty() || normalizedTarget.empty() || normalizedTarget == loadedPath_ ||
+		loadedOwnerSnapshotSaved_) return;
+	recentFiles.RememberViewport(loadedPath_, currentViewport);
+	recentFiles.RememberDoublePageMode(loadedPath_, currentModes);
+	loadedOwnerSnapshotSaved_ = true;
+}
+
+bool RecentImageLoadState::OwnsLoadedPath(const fs::path& selectedFilename) const {
+	const fs::path selectedPath = NormalizeAbsolute(selectedFilename);
+	return !selectedPath.empty() && !loadedPath_.empty() && selectedPath == loadedPath_ &&
+		(!pendingLoad_.has_value() || pendingLoad_->filename == loadedPath_);
+}
+
+ViewportSnapshot RecentImageLoadState::ViewportForSelection(
+	const fs::path& selectedFilename, const ViewportSnapshot& currentViewport,
+	const ViewportSnapshot& navigationViewport, const RecentFiles& recentFiles) const {
+	const fs::path selectedPath = NormalizeAbsolute(selectedFilename);
+	if (selectedPath.empty()) return navigationViewport;
+	if (pendingLoad_.has_value() && pendingLoad_->filename == selectedPath) {
+		return pendingLoad_->viewportSnapshot;
+	}
+	if (!pendingLoad_.has_value() && selectedPath == loadedPath_) {
+		return currentViewport;
+	}
+	const std::optional<ViewportSnapshot> savedViewport =
+		recentFiles.FindViewport(selectedPath);
+	return savedViewport.has_value() ? *savedViewport : navigationViewport;
+}
+
+void RecentImageLoadState::BeginLoad(const fs::path& filename,
+	const ViewportSnapshot& viewportSnapshot) {
+	const fs::path path = NormalizeAbsolute(filename);
+	if (path.empty()) {
+		pendingLoad_.reset();
+		return;
+	}
+	pendingLoad_ = PendingRecentImageLoad{path, viewportSnapshot,
+		viewportSnapshot};
+}
+
+bool RecentImageLoadState::UpdatePendingViewport(const fs::path& filename,
+	const ViewportSnapshot& viewportSnapshot) {
+	const fs::path path = NormalizeAbsolute(filename);
+	if (path.empty() || !pendingLoad_.has_value() || pendingLoad_->filename != path) return false;
+	ViewportSnapshot normalized;
+	if (!NormalizeSnapshot(viewportSnapshot, normalized)) return false;
+	pendingLoad_->viewportSnapshot = normalized;
+	return true;
+}
+
+std::optional<PendingRecentImageLoad> RecentImageLoadState::TakePendingLoad(
+	const fs::path& filename) {
+	const fs::path path = NormalizeAbsolute(filename);
+	if (path.empty() || !pendingLoad_.has_value() || pendingLoad_->filename != path) {
+		return std::nullopt;
+	}
+	std::optional<PendingRecentImageLoad> result(std::move(pendingLoad_));
+	pendingLoad_.reset();
+	return result;
+}
+
+bool RecentImageLoadState::CommitLoad(const fs::path& filename, RecentFiles& recentFiles) {
+	const fs::path path = NormalizeAbsolute(filename);
+	if (path.empty() || !pendingLoad_.has_value() || pendingLoad_->filename != path) return false;
+	recentFiles.Add(path);
+	loadedPath_ = path;
+	loadedOwnerSnapshotSaved_ = false;
+	pendingLoad_.reset();
+	return true;
+}
+
+bool RecentImageLoadState::FailLoad(const fs::path& filename) {
+	const fs::path path = NormalizeAbsolute(filename);
+	if (path.empty() || !pendingLoad_.has_value() || pendingLoad_->filename != path) return false;
+	loadedPath_.clear();
+	pendingLoad_.reset();
+	return true;
+}
+
+void RecentImageLoadState::CancelPendingLoad() {
+	pendingLoad_.reset();
+}
+
 fs::path RecentFilesDatabasePath() {
 	if (const char* stateHome = std::getenv("XDG_STATE_HOME");
 		stateHome != nullptr && stateHome[0] == '/') {

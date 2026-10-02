@@ -20,6 +20,26 @@ struct ViewportSnapshot {
 	double relativeZoom = 1.0;
 };
 
+enum class ViewportIntentType {
+	Fit,
+	ActualSize,
+	ZoomByFactor,
+	ZoomPreset,
+	Pan,
+};
+
+struct ViewportIntent {
+	ViewportIntentType type = ViewportIntentType::Fit;
+	bool fillWithCrop = false;
+	bool noEnlarge = true;
+	double value = 1.0;
+	int mouseX = 0;
+	int mouseY = 0;
+	double deltaX = 0.0;
+	double deltaY = 0.0;
+	bool pauseAtFitRelativeAnchor = false;
+};
+
 // Owns image scale and pan state independently of SDL. Viewer supplies the
 // current image and window dimensions whenever geometry must be recomputed.
 class Viewport {
@@ -73,5 +93,10 @@ private:
 	bool fitRelativeZoomMode_ = false;
 	ViewportSnapshot navigationState_;
 };
+
+// Applies a user viewport command against the supplied geometry. Zero image
+// dimensions still retain mode intent for commands whose geometry is pending.
+void ApplyViewportIntent(Viewport& viewport, const ViewportIntent& intent,
+	int imageWidth, int imageHeight, int windowWidth, int windowHeight);
 
 } // namespace jpegview_linux

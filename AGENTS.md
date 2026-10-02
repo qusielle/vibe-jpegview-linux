@@ -75,6 +75,20 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   the renderer thread.
 - Background workers may perform filesystem access, decoding, and pixel processing. Their requests
   must support cancellation or generation checks so obsolete results cannot replace current state.
+- Pending selections remain provisional: only a successful display commit may claim loaded-image
+  history, and saved state must still belong to the selected committed path.
+- During asynchronous transitions, track the identity being selected separately from the last
+  successfully committed owner; cancellation or reversal must resolve state for the new selection
+  without reusing transient state belonging to a canceled selection.
+- Asynchronous completions must reconcile user intent issued while work is pending, and apply it only
+  to the captured owner and source generation.
+- Deferred user-action queues need explicit capacity and overflow behavior, and must preserve accepted
+  action order across categories.
+- Unrelated updates must not present pending work as complete; its visible status remains owned by
+  the active operation until that operation commits or fails.
+- Scope cancellation to the work's dependencies. Detach requests when ownership is promoted; a
+  viewport-only change rejects viewport-bound results while preserving still-current source-only
+  work. Source or owner replacement still cancels that work.
 - Do not make worker destruction depend on the renderer or event loop continuing to run. Join workers
   safely during owner destruction.
 - Preserve the single configured large-image cache budget. Thumbnail retention is independent and all

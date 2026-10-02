@@ -53,6 +53,41 @@ private:
 	std::unordered_map<std::string, DoublePageModeState> displayModes_;
 };
 
+struct PendingRecentImageLoad {
+	std::filesystem::path filename;
+	ViewportSnapshot viewportSnapshot;
+	ViewportSnapshot intentBaseSnapshot;
+};
+
+// Separates a selected image awaiting completion from the last image whose
+// history was committed after a successful load.
+class RecentImageLoadState {
+public:
+	const std::filesystem::path& LoadedPath() const { return loadedPath_; }
+	bool OwnsLoadedPath(const std::filesystem::path& selectedFilename) const;
+	ViewportSnapshot ViewportForSelection(const std::filesystem::path& selectedFilename,
+		const ViewportSnapshot& currentViewport,
+		const ViewportSnapshot& navigationViewport, const RecentFiles& recentFiles) const;
+
+	void SaveCurrentBeforeLoad(const std::filesystem::path& target,
+		const ViewportSnapshot& currentViewport, const DoublePageModeState& currentModes,
+		RecentFiles& recentFiles);
+	void BeginLoad(const std::filesystem::path& filename,
+		const ViewportSnapshot& viewportSnapshot);
+	bool UpdatePendingViewport(const std::filesystem::path& filename,
+		const ViewportSnapshot& viewportSnapshot);
+	std::optional<PendingRecentImageLoad> TakePendingLoad(
+		const std::filesystem::path& filename);
+	bool CommitLoad(const std::filesystem::path& filename, RecentFiles& recentFiles);
+	bool FailLoad(const std::filesystem::path& filename);
+	void CancelPendingLoad();
+
+private:
+	std::filesystem::path loadedPath_;
+	bool loadedOwnerSnapshotSaved_ = false;
+	std::optional<PendingRecentImageLoad> pendingLoad_;
+};
+
 std::filesystem::path RecentFilesDatabasePath();
 bool LoadRecentFiles(const std::filesystem::path& filename, RecentFiles& recentFiles);
 bool SaveRecentFiles(const std::filesystem::path& filename, const RecentFiles& recentFiles);

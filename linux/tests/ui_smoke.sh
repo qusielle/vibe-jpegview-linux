@@ -68,6 +68,19 @@ write_ppm() {
 	} > "$filename"
 }
 
+send_repeated_keypresses() {
+	repeat_count=$1
+	repeated_key=$2
+	target_window=$3
+	set --
+	repeat_index=0
+	while [ "$repeat_index" -lt "$repeat_count" ]; do
+		set -- "$@" "$repeated_key"
+		repeat_index=$((repeat_index + 1))
+	done
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$target_window" "$@"
+}
+
 write_solid_ppm() {
 	filename=$1
 	red=$2
@@ -753,13 +766,14 @@ stop_viewer
 if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	# Hold the decoder's memory map until the harness has observed the visible
 	# loading window, then release it through an explicit file signal.
-	cc -shared -fPIC "$SCRIPT_DIR/delay_mmap.c" -o "$temporary/slow_map.so" -ldl
+	cc -shared -fPIC "$SCRIPT_DIR/delay_mmap.c" -o "$temporary/slow_map.so" -ldl -pthread
 	convert "$temporary/images/01-red.ppm" "$temporary/startup-delay.jpg"
 	startup_map_started="$temporary/startup-map.started"
 	startup_map_release="$temporary/startup-map.release"
 	DISPLAY=":$display_number" HOME="$temporary/home" XDG_CONFIG_HOME="$temporary/startup-config" \
 		LD_PRELOAD="$temporary/slow_map.so" \
 		JPEGVIEW_TEST_SLOW_MAP="$temporary/startup-delay.jpg" \
+		JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
 		JPEGVIEW_TEST_SLOW_MAP_STARTED="$startup_map_started" \
 		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$startup_map_release" \
 		"$BINARY" "$temporary/startup-delay.jpg" >"$temporary/startup-viewer.log" 2>&1 &
@@ -806,6 +820,473 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	esac
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
 	stop_viewer
+
+	# Cold JPEG dimensions arrive after the initial load. Restoring a recent
+	# manual zoom must use the snapshot selected by that initial load.
+	manual_zoom_image="$temporary/cold-jpeg-manual/01-manual.jpg"
+	mkdir -p "$(dirname -- "$manual_zoom_image")"
+	convert -size 400x240 xc:red -fill blue -draw 'rectangle 200,0 399,239' \
+		-quality 100 "$manual_zoom_image"
+	manual_zoom_path_hex=$(printf '%s' "$manual_zoom_image" | od -An -tx1 | tr -d ' \n')
+	manual_state="$temporary/cold-jpeg-manual-state"
+	mkdir -p "$manual_state/jpegview-linux"
+	{
+		printf '# JPEGView Linux recent files, version 3\n'
+		printf 'R %s\n' "$manual_zoom_path_hex"
+		printf 'V %s 0 0 0 2 1\n' "$manual_zoom_path_hex"
+	} > "$manual_state/jpegview-linux/recent-files.db"
+	DISPLAY=":$display_number" HOME="$temporary/cold-jpeg-manual-home" \
+		XDG_CONFIG_HOME="$temporary/cold-jpeg-manual-config" XDG_STATE_HOME="$manual_state" \
+		"$BINARY" "$manual_zoom_image" >"$temporary/cold-jpeg-manual.log" 2>&1 &
+	viewer_pid=$!
+	manual_zoom_window_id=''
+	manual_zoom_title=''
+	for _ in $(seq 1 100); do
+		for candidate_window in $(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null || true); do
+			candidate_title=$(DISPLAY=":$display_number" xdotool getwindowname \
+				"$candidate_window" 2>/dev/null || true)
+			case "$candidate_title" in
+				*"01-manual.jpg (400x240,"*)
+					manual_zoom_window_id=$candidate_window
+					manual_zoom_title=$candidate_title
+					break
+				;;
+			esac
+		done
+		[ -n "$manual_zoom_window_id" ] && break
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ -z "$manual_zoom_window_id" ]; then
+		echo "UI smoke test: cold JPEG did not complete its dimension continuation ($manual_zoom_title)" >&2
+		cat "$temporary/cold-jpeg-manual.log" >&2
+		exit 1
+	fi
+	window_id=$manual_zoom_window_id
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	if [ "$visual_assertions" -eq 1 ]; then
+		manual_zoom_rendered=0
+		manual_left_pixel=0
+		manual_right_pixel=0
+		for _ in $(seq 1 40); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/cold-jpeg-manual.png"
+			manual_capture_width=$(identify -format '%w' "$temporary/cold-jpeg-manual.png")
+			manual_capture_height=$(identify -format '%h' "$temporary/cold-jpeg-manual.png")
+			manual_sample_y=$((manual_capture_height / 2))
+			manual_left_x=$((manual_capture_width / 2 - 230))
+			manual_right_x=$((manual_capture_width / 2 + 230))
+			manual_left_pixel=$(convert "$temporary/cold-jpeg-manual.png" -format \
+				"%[fx:p{$manual_left_x,$manual_sample_y}.r>0.75&&p{$manual_left_x,$manual_sample_y}.b<0.25]" info:)
+			manual_right_pixel=$(convert "$temporary/cold-jpeg-manual.png" -format \
+				"%[fx:p{$manual_right_x,$manual_sample_y}.b>0.75&&p{$manual_right_x,$manual_sample_y}.r<0.25]" info:)
+			if [ "$manual_left_pixel" = 1 ] && [ "$manual_right_pixel" = 1 ]; then
+				manual_zoom_rendered=1
+				break
+			fi
+			sleep 0.05
+		done
+		if [ "$manual_zoom_rendered" -ne 1 ]; then
+			manual_zoom_final_title=$(DISPLAY=":$display_number" xdotool getwindowname \
+				"$window_id" 2>/dev/null || true)
+			case "$manual_zoom_final_title" in
+				*"01-manual.jpg (400x240,"*)
+					echo "UI smoke test: loaded cold JPEG did not render its saved 2x manual zoom ($manual_left_pixel/$manual_right_pixel; $manual_zoom_final_title)" >&2
+				;;
+			*Loading*)
+				echo "UI smoke test: cold JPEG remained in its loading state past the bounded render deadline ($manual_zoom_final_title)" >&2
+			;;
+			*)
+				echo "UI smoke test: cold JPEG never reached its loaded title ($manual_zoom_final_title)" >&2
+			;;
+			esac
+			exit 1
+		fi
+	fi
+	stop_viewer
+
+	# Hold a cold JPEG header read while viewport and transform commands arrive.
+	# Releasing the read must replay Fit and zoom against incoming dimensions,
+	# then apply the queued 90-degree rotation before presenting the image.
+	cold_intent_image="$temporary/cold-jpeg-intents/01-intents.jpg"
+	mkdir -p "$(dirname -- "$cold_intent_image")"
+	convert -size 1600x400 xc:red -fill blue -draw 'rectangle 800,0 1599,399' \
+		-quality 100 "$cold_intent_image"
+	write_ppm "$(dirname -- "$cold_intent_image")/02-scan-entry.ppm" 32 64 128
+	cold_intent_path_hex=$(printf '%s' "$cold_intent_image" | od -An -tx1 | tr -d ' \n')
+	cold_intent_state="$temporary/cold-jpeg-intents-state"
+	mkdir -p "$cold_intent_state/jpegview-linux"
+	{
+		printf '# JPEGView Linux recent files, version 3\n'
+		printf 'R %s\n' "$cold_intent_path_hex"
+		printf 'V %s 1 0 1 1 1\n' "$cold_intent_path_hex"
+	} > "$cold_intent_state/jpegview-linux/recent-files.db"
+	cold_header_started="$temporary/cold-header.started"
+	cold_header_release="$temporary/cold-header.release"
+	cold_header_active="$temporary/cold-header.active"
+	DISPLAY=":$display_number" HOME="$temporary/cold-intent-home" \
+		XDG_CONFIG_HOME="$temporary/cold-intent-config" XDG_STATE_HOME="$cold_intent_state" \
+		LD_PRELOAD="$temporary/slow_map.so" \
+		JPEGVIEW_TEST_SLOW_MAP="$cold_intent_image" \
+		JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
+		JPEGVIEW_TEST_SLOW_MAP_STARTED="$cold_header_started" \
+		JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$cold_header_active" \
+		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$cold_header_release" \
+		JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=2400 \
+		"$BINARY" "$cold_intent_image" >"$temporary/cold-jpeg-intents.log" 2>&1 &
+	viewer_pid=$!
+	cold_intent_window_id=''
+	for _ in $(seq 1 200); do
+		if [ -f "$cold_header_started" ]; then break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ ! -f "$cold_header_started" ] || [ ! -f "$cold_header_active" ]; then
+		echo "UI smoke test: cold JPEG dimension read did not reach its controlled barrier" >&2
+		cat "$temporary/cold-jpeg-intents.log" >&2
+		exit 1
+	fi
+	for _ in $(seq 1 100); do
+		cold_intent_window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		[ -n "$cold_intent_window_id" ] && break
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ -z "$cold_intent_window_id" ]; then
+		echo "UI smoke test: viewer did not present while the JPEG header read was blocked" >&2
+		cat "$temporary/cold-jpeg-intents.log" >&2
+		exit 1
+	fi
+	window_id=$cold_intent_window_id
+	DISPLAY=":$display_number" xdotool windowactivate --sync "$window_id"
+	DISPLAY=":$display_number" xdotool windowfocus --sync "$window_id"
+	cold_focused_window=''
+	for _ in $(seq 1 40); do
+		cold_focused_window=$(DISPLAY=":$display_number" xdotool getwindowfocus 2>/dev/null || true)
+		[ "$cold_focused_window" = "$window_id" ] && break
+		sleep 0.025
+	done
+	if [ "$cold_focused_window" != "$window_id" ]; then
+		echo "UI smoke test: cold-image viewer did not receive keyboard focus ($cold_focused_window != $window_id)" >&2
+		exit 1
+	fi
+	cold_pending_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id")
+	case "$cold_pending_title" in
+		*Loading*) ;;
+		*) echo "UI smoke test: controlled cold JPEG was not visibly pending ($cold_pending_title)" >&2; exit 1 ;;
+	esac
+	[ -f "$cold_header_active" ] || {
+		echo "UI smoke test: cold JPEG header barrier ended before pending commands" >&2
+		exit 1
+	}
+	# Queue a transform before viewport commands. The wide-short fixture makes
+	# grouped viewport-first replay clamp both vertical pans before rotation.
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Down
+	# Fill the remaining 255 slots with 252 Fits, Actual Size, and two pans. On
+	# the wide-short fixture, ordered replay rotates before the vertical pans;
+	# grouped replay clamps them against the original short height. The next pan
+	# is rejected at capacity and must not cancel the two accepted pans.
+	# xdotool treats each argument as a distinct press/release pair; SDL does
+	# not count OS autorepeat keydowns for these non-navigation commands.
+	send_repeated_keypresses 252 Return "$window_id"
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" space
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" shift+Up
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" shift+Up
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" shift+Down
+	[ -f "$cold_header_active" ] || {
+		echo "UI smoke test: cold JPEG header barrier ended before the queued rotation" >&2
+		exit 1
+	}
+	intent_limit_reported=0
+	for _ in $(seq 1 100); do
+		cold_pending_title=$(DISPLAY=":$display_number" xdotool getwindowname \
+			"$window_id" 2>/dev/null || true)
+		case "$cold_pending_title" in
+			*"Loading image header (pending input limit reached)"*)
+				intent_limit_reported=1
+				break
+			;;
+		esac
+		if [ ! -f "$cold_header_active" ] || ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$intent_limit_reported" -ne 1 ]; then
+		echo "UI smoke test: pending intent overflow was not reported while retaining header status ($cold_pending_title)" >&2
+		exit 1
+	fi
+	# Name sorting refreshes the generic title while the same header remains
+	# pending; the overflow status must remain visible through that refresh.
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" n
+	limit_title_retained=0
+	for _ in $(seq 1 100); do
+		cold_pending_title=$(DISPLAY=":$display_number" xdotool getwindowname \
+			"$window_id" 2>/dev/null || true)
+		case "$cold_pending_title" in
+			*"Loading image header (pending input limit reached)"*)
+				limit_title_retained=1
+				break
+			;;
+		esac
+		if [ ! -f "$cold_header_active" ] || ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$limit_title_retained" -ne 1 ]; then
+		echo "UI smoke test: generic title refresh cleared the pending input limit status ($cold_pending_title)" >&2
+		exit 1
+	fi
+	: > "$cold_header_release"
+	cold_intent_completed=0
+	cold_intent_title=''
+	for _ in $(seq 1 200); do
+		cold_intent_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id" 2>/dev/null || true)
+		case "$cold_intent_title" in
+			*"01-intents.jpg (1600x400,"*) cold_intent_completed=1; break ;;
+		esac
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$cold_intent_completed" -ne 1 ]; then
+		echo "UI smoke test: queued cold-image commands did not complete ($cold_intent_title)" >&2
+		cat "$temporary/cold-jpeg-intents.log" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		cold_intent_rendered=0
+		cold_pan_pixel=0
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/cold-jpeg-intents.png"
+			cold_capture_width=$(identify -format '%w' "$temporary/cold-jpeg-intents.png")
+			cold_capture_height=$(identify -format '%h' "$temporary/cold-jpeg-intents.png")
+			cold_sample_x=$((cold_capture_width / 2))
+			cold_pan_y=$((cold_capture_height / 2 + 70))
+			cold_pan_pixel=$(convert "$temporary/cold-jpeg-intents.png" -format \
+				"%[fx:p{$cold_sample_x,$cold_pan_y}.r>0.75&&p{$cold_sample_x,$cold_pan_y}.b<0.25]" info:)
+			if [ "$cold_pan_pixel" = 1 ]; then
+				cold_intent_rendered=1
+				break
+			fi
+			sleep 0.025
+		done
+		if [ "$cold_intent_rendered" -ne 1 ]; then
+			echo "UI smoke test: interleaved rotate/Actual Size/pan replay or bounded rejection failed ($cold_pan_pixel)" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+
+	# Reverse to the committed owner while another image's JPEG header is
+	# blocked. The stale read must drain without carrying its 3x view into A.
+	owner_return_directory="$temporary/cold-jpeg-owner-return"
+	mkdir -p "$owner_return_directory"
+	owner_return_image="$owner_return_directory/01-committed.jpg"
+	owner_pending_image="$owner_return_directory/02-pending.jpg"
+	convert -size 1600x400 xc:black -fill white -draw 'rectangle 775,0 824,399' \
+		-quality 100 "$owner_return_image"
+	convert -size 160x120 xc:yellow -quality 100 "$owner_pending_image"
+	owner_return_hex=$(printf '%s' "$owner_return_image" | od -An -tx1 | tr -d ' \n')
+	owner_pending_hex=$(printf '%s' "$owner_pending_image" | od -An -tx1 | tr -d ' \n')
+	owner_return_state="$temporary/cold-jpeg-owner-return-state"
+	mkdir -p "$owner_return_state/jpegview-linux"
+	{
+		printf '# JPEGView Linux recent files, version 3\n'
+		printf 'R %s\n' "$owner_return_hex"
+		printf 'V %s 0 0 0 2 1\n' "$owner_return_hex"
+		printf 'V %s 0 0 0 3 1\n' "$owner_pending_hex"
+	} > "$owner_return_state/jpegview-linux/recent-files.db"
+	owner_header_started="$temporary/owner-header.started"
+	owner_header_release="$temporary/owner-header.release"
+	owner_header_active="$temporary/owner-header.active"
+	DISPLAY=":$display_number" HOME="$temporary/owner-return-home" \
+		XDG_CONFIG_HOME="$temporary/owner-return-config" \
+		XDG_STATE_HOME="$owner_return_state" \
+		LD_PRELOAD="$temporary/slow_map.so" \
+		JPEGVIEW_TEST_SLOW_MAP="$owner_pending_image" \
+		JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
+		JPEGVIEW_TEST_SLOW_MAP_STARTED="$owner_header_started" \
+		JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$owner_header_active" \
+		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$owner_header_release" \
+		JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=12000 \
+		"$BINARY" "$owner_return_image" >"$temporary/cold-jpeg-owner-return.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 100); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		[ -n "$window_id" ] && break
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: owner-reversal viewer window did not appear" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		exit 1
+	fi
+	owner_initial_loaded=0
+	for _ in $(seq 1 240); do
+		owner_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id" 2>/dev/null || true)
+		case "$owner_title" in
+			*"[1/2]"*"01-committed.jpg (1600x400"*)
+				owner_initial_loaded=1
+				break
+			;;
+		esac
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_initial_loaded" -ne 1 ]; then
+		echo "UI smoke test: committed image did not load with its saved 2x view ($owner_title)" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		exit 1
+	fi
+	owner_window_title() {
+		if command -v xprop >/dev/null 2>&1; then
+			DISPLAY=":$display_number" xprop -id "$window_id" WM_NAME 2>/dev/null |
+				sed -n 's/^WM_NAME(STRING) = "\(.*\)"$/\1/p'
+		else
+			DISPLAY=":$display_number" xdotool getwindowname "$window_id" 2>/dev/null || true
+		fi
+	}
+	if [ "$visual_assertions" -eq 1 ]; then
+		owner_initial_white_run=0
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/cold-jpeg-owner-return-before.png"
+			owner_capture_width=$(identify -format '%w' \
+				"$temporary/cold-jpeg-owner-return-before.png")
+			owner_capture_height=$(identify -format '%h' \
+				"$temporary/cold-jpeg-owner-return-before.png")
+			owner_sample_y=$((owner_capture_height / 2))
+			owner_initial_white_run=$(convert "$temporary/cold-jpeg-owner-return-before.png" \
+				-crop "${owner_capture_width}x1+0+${owner_sample_y}" +repage \
+				-threshold 70% txt:- | awk '
+					NR == 1 { next }
+					/#FFFFFF/ { current++; if (current > maximum) maximum = current; next }
+					{ current = 0 }
+					END { print maximum + 0 }
+				')
+			if [ "$owner_initial_white_run" -ge 80 ] && [ "$owner_initial_white_run" -le 120 ]; then
+				break
+			fi
+			sleep 0.025
+		done
+		if [ "$owner_initial_white_run" -lt 80 ] || [ "$owner_initial_white_run" -gt 120 ]; then
+			echo "UI smoke test: committed image did not expose its saved 2x scale (white stripe width $owner_initial_white_run pixels)" >&2
+			exit 1
+		fi
+	fi
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
+	owner_pending_seen=0
+	for _ in $(seq 1 160); do
+		owner_title=$(owner_window_title)
+		case "$owner_title" in
+			*"02-pending.jpg [2/2]"*"Loading image header"*)
+				if [ -f "$owner_header_active" ]; then owner_pending_seen=1; break; fi
+			;;
+		esac
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_pending_seen" -ne 1 ]; then
+		echo "UI smoke test: B did not reach the controlled cold-header state ($owner_title)" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Left
+	owner_return_ready=0
+	for _ in $(seq 1 160); do
+		owner_title=$(owner_window_title)
+		case "$owner_title" in
+			*"01-committed.jpg (1600x400,"*)
+				if [ -f "$owner_header_active" ]; then owner_return_ready=1; break; fi
+			;;
+		esac
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_return_ready" -ne 1 ]; then
+		echo "UI smoke test: returning to A waited for or lost its blocked B replacement ($owner_title)" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		exit 1
+	fi
+	: > "$owner_header_release"
+	owner_settled_polls=0
+	owner_stale_drained=0
+	for _ in $(seq 1 240); do
+		owner_title=$(owner_window_title)
+		case "$owner_title" in
+			*"01-committed.jpg (1600x400,"*)
+				if [ ! -f "$owner_header_active" ]; then
+					owner_settled_polls=$((owner_settled_polls + 1))
+				else
+					owner_settled_polls=0
+				fi
+			;;
+			*) owner_settled_polls=0 ;;
+		esac
+		if [ "$owner_settled_polls" -ge 10 ]; then
+			owner_stale_drained=1
+			break
+		fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_stale_drained" -ne 1 ]; then
+		echo "UI smoke test: canceled B did not drain while A remained selected ($owner_title)" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/cold-jpeg-owner-return-after.png"
+		if ! compare -metric AE "$temporary/cold-jpeg-owner-return-before.png" \
+			"$temporary/cold-jpeg-owner-return-after.png" null: \
+			2>"$temporary/cold-jpeg-owner-return-difference.txt"; then
+			owner_return_difference=$(cat "$temporary/cold-jpeg-owner-return-difference.txt")
+			echo "UI smoke test: returned A did not retain its saved 2x viewport ($owner_return_difference differing pixels)" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+
+	# A failed cold header probe must fall through to decode failure, preserve a
+	# same-folder recent row, and return the nonzero startup status.
+	malformed_jpeg="$temporary/malformed-startup/01-malformed.jpg"
+	mkdir -p "$(dirname -- "$malformed_jpeg")"
+	printf 'not a JPEG image\000\377' > "$malformed_jpeg"
+	malformed_existing_recent="$temporary/malformed-startup/00-existing.jpg"
+	malformed_existing_recent_hex=$(printf '%s' "$malformed_existing_recent" | od -An -tx1 | tr -d ' \n')
+	malformed_state="$temporary/malformed-startup-state"
+	mkdir -p "$malformed_state/jpegview-linux"
+	{
+		printf '# JPEGView Linux recent files, version 3\n'
+		printf 'R %s\n' "$malformed_existing_recent_hex"
+	} > "$malformed_state/jpegview-linux/recent-files.db"
+	malformed_jpeg_hex=$(printf '%s' "$malformed_jpeg" | od -An -tx1 | tr -d ' \n')
+	if DISPLAY=":$display_number" timeout --foreground 5s \
+		env HOME="$temporary/malformed-startup-home" \
+		XDG_CONFIG_HOME="$temporary/malformed-startup-config" \
+		XDG_STATE_HOME="$malformed_state" \
+		"$BINARY" "$malformed_jpeg" >"$temporary/malformed-startup.log" 2>&1; then
+		malformed_status=0
+	else
+		malformed_status=$?
+	fi
+	if [ "$malformed_status" -ne 1 ]; then
+		echo "UI smoke test: malformed cold JPEG startup returned $malformed_status instead of 1" >&2
+		cat "$temporary/malformed-startup.log" >&2
+		exit 1
+	fi
+	malformed_recent_rows=$(awk '$1 == "R" { print $2 }' \
+		"$malformed_state/jpegview-linux/recent-files.db")
+	if [ "$malformed_recent_rows" != "$malformed_existing_recent_hex" ] || \
+		printf '%s\n' "$malformed_recent_rows" | grep -Fqx -- "$malformed_jpeg_hex"; then
+		echo "UI smoke test: failed cold JPEG changed the same-folder recent image" >&2
+		cat "$malformed_state/jpegview-linux/recent-files.db" >&2
+		exit 1
+	fi
 fi
 
 click_file_dialog_sort() {
@@ -2436,18 +2917,29 @@ if command -v convert >/dev/null 2>&1; then
 		>"$temporary/crop-viewer.log" 2>&1 &
 	viewer_pid=$!
 	window_id=''
-	for _ in $(seq 1 50); do
-		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
-			--class jpegview-linux 2>/dev/null | head -1 || true)
-		if [ -n "$window_id" ]; then break; fi
-		sleep 0.1
+	crop_viewer_ready=0
+	crop_window_title=''
+	for _ in $(seq 1 100); do
+		for candidate_window in $(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null || true); do
+			candidate_title=$(DISPLAY=":$display_number" xdotool getwindowname "$candidate_window" 2>/dev/null || true)
+			crop_window_title=$candidate_title
+			case "$candidate_title" in
+				*"01-crop.jpg (160x128,"*)
+					window_id=$candidate_window
+					crop_viewer_ready=1
+					break
+				;;
+			esac
+		done
+		[ "$crop_viewer_ready" -eq 1 ] && break
+		sleep 0.05
 	done
-	if [ -z "$window_id" ]; then
-		echo "UI smoke test: crop viewer did not appear" >&2
+	if [ "$crop_viewer_ready" -ne 1 ]; then
+		echo "UI smoke test: crop viewer did not finish loading its initial JPEG ($crop_window_title)" >&2
 		exit 1
 	fi
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
-	sleep 0.3
 	crop_window_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^WIDTH=//p')
 	crop_window_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" | sed -n 's/^HEIGHT=//p')
 	crop_image_left=$((crop_window_width / 2 - 80))
@@ -2455,6 +2947,21 @@ if command -v convert >/dev/null 2>&1; then
 	crop_settings="$temporary/crop-config/jpegview-linux/settings.conf"
 	# A fresh launch must leave normal drags in view mode rather than silently creating a crop.
 	if [ "$visual_assertions" -eq 1 ]; then
+		crop_image_rendered=0
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-image-readiness.png"
+			crop_image_pixels=$(convert "$temporary/crop-image-readiness.png" -format \
+				"%[fx:p{$((crop_image_left + 32)),$((crop_image_top + 32))}.r>0.7&&p{$((crop_image_left + 32)),$((crop_image_top + 32))}.b<0.3],%[fx:p{$((crop_image_left + 128)),$((crop_image_top + 32))}.b>0.7&&p{$((crop_image_left + 128)),$((crop_image_top + 32))}.r<0.3]" info:)
+			if [ "$crop_image_pixels" = "1,1" ]; then
+				crop_image_rendered=1
+				break
+			fi
+			sleep 0.05
+		done
+		if [ "$crop_image_rendered" -ne 1 ]; then
+			echo "UI smoke test: crop viewer did not render its initial JPEG pixels before the visual assertion ($crop_image_pixels)" >&2
+			exit 1
+		fi
 		DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-disabled-before.png"
 	fi
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \

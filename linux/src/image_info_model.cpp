@@ -186,4 +186,48 @@ std::string FormatModificationDateLine(std::string_view date) {
 	return std::string(date);
 }
 
+const std::string& WindowTitleFormatCache::GetOrBuild(const std::string& key,
+	const std::function<std::string()>& builder) {
+	if (!valid_ || key_ != key) {
+		key_ = key;
+		value_ = builder ? builder() : std::string();
+		valid_ = true;
+	}
+	return value_;
+}
+
+void WindowTitleFormatCache::Clear() {
+	key_.clear();
+	value_.clear();
+	valid_ = false;
+}
+
+const std::vector<std::string>& ImageInfoLineCache::GetOrBuild(const std::string& key,
+	const std::function<std::vector<std::string>()>& builder) {
+	if (!valid_ || key_ != key) {
+		key_ = key;
+		lines_ = builder ? builder() : std::vector<std::string>();
+		valid_ = true;
+	}
+	return lines_;
+}
+
+void ImageInfoLineCache::Clear() {
+	key_.clear();
+	lines_.clear();
+	valid_ = false;
+}
+
+bool AppliedWindowTitle::Update(std::string title) {
+	if (valid_ && title_ == title) return false;
+	title_ = std::move(title);
+	valid_ = true;
+	return true;
+}
+
+void AppliedWindowTitle::Clear() {
+	title_.clear();
+	valid_ = false;
+}
+
 } // namespace jpegview_linux
