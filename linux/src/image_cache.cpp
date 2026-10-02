@@ -20,16 +20,31 @@
 namespace fs = std::filesystem;
 
 namespace jpegview_linux {
-namespace {
 
-struct DecodedImageWorkKey {
-	SourceKey source;
-	bool dimensionsOnly = false;
-};
-
-bool operator==(const DecodedImageWorkKey& left, const DecodedImageWorkKey& right) {
+bool SameDecodedImageRequest(const DecodedImageRequestIdentity& left,
+	const DecodedImageRequestIdentity& right) {
 	return left.dimensionsOnly == right.dimensionsOnly && left.source == right.source;
 }
+
+bool CanTransferActiveSpreadRequestToCurrentImage(
+	const DecodedImageRequestIdentity& spreadRequest,
+	const DecodedImageRequestIdentity& currentImageRequest) {
+	return SameDecodedImageRequest(spreadRequest, currentImageRequest);
+}
+
+bool operator==(const DecodedImageRequestIdentity& left,
+	const DecodedImageRequestIdentity& right) {
+	return SameDecodedImageRequest(left, right);
+}
+
+bool operator!=(const DecodedImageRequestIdentity& left,
+	const DecodedImageRequestIdentity& right) {
+	return !(left == right);
+}
+
+namespace {
+
+using DecodedImageWorkKey = DecodedImageRequestIdentity;
 
 struct DecodedImageWorkKeyHash {
 	std::size_t operator()(const DecodedImageWorkKey& key) const {
@@ -61,25 +76,32 @@ std::size_t DecodedImageBytes(const DecodedImage& image) {
 	return bytes;
 }
 
+bool IsCurrentJpegDimensionsResult(std::uint64_t resultGeneration,
+	const SourceKey& resultSource, std::uint64_t expectedGeneration,
+	const SourceKey& expectedSource) {
+	return resultGeneration == expectedGeneration && resultSource == expectedSource;
+}
+
 std::vector<std::size_t> ImagePrefetchOrder(std::size_t fileCount,
 	std::size_t currentIndex, int preferredDirection, std::size_t maximumCount) {
 	std::vector<std::size_t> result;
 	if (fileCount < 2 || currentIndex >= fileCount || maximumCount == 0) return result;
 	result.reserve(std::min(maximumCount, fileCount - 1));
-	std::vector<bool> visited(fileCount, false);
-	visited[currentIndex] = true;
 	const int direction = preferredDirection < 0 ? -1 : 1;
-	for (std::size_t distance = 1; result.size() < maximumCount && result.size() + 1 < fileCount;
+	for (std::size_t distance = 1;
+		result.size() < maximumCount && result.size() + 1 < fileCount;
 		++distance) {
-		for (const int sign : {direction, -direction}) {
-			const std::size_t offset = distance % fileCount;
-			const std::size_t candidate = sign > 0 ?
-				(currentIndex + offset) % fileCount :
-				(currentIndex + fileCount - offset) % fileCount;
-			if (visited[candidate]) continue;
-			visited[candidate] = true;
-			result.push_back(candidate);
-			if (result.size() >= maximumCount || result.size() + 1 >= fileCount) break;
+		const std::size_t offset = distance % fileCount;
+		if (offset == 0) break;
+		const std::size_t forward = currentIndex >= fileCount - offset ?
+			currentIndex - (fileCount - offset) : currentIndex + offset;
+		const std::size_t backward = currentIndex >= offset ?
+			currentIndex - offset : fileCount - (offset - currentIndex);
+		const std::size_t first = direction > 0 ? forward : backward;
+		const std::size_t second = direction > 0 ? backward : forward;
+		result.push_back(first);
+		if (second != first && result.size() < maximumCount && result.size() + 1 < fileCount) {
+			result.push_back(second);
 		}
 	}
 	return result;

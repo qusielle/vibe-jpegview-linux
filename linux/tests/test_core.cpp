@@ -1,6 +1,9 @@
 #include "exif_reader.h"
 #include "file_list.h"
 #include "file_list_scan_worker.h"
+#include "display_prefetch_planner.h"
+#include "exif_metadata_worker.h"
+#include "pending_image_intents.h"
 #include "image_decoder.h"
 #include "image_cache.h"
 #include "display_image_cache.h"
@@ -711,6 +714,47 @@ void TestProvisionalSourceDescriptorSurvivesStartupReplacement() {
 		files.Current() == source && files.DescriptorAt(0)->Key() == replacementKey &&
 		directRequest.source.Key() != files.DescriptorAt(0)->Key(),
 		"same-path startup scan relabeled the old direct-decode key with the replacement descriptor");
+}
+
+void TestCurrentJpegDimensionsAcceptStableSourceAcrossListRevisions() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "header.jpg";
+	WriteBytes(source, {0xff, 0xd8, 0xff, 0xd9});
+	FileList files;
+	files.SetProvisionalInputs({source.string()});
+	const jpegview_linux::SourceKey requestSource = files.DescriptorAt(0)->Key();
+	const std::uint64_t requestGeneration = 12;
+	const std::uint64_t initialCatalogRevision = files.MutationRevision();
+	const std::uint64_t initialDescriptorRevision = files.DescriptorRevision();
+
+	FileListPreparedScan scan = FileList::PrepareScan(
+		files.MakeScanRequest(FileList::ScanOperation::Initialize), [] { return true; });
+	Expect(scan.completed && files.ApplyPreparedScan(std::move(scan), source) &&
+		files.MutationRevision() != initialCatalogRevision &&
+		files.DescriptorAt(0)->Key() == requestSource,
+		"startup catalog publication did not preserve the pending JPEG source identity");
+	Expect(jpegview_linux::IsCurrentJpegDimensionsResult(requestGeneration,
+		requestSource, requestGeneration, files.DescriptorAt(0)->Key()),
+		"catalog revision alone rejected the current JPEG header result");
+
+	const jpegview_linux::SourceDescriptor withDimensions =
+		files.DescriptorAt(0)->WithImageProperties(64, 48, false);
+	Expect(files.RefreshSourceDescriptor(withDimensions) &&
+		files.DescriptorRevision() != initialDescriptorRevision &&
+		files.DescriptorAt(0)->Key() == requestSource &&
+		jpegview_linux::IsCurrentJpegDimensionsResult(requestGeneration,
+			requestSource, requestGeneration, files.DescriptorAt(0)->Key()),
+		"descriptor revision alone rejected a JPEG header for the same backing source");
+
+	jpegview_linux::SourceIdentity replacementIdentity = requestSource.backingIdentity;
+	++replacementIdentity.modifiedNanoseconds;
+	const jpegview_linux::SourceKey replacementSource(
+		requestSource.logicalPath, replacementIdentity);
+	Expect(!jpegview_linux::IsCurrentJpegDimensionsResult(requestGeneration,
+		requestSource, requestGeneration, replacementSource) &&
+		!jpegview_linux::IsCurrentJpegDimensionsResult(requestGeneration,
+			requestSource, requestGeneration + 1, requestSource),
+		"JPEG header gate accepted a replaced source or superseded load generation");
 }
 
 void TestNonCurrentSourceRefreshPreservesSelection() {
@@ -2334,38 +2378,55 @@ void TestHeldNavigationCoalescesKeyRepeats() {
 	jpegview_linux::HeldNavigationController navigation;
 	Expect(navigation.KeyDown(1, 79, false) == 1 && navigation.Scancode() == 79,
 		"physical right-arrow press did not request one immediate navigation step");
-	Expect(navigation.AfterImageShown(true) == 0,
+	Expect(navigation.AfterImageShown(true, true) == 0,
 		"held navigation skipped an image before the initial repeat threshold");
 	Expect(navigation.KeyDown(-1, 80, true) == 0 && navigation.Scancode() == 79,
 		"stale key-repeat changed the active navigation direction");
-	Expect(navigation.AfterImageShown(true) == 0,
+	Expect(navigation.AfterImageShown(true, true) == 0,
 		"stale key-repeat enabled continuous navigation");
 	for (int repeat = 0; repeat < 100; ++repeat) {
 		Expect(navigation.KeyDown(1, 79, true) == 0 && navigation.Scancode() == 79,
 			"OS key-repeat queued another navigation step");
 	}
-	Expect(navigation.AfterImageShown(true) == 1 && navigation.AfterImageShown(true) == 1,
+	Expect(navigation.AfterImageShown(true, true) == 1 && navigation.AfterImageShown(true, true) == 1,
 		"held right-arrow did not request one step after each displayed image");
-	Expect(navigation.AfterImageShown(false) == 0 && navigation.Scancode() == -1,
+	Expect(navigation.AfterImageShown(false, true) == 0 && navigation.Scancode() == -1,
 		"released right-arrow continued navigating after the displayed image");
 	Expect(navigation.KeyDown(-1, 44, false, true) == -1 &&
 		navigation.ShiftModifierAllowed(),
 		"Shift+Space did not retain its allowed modifier while held");
 	Expect(navigation.KeyDown(-1, 44, true, false) == 0 &&
-		navigation.AfterImageShown(true) == 0,
+		navigation.AfterImageShown(true, true) == 0,
 		"stale unshifted Space repeat activated held Shift+Space navigation");
 	Expect(navigation.KeyDown(-1, 44, true, true) == 0 &&
-		navigation.AfterImageShown(true) == -1,
+		navigation.AfterImageShown(true, true) == -1,
 		"held Shift+Space did not repeat one previous-image step");
-	Expect(navigation.AfterImageShown(false) == 0 && !navigation.ShiftModifierAllowed(),
+	Expect(navigation.AfterImageShown(false, true) == 0 && !navigation.ShiftModifierAllowed(),
 		"released Shift+Space kept its modifier allowance");
-	Expect(navigation.KeyDown(-1, 80, false) == -1 && navigation.AfterImageShown(true) == 0,
+	Expect(navigation.KeyDown(-1, 80, false) == -1 && navigation.AfterImageShown(true, true) == 0,
 		"new left-arrow press bypassed the initial repeat threshold");
-	Expect(navigation.KeyDown(-1, 80, true) == 0 && navigation.AfterImageShown(true) == -1,
+	Expect(navigation.KeyDown(-1, 80, true) == 0 && navigation.AfterImageShown(true, true) == -1,
 		"held left-arrow did not continue after its repeat threshold");
 	navigation.Reset();
-	Expect(navigation.AfterImageShown(true) == 0 && navigation.Scancode() == -1,
+	Expect(navigation.AfterImageShown(true, true) == 0 && navigation.Scancode() == -1,
 		"reset navigation state retained a pending repeat");
+}
+
+void TestHeldNavigationWaitsForCurrentImageContinuation() {
+	jpegview_linux::HeldNavigationController navigation;
+	Expect(navigation.KeyDown(1, 79, false) == 1,
+		"initial Right press waited for the current image continuation");
+	Expect(navigation.KeyDown(1, 79, true) == 0,
+		"OS key-repeat queued another image change while its continuation was pending");
+	Expect(navigation.AfterImageShown(true, false) == 0,
+		"held Right advanced while the current JPEG header continuation was pending");
+	Expect(navigation.AfterImageShown(true, true) == 1,
+		"held Right did not resume after the current image was ready to present");
+	navigation.KeyDown(1, 79, true);
+	Expect(navigation.AfterImageShown(false, false) == 0 && navigation.Scancode() == -1,
+		"releasing Right during a pending continuation retained held-navigation state");
+	Expect(navigation.AfterImageShown(true, true) == 0,
+		"released Right advanced after the current image continuation completed");
 }
 
 void TestInteractionWorkPolicyIdleDeadlineAndCapture() {
@@ -3426,6 +3487,468 @@ void TestDecodedPrefetchWorkClassAttribution() {
 		"decoded prefetch did not separate nearest navigation work from distant speculation");
 }
 
+void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
+	TemporaryDirectory temporary;
+	std::vector<jpegview_linux::DisplayPrefetchCandidate> candidates;
+	for (int index = 0; index < 4; ++index) {
+		const fs::path filename = temporary.path() /
+			("planner-" + std::to_string(index) + ".jpg");
+		WriteText(filename, "captured source descriptor");
+		const auto source = jpegview_linux::DescribeImageSource(filename);
+		candidates.push_back({filename, source, static_cast<std::size_t>(index),
+			static_cast<std::size_t>(index + 1), {}, false, true});
+	}
+	std::atomic<int> dimensionReads{0};
+	jpegview_linux::DisplayPrefetchPlannerWorker planner(
+		[&dimensionReads](const jpegview_linux::SourceDescriptor&, int& width, int& height,
+			std::string&, const jpegview_linux::DisplayPrefetchPlannerWorker::Continue& keepGoing) {
+			if (!keepGoing()) return false;
+			++dimensionReads;
+			width = 800;
+			height = 600;
+			return keepGoing();
+		});
+	jpegview_linux::DisplayPrefetchPlannerRequest request;
+	request.catalogRevision = 17;
+	request.descriptorRevision = 23;
+	request.viewportRevision = 31;
+	request.currentIndex = 1;
+	request.pageCount = 4;
+	request.preferredDirection = 1;
+	request.imageAreaWidth = 640;
+	request.imageAreaHeight = 480;
+	request.maximumCount = 2;
+	request.neighbors = {candidates[2], candidates[0], candidates[3]};
+	const std::uint64_t generation = planner.Request(request);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(2)),
+		"captured JPEG neighbor planning did not finish before its deadline");
+	auto ready = planner.TakeReady();
+	Expect(ready.size() == 1 && ready.front().generation == generation &&
+		ready.front().catalogRevision == request.catalogRevision &&
+		ready.front().descriptorRevision == request.descriptorRevision &&
+		ready.front().viewportRevision == request.viewportRevision &&
+		ready.front().currentIndex == request.currentIndex &&
+		ready.front().preferredDirection == request.preferredDirection &&
+		ready.front().imageAreaWidth == request.imageAreaWidth &&
+		ready.front().imageAreaHeight == request.imageAreaHeight &&
+		ready.front().dimensions.size() == 2 && ready.front().requests.size() == 2 &&
+		dimensionReads.load() == 2,
+		"JPEG planner did not honor the captured revisions or bounded neighbor window");
+	const auto& result = ready.front();
+	Expect(jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
+		request.catalogRevision, request.descriptorRevision, request.viewportRevision,
+		request.currentIndex, request.preferredDirection, request.viewport,
+		request.imageAreaWidth, request.imageAreaHeight),
+		"current planner response did not match its captured catalog and viewport");
+	Expect(!jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
+		request.catalogRevision + 1, request.descriptorRevision,
+		request.viewportRevision, request.currentIndex, request.preferredDirection,
+		request.viewport, request.imageAreaWidth, request.imageAreaHeight) &&
+		!jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
+		request.catalogRevision, request.descriptorRevision,
+		request.viewportRevision + 1, request.currentIndex, request.preferredDirection,
+		request.viewport, request.imageAreaWidth, request.imageAreaHeight),
+		"stale catalog or viewport planner output remained eligible for application");
+
+	jpegview_linux::DisplayPrefetchPlannerRequest cachedDimensionsRequest = request;
+	for (jpegview_linux::DisplayPrefetchCandidate& candidate : cachedDimensionsRequest.neighbors) {
+		for (const jpegview_linux::DisplayPrefetchPlannedDimensions& dimensions : result.dimensions) {
+			if (candidate.index == dimensions.index && candidate.source.Key() == dimensions.source) {
+				candidate.source = candidate.source.WithImageProperties(
+					dimensions.width, dimensions.height, false);
+				break;
+			}
+		}
+	}
+	const std::uint64_t cachedGeneration = planner.Request(cachedDimensionsRequest);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(2)),
+		"cached-dimension neighbor plan did not finish before its deadline");
+	ready = planner.TakeReady();
+	Expect(ready.size() == 1 && ready.front().generation == cachedGeneration &&
+		ready.front().dimensions.size() == 2 && dimensionReads.load() == 2,
+		"the next neighbor plan reprobed dimensions already returned to the viewer cache");
+
+	std::mutex blockerMutex;
+	std::condition_variable blockerChanged;
+	bool firstReadStarted = false;
+	bool releaseFirstRead = false;
+	const std::string blockedPath = candidates[0].filename.string();
+	jpegview_linux::DisplayPrefetchPlannerWorker cancellable(
+		[&](const jpegview_linux::SourceDescriptor& source, int& width, int& height,
+			std::string&, const jpegview_linux::DisplayPrefetchPlannerWorker::Continue& keepGoing) {
+			if (source.LogicalPath().string() == blockedPath) {
+				std::unique_lock<std::mutex> lock(blockerMutex);
+				firstReadStarted = true;
+				blockerChanged.notify_all();
+				if (!blockerChanged.wait_for(lock, std::chrono::seconds(2),
+					[&] { return releaseFirstRead; })) return false;
+			}
+			if (!keepGoing()) return false;
+			width = 320;
+			height = 240;
+			return true;
+		});
+	jpegview_linux::DisplayPrefetchPlannerRequest obsolete = request;
+	obsolete.maximumCount = 1;
+	obsolete.neighbors = {candidates[0]};
+	const std::uint64_t obsoleteGeneration = cancellable.Request(obsolete);
+	{
+		std::unique_lock<std::mutex> lock(blockerMutex);
+		Expect(blockerChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return firstReadStarted; }),
+			"cancellable planner did not enter its injected header read");
+	}
+	jpegview_linux::DisplayPrefetchPlannerRequest replacement = obsolete;
+	replacement.catalogRevision++;
+	replacement.viewportRevision++;
+	replacement.neighbors = {candidates[1]};
+	const std::uint64_t replacementGeneration = cancellable.Request(replacement);
+	{
+		std::lock_guard<std::mutex> lock(blockerMutex);
+		releaseFirstRead = true;
+	}
+	blockerChanged.notify_all();
+	Expect(cancellable.WaitUntilIdle(std::chrono::seconds(2)),
+		"replacement planner request did not finish after the old read was released");
+	ready = cancellable.TakeReady();
+	Expect(ready.size() == 1 && ready.front().generation == replacementGeneration &&
+		ready.front().catalogRevision == replacement.catalogRevision &&
+		ready.front().dimensions.size() == 1 &&
+		ready.front().dimensions.front().source == candidates[1].source.Key() &&
+		obsoleteGeneration != replacementGeneration,
+		"canceled planner work published dimensions from the obsolete catalog snapshot");
+}
+
+void TestViewportInvalidationRetainsCurrentActiveSpreadBatch() {
+	jpegview_linux::WorkBatchGate activeSpreadGate;
+	jpegview_linux::WorkBatchGate speculativePlannerGate;
+	std::mutex activeMutex;
+	std::condition_variable activeChanged;
+	bool activeReaderStarted = false;
+	bool releaseActiveReader = false;
+	int activeDimensionsPublications = 0;
+	int activeWidth = 0;
+	int activeHeight = 0;
+	std::uint64_t currentSpreadGeneration = 19;
+	const std::uint64_t capturedSpreadGeneration = currentSpreadGeneration;
+	std::thread blockedDimensionsReader([&] {
+		{
+			std::unique_lock<std::mutex> lock(activeMutex);
+			activeReaderStarted = true;
+			activeChanged.notify_all();
+			activeChanged.wait(lock, [&] { return releaseActiveReader; });
+		}
+		(void)activeSpreadGate.Publish([&] {
+			if (currentSpreadGeneration != capturedSpreadGeneration) return;
+			activeWidth = 640;
+			activeHeight = 480;
+			++activeDimensionsPublications;
+		});
+	});
+
+	std::mutex plannerMutex;
+	std::condition_variable plannerChanged;
+	bool plannerCompletionCopied = false;
+	bool releasePlannerCompletion = false;
+	int stalePlannerPublications = 0;
+	std::uint64_t currentPlannerGeneration = 31;
+	const std::uint64_t capturedPlannerGeneration = currentPlannerGeneration;
+	std::thread blockedPlannerCompletion([&] {
+		{
+			std::unique_lock<std::mutex> lock(plannerMutex);
+			plannerCompletionCopied = true;
+			plannerChanged.notify_all();
+			plannerChanged.wait(lock, [&] { return releasePlannerCompletion; });
+		}
+		(void)speculativePlannerGate.Publish([&] {
+			if (currentPlannerGeneration == capturedPlannerGeneration) {
+				++stalePlannerPublications;
+			}
+		});
+	});
+
+	bool activeReaderBlocked = false;
+	{
+		std::unique_lock<std::mutex> lock(activeMutex);
+		activeReaderBlocked = activeChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return activeReaderStarted; });
+	}
+	bool plannerCompletionBlocked = false;
+	{
+		std::unique_lock<std::mutex> lock(plannerMutex);
+		plannerCompletionBlocked = plannerChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return plannerCompletionCopied; });
+	}
+	for (int invalidation = 0; invalidation < 3; ++invalidation) {
+		if (jpegview_linux::ShouldDeactivateDisplayPrefetchBatch(
+			jpegview_linux::DisplayPrefetchBatchOwner::ActiveSpread,
+			jpegview_linux::DisplayPrefetchBatchInvalidation::ViewportChanged,
+			currentSpreadGeneration == capturedSpreadGeneration)) {
+			activeSpreadGate.Deactivate();
+		}
+		if (jpegview_linux::ShouldDeactivateDisplayPrefetchBatch(
+			jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner,
+			jpegview_linux::DisplayPrefetchBatchInvalidation::ViewportChanged, false)) {
+			speculativePlannerGate.Deactivate();
+		}
+		++currentPlannerGeneration;
+	}
+	{
+		std::lock_guard<std::mutex> lock(activeMutex);
+		releaseActiveReader = true;
+	}
+	activeChanged.notify_all();
+	{
+		std::lock_guard<std::mutex> lock(plannerMutex);
+		releasePlannerCompletion = true;
+	}
+	plannerChanged.notify_all();
+	blockedDimensionsReader.join();
+	blockedPlannerCompletion.join();
+	Expect(activeReaderBlocked && plannerCompletionBlocked &&
+		activeDimensionsPublications == 1 && activeWidth == 640 && activeHeight == 480 &&
+		stalePlannerPublications == 0 &&
+		currentPlannerGeneration != capturedPlannerGeneration,
+		"viewport invalidation dropped current active-spread dimensions or admitted stale planner work");
+
+	jpegview_linux::WorkBatchGate replacedSpreadGate;
+	std::mutex replacementMutex;
+	std::condition_variable replacementChanged;
+	bool replacementReaderStarted = false;
+	bool releaseReplacementReader = false;
+	int replacedPublications = 0;
+	currentSpreadGeneration = 44;
+	const std::uint64_t replacedGeneration = currentSpreadGeneration;
+	std::thread replacedDimensionsReader([&] {
+		{
+			std::unique_lock<std::mutex> lock(replacementMutex);
+			replacementReaderStarted = true;
+			replacementChanged.notify_all();
+			replacementChanged.wait(lock, [&] { return releaseReplacementReader; });
+		}
+		(void)replacedSpreadGate.Publish([&] {
+			if (currentSpreadGeneration == replacedGeneration) ++replacedPublications;
+		});
+	});
+	bool replacementReaderBlocked = false;
+	{
+		std::unique_lock<std::mutex> lock(replacementMutex);
+		replacementReaderBlocked = replacementChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return replacementReaderStarted; });
+	}
+	const bool deactivateReplacement = jpegview_linux::ShouldDeactivateDisplayPrefetchBatch(
+		jpegview_linux::DisplayPrefetchBatchOwner::ActiveSpread,
+		jpegview_linux::DisplayPrefetchBatchInvalidation::OwnerChanged, false);
+	if (deactivateReplacement) replacedSpreadGate.Deactivate();
+	++currentSpreadGeneration;
+	{
+		std::lock_guard<std::mutex> lock(replacementMutex);
+		releaseReplacementReader = true;
+	}
+	replacementChanged.notify_all();
+	replacedDimensionsReader.join();
+	Expect(replacementReaderBlocked && deactivateReplacement && replacedPublications == 0,
+		"source replacement allowed a blocked active-spread dimensions result to publish");
+}
+
+void TestDisplayPrefetchRequestMergeCompletionOrders() {
+	const auto request = [](const std::string& key) {
+		jpegview_linux::DisplayImageRequest value;
+		value.key = key;
+		return value;
+	};
+	const std::vector<jpegview_linux::DisplayImageRequest> jpegRequests{
+		request("jpeg-forward"), request("jpeg-backward")};
+	const std::vector<jpegview_linux::DisplayImageRequest> decodedRequests{
+		request("decoded-forward"), request("decoded-backward")};
+	const auto preservesBothSets = [](const std::vector<jpegview_linux::DisplayImageRequest>& merged) {
+		std::set<std::string> keys;
+		for (const auto& item : merged) keys.insert(item.key);
+		return merged.size() == 4 && keys.size() == 4 &&
+			keys.find("jpeg-forward") != keys.end() &&
+			keys.find("jpeg-backward") != keys.end() &&
+			keys.find("decoded-forward") != keys.end() &&
+			keys.find("decoded-backward") != keys.end();
+	};
+
+	std::vector<jpegview_linux::DisplayImageRequest> merged;
+	jpegview_linux::AppendDisplayPrefetchRequests(merged, jpegRequests);
+	jpegview_linux::AppendDisplayPrefetchRequests(merged, decodedRequests);
+	Expect(preservesBothSets(merged),
+		"decoded neighbors arriving after JPEG planning replaced the JPEG request set");
+	merged.clear();
+	jpegview_linux::AppendDisplayPrefetchRequests(merged, decodedRequests);
+	jpegview_linux::AppendDisplayPrefetchRequests(merged, jpegRequests);
+	Expect(preservesBothSets(merged),
+		"JPEG planning arriving after decoded neighbors replaced the decoded request set");
+}
+
+void TestExifMetadataWorkerReloadAndStaleResultRejection() {
+	TemporaryDirectory temporary;
+	const fs::path firstPath = temporary.path() / "metadata-first.jpg";
+	const fs::path secondPath = temporary.path() / "metadata-second.jpg";
+	WriteText(firstPath, "first JPEG source");
+	WriteText(secondPath, "second JPEG source");
+	const auto firstSource = jpegview_linux::DescribeImageSource(firstPath);
+	const auto secondSource = jpegview_linux::DescribeImageSource(secondPath);
+	std::mutex blockerMutex;
+	std::condition_variable blockerChanged;
+	bool firstReadStarted = false;
+	bool releaseFirstRead = false;
+	std::atomic<int> reads{0};
+	jpegview_linux::ExifMetadataWorker worker(
+		[&](const fs::path& filename, jpegview_linux::ExifInfo& info, std::string&) {
+			const int read = ++reads;
+			if (filename == firstPath) {
+				std::unique_lock<std::mutex> lock(blockerMutex);
+				firstReadStarted = true;
+				blockerChanged.notify_all();
+				if (!blockerChanged.wait_for(lock, std::chrono::seconds(2),
+					[&] { return releaseFirstRead; })) return false;
+			}
+			info.hasExif = true;
+			info.cameraModel = "metadata-read-" + std::to_string(read);
+			if (filename == secondPath) info.dateTime = "2024:05:06 07:08:09";
+			return true;
+		});
+	const std::uint64_t staleGeneration = worker.Request(firstSource);
+	{
+		std::unique_lock<std::mutex> lock(blockerMutex);
+		Expect(blockerChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return firstReadStarted; }),
+			"EXIF worker did not enter the injected slow metadata read");
+	}
+	const std::uint64_t currentGeneration = worker.Request(secondSource);
+	jpegview_linux::DeferredExifDateAction deferredDateAction;
+	deferredDateAction.Begin(secondPath, secondSource.Key(), currentGeneration);
+	Expect(deferredDateAction.MustDeferFor(secondPath, secondSource.Key()) &&
+		deferredDateAction.Defer(secondPath, secondSource.Key()),
+		"EXIF-date action did not wait for the delayed matching metadata request");
+	{
+		std::lock_guard<std::mutex> lock(blockerMutex);
+		releaseFirstRead = true;
+	}
+	blockerChanged.notify_all();
+	Expect(worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"replacement EXIF read did not finish before its deadline");
+	auto ready = worker.TakeReady();
+	Expect(ready.size() == 1 && ready.front().source == secondSource.Key() &&
+		ready.front().generation == currentGeneration &&
+		jpegview_linux::IsCurrentExifMetadataResult(ready.front(),
+			currentGeneration, secondSource.Key()) &&
+		!jpegview_linux::IsCurrentExifMetadataResult(ready.front(),
+			staleGeneration, firstSource.Key()),
+		"late EXIF data from a previous image could replace the selected image metadata");
+	Expect(reads.load() == 2,
+		"obsolete EXIF result was allowed to replace the current worker request");
+	Expect(ready.front().metadata.dateTime == "2024:05:06 07:08:09",
+		"delayed EXIF result did not carry the usable date for the selected image");
+	const auto metadataFirst = deferredDateAction.Complete(
+		ready.front(), secondPath, secondSource.Key());
+	Expect(metadataFirst.matchedPendingRead && !metadataFirst.runDeferredAction &&
+		deferredDateAction.MustDeferFor(secondPath, secondSource.Key()),
+		"EXIF date changed the source while a cold dimensions read could still be active");
+	const auto committedAfterMetadata = deferredDateAction.MarkImageCommitted(
+		secondPath, secondSource.Key());
+	Expect(committedAfterMetadata.runDeferredAction,
+		"valid deferred EXIF-date action did not resume after image commit");
+
+	const std::uint64_t reloadGeneration = worker.Request(secondSource);
+	Expect(worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"EXIF metadata reload did not finish before its deadline");
+	ready = worker.TakeReady();
+	Expect(ready.size() == 1 && ready.front().generation == reloadGeneration &&
+		ready.front().metadata.cameraModel == "metadata-read-3" && reads.load() == 3,
+		"reloading the same source did not refresh its EXIF metadata");
+
+	std::mutex validationMutex;
+	std::condition_variable validationChanged;
+	bool finalValidationStarted = false;
+	bool releaseFinalValidation = false;
+	bool eventCallsCompleted = false;
+	std::atomic<int> firstSourceValidations{0};
+	jpegview_linux::ExifMetadataWorker validationWorker(
+		[](const fs::path&, jpegview_linux::ExifInfo& info, std::string&) {
+			info.cameraModel = "validated outside the worker lock";
+			return true;
+		}, [&](const jpegview_linux::SourceDescriptor& source) {
+			if (source.Key() == firstSource.Key() && ++firstSourceValidations == 3) {
+				std::unique_lock<std::mutex> lock(validationMutex);
+				finalValidationStarted = true;
+				validationChanged.notify_all();
+				if (!validationChanged.wait_for(lock, std::chrono::seconds(2),
+					[&] { return releaseFinalValidation; })) return false;
+			}
+			return true;
+		});
+	validationWorker.Request(firstSource);
+	{
+		std::unique_lock<std::mutex> lock(validationMutex);
+		Expect(validationChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return finalValidationStarted; }),
+			"EXIF worker did not enter its final source identity validation");
+	}
+	std::thread eventFacingCalls([&] {
+		validationWorker.Cancel();
+		validationWorker.Request(secondSource);
+		(void)validationWorker.TakeReady();
+		{
+			std::lock_guard<std::mutex> lock(validationMutex);
+			eventCallsCompleted = true;
+		}
+		validationChanged.notify_all();
+	});
+	bool eventCallsReturnedBeforeValidation = false;
+	{
+		std::unique_lock<std::mutex> lock(validationMutex);
+		eventCallsReturnedBeforeValidation = validationChanged.wait_for(lock,
+			std::chrono::milliseconds(750), [&] { return eventCallsCompleted; });
+		releaseFinalValidation = true;
+	}
+	validationChanged.notify_all();
+	eventFacingCalls.join();
+	Expect(eventCallsReturnedBeforeValidation,
+		"Request, Cancel, or TakeReady waited for final source identity I/O");
+	Expect(validationWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"replacement EXIF request did not finish after final validation was released");
+	ready = validationWorker.TakeReady();
+	Expect(ready.size() == 1 && ready.front().source == secondSource.Key() &&
+		ready.front().metadata.cameraModel == "validated outside the worker lock",
+		"slow final identity validation allowed canceled EXIF metadata to publish");
+
+	std::mutex shutdownMutex;
+	std::condition_variable shutdownChanged;
+	bool shutdownReadStarted = false;
+	bool releaseShutdownRead = false;
+	jpegview_linux::ExifMetadataWorker shutdownWorker(
+		[&](const fs::path&, jpegview_linux::ExifInfo& info, std::string&) {
+			std::unique_lock<std::mutex> lock(shutdownMutex);
+			shutdownReadStarted = true;
+			shutdownChanged.notify_all();
+			if (!shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+				[&] { return releaseShutdownRead; })) return false;
+			info.cameraModel = "canceled-during-shutdown";
+			return true;
+		});
+	shutdownWorker.Request(firstSource);
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		Expect(shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return shutdownReadStarted; }),
+			"EXIF shutdown fixture did not enter its reader before the deadline");
+	}
+	shutdownWorker.Cancel();
+	{
+		std::lock_guard<std::mutex> lock(shutdownMutex);
+		releaseShutdownRead = true;
+	}
+	shutdownChanged.notify_all();
+	shutdownWorker.Stop();
+	Expect(shutdownWorker.WaitUntilIdle(std::chrono::seconds(2)) &&
+		shutdownWorker.TakeReady().empty(),
+		"EXIF worker shutdown waited on the event loop or published canceled metadata");
+}
+
 void TestDecodedImageCacheAndBackgroundPrefetch() {
 	Expect(jpegview_linux::ImagePrefetchOrder(5, 2, 1, 4) ==
 		std::vector<std::size_t>({3, 1, 4, 0}),
@@ -3439,6 +3962,9 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	Expect(jpegview_linux::ImagePrefetchOrder(0, 0, 1, 4).empty() &&
 		jpegview_linux::ImagePrefetchOrder(1, 0, 1, 4).empty(),
 		"prefetch order produced work without neighboring files");
+	Expect(jpegview_linux::ImagePrefetchOrder(100000000, 50000000, 1, 4) ==
+		std::vector<std::size_t>{50000001, 49999999, 50000002, 49999998},
+		"bounded prefetch ordering scaled its allocation with the full catalog size");
 
 	TemporaryDirectory temporary;
 	std::vector<fs::path> files;
@@ -4028,6 +4554,116 @@ void TestJpegActiveSpreadDimensionsSurvivePause() {
 		pending.activeSpreadActive == 1 && paused.activeSpreadActive == 1 &&
 		cache.CachedImages() == 0,
 		"cold JPEG spread dimensions did not survive paused prefetch as metadata-only active-spread work");
+}
+
+void TestPromotedActiveSpreadJpegDimensionsKeepCurrentOwner() {
+	TemporaryDirectory temporary;
+	const fs::path partnerPath = temporary.path() / "selected-partner.jpg";
+	const fs::path nextPartnerPath = temporary.path() / "following-partner.jpg";
+	WriteText(partnerPath, "blocked JPEG dimensions source");
+	WriteText(nextPartnerPath, "next JPEG dimensions source");
+	const jpegview_linux::SourceDescriptor partnerSource =
+		jpegview_linux::DescribeImageSource(partnerPath);
+	const jpegview_linux::SourceDescriptor nextPartnerSource =
+		jpegview_linux::DescribeImageSource(nextPartnerPath);
+	const jpegview_linux::DecodedImageRequestIdentity partnerRequest{
+		partnerSource.Key(), true};
+	const jpegview_linux::DecodedImageRequestIdentity currentRequest{
+		partnerSource.Key(), true};
+	const jpegview_linux::DecodedImageRequestIdentity nextPartnerRequest{
+		nextPartnerSource.Key(), true};
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool readStarted = false;
+	bool releaseRead = false;
+	bool currentCallbackCompleted = false;
+	int currentWidth = 0;
+	int currentHeight = 0;
+	int obsoleteBatchPublications = 0;
+	std::atomic<int> dimensionReads{0};
+	const auto obsoleteBatch = std::make_shared<jpegview_linux::WorkBatchGate>();
+	std::optional<jpegview_linux::DecodedImageRequestIdentity> trackedPartnerRequest(
+		partnerRequest);
+	jpegview_linux::DecodedImageCache cache(64,
+		[](const fs::path&, DecodedImage&, std::string&) { return false; }, {}, 1,
+		[&](const fs::path&, int& width, int& height, std::string&) {
+			++dimensionReads;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				readStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseRead; });
+			}
+			width = 12;
+			height = 24;
+			return true;
+		});
+	ScopedConditionRelease releaseOnExit(mutex, changed, releaseRead);
+	cache.RequestJpegDimensions(partnerSource,
+		[&](const fs::path&, bool, int, int) {
+			obsoleteBatch->Publish([&] {
+				std::lock_guard<std::mutex> lock(mutex);
+				++obsoleteBatchPublications;
+			});
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool reachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return readStarted; });
+	}
+
+	const bool sameRequestTransfers = trackedPartnerRequest.has_value() &&
+		jpegview_linux::CanTransferActiveSpreadRequestToCurrentImage(
+			*trackedPartnerRequest, currentRequest);
+	if (sameRequestTransfers) {
+		obsoleteBatch->Deactivate();
+		trackedPartnerRequest.reset();
+	}
+	cache.RequestJpegDimensions(partnerSource,
+		[&](const fs::path&, bool succeeded, int width, int height) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				currentCallbackCompleted = succeeded;
+				currentWidth = width;
+				currentHeight = height;
+			}
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	const auto diagnosticsAfterPromotion = cache.GetDiagnostics();
+
+	// Preparing the next partner would cancel a stale tracked request. Once
+	// transferred, the old partner tracker is retired and cannot cancel this key.
+	bool obsoleteRequestCanceled = false;
+	if (trackedPartnerRequest.has_value() &&
+		!jpegview_linux::SameDecodedImageRequest(*trackedPartnerRequest, nextPartnerRequest)) {
+		obsoleteBatch->Deactivate();
+		obsoleteRequestCanceled = cache.CancelActiveSpreadRequest(partnerSource, true);
+		trackedPartnerRequest.reset();
+	}
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseRead = true;
+	}
+	changed.notify_all();
+	bool callbackReached = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		callbackReached = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return currentCallbackCompleted; });
+	}
+	const bool becameIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+
+	Expect(reachedBarrier && sameRequestTransfers && !trackedPartnerRequest.has_value() &&
+		!obsoleteRequestCanceled && callbackReached && becameIdle &&
+		currentWidth == 12 && currentHeight == 24 && dimensionReads == 1 &&
+		obsoleteBatchPublications == 0 &&
+		diagnosticsAfterPromotion.activeSpreadActive == 1 &&
+		!jpegview_linux::SameDecodedImageRequest(partnerRequest,
+			jpegview_linux::DecodedImageRequestIdentity{partnerSource.Key(), false}) &&
+		!jpegview_linux::SameDecodedImageRequest(partnerRequest, nextPartnerRequest),
+		"selecting a cold JPEG spread partner did not transfer its blocked dimensions read to current-image ownership");
 }
 
 void TestActiveSpreadPartnerReplacementCancelsObsoleteRequests() {
@@ -6126,6 +6762,11 @@ void TestPictureLevelsModelAndProcessing() {
 		defaultProcessing);
 	const auto defaults = jpegview_linux::ResolveImageProcessingForFile(current, nullptr, false, true,
 		defaultProcessing);
+	current.processing.localDensityEnabled = true;
+	const auto pendingContinuation = jpegview_linux::ResolveImageProcessingForLoad(
+		current, &saved, false, false, defaultProcessing, true);
+	const auto freshLoad = jpegview_linux::ResolveImageProcessingForLoad(
+		current, &saved, false, false, defaultProcessing, false);
 	ExpectNear(kept.processing.contrast, 0.25, 1e-12,
 		"keep-between-images did not override the saved per-file levels");
 	Expect(kept.autoContrast, "keep-between-images did not preserve auto correction state");
@@ -6135,6 +6776,13 @@ void TestPictureLevelsModelAndProcessing() {
 	ExpectNear(defaults.processing.saturation, 1.4, 1e-12,
 		"image without saved levels did not receive the configured default preset");
 	Expect(defaults.autoContrast, "image without saved levels did not receive default auto correction");
+	Expect(pendingContinuation.autoContrast == current.autoContrast &&
+		jpegview_linux::EqualImageProcessing(pendingContinuation.processing, current.processing),
+		"cold-header continuation replaced effective picture-level edits with the saved preset");
+	Expect(pendingContinuation.processing.localDensityEnabled &&
+		!freshLoad.processing.localDensityEnabled &&
+		std::abs(freshLoad.processing.contrast + 0.25) < 1e-12,
+		"cold-header regression fixture did not distinguish continuation from a fresh load");
 
 	const std::vector<std::uint8_t> pixels = {
 		32, 64, 96, 17, 64, 96, 128, 18,
@@ -7764,6 +8412,150 @@ void TestMagnifyingGlassGeometryMapsNativeTextureAndPadsEdges() {
 		!CalculateMagnifyingGlassGeometry(0.0, 250.0, fullImage, 1000, 500,
 		350, 175, 0.1).valid,
 		"magnifying glass geometry accepted an outside pointer or invalid zoom level");
+}
+
+void TestPendingViewportIntentsReplayAfterDimensions() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "pending-view.jpg";
+	WriteText(filename, "source identity fixture");
+	const jpegview_linux::SourceKey source =
+		jpegview_linux::DescribeImageSource(filename).Key();
+	const jpegview_linux::ViewportSnapshot savedManual{false, false, false, 2.0, 2.0};
+
+	jpegview_linux::Viewport viewport;
+	viewport.ActualSize();
+	ExpectNear(viewport.Zoom(), 1.0, 1e-12,
+		"outgoing image did not begin at Actual Size");
+	jpegview_linux::RecentImageLoadState recentLoad;
+	recentLoad.BeginLoad(filename, savedManual);
+	jpegview_linux::PendingImageIntents pendingIntents;
+	pendingIntents.Begin(filename, source, 41);
+	viewport.Restore(savedManual, 0, 0, 1000, 800);
+	ExpectNear(viewport.Zoom(), 2.0, 1e-12,
+		"pending incoming snapshot did not replace outgoing Actual Size");
+
+	const jpegview_linux::ViewportIntent fit{
+		jpegview_linux::ViewportIntentType::Fit, true, false};
+	jpegview_linux::ApplyViewportIntent(viewport, fit, 0, 0, 1000, 800);
+	Expect(viewport.IsFitToWindow() && viewport.FillWithCrop() && !viewport.NoEnlarge(),
+		"zero-dimension Fit did not record fit, crop, and enlargement intent");
+	Expect(recentLoad.UpdatePendingViewport(filename, viewport.Snapshot()) &&
+		pendingIntents.QueueViewport(filename, source, 41, fit),
+		"pending Fit intent was not retained with its load");
+
+	jpegview_linux::ViewportIntent zoom;
+	zoom.type = jpegview_linux::ViewportIntentType::ZoomByFactor;
+	zoom.value = 1.2;
+	zoom.mouseX = 500;
+	zoom.mouseY = 400;
+	jpegview_linux::ApplyViewportIntent(viewport, zoom, 0, 0, 1000, 800);
+	Expect(recentLoad.UpdatePendingViewport(filename, viewport.Snapshot()) &&
+		pendingIntents.QueueViewport(filename, source, 41, zoom),
+		"pending zoom intent was not retained after Fit");
+	jpegview_linux::ViewportIntent pan;
+	pan.type = jpegview_linux::ViewportIntentType::Pan;
+	pan.deltaX = 23.0;
+	pan.deltaY = -11.0;
+	jpegview_linux::ApplyViewportIntent(viewport, pan, 0, 0, 1000, 800);
+	Expect(recentLoad.UpdatePendingViewport(filename, viewport.Snapshot()) &&
+		pendingIntents.QueueViewport(filename, source, 41, pan),
+		"pending pan intent was not retained after zoom");
+	const auto pending = recentLoad.TakePendingLoad(filename);
+	const auto pendingActions = pendingIntents.Take(source, 41);
+	Expect(pending.has_value() && pending->intentBaseSnapshot.zoom == 2.0 &&
+		pendingActions.has_value() && pendingActions->actions.size() == 3,
+		"pending commands did not retain the incoming snapshot and ordered commands");
+
+	jpegview_linux::Viewport continued;
+	continued.Restore(pending->intentBaseSnapshot, 4000, 3000, 1000, 800);
+	for (const jpegview_linux::PendingImageIntent& action : pendingActions->actions) {
+		Expect(action.type == jpegview_linux::PendingImageIntentType::Viewport,
+			"viewport-only test received a transform action");
+		const jpegview_linux::ViewportIntent& intent = action.viewport;
+		jpegview_linux::ApplyViewportIntent(continued, intent, 4000, 3000, 1000, 800);
+		if (intent.type == jpegview_linux::ViewportIntentType::ZoomByFactor ||
+			intent.type == jpegview_linux::ViewportIntentType::ZoomPreset ||
+			intent.type == jpegview_linux::ViewportIntentType::Pan) {
+			continued.ClampToView(4000, 3000, 1000, 800);
+		}
+	}
+	Expect(!continued.IsFitToWindow() && continued.FillWithCrop() == false &&
+		continued.NoEnlarge() == false,
+		"Fit followed by manual zoom did not finish in manual mode");
+	ExpectNear(continued.Zoom(), 0.32, 1e-12,
+		"fill then zoom replay used outgoing or stale incoming geometry");
+	ExpectNear(continued.OffsetX(), 23.0, 1e-12,
+		"pending pan was lost when earlier typed viewport commands were replayed");
+	ExpectNear(continued.OffsetY(), -11.0, 1e-12,
+		"pending vertical pan was lost when earlier typed viewport commands were replayed");
+
+	jpegview_linux::Viewport relative;
+	relative.SetFitRelativeZoomMode(true);
+	relative.ActualSize();
+	const jpegview_linux::ViewportSnapshot incomingFit{true, false, true, 1.0, 1.0};
+	jpegview_linux::RecentImageLoadState relativeLoad;
+	relativeLoad.BeginLoad(filename, incomingFit);
+	pendingIntents.Begin(filename, source, 42);
+	relative.Restore(incomingFit, 0, 0, 1000, 800);
+	const jpegview_linux::ViewportIntent relativeFit{
+		jpegview_linux::ViewportIntentType::Fit, false, true};
+	jpegview_linux::ApplyViewportIntent(relative, relativeFit, 0, 0, 1000, 800);
+	relativeLoad.UpdatePendingViewport(filename, relative.Snapshot());
+	pendingIntents.QueueViewport(filename, source, 42, relativeFit);
+	jpegview_linux::ViewportIntent preset;
+	preset.type = jpegview_linux::ViewportIntentType::ZoomPreset;
+	preset.value = 4.0;
+	preset.mouseX = 500;
+	preset.mouseY = 400;
+	jpegview_linux::ApplyViewportIntent(relative, preset, 0, 0, 1000, 800);
+	relativeLoad.UpdatePendingViewport(filename, relative.Snapshot());
+	pendingIntents.QueueViewport(filename, source, 42, preset);
+	const auto relativePending = relativeLoad.TakePendingLoad(filename);
+	const auto relativeActions = pendingIntents.Take(source, 42);
+	Expect(relativePending.has_value(), "fit-relative pending load was lost");
+	relative.Restore(relativePending->intentBaseSnapshot, 4000, 3000, 1000, 800);
+	for (const jpegview_linux::PendingImageIntent& action : relativeActions->actions) {
+		const jpegview_linux::ViewportIntent& intent = action.viewport;
+		jpegview_linux::ApplyViewportIntent(relative, intent, 4000, 3000, 1000, 800);
+		if (intent.type == jpegview_linux::ViewportIntentType::ZoomByFactor ||
+			intent.type == jpegview_linux::ViewportIntentType::ZoomPreset ||
+			intent.type == jpegview_linux::ViewportIntentType::Pan) {
+			relative.ClampToView(4000, 3000, 1000, 800);
+		}
+	}
+	ExpectNear(relative.FitRelativeZoomBase(), 0.25, 1e-12,
+		"resolved fit-relative base used the outgoing image dimensions");
+	ExpectNear(relative.Zoom(), 1.0, 1e-12,
+		"Fit followed by a fit-relative preset did not use the incoming fit base");
+	ExpectNear(relative.Snapshot().relativeZoom, 4.0, 1e-12,
+		"fit-relative preset intent was not retained through header completion");
+
+	jpegview_linux::Viewport manualStep;
+	manualStep.ActualSize();
+	jpegview_linux::RecentImageLoadState manualStepLoad;
+	manualStepLoad.BeginLoad(filename, savedManual);
+	pendingIntents.Begin(filename, source, 43);
+	manualStep.Restore(savedManual, 0, 0, 1000, 800);
+	const jpegview_linux::ViewportIntent step{
+		jpegview_linux::ViewportIntentType::ZoomByFactor, false, true, 1.2};
+	jpegview_linux::ApplyViewportIntent(manualStep, step, 0, 0, 1000, 800);
+	manualStepLoad.UpdatePendingViewport(filename, manualStep.Snapshot());
+	pendingIntents.QueueViewport(filename, source, 43, step);
+	const auto manualPending = manualStepLoad.TakePendingLoad(filename);
+	const auto manualActions = pendingIntents.Take(source, 43);
+	Expect(manualPending.has_value(), "manual-step pending load was lost");
+	manualStep.Restore(manualPending->intentBaseSnapshot, 4000, 3000, 1000, 800);
+	for (const jpegview_linux::PendingImageIntent& action : manualActions->actions) {
+		const jpegview_linux::ViewportIntent& intent = action.viewport;
+		jpegview_linux::ApplyViewportIntent(manualStep, intent, 4000, 3000, 1000, 800);
+		if (intent.type == jpegview_linux::ViewportIntentType::ZoomByFactor ||
+			intent.type == jpegview_linux::ViewportIntentType::ZoomPreset ||
+			intent.type == jpegview_linux::ViewportIntentType::Pan) {
+			manualStep.ClampToView(4000, 3000, 1000, 800);
+		}
+	}
+	ExpectNear(manualStep.Zoom(), 2.4, 1e-12,
+		"manual step zoom did not start from the incoming saved 2x view");
 }
 
 void TestViewportNavigationResetsTransientZoom() {
@@ -10350,6 +11142,74 @@ void TestImageInfoFormatting() {
 	Expect(jpegview_linux::FormatWindowTitle("%s|%b|%m", context) ==
 		"0 B|0|8001x6000, 0 B",
 		"window-title pattern did not distinguish a zero-byte file from an unavailable size");
+
+	jpegview_linux::SourceIdentity archiveIdentity;
+	archiveIdentity.size = 9u * 1024u * 1024u;
+	archiveIdentity.valid = true;
+	const std::uint64_t memberSize = 1536u * 1024u;
+	const jpegview_linux::SourceDescriptor archiveMember =
+		jpegview_linux::DescribeArchiveMember("/photos/set.zip/image.jpg",
+			archiveIdentity, memberSize, 0, false);
+	WindowTitleContext archiveContext;
+	archiveContext.width = 100;
+	archiveContext.height = 80;
+	archiveContext.fileSize = archiveMember.Metadata().fileSize;
+	Expect(archiveMember.Metadata().archiveMember &&
+		jpegview_linux::FormatWindowTitle("%s|%b", archiveContext) == "1.5 MB|1572864" &&
+		jpegview_linux::FormatImageDimensionsAndSize(archiveContext.width,
+			archiveContext.height,
+			jpegview_linux::FormatFileSize(archiveMember.Metadata().fileSize)) ==
+			"100 X 80, 1.5 MB" &&
+		archiveMember.Metadata().fileSize != archiveMember.BackingIdentity().size,
+		"title or information formatting used the archive container size for a member");
+
+	int modeledSourceReads = 0;
+	int titleBuilds = 0;
+	int infoBuilds = 0;
+	int appliedTitleChanges = 0;
+	jpegview_linux::WindowTitleFormatCache titleCache;
+	jpegview_linux::ImageInfoLineCache infoCache;
+	jpegview_linux::AppliedWindowTitle appliedTitle;
+	WindowTitleContext cachedContext = context;
+	cachedContext.filename = "same-image.jpg";
+	const auto requestTitle = [&](const std::string& revision) -> const std::string& {
+		return titleCache.GetOrBuild(revision, [&] {
+			++titleBuilds;
+			++modeledSourceReads;
+			return jpegview_linux::FormatWindowTitle("[%p] %f %m", cachedContext);
+		});
+	};
+	const auto requestInfo = [&](const std::string& revision)
+		-> const std::vector<std::string>& {
+		return infoCache.GetOrBuild(revision, [&] {
+			++infoBuilds;
+			++modeledSourceReads;
+			return std::vector<std::string>{cachedContext.filename,
+				jpegview_linux::FormatImageDimensionsAndSize(cachedContext.width,
+					cachedContext.height, "10 MB")};
+		});
+	};
+	const std::string initialRevision = "catalog=1;source=image-a;index=1";
+	for (int pan = 0; pan < 250; ++pan) {
+		const std::string title = requestTitle(initialRevision);
+		if (appliedTitle.Update(title)) ++appliedTitleChanges;
+		const auto& lines = requestInfo(initialRevision);
+		Expect(lines.size() == 2 && lines.front() == "same-image.jpg",
+			"cached overlay formatting changed during a repeated pan");
+	}
+	Expect(modeledSourceReads == 2 && titleBuilds == 1 && infoBuilds == 1 &&
+		appliedTitleChanges == 1,
+		"repeated pan rebuilt title or metadata text, or reapplied an unchanged title");
+
+	cachedContext.filename = "reloaded-image.jpg";
+	const std::string reloadRevision = "catalog=2;source=image-b;index=1";
+	const std::string reloadedTitle = requestTitle(reloadRevision);
+	if (appliedTitle.Update(reloadedTitle)) ++appliedTitleChanges;
+	const auto& reloadedLines = requestInfo(reloadRevision);
+	Expect(modeledSourceReads == 4 && titleBuilds == 2 && infoBuilds == 2 &&
+		appliedTitleChanges == 2 && reloadedLines.front() == "reloaded-image.jpg" &&
+		reloadedTitle.find("reloaded-image.jpg") != std::string::npos,
+		"catalog/source reload did not refresh cached title and information text");
 }
 
 void TestSystemFontResolutionAndUnicodeRendering() {
@@ -10496,6 +11356,26 @@ void TestPlaybackSchedulerTimingAndModes() {
 	scheduler.Stop(1300);
 	Expect(scheduler.Mode() == PlaybackMode::None && scheduler.SlideshowSeconds() == 0.0,
 		"stopping playback did not clear active mode state");
+
+	jpegview_linux::PlaybackScheduler pendingSlideshow;
+	pendingSlideshow.StartSlideshow(1.0, 0);
+	pendingSlideshow.SetImageReady(false, 100);
+	Expect(pendingSlideshow.Tick(5000).type == PlaybackActionType::None,
+		"slideshow advanced while the current JPEG header was pending");
+	pendingSlideshow.SetImageReady(true, 5000);
+	Expect(pendingSlideshow.Tick(5999).type == PlaybackActionType::None &&
+		pendingSlideshow.Tick(6000).type == PlaybackActionType::NextImage,
+		"slideshow deadline did not restart when the cold image committed");
+
+	jpegview_linux::PlaybackScheduler pendingMovie;
+	pendingMovie.StartMovie(25.0, 0);
+	pendingMovie.SetImageReady(false, 10);
+	Expect(pendingMovie.Tick(1000).type == PlaybackActionType::None,
+		"movie advanced while the current JPEG header was pending");
+	pendingMovie.SetImageReady(true, 1000);
+	Expect(pendingMovie.Tick(1039).type == PlaybackActionType::None &&
+		pendingMovie.Tick(1040).type == PlaybackActionType::NextImage,
+		"movie interval did not restart when the cold image committed");
 
 	jpegview_linux::PlaybackScheduler wrapping;
 	wrapping.ConfigureImage({20, 20}, 0, true, 0xfffffff5u);
@@ -10709,6 +11589,393 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 	Expect(jpegview_linux::RecentFilesDatabasePath() ==
 		temporary.path() / "xdg-state" / "jpegview-linux" / "recent-files.db",
 		"recent-file database path did not follow XDG_STATE_HOME");
+}
+
+void TestRecentImageLoadHistoryCommitsOnlyAfterSuccess() {
+	TemporaryDirectory temporary;
+	const fs::path firstFolder = temporary.path() / "first-folder";
+	const fs::path secondFolder = temporary.path() / "second-folder";
+	const fs::path thirdFolder = temporary.path() / "third-folder";
+	const fs::path good = firstFolder / "good.jpg";
+	const fs::path malformed = firstFolder / "malformed.jpg";
+	const fs::path loaded = secondFolder / "loaded.jpg";
+	const fs::path pending = thirdFolder / "pending.jpg";
+	const fs::path replacement = temporary.path() / "replacement" / "replacement.jpg";
+	const fs::path normalizedGood = fs::absolute(good).lexically_normal();
+	const fs::path normalizedLoaded = fs::absolute(loaded).lexically_normal();
+
+	jpegview_linux::RecentFiles recents;
+	recents.Add(good);
+	jpegview_linux::RecentImageLoadState state;
+	const jpegview_linux::ViewportSnapshot defaultView{true, false, true, 1.0, 1.0};
+	state.BeginLoad(malformed, defaultView);
+	Expect(state.FailLoad(malformed),
+		"a failed cold-image continuation was not retired from pending load state");
+	Expect(state.LoadedPath().empty() && recents.Files().size() == 1 &&
+		recents.Files().front() == normalizedGood,
+		"a failed cold JPEG replaced the existing same-folder recent image");
+
+	const jpegview_linux::ViewportSnapshot loadedView{false, false, false, 1.75, 1.0};
+	state.BeginLoad(loaded, loadedView);
+	Expect(state.CommitLoad(loaded, recents) && state.LoadedPath() == normalizedLoaded &&
+		recents.Files().size() == 2 && recents.Files().front() == normalizedLoaded,
+		"a successful image load did not commit its recent row and history owner");
+	Expect(state.OwnsLoadedPath(loaded) && !state.OwnsLoadedPath(pending),
+		"the committed path was not the only image recognized as the loaded history owner");
+
+	const fs::path followup = temporary.path() / "followup" / "followup.jpg";
+	const jpegview_linux::ViewportSnapshot pendingView{false, false, false, 3.25, 2.5};
+	const jpegview_linux::ViewportSnapshot outgoingView{false, true, false, 1.5, 1.25};
+	const jpegview_linux::DoublePageModeState outgoingModes{true, true};
+	const jpegview_linux::ViewportSnapshot pendingCurrentView{true, false, false, 2.75, 1.6};
+	const jpegview_linux::DoublePageModeState pendingCurrentModes{false, false};
+	recents.RememberViewport(loaded, outgoingView);
+	recents.RememberDoublePageMode(loaded, outgoingModes);
+	recents.RememberViewport(pending, pendingView);
+	state.SaveCurrentBeforeLoad(pending, outgoingView, outgoingModes, recents);
+	state.BeginLoad(pending, *recents.FindViewport(pending));
+	Expect(state.LoadedPath() == normalizedLoaded &&
+		!state.OwnsLoadedPath(loaded) && !state.OwnsLoadedPath(pending),
+		"a pending image became the loaded history owner before completion");
+
+	const auto continuation = state.TakePendingLoad(pending);
+	Expect(continuation.has_value() &&
+		continuation->viewportSnapshot.zoom == pendingView.zoom,
+		"a cold JPEG continuation lost the selected image's saved viewport");
+	state.SaveCurrentBeforeLoad(pending, pendingCurrentView, pendingCurrentModes, recents);
+	state.BeginLoad(pending, continuation->viewportSnapshot);
+	state.CancelPendingLoad();
+	state.SaveCurrentBeforeLoad(replacement, pendingCurrentView, pendingCurrentModes, recents);
+	state.BeginLoad(replacement, defaultView);
+	const auto preservedPendingView = recents.FindViewport(pending);
+	const auto savedOutgoingView = recents.FindViewport(loaded);
+	const auto savedOutgoingModes = recents.FindDoublePageMode(loaded);
+	Expect(state.LoadedPath() == normalizedLoaded &&
+		!state.OwnsLoadedPath(loaded) && !state.OwnsLoadedPath(replacement) &&
+		preservedPendingView.has_value() &&
+		preservedPendingView->zoom == pendingView.zoom &&
+		preservedPendingView->relativeZoom == pendingView.relativeZoom &&
+		savedOutgoingView.has_value() && savedOutgoingView->fitToWindow == outgoingView.fitToWindow &&
+		savedOutgoingView->fillWithCrop == outgoingView.fillWithCrop &&
+		savedOutgoingView->noEnlarge == outgoingView.noEnlarge &&
+		savedOutgoingView->zoom == outgoingView.zoom &&
+		savedOutgoingView->relativeZoom == outgoingView.relativeZoom &&
+		savedOutgoingModes.has_value() &&
+		savedOutgoingModes->enabled == outgoingModes.enabled &&
+		savedOutgoingModes->mangaReadingOrder == outgoingModes.mangaReadingOrder,
+		"cold-image continuation or cancellation replacement overwrote the committed image's viewport or D/J modes");
+
+	const jpegview_linux::ViewportSnapshot replacementView{false, false, true, 4.0, 3.0};
+	const jpegview_linux::DoublePageModeState replacementModes{false, true};
+	Expect(state.CommitLoad(replacement, recents) && state.LoadedPath() ==
+		fs::absolute(replacement).lexically_normal(),
+		"the replacement image did not take history ownership after loading");
+	state.SaveCurrentBeforeLoad(followup, replacementView, replacementModes, recents);
+	const auto savedReplacementView = recents.FindViewport(replacement);
+	const auto savedReplacementModes = recents.FindDoublePageMode(replacement);
+	Expect(savedReplacementView.has_value() && savedReplacementView->zoom == replacementView.zoom &&
+		savedReplacementView->relativeZoom == replacementView.relativeZoom &&
+		savedReplacementModes.has_value() &&
+		savedReplacementModes->enabled == replacementModes.enabled &&
+		savedReplacementModes->mangaReadingOrder == replacementModes.mangaReadingOrder,
+		"a newly committed history owner did not save its own viewport and D/J modes");
+}
+
+void TestViewportSnapshotFollowsSelectedIdentityDuringCancellation() {
+	TemporaryDirectory temporary;
+	const fs::path committed = temporary.path() / "committed.jpg";
+	const fs::path pending = temporary.path() / "pending.jpg";
+	const jpegview_linux::ViewportSnapshot committedView{
+		false, false, false, 2.0, 1.0};
+	const jpegview_linux::ViewportSnapshot pendingView{
+		false, true, true, 3.0, 1.25};
+	const jpegview_linux::ViewportSnapshot navigationView{
+		true, false, true, 0.75, 1.0};
+
+	jpegview_linux::RecentFiles recentFiles;
+	recentFiles.RememberViewport(committed, committedView);
+	recentFiles.RememberViewport(pending, pendingView);
+	jpegview_linux::RecentImageLoadState state;
+	state.BeginLoad(committed, committedView);
+	Expect(state.CommitLoad(committed, recentFiles),
+		"the committed selection fixture did not acquire history ownership");
+	state.SaveCurrentBeforeLoad(pending, committedView, {}, recentFiles);
+	state.BeginLoad(pending, pendingView);
+
+	const jpegview_linux::ViewportSnapshot continuingPending =
+		state.ViewportForSelection(pending, pendingView, navigationView, recentFiles);
+	Expect(continuingPending.fitToWindow == pendingView.fitToWindow &&
+		continuingPending.fillWithCrop == pendingView.fillWithCrop &&
+		continuingPending.noEnlarge == pendingView.noEnlarge &&
+		continuingPending.zoom == 3.0 &&
+		continuingPending.relativeZoom == pendingView.relativeZoom,
+		"continuing the same pending selection lost its 3x viewport");
+
+	const jpegview_linux::ViewportSnapshot reversedSelection =
+		state.ViewportForSelection(committed, pendingView, navigationView, recentFiles);
+	Expect(!state.OwnsLoadedPath(committed) && state.LoadedPath() ==
+		fs::absolute(committed).lexically_normal() &&
+		reversedSelection.fitToWindow == committedView.fitToWindow &&
+		reversedSelection.fillWithCrop == committedView.fillWithCrop &&
+		reversedSelection.noEnlarge == committedView.noEnlarge &&
+		reversedSelection.zoom == 2.0 &&
+		reversedSelection.relativeZoom == committedView.relativeZoom,
+		"reversing to the committed identity reused the pending selection's viewport");
+
+	state.CancelPendingLoad();
+	Expect(!state.TakePendingLoad(pending).has_value() &&
+		!state.CommitLoad(pending, recentFiles),
+		"canceled pending state remained available to continue or commit");
+	state.BeginLoad(committed, reversedSelection);
+	const auto restoredSelection = state.TakePendingLoad(committed);
+	Expect(restoredSelection.has_value() &&
+		restoredSelection->viewportSnapshot.zoom == 2.0 &&
+		restoredSelection->viewportSnapshot.relativeZoom ==
+		committedView.relativeZoom &&
+		!state.TakePendingLoad(pending).has_value(),
+		"the replacement selection inherited state from the canceled identity");
+}
+
+void TestPendingRecentViewportTracksUserModeChanges() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "saved-two-times.jpg";
+	jpegview_linux::RecentFiles recents;
+	recents.RememberViewport(filename, {false, false, false, 2.0, 1.0});
+	const auto saved = recents.FindViewport(filename);
+	Expect(saved.has_value() && saved->zoom == 2.0,
+		"the pending viewport fixture did not begin from its saved 2x scale");
+
+	jpegview_linux::RecentImageLoadState state;
+	state.BeginLoad(filename, *saved);
+	const jpegview_linux::ViewportSnapshot actualSize{false, false, false, 1.0, 1.0};
+	Expect(state.UpdatePendingViewport(filename, actualSize),
+		"Actual Size did not update the selected pending image's snapshot");
+	Expect(!state.UpdatePendingViewport(temporary.path() / "another.jpg", actualSize),
+		"a viewport update changed the snapshot for a different pending path");
+	const auto actualContinuation = state.TakePendingLoad(filename);
+	Expect(actualContinuation.has_value() &&
+		actualContinuation->viewportSnapshot.zoom == 1.0 &&
+		!actualContinuation->viewportSnapshot.fitToWindow,
+		"the cold-image continuation ignored Actual Size after selecting a saved 2x view");
+
+	state.BeginLoad(filename, actualContinuation->viewportSnapshot);
+	const jpegview_linux::ViewportSnapshot fitToWindow{true, true, false, 0.75, 1.25};
+	Expect(state.UpdatePendingViewport(filename, fitToWindow),
+		"Fit to Window did not update the selected pending image's snapshot");
+	const auto fitContinuation = state.TakePendingLoad(filename);
+	Expect(fitContinuation.has_value() &&
+		fitContinuation->viewportSnapshot.fitToWindow &&
+		fitContinuation->viewportSnapshot.fillWithCrop &&
+		!fitContinuation->viewportSnapshot.noEnlarge &&
+		fitContinuation->viewportSnapshot.zoom == fitToWindow.zoom &&
+		fitContinuation->viewportSnapshot.relativeZoom == fitToWindow.relativeZoom,
+		"the cold-image continuation did not consume the latest fit mode and zoom snapshot");
+	Expect(!state.UpdatePendingViewport(filename, actualSize),
+		"a viewport update succeeded after the pending continuation had been consumed");
+}
+
+void TestPendingImageIntentsRespectSourceGeneration() {
+	TemporaryDirectory temporary;
+	const fs::path firstPath = temporary.path() / "pending-first.jpg";
+	const fs::path secondPath = temporary.path() / "pending-second.jpg";
+	WriteText(firstPath, "first image");
+	WriteText(secondPath, "second image");
+	const jpegview_linux::SourceKey first =
+		jpegview_linux::DescribeImageSource(firstPath).Key();
+	const jpegview_linux::SourceKey second =
+		jpegview_linux::DescribeImageSource(secondPath).Key();
+
+	jpegview_linux::PendingImageIntents pending;
+	jpegview_linux::RecentImageLoadState startupLoad;
+	startupLoad.BeginLoad(firstPath, {true, false, true, 1.0, 1.0});
+	pending.Begin(firstPath, first, 40);
+	jpegview_linux::ViewportIntent startupPan;
+	startupPan.type = jpegview_linux::ViewportIntentType::Pan;
+	startupPan.deltaY = 48.0;
+	Expect(pending.QueueViewport(firstPath, first, 40, startupPan),
+		"startup scan-completion fixture could not queue a pre-catalog viewport intent");
+	const fs::path provisionalSelection = fs::absolute(firstPath).lexically_normal();
+	const bool startupPathChanged = startupLoad.LoadedPath() != provisionalSelection;
+	const bool samePendingStartupLoad = pending.MatchesStartupLoad(true, true, true, true,
+		provisionalSelection, first, 40);
+	const bool currentPathChanged =
+		!samePendingStartupLoad && startupPathChanged;
+	Expect(startupPathChanged && samePendingStartupLoad &&
+		!currentPathChanged &&
+		!pending.MatchesStartupLoad(false, true, true, true,
+			provisionalSelection, first, 40) &&
+		!pending.MatchesStartupLoad(true, false, true, true,
+			provisionalSelection, first, 40) &&
+		!pending.MatchesStartupLoad(true, true, false, true,
+			provisionalSelection, first, 40) &&
+		!pending.MatchesStartupLoad(true, true, true, false,
+			provisionalSelection, first, 40) &&
+		!pending.MatchesStartupLoad(true, true, true, true,
+			provisionalSelection, second, 40) &&
+		!pending.MatchesStartupLoad(true, true, true, true,
+			provisionalSelection, first, 41),
+		"startup catalog completion did not distinguish the matching provisional cold load from a replacement");
+	const auto startupContinuation = startupLoad.TakePendingLoad(firstPath);
+	const auto startupActions = pending.Take(first, 40);
+	Expect(startupContinuation.has_value() && startupActions.has_value() &&
+		startupActions->actions.size() == 1 &&
+		startupActions->actions.front().type == jpegview_linux::PendingImageIntentType::Viewport &&
+		startupActions->actions.front().viewport.deltaY == 48.0,
+		"startup catalog completion lost the provisional load state or its pre-scan input");
+	pending.Begin(firstPath, first, 41);
+	Expect(pending.MatchesSelection(firstPath, first, 41) &&
+		!pending.MatchesSelection(firstPath, first, 42) &&
+		!pending.MatchesSelection(secondPath, first, 41) &&
+		pending.QueueTransform(firstPath, first, 41, IDM_ROTATE_90) &&
+		pending.QueueTransform(firstPath, first, 41, IDM_MIRROR_H) &&
+		pending.RequestTransition(first, 41),
+		"pending rotate, mirror, or transition intent was rejected");
+	Expect(!pending.Take(first, 42).has_value() &&
+		!pending.Take(second, 41).has_value(),
+		"a different load generation or source could consume pending image intents");
+	const auto completed = pending.Take(first, 41);
+	Expect(completed.has_value() && completed->actions.size() == 2 &&
+		completed->actions[0].type == jpegview_linux::PendingImageIntentType::Transform &&
+		completed->actions[0].transform == IDM_ROTATE_90 &&
+		completed->actions[1].transform == IDM_MIRROR_H && completed->startTransition &&
+		!pending.Take(first, 41).has_value(),
+		"matching header completion did not drain transforms in order with its transition");
+
+	pending.Begin(firstPath, first, 43);
+	Expect(pending.QueueTransform(firstPath, first, 43, IDM_ROTATE_270),
+		"replacement fixture could not queue its rotation");
+	pending.Begin(secondPath, second, 44);
+	Expect(!pending.Take(first, 43).has_value(),
+		"replacement source retained a stale queued rotation");
+
+	const jpegview_linux::ViewportSnapshot base{false, false, false, 2.0, 2.0};
+	pending.Begin(firstPath, first, 45);
+	jpegview_linux::ViewportIntent actualSize;
+	actualSize.type = jpegview_linux::ViewportIntentType::ActualSize;
+	jpegview_linux::ViewportIntent pan;
+	pan.type = jpegview_linux::ViewportIntentType::Pan;
+	pan.deltaX = 0.0;
+	pan.deltaY = 80.0;
+	Expect(pending.QueueTransform(firstPath, first, 45, IDM_ROTATE_90) &&
+		pending.QueueViewport(firstPath, first, 45, actualSize) &&
+		pending.QueueViewport(firstPath, first, 45, pan),
+		"interleaved rotate, Actual Size, and pan actions were rejected");
+	const auto interleaved = pending.Take(first, 45);
+	Expect(interleaved.has_value() && interleaved->actions.size() == 3 &&
+		interleaved->actions[0].type == jpegview_linux::PendingImageIntentType::Transform &&
+		interleaved->actions[1].type == jpegview_linux::PendingImageIntentType::Viewport &&
+		interleaved->actions[1].viewport.type == jpegview_linux::ViewportIntentType::ActualSize &&
+		interleaved->actions[2].type == jpegview_linux::PendingImageIntentType::Viewport &&
+		interleaved->actions[2].viewport.type == jpegview_linux::ViewportIntentType::Pan,
+		"cold-image actions lost their original cross-category order");
+
+	const auto replay = [&](const std::vector<jpegview_linux::PendingImageIntent>& actions,
+		bool groupViewportActionsFirst, jpegview_linux::Viewport& viewport) {
+		viewport.Restore(base, 1600, 400, 1000, 800);
+		int width = 1600;
+		int height = 400;
+		const auto rotate = [&] {
+			const jpegview_linux::ViewportSnapshot snapshot = viewport.Snapshot();
+			std::swap(width, height);
+			viewport.Restore(snapshot, width, height, 1000, 800);
+		};
+		const auto apply = [&](const jpegview_linux::PendingImageIntent& action) {
+			if (action.type == jpegview_linux::PendingImageIntentType::Transform) {
+				if (action.transform == IDM_ROTATE_90 || action.transform == IDM_ROTATE_270) rotate();
+				return;
+			}
+			jpegview_linux::ApplyViewportIntent(viewport, action.viewport,
+				width, height, 1000, 800);
+			if (action.viewport.type == jpegview_linux::ViewportIntentType::ZoomByFactor ||
+				action.viewport.type == jpegview_linux::ViewportIntentType::ZoomPreset ||
+				action.viewport.type == jpegview_linux::ViewportIntentType::Pan) {
+				viewport.ClampToView(width, height, 1000, 800);
+			}
+		};
+		if (groupViewportActionsFirst) {
+			for (const auto& action : actions) {
+				if (action.type == jpegview_linux::PendingImageIntentType::Viewport) apply(action);
+			}
+			for (const auto& action : actions) {
+				if (action.type == jpegview_linux::PendingImageIntentType::Transform) apply(action);
+			}
+		} else {
+			for (const auto& action : actions) apply(action);
+		}
+	};
+	jpegview_linux::Viewport orderedView;
+	jpegview_linux::Viewport groupedView;
+	replay(interleaved->actions, false, orderedView);
+	replay(interleaved->actions, true, groupedView);
+	ExpectNear(orderedView.Zoom(), 1.0, 1e-12,
+		"Actual Size after rotation did not set the final source-pixel scale");
+	ExpectNear(orderedView.OffsetY(), 80.0, 1e-12,
+		"vertical pan after rotation and Actual Size was lost");
+	ExpectNear(groupedView.OffsetY(), 0.0, 1e-12,
+		"grouped viewport replay no longer reproduces the lost-pan failure");
+
+	pending.Begin(firstPath, first, 46);
+	for (std::size_t index = 0; index < jpegview_linux::kMaximumPendingImageIntents; ++index) {
+		const bool accepted = index % 2 == 0 ?
+			pending.QueueViewport(firstPath, first, 46, pan) :
+			pending.QueueTransform(firstPath, first, 46, IDM_ROTATE_90);
+		Expect(accepted, "pending intent stress fixture hit the bound too early");
+	}
+	Expect(pending.ActionCount() == jpegview_linux::kMaximumPendingImageIntents &&
+		!pending.CanQueue(firstPath, first, 46) &&
+		!pending.QueueTransform(firstPath, first, 46, IDM_ROTATE_270) &&
+		!pending.QueueViewport(firstPath, first, 46, actualSize) &&
+		pending.ActionCount() == jpegview_linux::kMaximumPendingImageIntents,
+		"blocked-load intent admission grew past its documented bound");
+	const auto bounded = pending.Take(first, 46);
+	Expect(bounded.has_value() &&
+		bounded->actions.size() == jpegview_linux::kMaximumPendingImageIntents &&
+		bounded->actions.back().type == jpegview_linux::PendingImageIntentType::Transform &&
+		bounded->actions.back().transform == IDM_ROTATE_90,
+		"capacity rejection changed the final accepted action or replay order");
+	jpegview_linux::Viewport boundedReplay;
+	jpegview_linux::Viewport boundedReplayAgain;
+	replay(bounded->actions, false, boundedReplay);
+	replay(bounded->actions, false, boundedReplayAgain);
+	ExpectNear(boundedReplay.Zoom(), boundedReplayAgain.Zoom(), 1e-12,
+		"bounded blocked-I/O replay was not deterministic");
+	ExpectNear(boundedReplay.OffsetY(), boundedReplayAgain.OffsetY(), 1e-12,
+		"capacity rejection changed the terminal viewport replay");
+
+	jpegview_linux::DeferredExifDateAction deferredDate;
+	deferredDate.Begin(firstPath, first, 9);
+	Expect(deferredDate.MustDeferFor(firstPath, first) &&
+		deferredDate.Defer(firstPath, first),
+		"EXIF action was not recorded while metadata was pending");
+	jpegview_linux::ExifMetadataResult result;
+	result.generation = 8;
+	result.source = first;
+	result.metadata.dateTime = "2024:05:06 07:08:09";
+	Expect(!deferredDate.Complete(result, firstPath, first).matchedPendingRead &&
+		deferredDate.MustDeferFor(firstPath, first),
+		"stale EXIF metadata consumed the current deferred date action");
+	result.generation = 9;
+	const auto metadataBeforeCommit = deferredDate.Complete(result, firstPath, first);
+	Expect(metadataBeforeCommit.matchedPendingRead &&
+		!metadataBeforeCommit.runDeferredAction &&
+		deferredDate.MarkImageCommitted(firstPath, first).runDeferredAction,
+		"metadata-first completion did not wait for image commit before touching the source");
+
+	deferredDate.Begin(firstPath, first, 10);
+	Expect(deferredDate.Defer(firstPath, first) &&
+		!deferredDate.MarkImageCommitted(firstPath, first).runDeferredAction,
+		"image-first completion ran the EXIF action before metadata arrived");
+	result.generation = 10;
+	const auto commitBeforeMetadata = deferredDate.Complete(result, firstPath, first);
+	Expect(commitBeforeMetadata.matchedPendingRead &&
+		commitBeforeMetadata.runDeferredAction,
+		"image-first completion did not run the action when valid metadata arrived");
+
+	deferredDate.Begin(firstPath, first, 11);
+	Expect(deferredDate.Defer(firstPath, first) &&
+		!deferredDate.MarkImageCommitted(secondPath, second).runDeferredAction &&
+		!deferredDate.Complete(result, secondPath, second).matchedPendingRead,
+		"a replaced owner inherited the deferred EXIF-date action");
 }
 
 void TestFileDialogSorting() {
@@ -11422,6 +12689,8 @@ int main() {
 		TestSourceDescriptorIdentityAndUnusualPaths, failures);
 	RunTest("provisional-source-descriptor-survives-startup-replacement",
 		TestProvisionalSourceDescriptorSurvivesStartupReplacement, failures);
+	RunTest("current-jpeg-dimensions-stable-source-across-list-revisions",
+		TestCurrentJpegDimensionsAcceptStableSourceAcrossListRevisions, failures);
 	RunTest("noncurrent-source-refresh-preserves-selection",
 		TestNonCurrentSourceRefreshPreservesSelection, failures);
 	RunTest("current-processed-save-preserves-materialized-pixels",
@@ -11456,6 +12725,8 @@ int main() {
 	RunTest("full-list-replacement-rebuilds-spread-from-new-neighbor",
 		TestFullListReplacementRebuildsSpreadFromNewNeighbor, failures);
 	RunTest("held-navigation-repeat-coalescing", TestHeldNavigationCoalescesKeyRepeats, failures);
+	RunTest("held-navigation-waits-for-current-image-continuation",
+		TestHeldNavigationWaitsForCurrentImageContinuation, failures);
 	RunTest("interaction-work-policy-idle-deadline-and-capture",
 		TestInteractionWorkPolicyIdleDeadlineAndCapture, failures);
 	RunTest("work-batch-gate-serializes-deactivate-and-publish",
@@ -11478,6 +12749,14 @@ int main() {
 		TestPerfContextAndPendingInputDiagnostics, failures);
 	RunTest("decoded-prefetch-work-class-attribution",
 		TestDecodedPrefetchWorkClassAttribution, failures);
+	RunTest("display-prefetch-planner-worker-snapshots-and-cancellation",
+		TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation, failures);
+	RunTest("viewport-invalidation-retains-current-active-spread-batch",
+		TestViewportInvalidationRetainsCurrentActiveSpreadBatch, failures);
+	RunTest("display-prefetch-request-merge-completion-orders",
+		TestDisplayPrefetchRequestMergeCompletionOrders, failures);
+	RunTest("exif-metadata-worker-reload-and-stale-result-rejection",
+		TestExifMetadataWorkerReloadAndStaleResultRejection, failures);
 	RunTest("decoded-image-cache-and-background-prefetch-cold-spread-retention",
 		TestDecodedImageCacheAndBackgroundPrefetch, failures);
 	RunTest("decoded-active-spread-budget-pressure-preserves-foreground",
@@ -11488,6 +12767,8 @@ int main() {
 		TestDecodedBudgetRejectionPreservesQueuedActiveSpreadWork, failures);
 	RunTest("jpeg-active-spread-dimensions-survive-paused-prefetch",
 		TestJpegActiveSpreadDimensionsSurvivePause, failures);
+	RunTest("selected-spread-partner-transfers-blocked-jpeg-dimensions",
+		TestPromotedActiveSpreadJpegDimensionsKeepCurrentOwner, failures);
 	RunTest("active-spread-partner-replacement-cancels-obsolete-source-work",
 		TestActiveSpreadPartnerReplacementCancelsObsoleteRequests, failures);
 	RunTest("active-spread-cancellation-uses-submitted-source-identity",
@@ -11541,6 +12822,8 @@ int main() {
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
+	RunTest("pending-viewport-intents-replay-after-dimensions",
+		TestPendingViewportIntentsReplayAfterDimensions, failures);
 	RunTest("zoom-navigator-geometry-and-panning", TestZoomNavigatorGeometryAndPanning, failures);
 	RunTest("magnifying-glass-model-defaults-bounds-and-wheel-directions",
 		TestMagnifyingGlassModelDefaultsBoundsAndWheelDirections, failures);
@@ -11586,6 +12869,14 @@ int main() {
 	RunTest("playback-scheduler-timing-and-modes", TestPlaybackSchedulerTimingAndModes, failures);
 	RunTest("recent-files-mru-uniqueness-persistence-and-viewports",
 		TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots, failures);
+	RunTest("recent-image-load-history-commits-only-after-success",
+		TestRecentImageLoadHistoryCommitsOnlyAfterSuccess, failures);
+	RunTest("viewport-snapshot-follows-selected-identity-during-cancellation",
+		TestViewportSnapshotFollowsSelectedIdentityDuringCancellation, failures);
+	RunTest("pending-recent-viewport-tracks-user-mode-changes",
+		TestPendingRecentViewportTracksUserModeChanges, failures);
+	RunTest("pending-image-intents-respect-source-generation",
+		TestPendingImageIntentsRespectSourceGeneration, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
 	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
 	RunTest("file-dialog-model-state-and-navigation", TestFileDialogModelStateAndNavigation, failures);

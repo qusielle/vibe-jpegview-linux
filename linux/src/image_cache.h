@@ -15,10 +15,34 @@
 
 namespace jpegview_linux {
 
+// Cache identity for a decoded-image or header-only dimensions request.
+// Current-image loads may take ownership of an active spread request with the
+// same identity, so later spread replacement cannot cancel the promoted read.
+struct DecodedImageRequestIdentity {
+	SourceKey source;
+	bool dimensionsOnly = false;
+};
+
+bool SameDecodedImageRequest(const DecodedImageRequestIdentity& left,
+	const DecodedImageRequestIdentity& right);
+bool CanTransferActiveSpreadRequestToCurrentImage(
+	const DecodedImageRequestIdentity& spreadRequest,
+	const DecodedImageRequestIdentity& currentImageRequest);
+bool operator==(const DecodedImageRequestIdentity& left,
+	const DecodedImageRequestIdentity& right);
+bool operator!=(const DecodedImageRequestIdentity& left,
+	const DecodedImageRequestIdentity& right);
+
 // Pixel memory retained by a decoded image. Container bookkeeping is small
 // compared with the BGRA buffers and is intentionally excluded from the
 // configured cache budget.
 std::size_t DecodedImageBytes(const DecodedImage& image);
+
+// A JPEG header result remains usable across catalog/descriptor revisions
+// while its load generation and backing source identity are still current.
+bool IsCurrentJpegDimensionsResult(std::uint64_t resultGeneration,
+	const SourceKey& resultSource, std::uint64_t expectedGeneration,
+	const SourceKey& expectedSource);
 
 struct DecodedImageCacheDiagnostics {
 	std::size_t cachedBytes = 0;

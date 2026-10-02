@@ -68,5 +68,8 @@ bool EqualImageProcessing(const ImageProcessingParams& left,
 ImageProcessingPreset ResolveImageProcessingForFile(const ImageProcessingPreset& current,
 	const ImageProcessingPreset* saved, bool keepCurrent, bool defaultAutoContrast,
 	const ImageProcessingParams& defaultProcessing = {});
+ImageProcessingPreset ResolveImageProcessingForLoad(const ImageProcessingPreset& current,
+	const ImageProcessingPreset* saved, bool keepCurrent, bool defaultAutoContrast,
+	const ImageProcessingParams& defaultProcessing, bool continuingPendingLoad);
 
 } // namespace jpegview_linux

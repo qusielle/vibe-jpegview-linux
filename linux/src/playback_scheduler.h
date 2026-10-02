@@ -28,6 +28,7 @@ public:
 	void ConfigureImage(std::vector<int> frameDelaysMs, int loopCount,
 		bool animated, std::uint32_t now);
 	void NotifyInteraction(std::uint32_t now);
+	void SetImageReady(bool ready, std::uint32_t now);
 
 	void StartSlideshow(double seconds, std::uint32_t now);
 	void StartMovie(double framesPerSecond, std::uint32_t now);
@@ -59,6 +60,7 @@ private:
 	std::uint32_t lastInteractionTick_ = 0;
 	bool hasAnimation_ = false;
 	bool animationPlaying_ = false;
+	bool imageReady_ = true;
 	std::vector<int> frameDelaysMs_;
 	std::size_t frameIndex_ = 0;
 	int loopCount_ = 0;

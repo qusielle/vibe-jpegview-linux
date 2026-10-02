@@ -126,4 +126,12 @@ ImageProcessingPreset ResolveImageProcessingForFile(const ImageProcessingPreset&
 	return saved == nullptr ? ImageProcessingPreset{defaultProcessing, defaultAutoContrast} : *saved;
 }
 
+ImageProcessingPreset ResolveImageProcessingForLoad(const ImageProcessingPreset& current,
+	const ImageProcessingPreset* saved, bool keepCurrent, bool defaultAutoContrast,
+	const ImageProcessingParams& defaultProcessing, bool continuingPendingLoad) {
+	if (continuingPendingLoad) return current;
+	return ResolveImageProcessingForFile(current, saved, keepCurrent,
+		defaultAutoContrast, defaultProcessing);
+}
+
 } // namespace jpegview_linux

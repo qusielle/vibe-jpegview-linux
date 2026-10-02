@@ -1,6 +1,9 @@
 #include "sdl_abi.h"
 #include "file_list.h"
 #include "file_list_scan_worker.h"
+#include "display_prefetch_planner.h"
+#include "exif_metadata_worker.h"
+#include "pending_image_intents.h"
 #include "double_page_model.h"
 #include "archive_source.h"
 #include "exif_reader.h"
@@ -436,6 +439,7 @@ public:
 		SDL_ShowWindow(window_);
 		// Some X11 window managers publish the creation title when mapping a
 		// previously hidden window, so repeat the loading title after the map.
+		appliedWindowTitle_.Clear();
 		SetTitle("JPEGView — Loading");
 		PresentStartupFrame();
 		SDL_PumpEvents();
@@ -454,7 +458,8 @@ public:
 				0, FileListScanHandling::Startup, true, false, {},
 				DisplayModeLoadPolicy::UseDefaults);
 			startupInputs_.clear();
-			if (!fileList_.Empty() && !LoadCurrent(0, DisplayModeLoadPolicy::UseDefaults)) {
+			if (!fileList_.Empty() && !LoadCurrent(0,
+				DisplayModeLoadPolicy::UseDefaults, false, true)) {
 				startupImageLoadFailed_ = true;
 			} else if (fileList_.Empty()) {
 				SetTitle("JPEGView — Scanning folder");
@@ -476,6 +481,9 @@ public:
 			TickFileDialogDirectorySummaries();
 			TickFileDialogFileSizes();
 			ApplyWorkerDetectedSourceChanges();
+			TickDisplayPrefetchPlanner();
+			TickExifMetadata();
+			TickCurrentJpegDimensions();
 			Render();
 			// Present the current image before doing renderer-thread cache uploads.
 			// Held navigation then advances only after the closest ready neighbor
@@ -544,6 +552,27 @@ private:
 		int height = 0;
 	};
 
+	struct CurrentJpegDimensionsResult {
+		std::uint64_t loadGeneration = 0;
+		jpegview_linux::SourceKey source;
+		bool succeeded = false;
+		int width = 0;
+		int height = 0;
+	};
+
+	struct PendingCurrentJpegDimensions {
+		jpegview_linux::SourceDescriptor source;
+		std::uint64_t loadGeneration = 0;
+		int prefetchDirection = 0;
+		bool startupLoad = false;
+	};
+
+	struct CurrentJpegDimensionsMailbox {
+		std::mutex mutex;
+		std::vector<CurrentJpegDimensionsResult> ready;
+		bool active = true;
+	};
+
 	struct DisplayPrefetchContext {
 		jpegview_linux::ViewportSnapshot viewport;
 		int imageAreaWidth = 0;
@@ -556,6 +585,8 @@ private:
 
 	struct DisplayPrefetchBatch {
 		std::mutex mutex;
+		jpegview_linux::DisplayPrefetchBatchOwner owner =
+			jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner;
 		jpegview_linux::WorkBatchGate gate;
 		std::vector<jpegview_linux::DisplayImageRequest> requests;
 		std::unordered_map<std::string, jpegview_linux::PageDimensions> decodedPageDimensions;
@@ -628,6 +659,14 @@ private:
 	}
 
 	void Cleanup() {
+		displayPrefetchPlannerWorker_.Stop();
+		exifMetadataWorker_.Stop();
+		{
+			std::lock_guard<std::mutex> lock(currentJpegDimensionsMailbox_->mutex);
+			currentJpegDimensionsMailbox_->active = false;
+			currentJpegDimensionsMailbox_->ready.clear();
+		}
+		CancelPendingCurrentJpegDimensions();
 		fileListScanWorker_.Clear();
 		SaveSettings();
 		if (magnifyingGlassCursorActive_) {
@@ -635,11 +674,11 @@ private:
 			magnifyingGlassCursorActive_ = false;
 		}
 		if (recentFilesLoaded_) {
-			if (!clipboardMode_ && !loadedFilePath_.empty() && !fileList_.Empty() &&
-				AbsoluteNormalized(fileList_.Current()) == loadedFilePath_) {
-				recentFiles_.RememberViewport(loadedFilePath_,
+			if (!clipboardMode_ && !fileList_.Empty() &&
+				recentImageLoadState_.OwnsLoadedPath(fileList_.Current())) {
+				recentFiles_.RememberViewport(recentImageLoadState_.LoadedPath(),
 					clipboardReturnViewport_.value_or(viewport_.Snapshot()));
-				recentFiles_.RememberDoublePageMode(loadedFilePath_,
+				recentFiles_.RememberDoublePageMode(recentImageLoadState_.LoadedPath(),
 					{doublePageModeEnabled_, mangaReadingOrderEnabled_});
 			}
 			if (!recentFilesPath_.empty() &&
@@ -822,9 +861,8 @@ private:
 		return source == nullptr ? jpegview_linux::SourceDescriptor() : *source;
 	}
 
-	bool JpegDimensions(const fs::path& filename, int& width, int& height,
-		std::string& errorMessage) {
-		const jpegview_linux::SourceDescriptor source = SourceDescriptorForPath(filename);
+	bool CachedJpegDimensions(const jpegview_linux::SourceDescriptor& source,
+		int& width, int& height) const {
 		const jpegview_linux::SourceKey key = source.Key();
 		if (source.Metadata().hasDimensions) {
 			width = source.Metadata().width;
@@ -837,9 +875,158 @@ private:
 			height = cached->second.height;
 			return true;
 		}
-		if (!jpegview_linux::ReadJpegDimensions(filename, width, height, errorMessage)) return false;
-		if (key.Valid()) jpegDimensionCache_[key] = {width, height};
-		return true;
+		return false;
+	}
+
+	void CancelPendingCurrentJpegDimensions() {
+		recentImageLoadState_.CancelPendingLoad();
+		pendingImageIntents_.Cancel();
+		pendingTransitionImage_ = {};
+		if (pendingCurrentJpegDimensions_.has_value()) {
+			imageCache_.CancelActiveSpreadRequest(
+				pendingCurrentJpegDimensions_->source, true);
+			pendingCurrentJpegDimensions_.reset();
+		}
+		currentJpegHeaderPending_ = false;
+		pendingImageIntentLimitReached_ = false;
+	}
+
+	void RequestCurrentJpegDimensions(const jpegview_linux::SourceDescriptor& source,
+		std::uint64_t loadGeneration, int prefetchDirection, bool startupLoad) {
+		const std::shared_ptr<CurrentJpegDimensionsMailbox> mailbox =
+			currentJpegDimensionsMailbox_;
+		pendingCurrentJpegDimensions_ = PendingCurrentJpegDimensions{
+			source, loadGeneration, prefetchDirection, startupLoad};
+		imageCache_.RequestJpegDimensions(source,
+			[mailbox, loadGeneration, sourceKey = source.Key()](
+				const fs::path&, bool succeeded, int width, int height) {
+				std::lock_guard<std::mutex> lock(mailbox->mutex);
+				if (!mailbox->active) return;
+				mailbox->ready.push_back(CurrentJpegDimensionsResult{
+					loadGeneration, sourceKey,
+					succeeded, width, height});
+			}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	}
+
+	void TickCurrentJpegDimensions() {
+		std::vector<CurrentJpegDimensionsResult> results;
+		{
+			std::lock_guard<std::mutex> lock(currentJpegDimensionsMailbox_->mutex);
+			results.swap(currentJpegDimensionsMailbox_->ready);
+		}
+		for (const CurrentJpegDimensionsResult& result : results) {
+			if (fileList_.Empty()) continue;
+			const jpegview_linux::SourceDescriptor source =
+				SourceDescriptorForPath(fileList_.Current());
+			if (!jpegview_linux::IsCurrentJpegDimensionsResult(result.loadGeneration,
+				result.source, currentJpegLoadGeneration_, source.Key()) ||
+				!pendingCurrentJpegDimensions_.has_value() ||
+				pendingCurrentJpegDimensions_->loadGeneration != result.loadGeneration ||
+				pendingCurrentJpegDimensions_->source.Key() != result.source) continue;
+			const std::optional<jpegview_linux::PendingRecentImageLoad> pendingLoad =
+				recentImageLoadState_.TakePendingLoad(AbsoluteNormalized(fileList_.Current()));
+			if (!pendingLoad.has_value()) continue;
+			const PendingCurrentJpegDimensions pending =
+				std::move(*pendingCurrentJpegDimensions_);
+			pendingCurrentJpegDimensions_.reset();
+			currentJpegHeaderPending_ = false;
+			std::optional<jpegview_linux::PendingImageIntentBatch> intents =
+				pendingImageIntents_.Take(result.source, result.loadGeneration);
+			Image transitionImage;
+			if (intents.has_value() && intents->startTransition) {
+				transitionImage = std::move(pendingTransitionImage_);
+			}
+			pendingTransitionImage_ = {};
+			if (result.succeeded && result.width > 0 && result.height > 0) {
+				jpegDimensionCache_[result.source] = {result.width, result.height};
+				failedJpegDimensionKeys_.erase(result.source);
+			} else {
+				failedJpegDimensionKeys_.insert(result.source);
+			}
+			const bool loaded = LoadCurrent(pending.prefetchDirection,
+				DisplayModeLoadPolicy::PreserveCurrent, true, pending.startupLoad,
+				pendingLoad, intents.has_value() && !intents->actions.empty());
+			if (!loaded && pending.startupLoad) {
+				startupImageLoadFailed_ = true;
+				deferredExitCode_ = 1;
+				quitRequested_ = true;
+				continue;
+			}
+			if (loaded && intents.has_value()) {
+				bool replayedViewportIntent = false;
+				for (const jpegview_linux::PendingImageIntent& intent : intents->actions) {
+					if (intent.type == jpegview_linux::PendingImageIntentType::Viewport) {
+						ApplyPendingViewportIntent(intent.viewport);
+						replayedViewportIntent = true;
+					} else {
+						ApplyTransform(intent.transform);
+					}
+				}
+				if (replayedViewportIntent) {
+					currentDisplayRequest_.reset();
+					PrepareImagePrefetch(pending.prefetchDirection);
+					RefreshDoublePageRenderState();
+				}
+				if (intents->startTransition) StartTransition(transitionImage);
+			}
+		}
+	}
+
+	void TickExifMetadata() {
+		for (jpegview_linux::ExifMetadataResult& result : exifMetadataWorker_.TakeReady()) {
+			if (clipboardMode_ || fileList_.Empty() ||
+				!jpegview_linux::IsCurrentExifMetadataResult(result,
+					exifMetadataRequestGeneration_, exifMetadataSource_)) continue;
+			const jpegview_linux::SourceDescriptor current =
+				SourceDescriptorForPath(fileList_.Current());
+			if (current.Key() != result.source) continue;
+			metadata_ = std::move(result.metadata);
+			jpegComment_ = std::move(result.jpegComment);
+			++imageInfoMetadataRevision_;
+			const jpegview_linux::ExifDateActionCompletion deferredAction =
+				deferredExifDateAction_.Complete(result,
+					AbsoluteNormalized(fileList_.Current()), current.Key());
+			if (deferredAction.runDeferredAction) TouchCurrentImage(true);
+		}
+	}
+
+	void TickDisplayPrefetchPlanner() {
+		for (jpegview_linux::DisplayPrefetchPlannerResult& result :
+			displayPrefetchPlannerWorker_.TakeReady()) {
+			if (fileList_.Empty() || clipboardMode_) continue;
+			const SDL_Rect imageArea = ImageAreaRect();
+			if (!jpegview_linux::MatchesDisplayPrefetchSnapshot(result,
+				activeDisplayPrefetchGeneration_, fileList_.MutationRevision(),
+				fileList_.DescriptorRevision(), prefetchViewportRevision_,
+				fileList_.CurrentIndex(), pendingPrefetchDirection_,
+				viewport_.NavigationSnapshot(), imageArea.w, imageArea.h) ||
+				CurrentInteractionWorkPlan().cancelQueuedSpeculation) continue;
+			for (const jpegview_linux::DisplayPrefetchPlannedDimensions& dimensions :
+				result.dimensions) {
+				const jpegview_linux::SourceDescriptor* current =
+					fileList_.DescriptorAt(dimensions.index);
+				if (current == nullptr || current->Key() != dimensions.source ||
+					dimensions.width <= 0 || dimensions.height <= 0) continue;
+				jpegDimensionCache_[dimensions.source] = {
+					dimensions.width, dimensions.height};
+			}
+			const std::shared_ptr<DisplayPrefetchBatch> batch = displayPrefetchBatch_;
+			if (!batch) continue;
+			bool published = batch->gate.Publish([&] {
+				std::vector<jpegview_linux::DisplayImageRequest> requests;
+				{
+					std::lock_guard<std::mutex> lock(batch->mutex);
+					jpegview_linux::AppendDisplayPrefetchRequests(batch->requests,
+						result.requests);
+					requests = batch->requests;
+				}
+				displayImageCache_.Prefetch(std::move(requests));
+			});
+			if (!published) continue;
+			for (const std::string& key : result.protectedTextureKeys) {
+				displayTextureProtectedKeys_.insert(key);
+			}
+		}
 	}
 
 	std::optional<jpegview_linux::PageDimensions> PageDimensionsAt(std::size_t index) {
@@ -1027,7 +1214,7 @@ private:
 			return;
 		}
 		const bool selectionMatchesLoadedImage = clipboardMode_ ||
-			loadedFilePath_ == AbsoluteNormalized(fileList_.Current());
+			recentImageLoadState_.LoadedPath() == AbsoluteNormalized(fileList_.Current());
 		if (!selectionMatchesLoadedImage) {
 			if (IsPotentialDoublePageAnchor(currentIndex)) awaitDimensions();
 			else useSinglePage();
@@ -1253,14 +1440,15 @@ private:
 		return true;
 	}
 
-	void SelectPictureLevelsForCurrentFile() {
+	void SelectPictureLevelsForCurrentFile(bool continuingPendingLoad = false) {
 		const std::string key = AbsoluteNormalized(fileList_.Current()).string();
 		const auto saved = imageProcessingStore_.find(key);
 		const jpegview_linux::ImageProcessingPreset current{imageProcessing_, autoContrastEnabled_};
 		const jpegview_linux::ImageProcessingPreset selected =
-			jpegview_linux::ResolveImageProcessingForFile(current,
+			jpegview_linux::ResolveImageProcessingForLoad(current,
 				saved == imageProcessingStore_.end() ? nullptr : &saved->second,
-				keepPictureLevels_, defaultAutoContrastEnabled_, defaultImageProcessing_);
+				keepPictureLevels_, defaultAutoContrastEnabled_, defaultImageProcessing_,
+				continuingPendingLoad);
 		imageProcessing_ = selected.processing;
 		autoContrastEnabled_ = selected.autoContrast;
 		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
@@ -1269,22 +1457,24 @@ private:
 	}
 
 	bool LoadCurrent(int prefetchDirection = 0,
-		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent) {
+		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent,
+		bool preserveExifMetadataRequest = false, bool startupLoad = false,
+		std::optional<jpegview_linux::PendingRecentImageLoad> resumePendingLoad = std::nullopt,
+		bool replayPendingIntents = false) {
 		jpegview_linux::PerfContextScope workContext(
 			jpegview_linux::PerfWorkClass::ActiveImageSpread,
 			jpegview_linux::PerfExecution::EventThread);
 		if (fileList_.Empty()) {
+			CancelPendingCurrentJpegDimensions();
 			return false;
 		}
-		const jpegview_linux::SourceDescriptor source =
-			SourceDescriptorForPath(fileList_.Current());
 		const fs::path targetPath = AbsoluteNormalized(fileList_.Current());
-		const bool pathChanged = loadedFilePath_.empty() || targetPath != loadedFilePath_;
-		if (!clipboardMode_ && !loadedFilePath_.empty() && pathChanged) {
-			recentFiles_.RememberViewport(loadedFilePath_,
-				clipboardReturnViewport_.value_or(viewport_.Snapshot()));
-			recentFiles_.RememberDoublePageMode(loadedFilePath_,
-				{doublePageModeEnabled_, mangaReadingOrderEnabled_});
+		const bool pathChanged = recentImageLoadState_.LoadedPath().empty() ||
+			targetPath != recentImageLoadState_.LoadedPath();
+		if (!clipboardMode_) {
+			recentImageLoadState_.SaveCurrentBeforeLoad(targetPath,
+				clipboardReturnViewport_.value_or(viewport_.Snapshot()),
+				{doublePageModeEnabled_, mangaReadingOrderEnabled_}, recentFiles_);
 		}
 		if (!clipboardMode_ && pathChanged &&
 			modeLoadPolicy != DisplayModeLoadPolicy::PreserveCurrent) {
@@ -1304,28 +1494,54 @@ private:
 			doublePagePresentation_.UseSinglePage(currentIndex);
 		}
 		jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.NavigationSnapshot();
-		if (!clipboardMode_) {
-			if (clipboardReturnViewport_.has_value() && targetPath == loadedFilePath_) {
+		if (resumePendingLoad.has_value()) {
+			viewportSnapshot = replayPendingIntents ?
+				resumePendingLoad->intentBaseSnapshot : resumePendingLoad->viewportSnapshot;
+		} else if (!clipboardMode_) {
+			if (clipboardReturnViewport_.has_value() &&
+				targetPath == recentImageLoadState_.LoadedPath()) {
 				viewportSnapshot = *clipboardReturnViewport_;
-			} else if (pathChanged) {
-				const std::optional<jpegview_linux::ViewportSnapshot> savedViewport =
-					recentFiles_.FindViewport(targetPath);
-				if (savedViewport.has_value()) viewportSnapshot = *savedViewport;
 			} else {
-				viewportSnapshot = viewport_.Snapshot();
+				viewportSnapshot = recentImageLoadState_.ViewportForSelection(targetPath,
+					viewport_.Snapshot(), viewport_.NavigationSnapshot(), recentFiles_);
 			}
 		}
+		// Resolve the snapshot while the previous selected identity is still known. A
+		// cancellation here would otherwise make a reversal look like the committed
+		// image still owned the live viewport.
+		CancelPendingCurrentJpegDimensions();
+		const jpegview_linux::SourceDescriptor source =
+			SourceDescriptorForPath(fileList_.Current());
+		const std::uint64_t loadGeneration = ++currentJpegLoadGeneration_;
+		currentJpegHeaderPending_ = false;
 		const auto failedLoad = [this] {
-			if (!clipboardMode_) loadedFilePath_.clear();
+			deferredExifDateAction_.Cancel();
+			if (!clipboardMode_) {
+				recentImageLoadState_.FailLoad(AbsoluteNormalized(fileList_.Current()));
+			}
 			return false;
 		};
+		if (!clipboardMode_) recentImageLoadState_.BeginLoad(targetPath, viewportSnapshot);
 		ClearCropSelection();
-		SelectPictureLevelsForCurrentFile();
-		metadata_ = {};
-		jpegComment_.clear();
+		SelectPictureLevelsForCurrentFile(resumePendingLoad.has_value());
+		if (!preserveExifMetadataRequest) {
+			metadata_ = {};
+			jpegComment_.clear();
+			++imageInfoMetadataRevision_;
+			if (jpegview_linux::IsJpegPath(source.LogicalPath()) && source.Valid()) {
+				exifMetadataRequestGeneration_ = exifMetadataWorker_.Request(source);
+				exifMetadataSource_ = source.Key();
+				deferredExifDateAction_.Begin(targetPath, source.Key(),
+					exifMetadataRequestGeneration_);
+			} else {
+				exifMetadataWorker_.Cancel();
+				exifMetadataRequestGeneration_ = 0;
+				exifMetadataSource_ = {};
+				deferredExifDateAction_.Cancel();
+			}
+		}
 		ClearTransition();
 		std::string errorMessage;
-		jpegview_linux::ReadJpegMetadata(fileList_.Current(), metadata_, jpegComment_);
 
 		if (texture_ != nullptr) SDL_DestroyTexture(texture_);
 		texture_ = nullptr;
@@ -1356,11 +1572,11 @@ private:
 		const bool deferForPossibleSpread = IsPotentialDoublePageAnchor(currentIndex);
 
 		bool cachedDisplay = false;
+		bool waitingForJpegDimensions = false;
 		if (cacheBudget_->Capacity() != 0 && jpegview_linux::IsJpegPath(fileList_.Current())) {
 			int sourceWidth = 0;
 			int sourceHeight = 0;
-			if (JpegDimensions(fileList_.Current(), sourceWidth,
-				sourceHeight, errorMessage)) {
+			if (CachedJpegDimensions(source, sourceWidth, sourceHeight)) {
 				currentSourcePageDimensions_ =
 					jpegview_linux::PageDimensions{sourceWidth, sourceHeight};
 				image_.width = image_.originalWidth = sourceWidth;
@@ -1385,11 +1601,22 @@ private:
 					deferredCurrentDisplayPreparation_ =
 						deferForPossibleSpread && !cachedDisplay;
 				}
+			} else if (source.Valid() &&
+				failedJpegDimensionKeys_.find(source.Key()) == failedJpegDimensionKeys_.end()) {
+				currentJpegHeaderPending_ = true;
+				waitingForJpegDimensions = true;
+				RestoreScaleMode(viewportSnapshot);
+				pendingImageIntents_.Begin(targetPath, source.Key(), loadGeneration);
+				playback_.SetImageReady(false, now);
+				TransferActiveSpreadPartnerRequestToCurrentImage(source);
+				RequestCurrentJpegDimensions(source, loadGeneration,
+					prefetchDirection, startupLoad);
 			}
 		}
 
 		std::vector<int> animationFrameDelaysMs;
-		if (!cachedDisplay && !deferredCurrentDisplayPreparation_) {
+		if (!cachedDisplay && !deferredCurrentDisplayPreparation_ &&
+			!waitingForJpegDimensions) {
 			jpegview_linux::DecodedImageCache::ImagePtr decoded = imageCache_.Find(source);
 			if (!decoded) decoded = imageCache_.FindOrWait(source);
 			if (!decoded) {
@@ -1456,15 +1683,26 @@ private:
 			playback_.ConfigureImage({}, 0, false, now);
 		}
 		cropSelection_.SetImageSize(image_.width, image_.height);
-		SetTitle();
+		if (waitingForJpegDimensions) {
+			SetPendingHeaderTitle();
+		} else {
+			SetTitle();
+		}
 		PrepareThumbnailPreload();
 		PrepareImagePrefetch(prefetchDirection);
-		if (!clipboardMode_) {
-			recentFiles_.Add(targetPath);
-			loadedFilePath_ = targetPath;
+		if (!clipboardMode_ && !waitingForJpegDimensions) {
+			if (!recentImageLoadState_.CommitLoad(targetPath, recentFiles_)) {
+				return failedLoad();
+			}
 			clipboardReturnViewport_.reset();
 		}
 		RefreshDoublePageRenderState();
+		if (!waitingForJpegDimensions) {
+			const jpegview_linux::ExifDateActionCompletion deferredAction =
+				deferredExifDateAction_.MarkImageCommitted(targetPath, source.Key());
+			if (deferredAction.runDeferredAction) TouchCurrentImage(true);
+			playback_.SetImageReady(true, SDL_GetTicks());
+		}
 		return true;
 	}
 
@@ -1545,14 +1783,57 @@ private:
 		if (displayPrefetchBatch_) displayPrefetchBatch_->gate.Deactivate();
 	}
 
+	void InvalidateViewportPrefetch() {
+		++prefetchViewportRevision_;
+		displayPrefetchPlannerWorker_.Cancel();
+		activeDisplayPrefetchGeneration_ = 0;
+		ReconcileActiveSpreadPartnerSourceRequest();
+		if (displayPrefetchBatch_) {
+			const std::shared_ptr<DisplayPrefetchBatch> spreadBatch =
+				activeSpreadSourceRequest_.has_value() ?
+					activeSpreadSourceRequest_->batch.lock() : nullptr;
+			const bool activeSpreadRequestStillCurrent =
+				spreadBatch == displayPrefetchBatch_;
+			if (jpegview_linux::ShouldDeactivateDisplayPrefetchBatch(
+				displayPrefetchBatch_->owner,
+				jpegview_linux::DisplayPrefetchBatchInvalidation::ViewportChanged,
+				activeSpreadRequestStillCurrent)) {
+				displayPrefetchBatch_->gate.Deactivate();
+			}
+		}
+	}
+
 	void CancelActiveSpreadPartnerSourceRequest() {
 		if (!activeSpreadSourceRequest_.has_value()) return;
 		if (const auto batch = activeSpreadSourceRequest_->batch.lock()) {
-			batch->gate.Deactivate();
+			if (jpegview_linux::ShouldDeactivateDisplayPrefetchBatch(
+				batch->owner,
+				jpegview_linux::DisplayPrefetchBatchInvalidation::OwnerChanged, false)) {
+				batch->gate.Deactivate();
+			}
 		}
 		imageCache_.CancelActiveSpreadRequest(
 			activeSpreadSourceRequest_->source,
 			activeSpreadSourceRequest_->dimensionsOnly);
+		activeSpreadSourceRequest_.reset();
+	}
+
+	void TransferActiveSpreadPartnerRequestToCurrentImage(
+		const jpegview_linux::SourceDescriptor& currentSource) {
+		if (!activeSpreadSourceRequest_.has_value()) return;
+		const jpegview_linux::DecodedImageRequestIdentity partnerRequest{
+			activeSpreadSourceRequest_->source.Key(),
+			activeSpreadSourceRequest_->dimensionsOnly};
+		const jpegview_linux::DecodedImageRequestIdentity currentRequest{
+			currentSource.Key(), true};
+		if (!jpegview_linux::CanTransferActiveSpreadRequestToCurrentImage(
+			partnerRequest, currentRequest)) return;
+		if (const auto batch = activeSpreadSourceRequest_->batch.lock()) {
+			batch->gate.Deactivate();
+		}
+		// RequestJpegDimensions below rebinds this source key's completion to
+		// the current-load mailbox. Retire only the old batch owner here; it
+		// must not cancel the worker request after that rebinding takes effect.
 		activeSpreadSourceRequest_.reset();
 	}
 
@@ -1576,8 +1857,12 @@ private:
 		const auto pending = PendingActiveSpreadPartnerSource();
 		if (!pending.has_value() ||
 			pending->filename != activeSpreadSourceRequest_->filename ||
-			pending->dimensionsOnly != activeSpreadSourceRequest_->dimensionsOnly ||
-			pending->source.Key() != activeSpreadSourceRequest_->source.Key()) {
+			!jpegview_linux::SameDecodedImageRequest(
+				jpegview_linux::DecodedImageRequestIdentity{
+					pending->source.Key(), pending->dimensionsOnly},
+				jpegview_linux::DecodedImageRequestIdentity{
+					activeSpreadSourceRequest_->source.Key(),
+					activeSpreadSourceRequest_->dimensionsOnly})) {
 			CancelActiveSpreadPartnerSourceRequest();
 		}
 	}
@@ -1590,8 +1875,12 @@ private:
 		}
 		if (activeSpreadSourceRequest_.has_value() &&
 			(activeSpreadSourceRequest_->filename != sourceRequest->filename ||
-			 activeSpreadSourceRequest_->dimensionsOnly != sourceRequest->dimensionsOnly ||
-			 activeSpreadSourceRequest_->source.Key() != sourceRequest->source.Key())) {
+			 !jpegview_linux::SameDecodedImageRequest(
+				jpegview_linux::DecodedImageRequestIdentity{
+					sourceRequest->source.Key(), sourceRequest->dimensionsOnly},
+				jpegview_linux::DecodedImageRequestIdentity{
+				activeSpreadSourceRequest_->source.Key(),
+				activeSpreadSourceRequest_->dimensionsOnly}))) {
 			CancelActiveSpreadPartnerSourceRequest();
 		}
 		const std::size_t currentIndex = fileList_.CurrentIndex();
@@ -1600,6 +1889,7 @@ private:
 		const jpegview_linux::SourceDescriptor& partnerSource = sourceRequest->source;
 
 		auto batch = std::make_shared<DisplayPrefetchBatch>();
+		batch->owner = jpegview_linux::DisplayPrefetchBatchOwner::ActiveSpread;
 		batch->context.currentIndex = currentIndex;
 		batch->context.pageCount = fileList_.Size();
 		batch->context.currentPageDimensions = currentDimensions;
@@ -1648,6 +1938,8 @@ private:
 				(plan.foregroundPending && !lastForegroundPending_));
 		if (enteringSuspension) {
 			DeactivateDisplayPrefetchBatch();
+			displayPrefetchPlannerWorker_.Cancel();
+			activeDisplayPrefetchGeneration_ = 0;
 			displayImageCache_.Prefetch({});
 			imageCache_.Prefetch({}, 0, 0, 0);
 			std::set<jpegview_linux::PerfWorkClass> canceledClasses{
@@ -1670,6 +1962,9 @@ private:
 
 	void PrepareImagePrefetch(int preferredDirection = 0) {
 		pendingPrefetchDirection_ = preferredDirection;
+		++prefetchViewportRevision_;
+		displayPrefetchPlannerWorker_.Cancel();
+		activeDisplayPrefetchGeneration_ = 0;
 		// Prefetch replaces its neighbor set, so let an active lens reassert its
 		// optional request on the next renderer tick if this call cancels it.
 		magnifyingGlassBackgroundRequestedKey_.clear();
@@ -1686,7 +1981,10 @@ private:
 		// source again. Retire the paused-only request before replacing its batch.
 		CancelActiveSpreadPartnerSourceRequest();
 		prefetchRefreshNeeded_ = false;
-		if (fileList_.Empty() || clipboardMode_) return;
+		if (fileList_.Empty() || clipboardMode_) {
+			imageCache_.Prefetch({}, 0, 0, 0);
+			return;
+		}
 		displayImageCache_.Prefetch({});
 		const SDL_Rect imageArea = ImageAreaRect();
 		auto batch = std::make_shared<DisplayPrefetchBatch>();
@@ -1698,9 +1996,22 @@ private:
 		batch->context.pageCount = fileList_.Size();
 		batch->context.doublePageMode = {doublePageModeEnabled_, mangaReadingOrderEnabled_};
 		batch->context.currentPageDimensions = PageDimensionsAt(fileList_.CurrentIndex());
+		jpegview_linux::DisplayPrefetchPlannerRequest plannerRequest;
+		plannerRequest.catalogRevision = fileList_.MutationRevision();
+		plannerRequest.descriptorRevision = fileList_.DescriptorRevision();
+		plannerRequest.viewportRevision = prefetchViewportRevision_;
+		plannerRequest.currentIndex = fileList_.CurrentIndex();
+		plannerRequest.pageCount = fileList_.Size();
+		plannerRequest.preferredDirection = preferredDirection;
+		plannerRequest.viewport = batch->context.viewport;
+		plannerRequest.imageAreaWidth = imageArea.w;
+		plannerRequest.imageAreaHeight = imageArea.h;
+		plannerRequest.doublePageMode = batch->context.doublePageMode;
+		plannerRequest.currentPageDimensions = batch->context.currentPageDimensions;
 		for (const auto& retained : displayTextureCache_) {
 			batch->retainedTextureKeys.insert(retained.first);
 		}
+		plannerRequest.retainedTextureKeys = batch->retainedTextureKeys;
 		displayTextureProtectedKeys_.clear();
 		if (currentDisplayRequest_.has_value()) {
 			displayTextureProtectedKeys_.insert(currentDisplayRequest_->key);
@@ -1711,10 +2022,13 @@ private:
 		if (!doublePagePresentation_.PartnerTextureKey().empty()) {
 			displayTextureProtectedKeys_.insert(doublePagePresentation_.PartnerTextureKey());
 		}
+		const std::size_t maximumNeighborCount = jpegview_linux::DisplayPrefetchCount(
+			cacheBudget_->Capacity(), imageArea.w, imageArea.h, fileList_.Files().size());
+		plannerRequest.maximumCount = maximumNeighborCount;
 		const std::vector<std::size_t> prefetchOrder = jpegview_linux::ImagePrefetchOrder(
 			fileList_.Files().size(), fileList_.CurrentIndex(), preferredDirection,
-			jpegview_linux::DisplayPrefetchCount(cacheBudget_->Capacity(), imageArea.w,
-				imageArea.h, fileList_.Files().size()));
+			maximumNeighborCount);
+		plannerRequest.neighbors.reserve(prefetchOrder.size());
 		for (std::size_t position = 0; position < prefetchOrder.size(); ++position) {
 			jpegview_linux::PerfContextScope workContext(
 				position < 2 ? jpegview_linux::PerfWorkClass::NearestNavigationNeighbor :
@@ -1722,8 +2036,16 @@ private:
 				jpegview_linux::PerfExecution::EventThread);
 			const std::size_t fileIndex = prefetchOrder[position];
 			const fs::path& filename = fileList_.Files()[fileIndex];
-			const jpegview_linux::SourceDescriptor source =
-				SourceDescriptorForPath(filename);
+			const jpegview_linux::SourceDescriptor* sourceEntry = fileList_.DescriptorAt(fileIndex);
+			if (sourceEntry == nullptr) continue;
+			jpegview_linux::SourceDescriptor source = *sourceEntry;
+			if (jpegview_linux::IsJpegPath(filename)) {
+				int cachedWidth = 0;
+				int cachedHeight = 0;
+				if (CachedJpegDimensions(source, cachedWidth, cachedHeight)) {
+					source = source.WithImageProperties(cachedWidth, cachedHeight, false);
+				}
+			}
 			batch->priorityByFilename.emplace(filename.string(), position + 1);
 			batch->indexByFilename.emplace(filename.string(), fileIndex);
 			batch->sourceByFilename.emplace(filename.string(), source);
@@ -1739,43 +2061,12 @@ private:
 			fileProcessing.unsharpThreshold = unsharpMaskThreshold_;
 			batch->processingByFilename.emplace(filename.string(), fileProcessing);
 			batch->autoContrastByFilename.emplace(filename.string(), filePreset.autoContrast);
-			if (!jpegview_linux::IsJpegPath(filename)) continue;
-			int sourceWidth = 0;
-			int sourceHeight = 0;
-			std::string errorMessage;
-			if (!JpegDimensions(filename, sourceWidth, sourceHeight,
-				errorMessage)) continue;
-			if (doublePageModeEnabled_ && position < prefetchOrder.size() &&
-				prefetchOrder[position] == fileList_.CurrentIndex() + 1) {
-				const auto currentPage = PageDimensionsAt(fileList_.CurrentIndex());
-				if (currentPage.has_value() && jpegview_linux::BuildDoublePageSpread(
-					fileList_.CurrentIndex(), fileList_.Size(), *currentPage,
-					jpegview_linux::PageDimensions{sourceWidth, sourceHeight},
-					{true, mangaReadingOrderEnabled_}).has_value()) {
-					// The visible partner is requested separately at its spread-slot
-					// resolution; don't also produce a full-window neighbor texture.
-					continue;
-				}
-			}
-			jpegview_linux::Viewport viewport;
-			viewport.Restore(batch->context.viewport, sourceWidth, sourceHeight,
-				batch->context.imageAreaWidth, batch->context.imageAreaHeight);
-			const jpegview_linux::ViewportRect target = viewport.Destination(
-				sourceWidth, sourceHeight, batch->context.imageAreaWidth,
-				batch->context.imageAreaHeight);
-			jpegview_linux::DisplayImageRequest request =
-				jpegview_linux::MakeJpegDisplayImageRequest(source, sourceWidth, sourceHeight,
-					target.width, target.height, filePreset.autoContrast, position + 1,
-					fileProcessing);
-			request.workClass = position < 2 ?
-				jpegview_linux::PerfWorkClass::NearestNavigationNeighbor :
-				jpegview_linux::PerfWorkClass::DistantSpeculation;
-			if (!request.Valid()) continue;
-			displayTextureProtectedKeys_.insert(request.key);
-			if (batch->retainedTextureKeys.find(request.key) ==
-				batch->retainedTextureKeys.end()) batch->requests.push_back(std::move(request));
+			plannerRequest.neighbors.push_back({filename, source, fileIndex, position + 1,
+				fileProcessing, filePreset.autoContrast,
+				jpegview_linux::IsJpegPath(filename)});
 		}
-		displayImageCache_.Prefetch(batch->requests);
+		activeDisplayPrefetchGeneration_ = displayPrefetchPlannerWorker_.Request(
+			std::move(plannerRequest));
 		displayPrefetchBatch_ = batch;
 		imageCache_.Prefetch(fileList_.Files(), fileList_.CurrentIndex(),
 			preferredDirection, kDecodedImagePrefetchCount,
@@ -2484,6 +2775,16 @@ private:
 	}
 
 	void ApplyTransform(int command) {
+		if (currentJpegHeaderPending_) {
+			const jpegview_linux::SourceDescriptor source =
+				SourceDescriptorForPath(fileList_.Current());
+			const fs::path currentPath = AbsoluteNormalized(fileList_.Current());
+			if (!pendingImageIntents_.QueueTransform(currentPath, source.Key(),
+				currentJpegLoadGeneration_, command)) {
+				SetPendingImageIntentLimitTitle();
+			}
+			return;
+		}
 		if (!MaterializeCurrentPixels()) return;
 		ClearCropSelection();
 		const bool canKeepSpreadRotation = currentSpreadRotationValid_ || !imageModified_;
@@ -2593,10 +2894,26 @@ private:
 	}
 
 	void SetTitle(const std::string& title) {
-		SDL_SetWindowTitle(window_, title.c_str());
+		if (appliedWindowTitle_.Update(title)) {
+			SDL_SetWindowTitle(window_, appliedWindowTitle_.Current().c_str());
+		}
+	}
+
+	void SetPendingHeaderTitle(bool inputLimitReached = false) {
+		if (fileList_.Empty()) return;
+		std::string title = fileList_.Current().filename().string() + " [" +
+			CurrentImagePositionText() + "] — Loading image header";
+		if (inputLimitReached || pendingImageIntentLimitReached_) {
+			title += " (pending input limit reached)";
+		}
+		SetTitle(title);
 	}
 
 	void SetTitle() {
+		if (currentJpegHeaderPending_ && !fileList_.Empty()) {
+			SetPendingHeaderTitle();
+			return;
+		}
 		if (fileList_.Empty() || image_.originalWidth <= 0 || image_.originalHeight <= 0) {
 			SetTitle("JPEGView");
 			return;
@@ -2621,7 +2938,20 @@ private:
 		if (source.Metadata().hasFileSize) context.fileSize = source.Metadata().fileSize;
 		context.applicationName = "JPEGView";
 		context.applicationVersion = JPEGVIEW_APP_VERSION;
-		SetTitle(jpegview_linux::FormatWindowTitle(windowTitlePattern_, context));
+		std::ostringstream cacheKey;
+		cacheKey << windowTitlePattern_.size() << ':' << windowTitlePattern_ << '|'
+			<< fileList_.MutationRevision() << ':' << fileList_.DescriptorRevision() << '|'
+			<< context.position.size() << ':' << context.position << '|'
+			<< context.currentIndex << ':' << context.imageCount << '|'
+			<< context.fullPath.size() << ':' << context.fullPath << '|'
+			<< context.width << ':' << context.height << '|'
+			<< (context.fileSize.has_value() ? std::to_string(*context.fileSize) : "-") << '|'
+			<< context.applicationVersion;
+		const std::string& title = windowTitleFormatCache_.GetOrBuild(
+			cacheKey.str(), [this, &context] {
+				return jpegview_linux::FormatWindowTitle(windowTitlePattern_, context);
+			});
+		SetTitle(title);
 	}
 
 	void OpenDroppedFiles(const std::vector<std::string>& droppedFiles,
@@ -3333,6 +3663,7 @@ private:
 					preferredPath, modeLoadPolicy, markedToggleReturnPath, completionTitle);
 				continue;
 			}
+			if (fileList_.Empty()) CancelPendingCurrentJpegDimensions();
 			if (handling == FileListScanHandling::DroppedInputs) {
 				thumbnailCatalogRevisionTracker_.NoteReplacement();
 				ClearPendingFileListScan();
@@ -3349,10 +3680,22 @@ private:
 			}
 
 			const fs::path currentPath = fileList_.Current();
+			const jpegview_linux::SourceKey currentSourceKey =
+				SourceDescriptorForPath(currentPath).Key();
+			const bool dimensionsRequestPending =
+				pendingCurrentJpegDimensions_.has_value();
+			const bool startupLoadRequest = dimensionsRequestPending &&
+				pendingCurrentJpegDimensions_->startupLoad &&
+				pendingCurrentJpegDimensions_->loadGeneration == currentJpegLoadGeneration_;
+			const bool samePendingStartupLoad = pendingImageIntents_.MatchesStartupLoad(
+				handling == FileListScanHandling::Startup, currentJpegHeaderPending_,
+				dimensionsRequestPending, startupLoadRequest,
+				AbsoluteNormalized(currentPath), currentSourceKey, currentJpegLoadGeneration_);
 			const bool currentPathChanged = currentPath != previousPath ||
-				(!currentPath.empty() && loadedFilePath_ != AbsoluteNormalized(currentPath));
+				(!samePendingStartupLoad && !currentPath.empty() &&
+					recentImageLoadState_.LoadedPath() != AbsoluteNormalized(currentPath));
 			const bool currentSourceChanged = !currentPath.empty() &&
-				SourceDescriptorForPath(currentPath).Key() != previousSourceKey;
+				currentSourceKey != previousSourceKey;
 			if (handling == FileListScanHandling::Startup) {
 				if (fileList_.Empty()) {
 					const fs::path browseLocation = fileList_.BrowseLocationOnEmpty();
@@ -3367,18 +3710,21 @@ private:
 					continue;
 				}
 				if (currentPathChanged || currentSourceChanged) {
-					if (!LoadCurrent(0, modeLoadPolicy)) {
+					if (!LoadCurrent(0, modeLoadPolicy, false, true)) {
 						deferredExitCode_ = 1;
 						quitRequested_ = true;
 						continue;
 					}
 				} else {
-					if (startupImageLoadFailed_ && loadedFilePath_.empty()) {
+					if (startupImageLoadFailed_ && recentImageLoadState_.LoadedPath().empty()) {
 						deferredExitCode_ = 1;
 						quitRequested_ = true;
 						continue;
 					}
 					RefreshFileListConsumers();
+					if (samePendingStartupLoad) {
+						SetPendingHeaderTitle();
+					}
 				}
 				continue;
 			}
@@ -3416,6 +3762,13 @@ private:
 		}
 		std::time_t timestamp = std::time(nullptr);
 		if (useExifDate) {
+			const jpegview_linux::SourceDescriptor source =
+				SourceDescriptorForPath(fileList_.Current());
+			const fs::path targetPath = AbsoluteNormalized(fileList_.Current());
+			if (deferredExifDateAction_.MustDeferFor(targetPath, source.Key())) {
+				(void)deferredExifDateAction_.Defer(targetPath, source.Key());
+				return;
+			}
 			const std::string& exifDate = !metadata_.acquisitionDate.empty() ? metadata_.acquisitionDate : metadata_.dateTime;
 			if (exifDate.empty() || !ParseExifTimestamp(exifDate, timestamp)) {
 				SetTitle("Cannot set date: image has no usable EXIF date");
@@ -4011,8 +4364,10 @@ private:
 
 		if (!clipboardMode_) {
 			clipboardReturnViewport_ = viewport_.Snapshot();
-			if (!loadedFilePath_.empty()) {
-				recentFiles_.RememberViewport(loadedFilePath_, *clipboardReturnViewport_);
+			if (!fileList_.Empty() &&
+				recentImageLoadState_.OwnsLoadedPath(fileList_.Current())) {
+				recentFiles_.RememberViewport(recentImageLoadState_.LoadedPath(),
+					*clipboardReturnViewport_);
 			}
 		}
 		RestoreClipboardImage();
@@ -4035,6 +4390,19 @@ private:
 		SetTitle();
 	}
 
+	void ApplyPendingViewportIntent(const jpegview_linux::ViewportIntent& intent) {
+		const SDL_Rect imageArea = ImageAreaRect();
+		const auto dimensions = ViewportContentDimensions();
+		jpegview_linux::ApplyViewportIntent(viewport_, intent,
+			dimensions.first, dimensions.second, imageArea.w, imageArea.h);
+		if (intent.type == jpegview_linux::ViewportIntentType::ZoomByFactor ||
+			intent.type == jpegview_linux::ViewportIntentType::ZoomPreset ||
+			intent.type == jpegview_linux::ViewportIntentType::Pan) {
+			viewport_.ClampToView(dimensions.first, dimensions.second,
+				imageArea.w, imageArea.h);
+		}
+	}
+
 	void RefreshFitRelativeZoomBase() {
 		const auto dimensions = ViewportContentDimensions();
 		if (dimensions.first <= 0 || dimensions.second <= 0) return;
@@ -4044,12 +4412,18 @@ private:
 	}
 
 	void FitToWindow(bool fillCrop = false, bool noEnlarge = true) {
+		if (!CanQueuePendingViewportIntent()) return;
 		interactionWorkPolicy_.NotifyActivity(
 			jpegview_linux::InteractionActivity::Zoom);
 		const SDL_Rect imageArea = ImageAreaRect();
 		const auto dimensions = ViewportContentDimensions();
-		viewport_.Fit(dimensions.first, dimensions.second, imageArea.w, imageArea.h,
-			fillCrop, noEnlarge);
+		jpegview_linux::ViewportIntent intent;
+		intent.type = jpegview_linux::ViewportIntentType::Fit;
+		intent.fillWithCrop = fillCrop;
+		intent.noEnlarge = noEnlarge;
+		jpegview_linux::ApplyViewportIntent(viewport_, intent,
+			dimensions.first, dimensions.second, imageArea.w, imageArea.h);
+		UpdatePendingViewportSnapshot(intent);
 		currentDisplayRequest_.reset();
 		PrepareImagePrefetch();
 		ShowZoomReadoutTemporarily();
@@ -4057,9 +4431,13 @@ private:
 	}
 
 	void ActualSize() {
+		if (!CanQueuePendingViewportIntent()) return;
 		interactionWorkPolicy_.NotifyActivity(
 			jpegview_linux::InteractionActivity::Zoom);
-		viewport_.ActualSize();
+		jpegview_linux::ViewportIntent intent;
+		intent.type = jpegview_linux::ViewportIntentType::ActualSize;
+		jpegview_linux::ApplyViewportIntent(viewport_, intent, 0, 0, 0, 0);
+		UpdatePendingViewportSnapshot(intent);
 		currentDisplayRequest_.reset();
 		PrepareImagePrefetch();
 		ShowZoomReadoutTemporarily();
@@ -4105,15 +4483,22 @@ private:
 			command == IDM_PAN_DOWN ? -kKeyboardPanStep : 0.0;
 		PanViewport(deltaX, deltaY);
 		playback_.NotifyInteraction(SDL_GetTicks());
-		SetTitle();
 	}
 
 	void PanViewport(double deltaX, double deltaY) {
+		if (!CanQueuePendingViewportIntent()) return;
+		InvalidateViewportPrefetch();
 		interactionWorkPolicy_.NotifyActivity(jpegview_linux::InteractionActivity::Pan);
-		viewport_.Pan(deltaX, deltaY);
-		const SDL_Rect imageArea = ImageAreaRect();
+		jpegview_linux::ViewportIntent intent;
+		intent.type = jpegview_linux::ViewportIntentType::Pan;
+		intent.deltaX = deltaX;
+		intent.deltaY = deltaY;
 		const auto dimensions = ViewportContentDimensions();
+		const SDL_Rect imageArea = ImageAreaRect();
+		jpegview_linux::ApplyViewportIntent(viewport_, intent,
+			dimensions.first, dimensions.second, imageArea.w, imageArea.h);
 		viewport_.ClampToView(dimensions.first, dimensions.second, imageArea.w, imageArea.h);
+		UpdatePendingViewportSnapshot(intent);
 		ShowZoomNavigatorTemporarily();
 	}
 
@@ -4126,6 +4511,36 @@ private:
 		zoomReadoutVisibleUntil_ = SDL_GetTicks() + 1200;
 	}
 
+	void UpdatePendingViewportSnapshot(
+		const std::optional<jpegview_linux::ViewportIntent>& intent = std::nullopt) {
+		if (clipboardMode_ || fileList_.Empty()) return;
+		const fs::path currentPath = AbsoluteNormalized(fileList_.Current());
+		if (intent.has_value()) {
+			const jpegview_linux::SourceDescriptor source =
+				SourceDescriptorForPath(fileList_.Current());
+			(void)pendingImageIntents_.QueueViewport(currentPath, source.Key(),
+				currentJpegLoadGeneration_, *intent);
+		}
+		recentImageLoadState_.UpdatePendingViewport(currentPath, viewport_.Snapshot());
+	}
+
+	bool CanQueuePendingViewportIntent() {
+		if (!currentJpegHeaderPending_) return true;
+		if (fileList_.Empty()) return false;
+		const jpegview_linux::SourceDescriptor source =
+			SourceDescriptorForPath(fileList_.Current());
+		const fs::path currentPath = AbsoluteNormalized(fileList_.Current());
+		if (pendingImageIntents_.CanQueue(currentPath, source.Key(),
+			currentJpegLoadGeneration_)) return true;
+		SetPendingImageIntentLimitTitle();
+		return false;
+	}
+
+	void SetPendingImageIntentLimitTitle() {
+		pendingImageIntentLimitReached_ = true;
+		SetPendingHeaderTitle(true);
+	}
+
 	void ZoomByStep(int direction, int mouseX, int mouseY) {
 		if (direction == 0) return;
 		const double step = viewport_.ZoomStepMultiplier();
@@ -4134,25 +4549,49 @@ private:
 	}
 
 	void ZoomToPreset(double relativeFactor) {
-		const double targetZoom = viewport_.ZoomTargetForPreset(relativeFactor);
-		const double currentZoom = viewport_.Zoom();
-		if (currentZoom <= 0.0) return;
-		ZoomAt(targetZoom / currentZoom, imageCenterX_, imageCenterY_);
+		if (!CanQueuePendingViewportIntent()) return;
+		interactionWorkPolicy_.NotifyActivity(
+			jpegview_linux::InteractionActivity::Zoom);
+		const SDL_Rect imageArea = ImageAreaRect();
+		const auto dimensions = ViewportContentDimensions();
+		jpegview_linux::ViewportIntent intent;
+		intent.type = jpegview_linux::ViewportIntentType::ZoomPreset;
+		intent.value = relativeFactor;
+		intent.mouseX = std::clamp(imageCenterX_ - imageArea.x, 0, imageArea.w);
+		intent.mouseY = std::clamp(imageCenterY_ - imageArea.y, 0, imageArea.h);
+		jpegview_linux::ApplyViewportIntent(viewport_, intent,
+			dimensions.first, dimensions.second, imageArea.w, imageArea.h);
+		if (dimensions.first > 0 && dimensions.second > 0) {
+			viewport_.ClampToView(dimensions.first, dimensions.second,
+				imageArea.w, imageArea.h);
+		}
+		UpdatePendingViewportSnapshot(intent);
+		ShowZoomNavigatorTemporarily();
+		ShowZoomReadoutTemporarily();
+		playback_.NotifyInteraction(SDL_GetTicks());
+		SetTitle();
 	}
 
 	void ZoomAt(double factor, int mouseX, int mouseY, bool pauseAtFitRelativeAnchor = false) {
+		if (!CanQueuePendingViewportIntent()) return;
 		interactionWorkPolicy_.NotifyActivity(jpegview_linux::InteractionActivity::Zoom);
 		const auto dimensions = ViewportContentDimensions();
-		if (dimensions.first == 0 || dimensions.second == 0) {
-			return;
-		}
 		const SDL_Rect imageArea = ImageAreaRect();
 		const int localMouseX = std::clamp(mouseX - imageArea.x, 0, imageArea.w);
 		const int localMouseY = std::clamp(mouseY - imageArea.y, 0, imageArea.h);
-		viewport_.ZoomAt(factor, localMouseX, localMouseY,
-			dimensions.first, dimensions.second,
-			imageArea.w, imageArea.h, pauseAtFitRelativeAnchor);
-		viewport_.ClampToView(dimensions.first, dimensions.second, imageArea.w, imageArea.h);
+		jpegview_linux::ViewportIntent intent;
+		intent.type = jpegview_linux::ViewportIntentType::ZoomByFactor;
+		intent.value = factor;
+		intent.mouseX = localMouseX;
+		intent.mouseY = localMouseY;
+		intent.pauseAtFitRelativeAnchor = pauseAtFitRelativeAnchor;
+		jpegview_linux::ApplyViewportIntent(viewport_, intent,
+			dimensions.first, dimensions.second, imageArea.w, imageArea.h);
+		if (dimensions.first > 0 && dimensions.second > 0) {
+			viewport_.ClampToView(dimensions.first, dimensions.second,
+				imageArea.w, imageArea.h);
+		}
+		UpdatePendingViewportSnapshot(intent);
 		ShowZoomNavigatorTemporarily();
 		ShowZoomReadoutTemporarily();
 		playback_.NotifyInteraction(SDL_GetTicks());
@@ -4164,7 +4603,7 @@ private:
 		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
 			transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage;
-		if (animate && MaterializeCurrentPixels()) previousImage = image_;
+		if (animate && !currentJpegHeaderPending_ && MaterializeCurrentPixels()) previousImage = image_;
 		bool needsDirectoryScan = false;
 		if (!NavigateByPageStep(1, needsDirectoryScan)) {
 			if (needsDirectoryScan) RequestFileListScan(
@@ -4177,7 +4616,18 @@ private:
 			Render();
 		}
 		const bool loaded = LoadCurrent(1);
-		if (loaded && animate) StartTransition(previousImage);
+		if (loaded && animate) {
+			if (currentJpegHeaderPending_) {
+				const jpegview_linux::SourceDescriptor source =
+					SourceDescriptorForPath(fileList_.Current());
+				if (pendingImageIntents_.RequestTransition(source.Key(),
+					currentJpegLoadGeneration_)) {
+					pendingTransitionImage_ = std::move(previousImage);
+				}
+			} else {
+				StartTransition(previousImage);
+			}
+		}
 	}
 
 	void PreviousImage(bool showPendingNavigation = false) {
@@ -4185,7 +4635,7 @@ private:
 		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
 			transitionEffect_ != IDM_EFFECT_NONE;
 		Image previousImage;
-		if (animate && MaterializeCurrentPixels()) previousImage = image_;
+		if (animate && !currentJpegHeaderPending_ && MaterializeCurrentPixels()) previousImage = image_;
 		bool needsDirectoryScan = false;
 		if (!NavigateByPageStep(-1, needsDirectoryScan)) return;
 		SetTitle();
@@ -4193,7 +4643,18 @@ private:
 			Render();
 		}
 		const bool loaded = LoadCurrent(-1);
-		if (loaded && animate) StartTransition(previousImage);
+		if (loaded && animate) {
+			if (currentJpegHeaderPending_) {
+				const jpegview_linux::SourceDescriptor source =
+					SourceDescriptorForPath(fileList_.Current());
+				if (pendingImageIntents_.RequestTransition(source.Key(),
+					currentJpegLoadGeneration_)) {
+					pendingTransitionImage_ = std::move(previousImage);
+				}
+			} else {
+				StartTransition(previousImage);
+			}
+		}
 	}
 
 	void NavigateToSiblingFolder(int direction) {
@@ -4315,15 +4776,18 @@ private:
 		const bool keyIsHeld = keyStates != nullptr && scancode < keyCount && keyStates[scancode] != 0;
 		if (keyIsHeld) interactionWorkPolicy_.NotifyActivity(
 			jpegview_linux::InteractionActivity::HeldNavigation);
-		if (fileList_.Empty() || (!clipboardMode_ &&
-			loadedFilePath_ != AbsoluteNormalized(fileList_.Current())) ||
-			doublePagePresentation_.SuppressSinglePage(fileList_.CurrentIndex())) return;
-		if (activeDoublePageRender_.has_value() &&
-			(!doublePagePresentation_.SpreadReady(fileList_.CurrentIndex()) ||
-			!doublePagePresentation_.SpreadPresented(fileList_.CurrentIndex()) ||
-			ActiveDoublePageAnchorTexture() == nullptr ||
-			FindDisplayTexture(doublePagePresentation_.PartnerTextureKey()) == nullptr)) return;
-		const int direction = heldNavigation_.AfterImageShown(keyIsHeld);
+		bool currentImageReady = !fileList_.Empty() &&
+			(clipboardMode_ || recentImageLoadState_.LoadedPath() ==
+				AbsoluteNormalized(fileList_.Current())) &&
+			!currentJpegHeaderPending_ &&
+			!doublePagePresentation_.SuppressSinglePage(fileList_.CurrentIndex());
+		if (currentImageReady && activeDoublePageRender_.has_value()) {
+			currentImageReady = doublePagePresentation_.SpreadReady(fileList_.CurrentIndex()) &&
+				doublePagePresentation_.SpreadPresented(fileList_.CurrentIndex()) &&
+				ActiveDoublePageAnchorTexture() != nullptr &&
+				FindDisplayTexture(doublePagePresentation_.PartnerTextureKey()) != nullptr;
+		}
+		const int direction = heldNavigation_.AfterImageShown(keyIsHeld, currentImageReady);
 		if (direction == 0 || fileList_.Empty()) return;
 
 		const std::size_t previousIndex = fileList_.CurrentIndex();
@@ -4372,7 +4836,7 @@ private:
 
 	std::vector<std::string> ImageInfoLines() const {
 		std::vector<std::string> lines;
-		if (fileList_.Empty()) return lines;
+		if (fileList_.Empty() || currentJpegHeaderPending_) return lines;
 
 		std::ostringstream title;
 		title << '[' << CurrentImagePositionText() << "] "
@@ -4436,6 +4900,28 @@ private:
 		return lines;
 	}
 
+	const std::vector<std::string>& CachedImageInfoLines() {
+		if (fileList_.Empty() || currentJpegHeaderPending_) {
+			return imageInfoLineCache_.GetOrBuild("empty", [] {
+				return std::vector<std::string>();
+			});
+		}
+		const jpegview_linux::SourceDescriptor source =
+			SourceDescriptorForPath(fileList_.Current());
+		std::ostringstream key;
+		key << fileList_.MutationRevision() << ':' << fileList_.DescriptorRevision() << '|'
+			<< source.Key().logicalPath.size() << ':' << source.Key().logicalPath << '|'
+			<< fileList_.CurrentIndex() << ':' << fileList_.Size() << '|'
+			<< CurrentImagePositionText().size() << ':' << CurrentImagePositionText() << '|'
+			<< image_.originalWidth << ':' << image_.originalHeight << '|'
+			<< image_.width << ':' << image_.height << '|'
+			<< playback_.FrameIndex() << ':' << playback_.AnimationPlaying() << '|'
+			<< animationFrames_.size() << ':' << imageInfoMetadataRevision_;
+		return imageInfoLineCache_.GetOrBuild(key.str(), [this] {
+			return ImageInfoLines();
+		});
+	}
+
 	std::string CurrentImagePositionText() const {
 		std::optional<std::size_t> spreadPartnerIndex;
 		if (activeDoublePageRender_.has_value()) {
@@ -4451,7 +4937,7 @@ private:
 	}
 
 	jpegview_linux::InformationOverlayPaintPlan BuildImageInfoPaintPlan() {
-		std::vector<std::string> lines = ImageInfoLines();
+		std::vector<std::string> lines = CachedImageInfoLines();
 		if (lines.empty()) return {};
 		int contentWidth = 0;
 		for (std::string& line : lines) {
@@ -5169,8 +5655,9 @@ private:
 			doublePageModeEnabled_ = !doublePageModeEnabled_;
 			doublePageModeDefault_ = doublePageModeEnabled_;
 			ClearTransition();
-			if (!clipboardMode_ && !loadedFilePath_.empty()) {
-				recentFiles_.RememberDoublePageMode(loadedFilePath_,
+			if (!clipboardMode_ && !fileList_.Empty() &&
+				recentImageLoadState_.OwnsLoadedPath(fileList_.Current())) {
+				recentFiles_.RememberDoublePageMode(recentImageLoadState_.LoadedPath(),
 					{doublePageModeEnabled_, mangaReadingOrderEnabled_});
 			}
 			currentDisplayRequest_.reset();
@@ -5183,8 +5670,9 @@ private:
 			mangaReadingOrderEnabled_ = !mangaReadingOrderEnabled_;
 			mangaReadingOrderDefault_ = mangaReadingOrderEnabled_;
 			ClearTransition();
-			if (!clipboardMode_ && !loadedFilePath_.empty()) {
-				recentFiles_.RememberDoublePageMode(loadedFilePath_,
+			if (!clipboardMode_ && !fileList_.Empty() &&
+				recentImageLoadState_.OwnsLoadedPath(fileList_.Current())) {
+				recentFiles_.RememberDoublePageMode(recentImageLoadState_.LoadedPath(),
 					{doublePageModeEnabled_, mangaReadingOrderEnabled_});
 			}
 			currentDisplayRequest_.reset();
@@ -8790,7 +9278,7 @@ private:
 					display->second.height, display->second.hasTransparency};
 			}
 		}
-		if (loadedFilePath_.lexically_normal() != normalizedCurrent) return {};
+		if (recentImageLoadState_.LoadedPath().lexically_normal() != normalizedCurrent) return {};
 		if (displayTexture_ != nullptr) {
 			return {displayTexture_, displayTextureWidth_, displayTextureHeight_,
 				displayImage_.hasTransparency};
@@ -9373,7 +9861,6 @@ private:
 				UpdateNavigationPanelVisibility(event.motion.x, event.motion.y);
 				if (dragging_) {
 					PanViewport(event.motion.xrel, event.motion.yrel);
-					SetTitle();
 				}
 				lastMouseX_ = event.motion.x;
 				lastMouseY_ = event.motion.y;
@@ -9445,7 +9932,7 @@ private:
 		imageCenterY_ = imageArea.y + imageArea.h / 2;
 		const std::size_t currentIndex = fileList_.Empty() ? 0 : fileList_.CurrentIndex();
 		const bool selectedImageLoaded = !fileList_.Empty() && (clipboardMode_ ||
-			loadedFilePath_ == AbsoluteNormalized(fileList_.Current()));
+			recentImageLoadState_.LoadedPath() == AbsoluteNormalized(fileList_.Current()));
 		const bool spreadModelReady = !fileList_.Empty() &&
 			doublePagePresentation_.SpreadReady(currentIndex);
 		const SDL_Rect destination = CurrentPageScreenRect(imageArea);
@@ -9594,11 +10081,15 @@ private:
 
 	jpegview_linux::FileList fileList_;
 	jpegview_linux::FileListScanWorker fileListScanWorker_;
+	jpegview_linux::DisplayPrefetchPlannerWorker displayPrefetchPlannerWorker_;
+	jpegview_linux::ExifMetadataWorker exifMetadataWorker_;
 	jpegview_linux::InteractionWorkPolicy interactionWorkPolicy_;
 	bool speculativeWorkSuspended_ = false;
 	bool lastForegroundPending_ = false;
 	bool prefetchRefreshNeeded_ = false;
 	int pendingPrefetchDirection_ = 0;
+	std::uint64_t prefetchViewportRevision_ = 0;
+	std::uint64_t activeDisplayPrefetchGeneration_ = 0;
 	std::uint64_t fileListScanGeneration_ = 0;
 	std::optional<jpegview_linux::FileList::ScanOperation> pendingFileListScanOperation_;
 	std::optional<jpegview_linux::FileList::ScanRequest> pendingDroppedScanRequest_;
@@ -9614,8 +10105,8 @@ private:
 	int deferredExitCode_ = 0;
 	std::vector<std::string> startupInputs_;
 	jpegview_linux::RecentFiles recentFiles_;
+	jpegview_linux::RecentImageLoadState recentImageLoadState_;
 	fs::path recentFilesPath_;
-	fs::path loadedFilePath_;
 	std::optional<jpegview_linux::ViewportSnapshot> clipboardReturnViewport_;
 	bool recentFilesLoaded_ = false;
 	std::shared_ptr<jpegview_linux::SharedCacheBudget> cacheBudget_ =
@@ -9628,6 +10119,20 @@ private:
 	jpegview_linux::DecodedImageCache imageCache_{
 		std::numeric_limits<std::size_t>::max(), {}, cacheBudget_, 2};
 	std::shared_ptr<DisplayPrefetchBatch> displayPrefetchBatch_;
+	std::shared_ptr<CurrentJpegDimensionsMailbox> currentJpegDimensionsMailbox_ =
+		std::make_shared<CurrentJpegDimensionsMailbox>();
+	std::optional<PendingCurrentJpegDimensions> pendingCurrentJpegDimensions_;
+	jpegview_linux::PendingImageIntents pendingImageIntents_;
+	Image pendingTransitionImage_;
+	std::unordered_set<jpegview_linux::SourceKey,
+		jpegview_linux::SourceKeyHash> failedJpegDimensionKeys_;
+	std::uint64_t currentJpegLoadGeneration_ = 0;
+	bool currentJpegHeaderPending_ = false;
+	bool pendingImageIntentLimitReached_ = false;
+	std::uint64_t exifMetadataRequestGeneration_ = 0;
+	jpegview_linux::SourceKey exifMetadataSource_;
+	jpegview_linux::DeferredExifDateAction deferredExifDateAction_;
+	std::uint64_t imageInfoMetadataRevision_ = 0;
 	std::optional<ActiveSpreadSourceRequest> activeSpreadSourceRequest_;
 	jpegview_linux::DoublePagePresentationModel doublePagePresentation_;
 	bool deferredCurrentDisplayPreparation_ = false;
@@ -9635,6 +10140,9 @@ private:
 	double initialSlideshowSeconds_ = 0.0;
 	jpegview_linux::PlaybackScheduler playback_;
 	std::vector<Image> animationFrames_;
+	jpegview_linux::WindowTitleFormatCache windowTitleFormatCache_;
+	jpegview_linux::AppliedWindowTitle appliedWindowTitle_;
+	jpegview_linux::ImageInfoLineCache imageInfoLineCache_;
 	int transitionEffect_ = IDM_EFFECT_NONE;
 	Uint32 transitionDurationMs_ = 500;
 	Uint32 transitionStartTick_ = 0;

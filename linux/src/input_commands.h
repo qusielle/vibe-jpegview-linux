@@ -25,13 +25,13 @@ int SpacebarNavigationDirection(const SDL_KeyboardEvent& event, bool enabled);
 
 // Converts key-downs into one immediate navigation step. Continuous movement
 // starts only after SDL reports the keyboard's initial repeat threshold, then
-// requests one step after each displayed image while the key remains held.
-// Repeat notifications themselves never queue image changes.
+// requests one step after each ready image while the key remains held. Repeat
+// notifications themselves never queue image changes.
 class HeldNavigationController {
 public:
 	int KeyDown(int direction, int scancode, bool repeated,
 		bool shiftModifierAllowed = false);
-	int AfterImageShown(bool keyIsHeld);
+	int AfterImageShown(bool keyIsHeld, bool imageReady);
 	int Scancode() const { return scancode_; }
 	bool ShiftModifierAllowed() const { return shiftModifierAllowed_; }
 	void Reset();

@@ -109,12 +109,12 @@ int HeldNavigationController::KeyDown(int direction, int scancode, bool repeated
 	return direction_;
 }
 
-int HeldNavigationController::AfterImageShown(bool keyIsHeld) {
+int HeldNavigationController::AfterImageShown(bool keyIsHeld, bool imageReady) {
 	if (!keyIsHeld) {
 		Reset();
 		return 0;
 	}
-	return repeatObserved_ ? direction_ : 0;
+	return imageReady && repeatObserved_ ? direction_ : 0;
 }
 
 void HeldNavigationController::Reset() {

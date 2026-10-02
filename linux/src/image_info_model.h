@@ -3,8 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace jpegview_linux {
 
@@ -52,5 +54,46 @@ std::string FormatImageDimensionsAndSize(int width, int height,
 	std::string_view formattedFileSize);
 
 std::string FormatModificationDateLine(std::string_view date);
+
+// Avoids repeating title-template expansion while its source, document, and
+// display-position revisions are unchanged.
+class WindowTitleFormatCache {
+public:
+	const std::string& GetOrBuild(const std::string& key,
+		const std::function<std::string()>& builder);
+	void Clear();
+
+private:
+	std::string key_;
+	std::string value_;
+	bool valid_ = false;
+};
+
+// Avoids rebuilding formatted EXIF and image-information text on pan/paint
+// events. Geometry clipping remains the renderer's responsibility.
+class ImageInfoLineCache {
+public:
+	const std::vector<std::string>& GetOrBuild(const std::string& key,
+		const std::function<std::vector<std::string>()>& builder);
+	void Clear();
+
+private:
+	std::string key_;
+	std::vector<std::string> lines_;
+	bool valid_ = false;
+};
+
+// Tracks the last string sent to SDL so repeated input events do not call
+// SDL_SetWindowTitle with identical text.
+class AppliedWindowTitle {
+public:
+	bool Update(std::string title);
+	const std::string& Current() const { return title_; }
+	void Clear();
+
+private:
+	std::string title_;
+	bool valid_ = false;
+};
 
 } // namespace jpegview_linux
