@@ -127,6 +127,13 @@ should normally be added to one of these focused modules and covered by `tests/t
   speculation only; foreground and active-spread work continues draining, including metadata-only
   partner requests. Active-spread queued and active requests count as foreground source demand so
   visible thumbnails and list scans yield until the partner is ready.
+  Speculative display preparation reserves completion capacity before processing: at most two
+  in-flight or unconsumed speculative frames and 64 MiB of predicted pixels. Active-image and
+  active-spread work bypass those speculative limits. Oversized speculative requests are skipped at
+  admission, and workers wait when a valid speculative result cannot fit; cached speculative
+  completions wait as metadata until a slot is free. Consuming, promoting, canceling, or rejecting a
+  result releases its reservation. Thus a paused renderer cannot let completed speculative pixels
+  grow with the neighbor window.
   Borrowed-image identity bookkeeping is enabled only when performance
   tracing is active. Retirement deduplication uses the pending queue and active worker owner; the
   worker keeps each active frame alive until all external pixel handles are released, then performs
@@ -245,7 +252,13 @@ should normally be added to one of these focused modules and covered by `tests/t
   source-area reduction, and low-priority thumbnail preparation from either completed neighbor
   display frames or file-backed requests. One worker performs file reads, JPEG dimension lookup,
   reduced-DCT JPEG or ordinary image decode, and resampling; its prepared-frame reuse queue remains
-  bounded to two queued requests. When a prepared-frame request displaces farther queued file work,
+  bounded to two queued requests. Completion publication reserves capacity before preparation and
+  is capped at two in-flight or unconsumed results and 16 MiB of predicted pixels; invalid or
+  oversized geometry is rejected at request admission. The worker waits for renderer consumption or
+  cancellation to release a reservation, while canceled and uploaded thumbnail buffers move to a
+  worker-owned retirement queue. Shutdown drains that queue without event-loop activity, or leaves
+  its shared state running while an external pixel handle remains. When a prepared-frame request
+  displaces farther queued file work,
   the admission returns that file request's identity to the scheduler for retry. `TickThumbnailPreload`
   only admits requests, consumes one completion
   at a time, validates the catalog revision, file index, source key, and target geometry, and uploads
@@ -568,10 +581,12 @@ Display pixels may be prepared on workers, but SDL texture upload and destructio
 renderer thread because SDL renderer objects are not thread-safe. Decoded pixels, prepared frames, and retained SDL textures
 reserve from one configured cache budget. Prepared
 frames are uploaded at most once per event-loop iteration, after the current frame is presented;
-unfinished closer neighbors block farther uploads. Expensive CPU-buffer destruction is handed back to
-the retirement worker, which keeps its active strong owner until renderer-thread upload handles have
+closer neighbors block farther uploads while they can start. Expensive CPU-buffer destruction is
+handed back to the retirement worker, which keeps its active strong owner until renderer-thread upload handles have
 released the pixels. Its shared retirement state can outlive the cache while a valid pixel handle does,
 so cache destruction returns and the worker performs final destruction after that handle releases.
+Retirement workers block while their queues are empty and poll only while queued buffers still have
+external owners; the thumbnail retirement thread starts on its first enqueue.
 When the thumbnail panel is visible, completed display frames also feed one bounded,
 very-low-priority thumbnail-resampling queue before their CPU pixels are retired. File-backed
 thumbnail requests use that same worker when no display frame is available, so independent thumbnail

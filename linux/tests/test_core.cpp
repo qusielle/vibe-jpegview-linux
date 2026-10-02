@@ -59,6 +59,7 @@
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -71,6 +72,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -5056,6 +5058,21 @@ std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height) {
 	return image;
 }
 
+std::shared_ptr<const jpegview_linux::PreparedDisplayImage>
+DisplayCachePreparedTestImage(const jpegview_linux::DisplayImageRequest& request) {
+	auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+	image->filename = request.filename;
+	image->source = request.source;
+	image->cacheKey = request.cacheKey;
+	image->key = request.key;
+	image->width = request.targetWidth;
+	image->height = request.targetHeight;
+	const std::size_t bytes = static_cast<std::size_t>(image->width) *
+		static_cast<std::size_t>(image->height) * 4;
+	image->bgra.assign(bytes, 255);
+	return image;
+}
+
 void TestDisplayImageCacheForegroundActiveClassification() {
 	TemporaryDirectory temporary;
 	const fs::path foregroundFile = temporary.path() / "fresh-foreground.jpg";
@@ -5575,7 +5592,7 @@ void TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker() {
 	const auto retirementDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 	while (std::chrono::steady_clock::now() < retirementDeadline) {
 		const auto stats = uploadRace.GetDiagnostics();
-		if (stats.activeRetiredBytes == 16 && stats.retiredImages == 1) {
+		if (stats.retiredBytes == 16 && stats.retiredImages == 1) {
 			queueDrained = true;
 			break;
 		}
@@ -5586,9 +5603,8 @@ void TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker() {
 	uploadRace.Retire(pixels);
 	uploadRace.Retire(pixels);
 	const auto duplicateStats = uploadRace.GetDiagnostics();
-	Expect(duplicateStats.retiredImages == 1 && duplicateStats.retiredBytes == 16 &&
-		duplicateStats.activeRetiredBytes == 16,
-		"retiring again after the queue drained duplicated its active owner or byte count");
+	Expect(duplicateStats.retiredImages == 1 && duplicateStats.retiredBytes == 16,
+		"retiring again while ownership is shared duplicated its queued owner or byte count");
 	pixels.reset();
 	Expect(wasDestroyed(uploadRaceProbe),
 		"the retired display pixels were not destroyed before the bounded deadline");
@@ -5658,6 +5674,181 @@ void TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker() {
 		Expect(outlivingProbe->thread != eventThread && outlivingProbe->thread != teardownThread,
 			"outliving display pixels were not destroyed by the retirement worker");
 	}
+}
+
+void TestDisplayRetirementDoesNotDeduplicateReusedAddress() {
+	using Image = jpegview_linux::PreparedDisplayImage;
+	using ImagePtr = jpegview_linux::DisplayImageCache::ImagePtr;
+	alignas(std::max_align_t) unsigned char storage[1024];
+	static_assert(sizeof(Image) <= sizeof(storage), "display retirement fixture storage is too small");
+	static_assert(alignof(Image) <= alignof(std::max_align_t),
+		"display retirement fixture needs stronger alignment");
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool firstLifetimeEnded = false;
+	bool releaseFirstDeleter = false;
+	bool secondDestroyed = false;
+	std::thread::id secondDestroyedOn;
+	const std::thread::id caller = std::this_thread::get_id();
+	jpegview_linux::DisplayImageCache cache(0, 1);
+	ScopedConditionRelease releaseFirstOnExit(mutex, changed, releaseFirstDeleter);
+
+	Image* firstRaw = new (storage) Image();
+	const void* reusedAddress = firstRaw;
+	ImagePtr first(firstRaw, [&](const Image* retired) {
+		const_cast<Image*>(retired)->~Image();
+		std::unique_lock<std::mutex> lock(mutex);
+		firstLifetimeEnded = true;
+		changed.notify_all();
+		changed.wait_for(lock, std::chrono::seconds(3), [&] {
+			return releaseFirstDeleter;
+		});
+	});
+	cache.Retire(first);
+	first.reset();
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return firstLifetimeEnded;
+		}), "display retirement did not reach the address-reuse barrier");
+	}
+
+	Image* secondRaw = new (storage) Image();
+	Expect(secondRaw == reusedAddress,
+		"display retirement fixture did not reuse the first image's address");
+	ImagePtr second(secondRaw, [&](const Image* retired) {
+		const_cast<Image*>(retired)->~Image();
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			secondDestroyedOn = std::this_thread::get_id();
+			secondDestroyed = true;
+		}
+		changed.notify_all();
+	});
+	cache.Retire(second);
+	second.reset();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseFirstDeleter = true;
+	}
+	changed.notify_all();
+	bool secondFinished = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		secondFinished = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return secondDestroyed;
+		});
+	}
+	Expect(secondFinished && secondDestroyedOn != caller,
+		"a new display owner at a reused address was discarded or destroyed on the caller");
+}
+
+void TestDecodedRetirementDoesNotDeduplicateReusedAddress() {
+	using DisplayImage = jpegview_linux::PreparedDisplayImage;
+	using Decoded = jpegview_linux::DecodedImage;
+	using DisplayImagePtr = jpegview_linux::DisplayImageCache::ImagePtr;
+	alignas(std::max_align_t) unsigned char storage[1024];
+	static_assert(sizeof(DisplayImage) <= sizeof(storage) && sizeof(Decoded) <= sizeof(storage),
+		"decoded retirement fixture storage is too small");
+	static_assert(alignof(DisplayImage) <= alignof(std::max_align_t) &&
+		alignof(Decoded) <= alignof(std::max_align_t),
+		"decoded retirement fixture needs stronger alignment");
+	TemporaryDirectory temporary;
+	const fs::path blockerFile = temporary.path() / "retirement-address-blocker.png";
+	const fs::path queuedFile = temporary.path() / "retirement-address-decoded.png";
+	WriteText(blockerFile, "block retirement worker's sibling");
+	WriteText(queuedFile, "queue decoded retirement");
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool processorStarted = false;
+	bool releaseProcessor = false;
+	bool firstLifetimeEnded = false;
+	bool releaseFirstDeleter = false;
+	bool decodedDestroyed = false;
+	std::thread::id decodedDestroyedOn;
+	const std::thread::id caller = std::this_thread::get_id();
+	jpegview_linux::DisplayImageCache cache(0, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			if (request.filename == blockerFile) {
+				std::unique_lock<std::mutex> lock(mutex);
+				processorStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseProcessor; });
+			}
+			return DisplayCachePreparedTestImage(request);
+		});
+	ScopedConditionRelease releaseProcessorOnExit(mutex, changed, releaseProcessor);
+	ScopedConditionRelease releaseFirstOnExit(mutex, changed, releaseFirstDeleter);
+	const auto blockerRequest = jpegview_linux::MakeDisplayImageRequest(
+		blockerFile, DisplayCacheTestImage(2, 2), 0, 2, 2, false, 1);
+	cache.RequestBackground(blockerRequest);
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return processorStarted;
+		}), "decoded retirement fixture did not block its preparation worker");
+	}
+
+	DisplayImage* firstRaw = new (storage) DisplayImage();
+	const void* reusedAddress = firstRaw;
+	DisplayImagePtr first(firstRaw, [&](const DisplayImage* retired) {
+		const_cast<DisplayImage*>(retired)->~DisplayImage();
+		std::unique_lock<std::mutex> lock(mutex);
+		firstLifetimeEnded = true;
+		changed.notify_all();
+		changed.wait_for(lock, std::chrono::seconds(3), [&] {
+			return releaseFirstDeleter;
+		});
+	});
+	cache.Retire(first);
+	first.reset();
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return firstLifetimeEnded;
+		}), "display retirement did not reach the decoded address-reuse barrier");
+	}
+
+	Decoded* decodedRaw = new (storage) Decoded();
+	Expect(decodedRaw == reusedAddress,
+		"decoded retirement fixture did not reuse the display image's address");
+	jpegview_linux::DecodedFrame frame;
+	frame.width = frame.height = 2;
+	frame.bgra.assign(16, 255);
+	decodedRaw->frames.push_back(std::move(frame));
+	std::shared_ptr<Decoded> decoded(decodedRaw, [&](Decoded* retired) {
+		retired->~Decoded();
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			decodedDestroyedOn = std::this_thread::get_id();
+			decodedDestroyed = true;
+		}
+		changed.notify_all();
+	});
+	auto queuedRequest = jpegview_linux::MakeDisplayImageRequest(
+		queuedFile, decoded, 0, 2, 2, false, 2);
+	Expect(queuedRequest.Valid(), "decoded retirement fixture built an invalid request");
+	cache.RequestBackground(queuedRequest);
+	Expect(cache.GetDiagnostics().backgroundQueued == 1,
+		"decoded retirement request did not remain queued behind blocked preparation");
+	cache.CancelBackground(queuedRequest.key);
+	queuedRequest.decoded.reset();
+	decoded.reset();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseFirstDeleter = true;
+		releaseProcessor = true;
+	}
+	changed.notify_all();
+	bool decodedFinished = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		decodedFinished = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return decodedDestroyed;
+		});
+	}
+	Expect(decodedFinished && decodedDestroyedOn != caller,
+		"a decoded owner at a reused display address was discarded or destroyed on the caller");
 }
 
 void TestDisplayImageCacheBackgroundPreparation() {
@@ -5730,17 +5921,29 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		releasePairWorkers = true;
 	}
 	pairChanged.notify_all();
-	Expect(pairedWorkersStartedTogether &&
-		pairedPreparation.WaitUntilIdle(std::chrono::seconds(2)),
+	Expect(pairedWorkersStartedTogether,
 		"paired display requests were not made available to workers together with later neighbors");
+	const bool thirdRemainedBackpressured = !pairedPreparation.WaitUntilIdle(
+		std::chrono::milliseconds(100));
+	const auto pairedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (std::chrono::steady_clock::now() < pairedDeadline &&
+		pairedPreparation.GetDiagnostics().preparedImages != 2) {
+		std::this_thread::yield();
+	}
 	const jpegview_linux::DisplayImageCacheDiagnostics preparedStats =
 		pairedPreparation.GetDiagnostics();
-	Expect(preparedStats.preparedImages == 3 && preparedStats.preparedBytes == 48 &&
+	Expect(thirdRemainedBackpressured && preparedStats.preparedImages == 2 &&
+		preparedStats.preparedBytes == 32 &&
 		pairedPreparation.HasPendingOrCached(scaled.key),
-		"display cache diagnostics did not count its completed prepared frames");
-	const auto pairedFrames = pairedPreparation.TakeCompleted(3);
+		"display completion backpressure did not hold at two paired frames");
+	auto pairedFrames = pairedPreparation.TakeCompleted(2);
+	Expect(pairedFrames.size() == 2 &&
+		pairedPreparation.WaitUntilIdle(std::chrono::seconds(2)),
+		"consuming paired completions did not admit the next neighbor");
+	const auto thirdFrame = pairedPreparation.TakeCompleted(1);
+	pairedFrames.insert(pairedFrames.end(), thirdFrame.begin(), thirdFrame.end());
 	Expect(pairedFrames.size() == 3 &&
-		pairedPreparation.GetDiagnostics().borrowedBytes == preparedStats.preparedBytes,
+		pairedPreparation.GetDiagnostics().borrowedBytes == preparedStats.preparedBytes + 16,
 		"display cache diagnostics did not account for frames borrowed for upload");
 	for (const auto& frame : pairedFrames) pairedPreparation.Retire(frame);
 	Expect(pairedPreparation.GetDiagnostics().borrowedBytes == 0,
@@ -6075,6 +6278,15 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		jpegview_linux::MakeDisplayImageRequest(thirdFile, decoded, 0, 33, 1, false, 2),
 	};
 	ordered.Prefetch(requests);
+	const auto orderedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (std::chrono::steady_clock::now() < orderedDeadline &&
+		ordered.GetDiagnostics().speculativePreparedImages != 2) {
+		std::this_thread::yield();
+	}
+	std::vector<jpegview_linux::DisplayImageCache::ImagePtr> orderedFrames =
+		ordered.TakeCompleted(2);
+	Expect(orderedFrames.size() == 2,
+		"nearest display prefetch did not fill its bounded completion queue");
 	Expect(ordered.WaitUntilIdle(std::chrono::seconds(2)),
 		"display image prefetch did not finish");
 	{
@@ -6085,7 +6297,9 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	Expect(usedBackgroundThread, "display image processing ran on the calling thread");
 	Expect(ordered.CachedImages() == 2 && ordered.CachedBytes() == 32,
 		"display image cache did not enforce its pixel-memory budget");
-	ordered.TakeCompleted(10);
+	const auto finalOrderedFrames = ordered.TakeCompleted(10);
+	orderedFrames.insert(orderedFrames.end(), finalOrderedFrames.begin(), finalOrderedFrames.end());
+	for (const auto& frame : orderedFrames) ordered.Retire(frame);
 
 	std::mutex backgroundMutex;
 	std::condition_variable backgroundChanged;
@@ -6257,6 +6471,878 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	Expect(priorityCompletions.size() == 2 && priorityCompletions[0]->key == closest.key &&
 		priorityCompletions[1]->key == farther.key,
 		"display upload queue did not apply the latest priority to in-flight neighbors");
+}
+
+void TestDisplayCompletionQueueBackpressure() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "completion-backpressure.png";
+	WriteText(filename, "completion queue source");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::atomic<std::size_t> processorCalls{0};
+	jpegview_linux::DisplayImageCache cache(0, 4,
+		[&processorCalls](const jpegview_linux::DisplayImageRequest& request) {
+			++processorCalls;
+			return DisplayCachePreparedTestImage(request);
+		});
+	std::vector<jpegview_linux::DisplayImageRequest> requests;
+	for (std::size_t priority = 1; priority <= 6; ++priority) {
+		requests.push_back(jpegview_linux::MakeDisplayImageRequest(filename,
+			decoded, 0, static_cast<int>(priority), 1, false, priority));
+	}
+	cache.RequestBackgroundBatch(requests);
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (processorCalls.load() < 2 && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::yield();
+	}
+	const bool queueStayedBackpressured = !cache.WaitUntilIdle(
+		std::chrono::milliseconds(100));
+	const jpegview_linux::DisplayImageCacheDiagnostics diagnostics = cache.GetDiagnostics();
+	Expect(processorCalls.load() == 2 && diagnostics.preparedImages == 2 &&
+		diagnostics.speculativePreparedImages == 2 &&
+		diagnostics.speculativeReservedImages == 2 && queueStayedBackpressured,
+		"display workers prepared speculative frames beyond the two-frame completion allowance");
+	Expect(diagnostics.preparedBytes == 12 && diagnostics.speculativeReservedBytes == 12 &&
+		diagnostics.preparedBytes <= jpegview_linux::DisplayImageCache::
+			kMaximumSpeculativeCompletionBytes,
+		"display speculative completion accounting did not reflect two requested frames");
+}
+
+void TestDisplayQueuedPromotionWakesBackpressuredWorker() {
+	TemporaryDirectory temporary;
+	const fs::path firstFile = temporary.path() / "promotion-first.png";
+	const fs::path secondFile = temporary.path() / "promotion-second.png";
+	const fs::path promotedFile = temporary.path() / "promotion-queued.png";
+	WriteText(firstFile, "first completion");
+	WriteText(secondFile, "second completion");
+	WriteText(promotedFile, "queued promotion");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::mutex startedMutex;
+	std::condition_variable startedChanged;
+	bool promotedStarted = false;
+	std::atomic<std::size_t> processorCalls{0};
+	jpegview_linux::DisplayImageCache cache(0, 2,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			{
+				std::lock_guard<std::mutex> lock(startedMutex);
+				++processorCalls;
+				if (request.filename == promotedFile) promotedStarted = true;
+			}
+			startedChanged.notify_all();
+			return DisplayCachePreparedTestImage(request);
+		});
+	const auto first = jpegview_linux::MakeDisplayImageRequest(firstFile,
+		decoded, 0, 1, 1, false, 1);
+	const auto second = jpegview_linux::MakeDisplayImageRequest(secondFile,
+		decoded, 0, 1, 1, false, 2);
+	const auto queued = jpegview_linux::MakeDisplayImageRequest(promotedFile,
+		decoded, 0, 1, 1, false, 3);
+	cache.RequestBackgroundBatch({first, second, queued});
+	const auto fullDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	bool fullAndQueued = false;
+	while (std::chrono::steady_clock::now() < fullDeadline) {
+		const auto state = cache.GetDiagnostics();
+		if (state.speculativePreparedImages == 2 &&
+			state.speculativeReservedImages == 2 && state.backgroundQueued == 1 &&
+			state.backgroundActive == 0) {
+			fullAndQueued = true;
+			break;
+		}
+		std::this_thread::yield();
+	}
+	Expect(fullAndQueued,
+		"display promotion fixture did not fill speculative completions with queued work");
+
+	auto activeSpread = queued;
+	activeSpread.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	cache.RequestBackground(activeSpread);
+	bool startedWithoutRendererPolling = false;
+	{
+		std::unique_lock<std::mutex> lock(startedMutex);
+		startedWithoutRendererPolling = startedChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return promotedStarted; });
+	}
+	const bool preparedWithoutRendererPolling = cache.WaitUntilIdle(
+		std::chrono::seconds(2));
+	const std::set<jpegview_linux::PerfWorkClass> activeSpreadClass{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread};
+	const auto promotedCompletion = cache.TakeCompleted(1, activeSpreadClass);
+	Expect(startedWithoutRendererPolling && preparedWithoutRendererPolling &&
+		processorCalls.load() == 3 && promotedCompletion.size() == 1 &&
+		promotedCompletion.front()->key == queued.key,
+		"queued ActiveImageSpread promotion did not wake a worker without renderer polling");
+}
+
+void TestDisplayCompletedPromotionReleasesSpeculativeCapacity() {
+	TemporaryDirectory temporary;
+	const fs::path firstFile = temporary.path() / "completed-promotion-first.png";
+	const fs::path secondFile = temporary.path() / "completed-promotion-second.png";
+	const fs::path queuedFile = temporary.path() / "completed-promotion-queued.png";
+	WriteText(firstFile, "first completion");
+	WriteText(secondFile, "second completion");
+	WriteText(queuedFile, "queued request");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::mutex startedMutex;
+	std::condition_variable startedChanged;
+	bool queuedStarted = false;
+	std::atomic<std::size_t> processorCalls{0};
+	jpegview_linux::DisplayImageCache cache(0, 2,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			{
+				std::lock_guard<std::mutex> lock(startedMutex);
+				++processorCalls;
+				if (request.filename == queuedFile) queuedStarted = true;
+			}
+			startedChanged.notify_all();
+			return DisplayCachePreparedTestImage(request);
+		});
+	const auto first = jpegview_linux::MakeDisplayImageRequest(firstFile,
+		decoded, 0, 1, 1, false, 1);
+	const auto second = jpegview_linux::MakeDisplayImageRequest(secondFile,
+		decoded, 0, 1, 1, false, 2);
+	const auto queued = jpegview_linux::MakeDisplayImageRequest(queuedFile,
+		decoded, 0, 1, 1, false, 3);
+	cache.RequestBackgroundBatch({first, second, queued});
+	const auto fullDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	bool fullAndQueued = false;
+	while (std::chrono::steady_clock::now() < fullDeadline) {
+		const auto state = cache.GetDiagnostics();
+		if (state.speculativePreparedImages == 2 &&
+			state.speculativeReservedImages == 2 && state.backgroundQueued == 1 &&
+			state.backgroundActive == 0) {
+			fullAndQueued = true;
+			break;
+		}
+		std::this_thread::yield();
+	}
+	Expect(fullAndQueued,
+		"completed-promotion fixture did not fill speculative completions with queued work");
+
+	cache.Request(first);
+	bool startedWithoutRendererPolling = false;
+	{
+		std::unique_lock<std::mutex> lock(startedMutex);
+		startedWithoutRendererPolling = startedChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return queuedStarted; });
+	}
+	const bool preparedWithoutRendererPolling = cache.WaitUntilIdle(
+		std::chrono::seconds(2));
+	const std::set<jpegview_linux::PerfWorkClass> activeSpreadClass{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread};
+	const auto promotedCompletion = cache.TakeCompleted(1, activeSpreadClass);
+	Expect(startedWithoutRendererPolling && preparedWithoutRendererPolling &&
+		processorCalls.load() == 3 && promotedCompletion.size() == 1 &&
+		promotedCompletion.front()->key == first.key,
+		"promoting a completed frame did not release capacity and wake queued work");
+}
+
+void TestDisplayInFlightPromotionReleasesSpeculativeCapacity() {
+	TemporaryDirectory temporary;
+	const fs::path firstFile = temporary.path() / "inflight-promotion-first.png";
+	const fs::path promotedFile = temporary.path() / "inflight-promotion-active.png";
+	const fs::path queuedFile = temporary.path() / "inflight-promotion-queued.png";
+	WriteText(firstFile, "first completion");
+	WriteText(promotedFile, "active promotion");
+	WriteText(queuedFile, "queued request");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::mutex processorMutex;
+	std::condition_variable processorChanged;
+	bool promotedStarted = false;
+	bool releasePromoted = false;
+	bool queuedStarted = false;
+	std::atomic<std::size_t> processorCalls{0};
+	jpegview_linux::DisplayImageCache cache(0, 2,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			++processorCalls;
+			if (request.filename == promotedFile) {
+				std::unique_lock<std::mutex> lock(processorMutex);
+				promotedStarted = true;
+				processorChanged.notify_all();
+				processorChanged.wait(lock, [&] { return releasePromoted; });
+			} else if (request.filename == queuedFile) {
+				{
+					std::lock_guard<std::mutex> lock(processorMutex);
+					queuedStarted = true;
+				}
+				processorChanged.notify_all();
+			}
+			return DisplayCachePreparedTestImage(request);
+		});
+	const auto first = jpegview_linux::MakeDisplayImageRequest(firstFile,
+		decoded, 0, 1, 1, false, 1);
+	const auto promoted = jpegview_linux::MakeDisplayImageRequest(promotedFile,
+		decoded, 0, 1, 1, false, 2);
+	const auto queued = jpegview_linux::MakeDisplayImageRequest(queuedFile,
+		decoded, 0, 1, 1, false, 3);
+	cache.RequestBackgroundBatch({first, promoted, queued});
+	const auto fullDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	bool fullAndActive = false;
+	while (std::chrono::steady_clock::now() < fullDeadline) {
+		const auto state = cache.GetDiagnostics();
+		if (state.speculativePreparedImages == 1 &&
+			state.speculativeReservedImages == 2 && state.backgroundActive == 1 &&
+			state.backgroundQueued == 1) {
+			fullAndActive = true;
+			break;
+		}
+		std::this_thread::yield();
+	}
+	cache.Request(promoted);
+	bool queuedStartedWithoutRendererPolling = false;
+	{
+		std::unique_lock<std::mutex> lock(processorMutex);
+		queuedStartedWithoutRendererPolling = processorChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return queuedStarted; });
+		releasePromoted = true;
+	}
+	processorChanged.notify_all();
+	const bool preparedWithoutRendererPolling = cache.WaitUntilIdle(
+		std::chrono::seconds(2));
+	Expect(fullAndActive && promotedStarted && queuedStartedWithoutRendererPolling &&
+		preparedWithoutRendererPolling && processorCalls.load() == 3,
+		"in-flight foreground promotion did not release capacity and wake queued work");
+}
+
+void TestDisplayCompletionByteBudgetAndForegroundAdmission() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "completion-byte-budget.png";
+	WriteText(filename, "completion byte budget source");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	constexpr std::size_t mebibyte = 1024u * 1024u;
+	const std::size_t fortyMiB = 40u * mebibyte;
+	std::atomic<std::size_t> processorCalls{0};
+	std::atomic<std::size_t> foregroundCalls{0};
+	jpegview_linux::DisplayImageCache cache(0, 4,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			++processorCalls;
+			if (request.workClass == jpegview_linux::PerfWorkClass::ActiveImageSpread) {
+				++foregroundCalls;
+			}
+			return DisplayCachePreparedTestImage(request);
+		});
+	auto forty = jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
+		4096, 2560, false, 1);
+	auto thirty = jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
+		4096, 1920, false, 2);
+	auto onePixel = jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
+		1, 1, false, 3);
+	cache.RequestBackgroundBatch({forty, thirty, onePixel});
+	const auto preparedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (std::chrono::steady_clock::now() < preparedDeadline) {
+		const auto state = cache.GetDiagnostics();
+		if (state.speculativePreparedImages == 2) break;
+		std::this_thread::yield();
+	}
+	const bool largerFrameStayedQueued = !cache.WaitUntilIdle(
+		std::chrono::milliseconds(100));
+	const auto fullState = cache.GetDiagnostics();
+	Expect(processorCalls.load() == 2 && fullState.speculativePreparedImages == 2 &&
+		fullState.speculativePreparedBytes == fortyMiB + 4 &&
+		fullState.speculativeReservedImages == 2 &&
+		fullState.speculativeReservedBytes == fortyMiB + 4 &&
+		fullState.backgroundQueued == 1 && largerFrameStayedQueued,
+		"display speculation exceeded the 64 MiB completion-byte limit or failed to skip blocked work");
+
+	auto foreground = jpegview_linux::MakeDisplayImageRequest(filename, decoded, 0,
+		2, 2, false, 0);
+	foreground.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	cache.Request(foreground);
+	const auto foregroundDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	std::vector<jpegview_linux::DisplayImageCache::ImagePtr> admittedForeground;
+	const std::set<jpegview_linux::PerfWorkClass> foregroundClass{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread};
+	while (std::chrono::steady_clock::now() < foregroundDeadline &&
+		admittedForeground.empty()) {
+		admittedForeground = cache.TakeCompleted(1, foregroundClass);
+		if (admittedForeground.empty()) std::this_thread::yield();
+	}
+	const auto afterForeground = cache.GetDiagnostics();
+	Expect(foregroundCalls.load() == 1 && admittedForeground.size() == 1 &&
+		admittedForeground.front()->key == foreground.key &&
+		afterForeground.speculativeReservedImages == 2 &&
+		processorCalls.load() == 3,
+		"foreground display preparation was blocked by full speculative completion capacity");
+
+	cache.Prefetch({});
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) && processorCalls.load() == 3 &&
+		cache.GetDiagnostics().backgroundQueued == 0 &&
+		cache.GetDiagnostics().speculativePreparedImages == 0,
+		"canceling backpressured speculation did not discard queued and completed work");
+}
+
+void TestCapacityBlockedSpeculationDoesNotBlockCompletedFrames() {
+	TemporaryDirectory temporary;
+	const fs::path countFirstFile = temporary.path() / "count-ready-first.png";
+	const fs::path countSecondFile = temporary.path() / "count-ready-second.png";
+	const fs::path countCloserFile = temporary.path() / "count-queued-closer.png";
+	const fs::path bytesReadyFile = temporary.path() / "bytes-ready.png";
+	const fs::path bytesCloserFile = temporary.path() / "bytes-queued-closer.png";
+	for (const fs::path& filename : {countFirstFile, countSecondFile,
+		countCloserFile, bytesReadyFile, bytesCloserFile}) {
+		WriteText(filename, "completion priority barrier source");
+	}
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::atomic<std::size_t> countProcessorCalls{0};
+	jpegview_linux::DisplayImageCache countLimited(0, 2,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			++countProcessorCalls;
+			return DisplayCachePreparedTestImage(request);
+		});
+	const auto countFirst = jpegview_linux::MakeDisplayImageRequest(countFirstFile,
+		decoded, 0, 1, 1, false, 2);
+	const auto countSecond = jpegview_linux::MakeDisplayImageRequest(countSecondFile,
+		decoded, 0, 1, 1, false, 3);
+	const auto countCloser = jpegview_linux::MakeDisplayImageRequest(countCloserFile,
+		decoded, 0, 1, 1, false, 1);
+	countLimited.RequestBackgroundBatch({countFirst, countSecond});
+	const bool countCompletionsReady = countLimited.WaitUntilIdle(std::chrono::seconds(2));
+	const auto countFull = countLimited.GetDiagnostics();
+	countLimited.RequestBackground(countCloser);
+	const auto countQueued = countLimited.GetDiagnostics();
+	const auto countReleased = countLimited.TakeCompleted(1);
+	const bool countDrained = countLimited.WaitUntilIdle(std::chrono::seconds(2));
+	const auto countCloserCompleted = countLimited.TakeCompleted(1);
+	Expect(countCompletionsReady && countFull.speculativeReservedImages == 2 &&
+		countQueued.backgroundQueued == 1 && countReleased.size() == 1 &&
+		countReleased.front()->key == countFirst.key && countDrained &&
+		countProcessorCalls.load() == 3 && countCloserCompleted.size() == 1 &&
+		countCloserCompleted.front()->key == countCloser.key,
+		"count-blocked closer prevented a ready frame from releasing completion capacity");
+	countLimited.Retire(countReleased.front());
+	countLimited.Retire(countCloserCompleted.front());
+
+	constexpr int fullBudgetWidth = 4096;
+	constexpr int fullBudgetHeight = 4096;
+	const std::size_t fullBudgetBytes = jpegview_linux::DisplayImageCache::
+		kMaximumSpeculativeCompletionBytes;
+	std::atomic<std::size_t> byteProcessorCalls{0};
+	jpegview_linux::DisplayImageCache byteLimited(0, 2,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			++byteProcessorCalls;
+			auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
+			image->filename = request.filename;
+			image->source = request.source;
+			image->cacheKey = request.cacheKey;
+			image->key = request.key;
+			image->width = image->height = 1;
+			image->bgra.assign(4, 255);
+			return image;
+		});
+	const auto bytesReady = jpegview_linux::MakeDisplayImageRequest(bytesReadyFile,
+		decoded, 0, fullBudgetWidth, fullBudgetHeight, false, 2);
+	const auto bytesCloser = jpegview_linux::MakeDisplayImageRequest(bytesCloserFile,
+		decoded, 0, 1, 1, false, 1);
+	byteLimited.RequestBackground(bytesReady);
+	const bool byteCompletionReady = byteLimited.WaitUntilIdle(std::chrono::seconds(2));
+	const auto bytesFull = byteLimited.GetDiagnostics();
+	byteLimited.RequestBackground(bytesCloser);
+	const auto bytesQueued = byteLimited.GetDiagnostics();
+	const auto bytesReleased = byteLimited.TakeCompleted(1);
+	const bool bytesDrained = byteLimited.WaitUntilIdle(std::chrono::seconds(2));
+	const auto bytesCloserCompleted = byteLimited.TakeCompleted(1);
+	Expect(byteCompletionReady && bytesFull.speculativeReservedImages == 1 &&
+		bytesFull.speculativeReservedBytes == fullBudgetBytes &&
+		bytesQueued.backgroundQueued == 1 && bytesReleased.size() == 1 &&
+		bytesReleased.front()->key == bytesReady.key && bytesDrained &&
+		byteProcessorCalls.load() == 2 && bytesCloserCompleted.size() == 1 &&
+		bytesCloserCompleted.front()->key == bytesCloser.key,
+		"byte-blocked closer prevented a ready frame from releasing completion capacity");
+	byteLimited.Retire(bytesReleased.front());
+	byteLimited.Retire(bytesCloserCompleted.front());
+}
+
+void TestDisplayPrefetchReplacesCachedPrioritiesAndPreservesForeground() {
+	TemporaryDirectory temporary;
+	const fs::path firstFile = temporary.path() / "replacement-first.png";
+	const fs::path secondFile = temporary.path() / "replacement-second.png";
+	const fs::path foregroundFile = temporary.path() / "replacement-foreground.png";
+	for (const fs::path& filename : {firstFile, secondFile, foregroundFile}) {
+		WriteText(filename, "cached priority replacement source");
+	}
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::atomic<std::size_t> processorCalls{0};
+	const auto prepare = [&processorCalls](const jpegview_linux::DisplayImageRequest& request) {
+		++processorCalls;
+		auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>(
+			*DisplayCachePreparedTestImage(request));
+		image->priority = request.priority;
+		image->workClass = request.workClass;
+		return image;
+	};
+	jpegview_linux::DisplayImageCache cache(64, 1, prepare);
+	const auto first = jpegview_linux::MakeDisplayImageRequest(firstFile,
+		decoded, 0, 1, 1, false, 1);
+	const auto second = jpegview_linux::MakeDisplayImageRequest(secondFile,
+		decoded, 0, 1, 1, false, 2);
+	cache.Prefetch({first, second});
+	const bool initialBatchPrepared = cache.WaitUntilIdle(std::chrono::seconds(2));
+	const auto initialState = cache.GetDiagnostics();
+	auto reversedFirst = first;
+	auto reversedSecond = second;
+	reversedFirst.priority = 2;
+	reversedSecond.priority = 1;
+	cache.Prefetch({reversedSecond, reversedFirst});
+	const auto reversed = cache.TakeCompleted(2);
+	Expect(initialBatchPrepared && initialState.cachedImages == 2 &&
+		processorCalls.load() == 2 && reversed.size() == 2 &&
+		reversed[0]->key == second.key && reversed[1]->key == first.key &&
+		processorCalls.load() == 2,
+		"replacement Prefetch did not apply its new priorities to retained completions");
+
+	jpegview_linux::DisplayImageCache foregroundCache(64, 1, prepare);
+	auto foreground = jpegview_linux::MakeDisplayImageRequest(foregroundFile,
+		decoded, 0, 1, 1, false, 0);
+	foreground.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	foregroundCache.Request(foreground);
+	const bool foregroundPrepared = foregroundCache.WaitUntilIdle(std::chrono::seconds(2));
+	auto backgroundView = foreground;
+	backgroundView.priority = 3;
+	backgroundView.workClass = jpegview_linux::PerfWorkClass::DistantSpeculation;
+	foregroundCache.Prefetch({backgroundView});
+	const std::set<jpegview_linux::PerfWorkClass> foregroundClass{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread};
+	const auto preservedForeground = foregroundCache.TakeCompleted(1, foregroundClass);
+	Expect(foregroundPrepared && preservedForeground.size() == 1 &&
+		preservedForeground.front()->key == foreground.key &&
+		preservedForeground.front()->priority == 0 &&
+		preservedForeground.front()->workClass ==
+			jpegview_linux::PerfWorkClass::ActiveImageSpread,
+		"replacement Prefetch demoted or reclassified a foreground completion");
+}
+
+void TestPendingCachedCompletionsYieldToStartableColdWork() {
+	TemporaryDirectory temporary;
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::vector<fs::path> cachedFiles;
+	std::vector<jpegview_linux::DisplayImageRequest> cachedRequests;
+	for (std::size_t index = 0; index < 4; ++index) {
+		const fs::path filename = temporary.path() /
+			("cached-far-" + std::to_string(index) + ".png");
+		WriteText(filename, "retained distant completion");
+		cachedFiles.push_back(filename);
+	}
+	const fs::path nearestFile = temporary.path() / "cold-nearest.png";
+	WriteText(nearestFile, "cold nearest completion");
+	std::mutex nearestMutex;
+	std::condition_variable nearestChanged;
+	bool nearestStarted = false;
+	bool releaseNearest = false;
+	std::atomic<std::size_t> processorCalls{0};
+	jpegview_linux::DisplayImageCache cache(128, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			++processorCalls;
+			if (request.filename == nearestFile) {
+				std::unique_lock<std::mutex> lock(nearestMutex);
+				nearestStarted = true;
+				nearestChanged.notify_all();
+				nearestChanged.wait(lock, [&] { return releaseNearest; });
+			}
+			return DisplayCachePreparedTestImage(request);
+		});
+	ScopedConditionRelease releaseNearestOnExit(nearestMutex, nearestChanged, releaseNearest);
+	for (const fs::path& filename : cachedFiles) {
+		const auto request = jpegview_linux::MakeDisplayImageRequest(
+			filename, decoded, 0, 1, 1, false);
+		const auto prepared = cache.RequestAndWait(request);
+		const auto consumed = cache.TakeCompleted(1);
+		Expect(prepared && consumed.size() == 1 && consumed.front()->key == request.key,
+			"could not seed a retained display image for the cached refill test");
+		cachedRequests.push_back(request);
+	}
+	const bool allSourcesRetained = cache.GetDiagnostics().cachedImages == cachedRequests.size();
+	for (std::size_t index = 0; index < cachedRequests.size(); ++index) {
+		cachedRequests[index].priority = index + 3;
+	}
+	cache.Prefetch(cachedRequests);
+	const auto filled = cache.GetDiagnostics();
+	auto nearest = jpegview_linux::MakeDisplayImageRequest(
+		nearestFile, decoded, 0, 1, 1, false, 1);
+	cache.RequestBackground(nearest);
+	const auto queued = cache.GetDiagnostics();
+	const auto released = cache.TakeCompleted(1);
+	bool nearestEnteredProcessor = false;
+	{
+		std::unique_lock<std::mutex> lock(nearestMutex);
+		nearestEnteredProcessor = nearestChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return nearestStarted; });
+	}
+	const auto whileNearestBlocked = cache.GetDiagnostics();
+	{
+		std::lock_guard<std::mutex> lock(nearestMutex);
+		releaseNearest = true;
+	}
+	nearestChanged.notify_all();
+	const bool nearestDrained = nearestEnteredProcessor &&
+		cache.WaitUntilIdle(std::chrono::seconds(2));
+	const auto nearestCompletion = nearestDrained ? cache.TakeCompleted(1) :
+		std::vector<jpegview_linux::DisplayImageCache::ImagePtr>{};
+	const auto fartherCompletion = cache.TakeCompleted(1);
+	const auto afterRefill = cache.GetDiagnostics();
+	const std::size_t expectedProcessorCalls = cachedRequests.size() + 1;
+	Expect(allSourcesRetained && filled.cachedImages == cachedRequests.size() &&
+		filled.speculativePreparedImages == 2 && filled.speculativeReservedImages == 2 &&
+		queued.backgroundQueued == 1 && queued.speculativeReservedImages == 2 &&
+		released.size() == 1 && released.front()->key == cachedRequests.front().key &&
+		nearestEnteredProcessor && whileNearestBlocked.backgroundActive == 1 &&
+		whileNearestBlocked.backgroundQueued == 0 &&
+		whileNearestBlocked.speculativePreparedImages == 1 &&
+		whileNearestBlocked.speculativeReservedImages == 2 &&
+		whileNearestBlocked.speculativeReservedImages <=
+			jpegview_linux::DisplayImageCache::kMaximumSpeculativeCompletions &&
+		whileNearestBlocked.speculativeReservedBytes <=
+			jpegview_linux::DisplayImageCache::kMaximumSpeculativeCompletionBytes &&
+		nearestDrained && processorCalls.load() == expectedProcessorCalls &&
+		nearestCompletion.size() == 1 && nearestCompletion.front()->key == nearest.key &&
+		fartherCompletion.size() == 1 &&
+		fartherCompletion.front()->key == cachedRequests[1].key &&
+		afterRefill.speculativeReservedImages <=
+			jpegview_linux::DisplayImageCache::kMaximumSpeculativeCompletions,
+		"cached refill reserved capacity ahead of the startable nearest cold request");
+}
+
+void TestPendingCachedCompletionsYieldToEqualPriorityColdWork() {
+	TemporaryDirectory temporary;
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::vector<jpegview_linux::DisplayImageRequest> cachedRequests;
+	for (std::size_t index = 0; index < 4; ++index) {
+		const fs::path filename = temporary.path() /
+			("equal-priority-cached-" + std::to_string(index) + ".png");
+		WriteText(filename, "equal-priority retained completion");
+		cachedRequests.push_back(jpegview_linux::MakeDisplayImageRequest(
+			filename, decoded, 0, 1, 1, false));
+	}
+	const fs::path coldFile = temporary.path() / "equal-priority-cold.png";
+	WriteText(coldFile, "equal-priority cold completion");
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool coldStarted = false;
+	bool releaseCold = false;
+	std::atomic<std::size_t> processorCalls{0};
+	jpegview_linux::DisplayImageCache cache(128, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			++processorCalls;
+			if (request.filename == coldFile) {
+				std::unique_lock<std::mutex> lock(mutex);
+				coldStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseCold; });
+			}
+			return DisplayCachePreparedTestImage(request);
+		});
+	ScopedConditionRelease releaseColdOnExit(mutex, changed, releaseCold);
+	for (const auto& request : cachedRequests) {
+		const auto prepared = cache.RequestAndWait(request);
+		const auto consumed = cache.TakeCompleted(1);
+		Expect(prepared && consumed.size() == 1 && consumed.front()->key == request.key,
+			"could not seed retained images for the equal-priority refill test");
+	}
+	for (std::size_t index = 0; index < cachedRequests.size(); ++index) {
+		cachedRequests[index].priority = index + 3;
+	}
+	cache.Prefetch(cachedRequests);
+	const auto filled = cache.GetDiagnostics();
+	auto cold = jpegview_linux::MakeDisplayImageRequest(
+		coldFile, decoded, 0, 1, 1, false, 5);
+	cache.RequestBackground(cold);
+	const auto queued = cache.GetDiagnostics();
+	const auto released = cache.TakeCompleted(1);
+	bool entered = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		entered = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return coldStarted;
+		});
+	}
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseCold = true;
+	}
+	changed.notify_all();
+	const bool drained = cache.WaitUntilIdle(std::chrono::seconds(2));
+	Expect(filled.speculativePreparedImages == 2 &&
+		queued.backgroundQueued == 1 && released.size() == 1 &&
+		released.front()->key == cachedRequests.front().key && entered && drained &&
+		processorCalls.load() == cachedRequests.size() + 1,
+		"equal-priority cached refill reserved capacity ahead of startable cold work");
+}
+
+void TestDisplayOversizedSpeculationAndReservationRecovery() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "oversized-speculation.png";
+	const fs::path failure = temporary.path() / "allocation-failure.png";
+	const fs::path recovery = temporary.path() / "allocation-recovery.png";
+	WriteText(filename, "oversized source");
+	WriteText(failure, "allocation failure source");
+	WriteText(recovery, "allocation recovery source");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::atomic<std::size_t> oversizedCalls{0};
+	jpegview_linux::DisplayImageCache oversized(0, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			++oversizedCalls;
+			return DisplayCachePreparedTestImage(request);
+		});
+	const auto tooLarge = jpegview_linux::MakeDisplayImageRequest(filename, decoded,
+		0, 4096, 4097, false, 1);
+	oversized.RequestBackground(tooLarge);
+	Expect(oversized.WaitUntilIdle(std::chrono::milliseconds(100)) &&
+		oversizedCalls.load() == 0 && !oversized.HasPendingOrCached(tooLarge.key) &&
+		oversized.GetDiagnostics().backgroundQueued == 0,
+		"an oversized speculative result stayed queued or reached the image processor");
+
+	std::atomic<std::size_t> allocationCalls{0};
+	const std::size_t expectedBytes = 40u * 1024u * 1024u;
+	jpegview_linux::DisplayImageCache allocation(0, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			if (++allocationCalls == 1) throw std::bad_alloc();
+			return DisplayCachePreparedTestImage(request);
+		});
+	const auto throws = jpegview_linux::MakeDisplayImageRequest(failure, decoded,
+		0, 4096, 2560, false, 1);
+	const auto succeeds = jpegview_linux::MakeDisplayImageRequest(recovery, decoded,
+		0, 4096, 2560, false, 2);
+	allocation.RequestBackgroundBatch({throws, succeeds});
+	Expect(allocation.WaitUntilIdle(std::chrono::seconds(3)) && allocationCalls.load() == 2,
+		"display allocation failure retained a reservation and blocked later speculation");
+	const auto recovered = allocation.GetDiagnostics();
+	Expect(recovered.speculativePreparedImages == 1 &&
+		recovered.speculativeReservedImages == 1 &&
+		recovered.speculativeReservedBytes == expectedBytes,
+		"display reservation accounting did not recover after allocation failure");
+}
+
+void TestDisplayBackpressuredShutdownRetiresWithoutPumping() {
+	TemporaryDirectory temporary;
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	std::mutex destructionMutex;
+	std::condition_variable destructionChanged;
+	std::size_t destroyedImages = 0;
+	bool destroyedOffCaller = true;
+	const std::thread::id caller = std::this_thread::get_id();
+	auto cache = std::make_unique<jpegview_linux::DisplayImageCache>(0, 2,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+		auto* raw = new jpegview_linux::PreparedDisplayImage();
+		raw->filename = request.filename;
+		raw->source = request.source;
+		raw->cacheKey = request.cacheKey;
+		raw->key = request.key;
+		raw->width = request.targetWidth;
+		raw->height = request.targetHeight;
+		raw->bgra.assign(1024u * 1024u, 255);
+		return std::shared_ptr<const jpegview_linux::PreparedDisplayImage>(raw,
+			[&](const jpegview_linux::PreparedDisplayImage* image) {
+				{
+					std::lock_guard<std::mutex> lock(destructionMutex);
+					++destroyedImages;
+					destroyedOffCaller = destroyedOffCaller &&
+						std::this_thread::get_id() != caller;
+				}
+				destructionChanged.notify_all();
+				delete image;
+			});
+		});
+	std::vector<jpegview_linux::DisplayImageRequest> requests;
+	for (std::size_t priority = 1; priority <= 4; ++priority) {
+		const fs::path filename = temporary.path() /
+			("shutdown-" + std::to_string(priority) + ".png");
+		WriteText(filename, "shutdown image");
+		requests.push_back(jpegview_linux::MakeDisplayImageRequest(filename, decoded,
+			0, 512, 512, false, priority));
+	}
+	cache->RequestBackgroundBatch(requests);
+	const auto completionDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (std::chrono::steady_clock::now() < completionDeadline &&
+		cache->GetDiagnostics().speculativePreparedImages < 2) {
+		std::this_thread::yield();
+	}
+	Expect(cache->GetDiagnostics().speculativePreparedImages == 2 &&
+		cache->GetDiagnostics().backgroundQueued == 2,
+		"shutdown fixture did not fill the bounded completion queue");
+	cache.reset();
+	std::unique_lock<std::mutex> lock(destructionMutex);
+	const bool allImagesRetired = destructionChanged.wait_for(lock,
+		std::chrono::seconds(3), [&] { return destroyedImages == 2; });
+	Expect(allImagesRetired && destroyedOffCaller,
+		"display destruction did not retire both completed pixels off-caller without event-loop pumping");
+}
+
+void TestQueuedDecodedImageRetiresOffCaller() {
+	TemporaryDirectory temporary;
+	const fs::path activeFile = temporary.path() / "decoded-retirement-active.png";
+	const fs::path queuedFile = temporary.path() / "decoded-retirement-queued.png";
+	WriteText(activeFile, "active");
+	WriteText(queuedFile, "queued");
+	const auto activeDecoded = DisplayCacheTestImage(2, 2);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool activeStarted = false;
+	bool releaseActive = false;
+	std::thread::id destroyedOn;
+	bool destroyed = false;
+	const auto caller = std::this_thread::get_id();
+	jpegview_linux::DisplayImageCache cache(0, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			if (request.filename == activeFile) {
+				std::unique_lock<std::mutex> lock(mutex);
+				activeStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseActive; });
+			}
+			return DisplayCachePreparedTestImage(request);
+		});
+	ScopedConditionRelease releaseActiveOnExit(mutex, changed, releaseActive);
+	const auto active = jpegview_linux::MakeDisplayImageRequest(activeFile,
+		activeDecoded, 0, 2, 2, false, 1);
+	cache.RequestBackground(active);
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] { return activeStarted; }),
+			"decoded-retirement worker did not enter its active request");
+	}
+	auto* raw = new DecodedImage(*DisplayCacheTestImage(2, 2));
+	auto queuedDecoded = std::shared_ptr<DecodedImage>(raw,
+		[&](DecodedImage* image) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				destroyedOn = std::this_thread::get_id();
+				destroyed = true;
+			}
+			changed.notify_all();
+			delete image;
+		});
+	auto queued = jpegview_linux::MakeDisplayImageRequest(queuedFile,
+		queuedDecoded, 0, 2, 2, false, 2);
+	cache.RequestBackground(queued);
+	queued.decoded.reset();
+	queuedDecoded.reset();
+	cache.CancelBackground(queued.key);
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] { return destroyed; }),
+			"canceled queued decoded pixels were not drained by the retirement worker");
+		releaseActive = true;
+	}
+	changed.notify_all();
+	Expect(destroyedOn != caller && cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"canceling a queued decoded request destroyed its last pixels on the caller thread");
+}
+
+void TestDisplayRetirementSkipsSharedDecodedOwner() {
+	TemporaryDirectory temporary;
+	const fs::path activeFile = temporary.path() / "retirement-ready-display.png";
+	const fs::path queuedFile = temporary.path() / "retirement-shared-decoded.png";
+	WriteText(activeFile, "active");
+	WriteText(queuedFile, "queued");
+	const auto activeDecoded = DisplayCacheTestImage(2, 2);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool activeStarted = false;
+	bool releaseActive = false;
+	bool displayDestroyed = false;
+	bool decodedDestroyed = false;
+	std::thread::id displayDestroyedOn;
+	std::thread::id decodedDestroyedOn;
+	const std::thread::id caller = std::this_thread::get_id();
+	jpegview_linux::DisplayImageCache cache(0, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			if (request.filename == activeFile) {
+				std::unique_lock<std::mutex> lock(mutex);
+				activeStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseActive; });
+			}
+		auto* raw = new jpegview_linux::PreparedDisplayImage();
+		raw->filename = request.filename;
+		raw->source = request.source;
+		raw->cacheKey = request.cacheKey;
+		raw->key = request.key;
+		raw->width = raw->height = 2;
+		raw->bgra.assign(16, 255);
+		return std::shared_ptr<const jpegview_linux::PreparedDisplayImage>(raw,
+			[&](const jpegview_linux::PreparedDisplayImage* image) {
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+					displayDestroyed = true;
+					displayDestroyedOn = std::this_thread::get_id();
+				}
+				changed.notify_all();
+			delete image;
+		});
+		});
+	ScopedConditionRelease releaseActiveOnExit(mutex, changed, releaseActive);
+	const auto active = jpegview_linux::MakeDisplayImageRequest(activeFile,
+		activeDecoded, 0, 2, 2, false, 1);
+	cache.RequestBackground(active);
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] { return activeStarted; }),
+			"retirement worker did not reach the active decode barrier");
+	}
+	DecodedImage* rawDecoded = new DecodedImage(*DisplayCacheTestImage(2, 2));
+	auto externalDecoded = std::shared_ptr<DecodedImage>(rawDecoded,
+		[&](DecodedImage* image) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				decodedDestroyed = true;
+				decodedDestroyedOn = std::this_thread::get_id();
+			}
+			changed.notify_all();
+			delete image;
+		});
+	auto queued = jpegview_linux::MakeDisplayImageRequest(queuedFile,
+		externalDecoded, 0, 2, 2, false, 2);
+	cache.RequestBackground(queued);
+	queued.decoded.reset();
+	cache.CancelBackground(queued.key);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseActive = true;
+	}
+	changed.notify_all();
+	const auto publishDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (std::chrono::steady_clock::now() < publishDeadline &&
+		cache.GetDiagnostics().preparedImages != 1) {
+		std::this_thread::yield();
+	}
+	cache.Prefetch({});
+	bool displayRetiredBeforeExternalOwner = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		displayRetiredBeforeExternalOwner = changed.wait_for(lock,
+			std::chrono::seconds(2), [&] { return displayDestroyed; });
+	}
+	const bool decodedStillOwned = externalDecoded.use_count() == 1;
+	externalDecoded.reset();
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		(void)changed.wait_for(lock, std::chrono::seconds(2), [&] { return decodedDestroyed; });
+	}
+	Expect(displayRetiredBeforeExternalOwner && !decodedStillOwned && decodedDestroyed &&
+		displayDestroyedOn != caller && decodedDestroyedOn != caller,
+		"shared decoded ownership blocked independent prepared-image retirement or destroyed pixels on the caller");
+}
+
+void TestForegroundCompletionKeepsCachedPriorityClass() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "foreground-completion-priority.png";
+	WriteText(filename, "foreground completion");
+	const auto decoded = DisplayCacheTestImage(2, 2);
+	jpegview_linux::DisplayImageCache cache(0, 1,
+		[](const jpegview_linux::DisplayImageRequest& request) {
+			return DisplayCachePreparedTestImage(request);
+		});
+	auto foreground = jpegview_linux::MakeDisplayImageRequest(filename, decoded,
+		0, 2, 2, false, 0);
+	cache.Request(foreground);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"foreground completion fixture did not prepare its active image");
+	auto backgroundMerge = foreground;
+	backgroundMerge.priority = 3;
+	backgroundMerge.workClass = jpegview_linux::PerfWorkClass::DistantSpeculation;
+	cache.RequestBackgroundBatch({backgroundMerge});
+	const std::set<jpegview_linux::PerfWorkClass> foregroundClass{
+		jpegview_linux::PerfWorkClass::ActiveImageSpread};
+	const auto completion = cache.TakeCompleted(1, foregroundClass);
+	Expect(completion.size() == 1 && completion.front()->key == foreground.key,
+		"a background batch demoted an already queued foreground completion");
 }
 
 void TestSharedCacheBudgetAccounting() {
@@ -10471,15 +11557,26 @@ void TestThumbnailBackgroundPreparation() {
 	orderChanged.notify_all();
 	Expect(blockerStartedInTime, "thumbnail worker did not start in the background");
 	Expect(queuedNeighbors, "thumbnail worker rejected queued neighbors");
-	Expect(prioritized.WaitUntilIdle(std::chrono::seconds(2)),
-		"prioritized thumbnail work did not finish");
+	const auto prioritizedDeadline = std::chrono::steady_clock::now() +
+		std::chrono::seconds(2);
+	while (std::chrono::steady_clock::now() < prioritizedDeadline &&
+		prioritized.GetDiagnostics().completedResults < 2) {
+		std::this_thread::yield();
+	}
+	const auto firstPrioritized = prioritized.TakeCompleted(1);
+	Expect(firstPrioritized.size() == 1 &&
+		prioritized.WaitUntilIdle(std::chrono::seconds(2)),
+		"consuming thumbnail completions did not release the next prioritized request");
 	{
 		std::lock_guard<std::mutex> lock(orderMutex);
 		Expect(order == std::vector<std::string>({"blocker", "near", "far"}),
 			"thumbnail worker did not prefer the closest queued neighbor");
 	}
-	Expect(prioritized.TakeCompleted(3).size() == 3,
+	const auto remainingPrioritized = prioritized.TakeCompleted(2);
+	Expect(remainingPrioritized.size() == 2,
 		"thumbnail worker did not publish every prepared neighbor");
+	for (const auto& result : firstPrioritized) prioritized.Retire(result.image);
+	for (const auto& result : remainingPrioritized) prioritized.Retire(result.image);
 
 	auto activeSource = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 	activeSource->width = 4;
@@ -10695,6 +11792,336 @@ void TestThumbnailBackgroundPreparation() {
 		jpegview_linux::PerfWorkClass::DistantSpeculation});
 	Expect(canceledActiveResult.empty(),
 		"cooperatively canceled thumbnail published a duplicate retry result");
+}
+
+void TestThumbnailCompletionQueueCountBackpressure() {
+	auto makeRequest = [](std::size_t index) {
+		jpegview_linux::ThumbnailPreparationRequest request;
+		request.key = jpegview_linux::SourceKey("thumbnail-count-" +
+			std::to_string(index));
+		request.maximumWidth = request.maximumHeight = 512;
+		request.priority = index;
+		request.workClass = jpegview_linux::PerfWorkClass::DistantSpeculation;
+		request.logicalSource = "/virtual/thumbnail-count-" + std::to_string(index);
+		request.fileIndex = index;
+		return request;
+	};
+	std::atomic<std::size_t> processorCalls{0};
+	std::mutex startMutex;
+	std::condition_variable startChanged;
+	bool firstStarted = false;
+	bool releaseFirst = false;
+	jpegview_linux::ThumbnailPreparationWorker worker(
+		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			++processorCalls;
+			if (request.key.logicalPath == "thumbnail-count-1") {
+				std::unique_lock<std::mutex> lock(startMutex);
+				firstStarted = true;
+				startChanged.notify_all();
+				startChanged.wait(lock, [&] { return releaseFirst; });
+			}
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = request.key;
+			image->width = request.maximumWidth;
+			image->height = request.maximumHeight;
+			image->workClass = request.workClass;
+			image->bgra.assign(static_cast<std::size_t>(image->width) *
+				static_cast<std::size_t>(image->height) * 4, 255);
+			return image;
+		});
+	const bool firstAccepted = worker.Request(makeRequest(1));
+	bool reachedBarrier = false;
+	if (firstAccepted) {
+		std::unique_lock<std::mutex> lock(startMutex);
+		reachedBarrier = startChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return firstStarted; });
+	}
+	const bool restAccepted = reachedBarrier && worker.Request(makeRequest(2)) &&
+		worker.Request(makeRequest(3));
+	{
+		std::lock_guard<std::mutex> lock(startMutex);
+		releaseFirst = true;
+	}
+	startChanged.notify_all();
+	Expect(firstAccepted && reachedBarrier && restAccepted,
+		"thumbnail worker rejected requests needed to characterize completion backpressure");
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (std::chrono::steady_clock::now() < deadline &&
+		worker.GetDiagnostics().completedImages < 2) {
+		std::this_thread::yield();
+	}
+	const auto full = worker.GetDiagnostics();
+	Expect(processorCalls.load() == 2 && full.completedResults == 2 &&
+		full.completedImages == 2 && full.completedBytes == 2u * 1024u * 1024u &&
+		full.reservedCompletionImages == 2 &&
+		full.reservedCompletionBytes == 2u * 1024u * 1024u && full.queued == 1 &&
+		!worker.WaitUntilIdle(std::chrono::milliseconds(100)),
+		"thumbnail workers outran the two-result completion allowance");
+	auto first = worker.TakeCompleted(1);
+	Expect(first.size() == 1 && first.front().image &&
+		worker.WaitUntilIdle(std::chrono::seconds(2)) && processorCalls.load() == 3,
+		"consuming a thumbnail result did not release a completion reservation");
+	worker.Retire(first.front().image);
+	auto remaining = worker.TakeCompleted(2);
+	Expect(remaining.size() == 2 &&
+		worker.GetDiagnostics().reservedCompletionImages == 0,
+		"thumbnail completion reservations remained held after consumption");
+	for (const auto& result : remaining) worker.Retire(result.image);
+}
+
+void TestThumbnailCompletionByteBackpressureAndCancellation() {
+	constexpr std::size_t mebibyte = 1024u * 1024u;
+	auto makeRequest = [](const std::string& identity, int width, int height,
+		std::size_t priority) {
+		jpegview_linux::ThumbnailPreparationRequest request;
+		request.key = jpegview_linux::SourceKey(identity);
+		request.maximumWidth = width;
+		request.maximumHeight = height;
+		request.priority = priority;
+		request.workClass = jpegview_linux::PerfWorkClass::DistantSpeculation;
+		request.logicalSource = "/virtual/" + identity;
+		return request;
+	};
+	std::atomic<std::size_t> processorCalls{0};
+	std::mutex startMutex;
+	std::condition_variable startChanged;
+	bool firstStarted = false;
+	bool releaseFirst = false;
+	jpegview_linux::ThumbnailPreparationWorker worker(
+		[&](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			++processorCalls;
+			if (request.key.logicalPath == "thumbnail-12m") {
+				std::unique_lock<std::mutex> lock(startMutex);
+				firstStarted = true;
+				startChanged.notify_all();
+				startChanged.wait(lock, [&] { return releaseFirst; });
+			}
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = request.key;
+			image->width = request.maximumWidth;
+			image->height = request.maximumHeight;
+			image->workClass = request.workClass;
+			image->bgra.assign(static_cast<std::size_t>(image->width) *
+				static_cast<std::size_t>(image->height) * 4, 255);
+			return image;
+		});
+	const auto twelveMiB = makeRequest("thumbnail-12m", 2048, 1536, 1);
+	const auto eightMiB = makeRequest("thumbnail-8m", 2048, 1024, 2);
+	const auto tiny = makeRequest("thumbnail-tiny", 1, 1, 3);
+	const bool firstAccepted = worker.Request(twelveMiB);
+	bool reachedBarrier = false;
+	if (firstAccepted) {
+		std::unique_lock<std::mutex> lock(startMutex);
+		reachedBarrier = startChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return firstStarted; });
+	}
+	const bool restAccepted = reachedBarrier && worker.Request(eightMiB) && worker.Request(tiny);
+	{
+		std::lock_guard<std::mutex> lock(startMutex);
+		releaseFirst = true;
+	}
+	startChanged.notify_all();
+	Expect(firstAccepted && reachedBarrier && restAccepted,
+		"thumbnail byte-budget fixture failed to queue valid work");
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (std::chrono::steady_clock::now() < deadline &&
+		worker.GetDiagnostics().completedImages < 2) {
+		std::this_thread::yield();
+	}
+	const auto full = worker.GetDiagnostics();
+	Expect(processorCalls.load() == 2 && full.completedResults == 2 &&
+		full.completedImages == 2 && full.completedBytes == 12u * mebibyte + 4 &&
+		full.reservedCompletionImages == 2 &&
+		full.reservedCompletionBytes == 12u * mebibyte + 4 && full.queued == 1 &&
+		full.reservedCompletionBytes <=
+			jpegview_linux::ThumbnailPreparationWorker::kMaximumCompletedBytes,
+		"thumbnail completion pixels exceeded 16 MiB or failed to skip a blocked larger result");
+	const std::set<jpegview_linux::PerfWorkClass> distant{
+		jpegview_linux::PerfWorkClass::DistantSpeculation};
+	const auto canceled = worker.Cancel(distant);
+	Expect(canceled.size() == 3 && worker.WaitUntilIdle(std::chrono::seconds(2)) &&
+		processorCalls.load() == 2 && worker.GetDiagnostics().completedResults == 0 &&
+		worker.GetDiagnostics().reservedCompletionImages == 0 &&
+		worker.GetDiagnostics().reservedCompletionBytes == 0,
+		"thumbnail cancellation while backpressured admitted queued work or retained reservations");
+}
+
+void TestThumbnailOversizedAndAllocationFailure() {
+	auto makeRequest = [](const std::string& identity, int width, int height,
+		std::size_t priority) {
+		jpegview_linux::ThumbnailPreparationRequest request;
+		request.key = jpegview_linux::SourceKey(identity);
+		request.maximumWidth = width;
+		request.maximumHeight = height;
+		request.priority = priority;
+		request.workClass = jpegview_linux::PerfWorkClass::DistantSpeculation;
+		request.logicalSource = "/virtual/" + identity;
+		return request;
+	};
+	std::atomic<std::size_t> oversizedCalls{0};
+	jpegview_linux::ThumbnailPreparationWorker oversized(
+		[&oversizedCalls](const jpegview_linux::ThumbnailPreparationRequest&) {
+			++oversizedCalls;
+			return jpegview_linux::ThumbnailPreparationWorker::ImagePtr{};
+		});
+	const auto tooLarge = makeRequest("thumbnail-over-allowance", 2048, 2049, 1);
+	Expect(!oversized.Request(tooLarge) &&
+		oversized.WaitUntilIdle(std::chrono::milliseconds(100)) &&
+		oversizedCalls.load() == 0 && oversized.GetDiagnostics().queued == 0 &&
+		oversized.GetDiagnostics().reservedCompletionImages == 0,
+		"oversized thumbnail work was admitted but could never reserve completion bytes");
+
+	constexpr std::size_t mebibyte = 1024u * 1024u;
+	std::atomic<std::size_t> allocationCalls{0};
+	jpegview_linux::ThumbnailPreparationWorker allocation(
+		[&allocationCalls](const jpegview_linux::ThumbnailPreparationRequest& request) {
+			if (++allocationCalls == 1) throw std::bad_alloc();
+			auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+			image->key = request.key;
+			image->width = request.maximumWidth;
+			image->height = request.maximumHeight;
+			image->bgra.assign(static_cast<std::size_t>(image->width) *
+				static_cast<std::size_t>(image->height) * 4, 255);
+			return image;
+		});
+	const auto failed = makeRequest("thumbnail-allocation-failure", 2048, 1536, 1);
+	const auto succeeds = makeRequest("thumbnail-allocation-recovery", 2048, 1024, 2);
+	Expect(allocation.Request(failed) && allocation.Request(succeeds) &&
+		allocation.WaitUntilIdle(std::chrono::seconds(3)) && allocationCalls.load() == 2,
+		"thumbnail allocation failure retained bytes or stopped later worker processing");
+	const auto diagnostics = allocation.GetDiagnostics();
+	Expect(diagnostics.completedResults == 2 && diagnostics.completedImages == 1 &&
+		diagnostics.completedBytes == 8u * mebibyte &&
+		diagnostics.reservedCompletionImages == 2 &&
+		diagnostics.reservedCompletionBytes == 8u * mebibyte,
+		"thumbnail failure did not release its byte reservation while retaining bounded result count");
+	const auto results = allocation.TakeCompleted(2);
+	Expect(results.size() == 2 && !results.front().image && results.back().image &&
+		allocation.GetDiagnostics().reservedCompletionImages == 0,
+		"thumbnail worker did not publish failure metadata and recoverable pixels in order");
+	for (const auto& result : results) allocation.Retire(result.image);
+}
+
+void TestThumbnailShutdownRetiresWithoutEventLoop() {
+	struct DestructionProbe {
+		std::mutex mutex;
+		std::condition_variable changed;
+		std::size_t count = 0;
+		bool offCaller = true;
+	};
+	const std::thread::id caller = std::this_thread::get_id();
+	auto probe = std::make_shared<DestructionProbe>();
+	{
+		jpegview_linux::ThumbnailPreparationWorker worker(
+			[probe, caller](const jpegview_linux::ThumbnailPreparationRequest& request) {
+				auto* image = new jpegview_linux::PreparedThumbnailImage();
+				image->key = request.key;
+				image->width = request.maximumWidth;
+				image->height = request.maximumHeight;
+				image->bgra.assign(static_cast<std::size_t>(image->width) *
+					static_cast<std::size_t>(image->height) * 4, 255);
+				return jpegview_linux::ThumbnailPreparationWorker::ImagePtr(image,
+					[probe, caller](const jpegview_linux::PreparedThumbnailImage* retired) {
+						{
+							std::lock_guard<std::mutex> lock(probe->mutex);
+							++probe->count;
+							probe->offCaller = probe->offCaller &&
+								std::this_thread::get_id() != caller;
+						}
+						probe->changed.notify_all();
+						delete retired;
+					});
+			});
+		for (std::size_t index = 0; index < 2; ++index) {
+			jpegview_linux::ThumbnailPreparationRequest request;
+			request.key = jpegview_linux::SourceKey("thumbnail-shutdown-" +
+				std::to_string(index));
+			request.maximumWidth = request.maximumHeight = 256;
+			request.priority = index;
+			request.logicalSource = "/virtual/thumbnail-shutdown-" +
+				std::to_string(index);
+			Expect(worker.Request(request),
+				"thumbnail shutdown fixture failed to admit a result");
+		}
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+		while (std::chrono::steady_clock::now() < deadline &&
+			worker.GetDiagnostics().completedImages != 2) {
+			std::this_thread::yield();
+		}
+		Expect(worker.GetDiagnostics().completedImages == 2,
+			"thumbnail shutdown fixture did not fill its bounded completion queue");
+	}
+	std::lock_guard<std::mutex> lock(probe->mutex);
+	Expect(probe->count == 2 && probe->offCaller,
+		"thumbnail worker destruction required event-loop consumption to retire completed pixels");
+}
+
+void TestThumbnailRetirementDoesNotDeduplicateReusedAddress() {
+	using Image = jpegview_linux::PreparedThumbnailImage;
+	using ImagePtr = jpegview_linux::ThumbnailPreparationWorker::ImagePtr;
+	alignas(std::max_align_t) unsigned char storage[1024];
+	static_assert(sizeof(Image) <= sizeof(storage), "thumbnail retirement fixture storage is too small");
+	static_assert(alignof(Image) <= alignof(std::max_align_t),
+		"thumbnail retirement fixture needs stronger alignment");
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool firstLifetimeEnded = false;
+	bool releaseFirstDeleter = false;
+	bool secondDestroyed = false;
+	std::thread::id secondDestroyedOn;
+	const std::thread::id caller = std::this_thread::get_id();
+	jpegview_linux::ThumbnailPreparationWorker worker(
+		[](const jpegview_linux::ThumbnailPreparationRequest&) { return ImagePtr{}; });
+	ScopedConditionRelease releaseFirstOnExit(mutex, changed, releaseFirstDeleter);
+
+	Image* firstRaw = new (storage) Image();
+	const void* reusedAddress = firstRaw;
+	ImagePtr first(firstRaw, [&](const Image* retired) {
+		const_cast<Image*>(retired)->~Image();
+		std::unique_lock<std::mutex> lock(mutex);
+		firstLifetimeEnded = true;
+		changed.notify_all();
+		changed.wait_for(lock, std::chrono::seconds(3), [&] {
+			return releaseFirstDeleter;
+		});
+	});
+	worker.Retire(first);
+	first.reset();
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return firstLifetimeEnded;
+		}), "thumbnail retirement did not reach the address-reuse barrier");
+	}
+
+	Image* secondRaw = new (storage) Image();
+	Expect(secondRaw == reusedAddress,
+		"thumbnail retirement fixture did not reuse the first image's address");
+	ImagePtr second(secondRaw, [&](const Image* retired) {
+		const_cast<Image*>(retired)->~Image();
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			secondDestroyedOn = std::this_thread::get_id();
+			secondDestroyed = true;
+		}
+		changed.notify_all();
+	});
+	worker.Retire(second);
+	second.reset();
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseFirstDeleter = true;
+	}
+	changed.notify_all();
+	bool secondFinished = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		secondFinished = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return secondDestroyed;
+		});
+	}
+	Expect(secondFinished && secondDestroyedOn != caller,
+		"a new thumbnail owner at a reused address was discarded or destroyed on the caller");
 }
 
 void TestThumbnailQueueDisplacementReturnsSchedulerWork() {
@@ -12791,7 +14218,39 @@ int main() {
 		TestDisplayCacheRetirementIdentityAccounting, failures);
 	RunTest("display-cache-final-pixels-retirement-thread",
 		TestDisplayCacheFinalPixelsAreDestroyedByRetirementWorker, failures);
+	RunTest("display-retirement-address-reuse-uses-owner-identity",
+		TestDisplayRetirementDoesNotDeduplicateReusedAddress, failures);
+	RunTest("decoded-retirement-address-reuse-uses-owner-identity",
+		TestDecodedRetirementDoesNotDeduplicateReusedAddress, failures);
 	RunTest("display-image-cache-background-preparation", TestDisplayImageCacheBackgroundPreparation, failures);
+	RunTest("display-completion-queue-backpressure",
+		TestDisplayCompletionQueueBackpressure, failures);
+	RunTest("display-queued-promotion-wakes-backpressured-worker",
+		TestDisplayQueuedPromotionWakesBackpressuredWorker, failures);
+	RunTest("display-completed-promotion-releases-speculative-capacity",
+		TestDisplayCompletedPromotionReleasesSpeculativeCapacity, failures);
+	RunTest("display-inflight-promotion-releases-speculative-capacity",
+		TestDisplayInFlightPromotionReleasesSpeculativeCapacity, failures);
+	RunTest("display-completion-byte-budget-and-foreground-admission",
+		TestDisplayCompletionByteBudgetAndForegroundAdmission, failures);
+	RunTest("capacity-blocked-speculation-does-not-block-ready-frames",
+		TestCapacityBlockedSpeculationDoesNotBlockCompletedFrames, failures);
+	RunTest("display-prefetch-replaces-cached-priorities-and-preserves-foreground",
+		TestDisplayPrefetchReplacesCachedPrioritiesAndPreservesForeground, failures);
+	RunTest("pending-cached-completions-yield-to-startable-cold-work",
+		TestPendingCachedCompletionsYieldToStartableColdWork, failures);
+	RunTest("pending-cached-completions-yield-to-equal-priority-cold-work",
+		TestPendingCachedCompletionsYieldToEqualPriorityColdWork, failures);
+	RunTest("display-oversized-speculation-and-reservation-recovery",
+		TestDisplayOversizedSpeculationAndReservationRecovery, failures);
+	RunTest("display-backpressured-shutdown-retires-without-pumping",
+		TestDisplayBackpressuredShutdownRetiresWithoutPumping, failures);
+	RunTest("queued-decoded-image-retires-off-caller",
+		TestQueuedDecodedImageRetiresOffCaller, failures);
+	RunTest("display-retirement-skips-shared-decoded-owner",
+		TestDisplayRetirementSkipsSharedDecodedOwner, failures);
+	RunTest("foreground-completion-keeps-cached-priority-class",
+		TestForegroundCompletionKeepsCachedPriorityClass, failures);
 	RunTest("shared-cache-budget-accounting", TestSharedCacheBudgetAccounting, failures);
 	RunTest("image-storage-transforms-and-validation", TestImageStorageTransformsAndValidation, failures);
 	RunTest("image-crop-copies-half-open-rectangle", TestImageCropCopiesHalfOpenRectangle, failures);
@@ -12858,6 +14317,16 @@ int main() {
 	RunTest("thumbnail-invalid-descriptor-recaptures-recreated-source",
 		TestThumbnailInvalidDescriptorRecapturesRecreatedSource, failures);
 	RunTest("thumbnail-background-preparation", TestThumbnailBackgroundPreparation, failures);
+	RunTest("thumbnail-completion-queue-count-backpressure",
+		TestThumbnailCompletionQueueCountBackpressure, failures);
+	RunTest("thumbnail-completion-byte-backpressure-and-cancellation",
+		TestThumbnailCompletionByteBackpressureAndCancellation, failures);
+	RunTest("thumbnail-oversized-and-allocation-failure",
+		TestThumbnailOversizedAndAllocationFailure, failures);
+	RunTest("thumbnail-shutdown-retires-without-event-loop",
+		TestThumbnailShutdownRetiresWithoutEventLoop, failures);
+	RunTest("thumbnail-retirement-address-reuse-uses-owner-identity",
+		TestThumbnailRetirementDoesNotDeduplicateReusedAddress, failures);
 	RunTest("thumbnail-queue-displacement-returns-scheduler-work",
 		TestThumbnailQueueDisplacementReturnsSchedulerWork, failures);
 	RunTest("thumbnail-file-backed-preparation-and-shutdown",

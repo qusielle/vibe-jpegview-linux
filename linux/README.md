@@ -44,7 +44,9 @@ they support.
    normally avoids texture upload as well. Decoded images, prepared frames, thumbnails, and previews
    share a source identity based on the logical path and backing file's device, inode, size, and
    nanosecond modification time. After a source refresh, cache lookups use its new identity and miss
-   pixels retained under the old one.
+   pixels retained under the old one. Speculative display preparation reserves room for at most two
+   in-flight or unconsumed frames and 64 MiB of pixels; current-image and active-spread
+   preparation stays admissible when those limits are full.
    Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
    Fit, fill, actual-size, and manual modes survive navigation appropriately. While a cold JPEG header
@@ -160,8 +162,11 @@ they support.
    while sorting and navigation preserve unchanged thumbnails.
    Completed neighbor display frames feed a very-low-priority thumbnail worker when available.
    Remaining thumbnails are read, decoded, and resampled by that same single background worker;
-   JPEG thumbnails retain reduced-DCT decoding. The SDL thread validates results and uploads their
-   textures, so an unrelated slow thumbnail read does not block input or presentation. Its divider
+   JPEG thumbnails retain reduced-DCT decoding. Its unconsumed completion staging is capped at two
+   results and 16 MiB of pixels, with oversized requests skipped before preparation. Canceled and
+   uploaded thumbnail pixels retire on a worker even if the event loop stops. The SDL thread validates
+   results and uploads their textures, so an unrelated slow thumbnail read does not block input or
+   presentation. Its divider
    is mouse-resizable, its width and visibility persist, and thumbnail row height follows panel width
    so a narrow panel fits more images without large fixed gaps. Thumbnails have no forced horizontal
    inset and only a one-pixel vertical margin plus separator; source-area antialiasing keeps reduced

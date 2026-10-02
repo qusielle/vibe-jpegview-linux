@@ -94,10 +94,15 @@ bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
 struct ThumbnailPreparationDiagnostics {
 	std::size_t queued = 0;
 	std::size_t active = 0;
+	std::size_t completedResults = 0;
 	std::size_t completedBytes = 0;
 	std::size_t completedImages = 0;
+	std::size_t reservedCompletionBytes = 0;
+	std::size_t reservedCompletionImages = 0;
 	std::size_t retiredSourceBytes = 0;
 	std::size_t retiredSources = 0;
+	std::size_t retiredThumbnailBytes = 0;
+	std::size_t retiredThumbnailImages = 0;
 	std::size_t retainedSourceBytes = 0;
 };
 
@@ -109,6 +114,8 @@ public:
 	using ImagePtr = std::shared_ptr<const PreparedThumbnailImage>;
 	using Result = ThumbnailPreparationResult;
 	using Processor = std::function<ImagePtr(const ThumbnailPreparationRequest&)>;
+	static constexpr std::size_t kMaximumCompletedResults = 2;
+	static constexpr std::size_t kMaximumCompletedBytes = 16u * 1024u * 1024u;
 
 	explicit ThumbnailPreparationWorker(Processor processor = {});
 	~ThumbnailPreparationWorker();
@@ -120,6 +127,7 @@ public:
 	std::vector<Result> TakeCompleted(std::size_t maximumCount,
 		const std::set<PerfWorkClass>& permittedWorkClasses);
 	std::vector<Result> Cancel(const std::set<PerfWorkClass>& workClasses);
+	void Retire(const ImagePtr& image);
 	void Clear();
 	bool HasPendingWork() const;
 	ThumbnailPreparationDiagnostics GetDiagnostics() const;
