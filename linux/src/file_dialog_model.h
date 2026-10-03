@@ -1,6 +1,7 @@
 #pragma once
 
 #include "archive_source.h"
+#include "work_context.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -172,6 +173,7 @@ struct DirectorySummaryResult {
 	std::filesystem::path directory;
 	std::uint64_t generation = 0;
 	DirectorySummary summary;
+	WorkerFailure failure;
 };
 
 struct FileDialogFileSizeResult {
@@ -180,6 +182,7 @@ struct FileDialogFileSizeResult {
 	std::uintmax_t size = 0;
 	SourceDescriptor requestedSource;
 	SourceDescriptor observedSource;
+	WorkerFailure failure;
 };
 
 // Resolves ordinary-file and archive-member sizes away from the SDL event
@@ -246,6 +249,7 @@ public:
 	DirectorySummaryLoader& operator=(const DirectorySummaryLoader&) = delete;
 
 	void Request(const std::vector<std::filesystem::path>& directories, std::uint64_t generation);
+	bool IsYieldingForForeground() const;
 	std::vector<DirectorySummaryResult> TakeReady();
 
 private:

@@ -56,6 +56,7 @@ struct DecodedImageCacheDiagnostics {
 	std::size_t activeSpreadActive = 0;
 	std::size_t retiredBytes = 0;
 	std::size_t retiredImages = 0;
+	WorkerFailure lastWorkerFailure;
 };
 
 // Returns neighboring indices in likely-use order. The preferred direction

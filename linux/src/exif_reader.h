@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <string>
 
+#include "work_context.h"
+
 namespace jpegview_linux {
 
 // The fields mirror the information selected by JPEGView's CEXIFDisplayCtl.
@@ -37,6 +39,6 @@ struct ExifInfo {
 // scan data. Unsupported or malformed metadata is treated as absent; image
 // decoding itself is handled by the codec layer.
 bool ReadJpegMetadata(const std::filesystem::path& filename, ExifInfo& info,
-	std::string& jpegComment);
+	std::string& jpegComment, const WorkContext& context = {});
 
 } // namespace jpegview_linux

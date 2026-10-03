@@ -4,6 +4,7 @@
 #include "image_cache.h"
 #include "image_decoder.h"
 #include "perf_diagnostics.h"
+#include "source_work_coordinator.h"
 
 #include <algorithm>
 #include <atomic>
@@ -42,7 +43,7 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 	for (std::size_t position = 0; position < count && shouldContinue(); ++position) {
 		const DisplayPrefetchCandidate& candidate = request.neighbors[position];
 		if (!candidate.jpeg) continue;
-		PerfContextScope workContext(candidate.priority <= 2 ?
+		PerfContextScope perfContext(candidate.priority <= 2 ?
 			PerfWorkClass::NearestNavigationNeighbor :
 			PerfWorkClass::DistantSpeculation, PerfExecution::WorkerThread);
 		int sourceWidth = 0;
@@ -51,12 +52,31 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 			sourceWidth = candidate.source.Metadata().width;
 			sourceHeight = candidate.source.Metadata().height;
 		} else {
-			if (!candidate.source.Valid() || !IsImageSourceCurrent(candidate.source) ||
-				!shouldContinue()) continue;
+			if (!candidate.source.Valid() || !shouldContinue()) continue;
 			std::string errorMessage;
-			if (!dimensionsReader(candidate.source, sourceWidth, sourceHeight,
-				errorMessage, shouldContinue) || !shouldContinue() ||
-				!IsImageSourceCurrent(candidate.source)) continue;
+			WorkContext context = MakeWorkContext(candidate.source,
+				SourceWorkPriority::Metadata, shouldContinue);
+			SourceCpuWorkLease admission =
+				SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+					context, candidate.source.LogicalPath());
+			if (!admission) continue;
+			context.sourcePriority = context.Priority();
+			context.sourceAccessAlreadyAdmitted = true;
+			context.cpuProcessingAlreadyAdmitted = true;
+			bool dimensionsRead = false;
+			bool sourceCurrentAfterRead = false;
+			{
+				ScopedWorkContext activeContext(context);
+				dimensionsRead = context.Continue() && IsImageSourceCurrent(candidate.source) &&
+					dimensionsReader(candidate.source, sourceWidth, sourceHeight,
+						errorMessage, shouldContinue);
+				sourceCurrentAfterRead = dimensionsRead && context.Continue() &&
+					IsImageSourceCurrent(candidate.source);
+			}
+			context.sourceAccessAlreadyAdmitted = false;
+			context.cpuProcessingAlreadyAdmitted = false;
+			admission.Reset();
+			if (!dimensionsRead || !sourceCurrentAfterRead || !shouldContinue()) continue;
 		}
 		if (sourceWidth <= 0 || sourceHeight <= 0) continue;
 		result.dimensions.push_back({candidate.index, candidate.source.Key(),
@@ -150,8 +170,11 @@ struct DisplayPrefetchPlannerWorker::Impl {
 			dimensionsReader = [](const SourceDescriptor& source, int& width, int& height,
 				std::string& errorMessage, const Continue& shouldContinue) {
 			if (!shouldContinue()) return false;
+			WorkContext context = ResolveWorkContext(source.LogicalPath(),
+				SourceWorkPriority::Metadata);
+			context.shouldContinue = shouldContinue;
 			const bool read = ReadJpegDimensions(source.LogicalPath(), width, height,
-				errorMessage);
+				errorMessage, context);
 			return read && shouldContinue();
 		};
 		}
@@ -174,8 +197,34 @@ struct DisplayPrefetchPlannerWorker::Impl {
 				active = true;
 			}
 
-			DisplayPrefetchPlannerResult result = Plan(work.request, work.generation,
-				work.canceled, dimensionsReader);
+			DisplayPrefetchPlannerResult result;
+			try {
+				result = Plan(work.request, work.generation, work.canceled,
+					dimensionsReader);
+			} catch (const std::exception& error) {
+				result.failure = {WorkerFailureKind::Exception, error.what()};
+				result.requests.clear();
+				result.protectedTextureKeys.clear();
+				result.protectedTextureCacheKeys.clear();
+				result.dimensions.clear();
+				result.generation = work.generation;
+				result.catalogRevision = work.request.catalogRevision;
+				result.descriptorRevision = work.request.descriptorRevision;
+				result.viewportRevision = work.request.viewportRevision;
+				result.currentIndex = work.request.currentIndex;
+			} catch (...) {
+				result.failure = {WorkerFailureKind::Exception,
+					"unknown display prefetch planning failure"};
+				result.requests.clear();
+				result.protectedTextureKeys.clear();
+				result.protectedTextureCacheKeys.clear();
+				result.dimensions.clear();
+				result.generation = work.generation;
+				result.catalogRevision = work.request.catalogRevision;
+				result.descriptorRevision = work.request.descriptorRevision;
+				result.viewportRevision = work.request.viewportRevision;
+				result.currentIndex = work.request.currentIndex;
+			}
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				active = false;

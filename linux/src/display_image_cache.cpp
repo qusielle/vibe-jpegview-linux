@@ -5,6 +5,7 @@
 #include "image_cache.h"
 #include "cache_policy.h"
 #include "perf_diagnostics.h"
+#include "source_work_coordinator.h"
 
 #include <algorithm>
 #include <array>
@@ -53,6 +54,87 @@ bool EstimateDisplayBytes(const DisplayImageRequest& request, std::size_t& bytes
 
 bool IsSpeculativeDisplayWork(bool foreground, PerfWorkClass workClass) {
 	return !foreground && workClass != PerfWorkClass::ActiveImageSpread;
+}
+
+bool ClassifyArchiveMemberWithSourceAdmission(const fs::path& path,
+	WorkContext context, bool& archiveMember) {
+	archiveMember = false;
+	if (context.sourceAccessAlreadyAdmitted) {
+		if (context.Continue()) {
+			ScopedWorkContext activeContext(context);
+			archiveMember = IsArchiveMemberLocation(path);
+			return context.Continue();
+		}
+		return false;
+	}
+	if (context.cpuProcessingAlreadyAdmitted) return false;
+	SourceWorkLease admission = SourceWorkCoordinator::Global().Acquire(context, path);
+	if (!admission || !context.Continue()) return false;
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	{
+		ScopedWorkContext activeContext(context);
+		archiveMember = IsArchiveMemberLocation(path);
+	}
+	return context.Continue();
+}
+
+bool ValidateSourceWithAdmission(const SourceDescriptor& source,
+	const WorkContext& ownerContext, bool& sourceCurrent) {
+	WorkContext context = MakeWorkContext(source,
+		SourceWorkPriority::Metadata, ownerContext.shouldContinue);
+	context.currentPriority = ownerContext.currentPriority;
+	context.onForegroundYield = ownerContext.onForegroundYield;
+	const fs::path& path = source.LogicalPath();
+	bool archiveMember = source.Metadata().archiveMember;
+	if (!archiveMember && !ClassifyArchiveMemberWithSourceAdmission(path,
+		context, archiveMember)) return false;
+	if (archiveMember) {
+		SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+			context, path);
+		if (!admission || !context.Continue()) return false;
+		context.sourcePriority = context.Priority();
+		context.sourceAccessAlreadyAdmitted = true;
+		context.cpuProcessingAlreadyAdmitted = true;
+		ScopedWorkContext activeContext(context);
+		sourceCurrent = IsImageSourceCurrent(source);
+		return context.Continue();
+	}
+
+	SourceWorkLease admission = SourceWorkCoordinator::Global().Acquire(context, path);
+	if (!admission || !context.Continue()) return false;
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	ScopedWorkContext activeContext(context);
+	sourceCurrent = IsImageSourceCurrent(source);
+	return context.Continue();
+}
+
+SourceDescriptor DescribeCurrentSourceWithAdmission(const fs::path& path,
+	const WorkContext& ownerContext) {
+	WorkContext context = MakePathWorkContext(path,
+		SourceWorkPriority::Metadata, ownerContext.shouldContinue);
+	context.currentPriority = ownerContext.currentPriority;
+	context.onForegroundYield = ownerContext.onForegroundYield;
+	bool archiveMember = false;
+	if (!ClassifyArchiveMemberWithSourceAdmission(path, context, archiveMember)) return {};
+	if (archiveMember) {
+		SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+			context, path);
+		if (!admission || !context.Continue()) return {};
+		context.sourcePriority = context.Priority();
+		context.sourceAccessAlreadyAdmitted = true;
+		context.cpuProcessingAlreadyAdmitted = true;
+		ScopedWorkContext activeContext(context);
+		return DescribeImageSource(path, context);
+	}
+
+	SourceWorkLease admission = SourceWorkCoordinator::Global().Acquire(context, path);
+	if (!admission || !context.Continue()) return {};
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	ScopedWorkContext activeContext(context);
+	return DescribeImageSource(path, context);
 }
 
 std::shared_ptr<const void> PreparedAllocationIdentity(
@@ -171,8 +253,22 @@ std::string SerializeCacheKey(const DisplayImageCacheKey& key) {
 
 DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& request) {
 	if (!request.Valid()) return {};
-	const auto cancelled = [&request] {
-		return request.cancellation && request.cancellation->load();
+	WorkContext workContext = request.workContext;
+	if (workContext.source.Empty()) {
+		const SourceWorkPriority priority = request.workClass == PerfWorkClass::VisibleThumbnail ||
+			request.workClass == PerfWorkClass::NearestNavigationNeighbor ||
+			request.workClass == PerfWorkClass::DistantSpeculation ?
+			SourceWorkPriority::Speculative : SourceWorkPriority::Foreground;
+		workContext = MakeWorkContext(request.source, priority);
+	}
+	const std::function<bool()> previousContinue = workContext.shouldContinue;
+	workContext.shouldContinue = [&request, previousContinue] {
+		return (!request.cancellation || !request.cancellation->load()) &&
+			(!previousContinue || previousContinue());
+	};
+	const auto cancelled = [&workContext] { return !workContext.Continue(); };
+	const std::function<bool()> shouldContinue = [&workContext] {
+		return workContext.Continue();
 	};
 	if (cancelled()) return {};
 	DecodedImage displayDecoded;
@@ -187,11 +283,18 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		const int decodeTargetWidth = swapsAxes ? request.targetHeight : request.targetWidth;
 		const int decodeTargetHeight = swapsAxes ? request.targetWidth : request.targetHeight;
 		if (!DecodeJpegForDisplay(request.filename, decodeTargetWidth, decodeTargetHeight,
-			displayDecoded, sourceWidth, sourceHeight, errorMessage) ||
+			displayDecoded, sourceWidth, sourceHeight, errorMessage, workContext) ||
 			displayDecoded.frames.empty() || sourceWidth != request.sourceWidth ||
 			sourceHeight != request.sourceHeight || cancelled()) return {};
 		decodedFrame = &displayDecoded.frames.front();
 	}
+	CpuWorkLease cpuLease;
+	if (!workContext.cpuProcessingAlreadyAdmitted) {
+		cpuLease = SourceWorkCoordinator::Global().AcquireCpu(workContext);
+		if (!cpuLease) return {};
+		workContext.cpuProcessingAlreadyAdmitted = true;
+	}
+	if (!workContext.Continue()) return {};
 	Image image;
 	if (request.decoded) {
 		if (!image.StoreBGRA(decodedFrame->bgra.data(), decodedFrame->width,
@@ -207,17 +310,19 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	}
 	{
 		PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Processing);
-		if (!image.ApplyProcessing(request.processing, request.autoContrast) || cancelled()) return {};
+		if (!image.ApplyProcessing(request.processing, request.autoContrast,
+			shouldContinue) || cancelled()) return {};
 	}
 	switch (request.rotationQuarterTurns) {
 	case 1:
-		if (!image.Rotate(true)) return {};
+		if (!image.Rotate(true, shouldContinue)) return {};
 		break;
 	case 2:
-		if (!image.Rotate(true) || !image.Rotate(true)) return {};
+		if (!image.Rotate(true, shouldContinue) ||
+			!image.Rotate(true, shouldContinue)) return {};
 		break;
 	case 3:
-		if (!image.Rotate(false)) return {};
+		if (!image.Rotate(false, shouldContinue)) return {};
 		break;
 	default:
 		break;
@@ -225,7 +330,8 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	if (cancelled()) return {};
 	if (request.targetWidth < image.width || request.targetHeight < image.height) {
 		PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Resampling);
-		if (!image.Resize(request.targetWidth, request.targetHeight) || cancelled()) return {};
+		if (!image.Resize(request.targetWidth, request.targetHeight, 3,
+			shouldContinue) || cancelled()) return {};
 	}
 
 	auto prepared = std::make_shared<PreparedDisplayImage>();
@@ -615,12 +721,7 @@ struct DisplayImageCache::Impl {
 		: byteBudget(budget), processor(std::move(prepare)), sharedBudget(std::move(shared)),
 		  diagnosticsEnabled(PerfDiagnostics::Instance().Enabled()) {
 		if (!processor) processor = PrepareDisplayImage;
-		std::size_t count = requestedWorkers;
-		if (count == 0) {
-			const unsigned int hardwareThreads = std::thread::hardware_concurrency();
-			count = hardwareThreads > 2 ? std::min<std::size_t>(4, hardwareThreads - 1) : 1;
-		}
-		count = std::max<std::size_t>(1, count);
+		const std::size_t count = ClampCpuWorkerCount(requestedWorkers);
 		workers.reserve(count);
 		for (std::size_t index = 0; index < count; ++index) {
 			workers.emplace_back([this] { Run(); });
@@ -885,26 +986,120 @@ struct DisplayImageCache::Impl {
 			PerfContextScope context(work.request.workClass, PerfExecution::WorkerThread);
 			const bool cancelledBeforeOpen = work.request.cancellation &&
 				work.request.cancellation->load();
-			const bool sourceCurrentBeforeOpen = !cancelledBeforeOpen &&
-				IsImageSourceCurrent(work.request.source);
+			const auto cancellation = work.request.cancellation;
+			const auto previousContinue = work.request.workContext.shouldContinue;
+			const SourceWorkPriority sourcePriority = work.foreground ||
+				work.request.workClass == PerfWorkClass::ActiveImageSpread ?
+				SourceWorkPriority::Foreground : SourceWorkPriority::Speculative;
+			work.request.workContext = MakeWorkContext(work.request.source,
+				sourcePriority,
+				[cancellation, previousContinue] {
+					if (cancellation && cancellation->load()) return false;
+					if (!previousContinue) return true;
+					try {
+						return previousContinue();
+					} catch (...) {
+						return false;
+					}
+				});
+			work.request.workContext.currentPriority = [this,
+				cacheKey = work.request.cacheKey, sourcePriority] {
+				std::lock_guard<std::mutex> lock(mutex);
+				if (foregroundKeys.find(cacheKey) != foregroundKeys.end()) {
+					return SourceWorkPriority::Foreground;
+				}
+				const auto activeClass = inFlightWorkClasses.find(cacheKey);
+				return activeClass != inFlightWorkClasses.end() &&
+					activeClass->second == PerfWorkClass::ActiveImageSpread ?
+					SourceWorkPriority::Foreground : sourcePriority;
+			};
+			ScopedWorkContext activeContext(work.request.workContext);
+			bool sourceCurrentBeforeOpen = false;
+			bool sourceCheckSucceededBeforeOpen = false;
 			ImagePtr image;
-			if (sourceCurrentBeforeOpen) {
+			WorkerFailure workerFailure;
+			if (!cancelledBeforeOpen) {
 				try {
-					image = processor(work.request);
-				} catch (const std::exception&) {
-					image.reset();
+					sourceCheckSucceededBeforeOpen = ValidateSourceWithAdmission(
+						work.request.source, work.request.workContext,
+						sourceCurrentBeforeOpen);
+					if (!sourceCheckSucceededBeforeOpen) {
+						workerFailure = {WorkerFailureKind::Cancelled,
+							"display source validation was cancelled"};
+					}
+				} catch (const std::exception& error) {
+					workerFailure = {WorkerFailureKind::Exception, error.what()};
+				} catch (...) {
+					workerFailure = {WorkerFailureKind::Exception,
+						"unknown display source validation failure"};
 				}
 			}
-			const bool cancelledAfterWork = work.request.cancellation &&
-				work.request.cancellation->load();
-			const bool sourceCurrentBeforePublish = !cancelledAfterWork &&
-				IsImageSourceCurrent(work.request.source);
+			if (cancelledBeforeOpen) {
+				workerFailure = {WorkerFailureKind::Cancelled,
+					"display preparation was cancelled"};
+			} else if (sourceCheckSucceededBeforeOpen && !sourceCurrentBeforeOpen) {
+				workerFailure = {WorkerFailureKind::SourceUnavailable,
+					"display source changed before preparation"};
+			}
+			if (sourceCheckSucceededBeforeOpen && sourceCurrentBeforeOpen &&
+				!workerFailure.Failed()) {
+				try {
+					image = processor(work.request);
+				} catch (const std::exception& error) {
+					image.reset();
+					workerFailure = {WorkerFailureKind::Exception, error.what()};
+				} catch (...) {
+					image.reset();
+					workerFailure = {WorkerFailureKind::Exception,
+						"unknown display preparation failure"};
+				}
+			}
+			const bool cancelledAfterWork =
+				(work.request.cancellation && work.request.cancellation->load()) ||
+				!work.request.workContext.Continue();
+			bool sourceCurrentBeforePublish = false;
+			bool sourceCheckSucceededBeforePublish = false;
+			if (!cancelledAfterWork && !workerFailure.Failed()) {
+				try {
+					sourceCheckSucceededBeforePublish = ValidateSourceWithAdmission(
+						work.request.source, work.request.workContext,
+						sourceCurrentBeforePublish);
+					if (!sourceCheckSucceededBeforePublish) {
+						workerFailure = {WorkerFailureKind::Cancelled,
+							"display source validation was cancelled"};
+					}
+				} catch (const std::exception& error) {
+					workerFailure = {WorkerFailureKind::Exception, error.what()};
+				} catch (...) {
+					workerFailure = {WorkerFailureKind::Exception,
+						"unknown display source validation failure"};
+				}
+			}
+			if (cancelledAfterWork) {
+				workerFailure = {WorkerFailureKind::Cancelled,
+					"display preparation was cancelled"};
+			} else if (sourceCheckSucceededBeforePublish && !sourceCurrentBeforePublish) {
+				workerFailure = {WorkerFailureKind::SourceUnavailable,
+					"display source changed while it was being prepared"};
+			} else if (!image && !workerFailure.Failed()) {
+				workerFailure = {WorkerFailureKind::ProcessingFailed,
+					"display preparation produced no image"};
+			}
 			const bool sourceChanged = !cancelledBeforeOpen &&
-				(!sourceCurrentBeforeOpen ||
-					(!cancelledAfterWork && !sourceCurrentBeforePublish));
+				((sourceCheckSucceededBeforeOpen && !sourceCurrentBeforeOpen) ||
+					(!cancelledAfterWork && sourceCheckSucceededBeforePublish &&
+						!sourceCurrentBeforePublish));
 			SourceDescriptor changedSource;
-			if (sourceChanged) {
-				changedSource = DescribeImageSource(work.request.source.LogicalPath());
+			if (sourceChanged && workerFailure.kind != WorkerFailureKind::Exception) {
+				try {
+					changedSource = DescribeCurrentSourceWithAdmission(
+						work.request.source.LogicalPath(), work.request.workContext);
+				} catch (const std::exception& error) {
+					workerFailure = {WorkerFailureKind::Exception, error.what()};
+				} catch (...) {
+					workerFailure = {WorkerFailureKind::Exception,
+						"unknown display source refresh failure"};
+				}
 				image.reset();
 			}
 			const SourceChangeNotice sourceChange{
@@ -927,6 +1122,7 @@ struct DisplayImageCache::Impl {
 				inFlightKeys.erase(work.request.cacheKey);
 				inFlightPriorities.erase(work.request.cacheKey);
 				inFlightCancellation.erase(work.request.cacheKey);
+				if (workerFailure.Failed()) lastWorkerFailure = workerFailure;
 				Reservation reservation;
 				const auto activeReservation = inFlightReservations.find(work.request.cacheKey);
 				if (activeReservation != inFlightReservations.end()) {
@@ -1105,6 +1301,7 @@ struct DisplayImageCache::Impl {
 	DisplayImageCacheKey latestForegroundKey;
 	std::size_t cachedBytes = 0;
 	std::size_t activeWorkers = 0;
+	WorkerFailure lastWorkerFailure;
 	std::size_t speculativeReservedBytes = 0;
 	std::size_t speculativeReservedImages = 0;
 	std::uint64_t generation = 0;
@@ -1834,6 +2031,7 @@ DisplayImageCacheDiagnostics DisplayImageCache::GetDiagnostics() const {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	diagnostics.cachedBytes = impl_->cachedBytes;
 	diagnostics.cachedImages = impl_->entries.size();
+	diagnostics.lastWorkerFailure = impl_->lastWorkerFailure;
 	diagnostics.borrowedBytes = impl_->borrowedBytes;
 	diagnostics.borrowedImages = impl_->borrowedAllocations.size();
 	diagnostics.speculativeReservedImages = impl_->speculativeReservedImages;

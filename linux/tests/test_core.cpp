@@ -36,6 +36,7 @@
 #include "thumbnail_resampler.h"
 #include "interaction_work_policy.h"
 #include "work_batch_gate.h"
+#include "source_work_coordinator.h"
 #include "perf_diagnostics.h"
 #include "app_icon.h"
 #include "image_info_model.h"
@@ -115,6 +116,115 @@ public:
 
 void Expect(bool condition, const std::string& message) {
 	if (!condition) throw TestFailure(message);
+}
+
+struct SourceWorkFailureInjection {
+	jpegview_linux::detail::SourceWorkTestHookPoint point;
+	std::atomic<bool> fired{false};
+};
+
+void ThrowAtSourceWorkHook(jpegview_linux::detail::SourceWorkTestHookPoint point,
+	void* context) {
+	auto* injection = static_cast<SourceWorkFailureInjection*>(context);
+	if (injection != nullptr && point == injection->point &&
+		!injection->fired.exchange(true)) {
+		throw std::bad_alloc();
+	}
+}
+
+struct SourceWorkRegistrationCounter {
+	std::atomic<int> sourceRegistrations{0};
+	std::atomic<bool> threwOnNestedRegistration{false};
+};
+
+void ThrowOnNestedSourceRegistration(
+	jpegview_linux::detail::SourceWorkTestHookPoint point, void* context) {
+	auto* counter = static_cast<SourceWorkRegistrationCounter*>(context);
+	if (counter != nullptr && point ==
+		jpegview_linux::detail::SourceWorkTestHookPoint::InitialSourceQueueRegistration &&
+		counter->sourceRegistrations.fetch_add(1) == 1) {
+		counter->threwOnNestedRegistration.store(true);
+		throw std::bad_alloc();
+	}
+}
+
+struct ArchiveSourceProbeObservation {
+	std::atomic<int> locationClassification{0};
+	std::atomic<int> unadmittedLocationClassification{0};
+	std::atomic<int> passwordIdentity{0};
+	std::atomic<int> unadmittedPasswordIdentity{0};
+};
+
+struct ArchiveSourceProbeBarrier {
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool entered = false;
+	bool release = false;
+	bool sourceAdmitted = false;
+	bool cpuAdmitted = false;
+};
+
+void BlockArchiveClassificationProbe(jpegview_linux::detail::ArchiveSourceProbePoint point,
+	const fs::path&, bool sourceAdmitted, bool cpuAdmitted, void* context) {
+	if (point != jpegview_linux::detail::ArchiveSourceProbePoint::LocationClassificationStat) {
+		return;
+	}
+	auto* barrier = static_cast<ArchiveSourceProbeBarrier*>(context);
+	if (barrier == nullptr) return;
+	std::unique_lock<std::mutex> lock(barrier->mutex);
+	if (barrier->entered) return;
+	barrier->entered = true;
+	barrier->sourceAdmitted = sourceAdmitted;
+	barrier->cpuAdmitted = cpuAdmitted;
+	barrier->changed.notify_all();
+	(void)barrier->changed.wait_for(lock, std::chrono::seconds(5), [&] {
+		return barrier->release;
+	});
+}
+
+void ObserveArchiveSourceProbe(jpegview_linux::detail::ArchiveSourceProbePoint point,
+	const fs::path&, bool sourceAdmitted, bool cpuAdmitted, void* context) {
+	auto* observation = static_cast<ArchiveSourceProbeObservation*>(context);
+	if (observation == nullptr) return;
+	if (point == jpegview_linux::detail::ArchiveSourceProbePoint::LocationClassificationStat) {
+		observation->locationClassification.fetch_add(1);
+		if (!sourceAdmitted) observation->unadmittedLocationClassification.fetch_add(1);
+	} else {
+		observation->passwordIdentity.fetch_add(1);
+		if (!sourceAdmitted || !cpuAdmitted) {
+			observation->unadmittedPasswordIdentity.fetch_add(1);
+		}
+	}
+}
+
+struct ArchiveSourceProbeHookReset {
+	~ArchiveSourceProbeHookReset() {
+		jpegview_linux::SetArchiveSourceProbeHookForTesting(nullptr, nullptr);
+	}
+};
+
+struct ArchiveCatalogFailureInjection {
+	std::atomic<bool> fired{false};
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool entered = false;
+	bool release = false;
+};
+
+void ThrowAtArchiveCatalogHook(jpegview_linux::detail::ArchiveCatalogTestHookPoint,
+	void* context) {
+	auto* injection = static_cast<ArchiveCatalogFailureInjection*>(context);
+	if (injection != nullptr && !injection->fired.exchange(true)) {
+		{
+			std::unique_lock<std::mutex> lock(injection->mutex);
+			injection->entered = true;
+			injection->changed.notify_all();
+			(void)injection->changed.wait_for(lock, std::chrono::seconds(5), [&] {
+				return injection->release;
+			});
+		}
+		throw std::bad_alloc();
+	}
 }
 
 template <typename Mutex, typename Condition, typename Flag>
@@ -413,6 +523,35 @@ void WriteZipArchive(const fs::path& archivePath,
 		const std::string message = zip_strerror(archive);
 		zip_discard(archive);
 		throw TestFailure("cannot finish ZIP fixture: " + message);
+	}
+}
+
+void WriteZipArchiveWithImageMembers(const fs::path& archivePath, std::size_t count) {
+	int errorCode = 0;
+	zip_t* archive = zip_open(archivePath.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &errorCode);
+	if (archive == nullptr) throw TestFailure("cannot create large ZIP archive: " +
+		std::to_string(errorCode));
+	static constexpr char imageBytes[] = "x";
+	for (std::size_t index = 0; index < count; ++index) {
+		const std::string name = "image-" + std::to_string(index) + ".jpg";
+		zip_source_t* source = zip_source_buffer(archive, imageBytes,
+			sizeof(imageBytes) - 1, 0);
+		if (source == nullptr) {
+			const std::string message = zip_strerror(archive);
+			zip_discard(archive);
+			throw TestFailure("cannot add large ZIP fixture source: " + message);
+		}
+		if (zip_file_add(archive, name.c_str(), source, ZIP_FL_ENC_UTF_8) < 0) {
+			const std::string message = zip_strerror(archive);
+			zip_source_free(source);
+			zip_discard(archive);
+			throw TestFailure("cannot add large ZIP fixture member: " + message);
+		}
+	}
+	if (zip_close(archive) != 0) {
+		const std::string message = zip_strerror(archive);
+		zip_discard(archive);
+		throw TestFailure("cannot finish large ZIP fixture: " + message);
 	}
 }
 
@@ -1168,6 +1307,321 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 		"malformed ZIP input did not fail with a useful error");
 }
 
+void TestArchiveCatalogFailureReleasesLoadingState() {
+	TemporaryDirectory temporary;
+	const fs::path payload = temporary.path() / "catalog-payload.bin";
+	const fs::path archive = temporary.path() / "catalog-exception.zip";
+	WriteBytes(payload, {1, 2, 3, 4, 5, 6});
+	WriteZipArchive(archive, {{"image.jpg", payload}});
+	const fs::path member = archive / "image.jpg";
+	ArchiveCatalogFailureInjection injection;
+	jpegview_linux::WorkContext preadmittedContext = jpegview_linux::MakePathWorkContext(
+		member, jpegview_linux::SourceWorkPriority::Metadata);
+	preadmittedContext.sourceAccessAlreadyAdmitted = true;
+	preadmittedContext.cpuProcessingAlreadyAdmitted = true;
+	bool firstLoadSucceeded = false;
+	jpegview_linux::ArchiveErrorKind firstErrorKind = jpegview_linux::ArchiveErrorKind::None;
+	std::string firstError;
+	std::mutex waiterMutex;
+	std::condition_variable waiterChanged;
+	bool waiterObservedLoading = false;
+	bool waiterFinished = false;
+	std::atomic<int> waiterContinueCalls{0};
+	std::chrono::steady_clock::time_point waiterDeadline =
+		std::chrono::steady_clock::time_point::max();
+	std::atomic<bool> waiterCanceled{false};
+	jpegview_linux::WorkContext waiterContext = preadmittedContext;
+	bool waiterLoadSucceeded = false;
+	jpegview_linux::ArchiveErrorKind waiterErrorKind = jpegview_linux::ArchiveErrorKind::None;
+	std::string waiterError;
+	std::thread firstLoader;
+	std::thread waiter;
+	jpegview_linux::SetArchiveCatalogTestHookForTesting(
+		ThrowAtArchiveCatalogHook, &injection);
+	struct CatalogHookReset {
+		bool active = true;
+
+		void Reset() {
+			if (!active) return;
+			jpegview_linux::SetArchiveCatalogTestHookForTesting(nullptr, nullptr);
+			active = false;
+		}
+
+		~CatalogHookReset() { Reset(); }
+	} hookReset;
+	struct CatalogFailureThreadCleanup {
+		ArchiveCatalogFailureInjection& injection;
+		std::atomic<bool>& waiterCanceled;
+		std::condition_variable& waiterChanged;
+		std::thread& firstLoader;
+		std::thread& waiter;
+
+		void ReleaseLoader() {
+			{
+				std::lock_guard<std::mutex> lock(injection.mutex);
+				injection.release = true;
+			}
+			injection.changed.notify_all();
+		}
+
+		void CancelWaiter() {
+			waiterCanceled.store(true);
+			waiterChanged.notify_all();
+		}
+
+		void JoinThreads() {
+			if (firstLoader.joinable()) firstLoader.join();
+			if (waiter.joinable()) waiter.join();
+		}
+
+		~CatalogFailureThreadCleanup() {
+			ReleaseLoader();
+			CancelWaiter();
+			JoinThreads();
+		}
+	} threadCleanup{injection, waiterCanceled, waiterChanged, firstLoader, waiter};
+	waiterContext.shouldContinue = [&] {
+		bool notify = false;
+		bool keepWaiting = false;
+		{
+			std::lock_guard<std::mutex> lock(waiterMutex);
+			const int call = waiterContinueCalls.fetch_add(1);
+			if (call == 0) {
+				waiterDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+			}
+			if (call == 1) {
+				waiterObservedLoading = true;
+				notify = true;
+			}
+			keepWaiting = !waiterCanceled.load() &&
+				std::chrono::steady_clock::now() < waiterDeadline;
+		}
+		if (notify) waiterChanged.notify_all();
+		return keepWaiting;
+	};
+	firstLoader = std::thread([&] {
+		jpegview_linux::ArchiveMemberInfo info;
+		firstLoadSucceeded = jpegview_linux::GetArchiveMemberInfo(member, info,
+			firstError, &firstErrorKind, preadmittedContext);
+	});
+	bool loaderHookEntered = false;
+	{
+		std::unique_lock<std::mutex> lock(injection.mutex);
+		loaderHookEntered = injection.changed.wait_for(lock, std::chrono::seconds(3), [&] {
+			return injection.entered;
+		});
+	}
+	if (loaderHookEntered) {
+		waiter = std::thread([&] {
+			jpegview_linux::ArchiveMemberInfo info;
+			waiterLoadSucceeded = jpegview_linux::GetArchiveMemberInfo(member, info,
+				waiterError, &waiterErrorKind, waiterContext);
+			{
+				std::lock_guard<std::mutex> lock(waiterMutex);
+				waiterFinished = true;
+			}
+			waiterChanged.notify_all();
+		});
+	}
+	bool waiterReachedLoadingState = false;
+	if (loaderHookEntered) {
+		std::unique_lock<std::mutex> lock(waiterMutex);
+		waiterReachedLoadingState = waiterChanged.wait_for(lock,
+			std::chrono::seconds(3), [&] { return waiterObservedLoading; });
+	}
+	threadCleanup.ReleaseLoader();
+	if (firstLoader.joinable()) firstLoader.join();
+	bool waiterCompletionObserved = false;
+	if (waiter.joinable()) {
+		std::unique_lock<std::mutex> lock(waiterMutex);
+		waiterCompletionObserved = waiterChanged.wait_for(lock,
+			std::chrono::seconds(3), [&] { return waiterFinished; });
+		lock.unlock();
+		if (!waiterCompletionObserved) threadCleanup.CancelWaiter();
+		if (waiter.joinable()) waiter.join();
+	}
+	hookReset.Reset();
+	const bool firstLoadReportedFailure = !firstLoadSucceeded && injection.fired.load() &&
+		firstErrorKind == jpegview_linux::ArchiveErrorKind::Other && !firstError.empty();
+	const bool waiterReportedFailure = loaderHookEntered && waiterReachedLoadingState &&
+		waiterCompletionObserved && !waiterLoadSucceeded &&
+		waiterErrorKind == firstErrorKind && waiterError == firstError;
+	jpegview_linux::ArchiveMemberInfo retryInfo;
+	std::string retryError;
+	const auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	const jpegview_linux::WorkContext retryContext = jpegview_linux::MakePathWorkContext(
+		member, jpegview_linux::SourceWorkPriority::Metadata, [&retryDeadline] {
+			return std::chrono::steady_clock::now() < retryDeadline;
+		});
+	const bool retrySucceeded = jpegview_linux::GetArchiveMemberInfo(member, retryInfo,
+		retryError, nullptr, retryContext) &&
+		retryInfo.size == fs::file_size(payload);
+	const auto snapshot = jpegview_linux::SourceWorkCoordinator::Global().Snapshot();
+	Expect(firstLoadReportedFailure && waiterReportedFailure && retrySucceeded &&
+		snapshot.activeForeground == 0 &&
+		snapshot.activeSpeculative == 0 && snapshot.activeCpu == 0 &&
+		snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0 &&
+		snapshot.waitingCpu == 0,
+		"an exception left a cold archive catalog marked loading or leaked worker admission");
+}
+
+void TestColdArchiveMemberMetadataYieldAndReplacement() {
+	TemporaryDirectory temporary;
+	const fs::path payload = temporary.path() / "metadata-payload.bin";
+	WriteBytes(payload, {8, 7, 6, 5, 4, 3, 2, 1});
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const auto coordinatorIdle = [&coordinator] {
+		return coordinator.WaitForSnapshot([](const auto& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingForeground == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0 &&
+				!snapshot.foregroundPending;
+		}, std::chrono::seconds(3));
+	};
+
+	const fs::path retryArchive = temporary.path() / "metadata-retry.zip";
+	WriteZipArchive(retryArchive, {{"image.jpg", payload}});
+	const fs::path retryMember = retryArchive / "image.jpg";
+	const jpegview_linux::SourceDescriptor retryPlaceholder(retryMember, {}, {});
+	std::atomic<bool> retryGateInjected{false};
+	std::atomic<bool> retrySawPairedAdmission{false};
+	std::mutex retryMutex;
+	std::condition_variable retryChanged;
+	const auto retryCapture = [&](const jpegview_linux::SourceDescriptor& requested) {
+		if (requested.LogicalPath() == retryMember && !retryGateInjected.load()) {
+			const auto snapshot = coordinator.Snapshot();
+			if (snapshot.activeSpeculative == 1 && snapshot.activeCpu == 1) {
+				retrySawPairedAdmission.store(true);
+				coordinator.SetForegroundPending(true);
+				{
+					std::lock_guard<std::mutex> lock(retryMutex);
+					retryGateInjected.store(true);
+				}
+				retryChanged.notify_all();
+			}
+		}
+		return jpegview_linux::DescribeImageSource(requested.LogicalPath());
+	};
+	jpegview_linux::FileDialogFileSizeLoader retryLoader(retryCapture);
+	const bool retryCoordinatorIdle = coordinatorIdle();
+	retryLoader.RequestSources({retryPlaceholder}, 901);
+	bool retryGateObserved = false;
+	{
+		std::unique_lock<std::mutex> lock(retryMutex);
+		retryGateObserved = retryChanged.wait_for(lock, std::chrono::seconds(3), [&] {
+			return retryGateInjected.load();
+		});
+	}
+	auto retryForegroundCanceled = std::make_shared<std::atomic<bool>>(false);
+	const auto retryForegroundContext = jpegview_linux::MakePathWorkContext(retryMember,
+		jpegview_linux::SourceWorkPriority::Foreground,
+		[retryForegroundCanceled] { return !retryForegroundCanceled->load(); });
+	auto retryForegroundFuture = std::async(std::launch::async, [&coordinator,
+		retryMember, retryForegroundContext] {
+		return coordinator.Acquire(retryForegroundContext, retryMember);
+	});
+	const bool retryForegroundAdmitted = coordinator.WaitForSnapshot(
+		[](const auto& snapshot) {
+			return snapshot.activeForeground == 1 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(3));
+	const bool retryWithheldWhileForeground = retryLoader.TakeReady().empty();
+	if (!retryForegroundAdmitted) {
+		retryForegroundCanceled->store(true);
+		coordinator.SetForegroundPending(false);
+		coordinator.NotifyWaiters();
+	}
+	jpegview_linux::SourceWorkLease retryForegroundLease = retryForegroundFuture.get();
+	coordinator.SetForegroundPending(false);
+	retryForegroundLease.Reset();
+	std::vector<jpegview_linux::FileDialogFileSizeResult> retryResults;
+	const auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+	while (retryResults.empty() && std::chrono::steady_clock::now() < retryDeadline) {
+		retryResults = retryLoader.TakeReady();
+		if (retryResults.empty()) std::this_thread::yield();
+	}
+	const bool retryPublishedCurrent = retryResults.size() == 1 &&
+		retryResults.front().generation == 901 && retryResults.front().path == retryMember &&
+		retryResults.front().size == fs::file_size(payload) &&
+		retryResults.front().observedSource.Metadata().hasFileSize;
+	Expect(retryCoordinatorIdle && retryGateObserved && retrySawPairedAdmission.load() &&
+		retryForegroundAdmitted && retryWithheldWhileForeground && retryPublishedCurrent &&
+		coordinatorIdle(),
+		"cold archive member metadata did not yield paired permits and retry its current row result");
+
+	const fs::path replacedArchive = temporary.path() / "metadata-replaced.zip";
+	WriteZipArchive(replacedArchive, {{"old.jpg", payload}});
+	const fs::path replacedMember = replacedArchive / "old.jpg";
+	const fs::path replacementFile = temporary.path() / "replacement-row.bin";
+	WriteText(replacementFile, "replacement generation result");
+	const jpegview_linux::SourceDescriptor oldPlaceholder(replacedMember, {}, {});
+	const jpegview_linux::SourceDescriptor replacementPlaceholder(replacementFile, {}, {});
+	std::atomic<bool> replacementGateInjected{false};
+	std::mutex replacementMutex;
+	std::condition_variable replacementChanged;
+	const auto replacementCapture = [&](const jpegview_linux::SourceDescriptor& requested) {
+		if (requested.LogicalPath() == replacedMember && !replacementGateInjected.load()) {
+			const auto snapshot = coordinator.Snapshot();
+			if (snapshot.activeSpeculative == 1 && snapshot.activeCpu == 1) {
+				coordinator.SetForegroundPending(true);
+				{
+					std::lock_guard<std::mutex> lock(replacementMutex);
+					replacementGateInjected.store(true);
+				}
+				replacementChanged.notify_all();
+			}
+		}
+		return jpegview_linux::DescribeImageSource(requested.LogicalPath());
+	};
+	jpegview_linux::FileDialogFileSizeLoader replacementLoader(replacementCapture);
+	const bool replacementCoordinatorIdle = coordinatorIdle();
+	replacementLoader.RequestSources({oldPlaceholder}, 910);
+	bool replacementGateObserved = false;
+	{
+		std::unique_lock<std::mutex> lock(replacementMutex);
+		replacementGateObserved = replacementChanged.wait_for(lock,
+			std::chrono::seconds(3), [&] { return replacementGateInjected.load(); });
+	}
+	auto replacementForegroundCanceled = std::make_shared<std::atomic<bool>>(false);
+	const auto replacementForegroundContext = jpegview_linux::MakePathWorkContext(replacedMember,
+		jpegview_linux::SourceWorkPriority::Foreground,
+		[replacementForegroundCanceled] { return !replacementForegroundCanceled->load(); });
+	auto replacementForegroundFuture = std::async(std::launch::async,
+		[&coordinator, replacedMember, replacementForegroundContext] {
+			return coordinator.Acquire(replacementForegroundContext, replacedMember);
+		});
+	const bool replacementForegroundAdmitted = coordinator.WaitForSnapshot(
+		[](const auto& snapshot) {
+			return snapshot.activeForeground == 1 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0;
+		}, std::chrono::seconds(3));
+	replacementLoader.RequestSources({replacementPlaceholder}, 911);
+	const bool replacedResultWithheld = replacementLoader.TakeReady().empty();
+	if (!replacementForegroundAdmitted) {
+		replacementForegroundCanceled->store(true);
+		coordinator.SetForegroundPending(false);
+		coordinator.NotifyWaiters();
+	}
+	jpegview_linux::SourceWorkLease replacementForegroundLease =
+		replacementForegroundFuture.get();
+	coordinator.SetForegroundPending(false);
+	replacementForegroundLease.Reset();
+	std::vector<jpegview_linux::FileDialogFileSizeResult> replacementResults;
+	const auto replacementDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+	while (replacementResults.empty() &&
+		std::chrono::steady_clock::now() < replacementDeadline) {
+		replacementResults = replacementLoader.TakeReady();
+		if (replacementResults.empty()) std::this_thread::yield();
+	}
+	Expect(replacementCoordinatorIdle && replacementGateObserved &&
+		replacementForegroundAdmitted && replacedResultWithheld &&
+		replacementResults.size() == 1 && replacementResults.front().generation == 911 &&
+		replacementResults.front().path == replacementFile &&
+		replacementResults.front().size == fs::file_size(replacementFile) && coordinatorIdle(),
+		"a replaced archive metadata request published stale data or held paired admission");
+}
+
 void TestEncryptedZipBrowsingAndSessionPasswords() {
 	TemporaryDirectory temporary;
 	const fs::path fixture = fs::path(__FILE__).parent_path() / "fixtures" / "encrypted-zip.zip";
@@ -1201,6 +1655,58 @@ void TestEncryptedZipBrowsingAndSessionPasswords() {
 	Expect(!jpegview_linux::ValidateArchivePassword(archive, "incorrect", error, &errorKind) &&
 		errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword,
 		"incorrect ZIP password was not rejected deterministically");
+	const fs::path cancellationArchive = temporary.path() / "cancel-validation.zip";
+	Expect(fs::copy_file(fixture, cancellationArchive),
+		"could not copy the ZIP archive cancellation fixture");
+	int validationContinuationChecks = 0;
+	const jpegview_linux::WorkContext canceledValidation =
+		jpegview_linux::MakePathWorkContext(cancellationArchive,
+			jpegview_linux::SourceWorkPriority::Metadata,
+			[&validationContinuationChecks] {
+				return ++validationContinuationChecks < 9;
+			});
+	Expect(!jpegview_linux::ValidateArchivePassword(cancellationArchive,
+		"jpegview-test-password", error, &errorKind, canceledValidation) &&
+		error.find("cancelled") != std::string::npos &&
+		errorKind == jpegview_linux::ArchiveErrorKind::Other &&
+		validationContinuationChecks == 9,
+		"ZIP password probe ignored cancellation after cataloging or failed to release admission");
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	std::vector<jpegview_linux::CpuWorkLease> occupiedCpu;
+	const std::size_t cpuLimit = jpegview_linux::HardwareAwareCpuWorkerCount();
+	for (std::size_t index = 0; index < cpuLimit; ++index) {
+		auto lease = coordinator.AcquireCpu(jpegview_linux::MakePathWorkContext(
+			temporary.path() / ("archive-cpu-" + std::to_string(index)),
+			jpegview_linux::SourceWorkPriority::Speculative));
+		if (lease) occupiedCpu.push_back(std::move(lease));
+	}
+	jpegview_linux::ArchiveDirectoryLoader admittedValidationLoader;
+	constexpr std::uint64_t replacedValidationGeneration = 74;
+	constexpr std::uint64_t currentValidationGeneration = 75;
+	admittedValidationLoader.RequestPasswordValidation(archive,
+		"jpegview-test-password", replacedValidationGeneration);
+	const bool validationWaitedForSharedCpu = coordinator.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu >= 1 &&
+				snapshot.waitingSpeculative >= 1;
+		}, std::chrono::seconds(2));
+	const bool validationWithheldBeforeAdmission =
+		admittedValidationLoader.TakeReady().empty();
+	admittedValidationLoader.RequestPasswordValidation(archive,
+		"jpegview-test-password", currentValidationGeneration);
+	for (auto& lease : occupiedCpu) lease.Reset();
+	std::vector<jpegview_linux::ArchiveDirectoryResult> admittedResults;
+	const auto admittedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (admittedResults.empty() && std::chrono::steady_clock::now() < admittedDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		admittedResults = admittedValidationLoader.TakeReady();
+	}
+	Expect(validationWaitedForSharedCpu && validationWithheldBeforeAdmission &&
+		admittedResults.size() == 1 && admittedResults.front().passwordValidation &&
+		admittedResults.front().generation == currentValidationGeneration &&
+		admittedResults.front().error.empty(),
+		"archive password validation bypassed paired admission or published a replaced generation");
 	jpegview_linux::ArchiveDirectoryLoader validationLoader;
 	constexpr std::uint64_t validationGeneration = 73;
 	validationLoader.RequestPasswordValidation(archive, "incorrect", validationGeneration);
@@ -2719,6 +3225,1308 @@ void TestFileListMultipleInputs() {
 		"folder-wrap-enabled multiple inputs did not loop at the list boundary");
 }
 
+void TestResolveWorkContextComposesInheritedCallbacks() {
+	const fs::path path = "/virtual/context-compose.jpg";
+	{
+		bool activeContinueCalled = false;
+		bool localContinueCalled = false;
+		bool activePriorityCalled = false;
+		bool localPriorityCalled = false;
+		jpegview_linux::WorkContext active = jpegview_linux::MakePathWorkContext(path,
+			jpegview_linux::SourceWorkPriority::Metadata,
+			[&activeContinueCalled] {
+				activeContinueCalled = true;
+				return true;
+			});
+		active.currentPriority = [&activePriorityCalled] {
+			activePriorityCalled = true;
+			return jpegview_linux::SourceWorkPriority::Metadata;
+		};
+		jpegview_linux::ScopedWorkContext activeScope(active);
+		jpegview_linux::WorkContext local;
+		local.shouldContinue = [&localContinueCalled] {
+			localContinueCalled = true;
+			return false;
+		};
+		local.currentPriority = [&localPriorityCalled] {
+			localPriorityCalled = true;
+			return jpegview_linux::SourceWorkPriority::Foreground;
+		};
+		const jpegview_linux::WorkContext resolved = jpegview_linux::ResolveWorkContext(
+			path, jpegview_linux::SourceWorkPriority::Metadata, local);
+		Expect(resolved.source.logicalPath == active.source.logicalPath &&
+			!resolved.Continue() && activeContinueCalled && localContinueCalled,
+			"resolving nested work dropped its local cancellation callback or inherited source");
+		Expect(resolved.Priority() == jpegview_linux::SourceWorkPriority::Foreground &&
+			activePriorityCalled && localPriorityCalled,
+			"resolving nested work dropped or weakened its local priority callback");
+	}
+
+	jpegview_linux::WorkContext withoutActive;
+	withoutActive.currentPriority = [] {
+		return jpegview_linux::SourceWorkPriority::Speculative;
+	};
+	const jpegview_linux::WorkContext fallback = jpegview_linux::ResolveWorkContext(
+		path, jpegview_linux::SourceWorkPriority::Metadata, withoutActive);
+	Expect(fallback.Priority() == jpegview_linux::SourceWorkPriority::Speculative,
+		"path fallback discarded a supplied priority callback");
+}
+
+void TestSourceWorkAdmissionAcrossWorkerPools() {
+	const auto sourceKey = [](const std::string& path, std::uint64_t inode) {
+		jpegview_linux::SourceIdentity identity;
+		identity.device = 7;
+		identity.inode = inode;
+		identity.size = 1024;
+		identity.modifiedSeconds = 1700000000;
+		identity.valid = true;
+		return jpegview_linux::SourceKey{path, identity};
+	};
+	const auto contextFor = [](jpegview_linux::SourceKey source,
+		jpegview_linux::SourceWorkPriority priority) {
+		jpegview_linux::WorkContext context;
+		context.source = std::move(source);
+		context.sourcePriority = priority;
+		return context;
+	};
+	auto partialAdmissionContext = contextFor(sourceKey("/partial/source-only.jpg", 10),
+		jpegview_linux::SourceWorkPriority::Foreground);
+	partialAdmissionContext.sourceAccessAlreadyAdmitted = true;
+	jpegview_linux::SourceWorkCoordinator partialAdmissionPools;
+	Expect(!partialAdmissionPools.AcquireSourceAndCpu(partialAdmissionContext),
+		"paired admission accepted a context holding only the source lane");
+	partialAdmissionContext.sourceAccessAlreadyAdmitted = false;
+	partialAdmissionContext.cpuProcessingAlreadyAdmitted = true;
+	Expect(!partialAdmissionPools.AcquireSourceAndCpu(partialAdmissionContext),
+		"paired admission accepted a context holding only a CPU permit");
+
+	jpegview_linux::SourceWorkCoordinator pools;
+	auto firstSpeculation = pools.Acquire(contextFor(sourceKey("/photos/first.jpg", 11),
+		jpegview_linux::SourceWorkPriority::Speculative));
+	Expect(static_cast<bool>(firstSpeculation),
+		"the first speculative worker did not acquire source access");
+	std::mutex stateMutex;
+	std::condition_variable stateChanged;
+	const auto waitForAdmissionEntered = [&](const std::atomic<bool>& entered) {
+		std::unique_lock<std::mutex> lock(stateMutex);
+		return stateChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return entered.load(); });
+	};
+	std::atomic<bool> secondEntered{false};
+	bool releaseSecond = false;
+	std::thread secondPool([&] {
+		auto lease = pools.Acquire(contextFor(sourceKey("/photos/second.jpg", 12),
+			jpegview_linux::SourceWorkPriority::Metadata));
+		std::unique_lock<std::mutex> lock(stateMutex);
+		secondEntered.store(static_cast<bool>(lease));
+		stateChanged.notify_all();
+		stateChanged.wait(lock, [&] { return releaseSecond; });
+	});
+	const bool secondQueued = pools.WaitForSnapshot([](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+		return snapshot.waitingSpeculative == 1;
+	}, std::chrono::seconds(2));
+	const bool firstSerialized = pools.Snapshot().activeSpeculative == 1 &&
+		!secondEntered.load();
+	firstSpeculation.Reset();
+	bool secondAdmitted = false;
+	{
+		std::unique_lock<std::mutex> lock(stateMutex);
+		secondAdmitted = stateChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return secondEntered.load(); });
+		releaseSecond = true;
+	}
+	stateChanged.notify_all();
+	secondPool.join();
+	Expect(secondQueued && firstSerialized && secondAdmitted,
+		"speculative source admission was not shared across independent worker pools");
+
+	jpegview_linux::SourceWorkCoordinator foregroundPools;
+	auto activeSpeculation = foregroundPools.Acquire(contextFor(
+		sourceKey("/photos/speculative.jpg", 21),
+		jpegview_linux::SourceWorkPriority::Speculative));
+	foregroundPools.SetForegroundPending(true);
+	std::atomic<bool> queuedSpeculationEntered{false};
+	bool releaseQueuedSpeculation = false;
+	std::thread queuedSpeculation([&] {
+		auto lease = foregroundPools.Acquire(contextFor(
+			sourceKey("/photos/queued.jpg", 22),
+			jpegview_linux::SourceWorkPriority::Speculative));
+		std::unique_lock<std::mutex> lock(stateMutex);
+		queuedSpeculationEntered.store(static_cast<bool>(lease));
+		stateChanged.notify_all();
+		stateChanged.wait(lock, [&] { return releaseQueuedSpeculation; });
+	});
+	const bool speculativeQueued = foregroundPools.WaitForSnapshot([](
+		const jpegview_linux::SourceWorkSnapshot& snapshot) {
+		return snapshot.waitingSpeculative == 1;
+	}, std::chrono::seconds(2));
+	auto foreground = foregroundPools.Acquire(contextFor(
+		sourceKey("/photos/selected.jpg", 23),
+		jpegview_linux::SourceWorkPriority::Foreground));
+	const bool foregroundOvertook = static_cast<bool>(foreground) &&
+		foregroundPools.Snapshot().activeForeground == 1;
+	activeSpeculation.Reset();
+	const bool speculationStayedQueued = foregroundPools.WaitForSnapshot([](
+		const jpegview_linux::SourceWorkSnapshot& snapshot) {
+		return snapshot.activeForeground == 1 && snapshot.activeSpeculative == 0 &&
+			snapshot.waitingSpeculative == 1;
+	}, std::chrono::seconds(2)) && !queuedSpeculationEntered.load();
+	foreground.Reset();
+	foregroundPools.SetForegroundPending(false);
+	bool speculationResumed = false;
+	{
+		std::unique_lock<std::mutex> lock(stateMutex);
+		speculationResumed = stateChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return queuedSpeculationEntered.load(); });
+		releaseQueuedSpeculation = true;
+	}
+	stateChanged.notify_all();
+	queuedSpeculation.join();
+	Expect(speculativeQueued && foregroundOvertook && speculationStayedQueued &&
+		speculationResumed,
+		"foreground admission did not hold queued speculation until its demand cleared");
+
+	jpegview_linux::SourceWorkCoordinator archivePools;
+	const auto firstMember = contextFor(sourceKey("/photos/shared.zip!/a.jpg", 31),
+		jpegview_linux::SourceWorkPriority::Speculative);
+	const auto secondMember = contextFor(sourceKey("/photos/shared.zip!/b.jpg", 31),
+		jpegview_linux::SourceWorkPriority::Foreground);
+	auto firstArchiveRead = archivePools.Acquire(firstMember);
+	std::atomic<bool> sameContainerEntered{false};
+	bool releaseContainerRead = false;
+	std::thread secondArchivePool([&] {
+		auto lease = archivePools.Acquire(secondMember);
+		std::unique_lock<std::mutex> lock(stateMutex);
+		sameContainerEntered.store(static_cast<bool>(lease));
+		stateChanged.notify_all();
+		stateChanged.wait(lock, [&] { return releaseContainerRead; });
+	});
+	const bool archiveForegroundQueued = archivePools.WaitForSnapshot([](
+		const jpegview_linux::SourceWorkSnapshot& snapshot) {
+		return snapshot.waitingForeground == 1;
+	}, std::chrono::seconds(2)) &&
+		archivePools.Snapshot().activeSpeculative == 1 && !sameContainerEntered.load();
+	firstArchiveRead.Reset();
+	bool archiveResumed = false;
+	{
+		std::unique_lock<std::mutex> lock(stateMutex);
+		archiveResumed = stateChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return sameContainerEntered.load(); });
+		releaseContainerRead = true;
+	}
+	stateChanged.notify_all();
+	secondArchivePool.join();
+	Expect(archiveForegroundQueued && archiveResumed,
+		"archive members with one backing identity did not serialize across worker pools");
+
+	const auto versionedSource = [](const std::string& path, std::uint64_t device,
+		std::uint64_t inode, std::uint64_t size, std::int64_t modifiedSeconds,
+		std::int64_t modifiedNanoseconds) {
+		jpegview_linux::SourceIdentity identity;
+		identity.device = device;
+		identity.inode = inode;
+		identity.size = size;
+		identity.modifiedSeconds = modifiedSeconds;
+		identity.modifiedNanoseconds = modifiedNanoseconds;
+		identity.valid = true;
+		return jpegview_linux::SourceKey{path, identity};
+	};
+	{
+		jpegview_linux::SourceWorkCoordinator versionCoordinator;
+		const std::string path = "/photos/versioned.zip/image.jpg";
+		const auto older = contextFor(versionedSource(path, 61, 62, 100, 1700000000, 10),
+			jpegview_linux::SourceWorkPriority::Speculative);
+		const auto newer = contextFor(versionedSource(path, 61, 62, 120, 1700000001, 20),
+			jpegview_linux::SourceWorkPriority::Foreground);
+		auto olderLease = versionCoordinator.Acquire(older, path);
+		auto newerAdmission = std::async(std::launch::async,
+			[&versionCoordinator, newer, path] {
+				return versionCoordinator.Acquire(newer, path);
+			});
+		const bool newerVersionWaitedForSameObject = versionCoordinator.WaitForSnapshot(
+			[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+				return snapshot.activeSpeculative == 1 && snapshot.activeForeground == 0 &&
+					snapshot.waitingForeground == 1;
+			}, std::chrono::seconds(2));
+		olderLease.Reset();
+		auto newerLease = newerAdmission.get();
+		const bool newerVersionAdmittedAfterRelease = static_cast<bool>(newerLease);
+		newerLease.Reset();
+		Expect(newerVersionWaitedForSameObject && newerVersionAdmittedAfterRelease,
+			"source-only admission overlapped two versions of one device/inode backing object");
+	}
+	{
+		jpegview_linux::SourceWorkCoordinator versionCoordinator;
+		const std::string path = "/photos/paired-versioned.zip/image.jpg";
+		const auto older = contextFor(versionedSource(path, 71, 72, 100, 1700000010, 10),
+			jpegview_linux::SourceWorkPriority::Speculative);
+		const auto newer = contextFor(versionedSource(path, 71, 72, 120, 1700000011, 20),
+			jpegview_linux::SourceWorkPriority::Foreground);
+		auto olderLease = versionCoordinator.AcquireSourceAndCpu(older, path);
+		auto newerAdmission = std::async(std::launch::async,
+			[&versionCoordinator, newer, path] {
+				return versionCoordinator.AcquireSourceAndCpu(newer, path);
+			});
+		const bool newerVersionWaitedForSameObject = versionCoordinator.WaitForSnapshot(
+			[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+				return snapshot.activeSpeculative == 1 && snapshot.activeForeground == 0 &&
+					snapshot.waitingForeground == 1 && snapshot.activeCpu == 1 &&
+					snapshot.waitingCpu == 1;
+			}, std::chrono::seconds(2));
+		olderLease.Reset();
+		auto newerLease = newerAdmission.get();
+		const bool newerVersionAdmittedAfterRelease = static_cast<bool>(newerLease);
+		newerLease.Reset();
+		Expect(newerVersionWaitedForSameObject && newerVersionAdmittedAfterRelease,
+			"paired admission overlapped two versions of one device/inode backing object");
+	}
+
+	jpegview_linux::SourceWorkCoordinator cancellationPools;
+	auto heldForCancellation = cancellationPools.Acquire(contextFor(
+		sourceKey("/photos/active.jpg", 51),
+		jpegview_linux::SourceWorkPriority::Speculative));
+	std::atomic<bool> keepWaiting{true};
+	std::atomic<bool> canceledRequestEntered{false};
+	std::atomic<bool> canceledRequestReturned{false};
+	bool releaseCanceledRequest = false;
+	auto canceledContext = contextFor(sourceKey("/photos/canceled.jpg", 52),
+		jpegview_linux::SourceWorkPriority::Speculative);
+	canceledContext.shouldContinue = [&keepWaiting] { return keepWaiting.load(); };
+	std::thread canceledWaiter([&] {
+		auto lease = cancellationPools.Acquire(canceledContext);
+		canceledRequestEntered.store(static_cast<bool>(lease));
+		{
+			std::lock_guard<std::mutex> lock(stateMutex);
+			canceledRequestReturned.store(true);
+		}
+		stateChanged.notify_all();
+		if (lease) {
+			std::unique_lock<std::mutex> lock(stateMutex);
+			stateChanged.wait(lock, [&] { return releaseCanceledRequest; });
+		}
+	});
+	const bool cancellationQueued = cancellationPools.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	keepWaiting.store(false);
+	cancellationPools.NotifyWaiters();
+	const bool canceledWaiterLeftQueue = cancellationPools.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	heldForCancellation.Reset();
+	auto afterCancellation = cancellationPools.Acquire(contextFor(
+		sourceKey("/photos/after-cancel.jpg", 53),
+		jpegview_linux::SourceWorkPriority::Speculative));
+	{
+		std::lock_guard<std::mutex> lock(stateMutex);
+		releaseCanceledRequest = true;
+	}
+	stateChanged.notify_all();
+	canceledWaiter.join();
+	Expect(cancellationQueued && canceledWaiterLeftQueue &&
+		!canceledRequestEntered.load() && canceledRequestReturned.load() &&
+		static_cast<bool>(afterCancellation),
+		"canceling a waiting source task leaked its queue slot or admission permit");
+
+	Expect(jpegview_linux::HardwareAwareCpuWorkerCount(1) == 1 &&
+		jpegview_linux::HardwareAwareCpuWorkerCount(2) == 1 &&
+		jpegview_linux::HardwareAwareCpuWorkerCount(3) == 2 &&
+		jpegview_linux::HardwareAwareCpuWorkerCount(16) == 4 &&
+		jpegview_linux::ClampCpuWorkerCount(12, 16) == 4 &&
+		jpegview_linux::ClampCpuWorkerCount(0, 16) == 4,
+		"CPU processing worker counts no longer honor hardware limits or the four-worker cap");
+
+	jpegview_linux::SourceWorkCoordinator cpuPools;
+	const std::size_t cpuLimit = jpegview_linux::HardwareAwareCpuWorkerCount();
+	std::atomic<std::size_t> activeCpu{0};
+	std::atomic<std::size_t> peakCpu{0};
+	std::atomic<std::size_t> completedCpuWorkers{0};
+	bool releaseCpuWorkers = false;
+	std::vector<std::thread> cpuWorkers;
+	for (std::size_t index = 0; index < cpuLimit + 3; ++index) {
+		cpuWorkers.emplace_back([&, index] {
+			auto context = contextFor(sourceKey("/cpu/" + std::to_string(index), 100 + index),
+				jpegview_linux::SourceWorkPriority::Speculative);
+			auto lease = cpuPools.AcquireCpu(context);
+			if (!lease) return;
+			const std::size_t active = activeCpu.fetch_add(1) + 1;
+			std::size_t peak = peakCpu.load();
+			while (peak < active && !peakCpu.compare_exchange_weak(peak, active)) {}
+			{
+				std::unique_lock<std::mutex> lock(stateMutex);
+				stateChanged.notify_all();
+				stateChanged.wait(lock, [&] { return releaseCpuWorkers; });
+			}
+			activeCpu.fetch_sub(1);
+			completedCpuWorkers.fetch_add(1);
+		});
+	}
+	const bool cpuCapReached = cpuPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu >= 1;
+		}, std::chrono::seconds(2));
+	std::atomic<bool> keepWaitingForCpu{true};
+	std::atomic<bool> canceledCpuReturned{false};
+	auto canceledCpuContext = contextFor(sourceKey("/cpu/canceled", 120),
+		jpegview_linux::SourceWorkPriority::Speculative);
+	canceledCpuContext.shouldContinue = [&keepWaitingForCpu] {
+		return keepWaitingForCpu.load();
+	};
+	std::thread canceledCpuWaiter([&] {
+		auto lease = cpuPools.AcquireCpu(canceledCpuContext);
+		canceledCpuReturned.store(!lease);
+	});
+	const bool canceledCpuQueued = cpuPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu >= 4;
+		}, std::chrono::seconds(2));
+	keepWaitingForCpu.store(false);
+	cpuPools.NotifyWaiters();
+	const bool canceledCpuRemoved = cpuPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu == 3;
+		}, std::chrono::seconds(2));
+	canceledCpuWaiter.join();
+	{
+		std::lock_guard<std::mutex> lock(stateMutex);
+		releaseCpuWorkers = true;
+	}
+	stateChanged.notify_all();
+	for (std::thread& worker : cpuWorkers) worker.join();
+	Expect(cpuCapReached && canceledCpuQueued && canceledCpuRemoved &&
+		canceledCpuReturned.load() && completedCpuWorkers.load() == cpuLimit + 3 &&
+		peakCpu.load() <= cpuLimit && cpuPools.Snapshot().activeCpu == 0 &&
+		cpuPools.Snapshot().waitingCpu == 0,
+		"CPU work was not capped across pools or canceled waiters retained shared permits");
+
+	jpegview_linux::SourceWorkCoordinator pairedPools;
+	std::vector<jpegview_linux::CpuWorkLease> occupiedPermits;
+	for (std::size_t index = 0; index < cpuLimit; ++index) {
+		auto blocker = pairedPools.AcquireCpu(contextFor(
+			sourceKey("/paired/cpu-" + std::to_string(index), 200 + index),
+			jpegview_linux::SourceWorkPriority::Speculative));
+		Expect(static_cast<bool>(blocker), "could not saturate paired source/CPU admission");
+		occupiedPermits.push_back(std::move(blocker));
+	}
+	const auto pairedSource = sourceKey("/paired/shared.jpg", 220);
+	std::atomic<bool> pairedSpeculationEntered{false};
+	std::atomic<bool> pairedForegroundEntered{false};
+	bool releasePairedSpeculation = false;
+	bool releasePairedForeground = false;
+	auto pairedSpeculativeContext = contextFor(pairedSource,
+		jpegview_linux::SourceWorkPriority::Speculative);
+	std::thread pairedSpeculation([&] {
+		auto admission = pairedPools.AcquireSourceAndCpu(pairedSpeculativeContext);
+		pairedSpeculationEntered.store(static_cast<bool>(admission));
+		if (admission) {
+			std::unique_lock<std::mutex> lock(stateMutex);
+			stateChanged.notify_all();
+			stateChanged.wait(lock, [&] { return releasePairedSpeculation; });
+		}
+	});
+	const bool pairedSpeculationWaitedForCpu = pairedPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu == 1 &&
+				snapshot.waitingSpeculative == 1 && snapshot.activeSpeculative == 0;
+		}, std::chrono::seconds(2));
+	pairedPools.SetForegroundPending(true);
+	auto pairedForegroundContext = contextFor(pairedSource,
+		jpegview_linux::SourceWorkPriority::Foreground);
+	std::thread pairedForeground([&] {
+		auto admission = pairedPools.AcquireSourceAndCpu(pairedForegroundContext);
+		pairedForegroundEntered.store(static_cast<bool>(admission));
+		if (admission) {
+			std::unique_lock<std::mutex> lock(stateMutex);
+			stateChanged.notify_all();
+			stateChanged.wait(lock, [&] { return releasePairedForeground; });
+		}
+	});
+	const bool pairedForegroundQueued = pairedPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu == 2 &&
+				snapshot.waitingForeground == 1 && snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	occupiedPermits.front().Reset();
+	const bool pairedForegroundActive = pairedPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.activeForeground == 1 &&
+				snapshot.activeSpeculative == 0 && snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	const bool pairedForegroundOvertook = pairedForegroundActive &&
+		waitForAdmissionEntered(pairedForegroundEntered);
+	{
+		std::lock_guard<std::mutex> lock(stateMutex);
+		releasePairedForeground = true;
+	}
+	stateChanged.notify_all();
+	pairedForeground.join();
+	const bool pairedSpeculationStayedYielded = pairedPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingSpeculative == 1 && snapshot.activeCpu == cpuLimit - 1;
+		}, std::chrono::seconds(2)) && !pairedSpeculationEntered.load();
+	pairedPools.SetForegroundPending(false);
+	const bool pairedSpeculationActive = pairedPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 && snapshot.activeCpu == cpuLimit;
+		}, std::chrono::seconds(2));
+	const bool pairedSpeculationResumed = pairedSpeculationActive &&
+		waitForAdmissionEntered(pairedSpeculationEntered);
+	{
+		std::lock_guard<std::mutex> lock(stateMutex);
+		releasePairedSpeculation = true;
+	}
+	stateChanged.notify_all();
+	pairedSpeculation.join();
+	for (auto& permit : occupiedPermits) permit.Reset();
+	std::ostringstream pairedAdmissionFailure;
+	pairedAdmissionFailure << "foreground source work did not overtake paired speculative admission "
+		"or speculation did not resume (specQueued=" << pairedSpeculationWaitedForCpu
+		<< ", foregroundQueued=" << pairedForegroundQueued << ", foregroundOvertook="
+		<< pairedForegroundOvertook << ", speculationStayedYielded="
+		<< pairedSpeculationStayedYielded << ", speculationResumed="
+		<< pairedSpeculationResumed << ", activeCpu=" << pairedPools.Snapshot().activeCpu
+		<< ')';
+	Expect(pairedSpeculationWaitedForCpu && pairedForegroundQueued &&
+		pairedForegroundOvertook && pairedSpeculationStayedYielded &&
+		pairedSpeculationResumed && pairedPools.Snapshot().activeCpu == 0,
+		pairedAdmissionFailure.str());
+
+	jpegview_linux::SourceWorkCoordinator promotionPools;
+	std::vector<jpegview_linux::CpuWorkLease> promotionPermits;
+	for (std::size_t index = 0; index < cpuLimit; ++index) {
+		auto blocker = promotionPools.AcquireCpu(contextFor(
+			sourceKey("/promotion/cpu-" + std::to_string(index), 240 + index),
+				jpegview_linux::SourceWorkPriority::Speculative));
+		Expect(static_cast<bool>(blocker), "could not saturate promotion admission");
+		promotionPermits.push_back(std::move(blocker));
+	}
+	std::atomic<bool> promoteQueuedWork{false};
+	std::atomic<bool> promotedAdmissionEntered{false};
+	bool releasePromotedAdmission = false;
+	auto promotedContext = contextFor(sourceKey("/promotion/selected.jpg", 230),
+		jpegview_linux::SourceWorkPriority::Speculative);
+	promotedContext.currentPriority = [&promoteQueuedWork] {
+		return promoteQueuedWork.load() ? jpegview_linux::SourceWorkPriority::Foreground :
+			jpegview_linux::SourceWorkPriority::Speculative;
+	};
+	std::thread promotedWorker([&] {
+		auto admission = promotionPools.AcquireSourceAndCpu(promotedContext);
+		promotedAdmissionEntered.store(static_cast<bool>(admission));
+		if (admission) {
+			std::unique_lock<std::mutex> lock(stateMutex);
+			stateChanged.notify_all();
+			stateChanged.wait(lock, [&] { return releasePromotedAdmission; });
+		}
+	});
+	const bool promotionOriginallyQueued = promotionPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu == 1 &&
+				snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	promotionPools.SetForegroundPending(true);
+	promoteQueuedWork.store(true);
+	promotionPools.NotifyWaiters();
+	const bool promotionMovedBothQueues = promotionPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu == 1 &&
+				snapshot.waitingForeground == 1 && snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	promotionPermits.front().Reset();
+	const bool promotionForegroundActive = promotionPools.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.activeForeground == 1 &&
+				snapshot.activeSpeculative == 0;
+		}, std::chrono::seconds(2));
+	const bool promotionEnteredForegroundLane = promotionForegroundActive &&
+		waitForAdmissionEntered(promotedAdmissionEntered);
+	{
+		std::lock_guard<std::mutex> lock(stateMutex);
+		releasePromotedAdmission = true;
+	}
+	stateChanged.notify_all();
+	promotionPools.SetForegroundPending(false);
+	promotedWorker.join();
+	for (auto& permit : promotionPermits) permit.Reset();
+	Expect(promotionOriginallyQueued && promotionMovedBothQueues &&
+		promotionEnteredForegroundLane && promotionPools.Snapshot().activeCpu == 0,
+		"promoting in-flight source work did not move its paired source and CPU admission to foreground");
+
+	const auto throwingContext = contextFor(sourceKey("/photos/throws.jpg", 44),
+		jpegview_linux::SourceWorkPriority::Speculative);
+	try {
+		auto lease = archivePools.Acquire(throwingContext);
+		Expect(static_cast<bool>(lease), "exception-release fixture could not acquire source access");
+		throw std::runtime_error("injected worker exception");
+	} catch (const std::runtime_error&) {
+	}
+	Expect(static_cast<bool>(archivePools.Acquire(throwingContext)),
+		"exception unwinding leaked a source admission permit");
+
+	const auto coordinatorEmpty = [](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+		return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+			snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0 &&
+			snapshot.activeCpu == 0 && snapshot.waitingCpu == 0;
+	};
+	for (const auto point : {
+		jpegview_linux::detail::SourceWorkTestHookPoint::InitialSourceQueueRegistration,
+		jpegview_linux::detail::SourceWorkTestHookPoint::InitialCpuQueueRegistration}) {
+		jpegview_linux::SourceWorkCoordinator failurePools;
+		SourceWorkFailureInjection injection{point};
+		failurePools.SetTestHookForTesting(ThrowAtSourceWorkHook, &injection);
+		bool registrationFailed = false;
+		try {
+			(void)failurePools.AcquireSourceAndCpu(contextFor(
+				sourceKey("/admission/initial-registration.jpg", 300),
+				jpegview_linux::SourceWorkPriority::Speculative));
+		} catch (const std::bad_alloc&) {
+			registrationFailed = true;
+		}
+		failurePools.SetTestHookForTesting(nullptr, nullptr);
+		const bool rolledBack = coordinatorEmpty(failurePools.Snapshot());
+		auto validAdmission = failurePools.AcquireSourceAndCpu(contextFor(
+			sourceKey("/admission/initial-retry.jpg", 301),
+			jpegview_linux::SourceWorkPriority::Speculative));
+		const bool laterAdmissionWorked = static_cast<bool>(validAdmission);
+		validAdmission.Reset();
+		Expect(injection.fired.load() && registrationFailed && rolledBack &&
+			laterAdmissionWorked && coordinatorEmpty(failurePools.Snapshot()),
+			"paired initial queue registration left a partial record or blocked a later request");
+	}
+
+	for (const auto point : {
+		jpegview_linux::detail::SourceWorkTestHookPoint::InitialSourceQueueRegistration,
+		jpegview_linux::detail::SourceWorkTestHookPoint::InitialCpuQueueRegistration}) {
+		jpegview_linux::SourceWorkCoordinator failurePools;
+		SourceWorkFailureInjection injection{point};
+		failurePools.SetTestHookForTesting(ThrowAtSourceWorkHook, &injection);
+		bool registrationFailed = false;
+		try {
+			const auto context = contextFor(sourceKey("/admission/single-initial.jpg", 309),
+				jpegview_linux::SourceWorkPriority::Speculative);
+			if (point == jpegview_linux::detail::SourceWorkTestHookPoint::InitialSourceQueueRegistration) {
+				(void)failurePools.Acquire(context);
+			} else {
+				(void)failurePools.AcquireCpu(context);
+			}
+		} catch (const std::bad_alloc&) {
+			registrationFailed = true;
+		}
+		failurePools.SetTestHookForTesting(nullptr, nullptr);
+		const bool rolledBack = coordinatorEmpty(failurePools.Snapshot());
+		const auto retryContext = contextFor(sourceKey("/admission/single-initial-retry.jpg", 310),
+			jpegview_linux::SourceWorkPriority::Speculative);
+		bool laterAdmissionWorked = false;
+		if (point == jpegview_linux::detail::SourceWorkTestHookPoint::InitialSourceQueueRegistration) {
+			auto lease = failurePools.Acquire(retryContext);
+			laterAdmissionWorked = static_cast<bool>(lease);
+		} else {
+			auto lease = failurePools.AcquireCpu(retryContext);
+			laterAdmissionWorked = static_cast<bool>(lease);
+		}
+		Expect(injection.fired.load() && registrationFailed && rolledBack &&
+			laterAdmissionWorked && coordinatorEmpty(failurePools.Snapshot()),
+			"single-resource initial registration leaked its queue record or blocked a retry");
+	}
+
+	{
+		jpegview_linux::SourceWorkCoordinator failurePools;
+		auto blocker = failurePools.Acquire(contextFor(sourceKey(
+			"/admission/promotion-blocker.jpg", 302),
+			jpegview_linux::SourceWorkPriority::Speculative));
+		std::atomic<bool> promote{false};
+		auto context = contextFor(sourceKey("/admission/promoted.jpg", 303),
+			jpegview_linux::SourceWorkPriority::Speculative);
+		context.currentPriority = [&promote] {
+			return promote.load() ? jpegview_linux::SourceWorkPriority::Foreground :
+				jpegview_linux::SourceWorkPriority::Speculative;
+		};
+		SourceWorkFailureInjection injection{
+			jpegview_linux::detail::SourceWorkTestHookPoint::PromotedCpuQueueRegistration};
+		failurePools.SetTestHookForTesting(ThrowAtSourceWorkHook, &injection);
+		std::atomic<bool> promotionFailed{false};
+		std::thread worker([&] {
+			try {
+				(void)failurePools.AcquireSourceAndCpu(context);
+			} catch (const std::bad_alloc&) {
+				promotionFailed.store(true);
+			}
+		});
+		const bool queuedTogether = failurePools.WaitForSnapshot(
+			[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+				return snapshot.activeSpeculative == 1 && snapshot.waitingSpeculative == 1 &&
+					snapshot.waitingCpu == 1;
+			}, std::chrono::seconds(2));
+		promote.store(true);
+		failurePools.NotifyWaiters();
+		worker.join();
+		failurePools.SetTestHookForTesting(nullptr, nullptr);
+		const auto afterFailure = failurePools.Snapshot();
+		const bool candidateRemoved = afterFailure.activeSpeculative == 1 &&
+			afterFailure.activeForeground == 0 && afterFailure.waitingSpeculative == 0 &&
+			afterFailure.waitingForeground == 0 && afterFailure.activeCpu == 0 &&
+			afterFailure.waitingCpu == 0;
+		blocker.Reset();
+		auto validAdmission = failurePools.AcquireSourceAndCpu(contextFor(
+			sourceKey("/admission/promotion-retry.jpg", 304),
+			jpegview_linux::SourceWorkPriority::Foreground));
+		const bool laterAdmissionWorked = static_cast<bool>(validAdmission);
+		validAdmission.Reset();
+		Expect(queuedTogether && injection.fired.load() && promotionFailed.load() &&
+			candidateRemoved && laterAdmissionWorked && coordinatorEmpty(failurePools.Snapshot()),
+			"paired queue promotion left a request split across its source and CPU lanes");
+	}
+
+	{
+		jpegview_linux::SourceWorkCoordinator failurePools;
+		auto blocker = failurePools.Acquire(contextFor(sourceKey(
+			"/admission/single-promotion-blocker.jpg", 311),
+			jpegview_linux::SourceWorkPriority::Speculative));
+		std::atomic<bool> promote{false};
+		auto context = contextFor(sourceKey("/admission/single-promoted.jpg", 312),
+			jpegview_linux::SourceWorkPriority::Speculative);
+		context.currentPriority = [&promote] {
+			return promote.load() ? jpegview_linux::SourceWorkPriority::Foreground :
+				jpegview_linux::SourceWorkPriority::Speculative;
+		};
+		SourceWorkFailureInjection injection{
+			jpegview_linux::detail::SourceWorkTestHookPoint::PromotedSourceQueueRegistration};
+		failurePools.SetTestHookForTesting(ThrowAtSourceWorkHook, &injection);
+		std::atomic<bool> promotionFailed{false};
+		std::thread worker([&] {
+			try {
+				(void)failurePools.Acquire(context);
+			} catch (const std::bad_alloc&) {
+				promotionFailed.store(true);
+			}
+		});
+		const bool queued = failurePools.WaitForSnapshot(
+			[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+				return snapshot.activeSpeculative == 1 && snapshot.waitingSpeculative == 1;
+			}, std::chrono::seconds(2));
+		promote.store(true);
+		failurePools.NotifyWaiters();
+		worker.join();
+		failurePools.SetTestHookForTesting(nullptr, nullptr);
+		const auto afterFailure = failurePools.Snapshot();
+		const bool rolledBack = afterFailure.activeSpeculative == 1 &&
+			afterFailure.activeForeground == 0 && afterFailure.waitingSpeculative == 0 &&
+			afterFailure.waitingForeground == 0;
+		blocker.Reset();
+		auto retry = failurePools.Acquire(contextFor(sourceKey(
+			"/admission/single-promotion-retry.jpg", 313),
+			jpegview_linux::SourceWorkPriority::Foreground));
+		const bool laterAdmissionWorked = static_cast<bool>(retry);
+		retry.Reset();
+		Expect(queued && injection.fired.load() && promotionFailed.load() && rolledBack &&
+			laterAdmissionWorked && coordinatorEmpty(failurePools.Snapshot()),
+			"source-only promotion left split queue state or blocked a later request");
+	}
+
+	{
+		jpegview_linux::SourceWorkCoordinator failurePools;
+		const std::size_t failureCpuLimit = jpegview_linux::HardwareAwareCpuWorkerCount();
+		std::vector<jpegview_linux::CpuWorkLease> blockers;
+		for (std::size_t index = 0; index < failureCpuLimit; ++index) {
+			auto lease = failurePools.AcquireCpu(contextFor(sourceKey(
+				"/admission/single-cpu-blocker-" + std::to_string(index), 320 + index),
+				jpegview_linux::SourceWorkPriority::Foreground));
+			Expect(static_cast<bool>(lease), "could not saturate single CPU promotion admission");
+			blockers.push_back(std::move(lease));
+		}
+		std::atomic<bool> promote{false};
+		auto context = contextFor(sourceKey("/admission/single-cpu-promoted.jpg", 321),
+			jpegview_linux::SourceWorkPriority::Speculative);
+		context.currentPriority = [&promote] {
+			return promote.load() ? jpegview_linux::SourceWorkPriority::Foreground :
+				jpegview_linux::SourceWorkPriority::Speculative;
+		};
+		SourceWorkFailureInjection injection{
+			jpegview_linux::detail::SourceWorkTestHookPoint::PromotedCpuQueueRegistration};
+		failurePools.SetTestHookForTesting(ThrowAtSourceWorkHook, &injection);
+		std::atomic<bool> promotionFailed{false};
+		std::thread worker([&] {
+			try {
+				(void)failurePools.AcquireCpu(context);
+			} catch (const std::bad_alloc&) {
+				promotionFailed.store(true);
+			}
+		});
+		const bool queued = failurePools.WaitForSnapshot(
+			[failureCpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+				return snapshot.activeCpu == failureCpuLimit && snapshot.waitingCpu == 1;
+			}, std::chrono::seconds(2));
+		promote.store(true);
+		failurePools.NotifyWaiters();
+		worker.join();
+		failurePools.SetTestHookForTesting(nullptr, nullptr);
+		const auto afterFailure = failurePools.Snapshot();
+		const bool rolledBack = afterFailure.activeCpu == failureCpuLimit &&
+			afterFailure.waitingCpu == 0;
+		for (auto& blocker : blockers) blocker.Reset();
+		auto retry = failurePools.AcquireCpu(contextFor(sourceKey(
+			"/admission/single-cpu-promotion-retry.jpg", 322),
+			jpegview_linux::SourceWorkPriority::Foreground));
+		const bool laterAdmissionWorked = static_cast<bool>(retry);
+		retry.Reset();
+		Expect(queued && injection.fired.load() && promotionFailed.load() && rolledBack &&
+			laterAdmissionWorked && coordinatorEmpty(failurePools.Snapshot()),
+			"CPU-only promotion left a stale queue entry or blocked a later request");
+	}
+
+	for (const auto point : {
+		jpegview_linux::detail::SourceWorkTestHookPoint::ActiveSourceRegistration,
+		jpegview_linux::detail::SourceWorkTestHookPoint::ActiveCpuRegistration}) {
+		jpegview_linux::SourceWorkCoordinator failurePools;
+		SourceWorkFailureInjection injection{point};
+		failurePools.SetTestHookForTesting(ThrowAtSourceWorkHook, &injection);
+		bool activeRegistrationFailed = false;
+		try {
+			(void)failurePools.AcquireSourceAndCpu(contextFor(
+				sourceKey("/admission/active-registration.jpg", 305),
+				jpegview_linux::SourceWorkPriority::Foreground));
+		} catch (const std::bad_alloc&) {
+			activeRegistrationFailed = true;
+		}
+		failurePools.SetTestHookForTesting(nullptr, nullptr);
+		const bool rolledBack = coordinatorEmpty(failurePools.Snapshot());
+		auto validAdmission = failurePools.AcquireSourceAndCpu(contextFor(
+			sourceKey("/admission/active-retry.jpg", 306),
+			jpegview_linux::SourceWorkPriority::Foreground));
+		const bool laterAdmissionWorked = static_cast<bool>(validAdmission);
+		validAdmission.Reset();
+		Expect(injection.fired.load() && activeRegistrationFailed && rolledBack &&
+			laterAdmissionWorked && coordinatorEmpty(failurePools.Snapshot()),
+			"paired active registration leaked a source or CPU permit after allocation failure");
+	}
+
+	for (const auto point : {
+		jpegview_linux::detail::SourceWorkTestHookPoint::ActiveSourceRegistration,
+		jpegview_linux::detail::SourceWorkTestHookPoint::ActiveCpuRegistration}) {
+		jpegview_linux::SourceWorkCoordinator failurePools;
+		SourceWorkFailureInjection injection{point};
+		failurePools.SetTestHookForTesting(ThrowAtSourceWorkHook, &injection);
+		bool registrationFailed = false;
+		try {
+			if (point == jpegview_linux::detail::SourceWorkTestHookPoint::ActiveSourceRegistration) {
+				(void)failurePools.Acquire(contextFor(sourceKey(
+					"/admission/source-only-active.jpg", 307),
+					jpegview_linux::SourceWorkPriority::Foreground));
+			} else {
+				(void)failurePools.AcquireCpu(contextFor(sourceKey(
+					"/admission/cpu-only-active.jpg", 308),
+					jpegview_linux::SourceWorkPriority::Foreground));
+			}
+		} catch (const std::bad_alloc&) {
+			registrationFailed = true;
+		}
+		failurePools.SetTestHookForTesting(nullptr, nullptr);
+		const bool rolledBack = coordinatorEmpty(failurePools.Snapshot());
+		bool laterAdmissionWorked = false;
+		if (point == jpegview_linux::detail::SourceWorkTestHookPoint::ActiveSourceRegistration) {
+			auto lease = failurePools.Acquire(contextFor(sourceKey(
+				"/admission/source-only-active-retry.jpg", 323),
+				jpegview_linux::SourceWorkPriority::Foreground));
+			laterAdmissionWorked = static_cast<bool>(lease);
+		} else {
+			auto lease = failurePools.AcquireCpu(contextFor(sourceKey(
+				"/admission/cpu-only-active-retry.jpg", 324),
+				jpegview_linux::SourceWorkPriority::Foreground));
+			laterAdmissionWorked = static_cast<bool>(lease);
+		}
+		Expect(injection.fired.load() && registrationFailed && rolledBack &&
+			laterAdmissionWorked && coordinatorEmpty(failurePools.Snapshot()),
+			"single-resource active registration left a ghost queue entry or permit");
+	}
+}
+
+void TestWorkContextPathAdmissionKeysAvoidMetadataIo() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "path-key-source.jpg";
+	const fs::path alias = temporary.path() / "path-key-alias.jpg";
+	WriteText(source, "path key identity fixture");
+	std::error_code linkError;
+	fs::create_hard_link(source, alias, linkError);
+
+	const jpegview_linux::WorkContext pathContext =
+		jpegview_linux::MakePathWorkContext(source,
+			jpegview_linux::SourceWorkPriority::Metadata);
+	const bool pathContextAvoidedIdentityCapture =
+		!pathContext.source.backingIdentity.valid &&
+		pathContext.source.logicalPath == source.string();
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool coordinatorIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	const auto pathOnlyContext = [](const fs::path& path,
+		jpegview_linux::SourceWorkPriority priority) {
+		jpegview_linux::WorkContext context;
+		context.source.logicalPath = path.string();
+		context.sourcePriority = priority;
+		return context;
+	};
+	jpegview_linux::SourceWorkLease sourceLease = coordinator.Acquire(
+		pathOnlyContext(source, jpegview_linux::SourceWorkPriority::Metadata), source);
+	const bool sourceLeaseAcquired = static_cast<bool>(sourceLease);
+	std::mutex aliasMutex;
+	std::condition_variable aliasChanged;
+	bool releaseAlias = false;
+	std::atomic<bool> aliasAdmitted{false};
+	std::thread aliasWorker([&] {
+		auto lease = coordinator.Acquire(pathOnlyContext(alias,
+			jpegview_linux::SourceWorkPriority::Foreground), alias);
+		aliasAdmitted.store(static_cast<bool>(lease));
+		aliasChanged.notify_all();
+		std::unique_lock<std::mutex> lock(aliasMutex);
+		aliasChanged.wait(lock, [&] { return releaseAlias; });
+	});
+	const bool hardlinkPathsAdmittedIndependently = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 1 && snapshot.activeSpeculative == 1;
+		}, std::chrono::milliseconds(250));
+	sourceLease.Reset();
+	{
+		std::unique_lock<std::mutex> lock(aliasMutex);
+		(void)aliasChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return aliasAdmitted.load(); });
+		releaseAlias = true;
+	}
+	aliasChanged.notify_all();
+	aliasWorker.join();
+
+	const fs::path archive = temporary.path() / "path-key-archive.zip";
+	WriteText(archive, "archive backing path fixture");
+	const fs::path firstMember = archive / "first.jpg";
+	const fs::path secondMember = archive / "second.jpg";
+	const jpegview_linux::WorkContext archiveMemberContext =
+		jpegview_linux::MakePathWorkContext(firstMember,
+			jpegview_linux::SourceWorkPriority::Metadata);
+	const bool archiveContextAvoidedIdentityCapture =
+		!archiveMemberContext.source.backingIdentity.valid;
+	const bool archiveCandidateMatchesBackingPath =
+		jpegview_linux::ArchiveBackingFileForAdmission(firstMember) == archive;
+	jpegview_linux::SourceWorkLease firstMemberLease = coordinator.Acquire(
+		pathOnlyContext(firstMember, jpegview_linux::SourceWorkPriority::Metadata),
+		firstMember);
+	const bool firstMemberLeaseAcquired = static_cast<bool>(firstMemberLease);
+	std::atomic<bool> secondMemberAdmitted{false};
+	std::thread memberWorker([&] {
+		auto lease = coordinator.Acquire(pathOnlyContext(secondMember,
+			jpegview_linux::SourceWorkPriority::Foreground), secondMember);
+		secondMemberAdmitted.store(static_cast<bool>(lease));
+	});
+	const bool archiveMembersSharedBackingAdmission = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 &&
+				snapshot.waitingForeground == 1 && snapshot.activeForeground == 0;
+		}, std::chrono::seconds(2));
+	const jpegview_linux::SourceWorkSnapshot archiveAdmissionSnapshot = coordinator.Snapshot();
+	firstMemberLease.Reset();
+	memberWorker.join();
+	const bool allAdmissionsReturnedToIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	std::ostringstream failure;
+	failure << "path admission keys performed metadata I/O before admission or failed to use archive backing paths"
+		<< " (linkError=" << linkError.value() << ", coordinatorIdle=" << coordinatorIdle
+		<< ", pathIdentityInvalid=" << pathContextAvoidedIdentityCapture
+		<< ", sourceLease=" << sourceLeaseAcquired
+		<< ", independentHardlinks=" << hardlinkPathsAdmittedIndependently
+		<< ", aliasAdmitted=" << aliasAdmitted.load()
+		<< ", firstMemberLease=" << firstMemberLeaseAcquired
+		<< ", archiveIdentityInvalid=" << archiveContextAvoidedIdentityCapture
+		<< ", backingCandidate=" << archiveCandidateMatchesBackingPath
+		<< ", sharedArchiveWait=" << archiveMembersSharedBackingAdmission
+		<< ", archiveSnapshot=" << archiveAdmissionSnapshot.activeSpeculative << '/'
+		<< archiveAdmissionSnapshot.waitingForeground << '/'
+		<< archiveAdmissionSnapshot.activeForeground
+		<< ", secondMemberAdmitted=" << secondMemberAdmitted.load()
+		<< ", finalIdle=" << allAdmissionsReturnedToIdle << ')';
+	Expect(!linkError && coordinatorIdle && pathContextAvoidedIdentityCapture &&
+		sourceLeaseAcquired && firstMemberLeaseAcquired &&
+		hardlinkPathsAdmittedIndependently && aliasAdmitted.load() &&
+		archiveContextAvoidedIdentityCapture && archiveCandidateMatchesBackingPath &&
+		archiveMembersSharedBackingAdmission &&
+		secondMemberAdmitted.load() &&
+		allAdmissionsReturnedToIdle,
+		failure.str());
+
+	// A path-only worker may enter first, then a foreground request may arrive
+	// with an already captured descriptor for that same archive member. The
+	// descriptor's identity must not erase its normalized fallback path.
+	{
+		jpegview_linux::SourceWorkCoordinator mixedIdentityCoordinator;
+		jpegview_linux::SourceIdentity knownIdentity;
+		knownIdentity.device = 91;
+		knownIdentity.inode = 92;
+		knownIdentity.size = 93;
+		knownIdentity.modifiedSeconds = 94;
+		knownIdentity.valid = true;
+		const fs::path member = temporary.path() / "mixed-identity.zip" / "image.jpg";
+		const jpegview_linux::SourceDescriptor descriptor(member, knownIdentity, {});
+		const jpegview_linux::WorkContext pathOnly =
+			jpegview_linux::MakePathWorkContext(member,
+				jpegview_linux::SourceWorkPriority::Metadata);
+		jpegview_linux::SourceWorkLease pathOnlyLease =
+			mixedIdentityCoordinator.Acquire(pathOnly, member);
+		auto descriptorAdmission = std::async(std::launch::async,
+			[&mixedIdentityCoordinator, descriptor] {
+				return mixedIdentityCoordinator.Acquire(
+					jpegview_linux::MakeWorkContext(descriptor,
+						jpegview_linux::SourceWorkPriority::Foreground),
+					descriptor.LogicalPath());
+			});
+		const bool crossIdentityRequestRegistered =
+			mixedIdentityCoordinator.WaitForSnapshot(
+				[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+					return snapshot.activeForeground == 1 || snapshot.waitingForeground == 1;
+				}, std::chrono::seconds(2));
+		const jpegview_linux::SourceWorkSnapshot mixedSnapshot =
+			mixedIdentityCoordinator.Snapshot();
+		const bool descriptorWaitedForPathOnlyLease = crossIdentityRequestRegistered &&
+			mixedSnapshot.activeSpeculative == 1 &&
+			mixedSnapshot.activeForeground == 0 &&
+			mixedSnapshot.waitingForeground == 1;
+		pathOnlyLease.Reset();
+		jpegview_linux::SourceWorkLease descriptorLease = descriptorAdmission.get();
+		descriptorLease.Reset();
+		Expect(descriptorWaitedForPathOnlyLease,
+			"a descriptor-backed foreground request bypassed a path-only lease for the same archive");
+	}
+	{
+		jpegview_linux::SourceWorkCoordinator mixedIdentityCoordinator;
+		jpegview_linux::SourceIdentity identity;
+		identity.device = 93;
+		identity.inode = 94;
+		identity.valid = true;
+		const fs::path member = temporary.path() / "mixed-paired-identity.zip" / "image.jpg";
+		const jpegview_linux::SourceDescriptor descriptor(member, identity, {});
+		const auto pathOnly = jpegview_linux::MakePathWorkContext(member,
+			jpegview_linux::SourceWorkPriority::Speculative);
+		auto pathLease = mixedIdentityCoordinator.AcquireSourceAndCpu(pathOnly, member);
+		auto descriptorAdmission = std::async(std::launch::async,
+			[&mixedIdentityCoordinator, descriptor] {
+				return mixedIdentityCoordinator.AcquireSourceAndCpu(
+					jpegview_linux::MakeWorkContext(descriptor,
+						jpegview_linux::SourceWorkPriority::Foreground),
+					descriptor.LogicalPath());
+			});
+		const bool descriptorWaitedForPathLease = mixedIdentityCoordinator.WaitForSnapshot(
+			[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+				return snapshot.activeSpeculative == 1 && snapshot.activeForeground == 0 &&
+					snapshot.waitingForeground == 1 && snapshot.activeCpu == 1 &&
+					snapshot.waitingCpu == 1;
+			}, std::chrono::seconds(2));
+		pathLease.Reset();
+		auto descriptorLease = descriptorAdmission.get();
+		const bool descriptorAdmittedAfterPathRelease = static_cast<bool>(descriptorLease);
+		descriptorLease.Reset();
+		Expect(descriptorWaitedForPathLease && descriptorAdmittedAfterPathRelease,
+			"paired descriptor admission bypassed a path-only lease for the same backing path");
+	}
+
+	// Distinct captured identities continue to represent distinct backing
+	// sources even when a stale logical path happens to match.
+	{
+		jpegview_linux::SourceWorkCoordinator mismatchCoordinator;
+		jpegview_linux::SourceIdentity firstIdentity;
+		firstIdentity.device = 101;
+		firstIdentity.inode = 102;
+		firstIdentity.size = 103;
+		firstIdentity.modifiedSeconds = 104;
+		firstIdentity.valid = true;
+		jpegview_linux::SourceIdentity secondIdentity = firstIdentity;
+		++secondIdentity.inode;
+		const fs::path logicalPath = temporary.path() / "replaced-container.zip" / "image.jpg";
+		const jpegview_linux::SourceDescriptor firstDescriptor(logicalPath,
+			firstIdentity, {});
+		const jpegview_linux::SourceDescriptor secondDescriptor(logicalPath,
+			secondIdentity, {});
+		auto firstLease = mismatchCoordinator.Acquire(
+			jpegview_linux::MakeWorkContext(firstDescriptor,
+				jpegview_linux::SourceWorkPriority::Metadata), logicalPath);
+		auto secondLease = mismatchCoordinator.Acquire(
+			jpegview_linux::MakeWorkContext(secondDescriptor,
+				jpegview_linux::SourceWorkPriority::Foreground), logicalPath);
+		Expect(static_cast<bool>(firstLease) && static_cast<bool>(secondLease) &&
+			mismatchCoordinator.Snapshot().activeSpeculative == 1 &&
+			mismatchCoordinator.Snapshot().activeForeground == 1,
+			"known, nonmatching backing identities were serialized by their fallback path");
+	}
+}
+
+void TestArchiveSourceProbesRunUnderAdmission() {
+	TemporaryDirectory temporary;
+	const fs::path payload = temporary.path() / "probe-image.jpg";
+	const fs::path archive = temporary.path() / "probe-archive.zip";
+	WriteTinyImage(payload);
+	WriteZipArchive(archive, {{"image.jpg", payload}});
+	const fs::path member = archive / "image.jpg";
+	ArchiveSourceProbeObservation observation;
+	jpegview_linux::SetArchiveSourceProbeHookForTesting(
+		ObserveArchiveSourceProbe, &observation);
+	ArchiveSourceProbeHookReset resetHook;
+
+	std::vector<jpegview_linux::ArchiveEntryInfo> entries;
+	std::string error;
+	jpegview_linux::ArchiveErrorKind errorKind = jpegview_linux::ArchiveErrorKind::None;
+	Expect(jpegview_linux::ListArchiveDirectoryCancellable(archive, entries,
+		[] { return true; }, error, &errorKind) && entries.size() == 1,
+		"archive listing failed during source-probe admission coverage: " + error);
+	jpegview_linux::ArchiveMemberInfo memberInfo;
+	Expect(jpegview_linux::GetArchiveMemberInfo(member, memberInfo, error) &&
+		memberInfo.size == fs::file_size(payload),
+		"archive member metadata failed during source-probe admission coverage: " + error);
+	Expect(jpegview_linux::ValidateArchivePassword(archive, "unused", error, &errorKind),
+		"unencrypted archive password validation failed during admission coverage: " + error);
+	const jpegview_linux::WorkContext passwordContext =
+		jpegview_linux::MakePathWorkContext(member,
+			jpegview_linux::SourceWorkPriority::Metadata);
+	(void)jpegview_linux::HasSessionArchivePassword(member, passwordContext);
+
+	jpegview_linux::DirectorySummaryLoader summaries;
+	summaries.Request({archive}, 111);
+	std::vector<jpegview_linux::DirectorySummaryResult> summaryResults;
+	const auto summaryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (summaryResults.empty() && std::chrono::steady_clock::now() < summaryDeadline) {
+		summaryResults = summaries.TakeReady();
+		if (summaryResults.empty()) std::this_thread::yield();
+	}
+
+	jpegview_linux::FileDialogPreviewLoader previews;
+	const std::uint64_t previewGeneration = previews.Request(archive, true,
+		jpegview_linux::FileDialogSortMode::Name, 32, 32);
+	std::vector<jpegview_linux::FileDialogPreviewResult> previewResults;
+	const auto previewDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (previewResults.empty() && std::chrono::steady_clock::now() < previewDeadline) {
+		previewResults = previews.TakeReady();
+		if (previewResults.empty()) std::this_thread::yield();
+	}
+
+	FileListScanWorker scanner;
+	const std::uint64_t scanGeneration = scanner.Request(FileList::InitialScanRequest(
+		{archive.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	std::vector<FileListScanResult> scanResults;
+	const auto scanDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (scanResults.empty() && std::chrono::steady_clock::now() < scanDeadline) {
+		scanResults = scanner.TakeReady();
+		if (scanResults.empty()) std::this_thread::yield();
+	}
+
+	const int classifications = observation.locationClassification.load();
+	const int unadmittedClassifications =
+		observation.unadmittedLocationClassification.load();
+	const int passwordIdentityProbes = observation.passwordIdentity.load();
+	const int unadmittedPasswordIdentityProbes =
+		observation.unadmittedPasswordIdentity.load();
+	std::ostringstream failure;
+	failure << "archive source probes escaped admission (classification=" << classifications
+		<< ", unadmittedClassification=" << unadmittedClassifications
+		<< ", passwordIdentity=" << passwordIdentityProbes
+		<< ", unadmittedPasswordIdentity=" << unadmittedPasswordIdentityProbes
+		<< ", summaryResults=" << summaryResults.size()
+		<< ", previewResults=" << previewResults.size()
+		<< ", scanResults=" << scanResults.size() << ')';
+	Expect(classifications > 0 && unadmittedClassifications == 0 &&
+		passwordIdentityProbes > 0 && unadmittedPasswordIdentityProbes == 0 &&
+		summaryResults.size() == 1 && summaryResults.front().generation == 111 &&
+		previewResults.size() == 1 && previewResults.front().generation == previewGeneration &&
+		scanResults.size() == 1 && scanResults.front().generation == scanGeneration,
+		failure.str());
+}
+
+void TestArchivePasswordValidationYieldsForForegroundWork() {
+	TemporaryDirectory temporary;
+	const fs::path fixture = fs::path(__FILE__).parent_path() / "fixtures" /
+		"encrypted-zip.zip";
+	const fs::path archive = temporary.path() / "yield-password-validation.zip";
+	Expect(fs::copy_file(fixture, archive),
+		"could not copy the encrypted ZIP password-yield fixture");
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool coordinatorInitiallyIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingCpu == 0 &&
+				!snapshot.foregroundPending;
+		}, std::chrono::seconds(2));
+	ArchiveSourceProbeBarrier barrier;
+	jpegview_linux::SetArchiveSourceProbeHookForTesting(
+		BlockArchiveClassificationProbe, &barrier);
+	ArchiveSourceProbeHookReset resetHook;
+	jpegview_linux::ArchiveDirectoryLoader loader;
+	constexpr std::uint64_t validationGeneration = 541;
+	loader.RequestPasswordValidation(archive, "jpegview-test-password",
+		validationGeneration);
+	bool validationReachedProbe = false;
+	{
+		std::unique_lock<std::mutex> lock(barrier.mutex);
+		validationReachedProbe = barrier.changed.wait_for(lock, std::chrono::seconds(3), [&] {
+			return barrier.entered;
+		});
+	}
+	const auto validationSnapshot = coordinator.Snapshot();
+	const bool validationHeldPairedMetadataAdmission = validationReachedProbe &&
+		barrier.sourceAdmitted && barrier.cpuAdmitted &&
+		validationSnapshot.activeSpeculative == 1 && validationSnapshot.activeCpu == 1;
+	coordinator.SetForegroundPending(true);
+	const fs::path visibleSource = temporary.path() / "visible-foreground-source.jpg";
+	const jpegview_linux::WorkContext foregroundContext =
+		jpegview_linux::MakePathWorkContext(visibleSource,
+			jpegview_linux::SourceWorkPriority::Foreground);
+	auto foregroundAdmission = std::async(std::launch::async,
+		[&coordinator, foregroundContext, visibleSource] {
+			return coordinator.AcquireSourceAndCpu(foregroundContext, visibleSource);
+		});
+	{
+		std::lock_guard<std::mutex> lock(barrier.mutex);
+		barrier.release = true;
+	}
+	barrier.changed.notify_all();
+	const bool foregroundEnteredAfterValidationYield = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 1 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 1 && snapshot.foregroundPending;
+		}, std::chrono::seconds(3));
+	auto foregroundLease = foregroundAdmission.get();
+	auto earlyResults = loader.TakeReady();
+	const bool validationResultWithheld = earlyResults.empty();
+	const bool foregroundLeaseHeld = static_cast<bool>(foregroundLease);
+	foregroundLease.Reset();
+	coordinator.SetForegroundPending(false);
+	std::vector<jpegview_linux::ArchiveDirectoryResult> validationResults =
+		std::move(earlyResults);
+	const auto validationDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+	while (validationResults.empty() && std::chrono::steady_clock::now() < validationDeadline) {
+		validationResults = loader.TakeReady();
+		if (validationResults.empty()) std::this_thread::yield();
+	}
+	const bool validationRetriedWithSamePassword = validationResults.size() == 1 &&
+		validationResults.front().generation == validationGeneration &&
+		validationResults.front().passwordValidation && validationResults.front().error.empty();
+
+	{
+		std::lock_guard<std::mutex> lock(barrier.mutex);
+		barrier.entered = false;
+		barrier.release = false;
+		barrier.sourceAdmitted = false;
+		barrier.cpuAdmitted = false;
+	}
+	coordinator.SetForegroundPending(false);
+	constexpr std::uint64_t canceledGeneration = validationGeneration + 1;
+	loader.RequestPasswordValidation(archive, "jpegview-test-password", canceledGeneration);
+	bool canceledValidationReachedProbe = false;
+	{
+		std::unique_lock<std::mutex> lock(barrier.mutex);
+		canceledValidationReachedProbe = barrier.changed.wait_for(lock,
+			std::chrono::seconds(3), [&] { return barrier.entered; });
+	}
+	coordinator.SetForegroundPending(true);
+	{
+		std::lock_guard<std::mutex> lock(barrier.mutex);
+		barrier.release = true;
+	}
+	barrier.changed.notify_all();
+	const bool canceledValidationYielded = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.foregroundPending;
+		}, std::chrono::seconds(3));
+	const auto staleResultsBeforeClear = loader.TakeReady();
+	loader.Clear(canceledGeneration + 1);
+	constexpr std::uint64_t replacementGeneration = canceledGeneration + 2;
+	loader.RequestPasswordValidation(archive, "jpegview-test-password",
+		replacementGeneration);
+	coordinator.SetForegroundPending(false);
+	std::vector<jpegview_linux::ArchiveDirectoryResult> replacementResults;
+	const auto replacementDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+	while (replacementResults.empty() &&
+		std::chrono::steady_clock::now() < replacementDeadline) {
+		replacementResults = loader.TakeReady();
+		if (replacementResults.empty()) std::this_thread::yield();
+	}
+	const bool cancellationDiscardedAndReplacementWorked = canceledValidationReachedProbe &&
+		canceledValidationYielded && staleResultsBeforeClear.empty() &&
+		replacementResults.size() == 1 &&
+		replacementResults.front().generation == replacementGeneration &&
+		replacementResults.front().error.empty();
+
+	{
+		std::lock_guard<std::mutex> lock(barrier.mutex);
+		barrier.entered = false;
+		barrier.release = false;
+		barrier.sourceAdmitted = false;
+		barrier.cpuAdmitted = false;
+	}
+	coordinator.SetForegroundPending(false);
+	auto shutdownLoader = std::make_unique<jpegview_linux::ArchiveDirectoryLoader>();
+	shutdownLoader->RequestPasswordValidation(archive, "jpegview-test-password",
+		replacementGeneration + 1);
+	bool shutdownValidationReachedProbe = false;
+	{
+		std::unique_lock<std::mutex> lock(barrier.mutex);
+		shutdownValidationReachedProbe = barrier.changed.wait_for(lock,
+			std::chrono::seconds(3), [&] { return barrier.entered; });
+	}
+	coordinator.SetForegroundPending(true);
+	{
+		std::lock_guard<std::mutex> lock(barrier.mutex);
+		barrier.release = true;
+	}
+	barrier.changed.notify_all();
+	const bool shutdownValidationYielded = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.foregroundPending;
+		}, std::chrono::seconds(3));
+	std::promise<void> shutdownComplete;
+	auto shutdownFinished = shutdownComplete.get_future();
+	std::thread shutdownThread([owned = std::move(shutdownLoader),
+		&shutdownComplete]() mutable {
+		owned.reset();
+		shutdownComplete.set_value();
+	});
+	const bool shutdownWokeForegroundWait =
+		shutdownFinished.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+	if (!shutdownWokeForegroundWait) {
+		coordinator.SetForegroundPending(false);
+		coordinator.NotifyWaiters();
+	}
+	shutdownThread.join();
+	coordinator.SetForegroundPending(false);
+	std::ostringstream failure;
+	failure << "password validation failed to yield and retry around foreground image work"
+		<< " (coordinatorIdle=" << coordinatorInitiallyIdle
+		<< ", reachedProbe=" << validationReachedProbe
+		<< ", pairedAdmission=" << validationHeldPairedMetadataAdmission
+		<< ", foregroundEntered=" << foregroundEnteredAfterValidationYield
+		<< ", foregroundLease=" << foregroundLeaseHeld
+		<< ", resultWithheld=" << validationResultWithheld
+		<< ", retriedPassword=" << validationRetriedWithSamePassword
+		<< ", cancelProbe=" << canceledValidationReachedProbe
+		<< ", cancelYield=" << canceledValidationYielded
+		<< ", replacement=" << cancellationDiscardedAndReplacementWorked
+		<< ", shutdownProbe=" << shutdownValidationReachedProbe
+		<< ", shutdownYield=" << shutdownValidationYielded
+		<< ", shutdownWoke=" << shutdownWokeForegroundWait << ')';
+	Expect(coordinatorInitiallyIdle && validationReachedProbe &&
+		validationHeldPairedMetadataAdmission && foregroundEnteredAfterValidationYield &&
+		foregroundLeaseHeld && validationResultWithheld && validationRetriedWithSamePassword &&
+		cancellationDiscardedAndReplacementWorked && shutdownValidationReachedProbe &&
+		shutdownValidationYielded && shutdownWokeForegroundWait,
+		failure.str());
+}
+
 void TestFileListAsynchronousScanning() {
 	TemporaryDirectory temporary;
 	const fs::path root = temporary.path() / "root";
@@ -2881,6 +4689,137 @@ void TestFileListAsynchronousScanning() {
 		results.front().prepared.completed,
 		"the directory scan did not resume after foreground work completed");
 
+	// Hold the metadata lane until the scanner has queued its first entry, then
+	// interrupt that source read and clear the gate before scan postchecks run.
+	// A canceled DescribeFile can leave the path in a completed-looking list
+	// without its captured source metadata unless the worker retries the attempt.
+	const fs::path scanAdmissionBlockerPath = temporary.path() / "scan-admission-blocker.png";
+	WriteText(scanAdmissionBlockerPath, "admission blocker");
+	auto& sourceCoordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	sourceCoordinator.SetForegroundPending(false);
+	const bool scanCoordinatorIdle = sourceCoordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	const jpegview_linux::WorkContext scanAdmissionBlockerContext =
+		jpegview_linux::MakePathWorkContext(scanAdmissionBlockerPath,
+			jpegview_linux::SourceWorkPriority::Metadata);
+	jpegview_linux::SourceWorkLease scanAdmissionBlocker = sourceCoordinator.Acquire(
+		scanAdmissionBlockerContext, scanAdmissionBlockerPath);
+	const bool scanAdmissionBlockerAcquired = static_cast<bool>(scanAdmissionBlocker);
+	const bool scanBlockerExclusive = scanAdmissionBlockerAcquired &&
+		sourceCoordinator.Snapshot().activeSpeculative == 1 &&
+		sourceCoordinator.Snapshot().waitingSpeculative == 0;
+	FileListScanWorker interruptedDuringEntry;
+	const std::uint64_t interruptedGeneration = interruptedDuringEntry.Request(
+		FileList::InitialScanRequest({root.string()}, FileList::SortMode::FileName,
+			true, false, FileList::NavigationMode::LoopDirectory));
+	const bool scanQueuedForMetadataLane = sourceCoordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 && snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	interruptedDuringEntry.SetForegroundPending(true);
+	sourceCoordinator.SetForegroundPending(true);
+	scanAdmissionBlocker.Reset();
+	const auto interruptedYieldDeadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!interruptedDuringEntry.IsYieldingForForeground() &&
+		std::chrono::steady_clock::now() < interruptedYieldDeadline) {
+		std::this_thread::yield();
+	}
+	const bool scanInterruptedInsideEntry = interruptedDuringEntry.IsYieldingForForeground();
+	interruptedDuringEntry.SetForegroundPending(false);
+	sourceCoordinator.SetForegroundPending(false);
+	std::vector<FileListScanResult> interruptedResults;
+	const auto interruptedResultDeadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (interruptedResults.empty() &&
+		std::chrono::steady_clock::now() < interruptedResultDeadline) {
+		interruptedResults = interruptedDuringEntry.TakeReady();
+		if (interruptedResults.empty()) std::this_thread::yield();
+	}
+	bool allInterruptedScanDescriptorsCaptured = interruptedResults.size() == 1 &&
+		interruptedResults.front().generation == interruptedGeneration &&
+		interruptedResults.front().prepared.completed &&
+		interruptedResults.front().prepared.replacement.Size() == 2;
+	if (allInterruptedScanDescriptorsCaptured) {
+		for (std::size_t index = 0;
+			index < interruptedResults.front().prepared.replacement.Size(); ++index) {
+			const jpegview_linux::SourceDescriptor* descriptor =
+				interruptedResults.front().prepared.replacement.DescriptorAt(index);
+			allInterruptedScanDescriptorsCaptured = allInterruptedScanDescriptorsCaptured &&
+				descriptor != nullptr && descriptor->Valid() &&
+				descriptor->Metadata().hasFileSize &&
+				descriptor->Metadata().hasModificationTime;
+		}
+	}
+	std::ostringstream scanFailure;
+	scanFailure << "a foreground-interrupted directory scan published entries with missing "
+		"source metadata (idle=" << scanCoordinatorIdle << ", blocker=" << scanBlockerExclusive
+		<< ", queued=" << scanQueuedForMetadataLane << ", yielded=" << scanInterruptedInsideEntry
+		<< ", results=" << interruptedResults.size() << ", captured="
+		<< allInterruptedScanDescriptorsCaptured;
+	if (interruptedResults.size() == 1) {
+		scanFailure << ", complete=" << interruptedResults.front().prepared.completed
+			<< ", entries=" << interruptedResults.front().prepared.replacement.Size();
+		for (std::size_t index = 0;
+			index < interruptedResults.front().prepared.replacement.Size(); ++index) {
+			const auto* descriptor =
+				interruptedResults.front().prepared.replacement.DescriptorAt(index);
+			scanFailure << ", descriptor[" << index << "]="
+				<< (descriptor != nullptr && descriptor->Valid()) << '/'
+				<< (descriptor != nullptr && descriptor->Metadata().hasFileSize) << '/'
+				<< (descriptor != nullptr && descriptor->Metadata().hasModificationTime);
+		}
+	}
+	Expect(scanCoordinatorIdle && scanAdmissionBlockerAcquired && scanBlockerExclusive &&
+		scanQueuedForMetadataLane && scanInterruptedInsideEntry &&
+		allInterruptedScanDescriptorsCaptured, scanFailure.str());
+
+	const fs::path classifiedInput = temporary.path() / "classification-race.png";
+	const fs::path absentInput = temporary.path() / "classification-absent.png";
+	const fs::path classificationBlockerPath =
+		temporary.path() / "classification-admission-blocker.jpg";
+	WriteTinyImage(classifiedInput);
+	WriteText(classificationBlockerPath, "classification admission blocker");
+	const bool classificationCoordinatorIdle = sourceCoordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	const jpegview_linux::WorkContext classificationBlockerContext =
+		jpegview_linux::MakePathWorkContext(classificationBlockerPath,
+			jpegview_linux::SourceWorkPriority::Metadata);
+	jpegview_linux::SourceWorkLease classificationBlocker = sourceCoordinator.Acquire(
+		classificationBlockerContext, classificationBlockerPath);
+	FileListScanWorker classificationWorker;
+	const std::uint64_t classificationGeneration = classificationWorker.Request(
+		FileList::InitialScanRequest({classifiedInput.string(), absentInput.string()},
+			FileList::SortMode::FileName, true, false,
+			FileList::NavigationMode::LoopDirectory));
+	const bool classificationWaitedForAdmission = sourceCoordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 && snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	std::error_code removeClassifiedError;
+	(void)fs::remove(classifiedInput, removeClassifiedError);
+	classificationBlocker.Reset();
+	std::vector<FileListScanResult> classificationResults;
+	const auto classificationDeadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (classificationResults.empty() &&
+		std::chrono::steady_clock::now() < classificationDeadline) {
+		classificationResults = classificationWorker.TakeReady();
+		if (classificationResults.empty()) std::this_thread::yield();
+	}
+	Expect(classificationCoordinatorIdle && classificationWaitedForAdmission &&
+		!removeClassifiedError && classificationResults.size() == 1 &&
+		classificationResults.front().generation == classificationGeneration &&
+		classificationResults.front().prepared.completed &&
+		classificationResults.front().prepared.replacement.Empty(),
+		"initial file-list path classification probed filesystem state before metadata admission");
+
 	const auto waitForYield = [](FileListScanWorker& scanWorker) {
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
 		while (!scanWorker.IsYieldingForForeground() &&
@@ -2956,6 +4895,548 @@ void TestFileListAsynchronousScanning() {
 	shutdownThread.join();
 	Expect(shutdownGenerationYielded && shutdownBeforeCleanup,
 		"shutdown did not release and join a worker paused for foreground activity");
+}
+
+void TestArchiveTraversalYieldReleasesAdmission() {
+	constexpr std::size_t memberCount = 60000;
+	TemporaryDirectory temporary;
+	const fs::path causeArchive = temporary.path() / "cause-members.zip";
+	const fs::path scanArchive = temporary.path() / "scan-members.zip";
+	const fs::path summaryArchive = temporary.path() / "summary-members.zip";
+	WriteZipArchiveWithImageMembers(causeArchive, 8);
+	WriteZipArchiveWithImageMembers(scanArchive, memberCount);
+	WriteZipArchiveWithImageMembers(summaryArchive, memberCount);
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool causeCoordinatorIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingForeground == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0 &&
+				!snapshot.foregroundPending;
+		}, std::chrono::seconds(3));
+	bool injectedForegroundAtArchiveCheck = false;
+	bool archiveYieldCauseCaptured = false;
+	jpegview_linux::WorkContext causeContext;
+	causeContext.sourcePriority = jpegview_linux::SourceWorkPriority::Metadata;
+	causeContext.shouldContinue = [&] {
+		const jpegview_linux::SourceWorkSnapshot snapshot = coordinator.Snapshot();
+		if (!injectedForegroundAtArchiveCheck && snapshot.activeSpeculative == 1 &&
+			snapshot.activeCpu == 1) {
+			injectedForegroundAtArchiveCheck = true;
+			coordinator.SetForegroundPending(true);
+		}
+		return true;
+	};
+	causeContext.onForegroundYield = [&] { archiveYieldCauseCaptured = true; };
+	std::vector<jpegview_linux::ArchiveEntryInfo> causeEntries;
+	std::string causeError;
+	bool causeListingCompleted = false;
+	{
+		jpegview_linux::ScopedWorkContext activeContext(causeContext);
+		causeListingCompleted = jpegview_linux::ListArchiveDirectoryCancellable(causeArchive,
+			causeEntries, std::function<bool()>{}, causeError);
+	}
+	const bool causeAdmissionReleased = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 0 && snapshot.activeCpu == 0;
+		}, std::chrono::seconds(3));
+	coordinator.SetForegroundPending(false);
+	Expect(causeCoordinatorIdle && injectedForegroundAtArchiveCheck &&
+		archiveYieldCauseCaptured && !causeListingCompleted && causeEntries.empty() &&
+		causeAdmissionReleased && causeError.find("cancelled") != std::string::npos,
+		"the archive wrapper lost a foreground interruption raised between its caller check and internal gate check");
+	const auto waitForYield = [](const auto& worker) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+		while (!worker.IsYieldingForForeground() &&
+			std::chrono::steady_clock::now() < deadline) {
+			std::this_thread::yield();
+		}
+		return worker.IsYieldingForForeground();
+	};
+	const auto waitForCompleteScan = [memberCount](FileListScanWorker& worker,
+		std::uint64_t generation) {
+		std::vector<FileListScanResult> results;
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+		while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+			results = worker.TakeReady();
+			if (results.empty()) std::this_thread::yield();
+		}
+		if (results.size() != 1 || results.front().generation != generation ||
+			!results.front().prepared.completed ||
+			results.front().prepared.replacement.Size() != memberCount) return false;
+		const auto* first = results.front().prepared.replacement.DescriptorAt(0);
+		const auto* last = results.front().prepared.replacement.DescriptorAt(memberCount - 1);
+		return first != nullptr && first->Valid() && last != nullptr && last->Valid() &&
+			first->LogicalPath().filename() == "image-0.jpg" &&
+			last->LogicalPath().filename() == "image-59999.jpg";
+	};
+	const auto startForegroundAdmission = [&coordinator](const fs::path& archive,
+		const std::shared_ptr<std::atomic<bool>>& cancel) {
+		jpegview_linux::WorkContext context = jpegview_linux::MakePathWorkContext(archive,
+			jpegview_linux::SourceWorkPriority::Foreground,
+			[cancel] { return !cancel->load(); });
+		return std::async(std::launch::async, [&coordinator, archive, context] {
+			return coordinator.Acquire(context, archive);
+		});
+	};
+
+	const bool scanCoordinatorIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingForeground == 0 &&
+				snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(3));
+	FileListScanWorker scanner;
+	const std::uint64_t scanGeneration = scanner.Request(FileList::InitialScanRequest(
+		{scanArchive.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	const bool scanEnteredArchive = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 && snapshot.activeCpu == 1;
+		}, std::chrono::seconds(3));
+	coordinator.SetForegroundPending(true);
+	auto scanAdmissionCancelled = std::make_shared<std::atomic<bool>>(false);
+	auto scanForeground = startForegroundAdmission(scanArchive, scanAdmissionCancelled);
+	const bool scanForegroundQueued = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.waitingForeground == 1 || snapshot.activeForeground == 1;
+		}, std::chrono::seconds(3));
+	const bool scanYielded = waitForYield(scanner);
+	const bool scanForegroundAdmittedBeforeClear = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 1 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0;
+		}, std::chrono::seconds(3));
+	const auto scanGateDeadline = std::chrono::steady_clock::now() +
+		std::chrono::seconds(3);
+	bool scanGateStayedSet = false;
+	while (std::chrono::steady_clock::now() < scanGateDeadline) {
+		const auto snapshot = coordinator.Snapshot();
+		if (snapshot.foregroundPending && scanner.IsYieldingForForeground()) {
+			scanGateStayedSet = true;
+			break;
+		}
+		std::this_thread::yield();
+	}
+	const bool scanResultWithheld = scanner.TakeReady().empty();
+	if (!scanForegroundAdmittedBeforeClear) {
+		coordinator.SetForegroundPending(false);
+		scanAdmissionCancelled->store(true);
+		coordinator.NotifyWaiters();
+	}
+	jpegview_linux::SourceWorkLease scanForegroundLease = scanForeground.get();
+	const bool scanForegroundLeaseAcquired = static_cast<bool>(scanForegroundLease);
+	scanForegroundLease.Reset();
+	coordinator.SetForegroundPending(false);
+	const bool scanRepublishedComplete = waitForCompleteScan(scanner, scanGeneration);
+
+	const bool summaryCoordinatorIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingForeground == 0 &&
+				snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(3));
+	jpegview_linux::DirectorySummaryLoader summaryLoader;
+	const std::uint64_t summaryGeneration = 4401;
+	summaryLoader.Request({summaryArchive}, summaryGeneration);
+	const bool summaryEnteredArchive = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 && snapshot.activeCpu == 1;
+		}, std::chrono::seconds(3));
+	coordinator.SetForegroundPending(true);
+	auto summaryAdmissionCancelled = std::make_shared<std::atomic<bool>>(false);
+	auto summaryForeground = startForegroundAdmission(summaryArchive,
+		summaryAdmissionCancelled);
+	const bool summaryForegroundQueued = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.waitingForeground == 1 || snapshot.activeForeground == 1;
+		}, std::chrono::seconds(3));
+	const bool summaryYielded = waitForYield(summaryLoader);
+	const bool summaryForegroundAdmittedBeforeClear = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 1 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0;
+		}, std::chrono::seconds(3));
+	const auto summaryGateDeadline = std::chrono::steady_clock::now() +
+		std::chrono::seconds(3);
+	bool summaryGateStayedSet = false;
+	while (std::chrono::steady_clock::now() < summaryGateDeadline) {
+		const auto snapshot = coordinator.Snapshot();
+		if (snapshot.foregroundPending && summaryLoader.IsYieldingForForeground()) {
+			summaryGateStayedSet = true;
+			break;
+		}
+		std::this_thread::yield();
+	}
+	const bool summaryResultWithheld = summaryLoader.TakeReady().empty();
+	if (!summaryForegroundAdmittedBeforeClear) {
+		coordinator.SetForegroundPending(false);
+		summaryAdmissionCancelled->store(true);
+		coordinator.NotifyWaiters();
+	}
+	jpegview_linux::SourceWorkLease summaryForegroundLease = summaryForeground.get();
+	const bool summaryForegroundLeaseAcquired = static_cast<bool>(summaryForegroundLease);
+	summaryForegroundLease.Reset();
+	coordinator.SetForegroundPending(false);
+	std::vector<jpegview_linux::DirectorySummaryResult> summaryResults;
+	const auto summaryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+	while (summaryResults.empty() && std::chrono::steady_clock::now() < summaryDeadline) {
+		summaryResults = summaryLoader.TakeReady();
+		if (summaryResults.empty()) std::this_thread::yield();
+	}
+	const bool summaryRepublishedComplete = summaryResults.size() == 1 &&
+		summaryResults.front().generation == summaryGeneration &&
+		!summaryResults.front().failure.Failed() &&
+		summaryResults.front().summary.imageCount == memberCount;
+
+	std::ostringstream message;
+	message << "foreground admission waited for an interrupted archive traversal to release its "
+		"paired lease (scan idle/entered/yielded/queued/admitted/gate/withheld/lease/complete=" <<
+		scanCoordinatorIdle << '/' << scanEnteredArchive << '/' << scanYielded << '/' <<
+		scanForegroundQueued << '/' <<
+		scanForegroundAdmittedBeforeClear << '/' << scanGateStayedSet << '/' <<
+		scanResultWithheld << '/' << scanForegroundLeaseAcquired << '/' << scanRepublishedComplete <<
+		", summary idle/entered/yielded/queued/admitted/gate/withheld/lease/complete=" <<
+		summaryCoordinatorIdle << '/' << summaryEnteredArchive << '/' << summaryYielded << '/' <<
+		summaryForegroundQueued << '/' << summaryForegroundAdmittedBeforeClear << '/' <<
+		summaryGateStayedSet << '/' << summaryResultWithheld << '/' <<
+		summaryForegroundLeaseAcquired << '/' << summaryRepublishedComplete;
+	Expect(scanCoordinatorIdle && scanEnteredArchive && scanYielded && scanForegroundQueued &&
+		scanForegroundAdmittedBeforeClear && scanGateStayedSet && scanResultWithheld &&
+		scanForegroundLeaseAcquired && scanRepublishedComplete && summaryCoordinatorIdle &&
+		summaryEnteredArchive && summaryYielded && summaryForegroundQueued &&
+		summaryForegroundAdmittedBeforeClear && summaryGateStayedSet &&
+		summaryResultWithheld && summaryForegroundLeaseAcquired && summaryRepublishedComplete,
+		message.str());
+}
+
+void TestDirectoryEnumerationAdmissionYieldsAndRetries() {
+	TemporaryDirectory temporary;
+	const fs::path emptyDirectory = temporary.path() / "empty-directory";
+	fs::create_directories(emptyDirectory);
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool idleBeforeBlocker = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingForeground == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(3));
+	jpegview_linux::SourceIdentity blockerIdentity;
+	blockerIdentity.device = 991;
+	blockerIdentity.inode = 992;
+	blockerIdentity.size = 1;
+	blockerIdentity.valid = true;
+	jpegview_linux::WorkContext blockerContext;
+	blockerContext.source = jpegview_linux::SourceKey("/step09/directory-blocker",
+		blockerIdentity);
+	blockerContext.sourcePriority = jpegview_linux::SourceWorkPriority::Speculative;
+	jpegview_linux::SourceWorkLease blocker = coordinator.Acquire(blockerContext);
+
+	FileListScanWorker scanner;
+	const std::uint64_t generation = scanner.Request(FileList::InitialScanRequest(
+		{emptyDirectory.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory));
+	const bool enumerationQueued = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	coordinator.SetForegroundPending(true);
+	const bool enumerationYielded = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.waitingSpeculative == 0 && snapshot.activeSpeculative == 1 &&
+				snapshot.foregroundPending;
+		}, std::chrono::seconds(2)) && scanner.IsYieldingForForeground();
+	const bool noScanPublishedDuringForeground = scanner.TakeReady().empty();
+	blocker.Reset();
+	coordinator.SetForegroundPending(false);
+	std::vector<FileListScanResult> scanResults;
+	const auto scanDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (scanResults.empty() && std::chrono::steady_clock::now() < scanDeadline) {
+		scanResults = scanner.TakeReady();
+		if (scanResults.empty()) std::this_thread::yield();
+	}
+	const bool scanRetried = scanResults.size() == 1 &&
+		scanResults.front().generation == generation &&
+		scanResults.front().prepared.completed &&
+		scanResults.front().prepared.replacement.Empty();
+
+	const bool idleBeforePreviewBlocker = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingForeground == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(3));
+	blocker = coordinator.Acquire(blockerContext);
+	jpegview_linux::FileDialogPreviewLoader preview;
+	const std::uint64_t previewGeneration = preview.Request(emptyDirectory, true,
+		jpegview_linux::FileDialogSortMode::Name, 64, 64);
+	const bool previewEnumerationQueued = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	coordinator.SetForegroundPending(true);
+	const bool previewYielded = previewEnumerationQueued && coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.waitingSpeculative == 0 && snapshot.activeSpeculative == 1 &&
+				snapshot.foregroundPending;
+		}, std::chrono::seconds(2));
+	const bool noPreviewPublishedDuringForeground = preview.TakeReady().empty();
+	blocker.Reset();
+	coordinator.SetForegroundPending(false);
+	std::vector<jpegview_linux::FileDialogPreviewResult> previewResults;
+	const auto previewDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (previewResults.empty() && std::chrono::steady_clock::now() < previewDeadline) {
+		previewResults = preview.TakeReady();
+		if (previewResults.empty()) std::this_thread::yield();
+	}
+	const bool previewRetried = previewResults.size() == 1 &&
+		previewResults.front().generation == previewGeneration &&
+		previewResults.front().error == "No images in this folder";
+
+	coordinator.SetForegroundPending(false);
+	std::ostringstream diagnostic;
+	diagnostic << "directory admission/yield checks failed (idle/scan-queued/scan-yielded/"
+		"scan-withheld/scan-retried/preview-idle/preview-queued/preview-yielded/"
+		"preview-withheld/preview-retried=" << idleBeforeBlocker << '/' <<
+		enumerationQueued << '/' << enumerationYielded << '/' <<
+		noScanPublishedDuringForeground << '/' << scanRetried << '/' <<
+		idleBeforePreviewBlocker << '/' << previewEnumerationQueued << '/' <<
+		previewYielded << '/' << noPreviewPublishedDuringForeground << '/' << previewRetried;
+	Expect(idleBeforeBlocker && enumerationQueued && enumerationYielded &&
+		noScanPublishedDuringForeground && scanRetried && idleBeforePreviewBlocker &&
+		previewEnumerationQueued && previewYielded && noPreviewPublishedDuringForeground &&
+		previewRetried, diagnostic.str());
+}
+
+void TestArchivePrefetchPlannerKeepsAdmittedContext() {
+	TemporaryDirectory temporary;
+	const fs::path archive = temporary.path() / "planner-context.zip";
+	WriteZipArchiveWithImageMembers(archive, 1);
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(archive / "image-0.jpg");
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool idleBeforeTest = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingForeground == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(3));
+	SourceWorkRegistrationCounter registrations;
+	coordinator.SetTestHookForTesting(ThrowOnNestedSourceRegistration, &registrations);
+	jpegview_linux::DisplayPrefetchPlannerWorker planner(
+		[](const jpegview_linux::SourceDescriptor&, int& width, int& height,
+			std::string&, const jpegview_linux::DisplayPrefetchPlannerWorker::Continue& keepGoing) {
+			if (!keepGoing()) return false;
+			width = 640;
+			height = 480;
+			return keepGoing();
+		});
+	jpegview_linux::DisplayPrefetchPlannerRequest request;
+	request.catalogRevision = 1;
+	request.descriptorRevision = 1;
+	request.viewportRevision = 1;
+	request.pageCount = 1;
+	request.imageAreaWidth = 640;
+	request.imageAreaHeight = 480;
+	request.maximumCount = 1;
+	request.neighbors.push_back({source.LogicalPath(), source, 0, 1, {}, false, true});
+	const std::uint64_t generation = planner.Request(request);
+	const bool idle = planner.WaitUntilIdle(std::chrono::seconds(3));
+	coordinator.SetTestHookForTesting(nullptr, nullptr);
+	const std::vector<jpegview_linux::DisplayPrefetchPlannerResult> results =
+		planner.TakeReady();
+	const bool planned = results.size() == 1 && results.front().generation == generation &&
+		!results.front().failure.Failed() && results.front().dimensions.size() == 1 &&
+		results.front().dimensions.front().width == 640 &&
+		results.front().dimensions.front().height == 480;
+	Expect(idleBeforeTest && idle && source.Valid() && planned &&
+		registrations.sourceRegistrations.load() == 1 &&
+		!registrations.threwOnNestedRegistration.load(),
+		"archive JPEG dimension planning attempted a second admission while its paired "
+		"source and CPU lease was still held");
+}
+
+void TestArchiveDecodedCachePromotionCompletesDuringForegroundGate() {
+	TemporaryDirectory temporary;
+	const fs::path payload = temporary.path() / "image-payload.bin";
+	const fs::path archive = temporary.path() / "foreground-validation.zip";
+	WriteBytes(payload, {1, 2, 3, 4});
+	WriteZipArchive(archive, {{"inside.jpg", payload}});
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(archive / "inside.jpg");
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool decoderStarted = false;
+	bool releaseDecoder = false;
+	bool completionReceived = false;
+	bool foregroundWaitReturned = false;
+	bool foregroundGotImage = false;
+	jpegview_linux::DecodedImageCache cache(16,
+		[&](const fs::path&, DecodedImage& decoded, std::string&) {
+			std::unique_lock<std::mutex> lock(mutex);
+			decoderStarted = true;
+			changed.notify_all();
+			if (!changed.wait_for(lock, std::chrono::seconds(3),
+				[&] { return releaseDecoder; })) return false;
+			jpegview_linux::DecodedFrame frame;
+			frame.width = frame.height = 1;
+			frame.bgra = {1, 2, 3, 255};
+			decoded.frames.push_back(std::move(frame));
+			return true;
+		});
+	cache.RequestBackground(source,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			std::lock_guard<std::mutex> lock(mutex);
+			completionReceived = static_cast<bool>(image);
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::DistantSpeculation);
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decoderStarted; }),
+			"archive decode did not reach its foreground-validation barrier");
+	}
+	coordinator.SetForegroundPending(true);
+	std::thread foregroundWaiter([&] {
+		const auto image = cache.FindOrWait(source);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			foregroundGotImage = static_cast<bool>(image);
+			foregroundWaitReturned = true;
+		}
+		changed.notify_all();
+	});
+	const auto promotionDeadline = std::chrono::steady_clock::now() +
+		std::chrono::seconds(2);
+	bool promoted = false;
+	while (std::chrono::steady_clock::now() < promotionDeadline) {
+		if (cache.GetDiagnostics().foregroundActive == 1) {
+			promoted = true;
+			break;
+		}
+		std::this_thread::yield();
+	}
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseDecoder = true;
+	}
+	changed.notify_all();
+	bool completedBeforeGateClear = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		completedBeforeGateClear = changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return foregroundWaitReturned && completionReceived;
+		});
+	}
+	if (!completedBeforeGateClear) coordinator.SetForegroundPending(false);
+	foregroundWaiter.join();
+	const bool idle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	coordinator.SetForegroundPending(false);
+	Expect(source.Valid() && promoted && completedBeforeGateClear && idle &&
+		foregroundGotImage && completionReceived,
+		"a promoted archive decode lost its admitted context and blocked publication "
+		"behind the foreground gate");
+}
+
+void TestThumbnailValidationWaitHonorsCancellationAndShutdown() {
+	TemporaryDirectory temporary;
+	const fs::path payload = temporary.path() / "thumb-payload.bin";
+	const fs::path archive = temporary.path() / "thumbnail-validation.zip";
+	WriteBytes(payload, {1, 2, 3, 4});
+	WriteZipArchive(archive, {{"inside.jpg", payload}});
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(archive / "inside.jpg");
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	const auto runCase = [&](bool shutdown) {
+		coordinator.SetForegroundPending(false);
+		std::mutex mutex;
+		std::condition_variable changed;
+		bool processorStarted = false;
+		bool releaseProcessor = false;
+		jpegview_linux::ThumbnailPreparationWorker::Processor processor =
+			[&](const jpegview_linux::ThumbnailPreparationRequest& request)
+				-> jpegview_linux::ThumbnailPreparationWorker::ImagePtr {
+				std::unique_lock<std::mutex> lock(mutex);
+				processorStarted = true;
+				changed.notify_all();
+				if (!changed.wait_for(lock, std::chrono::seconds(3),
+					[&] { return releaseProcessor; })) return
+						jpegview_linux::ThumbnailPreparationWorker::ImagePtr{};
+				auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+				image->key = request.key;
+				image->sourceDescriptor = request.sourceDescriptor;
+				image->width = image->height = 1;
+				image->bgra = {1, 2, 3, 255};
+				return image;
+			};
+		auto worker = std::make_unique<jpegview_linux::ThumbnailPreparationWorker>(
+			std::move(processor));
+		auto cancellation = std::make_shared<std::atomic<bool>>(false);
+		jpegview_linux::ThumbnailPreparationRequest request;
+		request.key = source.Key();
+		request.logicalSource = source.LogicalPath();
+		request.sourceDescriptor = source;
+		request.maximumWidth = 1;
+		request.maximumHeight = 1;
+		request.workClass = jpegview_linux::PerfWorkClass::VisibleThumbnail;
+		request.cancellation = cancellation;
+		Expect(worker->Request(request), "thumbnail validation fixture was not admitted");
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			Expect(changed.wait_for(lock, std::chrono::seconds(2),
+				[&] { return processorStarted; }),
+				"thumbnail processor did not reach its validation barrier");
+		}
+		coordinator.SetForegroundPending(true);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			releaseProcessor = true;
+		}
+		changed.notify_all();
+		const bool validationQueued = coordinator.WaitForSnapshot(
+			[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+				return snapshot.waitingSpeculative == 1 && snapshot.foregroundPending;
+			}, std::chrono::seconds(2));
+		bool completedBeforeGateClear = false;
+		if (shutdown) {
+			std::mutex shutdownMutex;
+			std::condition_variable shutdownChanged;
+			bool destroyed = false;
+			std::thread destroyer([&] {
+				worker.reset();
+				{
+					std::lock_guard<std::mutex> lock(shutdownMutex);
+					destroyed = true;
+				}
+				shutdownChanged.notify_all();
+			});
+			{
+				std::unique_lock<std::mutex> lock(shutdownMutex);
+				completedBeforeGateClear = shutdownChanged.wait_for(lock,
+					std::chrono::seconds(2), [&] { return destroyed; });
+			}
+			if (!completedBeforeGateClear) coordinator.SetForegroundPending(false);
+			destroyer.join();
+		} else {
+			cancellation->store(true);
+			coordinator.NotifyWaiters();
+			completedBeforeGateClear = worker->WaitUntilIdle(std::chrono::seconds(2));
+			if (!completedBeforeGateClear) coordinator.SetForegroundPending(false);
+			(void)worker->WaitUntilIdle(std::chrono::seconds(2));
+		}
+		coordinator.SetForegroundPending(false);
+		return validationQueued && completedBeforeGateClear;
+	};
+	const bool cancellationReleasedWait = runCase(false);
+	const bool shutdownReleasedWait = runCase(true);
+	Expect(source.Valid() && cancellationReleasedWait && shutdownReleasedWait,
+		"archive thumbnail source validation ignored cancellation or shutdown while "
+		"waiting for paired admission");
 }
 
 void TestPreparedScansRejectDescriptorRefreshRace() {
@@ -3365,6 +5846,30 @@ void TestJpegDisplayDecodeScaling() {
 	Expect(jpegview_linux::ReadJpegDimensions(filename, headerWidth, headerHeight, error) &&
 		headerWidth == width && headerHeight == height,
 		"JPEG header probe returned incorrect source dimensions");
+	const jpegview_linux::SourceDescriptor cropSource =
+		jpegview_linux::DescribeImageSource(filename);
+	const jpegview_linux::WorkContext cropWork = jpegview_linux::MakeWorkContext(
+		cropSource, jpegview_linux::SourceWorkPriority::Foreground);
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(true);
+	int mcuWidth = 0;
+	int mcuHeight = 0;
+	std::string mcuError;
+	auto mcuRead = std::async(std::launch::async, [&] {
+		return jpegview_linux::ReadJpegMcuSize(filename, mcuWidth, mcuHeight,
+			mcuError, cropWork);
+	});
+	const bool mcuReadWhileForegroundPending =
+		mcuRead.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+	if (!mcuReadWhileForegroundPending) coordinator.SetForegroundPending(false);
+	const bool mcuReadCompleted = mcuRead.wait_for(std::chrono::seconds(2)) ==
+		std::future_status::ready;
+	const bool mcuReadSucceeded = mcuReadCompleted && mcuRead.get();
+	coordinator.SetForegroundPending(false);
+	Expect(mcuReadWhileForegroundPending && mcuReadSucceeded &&
+		mcuWidth > 0 && mcuHeight > 0,
+		"foreground JPEG crop metadata waited behind its own pending foreground gate: " +
+		mcuError);
 	DecodedImage scaled;
 	int sourceWidth = 0;
 	int sourceHeight = 0;
@@ -3376,6 +5881,26 @@ void TestJpegDisplayDecodeScaling() {
 	Expect(scaled.frames[0].width >= 9 && scaled.frames[0].height >= 7 &&
 		scaled.frames[0].width < width && scaled.frames[0].height < height,
 		"JPEG display decode did not select a reduced DCT size above the target");
+
+	const fs::path cancellableJpeg = temporary.path() / "cancellable-scanlines.jpg";
+	constexpr int cancellableHeight = 512;
+	std::vector<std::uint8_t> tallPixels(
+		static_cast<std::size_t>(width) * cancellableHeight * 4, 127);
+	Expect(jpegview_linux::WriteImage(cancellableJpeg, tallPixels.data(), width,
+		cancellableHeight, options, error),
+		"cannot create tall JPEG cancellation fixture: " + error);
+	int continuationChecks = 0;
+	const jpegview_linux::WorkContext cancelDuringScanlines =
+		jpegview_linux::MakePathWorkContext(cancellableJpeg,
+			jpegview_linux::SourceWorkPriority::Foreground, [&continuationChecks] {
+				return ++continuationChecks < 11;
+			});
+	DecodedImage canceledDecode;
+	error.clear();
+	Expect(!jpegview_linux::DecodeImage(cancellableJpeg, canceledDecode, error,
+		cancelDuringScanlines) && canceledDecode.frames.empty() &&
+		continuationChecks >= 11 && error.find("cancel") != std::string::npos,
+		"JPEG decode did not cancel at a scanline batch boundary and clean its pixels");
 
 	const jpegview_linux::DisplayImageRequest request =
 		jpegview_linux::MakeJpegDisplayImageRequest(filename, width, height,
@@ -3651,6 +6176,41 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 		ready.front().dimensions.front().source == candidates[1].source.Key() &&
 		obsoleteGeneration != replacementGeneration,
 		"canceled planner work published dimensions from the obsolete catalog snapshot");
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	std::atomic<int> admissionDimensionReads{0};
+	jpegview_linux::DisplayPrefetchPlannerWorker admissionPlanner(
+		[&admissionDimensionReads](const jpegview_linux::SourceDescriptor&, int& width,
+			int& height, std::string&, const jpegview_linux::DisplayPrefetchPlannerWorker::Continue& keepGoing) {
+		++admissionDimensionReads;
+		if (!keepGoing()) return false;
+		width = 400;
+		height = 300;
+		return true;
+	});
+	jpegview_linux::DisplayPrefetchPlannerRequest admissionRequest = obsolete;
+	SourceWorkFailureInjection admissionInjection{
+		jpegview_linux::detail::SourceWorkTestHookPoint::ActiveCpuRegistration};
+	coordinator.SetTestHookForTesting(ThrowAtSourceWorkHook, &admissionInjection);
+	const std::uint64_t failedAdmissionGeneration = admissionPlanner.Request(admissionRequest);
+	const bool failedAdmissionIdle = admissionPlanner.WaitUntilIdle(std::chrono::seconds(3));
+	coordinator.SetTestHookForTesting(nullptr, nullptr);
+	const auto failedAdmissionResults = admissionPlanner.TakeReady();
+	const std::uint64_t retriedAdmissionGeneration = admissionPlanner.Request(admissionRequest);
+	const bool retriedAdmissionIdle = admissionPlanner.WaitUntilIdle(std::chrono::seconds(3));
+	const auto retriedAdmissionResults = admissionPlanner.TakeReady();
+	Expect(admissionInjection.fired.load() && failedAdmissionIdle &&
+		failedAdmissionResults.size() == 1 &&
+		failedAdmissionResults.front().generation == failedAdmissionGeneration &&
+		failedAdmissionResults.front().failure.kind ==
+			jpegview_linux::WorkerFailureKind::Exception &&
+		failedAdmissionResults.front().dimensions.empty() &&
+		retriedAdmissionIdle && retriedAdmissionResults.size() == 1 &&
+		retriedAdmissionResults.front().generation == retriedAdmissionGeneration &&
+		!retriedAdmissionResults.front().failure.Failed() &&
+		retriedAdmissionResults.front().dimensions.size() == 1 &&
+		admissionDimensionReads.load() == 1,
+		"planner admission exception escaped its worker or prevented a valid retry");
 }
 
 void TestViewportInvalidationRetainsCurrentActiveSpreadBatch() {
@@ -3983,6 +6543,428 @@ void TestExifMetadataWorkerReloadAndStaleResultRejection() {
 		"EXIF worker shutdown waited on the event loop or published canceled metadata");
 }
 
+void TestExifArchiveForegroundYieldRetriesCurrentGeneration() {
+	TemporaryDirectory temporary;
+	const fs::path archive = temporary.path() / "metadata-foreground.zip";
+	const fs::path payload = temporary.path() / "metadata-photo.jpg";
+	const std::string archiveComment = "archive comment";
+	std::vector<std::uint8_t> jpegBytes{
+		0xff, 0xd8, 0xff, 0xfe, 0x00,
+		static_cast<std::uint8_t>(archiveComment.size() + 2)};
+	for (unsigned char byte : archiveComment) jpegBytes.push_back(byte);
+	jpegBytes.insert(jpegBytes.end(), {0xff, 0xd9});
+	WriteBytes(payload, jpegBytes);
+	WriteZipArchive(archive, {{"photo.jpg", payload}});
+	const fs::path member = archive / "photo.jpg";
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(member);
+	Expect(source.Valid() && source.Metadata().archiveMember,
+		"EXIF foreground-yield fixture did not capture an archive-member descriptor");
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool coordinatorInitiallyIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(2));
+	Expect(coordinatorInitiallyIdle,
+		"EXIF foreground-yield fixture started with unrelated source work active");
+
+	std::mutex readerMutex;
+	std::condition_variable readerChanged;
+	bool foregroundRaisedByFirstRead = false;
+	std::atomic<int> reads{0};
+	jpegview_linux::ExifMetadataWorker worker(
+		[&](const fs::path& filename, jpegview_linux::ExifInfo& info,
+			std::string& comment) {
+			const int read = ++reads;
+			if (read == 1) {
+				coordinator.SetForegroundPending(true);
+				{
+					std::lock_guard<std::mutex> lock(readerMutex);
+					foregroundRaisedByFirstRead = true;
+				}
+				readerChanged.notify_all();
+			}
+			return jpegview_linux::ReadJpegMetadata(filename, info, comment);
+		});
+	struct ClearForegroundGateOnExit {
+		jpegview_linux::SourceWorkCoordinator& coordinator;
+		~ClearForegroundGateOnExit() { coordinator.SetForegroundPending(false); }
+	} clearForegroundGate{coordinator};
+
+	const std::uint64_t generation = worker.Request(source);
+	{
+		std::unique_lock<std::mutex> lock(readerMutex);
+		Expect(readerChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return foregroundRaisedByFirstRead; }),
+			"EXIF reader did not raise foreground demand before returning");
+	}
+	const bool admissionReleasedWhileForegroundPending = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.foregroundPending && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(2));
+	coordinator.SetForegroundPending(false);
+	const bool completed = worker.WaitUntilIdle(std::chrono::seconds(3));
+	const auto ready = worker.TakeReady();
+	Expect(admissionReleasedWhileForegroundPending,
+		"EXIF archive metadata retained paired admission while foreground work was pending");
+	Expect(completed && ready.size() == 1 &&
+		ready.front().generation == generation && ready.front().source == source.Key() &&
+		ready.front().metadataAvailable &&
+		ready.front().jpegComment == archiveComment &&
+		!ready.front().failure.Failed() && reads.load() == 2,
+		"current archive EXIF request did not retry and publish after its foreground yield");
+}
+
+void TestExifArchiveForegroundYieldCanBeReplacedOrStopped() {
+	TemporaryDirectory temporary;
+	const fs::path archive = temporary.path() / "metadata-cancel.zip";
+	const fs::path payload = temporary.path() / "metadata-cancel.jpg";
+	const fs::path replacementPath = temporary.path() / "metadata-replacement.jpg";
+	WriteText(payload, "archive metadata source");
+	WriteText(replacementPath, "replacement metadata source");
+	WriteZipArchive(archive, {{"photo.jpg", payload}});
+	const fs::path member = archive / "photo.jpg";
+	const auto archiveSource = jpegview_linux::DescribeImageSource(member);
+	const auto replacementSource = jpegview_linux::DescribeImageSource(replacementPath);
+	Expect(archiveSource.Valid() && archiveSource.Metadata().archiveMember &&
+		replacementSource.Valid(),
+		"EXIF cancellation fixture did not capture its archive and replacement sources");
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool coordinatorInitiallyIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(2));
+	Expect(coordinatorInitiallyIdle,
+		"EXIF cancellation fixture started with unrelated source work active");
+
+	struct ClearForegroundGateOnExit {
+		jpegview_linux::SourceWorkCoordinator& coordinator;
+		~ClearForegroundGateOnExit() { coordinator.SetForegroundPending(false); }
+	} clearForegroundGate{coordinator};
+	std::mutex readerMutex;
+	std::condition_variable readerChanged;
+	bool firstArchiveReaderStarted = false;
+	bool releaseFirstArchiveReader = false;
+	bool firstArchiveReadRaisedForeground = false;
+	std::atomic<int> archiveReads{0};
+	std::atomic<int> replacementReads{0};
+	jpegview_linux::ExifMetadataWorker worker(
+		[&](const fs::path& filename, jpegview_linux::ExifInfo& info, std::string&) {
+			if (filename == member) {
+				if (++archiveReads == 1) {
+					{
+						std::unique_lock<std::mutex> lock(readerMutex);
+						firstArchiveReaderStarted = true;
+						readerChanged.notify_all();
+						if (!readerChanged.wait_for(lock, std::chrono::seconds(2),
+							[&] { return releaseFirstArchiveReader; })) return false;
+					}
+					coordinator.SetForegroundPending(true);
+					{
+						std::lock_guard<std::mutex> lock(readerMutex);
+						firstArchiveReadRaisedForeground = true;
+					}
+					readerChanged.notify_all();
+				}
+				info.cameraModel = "obsolete archive metadata";
+			} else {
+				++replacementReads;
+				info.cameraModel = "replacement metadata";
+			}
+			info.hasExif = true;
+			return true;
+		});
+	const std::uint64_t obsoleteGeneration = worker.Request(archiveSource);
+	{
+		std::unique_lock<std::mutex> lock(readerMutex);
+		Expect(readerChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return firstArchiveReaderStarted; }),
+			"EXIF reader did not start before foreground demand was raised");
+		releaseFirstArchiveReader = true;
+	}
+	readerChanged.notify_all();
+	{
+		std::unique_lock<std::mutex> lock(readerMutex);
+		Expect(readerChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return firstArchiveReadRaisedForeground; }),
+			"EXIF worker did not reach the foreground-yield reader barrier");
+	}
+	const bool oldAdmissionReleased = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.foregroundPending && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(2));
+	const bool oldGenerationRemainedActiveWhileYielded =
+		!worker.WaitUntilIdle(std::chrono::milliseconds(20));
+	const std::uint64_t replacementGeneration = worker.Request(replacementSource);
+	const bool replacementStayedPendingWhileForeground =
+		!worker.WaitUntilIdle(std::chrono::milliseconds(20)) && replacementReads.load() == 0;
+	coordinator.SetForegroundPending(false);
+	const bool replacementCompleted = worker.WaitUntilIdle(std::chrono::seconds(3));
+	const auto replacementReady = worker.TakeReady();
+	Expect(oldAdmissionReleased && oldGenerationRemainedActiveWhileYielded &&
+		replacementStayedPendingWhileForeground && replacementCompleted &&
+		replacementReady.size() == 1 && replacementReady.front().generation ==
+			replacementGeneration && replacementReady.front().source == replacementSource.Key() &&
+		replacementReady.front().metadata.cameraModel == "replacement metadata" &&
+		archiveReads.load() == 1 && replacementReads.load() == 1 &&
+		obsoleteGeneration != replacementGeneration,
+		"replacement did not cancel a yielded EXIF generation and publish only current metadata");
+
+	std::mutex shutdownMutex;
+	std::condition_variable shutdownChanged;
+	bool shutdownReaderStarted = false;
+	bool releaseShutdownReader = false;
+	bool shutdownReaderRaisedForeground = false;
+	jpegview_linux::ExifMetadataWorker shutdownWorker(
+		[&](const fs::path&, jpegview_linux::ExifInfo& info, std::string&) {
+			{
+				std::unique_lock<std::mutex> lock(shutdownMutex);
+				shutdownReaderStarted = true;
+				shutdownChanged.notify_all();
+				if (!shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+					[&] { return releaseShutdownReader; })) return false;
+			}
+			coordinator.SetForegroundPending(true);
+			{
+				std::lock_guard<std::mutex> lock(shutdownMutex);
+				shutdownReaderRaisedForeground = true;
+			}
+			shutdownChanged.notify_all();
+			info.hasExif = true;
+			return true;
+		});
+	shutdownWorker.Request(archiveSource);
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		Expect(shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return shutdownReaderStarted; }),
+			"EXIF shutdown reader did not start before foreground demand was raised");
+		releaseShutdownReader = true;
+	}
+	shutdownChanged.notify_all();
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		Expect(shutdownChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return shutdownReaderRaisedForeground; }),
+			"EXIF shutdown fixture did not raise foreground demand");
+	}
+	const bool shutdownAdmissionReleased = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.foregroundPending && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(2));
+	const bool shutdownWorkerRemainedActiveWhileYielded =
+		!shutdownWorker.WaitUntilIdle(std::chrono::milliseconds(20));
+	bool shutdownReturned = false;
+	std::thread stopThread([&] {
+		shutdownWorker.Stop();
+		{
+			std::lock_guard<std::mutex> lock(shutdownMutex);
+			shutdownReturned = true;
+		}
+		shutdownChanged.notify_all();
+	});
+	bool shutdownCompletedWithoutGateRelease = false;
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		shutdownCompletedWithoutGateRelease = shutdownChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return shutdownReturned; });
+	}
+	if (!shutdownCompletedWithoutGateRelease) coordinator.SetForegroundPending(false);
+	stopThread.join();
+	coordinator.SetForegroundPending(false);
+	Expect(shutdownAdmissionReleased && shutdownWorkerRemainedActiveWhileYielded &&
+		shutdownCompletedWithoutGateRelease && shutdownWorker.WaitUntilIdle(
+			std::chrono::seconds(2)) && shutdownWorker.TakeReady().empty(),
+		"EXIF worker shutdown did not wake and cancel a foreground-yielded generation");
+}
+
+void TestExifMetadataWorkerPublishesSourceUnavailable() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "vanishing-metadata.jpg";
+	WriteText(filename, "source before removal");
+	const auto source = jpegview_linux::DescribeImageSource(filename);
+	fs::remove(filename);
+	std::atomic<int> readerCalls{0};
+	jpegview_linux::ExifMetadataWorker worker(
+		[&](const fs::path&, jpegview_linux::ExifInfo& info, std::string&) {
+			++readerCalls;
+			info.hasExif = true;
+			return true;
+		});
+	const std::uint64_t generation = worker.Request(source);
+	const bool completed = worker.WaitUntilIdle(std::chrono::seconds(2));
+	const auto ready = worker.TakeReady();
+	Expect(completed && ready.size() == 1 && ready.front().generation == generation &&
+		ready.front().source == source.Key() &&
+		ready.front().failure.kind == jpegview_linux::WorkerFailureKind::SourceUnavailable &&
+		!ready.front().metadataAvailable && readerCalls.load() == 0,
+		"EXIF worker did not publish a terminal source-unavailable result");
+}
+
+void TestExifMetadataWorkerPublishesCurrentExceptions() {
+	TemporaryDirectory temporary;
+	const fs::path throwingPath = temporary.path() / "throwing-reader.jpg";
+	const fs::path admissionPath = temporary.path() / "throwing-admission.jpg";
+	WriteText(throwingPath, "reader exception source");
+	WriteText(admissionPath, "admission exception source");
+	const auto throwingSource = jpegview_linux::DescribeImageSource(throwingPath);
+	const auto admissionSource = jpegview_linux::DescribeImageSource(admissionPath);
+	std::atomic<int> readerCalls{0};
+	jpegview_linux::ExifMetadataWorker readerWorker(
+		[&](const fs::path& filename, jpegview_linux::ExifInfo& info,
+			std::string& comment) {
+			++readerCalls;
+			if (filename == throwingPath) {
+				info.hasExif = true;
+				info.cameraModel = "partial metadata before exception";
+				comment = "partial comment before exception";
+				throw std::runtime_error("injected EXIF reader failure");
+			}
+			info.hasExif = true;
+			info.cameraModel = "later request succeeded";
+			return true;
+		});
+	const std::uint64_t throwingGeneration = readerWorker.Request(throwingSource);
+	const bool readerFailureBecameIdle = readerWorker.WaitUntilIdle(std::chrono::seconds(2));
+	auto readerFailure = readerWorker.TakeReady();
+	const bool readerFailurePublished = readerFailure.size() == 1 &&
+		readerFailure.front().generation == throwingGeneration &&
+		readerFailure.front().source == throwingSource.Key() &&
+		readerFailure.front().failure.kind == jpegview_linux::WorkerFailureKind::Exception &&
+		!readerFailure.front().metadataAvailable &&
+		!readerFailure.front().metadata.hasExif &&
+		readerFailure.front().metadata.cameraModel.empty() &&
+		readerFailure.front().jpegComment.empty();
+	const std::uint64_t readerRetryGeneration = readerWorker.Request(admissionSource);
+	const bool readerRetryBecameIdle = readerWorker.WaitUntilIdle(std::chrono::seconds(2));
+	auto readerRetry = readerWorker.TakeReady();
+	const bool readerRetryPublished = readerRetry.size() == 1 &&
+		readerRetry.front().generation == readerRetryGeneration &&
+		readerRetry.front().source == admissionSource.Key() &&
+		readerRetry.front().metadataAvailable &&
+		readerRetry.front().metadata.cameraModel == "later request succeeded" &&
+		!readerRetry.front().failure.Failed() && readerCalls.load() == 2;
+	std::atomic<int> sourceValidationCalls{0};
+	jpegview_linux::ExifMetadataWorker validatorWorker(
+		[](const fs::path&, jpegview_linux::ExifInfo& info, std::string&) {
+			info.hasExif = true;
+			info.cameraModel = "metadata cleared after validator exception";
+			return true;
+		}, [&](const jpegview_linux::SourceDescriptor& source) {
+			if (source.Key() == throwingSource.Key() && ++sourceValidationCalls == 3) {
+				throw std::runtime_error("injected EXIF source validator failure");
+			}
+			return true;
+		});
+	const std::uint64_t validatorGeneration = validatorWorker.Request(throwingSource);
+	const bool validatorFailureBecameIdle = validatorWorker.WaitUntilIdle(
+		std::chrono::seconds(2));
+	auto validatorFailure = validatorWorker.TakeReady();
+	const bool validatorFailurePublished = validatorFailure.size() == 1 &&
+		validatorFailure.front().generation == validatorGeneration &&
+		validatorFailure.front().source == throwingSource.Key() &&
+		validatorFailure.front().failure.kind == jpegview_linux::WorkerFailureKind::Exception &&
+		!validatorFailure.front().metadataAvailable &&
+		!validatorFailure.front().metadata.hasExif &&
+		validatorFailure.front().metadata.cameraModel.empty() &&
+		validatorFailure.front().jpegComment.empty();
+	const std::uint64_t validatorRetryGeneration = validatorWorker.Request(admissionSource);
+	const bool validatorRetryBecameIdle = validatorWorker.WaitUntilIdle(
+		std::chrono::seconds(2));
+	auto validatorRetry = validatorWorker.TakeReady();
+	const bool validatorRetryPublished = validatorRetry.size() == 1 &&
+		validatorRetry.front().generation == validatorRetryGeneration &&
+		validatorRetry.front().metadataAvailable &&
+		validatorRetry.front().metadata.cameraModel ==
+			"metadata cleared after validator exception";
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool coordinatorInitiallyIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(2));
+	SourceWorkFailureInjection injection{
+		jpegview_linux::detail::SourceWorkTestHookPoint::InitialSourceQueueRegistration};
+	coordinator.SetTestHookForTesting(ThrowAtSourceWorkHook, &injection);
+	std::atomic<int> admissionReaderCalls{0};
+	jpegview_linux::ExifMetadataWorker admissionWorker(
+		[&](const fs::path&, jpegview_linux::ExifInfo& info, std::string&) {
+			++admissionReaderCalls;
+			info.hasExif = true;
+			info.cameraModel = "admission retry succeeded";
+			return true;
+		});
+	const std::uint64_t admissionGeneration = admissionWorker.Request(admissionSource);
+	const bool admissionFailureBecameIdle = admissionWorker.WaitUntilIdle(
+		std::chrono::seconds(2));
+	auto admissionFailure = admissionWorker.TakeReady();
+	const bool admissionFailurePublished = admissionFailure.size() == 1 &&
+		admissionFailure.front().generation == admissionGeneration &&
+		admissionFailure.front().source == admissionSource.Key() &&
+		admissionFailure.front().failure.kind == jpegview_linux::WorkerFailureKind::Exception &&
+		!admissionFailure.front().metadataAvailable &&
+		!admissionFailure.front().metadata.hasExif &&
+		admissionFailure.front().metadata.cameraModel.empty() &&
+		admissionFailure.front().jpegComment.empty() && admissionReaderCalls.load() == 0;
+	coordinator.SetTestHookForTesting(nullptr, nullptr);
+	const std::uint64_t admissionRetryGeneration = admissionWorker.Request(admissionSource);
+	const bool admissionRetryBecameIdle = admissionWorker.WaitUntilIdle(
+		std::chrono::seconds(2));
+	auto admissionRetry = admissionWorker.TakeReady();
+	const bool admissionRetryPublished = admissionRetry.size() == 1 &&
+		admissionRetry.front().generation == admissionRetryGeneration &&
+		admissionRetry.front().source == admissionSource.Key() &&
+		admissionRetry.front().metadataAvailable &&
+		admissionRetry.front().metadata.cameraModel == "admission retry succeeded" &&
+		!admissionRetry.front().failure.Failed() && admissionReaderCalls.load() == 1;
+	const auto finalSnapshot = coordinator.Snapshot();
+	const bool admissionReleased = finalSnapshot.activeForeground == 0 &&
+		finalSnapshot.activeSpeculative == 0 && finalSnapshot.activeCpu == 0 &&
+		finalSnapshot.waitingForeground == 0 && finalSnapshot.waitingSpeculative == 0 &&
+		finalSnapshot.waitingCpu == 0;
+	std::ostringstream failure;
+	failure << "current EXIF reader/admission exceptions did not publish clean terminal results or accept later work"
+		<< " (readerIdle=" << readerFailureBecameIdle
+		<< ", readerPublished=" << readerFailurePublished
+		<< ", readerRetryIdle=" << readerRetryBecameIdle
+		<< ", readerRetryPublished=" << readerRetryPublished
+		<< ", validatorIdle=" << validatorFailureBecameIdle
+		<< ", validatorPublished=" << validatorFailurePublished
+		<< ", validatorRetryIdle=" << validatorRetryBecameIdle
+		<< ", validatorRetryPublished=" << validatorRetryPublished
+		<< ", coordinatorIdle=" << coordinatorInitiallyIdle
+		<< ", admissionHook=" << injection.fired.load()
+		<< ", admissionIdle=" << admissionFailureBecameIdle
+		<< ", admissionPublished=" << admissionFailurePublished
+		<< ", admissionRetryIdle=" << admissionRetryBecameIdle
+		<< ", admissionRetryPublished=" << admissionRetryPublished
+		<< ", admissionReleased=" << admissionReleased << ')';
+	Expect(readerFailureBecameIdle && readerFailurePublished && readerRetryBecameIdle &&
+		readerRetryPublished && validatorFailureBecameIdle && validatorFailurePublished &&
+		validatorRetryBecameIdle && validatorRetryPublished && coordinatorInitiallyIdle &&
+		injection.fired.load() &&
+		admissionFailureBecameIdle && admissionFailurePublished &&
+		admissionRetryBecameIdle && admissionRetryPublished && admissionReleased,
+		failure.str());
+}
+
 void TestDecodedImageCacheAndBackgroundPrefetch() {
 	Expect(jpegview_linux::ImagePrefetchOrder(5, 2, 1, 4) ==
 		std::vector<std::size_t>({3, 1, 4, 0}),
@@ -4090,6 +7072,124 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	}
 	Expect(decodeFailure.WaitUntilIdle(std::chrono::seconds(2)),
 		"failed decoded prefetch did not become idle");
+
+	std::atomic<int> throwingDecoderCalls{0};
+	std::atomic<int> throwingDecoderCompletions{0};
+	std::atomic<int> throwingDecoderNullCompletions{0};
+	std::mutex throwingDecoderCompletionMutex;
+	std::condition_variable throwingDecoderCompletionChanged;
+	jpegview_linux::DecodedImageCache throwingDecoder(64,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			if (throwingDecoderCalls.fetch_add(1) == 0) {
+				throw std::runtime_error("injected decoder exception");
+			}
+			image = *CachedTestImage(4);
+			return true;
+		});
+	throwingDecoder.Prefetch(files, 2, 1, 2,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(throwingDecoderCompletionMutex);
+				throwingDecoderCompletions.fetch_add(1);
+				if (!image) throwingDecoderNullCompletions.fetch_add(1);
+			}
+			throwingDecoderCompletionChanged.notify_all();
+		});
+	const bool throwingDecoderIdle =
+		throwingDecoder.WaitUntilIdle(std::chrono::seconds(2));
+	bool throwingDecoderCallbacksCompleted = false;
+	{
+		std::unique_lock<std::mutex> lock(throwingDecoderCompletionMutex);
+		throwingDecoderCallbacksCompleted = throwingDecoderCompletionChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] {
+				return throwingDecoderCompletions.load() == 2;
+			});
+	}
+	Expect(throwingDecoderIdle && throwingDecoderCallbacksCompleted &&
+		throwingDecoderCalls.load() == 2 && throwingDecoderCompletions.load() == 2 &&
+		throwingDecoderNullCompletions.load() == 1 && throwingDecoder.CachedImages() == 1 &&
+		throwingDecoder.GetDiagnostics().lastWorkerFailure.kind ==
+			jpegview_linux::WorkerFailureKind::Exception,
+		"decoder exceptions did not produce a structured failure while keeping the worker alive");
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	const bool coordinatorWasIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingForeground == 0 &&
+				snapshot.waitingSpeculative == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(3));
+	std::atomic<int> admissionDecoderCalls{0};
+	std::atomic<int> admissionCallbacks{0};
+	std::atomic<int> missingAdmissionPixels{0};
+	std::mutex admissionCallbackMutex;
+	std::condition_variable admissionCallbackChanged;
+	jpegview_linux::DecodedImageCache admissionFailure(64,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			++admissionDecoderCalls;
+			image = *CachedTestImage(4);
+			return true;
+		});
+	SourceWorkFailureInjection admissionInjection{
+		jpegview_linux::detail::SourceWorkTestHookPoint::ActiveCpuRegistration};
+	coordinator.SetTestHookForTesting(ThrowAtSourceWorkHook, &admissionInjection);
+	admissionFailure.RequestBackground(files[0],
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(admissionCallbackMutex);
+				++admissionCallbacks;
+				if (!image) ++missingAdmissionPixels;
+			}
+			admissionCallbackChanged.notify_all();
+		});
+	const bool admissionFailureIdle = admissionFailure.WaitUntilIdle(std::chrono::seconds(3));
+	coordinator.SetTestHookForTesting(nullptr, nullptr);
+	const bool admissionFailureReported = admissionFailure.GetDiagnostics().lastWorkerFailure.kind ==
+		jpegview_linux::WorkerFailureKind::Exception;
+	const int admissionDecoderCallsAfterFailure = admissionDecoderCalls.load();
+	std::atomic<int> retryCallbacks{0};
+	std::atomic<bool> retryProducedPixels{false};
+	admissionFailure.RequestBackground(files[1],
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			{
+				std::lock_guard<std::mutex> lock(admissionCallbackMutex);
+				++retryCallbacks;
+				retryProducedPixels.store(static_cast<bool>(image));
+			}
+			admissionCallbackChanged.notify_all();
+		});
+	const bool admissionRetryIdle = admissionFailure.WaitUntilIdle(std::chrono::seconds(3));
+	bool bothCallbacksCompleted = false;
+	{
+		std::unique_lock<std::mutex> lock(admissionCallbackMutex);
+		bothCallbacksCompleted = admissionCallbackChanged.wait_for(lock,
+			std::chrono::seconds(3), [&] {
+				return admissionCallbacks.load() == 1 && retryCallbacks.load() == 1;
+			});
+	}
+	const auto coordinatorAfterRetry = coordinator.Snapshot();
+	std::ostringstream admissionFailureMessage;
+	admissionFailureMessage << "decoded-cache admission exception escaped its worker or blocked a later valid request "
+		"(idle/globalIdle/reported/injected/callbacks/missing/decodeCalls/retryCallbacks/retryPixels/firstDecodeCalls="
+		<< admissionFailureIdle << '/' << coordinatorWasIdle << '/' << admissionFailureReported << '/'
+		<< admissionInjection.fired.load() << '/' << admissionCallbacks.load() << '/'
+		<< missingAdmissionPixels.load() << '/' << admissionDecoderCalls.load() << '/'
+		<< retryCallbacks.load() << '/' << retryProducedPixels.load() << '/'
+		<< admissionDecoderCallsAfterFailure << ", permits="
+		<< coordinatorAfterRetry.activeForeground << '/' << coordinatorAfterRetry.activeSpeculative
+		<< '/' << coordinatorAfterRetry.activeCpu << '/' << coordinatorAfterRetry.waitingForeground
+		<< '/' << coordinatorAfterRetry.waitingSpeculative << '/' << coordinatorAfterRetry.waitingCpu
+		<< ')';
+	Expect(coordinatorWasIdle && admissionFailureIdle && admissionFailureReported &&
+		admissionInjection.fired.load() && admissionCallbacks.load() == 1 &&
+		missingAdmissionPixels.load() == 1 && admissionDecoderCallsAfterFailure == 0 &&
+		admissionRetryIdle && bothCallbacksCompleted && retryCallbacks.load() == 1 &&
+		retryProducedPixels.load() &&
+		admissionDecoderCalls.load() == 1 && coordinatorAfterRetry.activeForeground == 0 &&
+		coordinatorAfterRetry.activeSpeculative == 0 && coordinatorAfterRetry.activeCpu == 0 &&
+		coordinatorAfterRetry.waitingForeground == 0 &&
+		coordinatorAfterRetry.waitingSpeculative == 0 && coordinatorAfterRetry.waitingCpu == 0,
+		admissionFailureMessage.str());
 
 	std::atomic<int> speculativeDecodes{0};
 	jpegview_linux::DecodedImageCache fullCache(16,
@@ -5134,6 +8234,12 @@ void TestActiveSpreadDecodeDemandGatesBackgroundWork() {
 		std::this_thread::yield();
 	}
 	const bool scanYielded = scanner.IsYieldingForForeground();
+	{
+		std::lock_guard<std::mutex> lock(decodeMutex);
+		releaseDecode = true;
+	}
+	decodeChanged.notify_all();
+	const bool decodeIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
 	scanner.SetForegroundPending(false);
 	std::vector<FileListScanResult> scanResults;
 	const auto scanDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -5141,12 +8247,6 @@ void TestActiveSpreadDecodeDemandGatesBackgroundWork() {
 		scanResults = scanner.TakeReady();
 		if (scanResults.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-	{
-		std::lock_guard<std::mutex> lock(decodeMutex);
-		releaseDecode = true;
-	}
-	decodeChanged.notify_all();
-	const bool decodeIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
 	Expect(reachedBarrier && diagnostics.foregroundActive == 0 &&
 		diagnostics.backgroundActive == 1 && diagnostics.activeSpreadActive == 1 &&
 		plan.foregroundPending && !plan.AllowsThumbnail(1) && thumbnail.empty() &&
@@ -5172,6 +8272,76 @@ std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height) {
 }
 
 std::shared_ptr<const jpegview_linux::PreparedDisplayImage>
+DisplayCachePreparedTestImage(const jpegview_linux::DisplayImageRequest& request);
+
+void TestActiveSpreadAdmissionDuringForegroundPending() {
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "active-spread.png";
+	WriteText(filename, "active spread source");
+
+	std::mutex decodeMutex;
+	std::condition_variable decodeChanged;
+	bool decodeStarted = false;
+	bool releaseDecode = false;
+	coordinator.SetForegroundPending(true);
+	jpegview_linux::DecodedImageCache decodedCache(1024,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			{
+				std::unique_lock<std::mutex> lock(decodeMutex);
+				decodeStarted = true;
+				decodeChanged.notify_all();
+				decodeChanged.wait(lock, [&] { return releaseDecode; });
+			}
+			image = *CachedTestImage(64);
+			return true;
+		});
+	decodedCache.RequestBackground(filename, {},
+		jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool decodedWhileForegroundPending = false;
+	{
+		std::unique_lock<std::mutex> lock(decodeMutex);
+		decodedWhileForegroundPending = decodeChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return decodeStarted; });
+	}
+	coordinator.SetForegroundPending(false);
+	{
+		std::lock_guard<std::mutex> lock(decodeMutex);
+		releaseDecode = true;
+	}
+	decodeChanged.notify_all();
+	const bool decodedIdle = decodedCache.WaitUntilIdle(std::chrono::seconds(2));
+	const bool decodedCached = static_cast<bool>(decodedCache.Find(filename));
+
+	std::atomic<bool> foregroundPending{true};
+	std::atomic<bool> displayCpuAdmittedWhilePending{false};
+	auto displayRequest = jpegview_linux::MakeDisplayImageRequest(filename,
+		DisplayCacheTestImage(4, 4), 0, 2, 2, false, 1);
+	displayRequest.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	coordinator.SetForegroundPending(true);
+	jpegview_linux::DisplayImageCache displayCache(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			auto cpuLease = jpegview_linux::SourceWorkCoordinator::Global().AcquireCpu(
+				request.workContext);
+			displayCpuAdmittedWhilePending.store(static_cast<bool>(cpuLease) &&
+				foregroundPending.load());
+			return DisplayCachePreparedTestImage(request);
+		});
+	displayCache.RequestBackground(displayRequest);
+	const bool displayIdleWhilePending = displayCache.WaitUntilIdle(
+		std::chrono::seconds(2));
+	foregroundPending.store(false);
+	coordinator.SetForegroundPending(false);
+	const bool displayIdleAfterRelease = displayIdleWhilePending ||
+		displayCache.WaitUntilIdle(std::chrono::seconds(2));
+
+	Expect(decodedWhileForegroundPending && decodedIdle && decodedCached &&
+		displayIdleWhilePending && displayIdleAfterRelease &&
+		displayCpuAdmittedWhilePending.load(),
+		"active-spread decode or display processing yielded to its own foreground-pending state");
+}
+
+std::shared_ptr<const jpegview_linux::PreparedDisplayImage>
 DisplayCachePreparedTestImage(const jpegview_linux::DisplayImageRequest& request) {
 	auto image = std::make_shared<jpegview_linux::PreparedDisplayImage>();
 	image->filename = request.filename;
@@ -5184,6 +8354,79 @@ DisplayCachePreparedTestImage(const jpegview_linux::DisplayImageRequest& request
 		static_cast<std::size_t>(image->height) * 4;
 	image->bgra.assign(bytes, 255);
 	return image;
+}
+
+void TestDisplaySourceValidationWaitsForSourceAdmission() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "validation-admission.png";
+	const fs::path blockerPath = temporary.path() / "validation-admission-blocker.jpg";
+	WriteText(filename, "display source validation fixture");
+	WriteText(blockerPath, "source lane blocker");
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(filename);
+	Expect(source.Valid(), "display validation source fixture has no descriptor");
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	const bool coordinatorIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	const jpegview_linux::WorkContext blockerContext =
+		jpegview_linux::MakePathWorkContext(blockerPath,
+			jpegview_linux::SourceWorkPriority::Metadata);
+	jpegview_linux::SourceWorkLease blocker = coordinator.Acquire(blockerContext, blockerPath);
+	const bool blockerAcquired = static_cast<bool>(blocker);
+	std::atomic<int> processorCalls{0};
+	jpegview_linux::DisplayImageCache cache(64, 1,
+		[&processorCalls](const jpegview_linux::DisplayImageRequest& request) {
+			++processorCalls;
+			return DisplayCachePreparedTestImage(request);
+		});
+	auto request = jpegview_linux::MakeDisplayImageRequest(source,
+		DisplayCacheTestImage(2, 2), 0, 2, 2, false, 2);
+	request.workClass = jpegview_linux::PerfWorkClass::NearestNavigationNeighbor;
+	cache.RequestBackground(request);
+	const bool validationQueuedBehindSourceWork = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 && snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	blocker.Reset();
+	const bool cacheIdle = cache.WaitUntilIdle(std::chrono::seconds(2));
+	const auto completed = cache.TakeCompleted(1);
+	Expect(coordinatorIdle && blockerAcquired &&
+		validationQueuedBehindSourceWork && cacheIdle && processorCalls.load() == 1 &&
+		completed.size() == 1,
+		"ordinary display source validation bypassed cancellable source admission");
+
+	const fs::path archive = temporary.path() / "display-validation.zip";
+	const fs::path archivePayload = temporary.path() / "display-validation-payload.jpg";
+	WriteText(archivePayload, "archive member validation fixture");
+	WriteZipArchive(archive, {{"member.jpg", archivePayload}});
+	const jpegview_linux::SourceDescriptor archiveSource =
+		jpegview_linux::DescribeImageSource(archive / "member.jpg");
+	std::atomic<int> archiveProcessorCalls{0};
+	jpegview_linux::DisplayImageCache archiveCache(64, 1,
+		[&archiveProcessorCalls](const jpegview_linux::DisplayImageRequest& request) {
+			++archiveProcessorCalls;
+			return DisplayCachePreparedTestImage(request);
+		});
+	auto archiveRequest = jpegview_linux::MakeDisplayImageRequest(archiveSource,
+		DisplayCacheTestImage(2, 2), 0, 2, 2, false, 2);
+	archiveRequest.workClass = jpegview_linux::PerfWorkClass::NearestNavigationNeighbor;
+	archiveCache.RequestBackground(archiveRequest);
+	const bool archiveCacheIdle = archiveCache.WaitUntilIdle(std::chrono::seconds(2));
+	const auto archiveCompleted = archiveCache.TakeCompleted(1);
+	const bool archivePermitsReleased = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0 &&
+				snapshot.activeCpu == 0 && snapshot.waitingCpu == 0;
+		}, std::chrono::seconds(2));
+	Expect(archiveSource.Valid() && archiveCacheIdle && archiveProcessorCalls.load() == 1 &&
+		archiveCompleted.size() == 1 && archivePermitsReleased,
+		"archive display validation failed to reuse its paired source and CPU admission");
 }
 
 void TestDisplayCachePromotionMetadataReachesUploadScheduler() {
@@ -6338,6 +9581,46 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		secondFile, decoded, 0, 2, 2, false, 1);
 	const auto thirdScaled = jpegview_linux::MakeDisplayImageRequest(
 		thirdFile, decoded, 0, 2, 2, false, 2);
+	jpegview_linux::ImageProcessingParams canceledProcessing;
+	canceledProcessing.contrast = 0.2;
+	auto canceledProcessingRequest = jpegview_linux::MakeDisplayImageRequest(
+		thirdFile, DisplayCacheTestImage(32, 32), 0, 16, 16, false, 0,
+		canceledProcessing);
+	int displayContinuationChecks = 0;
+	canceledProcessingRequest.workContext.shouldContinue = [&displayContinuationChecks] {
+		return ++displayContinuationChecks < 8;
+	};
+	jpegview_linux::DisplayImageCache canceledProcessingDisplay(4096, 1);
+	canceledProcessingDisplay.Request(canceledProcessingRequest);
+	Expect(canceledProcessingDisplay.WaitUntilIdle(std::chrono::seconds(2)) &&
+		canceledProcessingDisplay.TakeCompleted(1).empty() &&
+		canceledProcessingDisplay.CachedImages() == 0 && displayContinuationChecks >= 8 &&
+		canceledProcessingDisplay.GetDiagnostics().lastWorkerFailure.kind ==
+			jpegview_linux::WorkerFailureKind::Cancelled,
+		"canceled color processing published partial display pixels or lost its failure state");
+
+	std::atomic<int> displayProcessorCalls{0};
+	jpegview_linux::DisplayImageCache resilientDisplay(64, 1,
+		[&displayProcessorCalls](const jpegview_linux::DisplayImageRequest& request) {
+			if (displayProcessorCalls.fetch_add(1) == 0) {
+				throw std::runtime_error("injected display processor exception");
+			}
+			return DisplayCachePreparedTestImage(request);
+		});
+	resilientDisplay.Request(scaled);
+	Expect(resilientDisplay.WaitUntilIdle(std::chrono::seconds(2)) &&
+		resilientDisplay.GetDiagnostics().lastWorkerFailure.kind ==
+			jpegview_linux::WorkerFailureKind::Exception,
+		"display preparation exception was not recorded as a structured worker failure");
+	resilientDisplay.Request(secondScaled);
+	Expect(resilientDisplay.WaitUntilIdle(std::chrono::seconds(2)) &&
+		displayProcessorCalls.load() == 2,
+		"display worker did not survive a processor exception for a later request");
+	const auto afterDisplayException = resilientDisplay.TakeCompleted(1);
+	Expect(afterDisplayException.size() == 1 &&
+		afterDisplayException.front()->key == secondScaled.key,
+		"display worker did not publish the request following a processor exception");
+
 	std::mutex pairMutex;
 	std::condition_variable pairChanged;
 	int pairWorkersStarted = 0;
@@ -9341,6 +12624,29 @@ void TestImageResizeFiltersAndLimits() {
 		multipass.width == beforeFailure.width && multipass.height == beforeFailure.height &&
 		multipass.bgra == beforeFailure.bgra,
 		"invalid resize dimensions modified the image");
+
+	std::vector<std::uint8_t> batchPixels(32u * 32u * 4u, 127);
+	jpegview_linux::Image cancellableResize;
+	Expect(cancellableResize.StoreBGRA(batchPixels.data(), 32, 32),
+		"could not create cancellable resize fixture");
+	int resizeChecks = 0;
+	const std::vector<std::uint8_t> originalPixels = cancellableResize.bgra;
+	Expect(!cancellableResize.Resize(24, 24, 0, [&resizeChecks] {
+		return ++resizeChecks < 3;
+	}) && resizeChecks == 3 && cancellableResize.width == 32 &&
+		cancellableResize.height == 32 && cancellableResize.bgra == originalPixels,
+		"canceled resize did not stop at a bounded row batch before publishing its output");
+
+	jpegview_linux::Image cancellableProcessing;
+	Expect(cancellableProcessing.StoreBGRA(batchPixels.data(), 32, 32),
+		"could not create cancellable color-processing fixture");
+	jpegview_linux::ImageProcessingParams processing;
+	processing.contrast = 0.2;
+	int processingChecks = 0;
+	Expect(!cancellableProcessing.ApplyProcessing(processing, false, [&processingChecks] {
+		return ++processingChecks < 4;
+	}) && processingChecks == 4,
+		"canceled color processing did not stop at a bounded row batch");
 }
 
 void TestImageAutoContrastInvariants() {
@@ -13565,6 +16871,9 @@ void TestThumbnailOversizedAndAllocationFailure() {
 	Expect(results.size() == 2 && !results.front().image && results.back().image &&
 		allocation.GetDiagnostics().reservedCompletionImages == 0,
 		"thumbnail worker did not publish failure metadata and recoverable pixels in order");
+	Expect(results.front().failure.kind == jpegview_linux::WorkerFailureKind::Exception &&
+		!results.front().failure.message.empty(),
+		"thumbnail processor exception was not exposed as a structured worker failure");
 	for (const auto& result : results) allocation.Retire(result.image);
 }
 
@@ -15223,6 +18532,142 @@ void TestFileDialogDirectorySummaries() {
 	}
 	Expect(results.size() == 1 && results[0].generation == 19 && results[0].directory == empty,
 		"background directory summary loader published stale work after a replacement request");
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	const fs::path summaryAdmissionBlockerPath =
+		temporary.path() / "summary-admission-blocker.jpg";
+	WriteText(summaryAdmissionBlockerPath, "admission blocker");
+	coordinator.SetForegroundPending(false);
+	const bool summaryCoordinatorIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	const jpegview_linux::WorkContext summaryAdmissionBlockerContext =
+		jpegview_linux::MakePathWorkContext(summaryAdmissionBlockerPath,
+			jpegview_linux::SourceWorkPriority::Metadata);
+	jpegview_linux::SourceWorkLease summaryAdmissionBlocker = coordinator.Acquire(
+		summaryAdmissionBlockerContext, summaryAdmissionBlockerPath);
+	const bool summaryAdmissionBlockerAcquired =
+		static_cast<bool>(summaryAdmissionBlocker);
+	const bool summaryBlockerExclusive = summaryAdmissionBlockerAcquired &&
+		coordinator.Snapshot().activeSpeculative == 1 &&
+		coordinator.Snapshot().waitingSpeculative == 0;
+	loader.Request({album}, 20);
+	const bool summaryQueuedForMetadataLane = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 && snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	coordinator.SetForegroundPending(true);
+	summaryAdmissionBlocker.Reset();
+	const auto yieldDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!loader.IsYieldingForForeground() &&
+		std::chrono::steady_clock::now() < yieldDeadline) {
+		std::this_thread::yield();
+	}
+	const bool summaryYielded = loader.IsYieldingForForeground();
+	coordinator.SetForegroundPending(false);
+	results.clear();
+	const auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (results.empty() && std::chrono::steady_clock::now() < retryDeadline) {
+		results = loader.TakeReady();
+		if (results.empty()) std::this_thread::yield();
+	}
+	std::ostringstream summaryFailure;
+	summaryFailure << "directory summary did not retry after its foreground interruption cleared "
+		"before retry (idle=" << summaryCoordinatorIdle << ", blocker="
+		<< summaryBlockerExclusive << ", queued=" << summaryQueuedForMetadataLane
+		<< ", yielded=" << summaryYielded << ", results=" << results.size();
+	if (!results.empty()) {
+		summaryFailure << ", generation=" << results.front().generation
+			<< ", images=" << results.front().summary.imageCount
+			<< ", subdirectories=" << results.front().summary.subdirectoryCount
+			<< ", failure=" << results.front().failure.message;
+	}
+	Expect(summaryCoordinatorIdle && summaryAdmissionBlockerAcquired && summaryBlockerExclusive &&
+		summaryQueuedForMetadataLane && summaryYielded &&
+		results.size() == 1 && results.front().generation == 20 &&
+		results.front().summary.imageCount == 2 &&
+		results.front().summary.subdirectoryCount == 3 && !results.front().failure.Failed(),
+		summaryFailure.str());
+
+	const fs::path emptyAdmissionBlockerPath =
+		temporary.path() / "empty-summary-admission-blocker.jpg";
+	WriteText(emptyAdmissionBlockerPath, "empty directory admission blocker");
+	const bool emptyCoordinatorIdle = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 0 && snapshot.activeSpeculative == 0 &&
+				snapshot.waitingForeground == 0 && snapshot.waitingSpeculative == 0;
+		}, std::chrono::seconds(2));
+	const jpegview_linux::WorkContext emptyBlockerContext =
+		jpegview_linux::MakePathWorkContext(emptyAdmissionBlockerPath,
+			jpegview_linux::SourceWorkPriority::Metadata);
+	jpegview_linux::SourceWorkLease emptyAdmissionBlocker = coordinator.Acquire(
+		emptyBlockerContext, emptyAdmissionBlockerPath);
+	const bool emptyBlockerAcquired = static_cast<bool>(emptyAdmissionBlocker);
+	loader.Request({empty}, 22);
+	const bool emptySummaryQueuedBeforeOpen = coordinator.WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeSpeculative == 1 && snapshot.waitingSpeculative == 1;
+		}, std::chrono::seconds(2));
+	coordinator.SetForegroundPending(true);
+	emptyAdmissionBlocker.Reset();
+	const auto emptyYieldDeadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!loader.IsYieldingForForeground() &&
+		std::chrono::steady_clock::now() < emptyYieldDeadline) {
+		std::this_thread::yield();
+	}
+	const bool emptySummaryYielded = loader.IsYieldingForForeground();
+	const bool noEmptySummaryWhileForegroundPending = loader.TakeReady().empty();
+	coordinator.SetForegroundPending(false);
+	results.clear();
+	const auto emptyRetryDeadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (results.empty() && std::chrono::steady_clock::now() < emptyRetryDeadline) {
+		results = loader.TakeReady();
+		if (results.empty()) std::this_thread::yield();
+	}
+	Expect(emptyCoordinatorIdle && emptyBlockerAcquired && emptySummaryQueuedBeforeOpen &&
+		emptySummaryYielded && noEmptySummaryWhileForegroundPending &&
+		results.size() == 1 && results.front().generation == 22 &&
+		results.front().directory == empty &&
+		results.front().summary.imageCount == 0 &&
+		results.front().summary.subdirectoryCount == 0 && !results.front().failure.Failed(),
+		"empty directory summary opened outside source admission or published during foreground suppression");
+
+	coordinator.SetForegroundPending(true);
+	auto stoppingLoader = std::make_unique<jpegview_linux::DirectorySummaryLoader>();
+	stoppingLoader->Request({album}, 21);
+	const auto shutdownYieldDeadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!stoppingLoader->IsYieldingForForeground() &&
+		std::chrono::steady_clock::now() < shutdownYieldDeadline) {
+		std::this_thread::yield();
+	}
+	const bool shutdownYielded = stoppingLoader->IsYieldingForForeground();
+	std::mutex shutdownMutex;
+	std::condition_variable shutdownChanged;
+	bool shutdownReturned = false;
+	std::thread shutdownThread([&] {
+		stoppingLoader.reset();
+		{
+			std::lock_guard<std::mutex> lock(shutdownMutex);
+			shutdownReturned = true;
+		}
+		shutdownChanged.notify_all();
+	});
+	bool shutdownFinishedWithoutGateRelease = false;
+	{
+		std::unique_lock<std::mutex> lock(shutdownMutex);
+		shutdownFinishedWithoutGateRelease = shutdownChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return shutdownReturned; });
+	}
+	if (!shutdownFinishedWithoutGateRelease) coordinator.SetForegroundPending(false);
+	shutdownThread.join();
+	coordinator.SetForegroundPending(false);
+	Expect(shutdownYielded && shutdownFinishedWithoutGateRelease,
+		"directory summary destruction waited for foreground work or renderer progress");
 }
 
 void TestColdArchiveRowDescriptorsAreCapturedOffThread() {
@@ -15736,6 +19181,20 @@ int main(int argc, char** argv) {
 		TestHeldNavigationWaitsForCurrentImageContinuation, failures);
 	RunTest("interaction-work-policy-idle-deadline-and-capture",
 		TestInteractionWorkPolicyIdleDeadlineAndCapture, failures);
+	RunTest("resolve-work-context-composes-inherited-callbacks",
+		TestResolveWorkContextComposesInheritedCallbacks, failures);
+	RunTest("source-work-admission-across-worker-pools",
+		TestSourceWorkAdmissionAcrossWorkerPools, failures);
+	RunTest("work-context-path-admission-keys-avoid-metadata-io",
+		TestWorkContextPathAdmissionKeysAvoidMetadataIo, failures);
+	RunTest("archive-source-probes-run-under-admission",
+		TestArchiveSourceProbesRunUnderAdmission, failures);
+	RunTest("archive-password-validation-yields-for-foreground-work",
+		TestArchivePasswordValidationYieldsForForegroundWork, failures);
+	RunTest("archive-catalog-failure-releases-loading-state",
+		TestArchiveCatalogFailureReleasesLoadingState, failures);
+	RunTest("cold-archive-member-metadata-yield-and-replacement",
+		TestColdArchiveMemberMetadataYieldAndReplacement, failures);
 	RunTest("display-upload-scheduler-permitted-foreground-priority",
 		TestDisplayUploadSchedulerPrioritizesPermittedForeground, failures);
 	RunTest("display-cache-promotion-metadata-reaches-upload-scheduler",
@@ -15749,6 +19208,14 @@ int main(int argc, char** argv) {
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);
 	RunTest("file-list-multiple-inputs", TestFileListMultipleInputs, failures);
 	RunTest("file-list-asynchronous-scanning", TestFileListAsynchronousScanning, failures);
+	RunTest("archive-traversal-yield-releases-admission",
+		TestArchiveTraversalYieldReleasesAdmission, failures);
+	RunTest("directory-enumeration-admission-yields-and-retries",
+		TestDirectoryEnumerationAdmissionYieldsAndRetries, failures);
+	RunTest("archive-prefetch-planner-keeps-admitted-context",
+		TestArchivePrefetchPlannerKeepsAdmittedContext, failures);
+	RunTest("archive-decoded-cache-promotion-completes-during-foreground-gate",
+		TestArchiveDecodedCachePromotionCompletesDuringForegroundGate, failures);
 	RunTest("prepared-scans-reject-descriptor-refresh-race",
 		TestPreparedScansRejectDescriptorRefreshRace, failures);
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
@@ -15770,6 +19237,14 @@ int main(int argc, char** argv) {
 		TestDisplayPrefetchRequestMergeCompletionOrders, failures);
 	RunTest("exif-metadata-worker-reload-and-stale-result-rejection",
 		TestExifMetadataWorkerReloadAndStaleResultRejection, failures);
+	RunTest("exif-archive-foreground-yield-retries-current-generation",
+		TestExifArchiveForegroundYieldRetriesCurrentGeneration, failures);
+	RunTest("exif-archive-foreground-yield-can-be-replaced-or-stopped",
+		TestExifArchiveForegroundYieldCanBeReplacedOrStopped, failures);
+	RunTest("exif-metadata-worker-publishes-source-unavailable",
+		TestExifMetadataWorkerPublishesSourceUnavailable, failures);
+	RunTest("exif-metadata-worker-publishes-current-exceptions",
+		TestExifMetadataWorkerPublishesCurrentExceptions, failures);
 	RunTest("decoded-image-cache-and-background-prefetch-cold-spread-retention",
 		TestDecodedImageCacheAndBackgroundPrefetch, failures);
 	RunTest("decoded-active-spread-budget-pressure-preserves-foreground",
@@ -15808,6 +19283,10 @@ int main(int argc, char** argv) {
 		TestDisplayImageCachePromotedSpreadSurvivesPause, failures);
 	RunTest("active-spread-decode-demand-gates-background-work",
 		TestActiveSpreadDecodeDemandGatesBackgroundWork, failures);
+	RunTest("active-spread-admission-proceeds-during-foreground-pending",
+		TestActiveSpreadAdmissionDuringForegroundPending, failures);
+	RunTest("display-source-validation-waits-for-source-admission",
+		TestDisplaySourceValidationWaitsForSourceAdmission, failures);
 	RunTest("display-cache-retirement-identity-accounting",
 		TestDisplayCacheRetirementIdentityAccounting, failures);
 	RunTest("display-cache-final-pixels-retirement-thread",
@@ -15933,6 +19412,8 @@ int main(int argc, char** argv) {
 	RunTest("thumbnail-invalid-descriptor-recaptures-recreated-source",
 		TestThumbnailInvalidDescriptorRecapturesRecreatedSource, failures);
 	RunTest("thumbnail-background-preparation", TestThumbnailBackgroundPreparation, failures);
+	RunTest("thumbnail-validation-wait-honors-cancellation-and-shutdown",
+		TestThumbnailValidationWaitHonorsCancellationAndShutdown, failures);
 	RunTest("thumbnail-completion-queue-count-backpressure",
 		TestThumbnailCompletionQueueCountBackpressure, failures);
 	RunTest("thumbnail-completion-byte-backpressure-and-cancellation",

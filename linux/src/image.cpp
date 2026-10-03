@@ -15,6 +15,20 @@ namespace {
 constexpr int kResizeFilterCount = 4;
 constexpr std::uint64_t kMaxImagePixels = 100ull * 1024ull * 1024ull;
 constexpr int kMaxImageDimension = 65535;
+constexpr int kCancellationRowBatch = 16;
+
+bool ContinueWork(const std::function<bool()>& shouldContinue) {
+	if (!shouldContinue) return true;
+	try {
+		return shouldContinue();
+	} catch (...) {
+		return false;
+	}
+}
+
+bool ContinueAtRow(int row, const std::function<bool()>& shouldContinue) {
+	return (row % kCancellationRowBatch) != 0 || ContinueWork(shouldContinue);
+}
 
 bool HasValidPixels(const Image& image) {
 	if (image.width <= 0 || image.height <= 0 ||
@@ -60,7 +74,8 @@ struct LocalDensityMap {
 	std::vector<std::uint8_t> values;
 };
 
-LocalDensityMap CreateLocalDensityMap(const Image& image) {
+LocalDensityMap CreateLocalDensityMap(const Image& image,
+	const std::function<bool()>& shouldContinue) {
 	LocalDensityMap map;
 	map.width = std::clamp(image.width / 32, 1, 256);
 	map.height = std::clamp(image.height / 32, 1, 256);
@@ -70,6 +85,7 @@ LocalDensityMap CreateLocalDensityMap(const Image& image) {
 	map.height = std::min(map.height, image.height);
 	map.values.resize(static_cast<std::size_t>(map.width) * map.height);
 	for (int my = 0; my < map.height; ++my) {
+		if (!ContinueAtRow(my, shouldContinue)) return {};
 		const int y0 = my * image.height / map.height;
 		const int y1 = std::max(y0 + 1, (my + 1) * image.height / map.height);
 		for (int mx = 0; mx < map.width; ++mx) {
@@ -77,6 +93,7 @@ LocalDensityMap CreateLocalDensityMap(const Image& image) {
 			const int x1 = std::max(x0 + 1, (mx + 1) * image.width / map.width);
 			std::uint64_t sumBlue = 0, sumGreen = 0, sumRed = 0, count = 0;
 			for (int y = y0; y < std::min(y1, image.height); ++y) {
+				if (!ContinueAtRow(y - y0, shouldContinue)) return {};
 				for (int x = x0; x < std::min(x1, image.width); ++x) {
 					const std::size_t offset = (static_cast<std::size_t>(y) * image.width + x) * 4;
 					sumBlue += image.bgra[offset];
@@ -103,19 +120,33 @@ LocalDensityMap CreateLocalDensityMap(const Image& image) {
 	}
 	if (map.width > 2 && map.height > 2) {
 		std::vector<std::uint8_t> horizontal(map.values.size());
-		for (int y = 0; y < map.height; ++y) for (int x = 0; x < map.width; ++x) {
-			const auto at = [&](int xx) { return map.values[static_cast<std::size_t>(y) * map.width + xx]; };
-			const int left = std::max(0, x - 1), right = std::min(map.width - 1, x + 1);
-			horizontal[static_cast<std::size_t>(y) * map.width + x] = static_cast<std::uint8_t>(
-				(x == 0 ? at(x) * 3 + at(right) : x == map.width - 1 ? at(x) * 3 + at(left) :
-				at(left) + at(x) * 6 + at(right)) / (x == 0 || x == map.width - 1 ? 4 : 8));
+		for (int y = 0; y < map.height; ++y) {
+			if (!ContinueAtRow(y, shouldContinue)) return {};
+			for (int x = 0; x < map.width; ++x) {
+				const auto at = [&](int xx) {
+					return map.values[static_cast<std::size_t>(y) * map.width + xx];
+				};
+				const int left = std::max(0, x - 1), right = std::min(map.width - 1, x + 1);
+				horizontal[static_cast<std::size_t>(y) * map.width + x] =
+					static_cast<std::uint8_t>((x == 0 ? at(x) * 3 + at(right) :
+						x == map.width - 1 ? at(x) * 3 + at(left) :
+						at(left) + at(x) * 6 + at(right)) /
+						(x == 0 || x == map.width - 1 ? 4 : 8));
 		}
-		for (int y = 0; y < map.height; ++y) for (int x = 0; x < map.width; ++x) {
-			const int top = std::max(0, y - 1), bottom = std::min(map.height - 1, y + 1);
-			const auto at = [&](int yy) { return horizontal[static_cast<std::size_t>(yy) * map.width + x]; };
-			map.values[static_cast<std::size_t>(y) * map.width + x] = static_cast<std::uint8_t>(
-				(y == 0 ? at(y) * 3 + at(bottom) : y == map.height - 1 ? at(y) * 3 + at(top) :
-				at(top) + at(y) * 6 + at(bottom)) / (y == 0 || y == map.height - 1 ? 4 : 8));
+		}
+		for (int y = 0; y < map.height; ++y) {
+			if (!ContinueAtRow(y, shouldContinue)) return {};
+			for (int x = 0; x < map.width; ++x) {
+				const int top = std::max(0, y - 1), bottom = std::min(map.height - 1, y + 1);
+				const auto at = [&](int yy) {
+					return horizontal[static_cast<std::size_t>(yy) * map.width + x];
+				};
+				map.values[static_cast<std::size_t>(y) * map.width + x] =
+					static_cast<std::uint8_t>((y == 0 ? at(y) * 3 + at(bottom) :
+						y == map.height - 1 ? at(y) * 3 + at(top) :
+						at(top) + at(y) * 6 + at(bottom)) /
+						(y == 0 || y == map.height - 1 ? 4 : 8));
+		}
 		}
 	}
 	return map;
@@ -137,7 +168,8 @@ int SampleDensityMap(const LocalDensityMap& map, int x, int y, int imageWidth, i
 	return static_cast<int>(std::lround(top * (1.0 - ty) + bottom * ty));
 }
 
-bool ApplyUnsharpMask(Image& image, const ImageProcessingParams& params) {
+bool ApplyUnsharpMask(Image& image, const ImageProcessingParams& params,
+	const std::function<bool()>& shouldContinue) {
 	const double radius = std::clamp(params.unsharpRadius, 0.0, 5.0);
 	const double amount = std::clamp(params.unsharpAmount, 0.0, 10.0);
 	const double threshold = std::clamp(params.unsharpThreshold, 0.0, 20.0);
@@ -164,6 +196,7 @@ bool ApplyUnsharpMask(Image& image, const ImageProcessingParams& params) {
 		return image.bgra[offset] * 0.114 + image.bgra[offset + 1] * 0.587 + image.bgra[offset + 2] * 0.299;
 	};
 	for (int y = 0; y < image.height; ++y) {
+		if (!ContinueAtRow(y, shouldContinue)) return false;
 		for (int x = 0; x < image.width; ++x) {
 			double smooth = 0.0;
 			for (int delta = -kernelRadius; delta <= kernelRadius; ++delta) {
@@ -175,6 +208,7 @@ bool ApplyUnsharpMask(Image& image, const ImageProcessingParams& params) {
 		}
 	}
 	for (int y = 0; y < image.height; ++y) {
+		if (!ContinueAtRow(y, shouldContinue)) return false;
 		for (int x = 0; x < image.width; ++x) {
 			double smooth = 0.0;
 			for (int delta = -kernelRadius; delta <= kernelRadius; ++delta) {
@@ -255,8 +289,8 @@ bool Image::Crop(int left, int top, int right, int bottom) {
 	return true;
 }
 
-bool Image::Rotate(bool clockwise) {
-	if (!HasValidPixels(*this)) return false;
+bool Image::Rotate(bool clockwise, const std::function<bool()>& shouldContinue) {
+	if (!HasValidPixels(*this) || !ContinueWork(shouldContinue)) return false;
 	const int newWidth = height;
 	const int newHeight = width;
 	std::vector<std::uint8_t> transformed;
@@ -266,6 +300,7 @@ bool Image::Rotate(bool clockwise) {
 		return false;
 	}
 	for (int sourceY = 0; sourceY < height; ++sourceY) {
+		if (!ContinueAtRow(sourceY, shouldContinue)) return false;
 		for (int sourceX = 0; sourceX < width; ++sourceX) {
 			const int targetX = clockwise ? height - sourceY - 1 : sourceY;
 			const int targetY = clockwise ? sourceX : width - sourceX - 1;
@@ -303,8 +338,10 @@ bool Image::Mirror(bool horizontal) {
 
 // Resample using the same four choices exposed by JPEGView's ResizeDlg:
 // point sampling, Lanczos, and two sharpened best-quality kernels.
-bool Image::Resize(int newWidth, int newHeight, int filter) {
-	if (!HasValidPixels(*this) || newWidth <= 0 || newHeight <= 0) return false;
+bool Image::Resize(int newWidth, int newHeight, int filter,
+	const std::function<bool()>& shouldContinue) {
+	if (!HasValidPixels(*this) || newWidth <= 0 || newHeight <= 0 ||
+		!ContinueWork(shouldContinue)) return false;
 	if (newWidth > kMaxImageDimension || newHeight > kMaxImageDimension ||
 		static_cast<std::uint64_t>(newWidth) * static_cast<std::uint64_t>(newHeight) > kMaxImagePixels) return false;
 	if (newWidth == width && newHeight == height) return true;
@@ -325,7 +362,7 @@ bool Image::Resize(int newWidth, int newHeight, int filter) {
 				std::max(newHeight, static_cast<int>(passHeight / factor));
 			const int passFilter = pass == steps - 1 ? filter : (filter == 3 ? 2 : 1);
 			if (nextWidth == passWidth && nextHeight == passHeight) continue;
-			if (!Resize(nextWidth, nextHeight, passFilter)) return false;
+			if (!Resize(nextWidth, nextHeight, passFilter, shouldContinue)) return false;
 			passWidth = nextWidth;
 			passHeight = nextHeight;
 		}
@@ -349,6 +386,7 @@ bool Image::Resize(int newWidth, int newHeight, int filter) {
 				static_cast<int>((static_cast<std::uint64_t>(target) * (sourceSize - 1)) / (targetSize - 1)));
 		};
 		for (int targetY = 0; targetY < newHeight; ++targetY) {
+			if (!ContinueAtRow(targetY, shouldContinue)) return false;
 			const int sourceY = sourceCoordinate(targetY, height, newHeight);
 			for (int targetX = 0; targetX < newWidth; ++targetX) {
 				const int sourceX = sourceCoordinate(targetX, width, newWidth);
@@ -414,7 +452,8 @@ bool Image::Resize(int newWidth, int newHeight, int filter) {
 		}
 		return sum;
 	};
-	const auto buildKernels = [&cubic, &lanczos, &integratedBestQuality, filter](int sourceSize, int targetSize) {
+	const auto buildKernels = [&cubic, &lanczos, &integratedBestQuality,
+		filter, &shouldContinue](int sourceSize, int targetSize) {
 		std::vector<Kernel> kernels(static_cast<std::size_t>(targetSize));
 		if (sourceSize == targetSize) {
 			for (int target = 0; target < targetSize; ++target) {
@@ -432,6 +471,7 @@ bool Image::Resize(int newWidth, int newHeight, int filter) {
 			(sourcePerTarget < 2.0 ? 1.0 / (sourcePerTarget - 0.5) :
 			1.0 / ((sourcePerTarget + 1.0) * 0.5))) : 1.0;
 		for (int target = 0; target < targetSize; ++target) {
+			if ((target % 256) == 0 && !ContinueWork(shouldContinue)) return std::vector<Kernel>{};
 			// Downsampling uses the source-space center of each destination
 			// pixel. Upsampling follows JPEGView's endpoint-preserving
 			// bicubic mapping, so the first and last source pixels stay sharp.
@@ -484,7 +524,10 @@ bool Image::Resize(int newWidth, int newHeight, int filter) {
 	}
 	const std::vector<Kernel> horizontalKernels = buildKernels(width, newWidth);
 	const std::vector<Kernel> verticalKernels = buildKernels(height, newHeight);
+	if (!ContinueWork(shouldContinue) || horizontalKernels.empty() ||
+		verticalKernels.empty()) return false;
 	for (int y = 0; y < height; ++y) {
+		if (!ContinueAtRow(y, shouldContinue)) return false;
 		for (int x = 0; x < newWidth; ++x) {
 			std::array<double, 4> values{};
 			for (const Sample& sample : horizontalKernels[static_cast<std::size_t>(x)].samples) {
@@ -498,6 +541,7 @@ bool Image::Resize(int newWidth, int newHeight, int filter) {
 		}
 	}
 	for (int y = 0; y < newHeight; ++y) {
+		if (!ContinueAtRow(y, shouldContinue)) return false;
 		for (int x = 0; x < newWidth; ++x) {
 			std::array<double, 4> values{};
 			for (const Sample& sample : verticalKernels[static_cast<std::size_t>(y)].samples) {
@@ -519,8 +563,9 @@ bool Image::Resize(int newWidth, int newHeight, int filter) {
 // Port of JPEGView's CHistogram/CHistogramCorr path. The correction is
 // deliberately applied to a copy by Viewer, so toggling it never changes
 // the decoded source pixels.
-bool Image::AutoContrast(double colorCorrection, double contrastCorrection) {
-	if (!HasValidPixels(*this)) return false;
+bool Image::AutoContrast(double colorCorrection, double contrastCorrection,
+	const std::function<bool()>& shouldContinue) {
+	if (!HasValidPixels(*this) || !ContinueWork(shouldContinue)) return false;
 
 	std::array<int, 256> channelB{};
 	std::array<int, 256> channelG{};
@@ -535,6 +580,7 @@ bool Image::AutoContrast(double colorCorrection, double contrastCorrection) {
 	const int lines = std::max(1, height / grid);
 	int sampledPixels = 0;
 	for (int line = 0; line < lines; ++line) {
+		if (!ContinueAtRow(line, shouldContinue)) return false;
 		const int y = std::min(height - 1, line * grid);
 		for (int column = 0; column < pixelsPerLine; ++column) {
 			const int x = std::min(width - 1, column * grid);
@@ -660,17 +706,26 @@ bool Image::AutoContrast(double colorCorrection, double contrastCorrection) {
 	const std::array<std::uint8_t, 256> lutB = calculateLut(blackB, whiteB, correctionBlue + correction, midPoint);
 	const std::array<std::uint8_t, 256> lutG = calculateLut(blackG, whiteG, correctionGreen + correction, midPoint);
 	const std::array<std::uint8_t, 256> lutR = calculateLut(blackR, whiteR, correctionRed + correction, midPoint);
-	for (std::size_t offset = 0; offset < bgra.size(); offset += 4) {
-		bgra[offset] = lutB[bgra[offset]];
-		bgra[offset + 1] = lutG[bgra[offset + 1]];
-		bgra[offset + 2] = lutR[bgra[offset + 2]];
+	const std::size_t rowBytes = static_cast<std::size_t>(width) * 4;
+	for (int y = 0; y < height; ++y) {
+		if (!ContinueAtRow(y, shouldContinue)) return false;
+		const std::size_t rowOffset = static_cast<std::size_t>(y) * rowBytes;
+		for (int x = 0; x < width; ++x) {
+			const std::size_t offset = rowOffset + static_cast<std::size_t>(x) * 4;
+			bgra[offset] = lutB[bgra[offset]];
+			bgra[offset + 1] = lutG[bgra[offset + 1]];
+			bgra[offset + 2] = lutR[bgra[offset + 2]];
+		}
 	}
 	return true;
 }
 
-bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContrast) {
-	if (!HasValidPixels(*this)) return false;
-	if (autoContrast && !AutoContrast(params.colorCorrection, params.contrastCorrection)) return false;
+bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContrast,
+	const std::function<bool()>& shouldContinue) {
+	if (!HasValidPixels(*this) || !ContinueWork(shouldContinue)) return false;
+	if (autoContrast && !AutoContrast(params.colorCorrection,
+		params.contrastCorrection, shouldContinue)) return false;
+	if (!ContinueWork(shouldContinue)) return false;
 	const bool localDensityActive = params.localDensityEnabled &&
 		(params.lightenShadows > 0.0 || params.darkenHighlights > 0.0);
 	const bool hasLevelChanges = std::abs(params.contrast) > 1e-9 ||
@@ -679,7 +734,7 @@ bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContra
 		std::abs(params.yellowBlue) > 1e-9 || localDensityActive ||
 		std::abs(params.sharpen) > 1e-9;
 	if (!hasLevelChanges && !(params.unsharpRadius > 0.0 && params.unsharpAmount > 0.0)) return true;
-	if (!hasLevelChanges) return ApplyUnsharpMask(*this, params);
+	if (!hasLevelChanges) return ApplyUnsharpMask(*this, params, shouldContinue);
 
 	const std::array<std::uint8_t, 256> toneLut = CreateToneLut(params.contrast, params.gamma);
 	const double saturation = std::clamp(params.saturation, 0.0, 2.0);
@@ -709,11 +764,16 @@ bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContra
 	std::array<int, 256> densityResponse{};
 	int blackPoint = 0, whitePoint = 255;
 	if (params.localDensityEnabled && (params.lightenShadows > 0.0 || params.darkenHighlights > 0.0)) {
-		densityMap = CreateLocalDensityMap(*this);
+		densityMap = CreateLocalDensityMap(*this, shouldContinue);
+		if (!ContinueWork(shouldContinue) || densityMap.values.empty()) return false;
 		std::array<std::size_t, 256> histogram{};
-		for (std::size_t offset = 0; offset < bgra.size(); offset += 4) {
-			const int grey = (bgra[offset] * 128 + bgra[offset + 1] * 640 + bgra[offset + 2] * 256) >> 10;
-			++histogram[static_cast<std::size_t>(grey)];
+		for (int y = 0; y < height; ++y) {
+			if (!ContinueAtRow(y, shouldContinue)) return false;
+			for (int x = 0; x < width; ++x) {
+				const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * 4;
+				const int grey = (bgra[offset] * 128 + bgra[offset + 1] * 640 + bgra[offset + 2] * 256) >> 10;
+				++histogram[static_cast<std::size_t>(grey)];
+			}
 		}
 		const std::size_t clipping = static_cast<std::size_t>(bgra.size() / 4 / 100);
 		std::size_t accumulated = 0;
@@ -745,6 +805,7 @@ bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContra
 	}
 
 	for (int y = 0; y < height; ++y) {
+		if (!ContinueAtRow(y, shouldContinue)) return false;
 		for (int x = 0; x < width; ++x) {
 			const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * 4;
 			const int blue = bgra[offset], green = bgra[offset + 1], red = bgra[offset + 2];
@@ -784,6 +845,7 @@ bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContra
 		std::copy_n(bgra.data(), rowBytes, previous.data());
 		std::copy_n(bgra.data() + rowBytes, rowBytes, current.data());
 		for (int y = 1; y < height - 1; ++y) {
+			if (!ContinueAtRow(y, shouldContinue)) return false;
 			std::copy_n(bgra.data() + static_cast<std::size_t>(y + 1) * rowBytes, rowBytes, next.data());
 			for (int x = 1; x < width - 1; ++x) for (int channel = 0; channel < 3; ++channel) {
 				const std::size_t at = static_cast<std::size_t>(x) * 4 + channel;
@@ -798,7 +860,7 @@ bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContra
 			current.swap(next);
 		}
 	}
-	return ApplyUnsharpMask(*this, params);
+	return ApplyUnsharpMask(*this, params, shouldContinue);
 }
 
 } // namespace jpegview_linux

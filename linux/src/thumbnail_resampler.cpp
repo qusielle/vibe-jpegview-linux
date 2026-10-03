@@ -2,6 +2,7 @@
 
 #include "image_decoder.h"
 #include "perf_diagnostics.h"
+#include "source_work_coordinator.h"
 #include "thumbnail_panel_model.h"
 
 #include <algorithm>
@@ -169,6 +170,50 @@ bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
 
 namespace {
 
+bool ValidateOrRefreshThumbnailSource(const SourceDescriptor& requested,
+	const std::function<bool()>& shouldContinue, SourceDescriptor& observed) {
+	const std::filesystem::path path = requested.LogicalPath();
+	if (path.empty()) return false;
+	WorkContext context = requested.Valid() ?
+		MakeWorkContext(requested, SourceWorkPriority::Metadata, shouldContinue) :
+		MakePathWorkContext(path, SourceWorkPriority::Metadata, shouldContinue);
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, path);
+	if (!admission || !context.Continue()) return false;
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	bool current = false;
+	{
+		ScopedWorkContext activeContext(context);
+		current = requested.Valid() && context.Continue() &&
+			IsImageSourceCurrent(requested);
+	}
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	admission.Reset();
+	if (!current && shouldContinue()) {
+		WorkContext refreshContext = MakePathWorkContext(path,
+			SourceWorkPriority::Metadata, shouldContinue);
+		SourceCpuWorkLease refreshAdmission =
+			SourceWorkCoordinator::Global().AcquireSourceAndCpu(refreshContext, path);
+		if (refreshAdmission && refreshContext.Continue()) {
+			refreshContext.sourcePriority = refreshContext.Priority();
+			refreshContext.sourceAccessAlreadyAdmitted = true;
+			refreshContext.cpuProcessingAlreadyAdmitted = true;
+			{
+				ScopedWorkContext activeContext(refreshContext);
+				observed = DescribeImageSource(path);
+			}
+			refreshContext.sourceAccessAlreadyAdmitted = false;
+			refreshContext.cpuProcessingAlreadyAdmitted = false;
+			refreshAdmission.Reset();
+			if (!requested.Valid() && !observed.Valid()) observed = SourceDescriptor{};
+		}
+	}
+	return current;
+}
+
 ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 	const ThumbnailPreparationRequest& request) {
 	if (!request.Valid()) return {};
@@ -176,8 +221,16 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 		return !request.cancellation || !request.cancellation->load();
 	};
 	if (!shouldContinue()) return {};
-	if (request.sourceDescriptor.Valid() &&
-		!IsImageSourceCurrent(request.sourceDescriptor)) return {};
+	WorkContext workContext = request.sourceDescriptor.Valid() ?
+		MakeWorkContext(request.sourceDescriptor, SourceWorkPriority::Speculative) :
+		MakePathWorkContext(request.logicalSource, SourceWorkPriority::Speculative);
+	workContext.source = request.key;
+	workContext.shouldContinue = shouldContinue;
+	if (request.sourceDescriptor.Valid()) {
+		SourceDescriptor observed;
+		if (!ValidateOrRefreshThumbnailSource(request.sourceDescriptor,
+			shouldContinue, observed)) return {};
+	}
 	DecodedImage decoded;
 	const std::vector<std::uint8_t>* sourcePixels = nullptr;
 	int sourceWidth = 0;
@@ -197,16 +250,17 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 			int jpegWidth = 0;
 			int jpegHeight = 0;
 			if (!ReadJpegDimensions(request.logicalSource, jpegWidth, jpegHeight,
-				errorMessage) || !shouldContinue()) return {};
+				errorMessage, workContext) || !shouldContinue()) return {};
 			size = FitThumbnailSize(jpegWidth, jpegHeight,
 				request.maximumWidth, request.maximumHeight);
 			int decodedSourceWidth = 0;
 			int decodedSourceHeight = 0;
 			if (size.width <= 0 || size.height <= 0 ||
 				!DecodeJpegForDisplay(request.logicalSource, size.width, size.height,
-					decoded, decodedSourceWidth, decodedSourceHeight, errorMessage) ||
+					decoded, decodedSourceWidth, decodedSourceHeight, errorMessage,
+					workContext) ||
 				decoded.frames.empty() || !shouldContinue()) return {};
-		} else if (!DecodeImage(request.logicalSource, decoded, errorMessage) ||
+		} else if (!DecodeImage(request.logicalSource, decoded, errorMessage, workContext) ||
 			decoded.frames.empty() || !shouldContinue()) {
 			return {};
 		}
@@ -229,8 +283,13 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 	prepared->height = size.height;
 	prepared->hasTransparency = hasTransparency;
 	prepared->workClass = request.workClass;
+	CpuWorkLease cpuLease = SourceWorkCoordinator::Global().AcquireCpu(workContext);
+	if (!cpuLease || !shouldContinue()) return {};
 	if (!DownsampleThumbnailBgra(*sourcePixels, sourceWidth, sourceHeight,
-		size.width, size.height, prepared->bgra, shouldContinue)) return {};
+		size.width, size.height, prepared->bgra,
+		[&workContext, &shouldContinue] {
+			return workContext.Continue() && shouldContinue();
+		})) return {};
 	return prepared;
 }
 
@@ -435,25 +494,33 @@ struct ThumbnailPreparationWorker::Impl {
 			PerfContextScope context(work.request.workClass, PerfExecution::WorkerThread);
 			ImagePtr image;
 			SourceDescriptor observedSource;
+			WorkerFailure processingFailure;
+			const auto shouldContinue = [this, generation = work.generation,
+				cancellation = work.request.cancellation] {
+				if (cancellation && cancellation->load()) return false;
+				std::lock_guard<std::mutex> lock(mutex);
+				return !stopping && generation == this->generation;
+			};
 			try {
 				const SourceDescriptor& sourceDescriptor = work.request.sourceDescriptor;
 				const bool hasDescriptorPath = !sourceDescriptor.LogicalPath().empty();
-				if (hasDescriptorPath && !sourceDescriptor.Valid()) {
-					SourceDescriptor recaptured =
-						DescribeImageSource(sourceDescriptor.LogicalPath());
-					if (recaptured.Valid()) observedSource = std::move(recaptured);
-				} else {
-					if (sourceDescriptor.Valid() && !IsImageSourceCurrent(sourceDescriptor)) {
-						observedSource = DescribeImageSource(sourceDescriptor.LogicalPath());
-					} else {
+				if (hasDescriptorPath) {
+					if (ValidateOrRefreshThumbnailSource(sourceDescriptor,
+						shouldContinue, observedSource)) {
 						image = processor(work.request);
-						if (sourceDescriptor.Valid() && !IsImageSourceCurrent(sourceDescriptor)) {
-							image.reset();
-							observedSource = DescribeImageSource(sourceDescriptor.LogicalPath());
-						}
+						if (sourceDescriptor.Valid() &&
+							!ValidateOrRefreshThumbnailSource(sourceDescriptor,
+								shouldContinue, observedSource)) image.reset();
 					}
+				} else {
+					image = processor(work.request);
 				}
+			} catch (const std::exception& error) {
+				processingFailure = {WorkerFailureKind::Exception, error.what()};
+				image.reset();
 			} catch (...) {
+				processingFailure = {WorkerFailureKind::Exception,
+					"unknown thumbnail preparation failure"};
 				image.reset();
 			}
 			work.request.source.reset();
@@ -467,6 +534,7 @@ struct ThumbnailPreparationWorker::Impl {
 			result.maximumWidth = work.request.maximumWidth;
 			result.maximumHeight = work.request.maximumHeight;
 			result.workClass = work.request.workClass;
+			result.failure = std::move(processingFailure);
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				--activeWorkers;

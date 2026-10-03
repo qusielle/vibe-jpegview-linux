@@ -1,5 +1,6 @@
 #include "exif_reader.h"
 #include "archive_source.h"
+#include "work_context.h"
 
 #include <algorithm>
 #include <array>
@@ -323,16 +324,20 @@ std::string TrimAscii(const std::uint8_t* data, std::size_t length) {
 
 } // namespace
 
-bool ReadJpegMetadata(const fs::path& filename, ExifInfo& info, std::string& jpegComment) {
+bool ReadJpegMetadata(const fs::path& filename, ExifInfo& info, std::string& jpegComment,
+	const WorkContext& supplied) {
 	info = {};
 	jpegComment.clear();
+	WorkContext context = ResolveWorkContext(filename, SourceWorkPriority::Metadata, supplied);
+	if (!context.Continue()) return false;
 	if (IsArchiveMemberLocation(filename)) {
 		std::string errorMessage;
 		return WithArchiveMemberFile(filename,
-			[&info, &jpegComment](const fs::path& temporary, std::string&) {
-				return ReadJpegMetadata(temporary, info, jpegComment);
-			}, errorMessage);
+			[&info, &jpegComment, context](const fs::path& temporary, std::string&) {
+				return ReadJpegMetadata(temporary, info, jpegComment, context);
+			}, errorMessage, nullptr, [context] { return context.Continue(); });
 	}
+	if (!context.Continue()) return false;
 	std::ifstream input(filename, std::ios::binary);
 	if (!input) return false;
 	const int first = input.get();
@@ -341,6 +346,7 @@ bool ReadJpegMetadata(const fs::path& filename, ExifInfo& info, std::string& jpe
 
 	bool foundMetadata = false;
 	for (;;) {
+		if (!context.Continue()) return false;
 		int prefix = input.get();
 		if (prefix != 0xFF) break;
 		int markerValue = input.get();
@@ -356,6 +362,7 @@ bool ReadJpegMetadata(const fs::path& filename, ExifInfo& info, std::string& jpe
 			(static_cast<std::size_t>(lengthHigh) << 8) |
 			static_cast<std::size_t>(lengthLow);
 		if (segmentLength < 2) break;
+		if (!context.Continue()) return false;
 		const std::size_t payloadLength = segmentLength - 2;
 		if (marker != 0xE1 && marker != 0xFE) {
 			input.seekg(static_cast<std::streamoff>(payloadLength), std::ios::cur);

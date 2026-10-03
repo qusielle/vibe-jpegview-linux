@@ -38,6 +38,7 @@
 #include "thumbnail_panel_model.h"
 #include "thumbnail_resampler.h"
 #include "interaction_work_policy.h"
+#include "source_work_coordinator.h"
 #include "work_batch_gate.h"
 #include "app_icon.h"
 #include "image_info_model.h"
@@ -1097,7 +1098,7 @@ private:
 	void TickDisplayPrefetchPlanner() {
 		for (jpegview_linux::DisplayPrefetchPlannerResult& result :
 			displayPrefetchPlannerWorker_.TakeReady()) {
-			if (fileList_.Empty() || clipboardMode_) continue;
+			if (result.failure.Failed() || fileList_.Empty() || clipboardMode_) continue;
 			const SDL_Rect imageArea = ImageAreaRect();
 			if (!jpegview_linux::MatchesDisplayPrefetchSnapshot(result,
 				activeDisplayPrefetchGeneration_, fileList_.MutationRevision(),
@@ -1247,6 +1248,28 @@ private:
 			request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
 			return request;
 		}
+		// Once the partner texture is ready, its decoded alias is deliberately
+		// released. Reuse the stored display identity while that texture remains
+		// cached instead of requiring the decoded source to be present again.
+		if (doublePagePartnerRequest_.has_value()) {
+			const jpegview_linux::DisplayImageRequest& cachedRequest =
+				*doublePagePartnerRequest_;
+			if (cachedRequest.source.Key() == source.Key() &&
+				cachedRequest.frameIndex == 0 &&
+				cachedRequest.sourceWidth == nextPage.width &&
+				cachedRequest.sourceHeight == nextPage.height &&
+				cachedRequest.targetWidth == spec.targetWidth &&
+				cachedRequest.targetHeight == spec.targetHeight &&
+				cachedRequest.autoContrast == spec.autoContrast &&
+				jpegview_linux::EqualImageProcessing(cachedRequest.processing,
+					spec.processing) &&
+				cachedRequest.rotationQuarterTurns == spec.rotationQuarterTurns &&
+				cachedRequest.key == doublePagePresentation_.PartnerTextureKey() &&
+				doublePagePresentation_.SpreadReady(fileList_.CurrentIndex()) &&
+				FindDisplayTexture(cachedRequest.key) != nullptr) {
+				return cachedRequest;
+			}
+		}
 		auto decoded = imageCache_.Find(source);
 		if (!decoded && displayPrefetchBatch_) {
 			std::lock_guard<std::mutex> lock(displayPrefetchBatch_->mutex);
@@ -1374,7 +1397,13 @@ private:
 			return;
 		}
 		auto partnerRequest = MakeDoublePagePartnerRequest(*spec, *next);
-		if (!partnerRequest.has_value() || !partnerRequest->Valid()) {
+		const bool cachedReadyPartner = partnerRequest.has_value() &&
+			!partnerRequest->Valid() &&
+			doublePagePresentation_.SpreadReady(currentIndex) &&
+			partnerRequest->key == doublePagePresentation_.PartnerTextureKey() &&
+			FindDisplayTexture(partnerRequest->key) != nullptr;
+		if (!partnerRequest.has_value() ||
+			(!partnerRequest->Valid() && !cachedReadyPartner)) {
 			useSinglePage(true);
 			return;
 		}
@@ -2075,6 +2104,8 @@ private:
 			zoomNavigatorDragging_ || thumbnailPanelResizing_);
 		const jpegview_linux::InteractionWorkPlan plan = CurrentInteractionWorkPlan();
 		fileListScanWorker_.SetForegroundPending(plan.foregroundPending);
+		jpegview_linux::SourceWorkCoordinator::Global().SetForegroundPending(
+			plan.foregroundPending);
 		const bool enteringSuspension = plan.cancelQueuedSpeculation &&
 			(!speculativeWorkSuspended_ ||
 				(plan.foregroundPending && !lastForegroundPending_));
@@ -3414,8 +3445,15 @@ private:
 		int mcuWidth = 0;
 		int mcuHeight = 0;
 		std::string errorMessage;
+		const jpegview_linux::SourceDescriptor* cropSource =
+			fileList_.DescriptorAt(fileList_.CurrentIndex());
+		const jpegview_linux::WorkContext cropMetadataWork = cropSource != nullptr &&
+			cropSource->Valid() ? jpegview_linux::MakeWorkContext(*cropSource,
+				jpegview_linux::SourceWorkPriority::Foreground) :
+			jpegview_linux::MakePathWorkContext(fileList_.Current(),
+				jpegview_linux::SourceWorkPriority::Foreground);
 		if (!jpegview_linux::ReadJpegMcuSize(fileList_.Current(), mcuWidth, mcuHeight,
-			errorMessage)) {
+			errorMessage, cropMetadataWork)) {
 			SetTitle("Cannot read JPEG crop block size: " + errorMessage);
 			return;
 		}

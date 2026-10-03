@@ -3,6 +3,7 @@
 #include "display_image_cache.h"
 #include "double_page_model.h"
 #include "viewport.h"
+#include "work_context.h"
 
 #include <chrono>
 #include <cstddef>
@@ -73,6 +74,7 @@ struct DisplayPrefetchPlannedDimensions {
 };
 
 struct DisplayPrefetchPlannerResult {
+	WorkerFailure failure;
 	std::uint64_t generation = 0;
 	std::uint64_t catalogRevision = 0;
 	std::uint64_t descriptorRevision = 0;

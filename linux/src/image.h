@@ -3,6 +3,7 @@
 #include "image_processing.h"
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace jpegview_linux {
@@ -26,19 +27,22 @@ public:
 	bool CopyCrop(int left, int top, int right, int bottom, Image& output) const;
 	// Retains the half-open pixel rectangle [left,right) x [top,bottom).
 	bool Crop(int left, int top, int right, int bottom);
-	bool Rotate(bool clockwise);
+	bool Rotate(bool clockwise, const std::function<bool()>& shouldContinue = {});
 	bool Mirror(bool horizontal);
 
 	// Filters match the resize dialog: 0 point, 1 Lanczos, 2 sharpen-low,
 	// and 3 sharpen-medium.
-	bool Resize(int newWidth, int newHeight, int filter = 3);
+	bool Resize(int newWidth, int newHeight, int filter = 3,
+		const std::function<bool()>& shouldContinue = {});
 
 	// Applies JPEGView's histogram-derived automatic correction in place.
-	bool AutoContrast(double colorCorrection = 0.0, double contrastCorrection = 0.0);
+	bool AutoContrast(double colorCorrection = 0.0, double contrastCorrection = 0.0,
+		const std::function<bool()>& shouldContinue = {});
 
 	// Applies the picture-level controls to the current pixels. Automatic
 	// correction remains independently switchable and is applied first.
-	bool ApplyProcessing(const ImageProcessingParams& params, bool autoContrast);
+	bool ApplyProcessing(const ImageProcessingParams& params, bool autoContrast,
+		const std::function<bool()>& shouldContinue = {});
 };
 
 } // namespace jpegview_linux

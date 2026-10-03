@@ -70,6 +70,7 @@ struct ThumbnailPreparationResult {
 	PerfWorkClass workClass = PerfWorkClass::VisibleThumbnail;
 	std::shared_ptr<const PreparedThumbnailImage> image;
 	bool cancelled = false;
+	WorkerFailure failure;
 };
 
 // One farther queued request may be displaced when an admitted request enters

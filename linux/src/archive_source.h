@@ -11,6 +11,23 @@
 
 namespace jpegview_linux {
 
+struct WorkContext;
+
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+namespace detail {
+enum class ArchiveCatalogTestHookPoint {
+	LoadingStateRegistered,
+};
+using ArchiveCatalogTestHook = void (*)(ArchiveCatalogTestHookPoint, void*);
+enum class ArchiveSourceProbePoint {
+	LocationClassificationStat,
+	PasswordCacheIdentityStat,
+};
+using ArchiveSourceProbeHook = void (*)(ArchiveSourceProbePoint,
+	const std::filesystem::path&, bool, bool, void*);
+} // namespace detail
+#endif
+
 // The filesystem identity of the physical source. For an archive member this
 // describes the archive container; the logical member path remains a separate
 // part of SourceKey so two members cannot alias.
@@ -150,6 +167,10 @@ std::filesystem::file_time_type ArchiveFileModificationTime(std::int64_t seconds
 // Return the physical container path for a virtual location, or the input unchanged
 // for a regular filesystem source.
 std::filesystem::path ArchiveBackingFile(const std::filesystem::path& path);
+// Return the lexical container candidate without filesystem validation, for
+// source-admission keys that must be formed before any source lease is held.
+std::filesystem::path ArchiveBackingFileForAdmission(
+	const std::filesystem::path& path);
 std::string ArchiveLocationDisplayName(const std::filesystem::path& path);
 std::uintmax_t ImageSourceFileSize(const std::filesystem::path& path,
 	std::error_code& error);
@@ -169,10 +190,15 @@ bool ListArchiveDirectoryCancellable(const std::filesystem::path& directory,
 	bool* containsEncryptedEntries = nullptr);
 bool GetArchiveMemberInfo(const std::filesystem::path& path,
 	ArchiveMemberInfo& info, std::string& errorMessage);
+bool GetArchiveMemberInfo(const std::filesystem::path& path,
+	ArchiveMemberInfo& info, std::string& errorMessage,
+	ArchiveErrorKind* errorKind, const WorkContext& workContext);
 
 // Passwords are keyed to the current backing-file identity and retained only
 // in process memory. They are never read from or written to viewer settings.
 bool HasSessionArchivePassword(const std::filesystem::path& path);
+bool HasSessionArchivePassword(const std::filesystem::path& path,
+	const WorkContext& workContext);
 bool SetSessionArchivePassword(const std::filesystem::path& path,
 	const std::string& password);
 void ForgetSessionArchivePassword(const std::filesystem::path& path);
@@ -180,13 +206,19 @@ void ClearSessionArchivePasswords();
 bool ValidateArchivePassword(const std::filesystem::path& path,
 	const std::string& password, std::string& errorMessage,
 	ArchiveErrorKind* errorKind = nullptr);
+// The context overload shares backing-container admission and checks caller
+// cancellation through catalog loading and password verification.
+bool ValidateArchivePassword(const std::filesystem::path& path,
+	const std::string& password, std::string& errorMessage,
+	ArchiveErrorKind* errorKind, const WorkContext& workContext);
 
 // Reads one selected member into a private anonymous memory file exposed to
 // existing path-based codecs for the duration of the callback. The callback
 // must not retain the temporary path.
 bool WithArchiveMemberFile(const std::filesystem::path& path,
 	const std::function<bool(const std::filesystem::path&, std::string&)>& callback,
-	std::string& errorMessage, ArchiveErrorKind* errorKind = nullptr);
+	std::string& errorMessage, ArchiveErrorKind* errorKind = nullptr,
+	const std::function<bool()>& shouldContinue = {});
 
 // Identity for worker-cache validation. It includes the archive's filesystem
 // identity for members, while the cache key continues to include their full
@@ -199,11 +231,19 @@ bool IdentifyImageSourceBackingFile(const std::filesystem::path& path,
 // Archive members include their uncompressed size, member timestamp, and lock
 // state while retaining the archive's device/inode/size/nanosecond timestamp.
 SourceDescriptor DescribeImageSource(const std::filesystem::path& path);
+SourceDescriptor DescribeImageSource(const std::filesystem::path& path,
+	const WorkContext& workContext);
 SourceDescriptor DescribeArchiveMember(const std::filesystem::path& path,
 	const SourceIdentity& backingIdentity, std::uint64_t memberSize,
 	std::int64_t modificationTimeSeconds, bool encrypted);
 bool CaptureImageSourceIdentity(const std::filesystem::path& path,
 	SourceIdentity& identity);
 bool IsImageSourceCurrent(const SourceDescriptor& descriptor);
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+void SetArchiveCatalogTestHookForTesting(
+	detail::ArchiveCatalogTestHook hook, void* context);
+void SetArchiveSourceProbeHookForTesting(
+	detail::ArchiveSourceProbeHook hook, void* context);
+#endif
 
 } // namespace jpegview_linux
