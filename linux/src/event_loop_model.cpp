@@ -62,6 +62,12 @@ int EventWaitTimeoutMs(std::uint32_t now,
 	return timeout;
 }
 
+std::optional<std::uint32_t> DisplayUploadContinuationDeadline(
+	std::uint32_t now, bool eligibleBandedUpload) {
+	if (!eligibleBandedUpload) return std::nullopt;
+	return now + 8u;
+}
+
 namespace {
 
 std::int32_t SaturatingAdd(std::int32_t left, std::int32_t right) {

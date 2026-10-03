@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 namespace jpegview_linux {
@@ -69,6 +70,8 @@ CoalescedCompletionWakeup& UiCompletionWakeup();
 // wrapping 32-bit tick clock and are compared with signed modular arithmetic.
 int EventWaitTimeoutMs(std::uint32_t now,
 	const std::vector<std::uint32_t>& deadlines, int fallbackMs);
+std::optional<std::uint32_t> DisplayUploadContinuationDeadline(
+	std::uint32_t now, bool eligibleBandedUpload);
 
 struct MouseMotionSample {
 	std::int32_t x = 0;

@@ -62,8 +62,9 @@ they support.
    separate setting. Active spreads take priority, and no more than one speculative image upload runs
    in each renderer-maintenance opportunity. Interaction pauses speculative uploads. Image textures
    larger than 8 MiB upload in private bands of at most 4 MiB and become visible only after the full
-   texture succeeds. Obsolete image textures are retired incrementally after presentation, with their
-   cache reservation held until renderer destruction completes.
+   texture succeeds. Eligible bands resume promptly between event-loop waits; uploads held for cache
+   admission resume when capacity returns. Obsolete image textures are retired incrementally after
+   presentation, with their cache reservation held until renderer destruction completes.
    Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
    Fit, fill, actual-size, and manual modes survive navigation appropriately. Selected JPEG header

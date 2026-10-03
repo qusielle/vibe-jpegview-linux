@@ -6700,6 +6700,22 @@ private:
 		if (zoomReadoutTimedVisible_) deadlines.push_back(zoomReadoutVisibleUntil_);
 		if (thumbnailPixelStoreRetry_) deadlines.push_back(thumbnailPixelStoreRetryTick_);
 		if (thumbnailUploadRetryKey_.has_value()) deadlines.push_back(thumbnailUploadRetryTick_);
+		if (!pendingTextureUploads_.empty()) {
+			const jpegview_linux::InteractionWorkPlan uploadWorkPlan =
+				CurrentInteractionWorkPlan();
+			const bool eligibleBandedUpload = std::any_of(pendingTextureUploads_.begin(),
+				pendingTextureUploads_.end(), [&uploadWorkPlan](
+					const PendingTextureUpload& pending) {
+					return pending.incompleteTexture != nullptr &&
+						pending.uploadPlan.CurrentBand().has_value() &&
+						uploadWorkPlan.Allows(pending.priority.workClass);
+				});
+			if (const auto uploadDeadline =
+				jpegview_linux::DisplayUploadContinuationDeadline(
+					now, eligibleBandedUpload); uploadDeadline.has_value()) {
+				deadlines.push_back(*uploadDeadline);
+			}
+		}
 		int timeout = jpegview_linux::EventWaitTimeoutMs(now, deadlines, 100);
 		if (const auto idleDeadline = interactionWorkPolicy_.NextIdleDeadline();
 			idleDeadline.has_value()) {

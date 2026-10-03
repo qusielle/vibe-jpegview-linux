@@ -410,7 +410,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   Workers publish their owned payloads to their normal generation-checked queues before notifying;
   the SDL user event carries no payload. `SDL_WaitEventTimeout` sleeps until input or the next
   playback, transition, overlay, held-navigation, retry, or interaction-idle deadline, with a 100 ms
-  fallback that drains queues if SDL rejects a wake. Drawing uses non-touching display-cache peeks
+  fallback that drains queues if SDL rejects a wake. An eligible in-progress display-texture upload
+  adds an 8 ms continuation deadline between bounded bands; uploads waiting on cache admission do
+  not poll and resume when capacity or completion work wakes the event loop. Drawing uses
+  non-touching display-cache peeks
   and does not schedule work, apply completions, update readiness, or touch display/thumbnail cache
   recency. Timed effects and visible-thumbnail LRU touches run in the event/update phase. A clean
   static frame therefore leaves the renderer idle until an invalidation or deadline requires another

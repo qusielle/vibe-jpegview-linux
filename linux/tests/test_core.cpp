@@ -19105,6 +19105,13 @@ void TestEventLoopInvalidationDeadlinesWakeupsAndMotion() {
 		jpegview_linux::EventWaitTimeoutMs(0xfffffff0u, {0x10u}, 100) == 32 &&
 		jpegview_linux::EventWaitTimeoutMs(100, {}, 0) == 1,
 		"event wait deadline selection lost the finite fallback or tick-wrap behavior");
+	const auto uploadDeadline =
+		jpegview_linux::DisplayUploadContinuationDeadline(100, true);
+	Expect(uploadDeadline == 108u &&
+		jpegview_linux::EventWaitTimeoutMs(100, {*uploadDeadline}, 100) == 8 &&
+		!jpegview_linux::DisplayUploadContinuationDeadline(100, false).has_value() &&
+		jpegview_linux::DisplayUploadContinuationDeadline(0xfffffffcu, true) == 4u,
+		"eligible banded uploads did not schedule an early wrap-safe continuation deadline");
 
 	jpegview_linux::CoalescedCompletionWakeup wakeup;
 	int posts = 0;
