@@ -168,6 +168,13 @@ bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
 		maximumHeight);
 }
 
+void PreserveThumbnailPreparationRetry(
+	std::optional<ThumbnailPreparationResult>& pending,
+	ThumbnailPreparationResult& failedResult) {
+	if (pending && &*pending == &failedResult) return;
+	pending = std::move(failedResult);
+}
+
 namespace {
 
 bool ValidateOrRefreshThumbnailSource(const SourceDescriptor& requested,

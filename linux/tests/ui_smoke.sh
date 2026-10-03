@@ -600,15 +600,16 @@ XDG_STATE_HOME=$spread_budget_previous_state
 export XDG_STATE_HOME
 
 if [ -n "$perf_trace_path" ]; then
-	# Exercise per-row work classes with a generated 100-entry collection. The
-	# trace must distinguish independent reads/resampling for rows in the strip
-	# from retained thumbnails generated beyond its visible range.
+	# Exercise per-row work classes with a generated 2,000-entry collection. All
+	# prepared pixels must remain resident while renderer textures stay bounded
+	# by the visible/overscan window. Revisiting an evicted texture must not read
+	# or resample its source again.
 	thumbnail_trace_directory="$temporary/thumbnail-trace-images"
 	thumbnail_trace_config="$temporary/thumbnail-trace-config/jpegview-linux"
 	thumbnail_trace="$perf_trace_path.thumbnails"
 	mkdir -p "$thumbnail_trace_directory" "$thumbnail_trace_config"
-	for index in $(seq 0 99); do
-		filename=$(printf '%03d' "$index")
+	for index in $(seq 0 1999); do
+		filename=$(printf '%04d' "$index")
 		write_ppm "$thumbnail_trace_directory/$filename.ppm" \
 			$((index % 256)) $(((index * 3) % 256)) $(((index * 7) % 256))
 	done
@@ -635,30 +636,70 @@ if [ -n "$perf_trace_path" ]; then
 	fi
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
 	thumbnail_trace_seen=0
-	for _ in $(seq 1 240); do
+	for _ in $(seq 1 600); do
 		if awk -F, '
 			$2 == "source_read" && $4 == "worker_thread" && $6 == "visible_thumbnail" { visible_read = 1 }
 			$2 == "source_read" && $4 == "worker_thread" && $6 == "distant_speculation" { distant_read = 1 }
 			$2 == "resampling" && $4 == "worker_thread" && $6 == "visible_thumbnail" { visible_resample = 1 }
 			$2 == "resampling" && $4 == "worker_thread" && $6 == "distant_speculation" { distant_resample = 1 }
 			$2 == "texture_upload" && $4 == "event_thread" && $6 == "visible_thumbnail" { visible_upload = 1 }
-			$2 == "texture_upload" && $4 == "event_thread" && $6 == "distant_speculation" { distant_upload = 1 }
-			END { exit !(visible_read && distant_read && visible_resample && distant_resample && visible_upload && distant_upload) }
+			$2 == "cache_snapshot" && $13 == "\"thumbnail_pixels\"" && $8 == 2000 { all_pixels_retained = 1 }
+			$2 == "cache_snapshot" && $13 == "\"thumbnail_textures\"" {
+				texture_snapshot = 1
+				if ($8 > 40) texture_window_exceeded = 1
+			}
+			END { exit !(visible_read && distant_read && visible_resample && distant_resample && visible_upload && all_pixels_retained && texture_snapshot && !texture_window_exceeded) }
 		' "$thumbnail_trace" 2>/dev/null; then
 			thumbnail_trace_seen=1
 			break
 		fi
 		sleep 0.05
 	done
-	DISPLAY=":$display_number" xdotool key q || true
-	wait "$viewer_pid" || true
-	viewer_pid=''
 	if [ "$thumbnail_trace_seen" -ne 1 ]; then
-		echo "UI smoke test: 100-entry thumbnail trace did not attribute visible and offscreen source reads/resampling separately" >&2
+		echo "UI smoke test: 2,000-entry thumbnail trace did not retain all pixels within a bounded texture window" >&2
 		cat "$temporary/thumbnail-trace-viewer.log" >&2
 		if [ -f "$thumbnail_trace" ]; then cat "$thumbnail_trace" >&2; fi
 		exit 1
 	fi
+	thumbnail_reads_before_revisit=$(awk -F, '
+		$2 == "source_read" && $4 == "worker_thread" && ($6 == "visible_thumbnail" || $6 == "distant_speculation") { count++ }
+		END { print count + 0 }
+	' "$thumbnail_trace")
+	thumbnail_resamples_before_revisit=$(awk -F, '
+		$2 == "resampling" && $4 == "worker_thread" && ($6 == "visible_thumbnail" || $6 == "distant_speculation") { count++ }
+		END { print count + 0 }
+	' "$thumbnail_trace")
+	thumbnail_uploads_before_revisit=$(awk -F, '
+		$2 == "texture_upload" && $4 == "event_thread" && ($6 == "visible_thumbnail" || $6 == "distant_speculation") { count++ }
+		END { print count + 0 }
+	' "$thumbnail_trace")
+	DISPLAY=":$display_number" xdotool key End
+	sleep 0.5
+	DISPLAY=":$display_number" xdotool key Home
+	sleep 1
+	thumbnail_reads_after_revisit=$(awk -F, '
+		$2 == "source_read" && $4 == "worker_thread" && ($6 == "visible_thumbnail" || $6 == "distant_speculation") { count++ }
+		END { print count + 0 }
+	' "$thumbnail_trace")
+	thumbnail_resamples_after_revisit=$(awk -F, '
+		$2 == "resampling" && $4 == "worker_thread" && ($6 == "visible_thumbnail" || $6 == "distant_speculation") { count++ }
+		END { print count + 0 }
+	' "$thumbnail_trace")
+	thumbnail_uploads_after_revisit=$(awk -F, '
+		$2 == "texture_upload" && $4 == "event_thread" && ($6 == "visible_thumbnail" || $6 == "distant_speculation") { count++ }
+		END { print count + 0 }
+	' "$thumbnail_trace")
+	if [ "$thumbnail_reads_after_revisit" -ne "$thumbnail_reads_before_revisit" ] || \
+		[ "$thumbnail_resamples_after_revisit" -ne "$thumbnail_resamples_before_revisit" ] || \
+		[ "$thumbnail_uploads_after_revisit" -le "$thumbnail_uploads_before_revisit" ]; then
+		echo "UI smoke test: thumbnail revisit decoded again or failed to upload retained pixels" >&2
+		cat "$temporary/thumbnail-trace-viewer.log" >&2
+		cat "$thumbnail_trace" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key q || true
+	wait "$viewer_pid" || true
+	viewer_pid=''
 
 	# With retained caching disabled, load and rotate an oversized source. Decode,
 	# processing, and resampling must stay on workers; only texture upload belongs

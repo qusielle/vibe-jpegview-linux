@@ -73,6 +73,9 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   `main.cpp` and should be covered by `linux/tests/test_core.cpp`.
 - SDL renderer resources are main-thread objects. Create, upload, render, and destroy SDL textures on
   the renderer thread.
+- When retrying an allocation-failed completion held in an `std::optional`, never move-assign the
+  pending object from itself. Preserve the original identity through consecutive failures and test a
+  later successful retry.
 - Background workers may perform filesystem access, decoding, and pixel processing. Their requests
   must support cancellation or generation checks so obsolete results cannot replace current state.
 - For new or extracted asynchronous controllers, keep request batches free of raw pointers or

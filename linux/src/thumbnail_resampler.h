@@ -92,6 +92,12 @@ bool ThumbnailPreparationResultMatches(const ThumbnailPreparationResult& result,
 	std::size_t fileIndex, const std::string& sourceKey,
 	int maximumWidth, int maximumHeight);
 
+// Keeps an allocation-failed completion available for a later retention
+// attempt. A retry may be the same object already held by the optional.
+void PreserveThumbnailPreparationRetry(
+	std::optional<ThumbnailPreparationResult>& pending,
+	ThumbnailPreparationResult& failedResult);
+
 struct ThumbnailPreparationDiagnostics {
 	std::size_t queued = 0;
 	std::size_t active = 0;

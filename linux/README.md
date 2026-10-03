@@ -1025,20 +1025,32 @@ Advanced configuration, to control the aggregate memory retained for decoded ima
 display frames, and renderer-ready textures. The value is in MiB, takes effect at the next launch,
 and defaults to 1024. Set it to `0` to disable retained image/display
 caching; this does not disable the separate thumbnail cache, whose generated entries are retained for
-the active file list regardless of the large-image budget.
+the active file list regardless of the large-image budget. Thumbnail CPU pixels are held separately
+from the large-image budget, while SDL thumbnail textures cover only the visible rows plus one
+viewport of rows above and below; an open delete confirmation may pin its selected preview. Moving
+through a long list can therefore upload a thumbnail again from memory without rereading or decoding
+its source.
 
 The thumbnail panel is hidden by default and can be enabled from the context menu or with Ctrl+T.
 It follows the active file ordering in a vertical strip: the current image remains centered and at
 normal brightness, while surrounding images are darkened. The image marked with Ctrl+M has a gold
 outline when it is in the displayed list, even when it is not the current image. Clicking a thumbnail
 opens that file.
-Thumbnails are loaded incrementally in nearest-to-current order and kept for the active file list.
+Thumbnail pixels are loaded incrementally in nearest-to-current order and retained for the active file
+list. SDL textures are limited to the visible rows plus one viewport of rows on either side, with a
+temporary pin for an available delete-confirmation preview. Moving the strip releases textures outside
+that window; revisiting them uploads the retained pixels without another source read or decode.
 Display-ready neighbor pixels are reused for thumbnail preparation when available; remaining
 entries are decoded and resampled on one low-priority background worker. JPEG thumbnails use
 reduced-DCT decoding. The SDL thread checks that results still match the active list and panel
-geometry before uploading them. Invalid sources are skipped without being marked as cached; a
-renderer upload failure retains prepared pixels for retry without rereading the source. The panel
-reserves its own space on the left instead of covering the image. Drag its right
+geometry before retaining pixels or uploading textures. Sorting and navigation preserve pixels for
+unchanged source identities; replacing a source or changing panel geometry invalidates incompatible
+pixels. Invalid sources are skipped without being marked as cached; a renderer upload failure retains
+prepared pixels for retry without rereading the source. At the default 164-pixel panel width, 15,000
+full-size thumbnail buffers can occupy about 1 GiB before container and allocator overhead; the actual
+total depends on image aspect ratios, and wider panels can require substantially more. The thumbnail
+pixel store is independent of `cache_size_mb`. The panel reserves its own space on the left instead of
+covering the image. Drag its right
 separator to adjust its width; row height follows the width, so narrower panels display more
 thumbnails without large fixed vertical gaps. The width and visibility are preserved between runs.
 
