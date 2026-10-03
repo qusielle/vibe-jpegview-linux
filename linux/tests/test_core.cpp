@@ -19162,9 +19162,9 @@ void TestViewportSnapshotFollowsSelectedIdentityDuringCancellation() {
 	state.BeginLoad(committed, reversedSelection);
 	const auto restoredSelection = state.TakePendingLoad(committed);
 	Expect(restoredSelection.has_value() &&
-		restoredSelection->viewportSnapshot.zoom == 2.0 &&
+		restoredSelection->viewportSnapshot.zoom == navigationView.zoom &&
 		restoredSelection->viewportSnapshot.relativeZoom ==
-		committedView.relativeZoom &&
+		navigationView.relativeZoom &&
 		!state.TakePendingLoad(pending).has_value(),
 		"the replacement selection inherited state from the canceled identity");
 }

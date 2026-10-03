@@ -1526,7 +1526,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			candidate_title=$(DISPLAY=":$display_number" xdotool getwindowname \
 				"$candidate_window" 2>/dev/null || true)
 			case "$candidate_title" in
-				*"01-manual.jpg (400x240"*)
+				*"00-before.jpg (400x240"*)
 					manual_zoom_window_id=$candidate_window
 					manual_zoom_title=$candidate_title
 					break

@@ -911,8 +911,9 @@ Clicking blank space inside the dialog leaves it open; press Escape to cancel.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
 The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while
 switching tabs; Ctrl+Tab switches between Browse and Recents. It previews and opens the focused
-image with Enter or a double-click. The history also remembers each file's last zoom and
-fit/fill/actual-size mode for later opens. Type any part of a filename to filter the Browse listing,
+   image with Enter or a double-click. The history also remembers each file's last zoom and
+   fit/fill/actual-size mode for explicit opens from Recents; normal previous/next navigation keeps
+   the current view mode and scale. Type any part of a filename to filter the Browse listing,
 then press Enter to open the selected match. Ctrl+Return
 opens a selected folder immediately at its first compatible image without entering the folder in
 the dialog. The sorting control switches the listing between case-insensitive filename order and
