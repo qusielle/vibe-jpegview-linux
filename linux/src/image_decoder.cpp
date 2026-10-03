@@ -1,6 +1,7 @@
 #include "image_decoder.h"
 #include "archive_source.h"
 #include "perf_diagnostics.h"
+#include "source_work_coordinator.h"
 
 #include <algorithm>
 #include <array>
@@ -420,7 +421,11 @@ void JpegErrorExit(j_common_ptr common) {
 void SuppressJpegMessage(j_common_ptr) {}
 
 bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& context) {
+	if (!context.Continue()) {
+		errorMessage = "JPEG metadata read was cancelled";
+		return false;
+	}
 	MappedInput input;
 	if (!MapInput(filename, input, false, errorMessage)) return false;
 	JpegErrorManager error{};
@@ -438,7 +443,14 @@ bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height
 	jpeg_create_decompress(&decoder);
 	created = true;
 	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
-	const bool valid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK &&
+	const bool headerValid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK;
+	if (!context.Continue()) {
+		jpeg_destroy_decompress(&decoder);
+		UnmapInput(input);
+		errorMessage = "JPEG metadata read was cancelled";
+		return false;
+	}
+	const bool valid = headerValid &&
 		ValidDimensions(static_cast<int>(decoder.image_width),
 			static_cast<int>(decoder.image_height), errorMessage);
 	if (valid) {
@@ -453,7 +465,12 @@ bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height
 
 bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage, int minimumWidth = 0, int minimumHeight = 0,
-	int* sourceWidth = nullptr, int* sourceHeight = nullptr) {
+	int* sourceWidth = nullptr, int* sourceHeight = nullptr,
+	const WorkContext& context = {}) {
+	if (!context.Continue()) {
+		errorMessage = "JPEG decode was cancelled";
+		return false;
+	}
 	MappedInput input;
 	if (!MapInput(filename, input, true, errorMessage)) return false;
 	JpegErrorManager error{};
@@ -482,7 +499,14 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	jpeg_create_decompress(&decoder);
 	created = true;
 	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
-	if (jpeg_read_header(&decoder, TRUE) != JPEG_HEADER_OK ||
+	const bool headerValid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK;
+	if (!context.Continue()) {
+		jpeg_destroy_decompress(&decoder);
+		UnmapInput(input);
+		errorMessage = "JPEG decode was cancelled";
+		return false;
+	}
+	if (!headerValid ||
 		!ValidDimensions(static_cast<int>(decoder.image_width),
 			static_cast<int>(decoder.image_height), errorMessage)) {
 		jpeg_destroy_decompress(&decoder);
@@ -515,6 +539,12 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	constexpr int outputComponents = 3;
 #endif
 	jpeg_start_decompress(&decoder);
+	if (!context.Continue()) {
+		jpeg_destroy_decompress(&decoder);
+		UnmapInput(input);
+		errorMessage = "JPEG decode was cancelled";
+		return false;
+	}
 	const int width = static_cast<int>(decoder.output_width);
 	const int height = static_cast<int>(decoder.output_height);
 	const std::size_t rowBytes = static_cast<std::size_t>(width) * outputComponents;
@@ -544,6 +574,18 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	}
 #endif
 	while (decoder.output_scanline < decoder.output_height) {
+		if ((decoder.output_scanline & 15u) == 0 && !context.Continue()) {
+			jpeg_destroy_decompress(&decoder);
+			created = false;
+#ifdef JCS_EXT_BGRA
+			delete const_cast<DecodedFrame*>(directFrame);
+#else
+			std::free(const_cast<std::uint8_t*>(pixels));
+#endif
+			UnmapInput(input);
+			errorMessage = "JPEG decode was cancelled";
+			return false;
+		}
 #ifdef JCS_EXT_BGRA
 		DecodedFrame* frame = const_cast<DecodedFrame*>(directFrame);
 		JSAMPROW row = frame->bgra.data() +
@@ -555,6 +597,18 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		jpeg_read_scanlines(&decoder, &row, 1);
 	}
 	jpeg_finish_decompress(&decoder);
+	if (!context.Continue()) {
+		jpeg_destroy_decompress(&decoder);
+		created = false;
+#ifdef JCS_EXT_BGRA
+		delete const_cast<DecodedFrame*>(directFrame);
+#else
+		std::free(const_cast<std::uint8_t*>(pixels));
+#endif
+		UnmapInput(input);
+		errorMessage = "JPEG decode was cancelled";
+		return false;
+	}
 	jpeg_destroy_decompress(&decoder);
 	created = false;
 	UnmapInput(input);
@@ -562,6 +616,12 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 #ifdef JCS_EXT_BGRA
 	try {
 		DecodedFrame* frame = const_cast<DecodedFrame*>(directFrame);
+		if (!context.Continue()) {
+			delete frame;
+			directFrame = nullptr;
+			errorMessage = "JPEG decode was cancelled";
+			return false;
+		}
 		image.frames.push_back(std::move(*frame));
 		delete frame;
 		directFrame = nullptr;
@@ -580,11 +640,29 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		errorMessage = "out of memory";
 		return false;
 	}
-	for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel) {
-		bgra[pixel * 4] = pixels[pixel * 3 + 2];
-		bgra[pixel * 4 + 1] = pixels[pixel * 3 + 1];
-		bgra[pixel * 4 + 2] = pixels[pixel * 3];
-		bgra[pixel * 4 + 3] = 255;
+	if (!context.Continue()) {
+		std::free(const_cast<std::uint8_t*>(pixels));
+		errorMessage = "JPEG decode was cancelled";
+		return false;
+	}
+	for (int y = 0; y < height; ++y) {
+		if ((y & 15) == 0 && !context.Continue()) {
+			std::free(const_cast<std::uint8_t*>(pixels));
+			errorMessage = "JPEG decode was cancelled";
+			return false;
+		}
+		for (int x = 0; x < width; ++x) {
+			const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
+			bgra[pixel * 4] = pixels[pixel * 3 + 2];
+			bgra[pixel * 4 + 1] = pixels[pixel * 3 + 1];
+			bgra[pixel * 4 + 2] = pixels[pixel * 3];
+			bgra[pixel * 4 + 3] = 255;
+		}
+	}
+	if (!context.Continue()) {
+		std::free(const_cast<std::uint8_t*>(pixels));
+		errorMessage = "JPEG decode was cancelled";
+		return false;
 	}
 	try {
 		DecodedFrame frame;
@@ -2198,45 +2276,69 @@ bool DecodeRaw(const std::filesystem::path& filename, DecodedImage& image,
 
 } // namespace
 
-bool IsJpegPath(const std::filesystem::path& filename) {
-	const std::string extension = Lower(filename.extension().string());
-	return extension == ".jpg" || extension == ".jpeg" || extension == ".jpe";
+namespace {
+
+template <typename Operation>
+bool RunWithSourceAndCpuAdmission(const std::filesystem::path& filename,
+	SourceWorkPriority defaultPriority, const WorkContext& supplied,
+	std::string& errorMessage, Operation operation) {
+	try {
+	WorkContext context = ResolveWorkContext(filename, defaultPriority, supplied);
+	if (!context.Continue()) {
+		errorMessage = "source work was cancelled";
+		return false;
+	}
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, filename);
+	if (!admission) {
+		errorMessage = "source or CPU work admission was cancelled";
+		return false;
+	}
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	ScopedWorkContext activeContext(context);
+	try {
+		if (!context.Continue()) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
+		const bool succeeded = operation(context);
+		if (!context.Continue()) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
+		return succeeded;
+	} catch (const std::exception& error) {
+		errorMessage = error.what();
+		return false;
+	} catch (...) {
+		errorMessage = "unknown image decoder failure";
+		return false;
+	}
+	} catch (const std::exception& error) {
+		errorMessage = error.what();
+		return false;
+	} catch (...) {
+		errorMessage = "unknown image admission failure";
+		return false;
+	}
 }
 
-bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,
-	std::string& errorMessage) {
-	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
-	width = 0;
-	height = 0;
-	errorMessage.clear();
-	if (!IsJpegPath(filename)) {
-		errorMessage = "invalid JPEG header";
+bool ReadJpegMcuSizeCore(const std::filesystem::path& filename,
+	int& width, int& height, std::string& errorMessage,
+	const WorkContext& context) {
+	if (!context.Continue()) {
+		errorMessage = "JPEG metadata read was cancelled";
 		return false;
 	}
 	if (IsArchiveMemberLocation(filename)) {
-		return WithArchiveMemberFile(filename, [&width, &height](const std::filesystem::path& temporary,
-			std::string& decodeError) {
-			return ReadJpegDimensions(temporary, width, height, decodeError);
-		}, errorMessage);
-	}
-	return ReadJpegSize(filename, width, height, errorMessage);
-}
-
-bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
-	std::string& errorMessage) {
-	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
-	width = 0;
-	height = 0;
-	errorMessage.clear();
-	if (!IsJpegPath(filename)) {
-		errorMessage = "invalid JPEG header";
-		return false;
-	}
-	if (IsArchiveMemberLocation(filename)) {
-		return WithArchiveMemberFile(filename, [&width, &height](const std::filesystem::path& temporary,
-			std::string& decodeError) {
-			return ReadJpegMcuSize(temporary, width, height, decodeError);
-		}, errorMessage);
+		return WithArchiveMemberFile(filename,
+			[&width, &height, context](const std::filesystem::path& temporary,
+				std::string& decodeError) {
+				return ReadJpegMcuSizeCore(temporary, width, height,
+					decodeError, context);
+			}, errorMessage, nullptr, [&context] { return context.Continue(); });
 	}
 	MappedInput input;
 	if (!MapInput(filename, input, false, errorMessage)) return false;
@@ -2255,8 +2357,15 @@ bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& hei
 	jpeg_create_decompress(&decoder);
 	created = true;
 	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
-	const bool valid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK &&
-		decoder.max_h_samp_factor > 0 && decoder.max_v_samp_factor > 0;
+	const bool headerValid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK;
+	if (!context.Continue()) {
+		jpeg_destroy_decompress(&decoder);
+		UnmapInput(input);
+		errorMessage = "JPEG metadata read was cancelled";
+		return false;
+	}
+	const bool valid = headerValid && decoder.max_h_samp_factor > 0 &&
+		decoder.max_v_samp_factor > 0;
 	if (valid) {
 		width = decoder.max_h_samp_factor * DCTSIZE;
 		height = decoder.max_v_samp_factor * DCTSIZE;
@@ -2267,44 +2376,104 @@ bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& hei
 	return valid;
 }
 
+} // namespace
+
+bool IsJpegPath(const std::filesystem::path& filename) {
+	const std::string extension = Lower(filename.extension().string());
+	return extension == ".jpg" || extension == ".jpeg" || extension == ".jpe";
+}
+
+bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage, const WorkContext& supplied) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
+	width = 0;
+	height = 0;
+	errorMessage.clear();
+	return RunWithSourceAndCpuAdmission(filename, SourceWorkPriority::Metadata,
+		supplied, errorMessage, [&filename, &width, &height, &errorMessage](
+			const WorkContext& context) {
+			if (!IsJpegPath(filename)) {
+				errorMessage = "invalid JPEG header";
+				return false;
+			}
+			if (IsArchiveMemberLocation(filename)) {
+				return WithArchiveMemberFile(filename,
+					[&width, &height, context](const std::filesystem::path& temporary,
+						std::string& decodeError) {
+						return ReadJpegDimensions(temporary, width, height, decodeError, context);
+					}, errorMessage, nullptr,
+					[context] { return context.Continue(); });
+			}
+			return ReadJpegSize(filename, width, height, errorMessage, context);
+		});
+}
+
+bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage, const WorkContext& supplied) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
+	width = 0;
+	height = 0;
+	errorMessage.clear();
+	return RunWithSourceAndCpuAdmission(filename, SourceWorkPriority::Metadata,
+		supplied, errorMessage, [&filename, &width, &height, &errorMessage](
+			const WorkContext& context) {
+			if (!IsJpegPath(filename)) {
+				errorMessage = "invalid JPEG header";
+				return false;
+			}
+			return ReadJpegMcuSizeCore(filename, width, height, errorMessage, context);
+		});
+}
+
 bool DecodeJpegForDisplay(const std::filesystem::path& filename,
 	int minimumWidth, int minimumHeight, DecodedImage& image,
-	int& sourceWidth, int& sourceHeight, std::string& errorMessage) {
+	int& sourceWidth, int& sourceHeight, std::string& errorMessage,
+	const WorkContext& supplied) {
 	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Decode);
 	image = {};
 	sourceWidth = 0;
 	sourceHeight = 0;
 	errorMessage.clear();
-	if (!IsJpegPath(filename) || minimumWidth <= 0 || minimumHeight <= 0) {
-		errorMessage = "invalid JPEG display request";
-		return false;
-	}
-	if (IsArchiveMemberLocation(filename)) {
-		return WithArchiveMemberFile(filename,
-			[minimumWidth, minimumHeight, &image, &sourceWidth, &sourceHeight](
-				const std::filesystem::path& temporary, std::string& decodeError) {
-				return DecodeJpegForDisplay(temporary, minimumWidth, minimumHeight, image,
-					sourceWidth, sourceHeight, decodeError);
-			}, errorMessage);
-	}
-	return DecodeJpeg(filename, image, errorMessage, minimumWidth, minimumHeight,
-		&sourceWidth, &sourceHeight);
+	return RunWithSourceAndCpuAdmission(filename, SourceWorkPriority::Foreground,
+		supplied, errorMessage, [&filename, minimumWidth, minimumHeight, &image,
+			&sourceWidth, &sourceHeight, &errorMessage](const WorkContext& context) {
+			if (!IsJpegPath(filename) || minimumWidth <= 0 || minimumHeight <= 0) {
+				errorMessage = "invalid JPEG display request";
+				return false;
+			}
+			if (IsArchiveMemberLocation(filename)) {
+				return WithArchiveMemberFile(filename,
+					[minimumWidth, minimumHeight, &image, &sourceWidth, &sourceHeight,
+						context](const std::filesystem::path& temporary,
+						std::string& decodeError) {
+						return DecodeJpegForDisplay(temporary, minimumWidth, minimumHeight,
+							image, sourceWidth, sourceHeight, decodeError, context);
+					}, errorMessage, nullptr,
+					[context] { return context.Continue(); });
+			}
+			return DecodeJpeg(filename, image, errorMessage, minimumWidth, minimumHeight,
+				&sourceWidth, &sourceHeight, context);
+		});
 }
 
 bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& supplied) {
 	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Decode);
 	image = {};
 	errorMessage.clear();
+	return RunWithSourceAndCpuAdmission(filename, SourceWorkPriority::Foreground,
+		supplied, errorMessage, [&filename, &image, &errorMessage](
+			const WorkContext& context) {
 	if (IsArchiveMemberLocation(filename)) {
 		return WithArchiveMemberFile(filename,
-			[&image](const std::filesystem::path& temporary, std::string& decodeError) {
-				return DecodeImage(temporary, image, decodeError);
-			}, errorMessage);
+			[&image, context](const std::filesystem::path& temporary,
+				std::string& decodeError) {
+				return DecodeImage(temporary, image, decodeError, context);
+			}, errorMessage, nullptr, [context] { return context.Continue(); });
 	}
 	const std::string extension = Lower(filename.extension().string());
 	if (IsJpegPath(filename)) {
-		return DecodeJpeg(filename, image, errorMessage);
+		return DecodeJpeg(filename, image, errorMessage, 0, 0, nullptr, nullptr, context);
 	}
 	if (extension == ".gif") {
 #if JPEGVIEW_HAVE_GIF
@@ -2383,5 +2552,6 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	}
 	if (extension == ".qoi") return DecodeQoi(filename, image, errorMessage);
 	return DecodeStb(filename, image, errorMessage);
+		});
 }
 } // namespace jpegview_linux

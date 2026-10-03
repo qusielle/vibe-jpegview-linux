@@ -18,6 +18,7 @@ struct ExifMetadataResult {
 	ExifInfo metadata;
 	std::string jpegComment;
 	bool metadataAvailable = false;
+	WorkerFailure failure;
 };
 
 // Loads optional JPEG metadata away from the event thread. Requests replace

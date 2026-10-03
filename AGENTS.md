@@ -75,6 +75,20 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   the renderer thread.
 - Background workers may perform filesystem access, decoding, and pixel processing. Their requests
   must support cancellation or generation checks so obsolete results cannot replace current state.
+- Independent source-reading pools must share an admission coordinator: keep foreground source access
+  separate, serialize speculative/metadata reads, stop new background admission while foreground work
+  is pending, and use the backing-container identity for archive members, including temporary extraction.
+  Work required to complete the currently visible foreground presentation must use foreground
+  admission even when initiated through a background/cache API.
+  Atomically admit source and CPU resources when a task needs both; never hold one while waiting for the
+  other. Preserve the pair through nested decoder/helpers, and reject partial preadmission contexts.
+  Waiting requests must be able to move to foreground after promotion. Invoke cancellation/priority
+  predicates outside coordinator locks. Use RAII for source/CPU permits and reservations.
+- Bound aggregate CPU-processing concurrency across pools with one hardware-aware permit pool, and
+  check cancellation at safe batches around source open, codec boundaries, color conversion, scaling,
+  and publication. An already-blocked filesystem or opaque codec call may finish. Worker callbacks and
+  codec integration must not allow exceptions to escape a worker thread or a C callback; publish
+  structured failures and continue servicing valid later work.
 - Pending selections remain provisional: only a successful display commit may claim loaded-image
   history, and saved state must still belong to the selected committed path.
 - During asynchronous transitions, track the identity being selected separately from the last
@@ -94,6 +108,9 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
 - Every transition that can make a worker condition-variable predicate true must update state under
   its mutex and notify waiters. Cover promotion, capacity release, cancellation, clear, and shutdown;
   test admission and shutdown without renderer polling or event-loop progress.
+- Preserve the reason a traversal stopped until its retry or publication decision. Do not infer a past
+  foreground interruption from a later gate snapshot, since the gate may already have cleared; retry
+  current interrupted work and include owner shutdown or replacement in every blocking wait predicate.
 - Bounded completion admission and delivery must use compatible priority rules. Capacity-blocked work
   must not prevent ready results from releasing capacity, and cached refills must yield to startable
   queued work of equal or higher priority.

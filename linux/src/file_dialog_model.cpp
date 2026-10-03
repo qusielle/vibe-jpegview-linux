@@ -3,12 +3,14 @@
 #include "image_formats.h"
 #include "image_decoder.h"
 #include "perf_diagnostics.h"
+#include "source_work_coordinator.h"
 #include "thumbnail_resampler.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -22,6 +24,8 @@
 namespace jpegview_linux {
 namespace {
 
+constexpr std::size_t kDirectoryEnumerationBatchSize = 32;
+
 std::string Lower(std::string value) {
 	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
 		return static_cast<char>(std::tolower(character));
@@ -29,37 +33,203 @@ std::string Lower(std::string value) {
 	return value;
 }
 
+bool AcquireDirectoryEnumerationLease(const std::filesystem::path& directory,
+	const std::function<bool()>& shouldContinue, bool& interruptedForForeground,
+	WorkContext& context, SourceWorkLease& lease) {
+	WorkContext supplied;
+	supplied.shouldContinue = shouldContinue;
+	context = ResolveWorkContext(directory, SourceWorkPriority::Metadata, supplied);
+	const WorkContext directoryContext = MakePathWorkContext(directory,
+		SourceWorkPriority::Metadata);
+	context.source = directoryContext.source;
+	context.sourcePriority = SourceWorkPriority::Metadata;
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	const std::function<bool()> inheritedContinue = context.shouldContinue;
+	const std::function<void()> inheritedYield = context.onForegroundYield;
+	const std::function<SourceWorkPriority()> inheritedPriority = context.currentPriority;
+	context.onForegroundYield = [&interruptedForForeground, inheritedYield] {
+		interruptedForForeground = true;
+		if (inheritedYield) inheritedYield();
+	};
+	context.shouldContinue = [&interruptedForForeground, inheritedContinue,
+		inheritedPriority, priority = context.sourcePriority, inheritedYield] {
+		if (inheritedContinue && !inheritedContinue()) return false;
+		const SourceWorkPriority currentPriority = inheritedPriority ?
+			inheritedPriority() : priority;
+		if (currentPriority != SourceWorkPriority::Foreground &&
+			SourceWorkCoordinator::Global().Snapshot().foregroundPending) {
+			interruptedForForeground = true;
+			if (inheritedYield) inheritedYield();
+			return false;
+		}
+		return true;
+	};
+	lease = SourceWorkCoordinator::Global().Acquire(context, directory);
+	if (!lease || !context.Continue()) {
+		if (lease) lease.Reset();
+		return false;
+	}
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	return true;
+}
+
+void ReleaseDirectoryEnumerationLease(WorkContext& context, SourceWorkLease& lease) {
+	context.sourceAccessAlreadyAdmitted = false;
+	lease.Reset();
+}
+
+bool CapturePreviewSource(const SourceDescriptor& requested,
+	const std::filesystem::path& path,
+	const FileDialogPreviewLoader::SourceCapture& sourceCapture,
+	const std::function<bool()>& shouldContinue, SourceDescriptor& observed) {
+	WorkContext context = requested.Valid() ?
+		MakeWorkContext(requested, SourceWorkPriority::Metadata, shouldContinue) :
+		MakePathWorkContext(path, SourceWorkPriority::Metadata, shouldContinue);
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, path);
+	if (!admission || !context.Continue()) return false;
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	{
+		ScopedWorkContext activeContext(context);
+		observed = sourceCapture(requested.Valid() ? requested : SourceDescriptor(path, {}, {}));
+	}
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	admission.Reset();
+	return context.Continue();
+}
+
+bool ValidateAndRefreshPreviewSource(const SourceDescriptor& requested,
+	const FileDialogPreviewLoader::SourceCapture& sourceCapture,
+	const std::function<bool()>& shouldContinue, SourceDescriptor& observed) {
+	if (!requested.Valid()) return false;
+	WorkContext context = MakeWorkContext(requested,
+		SourceWorkPriority::Metadata, shouldContinue);
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, requested.LogicalPath());
+	if (!admission || !context.Continue()) return false;
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	bool current = false;
+	{
+		ScopedWorkContext activeContext(context);
+		current = IsImageSourceCurrent(requested);
+	}
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	admission.Reset();
+	if (!current && context.Continue()) {
+		(void)CapturePreviewSource(SourceDescriptor{}, requested.LogicalPath(),
+			sourceCapture, shouldContinue, observed);
+	}
+	return current && context.Continue();
+}
+
 template<typename Continue>
 DirectorySummary CountImmediateDirectoryContentsWhile(
-	const std::filesystem::path& directory, Continue shouldContinue) {
+	const std::filesystem::path& directory, Continue shouldContinue,
+	bool* completed = nullptr, std::string* errorMessage = nullptr) {
+	if (completed != nullptr) *completed = true;
+	if (errorMessage != nullptr) errorMessage->clear();
 	DirectorySummary summary;
-	if (IsArchiveLocation(directory)) {
+	bool interruptedForForeground = false;
+	bool archiveLocation = false;
+	WorkContext classificationContext;
+	SourceWorkLease classificationLease;
+	if (!AcquireDirectoryEnumerationLease(directory,
+		[&shouldContinue] { return shouldContinue(); }, interruptedForForeground,
+		classificationContext, classificationLease)) {
+		if (completed != nullptr) *completed = false;
+		return summary;
+	}
+	{
+		ScopedWorkContext activeContext(classificationContext);
+		if (classificationContext.Continue()) {
+			archiveLocation = IsArchiveLocation(directory);
+		}
+		ReleaseDirectoryEnumerationLease(classificationContext, classificationLease);
+	}
+	if (interruptedForForeground || !shouldContinue()) {
+		if (completed != nullptr) *completed = false;
+		return summary;
+	}
+	if (archiveLocation) {
 		std::vector<ArchiveEntryInfo> entries;
-		std::string errorMessage;
+		std::string localError;
+		std::string& archiveError = errorMessage == nullptr ? localError : *errorMessage;
 		if (!ListArchiveDirectoryCancellable(directory, entries,
-			[&shouldContinue] { return shouldContinue(); }, errorMessage)) return summary;
+			[&shouldContinue] { return shouldContinue(); },
+			archiveError)) {
+			if (completed != nullptr) *completed = false;
+			return summary;
+		}
 		for (const ArchiveEntryInfo& entry : entries) {
-			if (!shouldContinue()) break;
+			if (!shouldContinue()) {
+				if (completed != nullptr) *completed = false;
+				break;
+			}
 			if (entry.directory) ++summary.subdirectoryCount;
 			else if (IsSupportedImagePath(entry.path)) ++summary.imageCount;
 		}
 		return summary;
 	}
 	std::error_code iteratorError;
-	std::filesystem::directory_iterator iterator(directory, iteratorError);
+	std::filesystem::directory_iterator iterator;
 	const std::filesystem::directory_iterator end;
-	while (!iteratorError && iterator != end && shouldContinue()) {
-		std::error_code statusError;
-		if (iterator->is_directory(statusError)) {
-			if (!statusError) ++summary.subdirectoryCount;
-		} else if (!statusError && iterator->is_regular_file(statusError) && !statusError) {
-			if (IsArchiveContainerName(iterator->path())) {
-				++summary.subdirectoryCount;
-			} else if (IsSupportedImagePath(iterator->path())) {
-				++summary.imageCount;
-			}
+	bool iteratorStarted = false;
+	while (!iteratorStarted || (!iteratorError && iterator != end)) {
+		WorkContext context;
+		SourceWorkLease sourceLease;
+		if (!AcquireDirectoryEnumerationLease(directory,
+			[&shouldContinue] { return shouldContinue(); }, interruptedForForeground,
+			context, sourceLease)) {
+			if (completed != nullptr) *completed = false;
+			break;
 		}
-		iterator.increment(iteratorError);
+		{
+			ScopedWorkContext activeContext(context);
+			if (!iteratorStarted) {
+				iterator = std::filesystem::directory_iterator(directory, iteratorError);
+				iteratorStarted = true;
+			}
+			std::size_t batchEntries = 0;
+			while (!iteratorError && iterator != end &&
+				batchEntries < kDirectoryEnumerationBatchSize) {
+				if (!context.Continue()) break;
+				const std::filesystem::path entryPath = iterator->path();
+				std::error_code statusError;
+				if (iterator->is_directory(statusError)) {
+					if (!statusError) ++summary.subdirectoryCount;
+				} else if (!statusError && iterator->is_regular_file(statusError) &&
+					!statusError) {
+					if (IsArchiveContainerName(entryPath)) {
+						++summary.subdirectoryCount;
+					} else if (IsSupportedImagePath(entryPath)) {
+						++summary.imageCount;
+					}
+				}
+				iterator.increment(iteratorError);
+				++batchEntries;
+			}
+			ReleaseDirectoryEnumerationLease(context, sourceLease);
+		}
+		if (interruptedForForeground || !shouldContinue()) {
+			if (completed != nullptr) *completed = false;
+			break;
+		}
+	}
+	if (iteratorError && errorMessage != nullptr) *errorMessage = iteratorError.message();
+	if ((iteratorError || interruptedForForeground) && completed != nullptr) {
+		*completed = false;
 	}
 	return summary;
 }
@@ -69,8 +239,23 @@ std::filesystem::path FirstImageInDirectoryWhile(
 	const std::function<bool()>& shouldContinue, std::string* errorMessage = nullptr,
 	ArchiveErrorKind* errorKind = nullptr, bool* containsEncryptedEntries = nullptr) {
 	std::vector<FileDialogEntry> images;
-	if (IsArchiveLocation(directory)) {
-		const std::string archiveFormat = ArchiveFormatName(directory);
+	bool interruptedForForeground = false;
+	bool archiveLocation = false;
+	std::string archiveFormat;
+	WorkContext classificationContext;
+	SourceWorkLease classificationLease;
+	if (!AcquireDirectoryEnumerationLease(directory, shouldContinue,
+		interruptedForForeground, classificationContext, classificationLease)) return {};
+	{
+		ScopedWorkContext activeContext(classificationContext);
+		if (classificationContext.Continue()) {
+			archiveLocation = IsArchiveLocation(directory);
+			if (archiveLocation) archiveFormat = ArchiveFormatName(directory);
+		}
+		ReleaseDirectoryEnumerationLease(classificationContext, classificationLease);
+	}
+	if (interruptedForForeground || !shouldContinue()) return {};
+	if (archiveLocation) {
 		const bool promptsForArchivePassword = archiveFormat == ".7Z" || archiveFormat == "RAR";
 		std::vector<ArchiveEntryInfo> archiveEntries;
 		std::string localErrorMessage;
@@ -104,8 +289,11 @@ std::filesystem::path FirstImageInDirectoryWhile(
 		SortFileDialogEntries(images, mode);
 		if (errorMessage != nullptr) errorMessage->clear();
 		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
+		WorkContext passwordContext;
+		passwordContext.sourcePriority = SourceWorkPriority::Metadata;
+		passwordContext.shouldContinue = shouldContinue;
 		if (promptsForArchivePassword && !images.empty() && images.front().encrypted &&
-			!HasSessionArchivePassword(directory)) {
+			!HasSessionArchivePassword(directory, passwordContext)) {
 			if (errorMessage != nullptr) {
 				*errorMessage = "password required for encrypted archive image";
 			}
@@ -115,25 +303,39 @@ std::filesystem::path FirstImageInDirectoryWhile(
 		return images.empty() ? std::filesystem::path{} : images.front().path;
 	}
 	std::error_code iteratorError;
-	std::filesystem::directory_iterator iterator(directory, iteratorError);
+	std::filesystem::directory_iterator iterator;
 	const std::filesystem::directory_iterator end;
-	while (!iteratorError && iterator != end && shouldContinue()) {
-		std::error_code statusError;
-		if (iterator->is_regular_file(statusError) && !statusError &&
-			IsSupportedImagePath(iterator->path())) {
-			std::error_code modificationError;
-			const std::filesystem::file_time_type modificationTime =
-				iterator->last_write_time(modificationError);
-			FileDialogEntry image{iterator->path(), false, false,
-				modificationError ? std::filesystem::file_time_type{} : modificationTime};
-			image.sourceDescriptor = DescribeImageSource(iterator->path());
-			if (image.sourceDescriptor.Metadata().hasFileSize) {
-				image.fileSize = image.sourceDescriptor.Metadata().fileSize;
-				image.fileSizeKnown = true;
+	bool iteratorStarted = false;
+	while (!iteratorStarted || (iterator != end && !iteratorError)) {
+		WorkContext context;
+		SourceWorkLease lease;
+		if (!AcquireDirectoryEnumerationLease(directory, shouldContinue,
+			interruptedForForeground, context, lease)) return {};
+		{
+			ScopedWorkContext activeContext(context);
+			if (!iteratorStarted) {
+				iterator = std::filesystem::directory_iterator(directory, iteratorError);
+				iteratorStarted = true;
 			}
-			images.push_back(std::move(image));
+			std::size_t batchEntries = 0;
+			while (!iteratorError && iterator != end &&
+				batchEntries < kDirectoryEnumerationBatchSize) {
+				if (!context.Continue()) break;
+				std::error_code statusError;
+				if (iterator->is_regular_file(statusError) && !statusError &&
+					IsSupportedImagePath(iterator->path())) {
+					std::error_code modificationError;
+					const std::filesystem::file_time_type modificationTime =
+						iterator->last_write_time(modificationError);
+					images.emplace_back(iterator->path(), false, false,
+						modificationError ? std::filesystem::file_time_type{} : modificationTime);
+				}
+				iterator.increment(iteratorError);
+				++batchEntries;
+			}
+			ReleaseDirectoryEnumerationLease(context, lease);
 		}
-		iterator.increment(iteratorError);
+		if (interruptedForForeground || !shouldContinue()) return {};
 	}
 	if (!shouldContinue()) return {};
 	SortFileDialogEntries(images, mode);
@@ -484,6 +686,7 @@ struct ArchiveDirectoryLoader::Impl {
 		stopping.store(true);
 		currentGeneration.fetch_add(1);
 		condition.notify_one();
+		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
 
@@ -502,21 +705,69 @@ struct ArchiveDirectoryLoader::Impl {
 			result.directory = task.directory;
 			result.generation = task.generation;
 			result.passwordValidation = task.validatePassword;
-			if (task.validatePassword) {
-				(void)ValidateArchivePassword(task.directory, task.password, result.error,
-					&result.errorKind);
-				std::fill(task.password.begin(), task.password.end(), '\0');
-			} else {
-				const auto isCurrent = [this, generation = task.generation] {
-					return !stopping.load() && currentGeneration.load() == generation;
-				};
-				(void)ListArchiveDirectoryCancellable(task.directory, result.entries,
-					isCurrent, result.error, &result.errorKind,
-					&result.containsEncryptedEntries);
-			}
 			const auto isCurrent = [this, generation = task.generation] {
 				return !stopping.load() && currentGeneration.load() == generation;
 			};
+			WorkContext workContext = MakePathWorkContext(task.directory,
+				SourceWorkPriority::Metadata, isCurrent);
+			if (task.validatePassword) {
+				bool foregroundYieldObserved = false;
+				WorkContext validationContext = MakePathWorkContext(task.directory,
+					SourceWorkPriority::Metadata,
+					[this, generation = task.generation, &foregroundYieldObserved] {
+						if (stopping.load() || currentGeneration.load() != generation) {
+							return false;
+						}
+						if (SourceWorkCoordinator::Global().Snapshot().foregroundPending) {
+							foregroundYieldObserved = true;
+							return false;
+						}
+						return true;
+					});
+				for (;;) {
+					foregroundYieldObserved = false;
+					try {
+						if (isCurrent()) {
+							(void)ValidateArchivePassword(task.directory, task.password,
+								result.error, &result.errorKind, validationContext);
+						}
+					} catch (const std::exception& error) {
+						result.error = error.what();
+					} catch (...) {
+						result.error = "unknown archive password validation failure";
+					}
+					if (!isCurrent() || !foregroundYieldObserved) break;
+					result.error.clear();
+					result.errorKind = ArchiveErrorKind::None;
+					(void)SourceWorkCoordinator::Global().WaitForSnapshot(
+						[&isCurrent](const SourceWorkSnapshot& snapshot) {
+							return !isCurrent() || !snapshot.foregroundPending;
+						}, std::chrono::hours(24));
+					if (!isCurrent()) break;
+				}
+				std::fill(task.password.begin(), task.password.end(), '\0');
+			} else {
+				ScopedWorkContext activeContext(workContext);
+				for (;;) {
+					try {
+						(void)ListArchiveDirectoryCancellable(task.directory, result.entries,
+							isCurrent, result.error, &result.errorKind,
+							&result.containsEncryptedEntries);
+					} catch (const std::exception& error) {
+						result.error = error.what();
+					} catch (...) {
+						result.error = "unknown archive directory worker failure";
+					}
+					if (!isCurrent() || result.error.find("cancelled") == std::string::npos) break;
+					result.error.clear();
+					result.errorKind = ArchiveErrorKind::None;
+					result.entries.clear();
+					(void)SourceWorkCoordinator::Global().WaitForSnapshot(
+						[&isCurrent](const SourceWorkSnapshot& snapshot) {
+							return !isCurrent() || !snapshot.foregroundPending;
+						}, std::chrono::hours(24));
+				}
+			}
 			if (!isCurrent()) continue;
 
 			std::lock_guard<std::mutex> lock(mutex);
@@ -550,6 +801,7 @@ void ArchiveDirectoryLoader::Request(const std::filesystem::path& directory,
 		impl_->StartWorkerLocked();
 		impl_->pending.push_back(Impl::Task{directory, generation, {}, false});
 	}
+	SourceWorkCoordinator::Global().NotifyWaiters();
 	impl_->condition.notify_one();
 }
 
@@ -563,14 +815,18 @@ void ArchiveDirectoryLoader::RequestPasswordValidation(const std::filesystem::pa
 		impl_->StartWorkerLocked();
 		impl_->pending.push_back(Impl::Task{archive, generation, password, true});
 	}
+	SourceWorkCoordinator::Global().NotifyWaiters();
 	impl_->condition.notify_one();
 }
 
 void ArchiveDirectoryLoader::Clear(std::uint64_t generation) {
 	impl_->currentGeneration.store(generation);
-	std::lock_guard<std::mutex> lock(impl_->mutex);
-	impl_->pending.clear();
-	impl_->ready.clear();
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->pending.clear();
+		impl_->ready.clear();
+	}
+	SourceWorkCoordinator::Global().NotifyWaiters();
 }
 
 std::vector<ArchiveDirectoryResult> ArchiveDirectoryLoader::TakeReady() {
@@ -597,7 +853,9 @@ struct FileDialogFileSizeLoader::Impl {
 
 	~Impl() {
 		stopping.store(true);
+		currentGeneration.fetch_add(1);
 		condition.notify_one();
+		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
 
@@ -630,13 +888,55 @@ struct FileDialogFileSizeLoader::Impl {
 			batch.reserve(32);
 			for (const SourceDescriptor& requestedSource : task.sources) {
 				if (!IsCurrent(task.generation)) break;
-				const SourceDescriptor observedSource = sourceCapture(requestedSource);
 				FileDialogFileSizeResult result;
 				result.generation = task.generation;
 				result.path = requestedSource.LogicalPath();
-				result.size = observedSource.Metadata().fileSize;
 				result.requestedSource = requestedSource;
-				result.observedSource = observedSource;
+				const auto shouldContinue = [this, generation = task.generation] {
+					return IsCurrent(generation);
+				};
+				for (;;) {
+					bool interruptedForForeground = false;
+					WorkContext context = MakePathWorkContext(result.path,
+						SourceWorkPriority::Metadata, shouldContinue);
+					context.onForegroundYield = [&interruptedForForeground] {
+						interruptedForForeground = true;
+					};
+					try {
+						SourceCpuWorkLease admission =
+							SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+								context, result.path);
+						if (admission && context.Continue()) {
+							context.sourcePriority = context.Priority();
+							context.sourceAccessAlreadyAdmitted = true;
+							context.cpuProcessingAlreadyAdmitted = true;
+							ScopedWorkContext activeContext(context);
+							result.observedSource = sourceCapture(requestedSource);
+							result.size = result.observedSource.Metadata().fileSize;
+						} else if (IsCurrent(task.generation)) {
+							result.failure = {WorkerFailureKind::Cancelled,
+								"file-size source admission was cancelled"};
+						}
+					} catch (const std::exception& error) {
+						result.failure = {WorkerFailureKind::Exception, error.what()};
+					} catch (...) {
+						result.failure = {WorkerFailureKind::Exception,
+							"unknown file-size worker failure"};
+					}
+					if (!interruptedForForeground || !IsCurrent(task.generation)) break;
+					SourceWorkCoordinator& coordinator = SourceWorkCoordinator::Global();
+					(void)coordinator.WaitForSnapshot(
+						[this, generation = task.generation](
+							const SourceWorkSnapshot& snapshot) {
+							return !IsCurrent(generation) || !snapshot.foregroundPending;
+						}, std::chrono::hours(24));
+					if (!IsCurrent(task.generation)) break;
+					result = {};
+					result.generation = task.generation;
+					result.path = requestedSource.LogicalPath();
+					result.requestedSource = requestedSource;
+				}
+				if (!IsCurrent(task.generation)) break;
 				batch.push_back(std::move(result));
 				if (batch.size() >= 32) Publish(batch, task.generation);
 			}
@@ -684,14 +984,18 @@ void FileDialogFileSizeLoader::RequestSources(
 			impl_->pending = Impl::Task{sources, generation};
 		}
 	}
+	SourceWorkCoordinator::Global().NotifyWaiters();
 	if (!sources.empty()) impl_->condition.notify_one();
 }
 
 void FileDialogFileSizeLoader::Clear(std::uint64_t generation) {
 	impl_->currentGeneration.store(generation);
-	std::lock_guard<std::mutex> lock(impl_->mutex);
-	impl_->pending.reset();
-	impl_->ready.clear();
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->pending.reset();
+		impl_->ready.clear();
+	}
+	SourceWorkCoordinator::Global().NotifyWaiters();
 }
 
 std::vector<FileDialogFileSizeResult> FileDialogFileSizeLoader::TakeReady() {
@@ -711,7 +1015,9 @@ struct DirectorySummaryLoader::Impl {
 
 	~Impl() {
 		stopping.store(true);
+		currentGeneration.fetch_add(1);
 		condition.notify_one();
+		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
 
@@ -726,15 +1032,68 @@ struct DirectorySummaryLoader::Impl {
 				pending.pop_front();
 			}
 
-			const DirectorySummary summary = CountImmediateDirectoryContentsWhile(task.directory,
-				[this, generation = task.generation] {
-					return !stopping.load() && currentGeneration.load() == generation;
-				});
+			DirectorySummary summary;
+			WorkerFailure failure;
+			for (;;) {
+				bool scanComplete = false;
+				bool interruptedForForeground = false;
+				std::string attemptError;
+				const auto shouldContinue = [this, generation = task.generation,
+					&interruptedForForeground] {
+					if (stopping.load() || currentGeneration.load() != generation) return false;
+					SourceWorkCoordinator& coordinator = SourceWorkCoordinator::Global();
+					if (!coordinator.Snapshot().foregroundPending) return true;
+					interruptedForForeground = true;
+					yieldingForForeground.store(true);
+					return false;
+				};
+				WorkContext workContext;
+				workContext.sourcePriority = SourceWorkPriority::Metadata;
+				workContext.shouldContinue = shouldContinue;
+				workContext.onForegroundYield = [this, &interruptedForForeground] {
+					interruptedForForeground = true;
+					yieldingForForeground.store(true);
+				};
+				try {
+					ScopedWorkContext activeContext(workContext);
+					summary = CountImmediateDirectoryContentsWhile(task.directory,
+						shouldContinue, &scanComplete, &attemptError);
+				} catch (const std::exception& error) {
+					failure = {WorkerFailureKind::Exception, error.what()};
+				} catch (...) {
+					failure = {WorkerFailureKind::Exception,
+						"unknown directory summary worker failure"};
+				}
+				if (stopping.load() || currentGeneration.load() != task.generation ||
+					failure.Failed()) {
+					yieldingForForeground.store(false);
+					break;
+				}
+				if (!interruptedForForeground && scanComplete) break;
+				if (!interruptedForForeground) {
+					failure = {WorkerFailureKind::ProcessingFailed,
+						attemptError.empty() ? "directory summary scan did not complete" :
+							attemptError};
+					break;
+				}
+				SourceWorkCoordinator& coordinator = SourceWorkCoordinator::Global();
+				yieldingForForeground.store(true);
+				(void)coordinator.WaitForSnapshot(
+					[this, generation = task.generation](const SourceWorkSnapshot& snapshot) {
+						return stopping.load() || currentGeneration.load() != generation ||
+							!snapshot.foregroundPending;
+					}, std::chrono::hours(24));
+				yieldingForForeground.store(false);
+				if (stopping.load() || currentGeneration.load() != task.generation) break;
+				summary = {};
+				failure = {};
+			}
 			if (stopping.load() || currentGeneration.load() != task.generation) continue;
 
 			std::lock_guard<std::mutex> lock(mutex);
 			if (currentGeneration.load() == task.generation) {
-				ready.push_back(DirectorySummaryResult{task.directory, task.generation, summary});
+				ready.push_back(DirectorySummaryResult{task.directory, task.generation,
+					summary, failure});
 			}
 		}
 	}
@@ -749,6 +1108,7 @@ struct DirectorySummaryLoader::Impl {
 	std::vector<DirectorySummaryResult> ready;
 	std::atomic<std::uint64_t> currentGeneration{0};
 	std::atomic<bool> stopping{false};
+	std::atomic<bool> yieldingForForeground{false};
 	std::thread worker;
 };
 
@@ -769,7 +1129,12 @@ void DirectorySummaryLoader::Request(
 			}
 		}
 	}
+	SourceWorkCoordinator::Global().NotifyWaiters();
 	if (!directories.empty()) impl_->condition.notify_one();
+}
+
+bool DirectorySummaryLoader::IsYieldingForForeground() const {
+	return impl_->yieldingForForeground.load();
 }
 
 std::vector<DirectorySummaryResult> DirectorySummaryLoader::TakeReady() {
@@ -819,9 +1184,13 @@ FileDialogPreviewResult LoadFileDialogPreview(
 			!providedSource.LogicalPath().empty() &&
 			providedSource.LogicalPath().lexically_normal() == result.source.lexically_normal();
 		result.sourceDescriptor = providedPathMatches ? providedSource :
-			sourceCapture(SourceDescriptor(result.source, {}, {}));
+			SourceDescriptor(result.source, {}, {});
+		if (!providedPathMatches && !CapturePreviewSource(result.sourceDescriptor,
+			result.source, sourceCapture, shouldContinue, result.sourceDescriptor)) return result;
 		if (!result.sourceDescriptor.Valid()) {
-			const SourceDescriptor recaptured = sourceCapture(result.sourceDescriptor);
+			SourceDescriptor recaptured;
+			if (!CapturePreviewSource(result.sourceDescriptor, result.source,
+				sourceCapture, shouldContinue, recaptured)) return result;
 			if (recaptured.Valid() && recaptured.LogicalPath().lexically_normal() ==
 				result.source.lexically_normal()) {
 				result.sourceDescriptor = recaptured;
@@ -832,22 +1201,25 @@ FileDialogPreviewResult LoadFileDialogPreview(
 			}
 		}
 		if (result.sourceDescriptor.Valid() &&
-			!IsImageSourceCurrent(result.sourceDescriptor)) {
-			result.observedSource = DescribeImageSource(result.source);
+			!ValidateAndRefreshPreviewSource(result.sourceDescriptor, sourceCapture,
+				shouldContinue, result.observedSource)) {
+			if (!shouldContinue()) return result;
 			result.error = "Image changed while preparing preview";
 			return result;
 		}
 		const SourceMetadata& metadata = result.sourceDescriptor.Metadata();
 		result.fileSize = metadata.fileSize;
 		result.fileSizeKnown = metadata.hasFileSize;
+		WorkContext sourceContext = MakeWorkContext(result.sourceDescriptor,
+			SourceWorkPriority::Speculative, shouldContinue);
 		DecodedImage decoded;
 		bool success = false;
 		if (IsJpegPath(result.source)) {
 			success = DecodeJpegForDisplay(result.source, maximumWidth,
 				maximumHeight, decoded, result.sourceWidth,
-				result.sourceHeight, result.error);
+				result.sourceHeight, result.error, sourceContext);
 		} else {
-			success = DecodeImage(result.source, decoded, result.error);
+			success = DecodeImage(result.source, decoded, result.error, sourceContext);
 		}
 		if (success && !decoded.frames.empty()) {
 			DecodedFrame frame = std::move(decoded.frames.front());
@@ -863,8 +1235,11 @@ FileDialogPreviewResult LoadFileDialogPreview(
 				static_cast<int>(std::floor(frame.width * scale + 0.5)));
 			const int height = std::max(1,
 				static_cast<int>(std::floor(frame.height * scale + 0.5)));
+			CpuWorkLease cpuLease = SourceWorkCoordinator::Global().AcquireCpu(sourceContext);
 			if (!DownsampleThumbnailBgra(frame.bgra, frame.width, frame.height,
-				width, height, result.bgra, shouldContinue)) {
+				width, height, result.bgra, [&sourceContext, &shouldContinue, &cpuLease] {
+					return cpuLease && sourceContext.Continue() && shouldContinue();
+				})) {
 				result.error = "Cannot resize preview";
 			} else {
 				result.width = width;
@@ -874,8 +1249,9 @@ FileDialogPreviewResult LoadFileDialogPreview(
 			result.error = "Image has no preview frame";
 		}
 		if (result.sourceDescriptor.Valid() &&
-			!IsImageSourceCurrent(result.sourceDescriptor)) {
-			result.observedSource = DescribeImageSource(result.source);
+			!ValidateAndRefreshPreviewSource(result.sourceDescriptor, sourceCapture,
+				shouldContinue, result.observedSource)) {
+			if (!shouldContinue()) return result;
 			result.bgra.clear();
 			result.width = 0;
 			result.height = 0;
@@ -924,6 +1300,7 @@ struct FileDialogPreviewLoader::Impl {
 			ready.clear();
 		}
 		condition.notify_one();
+		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
 
@@ -945,74 +1322,103 @@ struct FileDialogPreviewLoader::Impl {
 			PerfContextScope workContext(PerfWorkClass::FocusedPreview,
 				PerfExecution::WorkerThread);
 			FileDialogPreviewResult result;
-			const auto shouldContinue = [this, &task] {
-				return IsCurrent(task.generation);
-			};
-			const bool hasInvalidRequestedImageSource = !task.directory &&
-				!task.source.LogicalPath().empty() && !task.source.Valid() &&
-				task.source.LogicalPath().lexically_normal() == task.path.lexically_normal();
-			SourceDescriptor recapturedRequestedSource;
-			if (hasInvalidRequestedImageSource) {
-				recapturedRequestedSource = sourceCapture(task.source);
-				if (!recapturedRequestedSource.Valid()) {
-					recapturedRequestedSource = sourceCapture(task.source);
-				}
-				if (!recapturedRequestedSource.Valid()) {
-					result.source = task.path;
-					result.sourceDescriptor = task.source;
-					result.observedSource = recapturedRequestedSource;
-					result.error = "Image changed while preparing preview";
-				}
-			}
-		if (!hasInvalidRequestedImageSource && task.source.Valid() &&
-			!IsImageSourceCurrent(task.source)) {
-				result.source = task.source.LogicalPath();
-				result.sourceDescriptor = task.source;
-				result.observedSource = DescribeImageSource(task.source.LogicalPath());
-				result.error = "Image changed while preparing preview";
-			} else if (!hasInvalidRequestedImageSource ||
-				recapturedRequestedSource.Valid()) {
+			for (;;) {
+				bool interruptedForForeground = false;
+				const auto shouldContinue = [this, generation = task.generation,
+					&interruptedForForeground] {
+					if (!IsCurrent(generation)) return false;
+					if (SourceWorkCoordinator::Global().Snapshot().foregroundPending) {
+						interruptedForForeground = true;
+						return false;
+					}
+					return IsCurrent(generation);
+				};
+				WorkContext attemptContext = MakePathWorkContext(task.path,
+					SourceWorkPriority::Metadata, shouldContinue);
+				attemptContext.onForegroundYield = [&interruptedForForeground] {
+					interruptedForForeground = true;
+				};
+				result = {};
 				try {
-				result = useDefaultProcessor ?
-					LoadFileDialogPreview(task.path, task.directory, task.mode,
-						task.maximumWidth, task.maximumHeight, shouldContinue,
-						recapturedRequestedSource.Valid() ? recapturedRequestedSource : task.source,
-						sourceCapture) :
-					processor(task.path, task.directory, task.mode,
-						task.maximumWidth, task.maximumHeight, shouldContinue);
-				} catch (const std::exception& error) {
-					result.error = error.what();
-				}
-			}
-			if (hasInvalidRequestedImageSource && recapturedRequestedSource.Valid() &&
-				shouldContinue()) {
-				if (result.source.empty()) result.source = task.path;
-				if (result.source.lexically_normal() == task.path.lexically_normal()) {
-					result.sourceDescriptor = recapturedRequestedSource;
-					result.observedSource = recapturedRequestedSource;
-					const SourceDescriptor observed = sourceCapture(recapturedRequestedSource);
-					if (!IsImageSourceCurrent(recapturedRequestedSource) ||
-						observed.Key() != recapturedRequestedSource.Key()) {
-						result.observedSource = observed;
+					ScopedWorkContext activeContext(attemptContext);
+					const bool hasInvalidRequestedImageSource = !task.directory &&
+						!task.source.LogicalPath().empty() && !task.source.Valid() &&
+						task.source.LogicalPath().lexically_normal() ==
+							task.path.lexically_normal();
+					SourceDescriptor recapturedRequestedSource;
+					if (hasInvalidRequestedImageSource) {
+						(void)CapturePreviewSource(task.source, task.path, sourceCapture,
+							shouldContinue, recapturedRequestedSource);
+						if (!recapturedRequestedSource.Valid() && shouldContinue()) {
+							(void)CapturePreviewSource(task.source, task.path, sourceCapture,
+								shouldContinue, recapturedRequestedSource);
+						}
+						if (!recapturedRequestedSource.Valid() && shouldContinue()) {
+							result.source = task.path;
+							result.sourceDescriptor = task.source;
+							result.error = "Image changed while preparing preview";
+						}
+					}
+					bool sourceWasStale = false;
+					if (!hasInvalidRequestedImageSource && task.source.Valid() &&
+						!ValidateAndRefreshPreviewSource(task.source, sourceCapture,
+							shouldContinue, result.observedSource) && shouldContinue()) {
+						sourceWasStale = true;
+						result.source = task.source.LogicalPath();
+						result.sourceDescriptor = task.source;
+						result.error = "Image changed while preparing preview";
+					}
+					if (!sourceWasStale && (!hasInvalidRequestedImageSource ||
+						recapturedRequestedSource.Valid())) {
+						result = useDefaultProcessor ?
+							LoadFileDialogPreview(task.path, task.directory, task.mode,
+								task.maximumWidth, task.maximumHeight, shouldContinue,
+								recapturedRequestedSource.Valid() ?
+									recapturedRequestedSource : task.source,
+								sourceCapture) :
+							processor(task.path, task.directory, task.mode,
+								task.maximumWidth, task.maximumHeight, shouldContinue);
+					}
+					if (hasInvalidRequestedImageSource && recapturedRequestedSource.Valid() &&
+						shouldContinue()) {
+						if (result.source.empty()) result.source = task.path;
+						if (result.source.lexically_normal() == task.path.lexically_normal()) {
+							result.sourceDescriptor = recapturedRequestedSource;
+							result.observedSource = recapturedRequestedSource;
+						}
+					}
+					if (result.sourceDescriptor.LogicalPath().empty() &&
+						task.source.Valid() && !task.directory) {
+						result.sourceDescriptor = task.source;
+					}
+					result.requestedSourceDescriptor = task.source;
+					if (result.sourceDescriptor.Valid() && shouldContinue() &&
+						!ValidateAndRefreshPreviewSource(result.sourceDescriptor,
+							sourceCapture, shouldContinue, result.observedSource) &&
+						shouldContinue()) {
 						result.bgra.clear();
 						result.width = 0;
 						result.height = 0;
 						result.error = "Image changed while preparing preview";
 					}
+				} catch (const std::exception& error) {
+					result.source = task.path;
+					result.error = error.what();
+				} catch (...) {
+					result.source = task.path;
+					result.error = "unknown file preview worker failure";
 				}
-			}
-			if (result.sourceDescriptor.LogicalPath().empty() &&
-				task.source.Valid() && !task.directory) {
-				result.sourceDescriptor = task.source;
-			}
-			result.requestedSourceDescriptor = task.source;
-			if (task.source.Valid() && shouldContinue() &&
-				!IsImageSourceCurrent(task.source)) {
-				result.observedSource = DescribeImageSource(task.source.LogicalPath());
-				result.bgra.clear();
-				result.width = 0;
-				result.height = 0;
-				result.error = "Image changed while preparing preview";
+				if (interruptedForForeground && IsCurrent(task.generation)) {
+					SourceWorkCoordinator& coordinator = SourceWorkCoordinator::Global();
+					(void)coordinator.WaitForSnapshot(
+						[this, generation = task.generation](
+							const SourceWorkSnapshot& snapshot) {
+							return !IsCurrent(generation) || !snapshot.foregroundPending;
+						}, std::chrono::hours(24));
+					if (!IsCurrent(task.generation)) break;
+					continue;
+				}
+				break;
 			}
 			result.generation = task.generation;
 
@@ -1071,6 +1477,7 @@ std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path
 		}
 	}
 	impl_->condition.notify_one();
+	SourceWorkCoordinator::Global().NotifyWaiters();
 	return requestedGeneration;
 }
 

@@ -24,14 +24,45 @@ should normally be added to one of these focused modules and covered by `tests/t
   acceptance check and retries its original request after a stale result.
   While foreground image or spread work is pending, enumeration pauses at the existing continuation
   checkpoints and resumes the same scan when foreground work clears; the active list is never rebuilt or
-  replaced early. Foreground-state and generation changes share the pause mutex with its wait predicate,
-  so resume, replacement, clear, and shutdown cannot lose a wakeup.
+  replaced early. A foreground yield reported from a nested archive callback is retained by the scan
+  owner even if the coordinator gate clears before the scan returns. The worker releases archive
+  admissions before waiting for the shared foreground gate; replacement, clear, and shutdown wake
+  that wait. Initial input classification (including archive-container, directory, and regular-file
+  probes) also uses cancellable source admission, then releases it before catalog reads or paired
+  descriptor capture.
   The active `FileList` remains main-thread-owned, so ordinary next/previous steps within its loaded
   entries stay lock-free and do not copy the list. A compact path-sorted vector of entry indices
   preserves logarithmic path selection regardless of the active metadata sort, without duplicating
   each path string. A direct image launch uses a provisional one-image list so decoding can start
   before its folder scan completes. Cancellation never blocks waiting for the worker; destruction
   joins it during normal owner teardown.
+- `source_work_coordinator` and `work_context`: shared admission across otherwise independent
+  worker pools. Foreground source work has a separate lane; speculative and metadata reads share one
+  active lane and new background source admission waits while foreground work is pending. A partner
+  in the currently displayed spread uses foreground admission even when its cache request originated
+  as background work. Admission identity is separate from cache/source-version identity: valid
+  descriptors match by backing device and inode, while size and modification time remain part of
+  source freshness and cache keys. If either side lacks a valid identity, admission falls back to the
+  lexically normalized absolute backing path; two known, different device/inode pairs remain distinct
+  even if a stale path matches. Context construction and admission-key resolution do not stat sources
+  before admission, and archive members serialize on their container even when decoders use temporary
+  extracted paths. Ordinary-file
+  validation holds a cancellable source-only lease; archive validation holds the source/CPU pair across
+  both the container stat and member metadata lookup. Scoped admission flags let nested metadata calls
+  reuse that pair. One shared CPU semaphore caps
+  active processing across pools at the hardware-aware limit (no more than four). RAII leases release
+  source and CPU permits on every return, exception, and cancellation. Work needing both resources is
+  admitted atomically, so a source lane is never held while waiting for a CPU permit; already-admitted
+  contexts must carry both leases together. Waiting work can report live foreground promotion, which
+  moves its source and CPU queue positions without holding coordinator locks during owner callbacks.
+  Continuation and priority callbacks run outside coordinator locks; nested decoder/helper calls reuse
+  the scoped context rather than admitting the same source twice. Archive/catalog cancellation
+  callbacks return immediately when foreground work arrives, allowing paired source and CPU leases to
+  unwind before the outer worker waits; interrupted workers discard partial results and retry after
+  the foreground gate clears. Other metadata workers yield at entries or bounded batches, and canceled
+  waiters remove themselves promptly from admission queues. Work carries the observed interruption
+  reason across gate changes, so an interrupted traversal retries even if foreground work completes
+  before its post-scan check; shutdown wakes coordinator waits.
 - `double_page_model`: portrait-pair eligibility, cover handling, aspect-preserving shared-height
   spread geometry, whole-spread quarter-turn placement, page-step navigation, and configurable
   physical-key direction in manga reading order. It owns no image pixels, filesystem work, or SDL
@@ -59,7 +90,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   filesystem clock domain. The backing identity retains Unix stat seconds and nanoseconds. Failed
   stats produce an invalid identity that is distinct from every valid cache key.
   New archive formats should extend this backend dispatch while keeping viewer consumers
-  on the generic source operations.
+  on the generic source operations. Catalog/listing and member-extraction tasks acquire the shared
+  source lane using the backing container identity. Extraction carries its original archive member
+  context into temporary-file decoding, so nested codec calls do not admit the temp path as a new
+  source or lose cancellation for the archive read.
 - `seven_zip_backend.h` and its selected implementation: the optional `seven_zip_backend_7zip.cpp`
   wraps the official 7-Zip 24.09 `Format7zF` shared library through `IInArchive`, `IInStream`, and
   per-operation callbacks. A private handler and archive stream are created for each catalog or
@@ -88,8 +122,12 @@ should normally be added to one of these focused modules and covered by `tests/t
   pixel processing, the atomic native per-image levels database, and its portable backup/restore.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy. Image
   decoders resolve archive-member paths through `archive_source` before invoking the existing codec
-  path, retaining ordinary-file and reduced-DCT JPEG behavior. Decoded frames carry alpha-presence
-  metadata so opaque-image textures can keep blending disabled.
+  path, retaining ordinary-file and reduced-DCT JPEG behavior. JPEG cancellation is checked before
+  opening, after header parsing, between 16-row scanline batches, before color conversion/resampling,
+  and before publication; opaque codec calls are checked before and after their supported boundaries.
+  Existing libjpeg cleanup and error handling remain in place, and callbacks are never thrown across C
+  codec frames. Decoded frames carry alpha-presence metadata so opaque-image textures can keep blending
+  disabled.
 - `cache_budget`, `image_cache`, `display_image_cache`, `display_prefetch_planner`, and
   `display_upload_scheduler`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
@@ -145,6 +183,14 @@ should normally be added to one of these focused modules and covered by `tests/t
   diagnostics never acquire a temporary pixel owner. Shutdown stops preparation workers before
   retirement; it joins after draining when no external handles remain, and returns while the shared
   retirement state finishes later when a valid handle survives.
+- Worker source reads and CPU processing across decoded-image, display, thumbnail, dimension,
+  EXIF, file-list, Browse, and archive tasks use the shared coordinator described above. Cache workers
+  catch exceptions from injected decoder/processor callbacks, retain a structured last failure in
+  diagnostics, release RAII admission permits, and continue servicing later requests. The EXIF worker
+  publishes a terminal, metadata-cleared failure for a current-generation reader, validator, or
+  admission exception; cancellation and replaced generations remain unpublished. JPEG and supported
+  archive loops observe cancellation at bounded checkpoints; a call already blocked in filesystem I/O
+  or an opaque codec may finish before its owner discards the result.
 - `input_commands`: SDL key chords to shared JPEGView command IDs, the configurable Space/Shift+Space
   image-navigation direction, and held-navigation repeat state (including when Shift is permitted).
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
@@ -229,6 +275,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   identity before and after reading; a stale completion returns both the requested and observed
   descriptors for exact refresh. The SDL owner refreshes and invalidates only when their `SourceKey`s
   differ; an unchanged invalid key keeps its terminal missing-source error without resubmitting it.
+  Filesystem directory scans and focused-preview enumeration admit bounded iterator/status batches,
+  including empty-directory iterator opens, and release source-only leases before paired descriptor or
+  archive work. Partial results are discarded and retried after a foreground yield.
   Replacing queued or ready previews records cancellation on the event
   thread; a stale active result records cancellation on its worker, once per discarded task.
   Image-dimension and archive-member size lookups stay off the SDL event thread.
@@ -291,7 +340,11 @@ should normally be added to one of these focused modules and covered by `tests/t
   the captured `SourceKey`; Viewer applies metadata only when both source and request generation
   still match, so slow metadata cannot delay initial image presentation or overwrite another image.
   Filesystem/archive freshness checks, including the final pre-publication check, run outside the
-  mutex shared with event-facing requests, cancellation, and result polling.
+  mutex shared with event-facing requests, cancellation, and result polling. Archive-member reads
+  retain foreground-yield reasons from nested archive callbacks and reader checkpoints, release
+  paired source/CPU admission before waiting, then retry the same still-current generation after
+  foreground work clears. Replacement, cancellation, and shutdown wake that wait; genuine
+  source-unavailable and processing failures remain terminal results.
 - `system_font` and `bitmap_font`: desktop-font discovery, UTF-8 shaping, measurement, rasterization,
   and exact embedded-glyph ink bounds for crisp renderer overlays such as menu mnemonics. The SDL
   adapter creates printable-ASCII bitmap-font textures with nearest-neighbor sampling while keeping
@@ -405,6 +458,11 @@ unencrypted RAR catalogs remain on libarchive; the optional RAR backend inspects
 used for encrypted RAR4/RAR5 catalogs and extraction. Cold
 archive-directory listing runs in `ArchiveDirectoryLoader`; a newer request
 cancels obsolete libarchive, 7-Zip, or RAR callback work at read/seek boundaries and generation-checks returned results. A
+password-validation request holds paired source and CPU admission for the backing container and
+propagates its cancellation context through catalog reads, the password probe, and bounded extraction.
+It stays in metadata priority, records foreground interruptions at admission and archive checkpoints,
+releases the pair, and retries the same current password request after visible image work clears; owner
+replacement and shutdown wake the retry wait, and the request copy is cleared when the operation ends. A
 selected ZIP member is read by index; TAR/TGZ/7z/RAR members are found by rescanning archive order. Gzip
 streams are sequential, and solid 7z/RAR5 blocks can require decompressing earlier entries to reach a
 later member. The libarchive path does not support solid RAR4 archives. The encrypted backend uses

@@ -1,6 +1,7 @@
 #include "file_list.h"
 #include "archive_source.h"
 #include "image_formats.h"
+#include "source_work_coordinator.h"
 
 #include <algorithm>
 #include <chrono>
@@ -36,6 +37,110 @@ bool SameSourceMetadata(const SourceMetadata& left, const SourceMetadata& right)
 		left.transparencyKnown == right.transparencyKnown &&
 		left.archiveMember == right.archiveMember &&
 		left.archiveMemberEncrypted == right.archiveMemberEncrypted;
+}
+
+constexpr std::size_t kDirectoryEnumerationBatchSize = 32;
+
+bool AcquireDirectoryEnumerationLease(const fs::path& directory,
+	const std::function<bool()>& shouldContinue, bool& interruptedForForeground,
+	WorkContext& context, SourceWorkLease& lease) {
+	WorkContext supplied;
+	supplied.shouldContinue = shouldContinue;
+	context = ResolveWorkContext(directory, SourceWorkPriority::Metadata, supplied);
+	const WorkContext directoryContext = MakePathWorkContext(directory,
+		SourceWorkPriority::Metadata);
+	context.source = directoryContext.source;
+	context.sourcePriority = SourceWorkPriority::Metadata;
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	const std::function<bool()> inheritedContinue = context.shouldContinue;
+	const std::function<void()> inheritedYield = context.onForegroundYield;
+	const std::function<SourceWorkPriority()> inheritedPriority = context.currentPriority;
+	context.onForegroundYield = [&interruptedForForeground, inheritedYield] {
+		interruptedForForeground = true;
+		if (inheritedYield) inheritedYield();
+	};
+	context.shouldContinue = [&interruptedForForeground, inheritedContinue,
+		inheritedPriority, priority = context.sourcePriority, inheritedYield] {
+		if (inheritedContinue && !inheritedContinue()) return false;
+		const SourceWorkPriority currentPriority = inheritedPriority ?
+			inheritedPriority() : priority;
+		if (currentPriority != SourceWorkPriority::Foreground &&
+			SourceWorkCoordinator::Global().Snapshot().foregroundPending) {
+			interruptedForForeground = true;
+			if (inheritedYield) inheritedYield();
+			return false;
+		}
+		return true;
+	};
+	lease = SourceWorkCoordinator::Global().Acquire(context, directory);
+	if (!lease || !context.Continue()) {
+		if (lease) lease.Reset();
+		return false;
+	}
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	return true;
+}
+
+void ReleaseDirectoryEnumerationLease(WorkContext& context, SourceWorkLease& lease) {
+	context.sourceAccessAlreadyAdmitted = false;
+	lease.Reset();
+}
+
+bool ClassifyArchiveDirectory(const fs::path& directory,
+	const std::function<bool()>& shouldContinue, bool& interruptedForForeground,
+	bool& archiveLocation) {
+	archiveLocation = false;
+	WorkContext context;
+	SourceWorkLease lease;
+	if (!AcquireDirectoryEnumerationLease(directory, shouldContinue,
+		interruptedForForeground, context, lease)) return false;
+	{
+		ScopedWorkContext activeContext(context);
+		if (context.Continue()) archiveLocation = IsArchiveLocation(directory);
+		ReleaseDirectoryEnumerationLease(context, lease);
+	}
+	return !interruptedForForeground && ContinueScan(shouldContinue);
+}
+
+enum class InputPathKind {
+	Unsupported,
+	ArchiveContainer,
+	ArchiveMember,
+	Directory,
+	RegularFile,
+};
+
+bool ClassifyInputPath(const fs::path& path,
+	const std::function<bool()>& shouldContinue, InputPathKind& kind) {
+	kind = InputPathKind::Unsupported;
+	bool interruptedForForeground = false;
+	WorkContext context;
+	SourceWorkLease lease;
+	if (!AcquireDirectoryEnumerationLease(path, shouldContinue,
+		interruptedForForeground, context, lease)) return false;
+	{
+		ScopedWorkContext activeContext(context);
+		if (!context.Continue()) {
+			ReleaseDirectoryEnumerationLease(context, lease);
+			return false;
+		}
+		if (IsArchiveContainerFile(path)) {
+			kind = InputPathKind::ArchiveContainer;
+		} else if (IsArchiveMemberLocation(path)) {
+			kind = InputPathKind::ArchiveMember;
+		} else {
+			std::error_code error;
+			if (fs::is_directory(path, error) && !error) {
+				kind = InputPathKind::Directory;
+			} else if (!error && fs::is_regular_file(path, error) && !error) {
+				kind = InputPathKind::RegularFile;
+			}
+		}
+		ReleaseDirectoryEnumerationLease(context, lease);
+	}
+	return !interruptedForForeground && ContinueScan(shouldContinue);
 }
 
 } // namespace
@@ -105,7 +210,19 @@ FileList::Entry FileList::DescribeFile(const fs::path& path,
 	result.path = Normalize(path);
 	result.randomOrder = std::hash<std::string>{}(result.path.string());
 	if (!ContinueScan(shouldContinue)) return result;
-	result.source = DescribeImageSource(result.path);
+	WorkContext suppliedContext;
+	suppliedContext.shouldContinue = shouldContinue;
+	WorkContext context = ResolveWorkContext(result.path,
+		SourceWorkPriority::Metadata, suppliedContext);
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(context,
+		result.path);
+	if (!admission || !context.Continue()) return result;
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	ScopedWorkContext activeContext(context);
+	result.source = DescribeImageSource(result.path, context);
+	if (!context.Continue()) return Entry{};
 	const SourceMetadata& metadata = result.source.Metadata();
 	result.lastModificationTime = metadata.hasModificationTime ?
 		metadata.modificationTimeNanoseconds : 0;
@@ -120,7 +237,11 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 	const std::function<bool()>& shouldContinue) {
 	std::vector<Entry> result;
 	if (!ContinueScan(shouldContinue)) return result;
-	if (IsArchiveLocation(directory)) {
+	bool interruptedForForeground = false;
+	bool archiveLocation = false;
+	if (!ClassifyArchiveDirectory(directory, shouldContinue,
+		interruptedForForeground, archiveLocation)) return result;
+	if (archiveLocation) {
 		std::vector<ArchiveEntryInfo> archiveEntries;
 		std::string errorMessage;
 		if (!ListArchiveDirectoryCancellable(directory, archiveEntries,
@@ -144,17 +265,41 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 		return result;
 	}
 	std::error_code error;
-	fs::directory_iterator iterator(directory, error);
+	fs::directory_iterator iterator;
 	const fs::directory_iterator end;
-	while (iterator != end && !error && ContinueScan(shouldContinue)) {
-		const fs::directory_entry entry = *iterator;
-		std::error_code statusError;
-		if (entry.is_regular_file(statusError) && !statusError && IsSupportedImagePath(entry.path())) {
+	bool iteratorStarted = false;
+	while (!iteratorStarted || (iterator != end && !error)) {
+		std::vector<fs::path> imagePaths;
+		WorkContext context;
+		SourceWorkLease lease;
+		if (!AcquireDirectoryEnumerationLease(directory, shouldContinue,
+			interruptedForForeground, context, lease)) return {};
+		{
+			ScopedWorkContext activeContext(context);
+			if (!iteratorStarted) {
+				iterator = fs::directory_iterator(directory, error);
+				iteratorStarted = true;
+			}
+			std::size_t batchEntries = 0;
+			while (iterator != end && !error && batchEntries < kDirectoryEnumerationBatchSize) {
+				if (!context.Continue()) break;
+				const fs::directory_entry entry = *iterator;
+				std::error_code statusError;
+				if (entry.is_regular_file(statusError) && !statusError &&
+					IsSupportedImagePath(entry.path())) {
+					imagePaths.push_back(entry.path());
+				}
+				iterator.increment(error);
+				++batchEntries;
+			}
+			ReleaseDirectoryEnumerationLease(context, lease);
+		}
+		if (interruptedForForeground || !ContinueScan(shouldContinue)) return {};
+		for (const fs::path& imagePath : imagePaths) {
 			if (!ContinueScan(shouldContinue)) return {};
-			result.push_back(DescribeFile(entry.path(), shouldContinue));
+			result.push_back(DescribeFile(imagePath, shouldContinue));
 			if (!ContinueScan(shouldContinue)) return {};
 		}
-		iterator.increment(error);
 	}
 	return result;
 }
@@ -163,7 +308,11 @@ std::vector<fs::path> FileList::ChildDirectories(const fs::path& directory,
 	const std::function<bool()>& shouldContinue) {
 	std::vector<fs::path> result;
 	if (!ContinueScan(shouldContinue)) return result;
-	if (IsArchiveLocation(directory)) {
+	bool interruptedForForeground = false;
+	bool archiveLocation = false;
+	if (!ClassifyArchiveDirectory(directory, shouldContinue,
+		interruptedForForeground, archiveLocation)) return result;
+	if (archiveLocation) {
 		std::vector<ArchiveEntryInfo> archiveEntries;
 		std::string errorMessage;
 		if (ListArchiveDirectoryCancellable(directory, archiveEntries,
@@ -180,16 +329,36 @@ std::vector<fs::path> FileList::ChildDirectories(const fs::path& directory,
 		return result;
 	}
 	std::error_code error;
-	fs::directory_iterator iterator(directory, error);
+	fs::directory_iterator iterator;
 	const fs::directory_iterator end;
-	while (iterator != end && !error && ContinueScan(shouldContinue)) {
-		const fs::directory_entry entry = *iterator;
-		std::error_code statusError;
-		std::error_code symlinkError;
-		if (!entry.is_symlink(symlinkError) && !symlinkError && entry.is_directory(statusError) && !statusError) {
-			result.push_back(Normalize(entry.path()));
+	bool iteratorStarted = false;
+	while (!iteratorStarted || (iterator != end && !error)) {
+		WorkContext context;
+		SourceWorkLease lease;
+		if (!AcquireDirectoryEnumerationLease(directory, shouldContinue,
+			interruptedForForeground, context, lease)) return {};
+		{
+			ScopedWorkContext activeContext(context);
+			if (!iteratorStarted) {
+				iterator = fs::directory_iterator(directory, error);
+				iteratorStarted = true;
+			}
+			std::size_t batchEntries = 0;
+			while (iterator != end && !error && batchEntries < kDirectoryEnumerationBatchSize) {
+				if (!context.Continue()) break;
+				const fs::directory_entry entry = *iterator;
+				std::error_code statusError;
+				std::error_code symlinkError;
+				if (!entry.is_symlink(symlinkError) && !symlinkError &&
+					entry.is_directory(statusError) && !statusError) {
+					result.push_back(Normalize(entry.path()));
+				}
+				iterator.increment(error);
+				++batchEntries;
+			}
+			ReleaseDirectoryEnumerationLease(context, lease);
 		}
-		iterator.increment(error);
+		if (interruptedForForeground || !ContinueScan(shouldContinue)) return {};
 	}
 	std::sort(result.begin(), result.end(), [](const fs::path& left, const fs::path& right) {
 		const int nameComparison = CompareLogicalNames(left.filename().string(), right.filename().string());
@@ -243,8 +412,9 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 
 	if (inputs.size() == 1) {
 		const fs::path input = Normalize(inputs.front());
-		std::error_code error;
-		if (IsArchiveContainerFile(input)) {
+		InputPathKind inputKind = InputPathKind::Unsupported;
+		if (!ClassifyInputPath(input, shouldContinue, inputKind)) return;
+		if (inputKind == InputPathKind::ArchiveContainer) {
 			rootDirectory_ = input;
 			currentDirectory_ = input;
 			browseLocationOnEmpty_ = input;
@@ -254,7 +424,7 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 			RebuildPaths();
 			return;
 		}
-		if (IsArchiveMemberLocation(input) && IsSupportedImagePath(input)) {
+		if (inputKind == InputPathKind::ArchiveMember && IsSupportedImagePath(input)) {
 			rootDirectory_ = input.parent_path();
 			currentDirectory_ = input.parent_path();
 			entries_ = ScanDirectory(currentDirectory_, shouldContinue);
@@ -263,7 +433,7 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 			RebuildPaths();
 			return;
 		}
-		if (fs::is_directory(input, error)) {
+		if (inputKind == InputPathKind::Directory) {
 			rootDirectory_ = input;
 			currentDirectory_ = input;
 			browseLocationOnEmpty_ = input;
@@ -273,7 +443,7 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 			RebuildPaths();
 			return;
 		}
-		if (fs::is_regular_file(input, error) && IsSupportedImagePath(input)) {
+		if (inputKind == InputPathKind::RegularFile && IsSupportedImagePath(input)) {
 			rootDirectory_ = input.parent_path();
 			currentDirectory_ = input.parent_path();
 			entries_ = ScanDirectory(currentDirectory_, shouldContinue);
@@ -292,16 +462,18 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 	for (const std::string& inputString : inputs) {
 		if (!ContinueScan(shouldContinue)) return;
 		const fs::path input = Normalize(inputString);
-		std::error_code error;
-		if (IsArchiveContainerFile(input)) {
+		InputPathKind inputKind = InputPathKind::Unsupported;
+		if (!ClassifyInputPath(input, shouldContinue, inputKind)) return;
+		if (inputKind == InputPathKind::ArchiveContainer) {
 			const std::vector<Entry> archiveEntries = ScanDirectory(input, shouldContinue);
 			entries_.insert(entries_.end(), archiveEntries.begin(), archiveEntries.end());
-		} else if (IsArchiveMemberLocation(input) && IsSupportedImagePath(input)) {
+		} else if (inputKind == InputPathKind::ArchiveMember &&
+			IsSupportedImagePath(input)) {
 			entries_.push_back(DescribeFile(input, shouldContinue));
-		} else if (fs::is_directory(input, error)) {
+		} else if (inputKind == InputPathKind::Directory) {
 			const std::vector<Entry> directoryEntries = ScanDirectory(input, shouldContinue);
 			entries_.insert(entries_.end(), directoryEntries.begin(), directoryEntries.end());
-		} else if (fs::is_regular_file(input, error) && IsSupportedImagePath(input)) {
+		} else if (inputKind == InputPathKind::RegularFile && IsSupportedImagePath(input)) {
 			entries_.push_back(DescribeFile(input, shouldContinue));
 		}
 	}

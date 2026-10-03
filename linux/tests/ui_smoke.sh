@@ -914,7 +914,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			candidate_title=$(DISPLAY=":$display_number" xdotool getwindowname \
 				"$candidate_window" 2>/dev/null || true)
 			case "$candidate_title" in
-				*"01-manual.jpg (400x240,"*)
+				*"01-manual.jpg (400x240"*)
 					manual_zoom_window_id=$candidate_window
 					manual_zoom_title=$candidate_title
 					break
@@ -958,7 +958,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			manual_zoom_final_title=$(DISPLAY=":$display_number" xdotool getwindowname \
 				"$window_id" 2>/dev/null || true)
 			case "$manual_zoom_final_title" in
-				*"01-manual.jpg (400x240,"*)
+				*"01-manual.jpg (400x240"*)
 					echo "UI smoke test: loaded cold JPEG did not render its saved 2x manual zoom ($manual_left_pixel/$manual_right_pixel; $manual_zoom_final_title)" >&2
 				;;
 			*Loading*)

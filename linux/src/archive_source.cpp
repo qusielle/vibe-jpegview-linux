@@ -2,7 +2,9 @@
 
 #include "perf_diagnostics.h"
 #include "rar_backend.h"
+#include "source_work_coordinator.h"
 #include "seven_zip_backend.h"
+#include "work_context.h"
 
 #include <algorithm>
 #include <array>
@@ -51,6 +53,11 @@ struct ArchiveLocation {
 	ArchiveFormat format = ArchiveFormat::Zip;
 };
 
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+void NotifyArchiveSourceProbe(detail::ArchiveSourceProbePoint point,
+	const fs::path& path);
+#endif
+
 using BackingIdentity = SourceIdentity;
 
 struct SessionPassword {
@@ -92,7 +99,12 @@ std::string Lower(std::string value) {
 }
 
 bool ShouldContinue(const std::function<bool()>& shouldContinue) {
-	return !shouldContinue || shouldContinue();
+	if (!shouldContinue) return true;
+	try {
+		return shouldContinue();
+	} catch (...) {
+		return false;
+	}
 }
 
 ArchiveFormat FormatForContainerName(const fs::path& path) {
@@ -180,6 +192,10 @@ bool ParseArchiveLocation(const fs::path& path, ArchiveLocation& location) {
 		const ArchiveFormat format = FormatForContainerName(fs::path(component));
 		if (!component.empty() && HasArchiveExtension(fs::path(component))) {
 			const fs::path candidate(text.substr(0, componentEnd));
+		#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+			NotifyArchiveSourceProbe(
+				detail::ArchiveSourceProbePoint::LocationClassificationStat, candidate);
+		#endif
 			std::error_code statusError;
 			if (fs::is_regular_file(candidate, statusError) && !statusError) {
 				std::string member;
@@ -242,6 +258,10 @@ fs::path PasswordBackingPath(const fs::path& path) {
 bool PasswordCacheKey(const fs::path& path, std::string& key,
 	BackingIdentity& identity) {
 	const fs::path backing = PasswordBackingPath(path);
+	#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	NotifyArchiveSourceProbe(
+		detail::ArchiveSourceProbePoint::PasswordCacheIdentityStat, backing);
+	#endif
 	if (!StatIdentity(backing, identity)) return false;
 	std::error_code absoluteError;
 	const fs::path absolute = fs::absolute(backing, absoluteError);
@@ -333,12 +353,69 @@ struct CatalogCache {
 	std::unordered_map<std::string, CatalogCacheEntry> entries;
 	std::unordered_map<std::string, std::shared_ptr<CatalogLoadState>> loading;
 	std::uint64_t useCounter = 0;
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	detail::ArchiveCatalogTestHook testHook = nullptr;
+	void* testHookContext = nullptr;
+#endif
 };
+
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+struct ArchiveSourceProbeHooks {
+	std::mutex mutex;
+	detail::ArchiveSourceProbeHook hook = nullptr;
+	void* context = nullptr;
+};
+
+ArchiveSourceProbeHooks& GlobalArchiveSourceProbeHooks() {
+	static ArchiveSourceProbeHooks hooks;
+	return hooks;
+}
+
+void NotifyArchiveSourceProbe(detail::ArchiveSourceProbePoint point,
+	const fs::path& path) {
+	ArchiveSourceProbeHooks& hooks = GlobalArchiveSourceProbeHooks();
+	detail::ArchiveSourceProbeHook hook = nullptr;
+	void* hookContext = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(hooks.mutex);
+		hook = hooks.hook;
+		hookContext = hooks.context;
+	}
+	if (hook == nullptr) return;
+	const WorkContext* active = ActiveWorkContextSlot();
+	hook(point, path,
+		active != nullptr && active->sourceAccessAlreadyAdmitted,
+		active != nullptr && active->cpuProcessingAlreadyAdmitted,
+		hookContext);
+}
+#endif
 
 CatalogCache& GlobalCatalogCache() {
 	static CatalogCache cache;
 	return cache;
 }
+
+void SetCatalogFailureMessage(std::string& message, const char* fallback) noexcept {
+	try {
+		message.assign(fallback);
+	} catch (...) {
+		message.clear();
+	}
+}
+
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+void InvokeArchiveCatalogTestHook(detail::ArchiveCatalogTestHookPoint point) {
+	CatalogCache& cache = GlobalCatalogCache();
+	detail::ArchiveCatalogTestHook hook = nullptr;
+	void* context = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(cache.mutex);
+		hook = cache.testHook;
+		context = cache.testHookContext;
+	}
+	if (hook != nullptr) hook(point, context);
+}
+#endif
 
 void RemoveHeaderEncryptedCatalog(const std::string& key) {
 	CatalogCache& cache = GlobalCatalogCache();
@@ -956,9 +1033,11 @@ std::shared_ptr<const ArchiveCatalog> GetCatalog(const fs::path& archivePath,
 			if (loadState->identity == identity && loadState->catalog) {
 				return loadState->catalog;
 			}
-			if (loadState->identity == identity && !loadState->error.empty() &&
-				loadState->error != "archive indexing was cancelled") {
+			if (loadState->identity == identity && loadState->done) {
 				errorMessage = loadState->error;
+				if (errorMessage.empty()) {
+					errorMessage = "archive catalog construction failed";
+				}
 				if (errorKind != nullptr) *errorKind = loadState->errorKind;
 				return {};
 			}
@@ -973,106 +1052,146 @@ std::shared_ptr<const ArchiveCatalog> GetCatalog(const fs::path& archivePath,
 	std::shared_ptr<const ArchiveCatalog> loaded;
 	bool loadedSuccessfully = false;
 	ArchiveErrorKind loadErrorKind = ArchiveErrorKind::Other;
-	if (location.format == ArchiveFormat::Zip) {
-		loadedSuccessfully = LoadZipCatalog(archivePath, identity, loaded,
-			shouldContinue, errorMessage);
-		if (loadedSuccessfully) loadErrorKind = ArchiveErrorKind::None;
-	} else if (location.format == ArchiveFormat::SevenZip) {
-		loadedSuccessfully = LoadLibarchiveCatalog(archivePath, location.format, identity,
-			loaded, shouldContinue, errorMessage);
-		if (!ShouldContinue(shouldContinue)) {
-			loadedSuccessfully = false;
-			errorMessage = "archive indexing was cancelled";
-		} else if (loadedSuccessfully && !loaded->containsEncryptedEntries) {
-			loadErrorKind = ArchiveErrorKind::None;
-		} else {
-			std::string ignoredLibarchiveError = std::move(errorMessage);
-			errorMessage.clear();
-			loaded.reset();
-			std::string password;
-			std::optional<std::string> suppliedPassword;
-			if (ReadSessionPassword(archivePath, password)) suppliedPassword = password;
-			loadedSuccessfully = LoadSevenZipCatalog(archivePath, identity, suppliedPassword,
-				loaded, shouldContinue, errorMessage, &loadErrorKind);
-			ClearPasswordString(password);
-			if (!loadedSuccessfully && errorMessage.empty()) {
-				errorMessage = std::move(ignoredLibarchiveError);
+	try {
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+		InvokeArchiveCatalogTestHook(
+			detail::ArchiveCatalogTestHookPoint::LoadingStateRegistered);
+#endif
+		if (location.format == ArchiveFormat::Zip) {
+			loadedSuccessfully = LoadZipCatalog(archivePath, identity, loaded,
+				shouldContinue, errorMessage);
+			if (loadedSuccessfully) loadErrorKind = ArchiveErrorKind::None;
+		} else if (location.format == ArchiveFormat::SevenZip) {
+			loadedSuccessfully = LoadLibarchiveCatalog(archivePath, location.format, identity,
+				loaded, shouldContinue, errorMessage);
+			if (!ShouldContinue(shouldContinue)) {
+				loadedSuccessfully = false;
+				errorMessage = "archive indexing was cancelled";
+			} else if (loadedSuccessfully && !loaded->containsEncryptedEntries) {
+				loadErrorKind = ArchiveErrorKind::None;
+			} else {
+				std::string ignoredLibarchiveError = std::move(errorMessage);
+				errorMessage.clear();
+				loaded.reset();
+				std::string password;
+				std::optional<std::string> suppliedPassword;
+				if (ReadSessionPassword(archivePath, password)) suppliedPassword = password;
+				loadedSuccessfully = LoadSevenZipCatalog(archivePath, identity, suppliedPassword,
+					loaded, shouldContinue, errorMessage, &loadErrorKind);
+				ClearPasswordString(password);
+				if (!loadedSuccessfully && errorMessage.empty()) {
+					errorMessage = std::move(ignoredLibarchiveError);
+				}
 			}
-		}
-	} else if (location.format == ArchiveFormat::Rar) {
-		std::shared_ptr<const ArchiveCatalog> libarchiveCatalog;
-		std::string libarchiveError;
-		const bool libarchiveLoaded = LoadLibarchiveCatalog(archivePath, location.format,
-			identity, libarchiveCatalog, shouldContinue, libarchiveError);
-		if (!ShouldContinue(shouldContinue)) {
-			loadedSuccessfully = false;
-			errorMessage = "archive indexing was cancelled";
-		} else if (!RarBackendAvailable() && libarchiveLoaded) {
-			loaded = std::move(libarchiveCatalog);
-			loadedSuccessfully = true;
-			loadErrorKind = ArchiveErrorKind::None;
-		} else if (RarBackendAvailable()) {
-			std::string password;
-			std::optional<std::string> suppliedPassword;
-			if (ReadSessionPassword(archivePath, password)) suppliedPassword = password;
-			std::shared_ptr<const ArchiveCatalog> rarCatalog;
-			loadedSuccessfully = LoadRarCatalog(archivePath, identity, suppliedPassword,
-				rarCatalog, shouldContinue, errorMessage, &loadErrorKind);
-			ClearPasswordString(password);
-			if (loadedSuccessfully &&
-				(rarCatalog->containsEncryptedEntries || !libarchiveLoaded)) {
-				loaded = std::move(rarCatalog);
-				loadErrorKind = ArchiveErrorKind::None;
-			} else if (loadedSuccessfully) {
+		} else if (location.format == ArchiveFormat::Rar) {
+			std::shared_ptr<const ArchiveCatalog> libarchiveCatalog;
+			std::string libarchiveError;
+			const bool libarchiveLoaded = LoadLibarchiveCatalog(archivePath, location.format,
+				identity, libarchiveCatalog, shouldContinue, libarchiveError);
+			if (!ShouldContinue(shouldContinue)) {
+				loadedSuccessfully = false;
+				errorMessage = "archive indexing was cancelled";
+			} else if (!RarBackendAvailable() && libarchiveLoaded) {
 				loaded = std::move(libarchiveCatalog);
+				loadedSuccessfully = true;
 				loadErrorKind = ArchiveErrorKind::None;
-			} else if (libarchiveLoaded &&
-				loadErrorKind == ArchiveErrorKind::UnsupportedEncryption) {
+			} else if (RarBackendAvailable()) {
+				std::string password;
+				std::optional<std::string> suppliedPassword;
+				if (ReadSessionPassword(archivePath, password)) suppliedPassword = password;
+				std::shared_ptr<const ArchiveCatalog> rarCatalog;
+				loadedSuccessfully = LoadRarCatalog(archivePath, identity, suppliedPassword,
+					rarCatalog, shouldContinue, errorMessage, &loadErrorKind);
+				ClearPasswordString(password);
+				if (loadedSuccessfully &&
+					(rarCatalog->containsEncryptedEntries || !libarchiveLoaded)) {
+					loaded = std::move(rarCatalog);
+					loadErrorKind = ArchiveErrorKind::None;
+				} else if (loadedSuccessfully) {
+					loaded = std::move(libarchiveCatalog);
+					loadErrorKind = ArchiveErrorKind::None;
+				} else if (libarchiveLoaded &&
+					loadErrorKind == ArchiveErrorKind::UnsupportedEncryption) {
+					loaded = std::move(libarchiveCatalog);
+					loadedSuccessfully = true;
+					loadErrorKind = ArchiveErrorKind::None;
+				} else {
+					loadedSuccessfully = false;
+					if (errorMessage.empty()) errorMessage = std::move(libarchiveError);
+				}
+			} else if (libarchiveLoaded) {
 				loaded = std::move(libarchiveCatalog);
 				loadedSuccessfully = true;
 				loadErrorKind = ArchiveErrorKind::None;
 			} else {
 				loadedSuccessfully = false;
-				if (errorMessage.empty()) errorMessage = std::move(libarchiveError);
+				errorMessage = libarchiveError.empty() ?
+					"RAR archive support is unavailable in this build" : libarchiveError;
+				loadErrorKind = ArchiveErrorKind::UnsupportedEncryption;
 			}
-		} else if (libarchiveLoaded) {
-			loaded = std::move(libarchiveCatalog);
+		} else if (!LoadLibarchiveCatalog(archivePath, location.format, identity, loaded,
+			shouldContinue, errorMessage)) {
+			loadedSuccessfully = false;
+		} else {
 			loadedSuccessfully = true;
 			loadErrorKind = ArchiveErrorKind::None;
-		} else {
-			loadedSuccessfully = false;
-			errorMessage = libarchiveError.empty() ?
-				"RAR archive support is unavailable in this build" : libarchiveError;
-			loadErrorKind = ArchiveErrorKind::UnsupportedEncryption;
 		}
-	} else if (!LoadLibarchiveCatalog(archivePath, location.format, identity, loaded,
-		shouldContinue, errorMessage)) {
+		if (!ShouldContinue(shouldContinue)) {
+			loadedSuccessfully = false;
+			errorMessage = "archive indexing was cancelled";
+			loadErrorKind = ArchiveErrorKind::Other;
+		}
+	} catch (const std::bad_alloc&) {
+		loaded.reset();
 		loadedSuccessfully = false;
-	} else {
-		loadedSuccessfully = true;
-		loadErrorKind = ArchiveErrorKind::None;
-	}
-	if (!ShouldContinue(shouldContinue)) {
-		loadedSuccessfully = false;
-		errorMessage = "archive indexing was cancelled";
 		loadErrorKind = ArchiveErrorKind::Other;
+		SetCatalogFailureMessage(errorMessage, "catalog allocation failed");
+	} catch (const std::exception& error) {
+		loaded.reset();
+		loadedSuccessfully = false;
+		loadErrorKind = ArchiveErrorKind::Other;
+		try {
+			errorMessage.assign(error.what());
+		} catch (...) {
+			SetCatalogFailureMessage(errorMessage, "catalog construction failed");
+		}
+	} catch (...) {
+		loaded.reset();
+		loadedSuccessfully = false;
+		loadErrorKind = ArchiveErrorKind::Other;
+		SetCatalogFailureMessage(errorMessage, "catalog construction failed");
 	}
 	{
 		std::lock_guard<std::mutex> lock(cache.mutex);
 		if (loadedSuccessfully) {
-			cache.entries[key] = CatalogCacheEntry{loaded, ++cache.useCounter};
-			constexpr std::size_t kMaximumCachedArchives = 4;
-			while (cache.entries.size() > kMaximumCachedArchives) {
-				auto oldest = cache.entries.begin();
-				for (auto candidate = std::next(cache.entries.begin());
-					candidate != cache.entries.end(); ++candidate) {
-					if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
+			try {
+				cache.entries[key] = CatalogCacheEntry{loaded, ++cache.useCounter};
+				constexpr std::size_t kMaximumCachedArchives = 4;
+				while (cache.entries.size() > kMaximumCachedArchives) {
+					auto oldest = cache.entries.begin();
+					for (auto candidate = std::next(cache.entries.begin());
+						candidate != cache.entries.end(); ++candidate) {
+						if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
+					}
+					cache.entries.erase(oldest);
 				}
-				cache.entries.erase(oldest);
+			} catch (...) {
+				// Catalog retention is optional. Keep a successfully built catalog
+				// available to this caller even if the cache cannot grow.
 			}
 		}
 		loadState->catalog = loadedSuccessfully ? loaded : nullptr;
-		loadState->error = loadedSuccessfully ? std::string{} : errorMessage;
+		if (loadedSuccessfully) {
+			errorMessage.clear();
+			loadState->error.clear();
+		} else {
+			try {
+				loadState->error = errorMessage;
+			} catch (...) {
+				SetCatalogFailureMessage(loadState->error,
+					"catalog construction failed");
+			}
+		}
 		loadState->errorKind = loadedSuccessfully ? ArchiveErrorKind::None : loadErrorKind;
 		loadState->done = true;
 		const auto activeLoad = cache.loading.find(key);
@@ -1161,12 +1280,16 @@ bool MakePrivateMemberFile(const std::filesystem::path& memberPath,
 bool WithLibarchiveMemberFile(const fs::path& path, const ArchiveLocation& location,
 	const ArchiveCatalog& catalog, const ArchiveMemberRecord& member,
 	const std::function<bool(const fs::path&, std::string&)>& callback,
-	std::string& errorMessage) {
+	std::string& errorMessage, const std::function<bool()>& shouldContinue) {
 	LibarchiveArchiveReader archive;
-	if (!OpenArchiveReader(location.archive, location.format, AlwaysContinue(), archive, errorMessage)) {
+	if (!OpenArchiveReader(location.archive, location.format, shouldContinue, archive, errorMessage)) {
 		return false;
 	}
 	for (std::uint64_t ordinal = 0; ordinal <= member.index; ++ordinal) {
+		if (!ShouldContinue(shouldContinue)) {
+			errorMessage = "archive member read was cancelled";
+			return false;
+		}
 		struct archive_entry* entry = nullptr;
 		const int resultCode = archive_read_next_header(archive.reader, &entry);
 		if (resultCode != ARCHIVE_OK || entry == nullptr) {
@@ -1202,6 +1325,10 @@ bool WithLibarchiveMemberFile(const fs::path& path, const ArchiveLocation& locat
 		std::vector<std::uint8_t> buffer(64 * 1024);
 		std::uint64_t total = 0;
 		for (;;) {
+			if (!ShouldContinue(shouldContinue)) {
+				errorMessage = "archive member read was cancelled";
+				return false;
+			}
 			const la_ssize_t count = archive_read_data(archive.reader, buffer.data(), buffer.size());
 			if (count < 0) {
 				errorMessage = archive.context.cancelled ? "archive member read was cancelled" :
@@ -1233,6 +1360,10 @@ bool WithLibarchiveMemberFile(const fs::path& path, const ArchiveLocation& locat
 			errorMessage = "cannot rewind the archive image memory file";
 			return false;
 		}
+		if (!ShouldContinue(shouldContinue)) {
+			errorMessage = "archive member read was cancelled";
+			return false;
+		}
 		try {
 			return callback(temporary.link, errorMessage);
 		} catch (const std::exception& error) {
@@ -1247,7 +1378,8 @@ bool WithLibarchiveMemberFile(const fs::path& path, const ArchiveLocation& locat
 bool WithSevenZipMemberFile(const fs::path& path, const ArchiveLocation& location,
 	const ArchiveCatalog& catalog, const ArchiveMemberRecord& member,
 	const std::function<bool(const fs::path&, std::string&)>& callback,
-	std::string& errorMessage, ArchiveErrorKind* errorKind) {
+	std::string& errorMessage, ArchiveErrorKind* errorKind,
+	const std::function<bool()>& shouldContinue) {
 	std::string password;
 	std::optional<std::string> suppliedPassword;
 	if (catalog.headerEncrypted || member.encrypted) {
@@ -1285,7 +1417,7 @@ bool WithSevenZipMemberFile(const fs::path& path, const ArchiveLocation& locatio
 		return true;
 	};
 	if (!ExtractSevenZipMember(location.archive, member.index, member.rawPath,
-		suppliedPassword, AlwaysContinue(), writer, errorMessage, errorKind)) {
+		suppliedPassword, shouldContinue, writer, errorMessage, errorKind)) {
 		ClearPasswordString(password);
 		return false;
 	}
@@ -1306,6 +1438,11 @@ bool WithSevenZipMemberFile(const fs::path& path, const ArchiveLocation& locatio
 		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
 		return false;
 	}
+	if (!ShouldContinue(shouldContinue)) {
+		errorMessage = "archive member read was cancelled";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
 	try {
 		return callback(temporary.link, errorMessage);
 	} catch (const std::exception& error) {
@@ -1318,7 +1455,8 @@ bool WithSevenZipMemberFile(const fs::path& path, const ArchiveLocation& locatio
 bool WithRarMemberFile(const fs::path& path, const ArchiveLocation& location,
 	const ArchiveCatalog& catalog, const ArchiveMemberRecord& member,
 	const std::function<bool(const fs::path&, std::string&)>& callback,
-	std::string& errorMessage, ArchiveErrorKind* errorKind) {
+	std::string& errorMessage, ArchiveErrorKind* errorKind,
+	const std::function<bool()>& shouldContinue) {
 	std::string password;
 	std::optional<std::string> suppliedPassword;
 	if (catalog.headerEncrypted || member.encrypted) {
@@ -1362,7 +1500,7 @@ bool WithRarMemberFile(const fs::path& path, const ArchiveLocation& location,
 		return true;
 	};
 	const bool extracted = ExtractRarMember(location.archive, member.index, member.rawPath,
-		suppliedPassword, {}, writer, errorMessage, errorKind);
+		suppliedPassword, shouldContinue, writer, errorMessage, errorKind);
 	ClearPasswordString(password);
 	if (!extracted) return false;
 	if (total != member.size) {
@@ -1378,6 +1516,11 @@ bool WithRarMemberFile(const fs::path& path, const ArchiveLocation& location,
 	}
 	if (::lseek(temporary.descriptor, 0, SEEK_SET) < 0) {
 		errorMessage = "cannot rewind the archive image memory file";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	if (!ShouldContinue(shouldContinue)) {
+		errorMessage = "archive member read was cancelled";
 		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
 		return false;
 	}
@@ -1488,6 +1631,25 @@ fs::path ArchiveBackingFile(const fs::path& path) {
 	return ParseArchiveLocation(path, location) ? location.archive : path;
 }
 
+fs::path ArchiveBackingFileForAdmission(const fs::path& path) {
+	const fs::path normalized = path.lexically_normal();
+	const std::string text = normalized.string();
+	if (text.empty()) return normalized;
+	std::size_t componentStart = text.front() == '/' ? 1 : 0;
+	while (componentStart < text.size()) {
+		std::size_t componentEnd = text.find('/', componentStart);
+		if (componentEnd == std::string::npos) componentEnd = text.size();
+		const std::string component = text.substr(componentStart,
+			componentEnd - componentStart);
+		if (!component.empty() && HasArchiveExtension(fs::path(component))) {
+			return fs::path(text.substr(0, componentEnd));
+		}
+		if (componentEnd == text.size()) break;
+		componentStart = componentEnd + 1;
+	}
+	return normalized;
+}
+
 std::string ArchiveLocationDisplayName(const fs::path& path) {
 	ArchiveLocation location;
 	if (!ParseArchiveLocation(path, location)) return path.string();
@@ -1535,16 +1697,50 @@ bool ListArchiveDirectoryCancellable(const fs::path& directory,
 	errorMessage.clear();
 	if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
 	if (containsEncryptedEntries != nullptr) *containsEncryptedEntries = false;
+	WorkContext context = ResolveWorkContext(directory, SourceWorkPriority::Metadata);
+	if (shouldContinue) {
+		const auto inheritedContinue = context.shouldContinue;
+		context.shouldContinue = inheritedContinue ?
+			std::function<bool()>([inheritedContinue, shouldContinue] {
+				return inheritedContinue() && shouldContinue();
+			}) : shouldContinue;
+	}
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, ArchiveBackingFileForAdmission(directory));
+	if (!admission) {
+		errorMessage = "archive listing source or CPU admission was cancelled";
+		return false;
+	}
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	const std::function<bool()> continueBeforeAdmission = context.shouldContinue;
+	if (context.sourcePriority != SourceWorkPriority::Foreground) {
+		const auto markForegroundYield = [&context] { context.MarkForegroundYield(); };
+		context.shouldContinue = [continueBeforeAdmission, markForegroundYield] {
+			if (continueBeforeAdmission && !continueBeforeAdmission()) return false;
+			if (SourceWorkCoordinator::Global().Snapshot().foregroundPending) {
+				markForegroundYield();
+				return false;
+			}
+			return true;
+		};
+	}
+	ScopedWorkContext activeContext(context);
 	ArchiveLocation location;
 	if (!ParseArchiveLocation(directory, location)) return false;
+	const std::function<bool()> effectiveContinue = context.shouldContinue;
 	const std::shared_ptr<const ArchiveCatalog> catalog =
-		GetCatalog(location.archive, shouldContinue, errorMessage, errorKind);
+		GetCatalog(location.archive, effectiveContinue, errorMessage, errorKind);
 	if (!catalog) return false;
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	admission.Reset();
 	if (containsEncryptedEntries != nullptr) {
 		*containsEncryptedEntries = catalog->containsEncryptedEntries;
 	}
 	const SourceIdentity& backingIdentity = catalog->identity;
-	if (!ShouldContinue(shouldContinue)) {
+	if (!ShouldContinue(effectiveContinue)) {
 		errorMessage = "archive listing was cancelled";
 		return false;
 	}
@@ -1552,6 +1748,11 @@ bool ListArchiveDirectoryCancellable(const fs::path& directory,
 	if (children == catalog->directories.end()) return true;
 	entries.reserve(children->second.size());
 	for (const CatalogChild& child : children->second) {
+		if (!ShouldContinue(effectiveContinue)) {
+			entries.clear();
+			errorMessage = "archive listing was cancelled";
+			return false;
+		}
 		const std::string member = location.memberDirectory.empty() ? child.name :
 			location.memberDirectory + "/" + child.name;
 		entries.push_back(ArchiveEntryInfo{
@@ -1563,19 +1764,61 @@ bool ListArchiveDirectoryCancellable(const fs::path& directory,
 
 bool GetArchiveMemberInfo(const fs::path& path, ArchiveMemberInfo& info,
 	std::string& errorMessage) {
+	return GetArchiveMemberInfo(path, info, errorMessage, nullptr, WorkContext{});
+}
+
+bool GetArchiveMemberInfo(const fs::path& path, ArchiveMemberInfo& info,
+	std::string& errorMessage, ArchiveErrorKind* errorKind,
+	const WorkContext& suppliedWorkContext) {
 	info = {};
 	errorMessage.clear();
+	if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
+	WorkContext context = ResolveWorkContext(path, SourceWorkPriority::Metadata,
+		suppliedWorkContext);
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, ArchiveBackingFileForAdmission(path));
+	if (!admission) {
+		errorMessage = "archive member metadata admission was cancelled";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	const std::function<bool()> continueBeforeAdmission = context.shouldContinue;
+	if (context.Priority() != SourceWorkPriority::Foreground) {
+		context.shouldContinue = [&context, continueBeforeAdmission] {
+			if (continueBeforeAdmission && !continueBeforeAdmission()) return false;
+			if (context.Priority() != SourceWorkPriority::Foreground &&
+				SourceWorkCoordinator::Global().Snapshot().foregroundPending) {
+				context.MarkForegroundYield();
+				return false;
+			}
+			return true;
+		};
+	}
+	ScopedWorkContext activeContext(context);
 	ArchiveLocation location;
 	if (!ParseArchiveLocation(path, location) || location.memberDirectory.empty()) {
 		errorMessage = "not an archive image member";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
 		return false;
 	}
 	const std::shared_ptr<const ArchiveCatalog> catalog =
-		GetCatalog(location.archive, AlwaysContinue(), errorMessage);
+		GetCatalog(location.archive, context.shouldContinue, errorMessage, errorKind);
 	if (!catalog) return false;
+	context.sourceAccessAlreadyAdmitted = false;
+	context.cpuProcessingAlreadyAdmitted = false;
+	admission.Reset();
+	if (!context.Continue()) {
+		errorMessage = "archive member metadata lookup was cancelled";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
 	const auto found = catalog->members.find(location.memberDirectory);
 	if (found == catalog->members.end()) {
 		errorMessage = "archive member no longer exists";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
 		return false;
 	}
 	info.size = found->second.size;
@@ -1589,6 +1832,20 @@ bool HasSessionArchivePassword(const fs::path& path) {
 	const bool found = ReadSessionPassword(path, password);
 	ClearPasswordString(password);
 	return found;
+}
+
+bool HasSessionArchivePassword(const fs::path& path,
+	const WorkContext& suppliedWorkContext) {
+	WorkContext context = ResolveWorkContext(path, SourceWorkPriority::Metadata,
+		suppliedWorkContext);
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, ArchiveBackingFileForAdmission(path));
+	if (!admission || !context.Continue()) return false;
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	ScopedWorkContext activeContext(context);
+	return HasSessionArchivePassword(path);
 }
 
 bool SetSessionArchivePassword(const fs::path& path, const std::string& password) {
@@ -1622,19 +1879,46 @@ void ClearSessionArchivePasswords() {
 
 bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 	std::string& errorMessage, ArchiveErrorKind* errorKind) {
+	return ValidateArchivePassword(path, password, errorMessage, errorKind, WorkContext{});
+}
+
+bool ValidateArchivePassword(const fs::path& path, const std::string& password,
+	std::string& errorMessage, ArchiveErrorKind* errorKind,
+	const WorkContext& suppliedWorkContext) {
 	errorMessage.clear();
 	if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
+	WorkContext context = ResolveWorkContext(path, SourceWorkPriority::Metadata,
+		suppliedWorkContext);
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, ArchiveBackingFileForAdmission(path));
+	if (!admission) {
+		errorMessage = "archive password validation was cancelled before admission";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	}
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	ScopedWorkContext activeContext(context);
 	ArchiveLocation location;
 	if (!ParseArchiveLocation(path, location)) {
 		errorMessage = "not an archive container";
 		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
 		return false;
 	}
+	const std::function<bool()> shouldContinue = [&context] { return context.Continue(); };
+	const auto canceled = [&] {
+		errorMessage = "archive password validation was cancelled";
+		if (errorKind != nullptr) *errorKind = ArchiveErrorKind::Other;
+		return false;
+	};
+	if (!ShouldContinue(shouldContinue)) return canceled();
 	if (location.format == ArchiveFormat::SevenZip) {
 		std::vector<SevenZipEntry> entries;
 		bool headerEncrypted = false;
-		if (!ReadSevenZipCatalog(location.archive, password, AlwaysContinue(), entries,
+		if (!ReadSevenZipCatalog(location.archive, password, shouldContinue, entries,
 			headerEncrypted, errorMessage, errorKind)) return false;
+		if (!ShouldContinue(shouldContinue)) return canceled();
 		const auto encrypted = std::find_if(entries.begin(), entries.end(),
 			[](const SevenZipEntry& item) {
 				return item.encrypted && !item.directory && !item.specialFile;
@@ -1666,7 +1950,8 @@ bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 			return true;
 		};
 		if (!ExtractSevenZipMember(location.archive, passwordProbe.index, passwordProbe.rawPath,
-			password, AlwaysContinue(), discard, errorMessage, errorKind)) return false;
+			password, shouldContinue, discard, errorMessage, errorKind)) return false;
+		if (!ShouldContinue(shouldContinue)) return canceled();
 		if (total != passwordProbe.size) {
 			errorMessage = "encrypted 7z member ended before its declared size";
 			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::InvalidPassword;
@@ -1682,8 +1967,9 @@ bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 		}
 		std::vector<RarEntry> entries;
 		bool headerEncrypted = false;
-		if (!ReadRarCatalog(location.archive, password, {}, entries,
+		if (!ReadRarCatalog(location.archive, password, shouldContinue, entries,
 			headerEncrypted, errorMessage, errorKind)) return false;
+		if (!ShouldContinue(shouldContinue)) return canceled();
 		const auto encrypted = std::find_if(entries.begin(), entries.end(),
 			[](const RarEntry& entry) {
 			return entry.encrypted && !entry.directory && !entry.specialFile &&
@@ -1711,7 +1997,8 @@ bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 			return true;
 		};
 		if (!ExtractRarMember(location.archive, encrypted->index, encrypted->rawPath,
-			password, {}, discard, errorMessage, errorKind)) return false;
+			password, shouldContinue, discard, errorMessage, errorKind)) return false;
+		if (!ShouldContinue(shouldContinue)) return canceled();
 		if (total != encrypted->size) {
 			errorMessage = "encrypted RAR member ended before its declared size";
 			if (errorKind != nullptr) *errorKind = ArchiveErrorKind::InvalidPassword;
@@ -1720,8 +2007,9 @@ bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 		return true;
 	}
 	const std::shared_ptr<const ArchiveCatalog> catalog =
-		GetCatalog(location.archive, AlwaysContinue(), errorMessage, errorKind);
+		GetCatalog(location.archive, shouldContinue, errorMessage, errorKind);
 	if (!catalog) return false;
+	if (!ShouldContinue(shouldContinue)) return canceled();
 	if (!catalog->containsEncryptedEntries) return true;
 	if (location.format != ArchiveFormat::Zip) {
 		errorMessage = "password-protected archive format is not supported";
@@ -1739,6 +2027,7 @@ bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 		return false;
 	}
 	std::unique_ptr<zip_t, decltype(&zip_discard)> archiveOwner(archive, &zip_discard);
+	if (!ShouldContinue(shouldContinue)) return canceled();
 	zip_file_t* file = zip_fopen_index_encrypted(archive, encrypted->second.index,
 		ZIP_FL_UNCHANGED, password.c_str());
 	if (file == nullptr) {
@@ -1751,6 +2040,7 @@ bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 		return false;
 	}
 	std::unique_ptr<zip_file_t, decltype(&zip_fclose)> fileOwner(file, &zip_fclose);
+	if (!ShouldContinue(shouldContinue)) return canceled();
 	std::uint8_t probe = 0;
 	if (zip_fread(file, &probe, 1) < 0) {
 		const ArchiveErrorKind kind = ZipErrorKind(zip_file_get_error(file));
@@ -1759,12 +2049,14 @@ bool ValidateArchivePassword(const fs::path& path, const std::string& password,
 		if (errorKind != nullptr) *errorKind = kind;
 		return false;
 	}
+	if (!ShouldContinue(shouldContinue)) return canceled();
 	return true;
 }
 
 bool WithArchiveMemberFile(const fs::path& path,
 	const std::function<bool(const fs::path&, std::string&)>& callback,
-	std::string& errorMessage, ArchiveErrorKind* errorKind) {
+	std::string& errorMessage, ArchiveErrorKind* errorKind,
+	const std::function<bool()>& shouldContinue) {
 	errorMessage.clear();
 	if (errorKind != nullptr) *errorKind = ArchiveErrorKind::None;
 	const auto fail = [&errorMessage, errorKind](const std::string& message,
@@ -1776,12 +2068,29 @@ bool WithArchiveMemberFile(const fs::path& path,
 	if (!callback) {
 		return fail("archive member decoder callback is missing");
 	}
+	WorkContext supplied;
+	supplied.shouldContinue = shouldContinue;
+	WorkContext context = ResolveWorkContext(path,
+		SourceWorkPriority::Foreground, supplied);
+	SourceCpuWorkLease admission = SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+		context, ArchiveBackingFileForAdmission(path));
+	if (!admission || !context.Continue()) {
+		return fail("archive member read was cancelled before admission");
+	}
+	context.sourcePriority = context.Priority();
+	context.sourceAccessAlreadyAdmitted = true;
+	context.cpuProcessingAlreadyAdmitted = true;
+	ScopedWorkContext activeContext(context);
+	const std::function<bool()> effectiveContinue = [&context] {
+		return context.Continue();
+	};
+	if (!effectiveContinue()) return fail("archive member read was cancelled");
 	ArchiveLocation location;
 	if (!ParseArchiveLocation(path, location) || location.memberDirectory.empty()) {
 		return fail("not an archive image member");
 	}
 	const std::shared_ptr<const ArchiveCatalog> catalog =
-		GetCatalog(location.archive, AlwaysContinue(), errorMessage, errorKind);
+		GetCatalog(location.archive, effectiveContinue, errorMessage, errorKind);
 	if (!catalog) return false;
 	const auto member = catalog->members.find(location.memberDirectory);
 	if (member == catalog->members.end()) {
@@ -1801,15 +2110,16 @@ bool WithArchiveMemberFile(const fs::path& path,
 		if (!StatIdentity(location.archive, currentIdentity) || !(currentIdentity == catalog->identity)) {
 			return fail("archive changed before the image could be read");
 		}
-		return WithLibarchiveMemberFile(path, location, *catalog, member->second, callback, errorMessage);
+		return WithLibarchiveMemberFile(path, location, *catalog, member->second,
+			callback, errorMessage, effectiveContinue);
 	}
 	if (member->second.backend == ArchiveBackend::SevenZip) {
 		return WithSevenZipMemberFile(path, location, *catalog, member->second,
-			callback, errorMessage, errorKind);
+			callback, errorMessage, errorKind, effectiveContinue);
 	}
 	if (member->second.backend == ArchiveBackend::Rar) {
 		return WithRarMemberFile(path, location, *catalog, member->second,
-			callback, errorMessage, errorKind);
+			callback, errorMessage, errorKind, effectiveContinue);
 	}
 	std::string password;
 	if (member->second.encrypted && !ReadSessionPassword(location.archive, password)) {
@@ -1861,6 +2171,10 @@ bool WithArchiveMemberFile(const fs::path& path,
 	std::vector<std::uint8_t> buffer(64 * 1024);
 	std::uint64_t total = 0;
 	for (;;) {
+		if (!ShouldContinue(effectiveContinue)) {
+			ClearPasswordString(password);
+			return fail("archive member read was cancelled");
+		}
 		const zip_int64_t count = zip_fread(zipFile, buffer.data(), buffer.size());
 		if (count < 0) {
 			const ArchiveErrorKind kind = ZipErrorKind(zip_file_get_error(zipFile));
@@ -1884,6 +2198,9 @@ bool WithArchiveMemberFile(const fs::path& path,
 	}
 	if (total != member->second.size) {
 		return fail("archive member ended before its declared size");
+	}
+	if (!ShouldContinue(effectiveContinue)) {
+		return fail("archive member read was cancelled");
 	}
 	if (zip_fclose(zipFileOwner.release()) != 0) {
 		const ArchiveErrorKind kind = ZipErrorKind(zip_get_error(archive));
@@ -2055,6 +2372,11 @@ SourceDescriptor DescribeArchiveMember(const fs::path& path,
 }
 
 SourceDescriptor DescribeImageSource(const fs::path& path) {
+	return DescribeImageSource(path, WorkContext{});
+}
+
+SourceDescriptor DescribeImageSource(const fs::path& path,
+	const WorkContext& workContext) {
 	SourceIdentity identity;
 	if (!CaptureImageSourceIdentity(path, identity)) {
 		return SourceDescriptor(path, identity, {});
@@ -2062,7 +2384,8 @@ SourceDescriptor DescribeImageSource(const fs::path& path) {
 	if (IsArchiveMemberLocation(path)) {
 		ArchiveMemberInfo member;
 		std::string errorMessage;
-		if (!GetArchiveMemberInfo(path, member, errorMessage)) {
+		ArchiveErrorKind errorKind = ArchiveErrorKind::None;
+		if (!GetArchiveMemberInfo(path, member, errorMessage, &errorKind, workContext)) {
 			SourceMetadata metadata;
 			metadata.archiveMember = true;
 			return SourceDescriptor(path, identity, metadata);
@@ -2104,5 +2427,23 @@ bool IsImageSourceCurrent(const SourceDescriptor& descriptor) {
 			descriptor.Metadata().modificationTimeNanoseconds &&
 		member.encrypted == descriptor.Metadata().archiveMemberEncrypted;
 }
+
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+void SetArchiveCatalogTestHookForTesting(
+	detail::ArchiveCatalogTestHook hook, void* context) {
+	CatalogCache& cache = GlobalCatalogCache();
+	std::lock_guard<std::mutex> lock(cache.mutex);
+	cache.testHook = hook;
+	cache.testHookContext = context;
+}
+
+void SetArchiveSourceProbeHookForTesting(
+	detail::ArchiveSourceProbeHook hook, void* context) {
+	ArchiveSourceProbeHooks& hooks = GlobalArchiveSourceProbeHooks();
+	std::lock_guard<std::mutex> lock(hooks.mutex);
+	hooks.hook = hook;
+	hooks.context = context;
+}
+#endif
 
 } // namespace jpegview_linux

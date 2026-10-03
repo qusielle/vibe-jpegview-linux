@@ -1,6 +1,7 @@
 #include "image_cache.h"
 #include "archive_source.h"
 #include "cache_policy.h"
+#include "source_work_coordinator.h"
 
 #include <algorithm>
 #include <array>
@@ -156,6 +157,7 @@ struct DecodedImageCache::Impl {
 		Completion completion;
 		DimensionsCompletion dimensionsCompletion;
 		std::shared_ptr<std::atomic<bool>> cancellation;
+		bool foregroundAtStart = false;
 	};
 
 	static std::size_t TierIndex(CacheProtectionTier tier) {
@@ -193,7 +195,12 @@ struct DecodedImageCache::Impl {
 		DimensionsReader readDimensions)
 		: byteBudget(budget), decoder(std::move(decode)),
 		  dimensionsReader(std::move(readDimensions)), sharedBudget(std::move(shared)) {
-		if (!decoder) decoder = DecodeImage;
+		if (!decoder) {
+			decoder = [](const fs::path& filename, DecodedImage& image,
+				std::string& errorMessage) {
+				return DecodeImage(filename, image, errorMessage);
+			};
+		}
 		if (!dimensionsReader) {
 			dimensionsReader = [](const fs::path& filename, int& width, int& height,
 				std::string& errorMessage) {
@@ -201,8 +208,9 @@ struct DecodedImageCache::Impl {
 			};
 		}
 		retirementState = std::make_shared<RetirementState>();
-		workers.reserve(std::max<std::size_t>(1, workerCount));
-		for (std::size_t index = 0; index < std::max<std::size_t>(1, workerCount); ++index) {
+		const std::size_t boundedWorkerCount = ClampCpuWorkerCount(workerCount);
+		workers.reserve(boundedWorkerCount);
+		for (std::size_t index = 0; index < boundedWorkerCount; ++index) {
 			workers.emplace_back([this] { Run(); });
 		}
 		retirementWorker = std::thread([state = retirementState] { Retire(state); });
@@ -366,6 +374,7 @@ struct DecodedImageCache::Impl {
 				if (stopping) return;
 				work = std::move(queue.front());
 				queue.pop_front();
+				work.foregroundAtStart = foregroundKeys.find(work.key) != foregroundKeys.end();
 				queuedKeys.erase(work.key);
 				inFlightKeys.insert(work.key);
 				inFlightCancellation[work.key] = work.cancellation;
@@ -379,25 +388,130 @@ struct DecodedImageCache::Impl {
 			int sourceWidth = 0;
 			int sourceHeight = 0;
 			bool sourceChanged = false;
-			const bool sourceCurrentBeforeOpen = (!work.cancellation ||
-				!work.cancellation->load()) && IsImageSourceCurrent(work.source);
-			sourceChanged = !sourceCurrentBeforeOpen &&
-				(!work.cancellation || !work.cancellation->load());
-			bool completed = sourceCurrentBeforeOpen;
-			if (completed && work.dimensionsOnly) {
-				completed = dimensionsReader(work.filename, sourceWidth, sourceHeight,
-					errorMessage) && sourceWidth > 0 && sourceHeight > 0 &&
-					(!work.cancellation || !work.cancellation->load());
-			} else if (completed) {
-				image = std::make_shared<DecodedImage>();
-				completed = decoder(work.filename, *image, errorMessage) &&
-					!image->frames.empty() && (!work.cancellation || !work.cancellation->load());
+			const bool activeSpread =
+				work.workClass == PerfWorkClass::ActiveImageSpread;
+			const SourceWorkPriority sourcePriority = work.foregroundAtStart || activeSpread ?
+				SourceWorkPriority::Foreground : work.dimensionsOnly ?
+				SourceWorkPriority::Metadata : SourceWorkPriority::Speculative;
+			const auto cancellation = work.cancellation;
+			WorkContext sourceContext = MakeWorkContext(work.source, sourcePriority,
+				[cancellation] { return !cancellation || !cancellation->load(); });
+			sourceContext.currentPriority = [this, key = work.key, sourcePriority] {
+				std::lock_guard<std::mutex> lock(mutex);
+				if (foregroundKeys.find(key) != foregroundKeys.end()) {
+					return SourceWorkPriority::Foreground;
+				}
+				const auto activeClass = inFlightWorkClasses.find(key);
+				return activeClass != inFlightWorkClasses.end() &&
+					activeClass->second == PerfWorkClass::ActiveImageSpread ?
+					SourceWorkPriority::Foreground : sourcePriority;
+			};
+			bool sourceCurrentBeforeOpen = false;
+			bool completed = false;
+			bool sourceAdmissionSucceeded = false;
+			bool currentSource = false;
+			bool sourceCheckedForPublication = false;
+			bool sourceRefreshNeeded = false;
+			SourceDescriptor changedSource;
+			WorkerFailure workerFailure;
+			{
+				try {
+					SourceCpuWorkLease admission =
+						SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+							sourceContext, work.filename);
+					sourceAdmissionSucceeded = static_cast<bool>(admission);
+					if (admission) {
+						sourceContext.sourcePriority = sourceContext.Priority();
+						sourceContext.sourceAccessAlreadyAdmitted = true;
+						sourceContext.cpuProcessingAlreadyAdmitted = true;
+						ScopedWorkContext activeContext(sourceContext);
+						sourceCurrentBeforeOpen = (!work.cancellation ||
+							!work.cancellation->load()) && IsImageSourceCurrent(work.source);
+						if (sourceCurrentBeforeOpen && sourceContext.Continue() &&
+							work.dimensionsOnly) {
+							completed = dimensionsReader(work.filename, sourceWidth, sourceHeight,
+								errorMessage) && sourceWidth > 0 && sourceHeight > 0 &&
+								sourceContext.Continue();
+						} else if (sourceCurrentBeforeOpen && sourceContext.Continue()) {
+							image = std::make_shared<DecodedImage>();
+							completed = decoder(work.filename, *image, errorMessage) &&
+								!image->frames.empty() && sourceContext.Continue();
+						}
+						const bool cancelledAfterWork = work.cancellation &&
+							work.cancellation->load();
+						if (sourceCurrentBeforeOpen && !cancelledAfterWork &&
+							workerFailure.kind != WorkerFailureKind::Exception &&
+							sourceContext.Continue()) {
+							currentSource = IsImageSourceCurrent(work.source);
+							sourceCheckedForPublication = true;
+						}
+						if (!cancelledAfterWork && sourceCheckedForPublication && !currentSource) {
+							sourceChanged = true;
+							sourceRefreshNeeded = true;
+						}
+						sourceContext.sourceAccessAlreadyAdmitted = false;
+						sourceContext.cpuProcessingAlreadyAdmitted = false;
+					}
+				} catch (const std::exception& error) {
+					image.reset();
+					errorMessage = error.what();
+					workerFailure = {WorkerFailureKind::Exception, error.what()};
+					completed = false;
+				} catch (...) {
+					image.reset();
+					errorMessage = "unknown decoded-image worker failure";
+					workerFailure = {WorkerFailureKind::Exception,
+						"unknown decoded-image worker failure"};
+					completed = false;
+				}
+			}
+			if (sourceAdmissionSucceeded && !sourceCurrentBeforeOpen &&
+				!workerFailure.Failed() && (!work.cancellation || !work.cancellation->load())) {
+				sourceChanged = true;
+				sourceRefreshNeeded = true;
+			}
+			if (sourceRefreshNeeded && !workerFailure.Failed() &&
+				(!work.cancellation || !work.cancellation->load())) {
+				try {
+					WorkContext refreshContext = MakePathWorkContext(
+						work.source.LogicalPath(),
+						SourceWorkPriority::Metadata, [cancellation] {
+							return !cancellation || !cancellation->load();
+						});
+					refreshContext.currentPriority = sourceContext.currentPriority;
+					SourceCpuWorkLease refreshAdmission =
+						SourceWorkCoordinator::Global().AcquireSourceAndCpu(
+							refreshContext, work.filename);
+					if (refreshAdmission && refreshContext.Continue()) {
+						refreshContext.sourcePriority = refreshContext.Priority();
+						refreshContext.sourceAccessAlreadyAdmitted = true;
+						refreshContext.cpuProcessingAlreadyAdmitted = true;
+						{
+							ScopedWorkContext activeContext(refreshContext);
+							changedSource = DescribeImageSource(work.source.LogicalPath());
+						}
+						refreshContext.sourceAccessAlreadyAdmitted = false;
+						refreshContext.cpuProcessingAlreadyAdmitted = false;
+					}
+				} catch (const std::exception& error) {
+					workerFailure = {WorkerFailureKind::Exception, error.what()};
+					sourceChanged = false;
+				} catch (...) {
+					workerFailure = {WorkerFailureKind::Exception,
+						"unknown decoded-image source refresh failure"};
+					sourceChanged = false;
+				}
 			}
 			const bool cancelledAfterWork = work.cancellation && work.cancellation->load();
-			const bool currentSource = !cancelledAfterWork && IsImageSourceCurrent(work.source);
-			if (!cancelledAfterWork && !currentSource) sourceChanged = true;
-			SourceDescriptor changedSource;
-			if (sourceChanged) changedSource = DescribeImageSource(work.source.LogicalPath());
+			if (cancelledAfterWork) {
+				workerFailure = {WorkerFailureKind::Cancelled, "decoded-image request was cancelled"};
+			} else if (sourceChanged) {
+				workerFailure = {WorkerFailureKind::SourceUnavailable,
+					"image source changed while it was being decoded"};
+			} else if (!completed && !workerFailure.Failed()) {
+				workerFailure = {WorkerFailureKind::ProcessingFailed,
+					errorMessage.empty() ? "image decoding failed" : errorMessage};
+			}
 			const SourceChangeNotice sourceChange{work.source.Key(), changedSource};
 
 			ImagePtr completedImage;
@@ -414,6 +528,7 @@ struct DecodedImageCache::Impl {
 					if (existing == changedSources.end()) changedSources.push_back(sourceChange);
 					else *existing = sourceChange;
 				}
+				if (workerFailure.Failed()) lastWorkerFailure = workerFailure;
 				inFlightKeys.erase(work.key);
 				const auto activeWorkClass = inFlightWorkClasses.find(work.key);
 				if (activeWorkClass != inFlightWorkClasses.end()) {
@@ -478,9 +593,27 @@ struct DecodedImageCache::Impl {
 				--activeWorkers;
 				idle.notify_all();
 			}
-			if (completion) completion(work.filename, completedImage);
-			if (dimensionsCompletion) dimensionsCompletion(work.filename,
-				completed && currentSource, sourceWidth, sourceHeight);
+			try {
+				if (completion) completion(work.filename, completedImage);
+			} catch (const std::exception& error) {
+				std::lock_guard<std::mutex> lock(mutex);
+				lastWorkerFailure = {WorkerFailureKind::Exception, error.what()};
+			} catch (...) {
+				std::lock_guard<std::mutex> lock(mutex);
+				lastWorkerFailure = {WorkerFailureKind::Exception,
+					"unknown decoded-image completion callback failure"};
+			}
+			try {
+				if (dimensionsCompletion) dimensionsCompletion(work.filename,
+					completed && currentSource, sourceWidth, sourceHeight);
+			} catch (const std::exception& error) {
+				std::lock_guard<std::mutex> lock(mutex);
+				lastWorkerFailure = {WorkerFailureKind::Exception, error.what()};
+			} catch (...) {
+				std::lock_guard<std::mutex> lock(mutex);
+				lastWorkerFailure = {WorkerFailureKind::Exception,
+					"unknown JPEG dimensions callback failure"};
+			}
 		}
 	}
 
@@ -545,6 +678,7 @@ struct DecodedImageCache::Impl {
 	std::unordered_map<DecodedImageWorkKey, Work, DecodedImageWorkKeyHash> desiredWork;
 	std::size_t cachedBytes = 0;
 	std::size_t activeWorkers = 0;
+	WorkerFailure lastWorkerFailure;
 	std::uint64_t generation = 0;
 	bool stopping = false;
 };
@@ -986,6 +1120,7 @@ DecodedImageCacheDiagnostics DecodedImageCache::GetDiagnostics() const {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	diagnostics.cachedBytes = impl_->cachedBytes;
 	diagnostics.cachedImages = impl_->entries.size();
+	diagnostics.lastWorkerFailure = impl_->lastWorkerFailure;
 	for (const Impl::Work& work : impl_->queue) {
 		if (work.workClass == PerfWorkClass::ActiveImageSpread) {
 			++diagnostics.activeSpreadQueued;

@@ -60,6 +60,7 @@ struct DisplayImageRequest {
 	DisplayImageCacheKey cacheKey;
 	std::string key;
 	std::shared_ptr<std::atomic<bool>> cancellation;
+	WorkContext workContext;
 
 	bool Valid() const;
 };
@@ -127,6 +128,7 @@ struct DisplayImageCacheDiagnostics {
 	std::size_t retiredBytes = 0;
 	std::size_t retiredImages = 0;
 	std::size_t activeRetiredBytes = 0;
+	WorkerFailure lastWorkerFailure;
 };
 
 // Conservative number of neighboring full-viewport textures that fit beside

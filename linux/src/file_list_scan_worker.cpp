@@ -1,6 +1,8 @@
 #include "file_list_scan_worker.h"
+#include "source_work_coordinator.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <exception>
 #include <mutex>
@@ -28,12 +30,11 @@ struct FileListScanWorker::Impl {
 			std::lock_guard<std::mutex> lock(mutex);
 			pending.reset();
 			ready.reset();
-			std::lock_guard<std::mutex> pauseLock(pauseMutex);
 			stopping.store(true);
 			generation.fetch_add(1);
 		}
 		condition.notify_one();
-		pauseCondition.notify_all();
+		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
 
@@ -41,17 +42,16 @@ struct FileListScanWorker::Impl {
 		return !stopping.load() && generation.load() == requestedGeneration;
 	}
 
-	bool ShouldContinue(std::uint64_t requestedGeneration) {
+	bool ShouldContinue(std::uint64_t requestedGeneration,
+		bool& interruptedForForeground) {
 		if (!IsCurrent(requestedGeneration)) return false;
-		if (!foregroundPending.load()) return true;
-		std::unique_lock<std::mutex> lock(pauseMutex);
-		if (foregroundPending.load() && IsCurrent(requestedGeneration)) {
+		if (foregroundPending.load() ||
+			SourceWorkCoordinator::Global().Snapshot().foregroundPending) {
+			interruptedForForeground = true;
 			yieldingForForeground.store(true);
-			pauseCondition.wait(lock, [this, requestedGeneration] {
-				return !IsCurrent(requestedGeneration) || !foregroundPending.load();
-			});
-			yieldingForForeground.store(false);
+			return false;
 		}
+		yieldingForForeground.store(false);
 		return IsCurrent(requestedGeneration);
 	}
 
@@ -69,19 +69,47 @@ struct FileListScanWorker::Impl {
 
 			FileListScanResult result;
 			result.generation = task.generation;
-			try {
-				result.prepared = FileList::PrepareScan(task.request,
-					[this, requestedGeneration = task.generation] {
-						return ShouldContinue(requestedGeneration);
-					});
-			} catch (const std::exception& error) {
-				result.prepared.operation = task.request.operation;
-				result.prepared.expectedRevision = task.request.expectedRevision;
-				result.error = error.what();
-			} catch (...) {
-				result.prepared.operation = task.request.operation;
-				result.prepared.expectedRevision = task.request.expectedRevision;
-				result.error = "unknown directory scan error";
+			for (;;) {
+				bool interruptedForForeground = false;
+				const auto shouldContinue = [this,
+					requestedGeneration = task.generation, &interruptedForForeground] {
+					return ShouldContinue(requestedGeneration, interruptedForForeground);
+				};
+				WorkContext workContext;
+				workContext.sourcePriority = SourceWorkPriority::Metadata;
+				workContext.shouldContinue = shouldContinue;
+				workContext.onForegroundYield = [this, &interruptedForForeground] {
+					interruptedForForeground = true;
+					yieldingForForeground.store(true);
+				};
+				try {
+					ScopedWorkContext activeContext(workContext);
+					result.prepared = FileList::PrepareScan(task.request, shouldContinue);
+				} catch (const std::exception& error) {
+					result.prepared.operation = task.request.operation;
+					result.prepared.expectedRevision = task.request.expectedRevision;
+					result.error = error.what();
+				} catch (...) {
+					result.prepared.operation = task.request.operation;
+					result.prepared.expectedRevision = task.request.expectedRevision;
+					result.error = "unknown directory scan error";
+				}
+				if (!result.error.empty() || !IsCurrent(task.generation)) {
+					yieldingForForeground.store(false);
+					break;
+				}
+				if (!interruptedForForeground && result.prepared.completed) break;
+				if (!interruptedForForeground) break;
+				yieldingForForeground.store(true);
+				(void)SourceWorkCoordinator::Global().WaitForSnapshot(
+					[this, requestedGeneration = task.generation](
+						const SourceWorkSnapshot& snapshot) {
+						return !IsCurrent(requestedGeneration) || !snapshot.foregroundPending;
+					}, std::chrono::hours(24));
+				yieldingForForeground.store(false);
+				if (!IsCurrent(task.generation)) break;
+				result = {};
+				result.generation = task.generation;
 			}
 			if (!IsCurrent(task.generation) ||
 				(!result.prepared.completed && result.error.empty())) continue;
@@ -97,8 +125,6 @@ struct FileListScanWorker::Impl {
 
 	std::mutex mutex;
 	std::condition_variable condition;
-	std::mutex pauseMutex;
-	std::condition_variable pauseCondition;
 	std::optional<Task> pending;
 	std::optional<FileListScanResult> ready;
 	std::atomic<std::uint64_t> generation{0};
@@ -119,39 +145,36 @@ std::uint64_t FileListScanWorker::Request(FileList::ScanRequest request) {
 	std::uint64_t nextGeneration = 0;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		{
-			std::lock_guard<std::mutex> pauseLock(impl_->pauseMutex);
-			if (impl_->stopping.load()) return 0;
-			nextGeneration = impl_->generation.fetch_add(1) + 1;
-		}
+		if (impl_->stopping.load()) return 0;
+		nextGeneration = impl_->generation.fetch_add(1) + 1;
 		impl_->ready.reset();
 		impl_->pending = Impl::Task{std::move(request), nextGeneration};
 		impl_->StartWorkerLocked();
 	}
 	impl_->condition.notify_one();
-	impl_->pauseCondition.notify_all();
+	SourceWorkCoordinator::Global().NotifyWaiters();
 	return nextGeneration;
 }
 
 void FileListScanWorker::Clear() {
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		{
-			std::lock_guard<std::mutex> pauseLock(impl_->pauseMutex);
-			impl_->generation.fetch_add(1);
-		}
+		impl_->generation.fetch_add(1);
 		impl_->pending.reset();
 		impl_->ready.reset();
 	}
-	impl_->pauseCondition.notify_all();
+	SourceWorkCoordinator::Global().NotifyWaiters();
 }
 
 void FileListScanWorker::SetForegroundPending(bool pending) {
-	{
-		std::lock_guard<std::mutex> lock(impl_->pauseMutex);
-		impl_->foregroundPending.store(pending);
+	SourceWorkCoordinator& coordinator = SourceWorkCoordinator::Global();
+	if (pending) {
+		coordinator.SetForegroundPending(true);
+		impl_->foregroundPending.store(true);
+	} else {
+		impl_->foregroundPending.store(false);
+		coordinator.SetForegroundPending(false);
 	}
-	impl_->pauseCondition.notify_all();
 }
 
 bool FileListScanWorker::IsYieldingForForeground() const {

@@ -107,6 +107,24 @@ they support.
    by default; set `manga_mode_inverts_left_right=0` in `settings.conf` to keep the normal key direction
    while retaining manga page placement.
 
+   Source-consuming work from independent decode, display, thumbnail, metadata, directory, and archive
+   workers shares admission: one speculative or metadata source task may read at a time, foreground
+   source work has a separate lane, and pending foreground work stops new background source admission.
+   A partner in the currently displayed spread receives foreground admission so it cannot wait behind
+   the foreground operation that is waiting for that partner.
+   Archive members coordinate by their backing container. A shared CPU-processing pool uses a
+   hardware-aware limit of at most four active workers across those pools. When foreground work
+   arrives during archive/catalog traversal, cancellation callbacks return immediately so paired
+   source and CPU admissions are released; outer workers wait for foreground work to finish, discard
+   partial results, and retry. Other metadata scans yield between entries or bounded batches.
+   Cancellation reaches JPEG open/header and scanline batches, color
+   conversion, resampling, and publication; opaque codec calls can only be checked before and after
+   the call. A read already blocked by the filesystem may finish after foreground work arrives.
+   Work that needs both source access and CPU processing receives both admissions together, and a
+   queued request promoted by navigation joins foreground admission. Worker failures are reported
+   through structured results or cache diagnostics, and canceled work releases its admission and memory
+   reservations.
+
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;
    sibling folders; reload; and previous-folder history. Ctrl+M marks one image; after moving to a
@@ -323,8 +341,9 @@ they support.
     changing the file timestamp cannot stale an active cold-header read. Neighbor plans are
     invalidated when their captured catalog, descriptor, viewport, or source state no longer matches;
     EXIF metadata results remain bound to their source identity and request generation and are
-    discarded when either becomes stale. Large evicted CPU buffers are retired on workers rather than
-    destroyed on the event thread. Previously viewed and prefetched images
+    discarded when either becomes stale. Archive-member EXIF reads resume after foreground source
+    work so navigation does not permanently lose optional metadata. Large evicted CPU buffers are
+    retired on workers rather than destroyed on the event thread. Previously viewed and prefetched images
     therefore avoid repeated synchronous decoding, correction, high-quality scaling, and texture
     creation during navigation.
 
