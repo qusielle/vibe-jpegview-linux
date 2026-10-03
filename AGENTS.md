@@ -75,6 +75,11 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   the renderer thread.
 - Background workers may perform filesystem access, decoding, and pixel processing. Their requests
   must support cancellation or generation checks so obsolete results cannot replace current state.
+- For new or extracted asynchronous controllers, keep request batches free of raw pointers or
+  references to the composition root and renderer/cache owners. Pass owned service handles and
+  generation-tagged value completions through an explicit channel; the owner drains effects and
+  performs renderer/cache operations on their required thread. Close publication channels and stop
+  or join their workers before dependent owners are torn down.
 - Independent source-reading pools must share an admission coordinator: keep foreground source access
   separate, serialize speculative/metadata reads, stop new background admission while foreground work
   is pending, and use the backing-container identity for archive members, including temporary extraction.
