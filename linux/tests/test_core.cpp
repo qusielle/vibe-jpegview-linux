@@ -6335,6 +6335,417 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 		"planner admission exception escaped its worker or prevented a valid retry");
 }
 
+std::shared_ptr<const jpegview_linux::PreparedDisplayImage>
+DisplayCachePreparedTestImage(const jpegview_linux::DisplayImageRequest& request);
+
+void TestFailedDisplayRequestResolutionRecovery() {
+	jpegview_linux::DisplayImageRequest failedRequest;
+	failedRequest.key = "failed-large-display-request";
+	failedRequest.targetWidth = 1200;
+	failedRequest.targetHeight = 800;
+	const jpegview_linux::DisplayImageTarget unchangedResolution =
+		jpegview_linux::ClampDisplayImageTarget(1200, 800, 2400, 1600);
+	const jpegview_linux::DisplayImageTarget smallerResolution =
+		jpegview_linux::ClampDisplayImageTarget(1200, 800, 600, 400);
+
+	Expect(!jpegview_linux::FailedDisplayRequestNeedsNewResolution(
+		failedRequest, failedRequest.key, unchangedResolution),
+		"unchanged canonical dimensions stopped suppressing a failed request");
+	Expect(jpegview_linux::FailedDisplayRequestNeedsNewResolution(
+		failedRequest, failedRequest.key, smallerResolution),
+		"a smaller canonical target did not invalidate its failed larger request");
+	Expect(!jpegview_linux::FailedDisplayRequestNeedsNewResolution(
+		failedRequest, "another-failed-request", smallerResolution),
+		"a different failed request key invalidated the current display request");
+}
+
+void TestDisplayResolutionRequestCanonicalization() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "resolution-planner.jpg";
+	WriteText(filename, "captured source descriptor");
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(filename).WithImageProperties(400, 250, false);
+	Expect(source.Valid(), "resolution planner fixture has no source descriptor");
+
+	const auto sourceResolution = jpegview_linux::MakeJpegDisplayImageRequest(source,
+		400, 250, 400, 250, false);
+	const jpegview_linux::DisplayImageTarget enlargedTarget =
+		jpegview_linux::ClampDisplayImageTarget(400, 250, 800, 500);
+	const auto enlarged = jpegview_linux::MakeJpegDisplayImageRequest(source,
+		400, 250, enlargedTarget.width, enlargedTarget.height, false);
+	Expect(sourceResolution.Valid() && enlarged.Valid() &&
+		sourceResolution.key == enlarged.key && enlarged.targetWidth == 400 &&
+		enlarged.targetHeight == 250,
+		"enlargement above source resolution created a duplicate display request");
+
+	const auto rotatedSourceResolution = jpegview_linux::MakeJpegDisplayImageRequest(
+		source, 400, 250, 250, 400, false, 0, {}, 1);
+	const jpegview_linux::DisplayImageTarget rotatedTarget =
+		jpegview_linux::ClampDisplayImageTarget(400, 250, 500, 800, 1);
+	const auto rotatedEnlarged = jpegview_linux::MakeJpegDisplayImageRequest(
+		source, 400, 250, rotatedTarget.width, rotatedTarget.height, false, 0, {}, 1);
+	Expect(rotatedSourceResolution.Valid() && rotatedEnlarged.Valid() &&
+		rotatedSourceResolution.key == rotatedEnlarged.key &&
+		rotatedEnlarged.targetWidth == 250 && rotatedEnlarged.targetHeight == 400,
+		"rotated spread enlargement did not reuse its source-resolution request");
+	const auto histogramRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		source, 400, 250, 400, 250, false, 0, {}, 0, true);
+	std::size_t estimatedHistogramBytes = 0;
+	Expect(jpegview_linux::EstimateDisplayImageBytes(histogramRequest,
+		estimatedHistogramBytes) &&
+		estimatedHistogramBytes == 400u * 250u * 4u +
+			sizeof(jpegview_linux::GrayscaleSpectrum),
+		"prepared-frame estimate omitted retained histogram data");
+	const auto fittedRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		source, 400, 250, 100, 63, false);
+	const auto processingChangedRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		source, 400, 250, 400, 250, false, 0,
+		jpegview_linux::ImageProcessingParams{0.1});
+	Expect(jpegview_linux::CanReuseDisplayImageRepresentation(
+		fittedRequest.cacheKey, sourceResolution.cacheKey) &&
+		!jpegview_linux::CanReuseDisplayImageRepresentation(
+			sourceResolution.cacheKey, fittedRequest.cacheKey) &&
+		!jpegview_linux::CanReuseDisplayImageRepresentation(
+			fittedRequest.cacheKey, processingChangedRequest.cacheKey) &&
+		!jpegview_linux::CanReuseDisplayImageRepresentation(
+			fittedRequest.cacheKey, histogramRequest.cacheKey) &&
+		!jpegview_linux::CanReuseDisplayImageRepresentation(
+			fittedRequest.cacheKey, rotatedSourceResolution.cacheKey),
+		"larger representation reuse ignored required detail, processing, histogram, or orientation");
+}
+
+
+void TestDisplayPrefetchUsesFittedResolution() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "fitted-prefetch.jpg";
+	const fs::path secondFilename = temporary.path() / "fitted-prefetch-second.jpg";
+	WriteText(filename, "captured source descriptor");
+	WriteText(secondFilename, "captured source descriptor");
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(filename).WithImageProperties(400, 250, false);
+	const jpegview_linux::SourceDescriptor secondSource =
+		jpegview_linux::DescribeImageSource(secondFilename).WithImageProperties(400, 250, false);
+	jpegview_linux::DisplayPrefetchCandidate candidate{filename, source, 1, 1,
+		{}, false, true};
+	jpegview_linux::DisplayPrefetchCandidate secondCandidate{secondFilename,
+		secondSource, 2, 2, {}, false, true};
+	jpegview_linux::DisplayPrefetchPlannerRequest plan;
+	plan.currentIndex = 0;
+	plan.pageCount = 3;
+	plan.maximumCount = 2;
+	plan.imageAreaWidth = 100;
+	plan.imageAreaHeight = 80;
+	plan.maximumPreparedBytes = 100u * 63u * 4u;
+	jpegview_linux::Viewport navigationViewport;
+	navigationViewport.SetFitRelativeZoomMode(true);
+	navigationViewport.Fit(400, 250, 100, 80);
+	navigationViewport.ZoomAt(2.0, 50, 40, 400, 250, 100, 80);
+	Expect(!navigationViewport.NavigationSnapshot().fitToWindow &&
+		navigationViewport.PrefetchSnapshot().fitToWindow,
+		"fit-relative navigation zoom was lost or leaked into the prefetch fit snapshot");
+	jpegview_linux::Viewport pendingFitViewport;
+	pendingFitViewport.Fit(400, 250, 100, 80);
+	pendingFitViewport.Fit(0, 0, 100, 80, true, false);
+	const jpegview_linux::ViewportSnapshot pendingFit =
+		pendingFitViewport.PrefetchSnapshot();
+	Expect(pendingFit.fitToWindow && pendingFit.fillWithCrop && !pendingFit.noEnlarge,
+		"fit settings changed before dimensions arrived were omitted from neighbor planning");
+	plan.viewport = navigationViewport.NavigationSnapshot();
+	plan.neighbors = {candidate, secondCandidate};
+	jpegview_linux::DisplayPrefetchPlannerWorker planner(
+		[](const jpegview_linux::SourceDescriptor&, int&, int&, std::string&,
+			const jpegview_linux::DisplayPrefetchPlannerWorker::Continue&) {
+			return false;
+		});
+	const std::uint64_t generation = planner.Request(plan);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(2)),
+		"fitted neighbor planning did not finish before its deadline");
+	const auto results = planner.TakeReady();
+	Expect(results.size() == 1 && results.front().generation == generation &&
+		results.front().requests.size() == 1,
+		"neighbor planner did not enforce its estimated prepared-frame byte budget");
+	const jpegview_linux::DisplayImageRequest& neighbor = results.front().requests.front();
+	Expect(neighbor.targetWidth == 100 && neighbor.targetHeight == 63,
+		"neighbor prefetch inherited the selected image's magnified viewport");
+	std::size_t estimatedBytes = 0;
+	Expect(jpegview_linux::EstimateDisplayImageBytes(neighbor, estimatedBytes) &&
+		estimatedBytes == plan.maximumPreparedBytes &&
+		neighbor.filename == filename && results.front().protectedTextureKeys.size() == 1,
+		"neighbor admission did not use its actual fitted-frame byte estimate");
+	const auto secondRetained = jpegview_linux::MakeJpegDisplayImageRequest(
+		secondSource, 400, 250, neighbor.targetWidth, neighbor.targetHeight, false, 2);
+	plan.retainedTextures = {{secondRetained.key, secondRetained.cacheKey}};
+	const std::uint64_t fullBudgetGeneration = planner.Request(plan);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(2)),
+		"full-budget nearest-neighbor planning did not finish before its deadline");
+	const auto fullBudgetResults = planner.TakeReady();
+	Expect(fullBudgetResults.size() == 1 &&
+		fullBudgetResults.front().generation == fullBudgetGeneration &&
+		fullBudgetResults.front().requests.size() == 1 &&
+		fullBudgetResults.front().requests.front().key == neighbor.key &&
+		fullBudgetResults.front().protectedTextureKeys.size() == 2 &&
+		std::find(fullBudgetResults.front().protectedTextureKeys.begin(),
+			fullBudgetResults.front().protectedTextureKeys.end(), secondRetained.key) !=
+			fullBudgetResults.front().protectedTextureKeys.end() &&
+		fullBudgetResults.front().protectedTextureCacheKeys.size() == 2 &&
+		std::find(fullBudgetResults.front().protectedTextureCacheKeys.begin(),
+			fullBudgetResults.front().protectedTextureCacheKeys.end(),
+			secondRetained.cacheKey) !=
+			fullBudgetResults.front().protectedTextureCacheKeys.end(),
+		"budget exhaustion skipped protection for a retained second nearest texture");
+	const auto retainedHigherResolution = jpegview_linux::MakeJpegDisplayImageRequest(
+		source, 400, 250, 400, 250, false, 1);
+	plan.maximumCount = 2;
+	plan.neighbors = {candidate, secondCandidate};
+	plan.maximumPreparedBytes = 2u * 100u * 63u * 4u;
+	plan.retainedTextures = {{retainedHigherResolution.key,
+		retainedHigherResolution.cacheKey}};
+	const std::uint64_t higherResolutionGeneration = planner.Request(plan);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(2)),
+		"higher-resolution retained-neighbor planning did not finish before its deadline");
+	const auto higherResolutionResults = planner.TakeReady();
+	Expect(higherResolutionResults.size() == 1 &&
+		higherResolutionResults.front().generation == higherResolutionGeneration &&
+		higherResolutionResults.front().requests.size() == 1 &&
+		higherResolutionResults.front().requests.front().filename == secondFilename &&
+		higherResolutionResults.front().protectedTextureKeys.size() == 2 &&
+		std::find(higherResolutionResults.front().protectedTextureKeys.begin(),
+			higherResolutionResults.front().protectedTextureKeys.end(),
+			retainedHigherResolution.key) !=
+			higherResolutionResults.front().protectedTextureKeys.end() &&
+		std::find(higherResolutionResults.front().protectedTextureCacheKeys.begin(),
+			higherResolutionResults.front().protectedTextureCacheKeys.end(),
+			retainedHigherResolution.cacheKey) !=
+			higherResolutionResults.front().protectedTextureCacheKeys.end(),
+		"fitted planning duplicated or failed to protect a retained source-resolution neighbor");
+	plan.maximumPreparedBytes = 0;
+	plan.retainedTextures = {{secondRetained.key, secondRetained.cacheKey}};
+	const std::uint64_t zeroBudgetGeneration = planner.Request(plan);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(2)),
+		"zero-budget nearest-neighbor planning did not finish before its deadline");
+	const auto zeroBudgetResults = planner.TakeReady();
+	Expect(zeroBudgetResults.size() == 1 &&
+		zeroBudgetResults.front().generation == zeroBudgetGeneration &&
+		zeroBudgetResults.front().requests.empty() &&
+		zeroBudgetResults.front().protectedTextureKeys.size() == 1 &&
+		zeroBudgetResults.front().protectedTextureKeys.front() == secondRetained.key,
+		"zero prepared-byte budget skipped protection for a retained nearest texture");
+	plan.maximumCount = 1;
+	plan.neighbors.resize(1);
+	plan.maximumPreparedBytes = 100u * 63u * 4u;
+	plan.retainedTextures = {{neighbor.key, neighbor.cacheKey}};
+	const std::uint64_t retainedGeneration = planner.Request(plan);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(2)),
+		"retained nearest-neighbor planning did not finish before its deadline");
+	const auto retainedResults = planner.TakeReady();
+	Expect(retainedResults.size() == 1 &&
+		retainedResults.front().generation == retainedGeneration &&
+		retainedResults.front().requests.empty() &&
+		retainedResults.front().protectedTextureKeys.size() == 1 &&
+		retainedResults.front().protectedTextureKeys.front() == neighbor.key &&
+		retainedResults.front().protectedTextureCacheKeys.size() == 1 &&
+		retainedResults.front().protectedTextureCacheKeys.front() == neighbor.cacheKey,
+		"retained nearest texture was not protected when its replacement request was skipped");
+
+	const fs::path decodedNeighborPath = temporary.path() / "decoded-neighbor.png";
+	WriteText(decodedNeighborPath, "decoded neighbor source descriptor");
+	const jpegview_linux::SourceDescriptor decodedNeighborSource =
+		jpegview_linux::DescribeImageSource(decodedNeighborPath).WithImageProperties(
+			400, 250, false);
+	auto decodedNeighbor = std::make_shared<jpegview_linux::DecodedImage>();
+	decodedNeighbor->frames.push_back({400, 250, std::vector<std::uint8_t>(
+		400u * 250u * 4u), false, 0});
+	const auto decodedFitRequest = jpegview_linux::MakeDisplayImageRequest(
+		decodedNeighborSource, decodedNeighbor, 0, 100, 63, false, 1);
+	const auto decodedSourceResolution = jpegview_linux::MakeDisplayImageRequest(
+		decodedNeighborSource, decodedNeighbor, 0, 400, 250, false, 1);
+	const std::vector<jpegview_linux::RetainedDisplayTexture> decodedRetainedTextures = {
+		{decodedSourceResolution.key, decodedSourceResolution.cacheKey}};
+	const jpegview_linux::RetainedDisplayTexture* decodedReuse =
+		jpegview_linux::FindReusableRetainedDisplayTexture(decodedFitRequest.cacheKey,
+			decodedRetainedTextures);
+	Expect(decodedFitRequest.Valid() && decodedSourceResolution.Valid() &&
+		decodedNeighborPath.extension() == ".png" && decodedReuse != nullptr &&
+		decodedReuse->key == decodedSourceResolution.key &&
+		decodedReuse->cacheKey == decodedSourceResolution.cacheKey &&
+		jpegview_linux::CanReuseDisplayImageRepresentation(decodedFitRequest.cacheKey,
+			decodedReuse->cacheKey),
+		"decoded non-JPEG neighbor did not reuse and protect its retained higher-resolution texture");
+}
+
+void TestCurrentDisplayPanAndZoomRequestReuse() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "pan-reuse.jpg";
+	WriteText(filename, "captured source descriptor");
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(filename).WithImageProperties(400, 250, false);
+	jpegview_linux::Viewport viewport;
+	viewport.SetFitRelativeZoomMode(false);
+	viewport.Fit(400, 250, 100, 80);
+	std::atomic<std::size_t> preparations{0};
+	jpegview_linux::DisplayImageCache cache(1024 * 1024, 1,
+		[&preparations](const jpegview_linux::DisplayImageRequest& request) {
+			++preparations;
+			return DisplayCachePreparedTestImage(request);
+		});
+	const auto prepareOnce = [&](const jpegview_linux::DisplayImageRequest& request) {
+		if (cache.Find(request)) return;
+		cache.Request(request);
+		Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+			"display preparation did not finish before its deadline");
+	};
+	const auto requestForViewport = [&] {
+		const auto destination = viewport.Destination(400, 250, 100, 80);
+		const jpegview_linux::DisplayImageTarget resolution =
+			jpegview_linux::ClampDisplayImageTarget(400, 250,
+				destination.width, destination.height);
+		return jpegview_linux::MakeJpegDisplayImageRequest(source, 400, 250,
+			resolution.width, resolution.height, false);
+	};
+	const auto fit = requestForViewport();
+	prepareOnce(fit);
+	viewport.ActualSize();
+	const auto actual = requestForViewport();
+	prepareOnce(actual);
+	viewport.ZoomAt(1.1, 50, 40, 400, 250, 100, 80);
+	const auto zoomBurst = requestForViewport();
+	viewport.ZoomAt(2.0, 50, 40, 400, 250, 100, 80);
+	const auto enlarged = requestForViewport();
+	prepareOnce(enlarged);
+	viewport.Pan(12.0, -8.0);
+	const auto panned = requestForViewport();
+	prepareOnce(panned);
+	viewport.Fit(400, 250, 100, 80);
+	prepareOnce(requestForViewport());
+	Expect(preparations.load() == 2,
+		"fit, actual-size, enlargement, pan, or fit return repeated sufficient preparation");
+	const auto changedProcessing = jpegview_linux::MakeJpegDisplayImageRequest(source,
+		400, 250, 400, 250, false, 0,
+		jpegview_linux::ImageProcessingParams{0.1});
+	prepareOnce(changedProcessing);
+	Expect(preparations.load() == 3,
+		"changed processing did not request a distinct prepared frame");
+	Expect(zoomBurst.key == actual.key && enlarged.key == actual.key &&
+		panned.key == actual.key && cache.Find(changedProcessing),
+		"zoom burst and pan did not reuse source pixels or preserve processing identity");
+}
+
+void TestRotatedSpreadPartnerResolutionAndAdmission() {
+	TemporaryDirectory temporary;
+	const fs::path anchorPath = temporary.path() / "spread-anchor.jpg";
+	const fs::path partnerPath = temporary.path() / "spread-partner.jpg";
+	WriteText(anchorPath, "captured anchor source descriptor");
+	WriteText(partnerPath, "captured partner source descriptor");
+	const jpegview_linux::SourceDescriptor anchorSource =
+		jpegview_linux::DescribeImageSource(anchorPath).WithImageProperties(600, 900, false);
+	const jpegview_linux::SourceDescriptor partnerSource =
+		jpegview_linux::DescribeImageSource(partnerPath).WithImageProperties(600, 1200, false);
+	const jpegview_linux::PageDimensions anchorDimensions{600, 900};
+	const jpegview_linux::PageDimensions partnerDimensions{600, 1200};
+	const auto spread = jpegview_linux::BuildDoublePageSpread(1, 3,
+		anchorDimensions, partnerDimensions, {true, false}, true, 1);
+	Expect(spread.has_value(), "rotated source-resolution fixture did not form a spread");
+
+	jpegview_linux::Viewport viewport;
+	viewport.Restore({false, false, true, 2.0, 2.0}, spread->canvasWidth,
+		spread->canvasHeight, 2800, 3000);
+	const jpegview_linux::ViewportRect canvas = viewport.Destination(
+		spread->canvasWidth, spread->canvasHeight, 2800, 3000);
+	const auto placementSize = [&](const jpegview_linux::SpreadPagePlacement& page) {
+		const int left = static_cast<int>(std::lround(
+			static_cast<double>(canvas.width) * page.x / spread->canvasWidth));
+		const int top = static_cast<int>(std::lround(
+			static_cast<double>(canvas.height) * page.y / spread->canvasHeight));
+		const int right = static_cast<int>(std::lround(
+			static_cast<double>(canvas.width) * (page.x + page.width) /
+				spread->canvasWidth));
+		const int bottom = static_cast<int>(std::lround(
+			static_cast<double>(canvas.height) * (page.y + page.height) /
+				spread->canvasHeight));
+		return jpegview_linux::DisplayImageTarget{right - left, bottom - top};
+	};
+	const jpegview_linux::DisplayImageTarget enlargedPartner = placementSize(spread->nextPage);
+	const jpegview_linux::DisplayImageTarget canonicalPartner =
+		jpegview_linux::ClampDisplayImageTarget(partnerDimensions.width,
+			partnerDimensions.height, enlargedPartner.width, enlargedPartner.height,
+			spread->clockwiseQuarterTurns);
+	Expect(enlargedPartner.width > partnerDimensions.height &&
+		enlargedPartner.height > partnerDimensions.width &&
+		canonicalPartner.width == partnerDimensions.height &&
+		canonicalPartner.height == partnerDimensions.width,
+		"zoomed rotated spread partner was not clamped to its oriented source resolution");
+	const auto partnerAtZoom = jpegview_linux::MakeJpegDisplayImageRequest(
+		partnerSource, partnerDimensions.width, partnerDimensions.height,
+		canonicalPartner.width, canonicalPartner.height, false, 1, {},
+		spread->clockwiseQuarterTurns);
+	const jpegview_linux::DisplayImageTarget stillLargerPartner =
+		jpegview_linux::ClampDisplayImageTarget(partnerDimensions.width,
+			partnerDimensions.height, enlargedPartner.width * 2,
+			enlargedPartner.height * 2, spread->clockwiseQuarterTurns);
+	const auto partnerAtLargerZoom = jpegview_linux::MakeJpegDisplayImageRequest(
+		partnerSource, partnerDimensions.width, partnerDimensions.height,
+		stillLargerPartner.width, stillLargerPartner.height, false, 1, {},
+		spread->clockwiseQuarterTurns);
+	Expect(partnerAtZoom.Valid() && partnerAtLargerZoom.Valid() &&
+		stillLargerPartner.width == canonicalPartner.width &&
+		stillLargerPartner.height == canonicalPartner.height &&
+		partnerAtZoom.key == partnerAtLargerZoom.key,
+		"additional spread enlargement created another rotated partner request");
+
+	const jpegview_linux::DisplayImageTarget enlargedAnchor = placementSize(spread->currentPage);
+	const jpegview_linux::DisplayImageTarget canonicalAnchor =
+		jpegview_linux::ClampDisplayImageTarget(anchorDimensions.width,
+			anchorDimensions.height, enlargedAnchor.width, enlargedAnchor.height);
+	const auto anchorRequest = jpegview_linux::MakeJpegDisplayImageRequest(anchorSource,
+		anchorDimensions.width, anchorDimensions.height, canonicalAnchor.width,
+		canonicalAnchor.height, false);
+	std::size_t anchorBytes = 0;
+	std::size_t partnerBytes = 0;
+	Expect(jpegview_linux::EstimateDisplayImageBytes(anchorRequest, anchorBytes) &&
+		jpegview_linux::EstimateDisplayImageBytes(partnerAtZoom, partnerBytes),
+		"canonical spread frame sizes could not be estimated");
+	const std::size_t canonicalPairBytes = anchorBytes + partnerBytes;
+	const std::size_t rawPartnerBytes = static_cast<std::size_t>(enlargedPartner.width) *
+		static_cast<std::size_t>(enlargedPartner.height) * 4;
+	jpegview_linux::PresentationController presentation;
+	const auto decision = presentation.PlanSpreadRequests({true, anchorBytes,
+		partnerBytes, canonicalPairBytes, false});
+	Expect(rawPartnerBytes > canonicalPairBytes &&
+		decision.action == jpegview_linux::SpreadRequestAction::StartSpreadRequests,
+		"spread admission rejected source-resolution textures based on enlarged destination bytes");
+
+	const fs::path budgetPartnerPath = temporary.path() / "spread-budget-partner.jpg";
+	WriteText(budgetPartnerPath, "captured budget partner source descriptor");
+	const jpegview_linux::SourceDescriptor budgetPartnerSource =
+		jpegview_linux::DescribeImageSource(budgetPartnerPath).WithImageProperties(
+			600, 900, false);
+	const auto actualSizeAnchor = jpegview_linux::MakeJpegDisplayImageRequest(
+		anchorSource, 600, 900, 600, 900, false);
+	const auto fittedAnchor = jpegview_linux::MakeJpegDisplayImageRequest(
+		anchorSource, 600, 900, 400, 600, false);
+	const auto fittedPartner = jpegview_linux::MakeJpegDisplayImageRequest(
+		budgetPartnerSource, 600, 900, 400, 600, false);
+	std::size_t actualSizeAnchorBytes = 0;
+	std::size_t fittedAnchorBytes = 0;
+	std::size_t fittedPartnerBytes = 0;
+	Expect(jpegview_linux::EstimateDisplayImageBytes(actualSizeAnchor,
+		actualSizeAnchorBytes) && jpegview_linux::EstimateDisplayImageBytes(
+			fittedAnchor, fittedAnchorBytes) &&
+		jpegview_linux::EstimateDisplayImageBytes(fittedPartner, fittedPartnerBytes),
+		"actual-size to fitted spread fixture sizes could not be estimated");
+	const std::size_t spreadBudget = 2500u * 1024u;
+	const auto actualSizeSpread = presentation.PlanSpreadRequests({true,
+		actualSizeAnchorBytes, fittedPartnerBytes, spreadBudget, false});
+	const auto fittedSpread = presentation.PlanSpreadRequests({true,
+		fittedAnchorBytes, fittedPartnerBytes, spreadBudget, false});
+	Expect(actualSizeAnchorBytes + fittedPartnerBytes > spreadBudget &&
+		fittedAnchorBytes + fittedPartnerBytes <= spreadBudget &&
+		actualSizeSpread.action ==
+			jpegview_linux::SpreadRequestAction::ReturnToSinglePage &&
+		fittedSpread.action == jpegview_linux::SpreadRequestAction::StartSpreadRequests,
+		"actual-size anchor admission did not permit retrying with a fitted anchor after returning to fit");
+}
+
 void TestDisplayPreparationControllerOwnsGenerationTaggedCompletions() {
 	TemporaryDirectory temporary;
 	const fs::path filename = temporary.path() / "controller-neighbor.jpg";
@@ -8471,9 +8882,6 @@ std::shared_ptr<DecodedImage> DisplayCacheTestImage(int width, int height) {
 	return image;
 }
 
-std::shared_ptr<const jpegview_linux::PreparedDisplayImage>
-DisplayCachePreparedTestImage(const jpegview_linux::DisplayImageRequest& request);
-
 void TestActiveSpreadAdmissionDuringForegroundPending() {
 	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
 	TemporaryDirectory temporary;
@@ -9795,15 +10203,13 @@ void TestDecodedRetirementDoesNotDeduplicateReusedAddress() {
 }
 
 void TestDisplayImageCacheBackgroundPreparation() {
-	Expect(jpegview_linux::DisplayPrefetchCount(1024, 10, 10, 100) == 1,
-		"display prefetch sizing did not reserve one texture slot for the current image");
-	Expect(jpegview_linux::DisplayPrefetchCount(40000, 10, 10, 100) == 99,
-		"display prefetch sizing did not use the available texture budget");
-	Expect(jpegview_linux::DisplayPrefetchCount(1024 * 1024, 1, 1, 10000) == 512,
-		"display prefetch sizing did not enforce its speculative work cap");
-	Expect(jpegview_linux::DisplayPrefetchCount(399, 10, 10, 5) == 0 &&
-		jpegview_linux::DisplayPrefetchCount(1024, 0, 10, 5) == 0,
-		"display prefetch sizing accepted an unusable cache or viewport");
+	Expect(jpegview_linux::DisplayPrefetchCandidateLimit(1024, 100) == 99,
+		"display prefetch candidate limit did not exclude the current image");
+	Expect(jpegview_linux::DisplayPrefetchCandidateLimit(1024 * 1024, 10000) == 512,
+		"display prefetch candidate limit did not enforce its speculative work cap");
+	Expect(jpegview_linux::DisplayPrefetchCandidateLimit(0, 5) == 0 &&
+		jpegview_linux::DisplayPrefetchCandidateLimit(1024, 1) == 0,
+		"display prefetch candidate limit accepted a disabled cache or single image");
 
 	TemporaryDirectory temporary;
 	const fs::path firstFile = temporary.path() / "first.jpg";
@@ -19974,6 +20380,16 @@ int main(int argc, char** argv) {
 		TestDecodedPrefetchWorkClassAttribution, failures);
 	RunTest("display-prefetch-planner-worker-snapshots-and-cancellation",
 		TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation, failures);
+	RunTest("display-resolution-request-canonicalization",
+		TestDisplayResolutionRequestCanonicalization, failures);
+	RunTest("failed-display-request-resolution-recovery",
+		TestFailedDisplayRequestResolutionRecovery, failures);
+	RunTest("display-prefetch-uses-fitted-resolution",
+		TestDisplayPrefetchUsesFittedResolution, failures);
+	RunTest("current-display-pan-and-zoom-request-reuse",
+		TestCurrentDisplayPanAndZoomRequestReuse, failures);
+	RunTest("rotated-spread-partner-resolution-and-admission",
+		TestRotatedSpreadPartnerResolutionAndAdmission, failures);
 	RunTest("display-preparation-controller-generation-channel",
 		TestDisplayPreparationControllerOwnsGenerationTaggedCompletions, failures);
 	RunTest("viewport-invalidation-retains-current-active-spread-batch",

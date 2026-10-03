@@ -65,6 +65,14 @@ ViewportSnapshot Viewport::NavigationSnapshot() const {
 	return navigationState_;
 }
 
+ViewportSnapshot Viewport::PrefetchSnapshot() const {
+	ViewportSnapshot snapshot = prefetchFitState_;
+	snapshot.fitToWindow = true;
+	snapshot.zoom = 1.0;
+	snapshot.relativeZoom = 1.0;
+	return snapshot;
+}
+
 void Viewport::LoadScaleMode(std::string_view mode, bool manualZoomSet, double manualZoom) {
 	(void)manualZoomSet;
 	(void)manualZoom;
@@ -82,6 +90,7 @@ void Viewport::LoadScaleMode(std::string_view mode, bool manualZoomSet, double m
 	offsetX_ = 0.0;
 	offsetY_ = 0.0;
 	navigationState_ = Snapshot();
+	prefetchFitState_ = navigationState_;
 }
 
 ViewportSnapshot Viewport::Snapshot() const {
@@ -94,6 +103,7 @@ ViewportSnapshot Viewport::Snapshot() const {
 void Viewport::Restore(const ViewportSnapshot& snapshot, int imageWidth, int imageHeight,
 	int windowWidth, int windowHeight) {
 	const ViewportSnapshot navigationState = navigationState_;
+	const ViewportSnapshot prefetchFitState = prefetchFitState_;
 	UpdateFitRelativeZoomBase(imageWidth, imageHeight, windowWidth, windowHeight);
 	if (snapshot.fitToWindow) {
 		Fit(imageWidth, imageHeight, windowWidth, windowHeight,
@@ -105,6 +115,7 @@ void Viewport::Restore(const ViewportSnapshot& snapshot, int imageWidth, int ima
 		SetManualZoom(snapshot.zoom);
 	}
 	navigationState_ = navigationState;
+	prefetchFitState_ = prefetchFitState;
 }
 
 void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowHeight,
@@ -116,6 +127,7 @@ void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowH
 	offsetY_ = 0.0;
 	if (imageWidth <= 0 || imageHeight <= 0) {
 		navigationState_ = Snapshot();
+		prefetchFitState_ = navigationState_;
 		return;
 	}
 	UpdateFitRelativeZoomBase(imageWidth, imageHeight, windowWidth, windowHeight);
@@ -128,6 +140,7 @@ void Viewport::Fit(int imageWidth, int imageHeight, int windowWidth, int windowH
 		std::min(widthScale, heightScale);
 	zoom_ = ClampedZoom(noEnlarge ? std::min(1.0, windowScale) : windowScale);
 	navigationState_ = Snapshot();
+	prefetchFitState_ = navigationState_;
 }
 
 void Viewport::ActualSize() {

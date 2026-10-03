@@ -50,6 +50,11 @@ bool EstimateDisplayBytes(const DisplayImageRequest& request, std::size_t& bytes
 	const std::size_t pixels = width * height;
 	if (pixels > maximum / 4) return false;
 	bytes = pixels * 4;
+	if (request.includeSpectrum) {
+		const std::size_t spectrumBytes = sizeof(GrayscaleSpectrum);
+		if (bytes > maximum - spectrumBytes) return false;
+		bytes += spectrumBytes;
+	}
 	return true;
 }
 
@@ -398,6 +403,19 @@ bool operator!=(const DisplayImageCacheKey& left, const DisplayImageCacheKey& ri
 	return !(left == right);
 }
 
+bool CanReuseDisplayImageRepresentation(const DisplayImageCacheKey& requested,
+	const DisplayImageCacheKey& available) {
+	return requested.Valid() && available.Valid() &&
+		requested.source == available.source &&
+		requested.frameIndex == available.frameIndex &&
+		available.targetWidth >= requested.targetWidth &&
+		available.targetHeight >= requested.targetHeight &&
+		requested.rotationQuarterTurns == available.rotationQuarterTurns &&
+		requested.autoContrast == available.autoContrast &&
+		requested.includeSpectrum == available.includeSpectrum &&
+		EqualProcessingKeyValues(requested.processing, available.processing);
+}
+
 std::size_t DisplayImageCacheKeyHash::operator()(const DisplayImageCacheKey& key) const {
 	const auto combine = [](std::size_t seed, std::size_t value) {
 		return seed ^ (value + static_cast<std::size_t>(0x9e3779b9u) +
@@ -434,6 +452,11 @@ bool DisplayImageRequest::Valid() const {
 	return frame.width > 0 && frame.height > 0 && !frame.bgra.empty();
 }
 
+bool EstimateDisplayImageBytes(const DisplayImageRequest& request,
+	std::size_t& bytes) {
+	return EstimateDisplayBytes(request, bytes);
+}
+
 DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority,
@@ -454,9 +477,9 @@ DisplayImageRequest MakeDisplayImageRequest(const SourceDescriptor& source,
 	request.filename = source.LogicalPath();
 	request.decoded = decoded;
 	request.frameIndex = frameIndex;
+	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	request.targetWidth = targetWidth;
 	request.targetHeight = targetHeight;
-	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	request.autoContrast = autoContrast;
 	request.includeSpectrum = includeSpectrum;
 	request.processing = processing;
@@ -490,9 +513,9 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	request.filename = source.LogicalPath();
 	request.sourceWidth = sourceWidth;
 	request.sourceHeight = sourceHeight;
+	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	request.targetWidth = targetWidth;
 	request.targetHeight = targetHeight;
-	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	request.autoContrast = autoContrast;
 	request.includeSpectrum = includeSpectrum;
 	request.processing = processing;
@@ -510,18 +533,28 @@ std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image) {
 		(image.spectrum ? sizeof(*image.spectrum) : 0);
 }
 
-std::size_t DisplayPrefetchCount(std::size_t cacheBytes, int viewportWidth,
-	int viewportHeight, std::size_t fileCount) {
+DisplayImageTarget ClampDisplayImageTarget(int sourceWidth, int sourceHeight,
+	int targetWidth, int targetHeight, int rotationQuarterTurns) {
+	if (sourceWidth <= 0 || sourceHeight <= 0) return {targetWidth, targetHeight};
+	const bool swapsAxes = (NormalizeQuarterTurns(rotationQuarterTurns) & 1) != 0;
+	const int maximumWidth = swapsAxes ? sourceHeight : sourceWidth;
+	const int maximumHeight = swapsAxes ? sourceWidth : sourceHeight;
+	return {std::min(targetWidth, maximumWidth), std::min(targetHeight, maximumHeight)};
+}
+
+bool FailedDisplayRequestNeedsNewResolution(const DisplayImageRequest& request,
+	const std::string& failedRequestKey,
+	const DisplayImageTarget& requestedResolution) {
+	return !failedRequestKey.empty() && request.key == failedRequestKey &&
+		(request.targetWidth != requestedResolution.width ||
+			request.targetHeight != requestedResolution.height);
+}
+
+std::size_t DisplayPrefetchCandidateLimit(std::size_t cacheBytes,
+	std::size_t fileCount) {
 	constexpr std::size_t maximumSpeculativeFiles = 512;
-	if (cacheBytes == 0 || viewportWidth <= 0 || viewportHeight <= 0 || fileCount < 2) return 0;
-	const std::size_t width = static_cast<std::size_t>(viewportWidth);
-	const std::size_t height = static_cast<std::size_t>(viewportHeight);
-	if (width > std::numeric_limits<std::size_t>::max() / height ||
-		width * height > std::numeric_limits<std::size_t>::max() / 4) return 0;
-	const std::size_t textureBytes = width * height * 4;
-	const std::size_t textureSlots = cacheBytes / textureBytes;
-	if (textureSlots < 2) return 0;
-	return std::min({textureSlots - 1, fileCount - 1, maximumSpeculativeFiles});
+	if (cacheBytes == 0 || fileCount < 2) return 0;
+	return std::min(fileCount - 1, maximumSpeculativeFiles);
 }
 
 struct DisplayImageCache::Impl {

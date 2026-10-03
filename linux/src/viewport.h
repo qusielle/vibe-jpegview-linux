@@ -66,6 +66,9 @@ public:
 	void LoadScaleMode(std::string_view mode, bool manualZoomSet, double manualZoom);
 	ViewportSnapshot Snapshot() const;
 	ViewportSnapshot NavigationSnapshot() const;
+	// The fitted representation used to prepare speculative neighbors. It stays
+	// independent of the selected image's transient actual-size/manual zoom.
+	ViewportSnapshot PrefetchSnapshot() const;
 
 	void Restore(const ViewportSnapshot& snapshot, int imageWidth, int imageHeight,
 		int windowWidth, int windowHeight);
@@ -92,6 +95,7 @@ private:
 	bool noEnlarge_ = true;
 	bool fitRelativeZoomMode_ = false;
 	ViewportSnapshot navigationState_;
+	ViewportSnapshot prefetchFitState_;
 };
 
 // Applies a user viewport command against the supplied geometry. Zero image

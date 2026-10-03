@@ -173,15 +173,30 @@ should normally be added to one of these focused modules and covered by `tests/t
   Rotated spread partners are oriented on the worker before final slot-size resampling; unrotated
   image requests retain the same processing path. JPEG display requests use native reduced DCT
   decode with swapped target axes for quarter-turns before exact scaling, without requiring a
-  retained full-resolution source frame. Active display-work diagnostics use each in-flight request's
+  retained full-resolution source frame. Selected display requests clamp their preparation target to
+  the effective source dimensions before key lookup. The renderer destination remains viewport-sized,
+  so enlargement scales the source-resolution texture and pan changes only its position; neither needs
+  another prepared frame. A larger cached representation may serve a smaller request only when source,
+  frame, orientation, histogram, and effective processing keys match; the planner protects that
+  retained texture instead of queueing a duplicate fitted frame. Rotated double-page partners clamp
+  against the source dimensions after quarter-turn orientation, and spread admission estimates
+  canonical prepared requests. If a retained higher-resolution anchor makes the pair exceed the
+  shared budget, the viewer retries admission with the fitted anchor request before selecting the
+  single-page fallback. Neighbor
+  planning uses a separate fitted snapshot, preserving normal fitted frames while the selected image
+  is in actual-size, manual, or fit-relative zoom. The planner caps its
+  source-probe window at 512 candidates, sums each fitted request's estimated frame bytes, and stops
+  admission at the shared cache capacity after reserving the current source-resolution image. Window
+  and thumbnail-panel resizing update geometry immediately but hold neighbor rebuilding until the
+  existing interaction quiet period expires. Active display-work diagnostics use each in-flight request's
   current priority and effective work class, so a promoted neighbor keeps its active-spread upload
   eligibility across an empty prefetch cancellation. Explicit display-work cancellation retires the
   active background class as well as its desired-key membership, so empty prefetch preserves only
   still-desired spread requests and cannot revive a retired partner. Decoded-image promotions
   likewise use the effective class for cache admission; header-only JPEG dimension requests use
   the decoded worker without retaining full-resolution pixels. The viewer captures a bounded
-  neighbor window with catalog, descriptor, current-index, direction, viewport, and per-file
-  processing snapshots. `display_prefetch_planner` probes missing JPEG dimensions and builds display
+  neighbor window with catalog, descriptor, current-index, direction, fitted-prefetch viewport, and
+  per-file processing snapshots. `display_prefetch_planner` probes missing JPEG dimensions and builds
   requests on a worker; the SDL owner applies results only when those captured revisions and viewport
   still match. Pan and replacement cancel obsolete planner work. Viewport invalidation retains the
   publication batch for a still-current active-spread dimensions read, while source or mode
@@ -269,8 +284,9 @@ should normally be added to one of these focused modules and covered by `tests/t
   read by changing the source modification time.
 - `viewport`: fit/fill/manual zoom modes, optional fit-relative scale base and
   preset/step/snap calculations, source-pixel plus fit-relative zoom readout formatting, relative
-  navigation snapshots, pan state, destination geometry, and panning bounds that keep the viewport
-  inside the image. Fit-relative calculations follow the `ZoomMath.cpp` model from
+  navigation snapshots, a fitted prefetch snapshot independent of the selected image's transient zoom,
+  pan state, destination geometry, and panning bounds that keep the viewport inside the image.
+  Fit-relative calculations follow the `ZoomMath.cpp` model from
   [andrewvladved/jpegview](https://github.com/andrewvladved/jpegview/blob/9dcd25766585be5fb65ca6a26c0a6beb46346112/src/JPEGView/ZoomMath.cpp);
   the mode remains disabled by default.
 - `zoom_navigator_model`: responsive overview geometry, visible-image mapping, pointer conversion,

@@ -40,8 +40,12 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 	const auto shouldContinue = [&] {
 		return !canceled || !canceled->load(std::memory_order_relaxed);
 	};
+	std::size_t estimatedPreparedBytes = 0;
 	for (std::size_t position = 0; position < count && shouldContinue(); ++position) {
 		const DisplayPrefetchCandidate& candidate = request.neighbors[position];
+		const bool admissionBudgetAvailable =
+			request.maximumPreparedBytes - estimatedPreparedBytes >= 4;
+		if (!admissionBudgetAvailable && candidate.priority > 2) continue;
 		if (!candidate.jpeg) continue;
 		PerfContextScope perfContext(candidate.priority <= 2 ?
 			PerfWorkClass::NearestNavigationNeighbor :
@@ -83,22 +87,34 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 			sourceWidth, sourceHeight});
 
 		Viewport viewport;
-		viewport.Restore(request.viewport, sourceWidth, sourceHeight,
+		ViewportSnapshot fittedViewport = request.viewport;
+		fittedViewport.fitToWindow = true;
+		fittedViewport.zoom = 1.0;
+		fittedViewport.relativeZoom = 1.0;
+		viewport.Restore(fittedViewport, sourceWidth, sourceHeight,
 			request.imageAreaWidth, request.imageAreaHeight);
 		const ViewportRect target = viewport.Destination(sourceWidth, sourceHeight,
 			request.imageAreaWidth, request.imageAreaHeight);
+		const DisplayImageTarget resolution = ClampDisplayImageTarget(sourceWidth,
+			sourceHeight, target.width, target.height);
 		DisplayImageRequest displayRequest = MakeJpegDisplayImageRequest(
-			candidate.source, sourceWidth, sourceHeight, target.width, target.height,
+			candidate.source, sourceWidth, sourceHeight,
+			resolution.width, resolution.height,
 			candidate.autoContrast, candidate.priority, candidate.processing);
 		displayRequest.workClass = candidate.priority <= 2 ?
 			PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
 		if (!displayRequest.Valid()) continue;
-		if (candidate.priority <= 2) {
-			result.protectedTextureKeys.push_back(displayRequest.key);
-			result.protectedTextureCacheKeys.push_back(displayRequest.cacheKey);
+		const RetainedDisplayTexture* retainedTexture =
+			FindReusableRetainedDisplayTexture(displayRequest.cacheKey,
+				request.retainedTextures);
+		if (retainedTexture != nullptr) {
+			if (candidate.priority <= 2) {
+				result.protectedTextureKeys.push_back(retainedTexture->key);
+				result.protectedTextureCacheKeys.push_back(retainedTexture->cacheKey);
+			}
+			continue;
 		}
-		if (request.retainedTextureKeys.find(displayRequest.key) !=
-			request.retainedTextureKeys.end()) continue;
+		if (!admissionBudgetAvailable) continue;
 
 		if (request.doublePageMode.enabled &&
 			candidate.index == request.currentIndex + 1 &&
@@ -109,12 +125,32 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 				request.doublePageMode).has_value()) {
 			continue;
 		}
+		std::size_t displayBytes = 0;
+		if (!EstimateDisplayImageBytes(displayRequest, displayBytes) ||
+			displayBytes > request.maximumPreparedBytes -
+				std::min(request.maximumPreparedBytes, estimatedPreparedBytes)) continue;
+		estimatedPreparedBytes += displayBytes;
+		if (candidate.priority <= 2) {
+			result.protectedTextureKeys.push_back(displayRequest.key);
+			result.protectedTextureCacheKeys.push_back(displayRequest.cacheKey);
+		}
 		result.requests.push_back(std::move(displayRequest));
 	}
 	return result;
 }
 
 } // namespace
+
+const RetainedDisplayTexture* FindReusableRetainedDisplayTexture(
+	const DisplayImageCacheKey& requested,
+	const std::vector<RetainedDisplayTexture>& retainedTextures) {
+	for (const RetainedDisplayTexture& retained : retainedTextures) {
+		if (CanReuseDisplayImageRepresentation(requested, retained.cacheKey)) {
+			return &retained;
+		}
+	}
+	return nullptr;
+}
 
 bool SameViewportSnapshot(const ViewportSnapshot& left,
 	const ViewportSnapshot& right) {

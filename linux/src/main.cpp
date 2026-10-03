@@ -554,6 +554,7 @@ private:
 		SDL_Texture* texture = nullptr;
 		std::size_t bytes = 0;
 		jpegview_linux::SourceKey source;
+		jpegview_linux::DisplayImageCacheKey cacheKey;
 		int width = 0;
 		int height = 0;
 		bool hasTransparency = false;
@@ -612,7 +613,7 @@ private:
 		std::unordered_map<std::string, std::pair<jpegview_linux::SourceKey,
 			jpegview_linux::DecodedImageCache::ImagePtr>> decodedImages;
 		std::unordered_set<std::string> failedDecodeFilenames;
-		std::unordered_set<std::string> retainedTextureKeys;
+		std::vector<jpegview_linux::RetainedDisplayTexture> retainedTextures;
 		std::vector<std::string> protectedTextureKeys;
 		std::vector<jpegview_linux::DisplayImageCacheKey> protectedTextureCacheKeys;
 		std::unordered_map<std::string, std::size_t> priorityByFilename;
@@ -1391,7 +1392,7 @@ private:
 				fileList_.MutationRevision(),
 				fileList_.DescriptorRevision(), displayPreparationController_.ViewportRevision(),
 				fileList_.CurrentIndex(), pendingPrefetchDirection_,
-				viewport_.NavigationSnapshot(), imageArea.w, imageArea.h) ||
+				viewport_.PrefetchSnapshot(), imageArea.w, imageArea.h) ||
 				CurrentInteractionWorkPlan().cancelQueuedSpeculation) continue;
 			for (const jpegview_linux::DisplayPrefetchPlannedDimensions& dimensions :
 				result.dimensions) {
@@ -1535,10 +1536,13 @@ private:
 		const DoublePagePartnerSpec& spec, const jpegview_linux::PageDimensions& nextPage) {
 		const fs::path& filename = spec.filename;
 		const jpegview_linux::SourceDescriptor source = SourceDescriptorForPath(filename);
+		const jpegview_linux::DisplayImageTarget resolution =
+			jpegview_linux::ClampDisplayImageTarget(nextPage.width, nextPage.height,
+				spec.targetWidth, spec.targetHeight, spec.rotationQuarterTurns);
 		if (jpegview_linux::IsJpegPath(filename)) {
 			jpegview_linux::DisplayImageRequest request =
 				jpegview_linux::MakeJpegDisplayImageRequest(source, nextPage.width,
-				nextPage.height, spec.targetWidth, spec.targetHeight,
+				nextPage.height, resolution.width, resolution.height,
 				spec.autoContrast, 1, spec.processing, spec.rotationQuarterTurns);
 			request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
 			return request;
@@ -1553,8 +1557,8 @@ private:
 				cachedRequest.frameIndex == 0 &&
 				cachedRequest.sourceWidth == nextPage.width &&
 				cachedRequest.sourceHeight == nextPage.height &&
-				cachedRequest.targetWidth == spec.targetWidth &&
-				cachedRequest.targetHeight == spec.targetHeight &&
+				cachedRequest.targetWidth == resolution.width &&
+				cachedRequest.targetHeight == resolution.height &&
 				cachedRequest.autoContrast == spec.autoContrast &&
 				jpegview_linux::EqualImageProcessing(cachedRequest.processing,
 					spec.processing) &&
@@ -1577,7 +1581,7 @@ private:
 		if (!decoded || decoded->frames.empty()) return std::nullopt;
 		jpegview_linux::DisplayImageRequest request =
 			jpegview_linux::MakeDisplayImageRequest(source, decoded, 0,
-			spec.targetWidth, spec.targetHeight, spec.autoContrast, 1, spec.processing,
+			resolution.width, resolution.height, spec.autoContrast, 1, spec.processing,
 			spec.rotationQuarterTurns);
 		request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
 		return request;
@@ -1757,32 +1761,93 @@ private:
 			anchorRequest = *anchorRequestPointer;
 			anchorKey = anchorRequest->key;
 		}
-		const std::size_t anchorPixels = static_cast<std::size_t>(anchorSize.first) *
-			static_cast<std::size_t>(anchorSize.second);
-		const std::size_t partnerPixels =
-			static_cast<std::size_t>(spec->targetWidth) *
-			static_cast<std::size_t>(spec->targetHeight);
 		std::size_t anchorTextureBytes = std::numeric_limits<std::size_t>::max();
 		std::size_t partnerTextureBytes = std::numeric_limits<std::size_t>::max();
-		if (anchorPixels <= std::numeric_limits<std::size_t>::max() / 4 &&
-			partnerPixels <= std::numeric_limits<std::size_t>::max() / 4) {
-			anchorTextureBytes = anchorPixels * 4;
-			partnerTextureBytes = partnerPixels * 4;
+		if (anchorRequest.has_value()) {
+			if (!jpegview_linux::EstimateDisplayImageBytes(*anchorRequest,
+				anchorTextureBytes)) {
+				anchorTextureBytes = std::numeric_limits<std::size_t>::max();
+			}
+		} else if (image_.width > 0 && image_.height > 0) {
+			const std::size_t width = static_cast<std::size_t>(image_.width);
+			const std::size_t height = static_cast<std::size_t>(image_.height);
+			const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+			if (width <= maximum / height && width * height <= maximum / 4) {
+				anchorTextureBytes = width * height * 4;
+			}
+		}
+		if (!jpegview_linux::EstimateDisplayImageBytes(*partnerRequest,
+			partnerTextureBytes)) {
+			partnerTextureBytes = std::numeric_limits<std::size_t>::max();
 		}
 
 		const std::string oldAnchorKey = presentationController_.AnchorTextureKey();
 		const std::string oldPartnerKey = presentationController_.PartnerTextureKey();
-		const jpegview_linux::SpreadRequestDecision requestDecision =
+		const jpegview_linux::SpreadRequestDecision initialRequestDecision =
 			presentationController_.PlanSpreadRequests({true,
 				anchorTextureBytes, partnerTextureBytes, cacheBudget_->Capacity(),
 				presentationController_.SpreadFailed(currentIndex,
 					anchorKey, partnerRequest->key)});
-		if (requestDecision.action ==
+		jpegview_linux::SpreadRequestDecision admittedRequestDecision =
+			initialRequestDecision;
+		if (admittedRequestDecision.action ==
+			jpegview_linux::SpreadRequestAction::ReturnToSinglePage &&
+			anchorRequest.has_value()) {
+			const jpegview_linux::DisplayImageTarget fittedResolution =
+				jpegview_linux::ClampDisplayImageTarget(anchorRequest->sourceWidth,
+					anchorRequest->sourceHeight, anchorSize.first, anchorSize.second,
+					anchorRequest->rotationQuarterTurns);
+			if (fittedResolution.width < anchorRequest->targetWidth ||
+				fittedResolution.height < anchorRequest->targetHeight) {
+				jpegview_linux::DisplayImageRequest fittedAnchorRequest;
+				if (anchorRequest->decoded) {
+					fittedAnchorRequest = jpegview_linux::MakeDisplayImageRequest(
+						anchorRequest->source, anchorRequest->decoded,
+						anchorRequest->frameIndex, fittedResolution.width,
+						fittedResolution.height, anchorRequest->autoContrast,
+						anchorRequest->priority, anchorRequest->processing,
+						anchorRequest->rotationQuarterTurns,
+						anchorRequest->includeSpectrum);
+				} else {
+					fittedAnchorRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+						anchorRequest->source, anchorRequest->sourceWidth,
+						anchorRequest->sourceHeight, fittedResolution.width,
+						fittedResolution.height, anchorRequest->autoContrast,
+						anchorRequest->priority, anchorRequest->processing,
+						anchorRequest->rotationQuarterTurns,
+						anchorRequest->includeSpectrum);
+				}
+				fittedAnchorRequest.workClass = anchorRequest->workClass;
+				fittedAnchorRequest.selectionGeneration =
+					anchorRequest->selectionGeneration;
+				std::size_t fittedAnchorTextureBytes =
+					std::numeric_limits<std::size_t>::max();
+				if (fittedAnchorRequest.Valid() &&
+					fittedAnchorRequest.key != anchorRequest->key &&
+					jpegview_linux::EstimateDisplayImageBytes(fittedAnchorRequest,
+						fittedAnchorTextureBytes)) {
+					const jpegview_linux::SpreadRequestDecision fittedDecision =
+						presentationController_.PlanSpreadRequests({true,
+							fittedAnchorTextureBytes, partnerTextureBytes,
+							cacheBudget_->Capacity(),
+							presentationController_.SpreadFailed(currentIndex,
+								fittedAnchorRequest.key, partnerRequest->key)});
+					if (fittedDecision.action !=
+						jpegview_linux::SpreadRequestAction::ReturnToSinglePage) {
+						anchorTextureBytes = fittedAnchorTextureBytes;
+						anchorKey = fittedAnchorRequest.key;
+						anchorRequest = std::move(fittedAnchorRequest);
+						admittedRequestDecision = fittedDecision;
+					}
+				}
+			}
+		}
+		if (admittedRequestDecision.action ==
 			jpegview_linux::SpreadRequestAction::ReturnToSinglePage) {
-			useSinglePage(requestDecision.preserveDeferredDisplay);
+			useSinglePage(admittedRequestDecision.preserveDeferredDisplay);
 			return;
 		}
-		if (requestDecision.action ==
+		if (admittedRequestDecision.action ==
 			jpegview_linux::SpreadRequestAction::KeepFailedSpreadDeferred) {
 			CancelPendingDoublePageRequests();
 			deferredCurrentDisplayPreparation_ = true;
@@ -2430,7 +2495,7 @@ private:
 		auto batch = std::make_shared<DisplayPrefetchBatch>();
 		batch->generation = displayPreparationController_.BeginRequestBatch();
 		batch->completionChannel = displayPreparationController_.RequestChannel();
-		batch->context.viewport = viewport_.NavigationSnapshot();
+		batch->context.viewport = viewport_.PrefetchSnapshot();
 		batch->context.imageAreaWidth = imageArea.w;
 		batch->context.imageAreaHeight = imageArea.h;
 		batch->context.currentIndex = fileList_.CurrentIndex();
@@ -2450,9 +2515,10 @@ private:
 		plannerRequest.doublePageMode = batch->context.doublePageMode;
 		plannerRequest.currentPageDimensions = batch->context.currentPageDimensions;
 		for (const auto& retained : displayTextureCache_) {
-			batch->retainedTextureKeys.insert(retained.first);
+			batch->retainedTextures.push_back({retained.first,
+				retained.second.cacheKey});
 		}
-		plannerRequest.retainedTextureKeys = batch->retainedTextureKeys;
+		plannerRequest.retainedTextures = batch->retainedTextures;
 		ClearDisplayTextureProtections();
 		if (currentDisplayRequest_.has_value()) {
 			SetDisplayTextureProtection(currentDisplayRequest_->key,
@@ -2466,8 +2532,29 @@ private:
 			SetDisplayTextureProtection(presentationController_.PartnerTextureKey(),
 				jpegview_linux::CacheProtectionTier::Active);
 		}
-		const std::size_t maximumNeighborCount = jpegview_linux::DisplayPrefetchCount(
-			cacheBudget_->Capacity(), imageArea.w, imageArea.h, fileList_.Files().size());
+		const std::size_t cacheCapacity = cacheBudget_->Capacity();
+		plannerRequest.maximumPreparedBytes = cacheCapacity;
+		if (image_.width > 0 && image_.height > 0) {
+			const std::size_t width = static_cast<std::size_t>(image_.width);
+			const std::size_t height = static_cast<std::size_t>(image_.height);
+			const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+			if (width <= maximum / height && width * height <= maximum / 4) {
+				std::size_t currentSourceBytes = width * height * 4;
+				if (showHistogram_ && infoVisible_) {
+					const std::size_t spectrumBytes =
+						sizeof(jpegview_linux::GrayscaleSpectrum);
+					currentSourceBytes = currentSourceBytes <= maximum - spectrumBytes ?
+						currentSourceBytes + spectrumBytes : maximum;
+				}
+				plannerRequest.maximumPreparedBytes = currentSourceBytes >= cacheCapacity ?
+					0 : cacheCapacity - currentSourceBytes;
+			} else {
+				plannerRequest.maximumPreparedBytes = 0;
+			}
+		}
+		const std::size_t maximumNeighborCount =
+			jpegview_linux::DisplayPrefetchCandidateLimit(
+				cacheCapacity, fileList_.Files().size());
 		plannerRequest.maximumCount = maximumNeighborCount;
 		const std::vector<std::size_t> prefetchOrder = jpegview_linux::ImagePrefetchOrder(
 			fileList_.Files().size(), fileList_.CurrentIndex(), preferredDirection,
@@ -2540,6 +2627,9 @@ private:
 				const jpegview_linux::ViewportRect target = viewport.Destination(
 					frame.width, frame.height, batch->context.imageAreaWidth,
 					batch->context.imageAreaHeight);
+				const jpegview_linux::DisplayImageTarget resolution =
+					jpegview_linux::ClampDisplayImageTarget(frame.width, frame.height,
+						target.width, target.height);
 				const auto priority = batch->priorityByFilename.find(filename.string());
 				const auto processing = batch->processingByFilename.find(filename.string());
 				const auto autoContrast = batch->autoContrastByFilename.find(filename.string());
@@ -2550,7 +2640,7 @@ private:
 					source == batch->sourceByFilename.end()) return;
 				jpegview_linux::DisplayImageRequest request =
 					jpegview_linux::MakeDisplayImageRequest(source->second, decoded, 0,
-						target.width, target.height, autoContrast->second,
+						resolution.width, resolution.height, autoContrast->second,
 						priority->second, processing->second);
 				request.workClass = priority->second <= 2 ?
 					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor :
@@ -2568,17 +2658,24 @@ private:
 					}
 				}
 				if (!request.Valid()) return;
-				const bool retainedTexture = batch->retainedTextureKeys.find(request.key) !=
-					batch->retainedTextureKeys.end();
+				const jpegview_linux::RetainedDisplayTexture* retainedTexture =
+					jpegview_linux::FindReusableRetainedDisplayTexture(
+						request.cacheKey, batch->retainedTextures);
 				batch->gate.Publish([&] {
 					{
 						std::lock_guard<std::mutex> lock(batch->mutex);
 						if (priority->second <= 2) {
-							batch->protectedTextureCacheKeys.push_back(request.cacheKey);
-							batch->protectedTextureKeys.push_back(request.key);
+							if (retainedTexture != nullptr) {
+								batch->protectedTextureCacheKeys.push_back(
+									retainedTexture->cacheKey);
+								batch->protectedTextureKeys.push_back(retainedTexture->key);
+							} else {
+								batch->protectedTextureCacheKeys.push_back(request.cacheKey);
+								batch->protectedTextureKeys.push_back(request.key);
+							}
 						}
 					}
-					if (retainedTexture) return;
+					if (retainedTexture != nullptr) return;
 					// A late neighbor decode must not replace/cancel the active spread's
 					// foreground pair requests in the display cache.
 					if (batch->completionChannel) {
@@ -2946,7 +3043,8 @@ private:
 		list.push_back(prepared->key);
 		displayTextureCache_.emplace(prepared->key,
 			DisplayTextureCacheEntry{texture, bytes, prepared->source.Key(),
-				prepared->width, prepared->height, prepared->hasTransparency,
+				prepared->cacheKey, prepared->width, prepared->height,
+				prepared->hasTransparency,
 				prepared->spectrum, activeWorking, protection,
 				std::move(reservation),
 				std::prev(list.end())});
@@ -3206,28 +3304,74 @@ private:
 		}
 		const jpegview_linux::SourceDescriptor source =
 			SourceDescriptorForPath(fileList_.Current());
-		if (!currentDisplayRequest_.has_value() ||
-			currentDisplayRequest_->source.Key() != source.Key() ||
-			currentDisplayRequest_->decoded != currentDecoded_ ||
-			currentDisplayRequest_->frameIndex != currentAnimationFrame_ ||
-			currentDisplayRequest_->targetWidth != width ||
-			currentDisplayRequest_->targetHeight != height ||
-			currentDisplayRequest_->autoContrast != autoContrastEnabled_ ||
-			currentDisplayRequest_->includeSpectrum !=
-				(showHistogram_ && infoVisible_) ||
-			!jpegview_linux::EqualImageProcessing(currentDisplayRequest_->processing,
-				imageProcessing_)) {
+		const int sourceWidth = image_.originalWidth > 0 ?
+			image_.originalWidth : image_.width;
+		const int sourceHeight = image_.originalHeight > 0 ?
+			image_.originalHeight : image_.height;
+		const jpegview_linux::DisplayImageTarget resolution =
+			jpegview_linux::ClampDisplayImageTarget(sourceWidth, sourceHeight,
+				width, height);
+		const bool failedRequestNeedsNewResolution = currentDisplayRequest_.has_value() &&
+			jpegview_linux::FailedDisplayRequestNeedsNewResolution(
+				*currentDisplayRequest_, failedCurrentDisplayKey_, resolution);
+		const bool currentRepresentationSufficient = currentDisplayRequest_.has_value() &&
+			!failedRequestNeedsNewResolution &&
+			currentDisplayRequest_->source.Key() == source.Key() &&
+			currentDisplayRequest_->decoded == currentDecoded_ &&
+			currentDisplayRequest_->frameIndex == currentAnimationFrame_ &&
+			currentDisplayRequest_->targetWidth >= resolution.width &&
+			currentDisplayRequest_->targetHeight >= resolution.height &&
+			currentDisplayRequest_->rotationQuarterTurns == 0 &&
+			currentDisplayRequest_->autoContrast == autoContrastEnabled_ &&
+			currentDisplayRequest_->includeSpectrum ==
+				(showHistogram_ && infoVisible_) &&
+			jpegview_linux::EqualImageProcessing(currentDisplayRequest_->processing,
+				imageProcessing_);
+		if (!currentRepresentationSufficient) {
 			failedCurrentDisplayKey_.clear();
+			jpegview_linux::DisplayImageRequest requested;
 			if (currentDecoded_) {
-				currentDisplayRequest_ = jpegview_linux::MakeDisplayImageRequest(
-					source, currentDecoded_, currentAnimationFrame_, width, height,
+				requested = jpegview_linux::MakeDisplayImageRequest(
+					source, currentDecoded_, currentAnimationFrame_,
+					resolution.width, resolution.height,
 					autoContrastEnabled_, 0, imageProcessing_, 0,
 					showHistogram_ && infoVisible_);
 			} else {
-				currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
-					source, image_.originalWidth, image_.originalHeight, width, height,
+				requested = jpegview_linux::MakeJpegDisplayImageRequest(
+					source, image_.originalWidth, image_.originalHeight,
+					resolution.width, resolution.height,
 					autoContrastEnabled_, 0, imageProcessing_, 0,
 					showHistogram_ && infoVisible_);
+			}
+			currentDisplayRequest_ = std::move(requested);
+			std::size_t bestBytes = std::numeric_limits<std::size_t>::max();
+			const DisplayTextureCacheEntry* bestRepresentation = nullptr;
+			for (const auto& cached : displayTextureCache_) {
+				if (!jpegview_linux::CanReuseDisplayImageRepresentation(
+					currentDisplayRequest_->cacheKey, cached.second.cacheKey) ||
+					cached.second.bytes >= bestBytes) continue;
+				bestBytes = cached.second.bytes;
+				bestRepresentation = &cached.second;
+			}
+			if (bestRepresentation != nullptr &&
+				bestRepresentation->cacheKey != currentDisplayRequest_->cacheKey) {
+				if (currentDecoded_) {
+					currentDisplayRequest_ = jpegview_linux::MakeDisplayImageRequest(
+						source, currentDecoded_, currentAnimationFrame_,
+						bestRepresentation->cacheKey.targetWidth,
+						bestRepresentation->cacheKey.targetHeight,
+						autoContrastEnabled_, 0, imageProcessing_,
+						bestRepresentation->cacheKey.rotationQuarterTurns,
+						showHistogram_ && infoVisible_);
+				} else {
+					currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
+						source, image_.originalWidth, image_.originalHeight,
+						bestRepresentation->cacheKey.targetWidth,
+						bestRepresentation->cacheKey.targetHeight,
+						autoContrastEnabled_, 0, imageProcessing_,
+						bestRepresentation->cacheKey.rotationQuarterTurns,
+						showHistogram_ && infoVisible_);
+				}
 			}
 			currentDisplayRequest_->workClass =
 				jpegview_linux::PerfWorkClass::ActiveImageSpread;
