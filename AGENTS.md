@@ -96,6 +96,10 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   structured failures and continue servicing valid later work.
 - Pending selections remain provisional: only a successful display commit may claim loaded-image
   history, and saved state must still belong to the selected committed path.
+- Restore a per-image fit/zoom/actual-size viewport snapshot only when the user explicitly opens
+  that image from Recents. Ordinary image navigation uses the current navigation mode and scale even
+  when the destination has an older saved Recents snapshot; keep this viewport rule separate from
+  the double-page and manga-mode restoration policy.
 - During asynchronous transitions, track the identity being selected separately from the last
   successfully committed owner; cancellation or reversal must resolve state for the new selection
   without reusing transient state belonging to a canceled selection.

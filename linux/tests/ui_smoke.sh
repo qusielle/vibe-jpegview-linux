@@ -1493,12 +1493,15 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
 	stop_viewer
 
-	# Cold JPEG dimensions arrive after the initial load. Restoring a recent
-	# manual zoom must use the snapshot selected by that initial load.
+	# Cold JPEG dimensions arrive after the initial load. Ordinary navigation
+	# keeps the current Actual Size mode despite a saved Recents zoom; an explicit
+	# open from Recents restores that saved mode when the JPEG header completes.
 	manual_zoom_image="$temporary/cold-jpeg-manual/01-manual.jpg"
+	manual_zoom_before="$temporary/cold-jpeg-manual/00-before.jpg"
 	mkdir -p "$(dirname -- "$manual_zoom_image")"
 	convert -size 400x240 xc:red -fill blue -draw 'rectangle 200,0 399,239' \
 		-quality 100 "$manual_zoom_image"
+	convert -size 400x240 xc:green -quality 100 "$manual_zoom_before"
 	manual_zoom_path_hex=$(printf '%s' "$manual_zoom_image" | od -An -tx1 | tr -d ' \n')
 	manual_state="$temporary/cold-jpeg-manual-state"
 	mkdir -p "$manual_state/jpegview-linux"
@@ -1507,9 +1510,13 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		printf 'R %s\n' "$manual_zoom_path_hex"
 		printf 'V %s 0 0 0 2 1\n' "$manual_zoom_path_hex"
 	} > "$manual_state/jpegview-linux/recent-files.db"
+	manual_config="$temporary/cold-jpeg-manual-config"
+	mkdir -p "$manual_config/jpegview-linux"
+	printf 'scale_mode=manual\ndouble_page_mode_enabled=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$manual_config/jpegview-linux/settings.conf"
 	DISPLAY=":$display_number" HOME="$temporary/cold-jpeg-manual-home" \
-		XDG_CONFIG_HOME="$temporary/cold-jpeg-manual-config" XDG_STATE_HOME="$manual_state" \
-		"$BINARY" "$manual_zoom_image" >"$temporary/cold-jpeg-manual.log" 2>&1 &
+		XDG_CONFIG_HOME="$manual_config" XDG_STATE_HOME="$manual_state" \
+		"$BINARY" "$manual_zoom_before" >"$temporary/cold-jpeg-manual.log" 2>&1 &
 	viewer_pid=$!
 	manual_zoom_window_id=''
 	manual_zoom_title=''
@@ -1531,12 +1538,91 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		sleep 0.05
 	done
 	if [ -z "$manual_zoom_window_id" ]; then
-		echo "UI smoke test: cold JPEG did not complete its dimension continuation ($manual_zoom_title)" >&2
+		echo "UI smoke test: Actual Size baseline image did not load ($manual_zoom_title)" >&2
 		cat "$temporary/cold-jpeg-manual.log" >&2
 		exit 1
 	fi
 	window_id=$manual_zoom_window_id
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Right
+	assert_title_prefix "01-manual.jpg (400x240" \
+		"ordinary navigation did not load the saved Recents viewport fixture"
+	if [ "$visual_assertions" -eq 1 ]; then
+		ordinary_zoom_rendered=0
+		ordinary_left_pixel=0
+		ordinary_right_pixel=0
+		for _ in $(seq 1 40); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/cold-jpeg-manual-ordinary.png"
+			ordinary_width=$(identify -format '%w' "$temporary/cold-jpeg-manual-ordinary.png")
+			ordinary_height=$(identify -format '%h' "$temporary/cold-jpeg-manual-ordinary.png")
+			ordinary_sample_y=$((ordinary_height / 2))
+			ordinary_left_x=$((ordinary_width / 2 - 230))
+			ordinary_right_x=$((ordinary_width / 2 + 230))
+			ordinary_left_pixel=$(convert "$temporary/cold-jpeg-manual-ordinary.png" -format \
+				"%[fx:p{$ordinary_left_x,$ordinary_sample_y}.r>0.75&&p{$ordinary_left_x,$ordinary_sample_y}.b<0.25]" info:)
+			ordinary_right_pixel=$(convert "$temporary/cold-jpeg-manual-ordinary.png" -format \
+				"%[fx:p{$ordinary_right_x,$ordinary_sample_y}.b>0.75&&p{$ordinary_right_x,$ordinary_sample_y}.r<0.25]" info:)
+			if [ "$ordinary_left_pixel" = 0 ] && [ "$ordinary_right_pixel" = 0 ]; then
+				ordinary_zoom_rendered=1
+				break
+			fi
+			sleep 0.05
+		done
+		if [ "$ordinary_zoom_rendered" -ne 1 ]; then
+			echo "UI smoke test: ordinary navigation applied the image's saved 2x Recents viewport instead of current Actual Size ($ordinary_left_pixel/$ordinary_right_pixel)" >&2
+			cat "$temporary/cold-jpeg-manual.log" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+	# The first process correctly saved the ordinary Actual Size view when it
+	# closed. Restore a distinct 2x recent snapshot for the explicit-open case.
+	{
+		printf '# JPEGView Linux recent files, version 3\n'
+		printf 'R %s\n' "$manual_zoom_path_hex"
+		printf 'V %s 0 0 0 2 1\n' "$manual_zoom_path_hex"
+	} > "$manual_state/jpegview-linux/recent-files.db"
+	manual_zoom_outside="$temporary/cold-jpeg-manual-outside/00-outside.jpg"
+	mkdir -p "$(dirname -- "$manual_zoom_outside")"
+	convert -size 400x240 xc:green -quality 100 "$manual_zoom_outside"
+	DISPLAY=":$display_number" HOME="$temporary/cold-jpeg-manual-home" \
+		XDG_CONFIG_HOME="$manual_config" XDG_STATE_HOME="$manual_state" \
+		"$BINARY" "$manual_zoom_outside" >"$temporary/cold-jpeg-manual-recent.log" 2>&1 &
+	viewer_pid=$!
+	manual_zoom_window_id=''
+	manual_zoom_title=''
+	for _ in $(seq 1 100); do
+		for candidate_window in $(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null || true); do
+			candidate_title=$(DISPLAY=":$display_number" xdotool getwindowname \
+				"$candidate_window" 2>/dev/null || true)
+			case "$candidate_title" in
+				*"00-outside.jpg (400x240"*)
+					manual_zoom_window_id=$candidate_window
+					manual_zoom_title=$candidate_title
+					break
+				;;
+			esac
+		done
+		[ -n "$manual_zoom_window_id" ] && break
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ -z "$manual_zoom_window_id" ]; then
+		echo "UI smoke test: separate image for explicit Recents restoration did not load ($manual_zoom_title)" >&2
+		cat "$temporary/cold-jpeg-manual-recent.log" >&2
+		exit 1
+	fi
+	window_id=$manual_zoom_window_id
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+o
+	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+Tab
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Home
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Down
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+	assert_title_prefix "01-manual.jpg (400x240" \
+		"Recents did not explicitly reopen the saved cold JPEG viewport"
 	if [ "$visual_assertions" -eq 1 ]; then
 		manual_zoom_rendered=0
 		manual_left_pixel=0
@@ -1564,7 +1650,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 				"$window_id" 2>/dev/null || true)
 			case "$manual_zoom_final_title" in
 				*"01-manual.jpg (400x240"*)
-					echo "UI smoke test: loaded cold JPEG did not render its saved 2x manual zoom ($manual_left_pixel/$manual_right_pixel; $manual_zoom_final_title)" >&2
+					echo "UI smoke test: explicit Recents open did not render its saved 2x manual zoom after cold JPEG dimensions arrived ($manual_left_pixel/$manual_right_pixel; $manual_zoom_final_title)" >&2
 				;;
 			*Loading*)
 				echo "UI smoke test: cold JPEG remained in its loading state past the bounded render deadline ($manual_zoom_final_title)" >&2
@@ -1847,7 +1933,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	fi
 
 	# Reverse to the committed owner while another image's JPEG header is
-	# blocked. The stale read must drain without carrying its 3x view into A.
+	# blocked. Startup uses the configured Fit mode despite A's saved Recents 2x
+	# view, and the stale read must drain without carrying its 3x view into A.
 	owner_return_directory="$temporary/cold-jpeg-owner-return"
 	mkdir -p "$owner_return_directory"
 	owner_return_image="$owner_return_directory/01-committed.jpg"
@@ -1859,6 +1946,10 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	owner_pending_hex=$(printf '%s' "$owner_pending_image" | od -An -tx1 | tr -d ' \n')
 	owner_return_state="$temporary/cold-jpeg-owner-return-state"
 	mkdir -p "$owner_return_state/jpegview-linux"
+	owner_return_config="$temporary/owner-return-config"
+	mkdir -p "$owner_return_config/jpegview-linux"
+	printf 'scale_mode=fit\ndouble_page_mode_enabled=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$owner_return_config/jpegview-linux/settings.conf"
 	{
 		printf '# JPEGView Linux recent files, version 3\n'
 		printf 'R %s\n' "$owner_return_hex"
@@ -1869,7 +1960,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	owner_header_release="$temporary/owner-header.release"
 	owner_header_active="$temporary/owner-header.active"
 	DISPLAY=":$display_number" HOME="$temporary/owner-return-home" \
-		XDG_CONFIG_HOME="$temporary/owner-return-config" \
+		XDG_CONFIG_HOME="$owner_return_config" \
 		XDG_STATE_HOME="$owner_return_state" \
 		LD_PRELOAD="$temporary/slow_map.so" \
 		JPEGVIEW_TEST_SLOW_MAP="$owner_pending_image" \
@@ -1936,13 +2027,13 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 					{ current = 0 }
 					END { print maximum + 0 }
 				')
-			if [ "$owner_initial_white_run" -ge 80 ] && [ "$owner_initial_white_run" -le 120 ]; then
+			if [ "$owner_initial_white_run" -ge 20 ] && [ "$owner_initial_white_run" -le 60 ]; then
 				break
 			fi
 			sleep 0.025
 		done
-		if [ "$owner_initial_white_run" -lt 80 ] || [ "$owner_initial_white_run" -gt 120 ]; then
-			echo "UI smoke test: committed image did not expose its saved 2x scale (white stripe width $owner_initial_white_run pixels)" >&2
+		if [ "$owner_initial_white_run" -lt 20 ] || [ "$owner_initial_white_run" -gt 60 ]; then
+			echo "UI smoke test: startup did not keep the configured Fit mode over A's saved Recents 2x view (white stripe width $owner_initial_white_run pixels)" >&2
 			exit 1
 		fi
 	fi
@@ -2014,7 +2105,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			"$temporary/cold-jpeg-owner-return-after.png" null: \
 			2>"$temporary/cold-jpeg-owner-return-difference.txt"; then
 			owner_return_difference=$(cat "$temporary/cold-jpeg-owner-return-difference.txt")
-			echo "UI smoke test: returned A did not retain its saved 2x viewport ($owner_return_difference differing pixels)" >&2
+			echo "UI smoke test: returning to A changed its current Fit viewport ($owner_return_difference differing pixels)" >&2
 			exit 1
 		fi
 	fi

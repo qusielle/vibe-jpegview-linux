@@ -67,7 +67,8 @@ public:
 	bool OwnsLoadedPath(const std::filesystem::path& selectedFilename) const;
 	ViewportSnapshot ViewportForSelection(const std::filesystem::path& selectedFilename,
 		const ViewportSnapshot& currentViewport,
-		const ViewportSnapshot& navigationViewport, const RecentFiles& recentFiles) const;
+		const ViewportSnapshot& navigationViewport, const RecentFiles& recentFiles,
+		bool restoreRecentViewport = false) const;
 
 	void SaveCurrentBeforeLoad(const std::filesystem::path& target,
 		const ViewportSnapshot& currentViewport, const DoublePageModeState& currentModes,

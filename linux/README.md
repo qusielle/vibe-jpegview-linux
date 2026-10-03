@@ -254,15 +254,18 @@ they support.
    **Recents** tab with the same preview pane. It lists the most recently opened image from each
    parent folder, with the folder path on the left and filename on the right; its filter matches
    both path and filename. Browse and Recents keep their own selection and filter while switching.
-   A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode when it
-   is opened again. Images enter Recents after their first frame is ready; a selected image that fails
+   A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode only
+   when it is explicitly opened from Recents. Ordinary image navigation keeps the current fit, crop,
+   actual-size, or manual zoom mode and scale, even when the destination has an older saved Recents
+   snapshot. Images enter Recents after their first frame is ready; a selected image that fails
    decoding or is replaced during asynchronous preparation leaves the last committed history owner
    and the failed image's saved viewport unchanged. Selecting a picture
    from Recents also restores its saved double-page and manga
    modes; those modes then carry through normal image navigation. Actual Size, Fit to Window, and
    zoom changes made while a cold JPEG header is pending are applied when that image continues
-   loading. Reversing navigation during a pending header read restores the newly selected image's
-   saved viewport instead of carrying over the canceled selection's view. New paths opened from
+   loading. Reversing navigation during a pending header read uses the current navigation mode and
+   scale for the new selection rather than restoring its saved Recents viewport or carrying over the
+   canceled selection's transient view. New paths opened from
    Browse or dropped onto the viewer inherit the global display-mode defaults. In Recents, Delete
    or the **Remove** button removes the selected row; Ctrl+Z restores removals in reverse order
    while the dialog remains open. Closing the dialog clears its undo history. ZIP, CBZ, TAR,
@@ -978,10 +981,12 @@ navigation-panel button displays its Windows-style action hint. Set `fit_relativ
 `settings.conf` (or enable **Fit-relative zoom mode** under Advanced configuration → Behavior) to
 make window-fit size count as 100%; the zoom presets and `+`/`-` steps then use that fit scale, while
 the temporary readout also shows the source-pixel percentage. In this mode unseen files inherit the
-current relative zoom ratio, and a visited image restores its own saved ratio. With the option off,
-zoom percentages remain relative to source pixels as before. In default mode, unseen files inherit the
-shared fit/fill/actual-size or manual mode as navigation proceeds; a previously visited file restores
-its own last view when opened again. Magnifier size and zoom use `magnifying_glass_width` (default 350),
+current relative zoom ratio during normal navigation, and a visited image's saved ratio is restored
+when it is explicitly opened from Recents. With the option off, zoom percentages remain relative to
+source pixels as before. In default mode, unseen files inherit the shared fit/fill/actual-size or
+manual mode as navigation proceeds, and visited files keep that current mode too; explicit opens from
+Recents restore the selected image's last view. Magnifier size and zoom use
+`magnifying_glass_width` (default 350),
 `magnifying_glass_height` (default 175), and `magnifying_glass_zoom_level` (default 0.5), editable
 under Advanced configuration; the lens itself remains disabled at startup. The shared scale mode
 remains saved between application runs, as

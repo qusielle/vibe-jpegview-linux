@@ -156,7 +156,8 @@ void ImageSessionController::UpdateProcessing(const ImageProcessingPreset& proce
 ViewportSnapshot ImageSessionController::ResolveViewportForSelection(
 	const fs::path& filename, bool clipboardMode,
 	const ViewportSnapshot& currentViewport,
-	const ViewportSnapshot& navigationViewport, const RecentFiles& recentFiles) const {
+	const ViewportSnapshot& navigationViewport, const RecentFiles& recentFiles,
+	bool restoreRecentViewport) const {
 	if (clipboardMode) return navigationViewport;
 	const fs::path selectedPath = NormalizeAbsolutePath(filename);
 	if (clipboardReturnViewport_.has_value() && !LoadedPath().empty() &&
@@ -164,7 +165,7 @@ ViewportSnapshot ImageSessionController::ResolveViewportForSelection(
 		return *clipboardReturnViewport_;
 	}
 	return history_.ViewportForSelection(selectedPath, currentViewport,
-		navigationViewport, recentFiles);
+		navigationViewport, recentFiles, restoreRecentViewport);
 }
 
 void ImageSessionController::SetClipboardReturnViewport(
