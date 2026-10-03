@@ -725,6 +725,9 @@ decoded pixels, prepared frames, and image textures, and releases each owner loc
 the next owner. Removing an aliased victim does not count as reclaimed capacity; deferred texture
 uploads stay in a bounded queue and retry after the shared budget's retained-capacity revision advances.
 Releases of temporary upload or active-working charges do not authorize another retained eviction.
+Both active-spread texture keys remain explicit renderer pins while their pair is preparing or ready;
+the active protection tier alone is insufficient because temporary working textures also pass through
+cleanup paths that remove unpinned entries.
 Decoded protection snapshots reconcile entries targeting the active tier before lower-tier changes,
 because reclassification can release retained capacity needed by another entry in the same snapshot;
 the original LRU order is preserved within both groups.
@@ -746,12 +749,35 @@ own thread-safe cache; when shared capacity is held elsewhere they decline reten
 delivering the active result. The configured limit therefore governs retained large-image caching,
 not total RSS or required active display data.
 
-Prepared frames are uploaded at most once per event-loop iteration, after the current frame is
-presented; closer neighbors block farther uploads while they can start. Expensive CPU-buffer
-destruction is handed back to the retirement worker, which keeps its active strong owner until
-renderer-thread upload handles have released the pixels. Its shared retirement state can outlive the
-cache while a valid pixel handle does, so cache destruction returns and the worker performs final
-destruction after that handle releases.
+Prepared frames are uploaded after the current frame is presented. Active spread frames take
+priority and may advance together; each maintenance opportunity admits at most one speculative
+image upload, even while an active spread is being prepared. Interaction or pending foreground
+source work suppresses speculative uploads. Speculative image textures use the smaller of half the
+configured shared cache budget and 256 MiB; this is an internal share of the existing limit, not a
+second cache setting. Over-budget distant results are discarded, while nearer results may retire one
+lower-priority texture and retry after its renderer reservation has returned.
+
+Image textures larger than 8 MiB upload through a private incomplete SDL texture in bands of at
+most 4 MiB per maintenance opportunity. The prepared pixels and texture reservation stay owned by
+the pending upload while bands advance. A texture becomes cache-visible and presentation-ready only
+after every band and its final blend setup succeed. Source-generation replacement cancels the
+incomplete upload; failed band or setup work follows the same rollback path. Small images retain a
+single-call upload.
+
+Obsolete image textures leave the cache map immediately but enter a renderer-thread retirement
+queue. Outside active interaction, one queued image texture is destroyed per maintenance opportunity
+after presentation. During interaction, maintenance stays quiet until four obsolete textures have
+queued, then destroys at most one per opportunity so held navigation cannot defer GPU reclamation
+indefinitely. Its shared cache reservation stays attached until `SDL_DestroyTexture` completes, so
+capacity cannot be reused while the old renderer allocation still exists. Shutdown drains the queue
+before destroying the renderer. `texture_upload` records full or banded update duration and bytes;
+`texture_destroy` records renderer-thread texture-destruction duration separately. Display texture
+residency snapshots include speculative bytes and their internal limit.
+
+Expensive CPU-buffer destruction is handed back to the retirement worker, which keeps its active
+strong owner until renderer-thread upload handles have released the pixels. Its shared retirement
+state can outlive the cache while a valid pixel handle does, so cache destruction returns and the
+worker performs final destruction after that handle releases.
 Retirement workers block while their queues are empty and poll only while queued buffers still have
 external owners; the thumbnail retirement thread starts on its first enqueue.
 When the thumbnail panel is visible, completed display frames also feed one bounded,

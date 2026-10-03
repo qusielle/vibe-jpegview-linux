@@ -3178,6 +3178,167 @@ void TestDisplayUploadSchedulerPrioritizesPermittedForeground() {
 	Expect(std::find(spreadTick.begin(), spreadTick.end(), 0) == spreadTick.end() &&
 		std::find(spreadTick.begin(), spreadTick.end(), 3) == spreadTick.end(),
 		"interaction-time upload planning admitted pending neighbor or distant work");
+
+	const std::vector<std::size_t> oneSpeculativePerOpportunity =
+		jpegview_linux::PlanDisplayTextureUploads(candidates,
+			{PerfWorkClass::ActiveImageSpread, PerfWorkClass::FocusedPreview,
+				PerfWorkClass::NearestNavigationNeighbor, PerfWorkClass::DistantSpeculation},
+		4, 1);
+	const std::size_t speculativeSelected = static_cast<std::size_t>(std::count_if(
+		oneSpeculativePerOpportunity.begin(), oneSpeculativePerOpportunity.end(),
+		[&candidates](std::size_t index) {
+			return candidates[index].workClass == PerfWorkClass::NearestNavigationNeighbor ||
+				candidates[index].workClass == PerfWorkClass::DistantSpeculation;
+		}));
+	Expect(oneSpeculativePerOpportunity == std::vector<std::size_t>({2, 1, 4, 0}) &&
+		speculativeSelected == 1 &&
+		candidates[oneSpeculativePerOpportunity.back()].workClass ==
+			PerfWorkClass::NearestNavigationNeighbor,
+		"renderer maintenance admitted more than one speculative image upload opportunity");
+}
+
+void TestDisplayTextureBudgetAndBandedUploadRollback() {
+	constexpr std::size_t mebibyte = 1024u * 1024u;
+	Expect(jpegview_linux::SpeculativeDisplayTextureBudgetBytes(0) == 0 &&
+		jpegview_linux::SpeculativeDisplayTextureBudgetBytes(128 * mebibyte) ==
+			64 * mebibyte &&
+		jpegview_linux::SpeculativeDisplayTextureBudgetBytes(1024 * mebibyte) ==
+			256 * mebibyte &&
+		jpegview_linux::SpeculativeDisplayTextureBudgetBytes(4096 * mebibyte) ==
+			256 * mebibyte,
+		"speculative image textures exceeded half the shared budget or the 256 MiB ceiling");
+	Expect(jpegview_linux::CanRetainSpeculativeDisplayTexture(60, 4, 64) &&
+		!jpegview_linux::CanRetainSpeculativeDisplayTexture(61, 4, 64) &&
+		!jpegview_linux::CanRetainSpeculativeDisplayTexture(
+			std::numeric_limits<std::size_t>::max(), 1,
+			std::numeric_limits<std::size_t>::max()),
+		"speculative texture admission failed at its exact boundary or overflowed");
+
+	const std::size_t largeImageBytes = 4000u * 2500u * 4u;
+	jpegview_linux::DisplayTextureUploadPlan bands(4000, 2500, largeImageBytes,
+		8 * mebibyte, 4 * mebibyte);
+	Expect(bands.Valid() && bands.IsBanded() && !bands.Complete(),
+		"large foreground texture did not start as a private incomplete upload");
+	int expectedY = 0;
+	std::size_t bandCount = 0;
+	while (const auto band = bands.CurrentBand()) {
+		const std::size_t bandBytes = static_cast<std::size_t>(band->height) * 4000u * 4u;
+		Expect(band->y == expectedY && band->height > 0 && bandBytes <= 4 * mebibyte,
+			"large texture upload plan produced an overlapping or over-budget band");
+		expectedY += band->height;
+		++bandCount;
+		Expect(bands.MarkCurrentBandUploaded(),
+			"texture upload plan rejected a current successful band");
+		Expect(bands.Complete() == (expectedY == 2500),
+			"texture upload plan published before every band was complete");
+	}
+	Expect(expectedY == 2500 && bandCount > 1 && bands.Complete(),
+		"successful band uploads did not complete the entire source texture");
+
+	jpegview_linux::DisplayTextureUploadPlan failed(4000, 2500, largeImageBytes,
+		8 * mebibyte, 4 * mebibyte);
+	Expect(failed.MarkCurrentBandUploaded() && failed.CurrentBand().has_value(),
+		"upload failure rollback fixture did not advance past its first private band");
+	failed.Fail();
+	Expect(failed.Failed() && !failed.Complete() && !failed.CurrentBand().has_value() &&
+		!failed.MarkCurrentBandUploaded(),
+		"failed band left a partially uploaded texture publishable or retryable");
+
+	jpegview_linux::DisplayTextureUploadPlan cancelled(4000, 2500, largeImageBytes,
+		8 * mebibyte, 4 * mebibyte);
+	Expect(cancelled.MarkCurrentBandUploaded(),
+		"cancellation fixture did not advance its private upload");
+	cancelled.Cancel();
+	Expect(cancelled.Cancelled() && !cancelled.Complete() &&
+		!cancelled.CurrentBand().has_value(),
+		"canceling a partial texture upload left another band eligible for publication");
+
+	jpegview_linux::DisplayTextureUploadPlan oneShot(640, 480, 640u * 480u * 4u,
+		8 * mebibyte, 4 * mebibyte);
+	const auto oneShotBand = oneShot.CurrentBand();
+	Expect(oneShot.Valid() && !oneShot.IsBanded() &&
+		oneShotBand.has_value() && oneShotBand->y == 0 && oneShotBand->height == 480 &&
+		oneShot.MarkCurrentBandUploaded() && oneShot.Complete(),
+		"small texture no longer uploads in one maintenance opportunity");
+	Expect(!jpegview_linux::DisplayTextureUploadPlan(0, 480, 0,
+		8 * mebibyte, 4 * mebibyte).Valid() &&
+		!jpegview_linux::DisplayTextureUploadPlan(640, 480, 1,
+		8 * mebibyte, 4 * mebibyte).Valid(),
+		"invalid texture geometry or pixel accounting was accepted for upload");
+}
+
+void TestDisplayTextureRetirementMakesProgressUnderSustainedInteraction() {
+	constexpr std::size_t maximumPerTick = 1;
+	constexpr std::size_t pressureThreshold = 4;
+	Expect(jpegview_linux::DisplayTextureRetirementsForTick(0, false,
+		maximumPerTick, pressureThreshold) == 0 &&
+		jpegview_linux::DisplayTextureRetirementsForTick(3, true,
+			maximumPerTick, pressureThreshold) == 0 &&
+		jpegview_linux::DisplayTextureRetirementsForTick(4, true,
+			maximumPerTick, pressureThreshold) == 1 &&
+		jpegview_linux::DisplayTextureRetirementsForTick(20, true,
+			maximumPerTick, pressureThreshold) == 1 &&
+		jpegview_linux::DisplayTextureRetirementsForTick(20, false,
+			maximumPerTick, pressureThreshold) == 1 &&
+		jpegview_linux::DisplayTextureRetirementsForTick(20, false,
+			0, pressureThreshold) == 0,
+		"renderer texture retirement violated its interaction threshold or per-tick bound");
+
+	std::size_t queued = 0;
+	std::size_t destroyed = 0;
+	std::size_t maximumQueued = 0;
+	for (std::size_t navigation = 0; navigation < 100; ++navigation) {
+		++queued; // Each successful held-navigation step makes the old texture obsolete.
+		maximumQueued = std::max(maximumQueued, queued);
+		const std::size_t retire = jpegview_linux::DisplayTextureRetirementsForTick(
+			queued, true, maximumPerTick, pressureThreshold);
+		queued -= retire;
+		destroyed += retire;
+	}
+	Expect(destroyed == 97 && queued == 3 && maximumQueued == pressureThreshold,
+		"obsolete GPU textures accumulated without bound during sustained held navigation");
+}
+
+void TestThumbnailPreparationRetryPreservesIdentityAcrossRepeatedFailuresAndRecovery() {
+	std::optional<jpegview_linux::ThumbnailPreparationResult> retry;
+	jpegview_linux::ThumbnailPreparationResult result;
+	result.key = jpegview_linux::SourceKey("/photos/retry-me.jpg");
+	result.fileIndex = 27;
+	result.catalogRevision = 5;
+	result.geometryRevision = 9;
+	result.maximumWidth = 164;
+	result.maximumHeight = 109;
+	auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+	image->key = result.key;
+	image->width = 1;
+	image->height = 1;
+	image->bgra.assign(4, 31);
+	result.image = image;
+
+	jpegview_linux::PreserveThumbnailPreparationRetry(retry, result);
+	Expect(retry.has_value() && retry->key == "/photos/retry-me.jpg" &&
+		retry->fileIndex == 27 && retry->image == image,
+		"first thumbnail repository allocation failure did not preserve the completion for retry");
+	const jpegview_linux::SourceKey retainedKey = retry->key;
+	const auto retainedImage = retry->image;
+	// Each self-alias call represents another failed Store attempt on the retry.
+	jpegview_linux::PreserveThumbnailPreparationRetry(retry, *retry);
+	Expect(retry->key == retainedKey && retry->fileIndex == 27 && retry->image == retainedImage &&
+		jpegview_linux::ThumbnailPreparationResultMatches(*retry, 5, 9, 27,
+			retainedKey, 164, 109),
+		"a repeated thumbnail allocation failure self-moved and invalidated its pending retry");
+	jpegview_linux::PreserveThumbnailPreparationRetry(retry, *retry);
+	Expect(retry->key == retainedKey && retry->image == retainedImage,
+		"a later thumbnail allocation retry corrupted the original request identity");
+	jpegview_linux::ThumbnailPixelRepository repository;
+	repository.SetGeometry(164, 109);
+	Expect(repository.Store(retry->image) ==
+		jpegview_linux::ThumbnailPixelStoreOutcome::Stored &&
+		repository.Find(retainedKey) == retainedImage,
+		"the preserved thumbnail retry could not be retained after allocation recovered");
+	retry.reset();
+	Expect(!retry && repository.Find(retainedKey) == retainedImage,
+		"successful thumbnail retry did not transfer ownership to the pixel repository");
 }
 
 void TestFileListDateSortingAndSelectionPreservation() {
@@ -9333,6 +9494,15 @@ void TestDisplayTexturePinHandoffPreservesBorrowedWorkingTexture() {
 		borrowedKey, true) && !jpegview_linux::IsDisplayTexturePinned(borrowedKey,
 		"", "", "", borrowedKey, false),
 		"last-presented display texture was not pinned only for the current source");
+	const std::string spreadAnchorKey = "active-spread-anchor";
+	const std::string spreadPartnerKey = "active-spread-partner";
+	Expect(jpegview_linux::IsDisplayTexturePinned(spreadAnchorKey, "", "", "",
+		"", false, spreadAnchorKey, spreadPartnerKey) &&
+		jpegview_linux::IsDisplayTexturePinned(spreadPartnerKey, "", "", "",
+			"", false, spreadAnchorKey, spreadPartnerKey) &&
+		!jpegview_linux::IsDisplayTexturePinned("unrelated-frame", "", "", "",
+			"", false, spreadAnchorKey, spreadPartnerKey),
+		"active spread textures were not pinned as a pair while awaiting presentation");
 }
 
 void TestDisplayImageCacheForegroundActiveClassification() {
@@ -20486,6 +20656,10 @@ int main(int argc, char** argv) {
 		TestColdArchiveMemberMetadataYieldAndReplacement, failures);
 	RunTest("display-upload-scheduler-permitted-foreground-priority",
 		TestDisplayUploadSchedulerPrioritizesPermittedForeground, failures);
+	RunTest("display-texture-budget-and-banded-upload-rollback",
+		TestDisplayTextureBudgetAndBandedUploadRollback, failures);
+	RunTest("display-texture-retirement-under-sustained-interaction",
+		TestDisplayTextureRetirementMakesProgressUnderSustainedInteraction, failures);
 	RunTest("display-cache-promotion-metadata-reaches-upload-scheduler",
 		TestDisplayCachePromotionMetadataReachesUploadScheduler, failures);
 	RunTest("display-prefetch-retains-only-active-spread-decoded-fallback",

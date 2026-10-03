@@ -73,9 +73,23 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   `main.cpp` and should be covered by `linux/tests/test_core.cpp`.
 - SDL renderer resources are main-thread objects. Create, upload, render, and destroy SDL textures on
   the renderer thread.
+- Do not publish an incomplete banded image texture. Keep its upload state private until every band
+  and final texture setup succeeds; cancellation or any band/setup failure must retire the partial
+  texture and release its reservation only after renderer-thread destruction.
+- Retiring a display texture does not free renderer memory immediately. Keep its shared cache
+  reservation attached to the retirement record until `SDL_DestroyTexture` runs, and drain obsolete
+  image textures incrementally after presenting the current frame. Do not suspend retirement for the
+  full duration of continuous interaction: trigger a bounded drain when obsolete renderer resources
+  cross a pressure threshold, and test sustained held navigation for progress and bounded residency.
 - When retrying an allocation-failed completion held in an `std::optional`, never move-assign the
   pending object from itself. Preserve the original identity through consecutive failures and test a
   later successful retry.
+- Keep speculative image-texture admission inside the existing shared cache budget. Bound its
+  share, admit no more than one speculative image upload per renderer-maintenance opportunity,
+  prioritize active spreads, and suppress speculative uploads during interaction.
+- Pin both display keys owned by an active spread in every renderer eviction and active-working
+  cleanup path, from pair admission through presentation or cancellation. Protection priority alone
+  does not prevent cleanup from removing a required spread texture.
 - Background workers may perform filesystem access, decoding, and pixel processing. Their requests
   must support cancellation or generation checks so obsolete results cannot replace current state.
 - For new or extracted asynchronous controllers, keep request batches free of raw pointers or

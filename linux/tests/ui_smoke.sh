@@ -790,8 +790,8 @@ if [ -n "$perf_trace_path" ]; then
 		> "$zoom_pan_config/settings.conf"
 	zoom_pan_image="$zoom_pan_directory/zoom-pan.ppm"
 	{
-		printf 'P6\n1600 1200\n255\n'
-		head -c "$((1600 * 1200 * 3))" /dev/zero
+		printf 'P6\n2000 1200\n255\n'
+		head -c "$((2000 * 1200 * 3))" /dev/zero
 	} > "$zoom_pan_image"
 	DISPLAY=":$display_number" HOME="$temporary/zoom-pan-home" \
 		XDG_CONFIG_HOME="$temporary/zoom-pan-config" \
@@ -836,7 +836,7 @@ if [ -n "$perf_trace_path" ]; then
 			$6 == "active_image_spread" { count++ } END { print count + 0 }' "$zoom_pan_trace")
 		actual_processing=$(awk -F, '$2 == "processing" && $4 == "worker_thread" && \
 			$6 == "active_image_spread" { count++ } END { print count + 0 }' "$zoom_pan_trace")
-		if [ "$actual_uploads" -gt "$baseline_uploads" ] && \
+		if [ "$actual_uploads" -ge "$((baseline_uploads + 3))" ] && \
 			[ "$actual_processing" -gt "$baseline_processing" ]; then
 			actual_ready=1
 			break
@@ -844,7 +844,7 @@ if [ -n "$perf_trace_path" ]; then
 		sleep 0.05
 	done
 	if [ "$actual_ready" -ne 1 ]; then
-		echo "UI smoke test: actual-size source-resolution frame did not become renderer-ready" >&2
+		echo "UI smoke test: actual-size banded source-resolution frame did not finish its three uploads" >&2
 		cat "$temporary/zoom-pan-viewer.log" >&2
 		cat "$zoom_pan_trace" >&2
 		exit 1
@@ -863,11 +863,97 @@ if [ -n "$perf_trace_path" ]; then
 	DISPLAY=":$display_number" xdotool key q || true
 	wait "$viewer_pid" || true
 	viewer_pid=''
+	texture_destroy_count=$(awk -F, '$2 == "texture_destroy" && $4 == "event_thread" { count++ } \
+		END { print count + 0 }' "$zoom_pan_trace")
+	texture_residency_violation=$(awk -F, '$2 == "cache_snapshot" && \
+		$13 == "\"display_texture_residency\"" && $7 > $8 { failed = 1 } \
+		END { print failed + 0 }' "$zoom_pan_trace")
+	texture_residency_samples=$(awk -F, '$2 == "cache_snapshot" && \
+		$13 == "\"display_texture_residency\"" { count++ } END { print count + 0 }' "$zoom_pan_trace")
 	if [ "$final_uploads" -ne "$baseline_uploads" ] || \
-		[ "$final_processing" -ne "$baseline_processing" ]; then
+		[ "$final_processing" -ne "$baseline_processing" ] || \
+		[ "$texture_destroy_count" -eq 0 ] || \
+		[ "$texture_residency_violation" -ne 0 ] || \
+		[ "$texture_residency_samples" -eq 0 ]; then
 		echo "UI smoke test: source-resolution enlargement or pan repeated display preparation/upload ($baseline_processing/$final_processing processing; $baseline_uploads/$final_uploads uploads)" >&2
 		cat "$temporary/zoom-pan-viewer.log" >&2
 		cat "$zoom_pan_trace" >&2
+		exit 1
+	fi
+
+	# Continuous held navigation keeps the interaction policy active. Once four
+	# obsolete renderer textures queue, maintenance must destroy one per tick so
+	# active-working textures cannot accumulate for the duration of the hold.
+	held_navigation_directory="$temporary/held-navigation-images"
+	held_navigation_config="$temporary/held-navigation-config/jpegview-linux"
+	held_navigation_trace="$perf_trace_path.held-navigation"
+	mkdir -p "$held_navigation_directory" "$held_navigation_config"
+	for index in $(seq 0 19); do
+		filename=$(printf '%02d' "$index")
+		write_solid_ppm "$held_navigation_directory/$filename.ppm" \
+			$((index * 11 % 256)) $((index * 17 % 256)) $((index * 23 % 256))
+	done
+	printf 'scale_mode=fit\ncache_size_mb=0\ndouble_page_mode_enabled=0\nshow_histogram=0\nthumbnail_panel_visible=0\n' \
+		> "$held_navigation_config/settings.conf"
+	DISPLAY=":$display_number" HOME="$temporary/held-navigation-home" \
+		XDG_CONFIG_HOME="$temporary/held-navigation-config" \
+		XDG_STATE_HOME="$temporary/held-navigation-state" \
+		JPEGVIEW_PERF_TRACE="$held_navigation_trace" \
+		"$BINARY" "$held_navigation_directory" \
+		> "$temporary/held-navigation-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: held-navigation retirement fixture did not create its window" >&2
+		cat "$temporary/held-navigation-viewer.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	initial_navigation_uploads=0
+	for _ in $(seq 1 100); do
+		initial_navigation_uploads=$(awk -F, '$2 == "texture_upload" && \
+			$4 == "event_thread" && $6 == "active_image_spread" { count++ } \
+			END { print count + 0 }' "$held_navigation_trace" 2>/dev/null || true)
+		if [ "$initial_navigation_uploads" -gt 0 ]; then break; fi
+		sleep 0.05
+	done
+	if [ "$initial_navigation_uploads" -eq 0 ]; then
+		echo "UI smoke test: held-navigation retirement fixture did not upload its first image" >&2
+		cat "$temporary/held-navigation-viewer.log" >&2
+		cat "$held_navigation_trace" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool keydown --window "$window_id" Right
+	held_navigation_destroy_count=0
+	for _ in $(seq 1 120); do
+		held_navigation_destroy_count=$(awk -F, \
+			'$2 == "texture_destroy" && $4 == "event_thread" { count++ } \
+			END { print count + 0 }' "$held_navigation_trace" 2>/dev/null || true)
+		if [ "$held_navigation_destroy_count" -ge 3 ]; then break; fi
+		sleep 0.05
+	done
+	DISPLAY=":$display_number" xdotool keyup --window "$window_id" Right
+	DISPLAY=":$display_number" xdotool key q || true
+	wait "$viewer_pid" || true
+	viewer_pid=''
+	held_navigation_max_retirement_queue=$(awk -F, \
+		'$2 == "cache_snapshot" && $13 == "\"display_texture_residency\"" { \
+			if ($10 > maximum) maximum = $10; samples++ \
+		} END { print maximum + 0 ":" samples + 0 }' "$held_navigation_trace")
+	held_navigation_max_queue=${held_navigation_max_retirement_queue%%:*}
+	held_navigation_queue_samples=${held_navigation_max_retirement_queue#*:}
+	if [ "$held_navigation_destroy_count" -lt 3 ] || \
+		[ "$held_navigation_queue_samples" -eq 0 ] || \
+		[ "$held_navigation_max_queue" -gt 4 ]; then
+		echo "UI smoke test: held navigation stalled texture retirement or exceeded its queue bound ($held_navigation_destroy_count destroys, maximum queue $held_navigation_max_queue)" >&2
+		cat "$temporary/held-navigation-viewer.log" >&2
+		cat "$held_navigation_trace" >&2
 		exit 1
 	fi
 fi

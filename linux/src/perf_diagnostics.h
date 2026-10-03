@@ -67,6 +67,7 @@ enum class PerfMetric : std::uint8_t {
 	Processing,
 	Resampling,
 	TextureUpload,
+	TextureDestroy,
 	Cancellation,
 	CacheSnapshot,
 	QueueSnapshot,
