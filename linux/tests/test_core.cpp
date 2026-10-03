@@ -8,6 +8,7 @@
 #include "image_decoder.h"
 #include "image_cache.h"
 #include "display_image_cache.h"
+#include "display_texture_pins.h"
 #include "cache_budget.h"
 #include "cache_policy.h"
 #include "display_upload_scheduler.h"
@@ -8883,6 +8884,49 @@ void TestDecodedCacheProtectionReconcilesActiveReservationsFirst() {
 		"neighbor promotion ran before active reservation reconciliation released capacity");
 }
 
+void TestDisplayTexturePinHandoffPreservesBorrowedWorkingTexture() {
+	const std::string borrowedKey = "outgoing-active-working-frame";
+	std::string transitionKey = "older-transition-frame";
+	std::string pendingTransitionKey;
+	std::string captureKey;
+	std::string lastPresentedKey;
+	bool activeWorkingTextureDestroyed = false;
+	Expect(!jpegview_linux::IsDisplayTexturePinned(borrowedKey, "", "", "", "", false),
+		"transition handoff fixture accidentally starts with another pin protecting its texture");
+	const auto sweepActiveWorkingTexture = [&] {
+		if (!jpegview_linux::IsDisplayTexturePinned(borrowedKey, transitionKey,
+			pendingTransitionKey, captureKey, lastPresentedKey, false)) {
+			activeWorkingTextureDestroyed = true;
+		}
+	};
+
+	{
+		jpegview_linux::DisplayTexturePinHandoff handoff(captureKey, borrowedKey);
+		transitionKey.clear();
+		pendingTransitionKey.clear();
+		sweepActiveWorkingTexture();
+		Expect(!activeWorkingTextureDestroyed,
+			"clearing the older transition destroyed the borrowed outgoing texture");
+
+		transitionKey = borrowedKey;
+		handoff.Restore();
+		sweepActiveWorkingTexture();
+		Expect(!activeWorkingTextureDestroyed,
+			"releasing the temporary pin destroyed a texture already owned by the new transition");
+	}
+	Expect(captureKey.empty(), "transition pin handoff did not restore the prior capture pin");
+	transitionKey.clear();
+	Expect(!jpegview_linux::IsDisplayTexturePinned(borrowedKey, transitionKey,
+		pendingTransitionKey, captureKey, lastPresentedKey, false),
+		"completed transition retained a stale borrowed-texture pin");
+	Expect(!jpegview_linux::IsDisplayTexturePinned("", "", "", "", "", true),
+		"an empty display key was considered pinned");
+	Expect(jpegview_linux::IsDisplayTexturePinned(borrowedKey, "", "", "",
+		borrowedKey, true) && !jpegview_linux::IsDisplayTexturePinned(borrowedKey,
+		"", "", "", borrowedKey, false),
+		"last-presented display texture was not pinned only for the current source");
+}
+
 void TestDisplayImageCacheForegroundActiveClassification() {
 	TemporaryDirectory temporary;
 	const fs::path foregroundFile = temporary.path() / "fresh-foreground.jpg";
@@ -9776,6 +9820,63 @@ void TestDisplayImageCacheBackgroundPreparation() {
 	const jpegview_linux::DisplayImageRequest scaled =
 		jpegview_linux::MakeDisplayImageRequest(firstFile, decoded, 0, 2, 2, false);
 	Expect(scaled.Valid(), "display cache rejected a valid preparation request");
+	auto spectrumRequest = jpegview_linux::MakeDisplayImageRequest(
+		firstFile, decoded, 0, 4, 4, false, 0, {}, 0, true);
+	spectrumRequest.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	spectrumRequest.selectionGeneration = 23;
+	jpegview_linux::DisplayImageCache spectrumDisplay(0, 1);
+	spectrumDisplay.Request(spectrumRequest);
+	Expect(spectrumDisplay.WaitUntilIdle(std::chrono::seconds(2)),
+		"display worker did not finish selected-frame spectrum preparation");
+	const auto spectrumCompletions = spectrumDisplay.TakeCompletedWithMetadata(1);
+	const jpegview_linux::GrayscaleSpectrum expectedSpectrum =
+		jpegview_linux::BuildGrayscaleSpectrum(decoded->frames.front().bgra, 4, 4);
+	Expect(spectrumCompletions.size() == 1 && spectrumCompletions.front().image &&
+		spectrumCompletions.front().selectionGeneration == 23 &&
+		spectrumCompletions.front().image->spectrum &&
+		*spectrumCompletions.front().image->spectrum == expectedSpectrum &&
+		jpegview_linux::PreparedDisplayImageBytes(*spectrumCompletions.front().image) ==
+			decoded->frames.front().bgra.size() + sizeof(expectedSpectrum),
+		"selected histogram work was not prepared on the display worker or budgeted");
+	const fs::path histogramJpeg = temporary.path() / "histogram.jpg";
+	std::vector<std::uint8_t> histogramPixels(8 * 4 * 4);
+	for (int y = 0; y < 4; ++y) {
+		for (int x = 0; x < 8; ++x) {
+			const std::size_t offset = (static_cast<std::size_t>(y) * 8 + x) * 4;
+			histogramPixels[offset] = static_cast<std::uint8_t>(x * 24);
+			histogramPixels[offset + 1] = static_cast<std::uint8_t>(y * 50);
+			histogramPixels[offset + 2] = static_cast<std::uint8_t>(255 - x * 20);
+			histogramPixels[offset + 3] = 255;
+		}
+	}
+	jpegview_linux::ImageWriteOptions histogramWriteOptions;
+	std::string histogramWriteError;
+	Expect(jpegview_linux::WriteImage(histogramJpeg, histogramPixels.data(), 8, 4,
+		histogramWriteOptions, histogramWriteError),
+		"could not create a JPEG histogram fixture: " + histogramWriteError);
+	jpegview_linux::DecodedImage fullHistogramDecode;
+	std::string fullHistogramError;
+	Expect(jpegview_linux::DecodeImage(histogramJpeg, fullHistogramDecode,
+		fullHistogramError) && !fullHistogramDecode.frames.empty(),
+		"could not decode the full JPEG histogram fixture: " + fullHistogramError);
+	auto fileBackedSpectrumRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		jpegview_linux::DescribeImageSource(histogramJpeg), 8, 4, 2, 2, false,
+		0, {}, 0, true);
+	fileBackedSpectrumRequest.workClass =
+		jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	jpegview_linux::DisplayImageCache fileBackedSpectrumDisplay(0, 1);
+	fileBackedSpectrumDisplay.Request(fileBackedSpectrumRequest);
+	Expect(fileBackedSpectrumDisplay.WaitUntilIdle(std::chrono::seconds(2)),
+		"file-backed histogram preparation did not finish on its worker");
+	const auto fileBackedSpectrum =
+		fileBackedSpectrumDisplay.TakeCompletedWithMetadata(1);
+	const jpegview_linux::GrayscaleSpectrum fullSourceSpectrum =
+		jpegview_linux::BuildGrayscaleSpectrum(
+			fullHistogramDecode.frames.front().bgra, 8, 4);
+	Expect(fileBackedSpectrum.size() == 1 && fileBackedSpectrum.front().image &&
+		fileBackedSpectrum.front().image->spectrum &&
+		*fileBackedSpectrum.front().image->spectrum == fullSourceSpectrum,
+		"fitted JPEG histogram changed when display pixels were reduced for presentation");
 	const auto secondScaled = jpegview_linux::MakeDisplayImageRequest(
 		secondFile, decoded, 0, 2, 2, false, 1);
 	const auto thirdScaled = jpegview_linux::MakeDisplayImageRequest(
@@ -9811,6 +9912,31 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		resilientDisplay.GetDiagnostics().lastWorkerFailure.kind ==
 			jpegview_linux::WorkerFailureKind::Exception,
 		"display preparation exception was not recorded as a structured worker failure");
+	std::atomic<int> failedProcessorCalls{0};
+	jpegview_linux::DisplayImageCache failedSelectedDisplay(64, 1,
+		[&failedProcessorCalls](const jpegview_linux::DisplayImageRequest&) {
+			++failedProcessorCalls;
+			throw std::runtime_error("selected display preparation failed");
+			return jpegview_linux::DisplayImageCache::ImagePtr{};
+		});
+	auto failedSelectedRequest = secondScaled;
+	failedSelectedRequest.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	failedSelectedRequest.selectionGeneration = 77;
+	failedSelectedDisplay.Request(failedSelectedRequest);
+	Expect(failedSelectedDisplay.WaitUntilIdle(std::chrono::seconds(2)),
+		"selected display worker did not finish its failing request");
+	Expect(failedSelectedDisplay.HasPendingOrCached(failedSelectedRequest.key),
+		"selected display failure was discarded before the renderer could observe it");
+	failedSelectedDisplay.Request(failedSelectedRequest);
+	const auto selectedFailures = failedSelectedDisplay.TakeFailedCompletions();
+	Expect(selectedFailures.size() == 1 &&
+		selectedFailures.front().key == failedSelectedRequest.key &&
+		selectedFailures.front().selectionGeneration == 77 &&
+		selectedFailures.front().failure.message ==
+			"selected display preparation failed" &&
+		failedProcessorCalls.load() == 1 &&
+		!failedSelectedDisplay.HasPendingOrCached(failedSelectedRequest.key),
+		"selected display failure lost its owner identity or retried before resolution");
 	resilientDisplay.Request(secondScaled);
 	Expect(resilientDisplay.WaitUntilIdle(std::chrono::seconds(2)) &&
 		displayProcessorCalls.load() == 2,
@@ -9962,6 +10088,72 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		canceledNeighbor.WaitUntilIdle(std::chrono::seconds(2)) &&
 		canceledNeighbor.TakeCompleted(1).empty() && !canceledNeighbor.Find(nearestRequest),
 		"obsolete active neighbor work was not canceled or uploaded after interaction began");
+	std::mutex promotedMutex;
+	std::condition_variable promotedChanged;
+	bool promotedStarted = false;
+	bool cancellationObserved = false;
+	bool releasePromotedProcessor = false;
+	std::shared_ptr<std::atomic<bool>> promotedCancellation;
+	std::atomic<int> promotedProcessorCalls{0};
+	jpegview_linux::DisplayImageCache promotedAfterCancellation(64, 1,
+		[&](const jpegview_linux::DisplayImageRequest& request) {
+			const int call = ++promotedProcessorCalls;
+			if (call == 1) {
+				std::unique_lock<std::mutex> lock(promotedMutex);
+				promotedCancellation = request.cancellation;
+				promotedStarted = true;
+				promotedChanged.notify_all();
+				while (request.workContext.Continue()) {
+					promotedChanged.wait_for(lock, std::chrono::milliseconds(2));
+				}
+				cancellationObserved = true;
+				promotedChanged.notify_all();
+				promotedChanged.wait(lock, [&] { return releasePromotedProcessor; });
+				return jpegview_linux::DisplayImageCache::ImagePtr{};
+			}
+			return DisplayCachePreparedTestImage(request);
+		});
+	promotedAfterCancellation.RequestBackground(nearestRequest);
+	bool promotedProcessorStarted = false;
+	{
+		std::unique_lock<std::mutex> lock(promotedMutex);
+		promotedProcessorStarted = promotedChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return promotedStarted; });
+	}
+	if (promotedProcessorStarted) {
+		promotedAfterCancellation.CancelBackground(nearestRequest.key);
+	}
+	bool observedPromotedCancellation = false;
+	{
+		std::unique_lock<std::mutex> lock(promotedMutex);
+		observedPromotedCancellation = promotedChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return cancellationObserved; });
+	}
+	auto promotedForegroundRequest = nearestRequest;
+	promotedForegroundRequest.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+	promotedForegroundRequest.selectionGeneration = 41;
+	if (observedPromotedCancellation) {
+		promotedAfterCancellation.Request(promotedForegroundRequest);
+		promotedAfterCancellation.Prefetch({});
+		promotedAfterCancellation.RequestBackgroundBatch({promotedForegroundRequest});
+	}
+	const bool promotionCancellationPreserved = promotedCancellation &&
+		promotedCancellation->load();
+	{
+		std::lock_guard<std::mutex> lock(promotedMutex);
+		releasePromotedProcessor = true;
+	}
+	promotedChanged.notify_all();
+	const bool promotedRetryIdle = promotedAfterCancellation.WaitUntilIdle(
+		std::chrono::seconds(2));
+	const auto promotedRetryCompletion =
+		promotedAfterCancellation.TakeCompletedWithMetadata(1);
+	Expect(promotedProcessorStarted && observedPromotedCancellation &&
+		promotionCancellationPreserved && promotedRetryIdle &&
+		promotedProcessorCalls.load() == 2 && promotedRetryCompletion.size() == 1 &&
+		promotedRetryCompletion.front().image &&
+		promotedRetryCompletion.front().selectionGeneration == 41,
+		"background scheduling revived canceled work or lost its foreground retry");
 	jpegview_linux::DisplayImageCache failedPreparation(64, 1,
 		[](const jpegview_linux::DisplayImageRequest&) {
 			return jpegview_linux::DisplayImageCache::ImagePtr{};
@@ -16382,6 +16574,81 @@ void TestDecodedCacheReportsDeletedSourceAfterDecodeFailure() {
 		"failed decode after source deletion did not report its invalid observed identity");
 }
 
+void TestSelectedDecodeRetriesAfterObservedSpreadCancellation() {
+	TemporaryDirectory temporary;
+	const fs::path source = temporary.path() / "promoted-selected-source.png";
+	WriteText(source, "selected source cancellation retry");
+	const jpegview_linux::SourceDescriptor descriptor =
+		jpegview_linux::DescribeImageSource(source);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool decoderStarted = false;
+	bool cancellationObserved = false;
+	bool releaseCancelledDecoder = false;
+	std::atomic<int> decoderCalls{0};
+	std::atomic<int> spreadCallbacks{0};
+	std::atomic<int> selectedCallbacks{0};
+	std::atomic<bool> selectedProducedImage{false};
+	jpegview_linux::DecodedImageCache cache(64,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			const int call = ++decoderCalls;
+			if (call == 1) {
+				std::unique_lock<std::mutex> lock(mutex);
+				decoderStarted = true;
+				changed.notify_all();
+				jpegview_linux::WorkContext context =
+					jpegview_linux::ResolveWorkContext(source,
+						jpegview_linux::SourceWorkPriority::Foreground);
+				while (context.Continue()) {
+					changed.wait_for(lock, std::chrono::milliseconds(2));
+				}
+				cancellationObserved = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseCancelledDecoder; });
+				return false;
+			}
+			image = *CachedTestImage(4);
+			return true;
+		});
+	cache.RequestBackground(descriptor,
+		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
+			++spreadCallbacks;
+		}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	bool reachedDecoder = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		reachedDecoder = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decoderStarted; });
+	}
+	const bool canceled = reachedDecoder && cache.CancelActiveSpreadRequest(descriptor);
+	bool observedCancellation = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		observedCancellation = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return cancellationObserved; });
+	}
+	if (observedCancellation) {
+		cache.RequestSelectedSource(descriptor,
+			[&](const jpegview_linux::SourceDescriptor&,
+				const jpegview_linux::DecodedImageCache::ImagePtr& image,
+				const jpegview_linux::WorkerFailure&) {
+				++selectedCallbacks;
+				selectedProducedImage.store(static_cast<bool>(image));
+			}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	}
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseCancelledDecoder = true;
+	}
+	changed.notify_all();
+	const bool idle = cache.WaitUntilIdle(std::chrono::seconds(3));
+	Expect(reachedDecoder && canceled && observedCancellation && idle &&
+		decoderCalls.load() == 2 && spreadCallbacks.load() == 0 &&
+		selectedCallbacks.load() == 1 && selectedProducedImage.load() &&
+		cache.Find(descriptor) != nullptr,
+		"a cancelled spread decoder's failure replaced the newly selected request instead of retrying it");
+}
+
 void TestThumbnailSourceNoticeRoutesThroughCurrentRefresh() {
 	TemporaryDirectory temporary;
 	const fs::path source = temporary.path() / "current-thumbnail-source.png";
@@ -17834,6 +18101,25 @@ void TestPlaybackSchedulerTimingAndModes() {
 	scheduler.FrameDisplayFailed();
 	Expect(!scheduler.AnimationPlaying() && scheduler.NextTick() == 0,
 		"failed animation frame did not stop scheduling");
+	jpegview_linux::PlaybackScheduler failedSlideshow;
+	failedSlideshow.StartSlideshow(0.1, 500);
+	failedSlideshow.ConfigureImage({20, 20}, 0, true, 500);
+	failedSlideshow.SetImageReady(false, 510);
+	failedSlideshow.FrameDisplayFailed();
+	Expect(failedSlideshow.Tick(599).type == PlaybackActionType::None &&
+		failedSlideshow.Tick(600).type == PlaybackActionType::NextImage,
+		"failed animation frame left slideshow permanently unready");
+
+	jpegview_linux::PlaybackScheduler repeatedReady;
+	repeatedReady.ConfigureImage({20, 20}, 0, true, 100);
+	repeatedReady.SetImageReady(false, 110);
+	repeatedReady.SetImageReady(true, 200);
+	const std::uint32_t readyFrameDeadline = repeatedReady.NextTick();
+	repeatedReady.SetImageReady(true, 210);
+	Expect(readyFrameDeadline == 220 && repeatedReady.NextTick() == readyFrameDeadline &&
+		repeatedReady.Tick(readyFrameDeadline).type == PlaybackActionType::ShowFrame &&
+		repeatedReady.FrameIndex() == 1,
+		"repeated renderer-ready notifications postponed an animation frame indefinitely");
 
 	scheduler.ConfigureImage({}, 0, false, 400);
 	scheduler.StartMovie(25.0, 400);
@@ -18167,6 +18453,74 @@ void TestImageSessionControllerSnapshotsNavigationAndClipboardState() {
 		"completed return from clipboard mode retained its temporary viewport snapshot");
 }
 
+void TestImageSessionSelectedLoadCommitsOnlyReadyCurrentOwner() {
+	TemporaryDirectory temporary;
+	const fs::path first = temporary.path() / "first" / "image.png";
+	const fs::path failed = temporary.path() / "failed" / "image.png";
+	fs::create_directories(first.parent_path());
+	fs::create_directories(failed.parent_path());
+	WriteTinyImage(first);
+	WriteTinyImage(failed);
+	const auto firstSource = jpegview_linux::DescribeImageSource(first);
+	const auto failedSource = jpegview_linux::DescribeImageSource(failed);
+	jpegview_linux::ImageSessionController session;
+	jpegview_linux::RecentFiles recent;
+	const auto start = session.BeginSelection(firstSource, first, {}, {}, true);
+	Expect(session.Stage() == jpegview_linux::ImageSessionStage::Selected &&
+		session.SetStage(start.selection.generation, firstSource.Key(),
+			jpegview_linux::ImageSessionStage::AwaitingDisplayFrame) &&
+		!session.MarkDisplayFrameReady(start.selection.generation + 1,
+			firstSource.Key()) &&
+		session.MarkDisplayFrameReady(start.selection.generation, firstSource.Key()) &&
+		session.CommitSelectedLoad(start.selection.generation, firstSource.Key(), first, recent) &&
+		session.Stage() == jpegview_linux::ImageSessionStage::Committed &&
+		session.LoadedPath() == fs::absolute(first).lexically_normal(),
+		"selected-load stage did not require a matching renderer-ready owner before Recents commit");
+	const auto sameSourceStart = session.BeginSelection(firstSource, first, {}, {}, true);
+	Expect(!sameSourceStart.effects.clearPreviousPresentation &&
+		sameSourceStart.selection.generation > start.selection.generation,
+		"same-source replacement did not preserve the current presentation while advancing its owner");
+	const auto failedStart = session.BeginSelection(failedSource, failed, {}, {}, true);
+	Expect(failedStart.effects.clearPreviousPresentation &&
+		session.SetStage(failedStart.selection.generation, failedSource.Key(),
+		jpegview_linux::ImageSessionStage::AwaitingDecodedSource) &&
+		session.FailSelectedLoad(failedStart.selection.generation,
+			failedSource.Key(), failed) &&
+		session.Stage() == jpegview_linux::ImageSessionStage::Failed &&
+		session.LoadedPath() == fs::absolute(first).lexically_normal() &&
+		!session.CommitSelectedLoad(failedStart.selection.generation,
+			failedSource.Key(), failed, recent),
+		"failed selected work replaced the last committed image history");
+}
+
+void TestSelectedSourceDecodeChannelRejectsStaleOwnerCompletions() {
+	TemporaryDirectory temporary;
+	const fs::path first = temporary.path() / "first.png";
+	const fs::path second = temporary.path() / "second.png";
+	WriteTinyImage(first);
+	WriteTinyImage(second);
+	const auto firstSource = jpegview_linux::DescribeImageSource(first);
+	const auto secondSource = jpegview_linux::DescribeImageSource(second);
+	jpegview_linux::SelectedSourceDecodeChannel channel;
+	channel.Activate(1, firstSource.Key());
+	Expect(channel.Publish({1, firstSource, {}, {}}),
+		"current selected decode could not publish its result");
+	channel.Activate(2, secondSource.Key());
+	channel.Activate(3, firstSource.Key());
+	Expect(!channel.Publish({1, firstSource, {}, {}}) &&
+		!channel.Take(1, firstSource.Key()).has_value() &&
+		channel.Publish({3, firstSource, {}, {}}),
+		"A-to-B-to-A selection accepted a stale first-A completion");
+	const auto newest = channel.Take(3, firstSource.Key());
+	Expect(newest.has_value() && newest->generation == 3 &&
+		newest->source.Key() == firstSource.Key() &&
+		!channel.Take(3, firstSource.Key()).has_value(),
+		"selected decode mailbox did not consume only the latest matching result");
+	channel.Shutdown();
+	Expect(!channel.Publish({3, firstSource, {}, {}}),
+		"selected decode mailbox accepted work after shutdown");
+}
+
 void TestImageSessionControllerPlansSelectedSourcePreparation() {
 	using jpegview_linux::ImageSessionController;
 	using jpegview_linux::SelectedSourcePreparationAction;
@@ -18254,8 +18608,24 @@ void TestRecentImageLoadHistoryCommitsOnlyAfterSuccess() {
 	Expect(state.CommitLoad(loaded, recents) && state.LoadedPath() == normalizedLoaded &&
 		recents.Files().size() == 2 && recents.Files().front() == normalizedLoaded,
 		"a successful image load did not commit its recent row and history owner");
+	state.BeginLoad(pending, defaultView);
+	Expect(state.FailLoad(pending) && state.LoadedPath() == normalizedLoaded,
+		"a failed replacement cleared the previous committed image history owner");
 	Expect(state.OwnsLoadedPath(loaded) && !state.OwnsLoadedPath(pending),
 		"the committed path was not the only image recognized as the loaded history owner");
+	const jpegview_linux::DoublePageModeState modes{false, false};
+	state.SaveCurrentBeforeLoad(pending, loadedView, modes, recents);
+	state.BeginLoad(pending, defaultView);
+	Expect(state.FailLoad(pending) && state.LoadedPath() == normalizedLoaded &&
+		!state.OwnsLoadedPath(loaded),
+		"a failed replacement discarded or falsely retained the previous presentation owner");
+	const jpegview_linux::ViewportSnapshot transientView{false, false, false, 0.75, 0.5};
+	const jpegview_linux::ViewportSnapshot restoredAfterFailure = state.ViewportForSelection(
+		loaded, transientView, defaultView, recents);
+	Expect(restoredAfterFailure.zoom == loadedView.zoom &&
+		restoredAfterFailure.relativeZoom == loadedView.relativeZoom &&
+		restoredAfterFailure.fitToWindow == loadedView.fitToWindow,
+		"reversing after a failed replacement reused its transient viewport");
 
 	const fs::path followup = temporary.path() / "followup" / "followup.jpg";
 	const jpegview_linux::ViewportSnapshot pendingView{false, false, false, 3.25, 2.5};
@@ -18430,23 +18800,21 @@ void TestPendingImageIntentsRespectSourceGeneration() {
 		"startup scan-completion fixture could not queue a pre-catalog viewport intent");
 	const fs::path provisionalSelection = fs::absolute(firstPath).lexically_normal();
 	const bool startupPathChanged = startupLoad.LoadedPath() != provisionalSelection;
-	const bool samePendingStartupLoad = pending.MatchesStartupLoad(true, true, true, true,
+	const bool samePendingStartupLoad = pending.MatchesStartupLoad(true, true, true,
 		provisionalSelection, first, 40);
 	const bool currentPathChanged =
 		!samePendingStartupLoad && startupPathChanged;
 	Expect(startupPathChanged && samePendingStartupLoad &&
 		!currentPathChanged &&
-		!pending.MatchesStartupLoad(false, true, true, true,
+		!pending.MatchesStartupLoad(false, true, true,
 			provisionalSelection, first, 40) &&
-		!pending.MatchesStartupLoad(true, false, true, true,
+		!pending.MatchesStartupLoad(true, false, true,
 			provisionalSelection, first, 40) &&
-		!pending.MatchesStartupLoad(true, true, false, true,
+		!pending.MatchesStartupLoad(true, true, false,
 			provisionalSelection, first, 40) &&
-		!pending.MatchesStartupLoad(true, true, true, false,
-			provisionalSelection, first, 40) &&
-		!pending.MatchesStartupLoad(true, true, true, true,
+		!pending.MatchesStartupLoad(true, true, true,
 			provisionalSelection, second, 40) &&
-		!pending.MatchesStartupLoad(true, true, true, true,
+		!pending.MatchesStartupLoad(true, true, true,
 			provisionalSelection, first, 41),
 		"startup catalog completion did not distinguish the matching provisional cold load from a replacement");
 	const auto startupContinuation = startupLoad.TakePendingLoad(firstPath);
@@ -18474,6 +18842,18 @@ void TestPendingImageIntentsRespectSourceGeneration() {
 		completed->actions[1].transform == IDM_MIRROR_H && completed->startTransition &&
 		!pending.Take(first, 41).has_value(),
 		"matching header completion did not drain transforms in order with its transition");
+	pending.Begin(firstPath, first, 42);
+	Expect(pending.QueueViewport(firstPath, first, 42, startupPan),
+		"async-stage fixture could not queue its first viewport action");
+	const auto drained = pending.Drain(first, 42);
+	Expect(drained.has_value() && drained->actions.size() == 1 &&
+		pending.MatchesSelection(firstPath, first, 42) && pending.ActionCount() == 0 &&
+		pending.QueueTransform(firstPath, first, 42, IDM_ROTATE_90),
+		"draining one async stage deactivated the selection or discarded later input");
+	const auto laterStage = pending.Take(first, 42);
+	Expect(laterStage.has_value() && laterStage->actions.size() == 1 &&
+		laterStage->actions.front().type == jpegview_linux::PendingImageIntentType::Transform,
+		"the next async stage did not receive input queued after a drain");
 
 	pending.Begin(firstPath, first, 43);
 	Expect(pending.QueueTransform(firstPath, first, 43, IDM_ROTATE_270),
@@ -18547,6 +18927,31 @@ void TestPendingImageIntentsRespectSourceGeneration() {
 		"vertical pan after rotation and Actual Size was lost");
 	ExpectNear(groupedView.OffsetY(), 0.0, 1e-12,
 		"grouped viewport replay no longer reproduces the lost-pan failure");
+
+	pending.Begin(firstPath, first, 47);
+	Expect(pending.QueueCopySelection(firstPath, first, 47, 12, 18, 76, 64),
+		"deferred copy-selection action was rejected");
+	Expect(pending.QueueCopyImage(firstPath, first, 47, false) &&
+		pending.QueueCropSelection(firstPath, first, 47, 4, 7, 90, 101),
+		"deferred copy-image or crop-selection action was rejected");
+	const auto copySelection = pending.Take(first, 47);
+	Expect(copySelection.has_value() && copySelection->actions.size() == 3 &&
+		copySelection->actions.front().type ==
+			jpegview_linux::PendingImageIntentType::CopySelection &&
+		copySelection->actions.front().selectionLeft == 12 &&
+		copySelection->actions.front().selectionTop == 18 &&
+		copySelection->actions.front().selectionRight == 76 &&
+		copySelection->actions.front().selectionBottom == 64 &&
+		copySelection->actions[1].type ==
+			jpegview_linux::PendingImageIntentType::CopyImage &&
+		!copySelection->actions[1].fullSize &&
+		copySelection->actions[2].type ==
+			jpegview_linux::PendingImageIntentType::CropSelection &&
+		copySelection->actions[2].selectionLeft == 4 &&
+		copySelection->actions[2].selectionTop == 7 &&
+		copySelection->actions[2].selectionRight == 90 &&
+		copySelection->actions[2].selectionBottom == 101,
+		"deferred pixel actions lost their captured arguments or accepted order");
 
 	pending.Begin(firstPath, first, 46);
 	for (std::size_t index = 0; index < jpegview_linux::kMaximumPendingImageIntents; ++index) {
@@ -19613,6 +20018,8 @@ int main(int argc, char** argv) {
 		TestDecodedCacheProtectionSnapshotPreservesLruAcrossTierChanges, failures);
 	RunTest("decoded-cache-active-reservations-reconcile-before-retained-tiers",
 		TestDecodedCacheProtectionReconcilesActiveReservationsFirst, failures);
+	RunTest("display-texture-pin-handoff-preserves-borrowed-working-texture",
+		TestDisplayTexturePinHandoffPreservesBorrowedWorkingTexture, failures);
 	RunTest("display-cache-prefetch-preserves-active-foreground",
 		TestDisplayImageCachePrefetchPreservesActiveForeground, failures);
 	RunTest("display-cache-empty-prefetch-preserves-foreground-and-spread",
@@ -19747,6 +20154,8 @@ int main(int argc, char** argv) {
 		TestDisplayCacheReportsDeletedSourceIdentity, failures);
 	RunTest("decoded-cache-reports-deleted-source-after-decode-failure",
 		TestDecodedCacheReportsDeletedSourceAfterDecodeFailure, failures);
+	RunTest("selected-decode-retries-after-observed-spread-cancellation",
+		TestSelectedDecodeRetriesAfterObservedSpreadCancellation, failures);
 	RunTest("thumbnail-source-notice-routes-through-current-refresh",
 		TestThumbnailSourceNoticeRoutesThroughCurrentRefresh, failures);
 	RunTest("thumbnail-invalid-descriptor-recaptures-recreated-source",
@@ -19777,6 +20186,10 @@ int main(int argc, char** argv) {
 		TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots, failures);
 	RunTest("image-session-controller-navigation-and-clipboard-state",
 		TestImageSessionControllerSnapshotsNavigationAndClipboardState, failures);
+	RunTest("image-session-selected-load-commits-only-ready-current-owner",
+		TestImageSessionSelectedLoadCommitsOnlyReadyCurrentOwner, failures);
+	RunTest("selected-source-decode-channel-rejects-stale-owner-completions",
+		TestSelectedSourceDecodeChannelRejectsStaleOwnerCompletions, failures);
 	RunTest("image-session-controller-selected-source-preparation",
 		TestImageSessionControllerPlansSelectedSourcePreparation, failures);
 	RunTest("recent-image-load-history-commits-only-after-success",

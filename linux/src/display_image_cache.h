@@ -5,10 +5,13 @@
 #include "cache_budget.h"
 #include "image_processing.h"
 #include "perf_diagnostics.h"
+#include "spectrum_model.h"
+#include "work_context.h"
 
 #include <chrono>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -29,6 +32,7 @@ struct DisplayImageCacheKey {
 	int targetHeight = 0;
 	int rotationQuarterTurns = 0;
 	bool autoContrast = false;
+	bool includeSpectrum = false;
 	ImageProcessingParams processing;
 
 	bool Valid() const;
@@ -54,9 +58,13 @@ struct DisplayImageRequest {
 	int targetHeight = 0;
 	int rotationQuarterTurns = 0;
 	bool autoContrast = false;
+	bool includeSpectrum = false;
 	ImageProcessingParams processing;
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::Unspecified;
+	// Zero for speculative work; selected requests retain their owner generation
+	// through renderer-thread upload delivery without changing the pixel key.
+	std::uint64_t selectionGeneration = 0;
 	DisplayImageCacheKey cacheKey;
 	std::string key;
 	std::shared_ptr<std::atomic<bool>> cancellation;
@@ -74,6 +82,7 @@ struct PreparedDisplayImage {
 	int height = 0;
 	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
+	std::shared_ptr<const GrayscaleSpectrum> spectrum;
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::Unspecified;
 	int rotationQuarterTurns = 0;
@@ -86,6 +95,16 @@ struct DisplayImageCompletionInfo {
 	std::shared_ptr<const PreparedDisplayImage> image;
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::Unspecified;
+	std::uint64_t selectionGeneration = 0;
+};
+
+struct DisplayImageFailureInfo {
+	DisplayImageCacheKey cacheKey;
+	std::string key;
+	WorkerFailure failure;
+	std::size_t priority = 0;
+	PerfWorkClass workClass = PerfWorkClass::Unspecified;
+	std::uint64_t selectionGeneration = 0;
 };
 
 // Captures the source identity at request time. An invalid request is returned
@@ -93,20 +112,24 @@ struct DisplayImageCompletionInfo {
 DisplayImageRequest MakeDisplayImageRequest(const std::filesystem::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0,
-	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
+	bool includeSpectrum = false);
 DisplayImageRequest MakeDisplayImageRequest(const SourceDescriptor& source,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority = 0,
-	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
+	bool includeSpectrum = false);
 
 DisplayImageRequest MakeJpegDisplayImageRequest(const std::filesystem::path& filename,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	bool autoContrast, std::size_t priority = 0,
-	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
+	bool includeSpectrum = false);
 DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	bool autoContrast, std::size_t priority = 0,
-	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0);
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
+	bool includeSpectrum = false);
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
 
@@ -183,6 +206,7 @@ public:
 	std::vector<DisplayImageCompletionInfo> TakeCompletedWithMetadata(
 		std::size_t maximumCount,
 		const std::set<PerfWorkClass>& permittedWorkClasses);
+	std::vector<DisplayImageFailureInfo> TakeFailedCompletions();
 	void Release(const std::string& key);
 	// Removes the entry while tracking its CPU pixels as temporary upload staging
 	// until the final shared owner releases them on the retirement worker.

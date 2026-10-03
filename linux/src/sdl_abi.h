@@ -296,6 +296,7 @@ void SDL_DestroyRenderer(SDL_Renderer* renderer);
 SDL_Texture* SDL_CreateTexture(SDL_Renderer* renderer, Uint32 format, int access, int w, int h);
 void SDL_DestroyTexture(SDL_Texture* texture);
 int SDL_UpdateTexture(SDL_Texture* texture, const SDL_Rect* rect, const void* pixels, int pitch);
+int SDL_GetTextureBlendMode(SDL_Texture* texture, int* blendMode);
 int SDL_SetTextureBlendMode(SDL_Texture* texture, int blendMode);
 int SDL_SetTextureAlphaMod(SDL_Texture* texture, Uint8 alpha);
 int SDL_SetTextureColorMod(SDL_Texture* texture, Uint8 r, Uint8 g, Uint8 b);

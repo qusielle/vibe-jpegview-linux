@@ -119,6 +119,8 @@ SOURCES += src/cache_policy.cpp src/cache_policy.h
 TEST_SOURCES += src/cache_policy.cpp src/cache_policy.h
 SOURCES += src/display_upload_scheduler.cpp src/display_upload_scheduler.h
 TEST_SOURCES += src/display_upload_scheduler.cpp src/display_upload_scheduler.h
+SOURCES += src/display_texture_pins.h
+TEST_SOURCES += src/display_texture_pins.h
 TEST_SOURCES += tests/fixtures/data-encrypted.7z tests/fixtures/header-encrypted.7z
 TEST_SOURCES += tests/fixtures/encrypted_rar/private.png \
 	tests/fixtures/encrypted_rar/rar4-data-encrypted.rar \

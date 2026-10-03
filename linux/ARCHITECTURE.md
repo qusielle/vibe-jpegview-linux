@@ -70,11 +70,15 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `image_session_controller`: the selected source ticket, monotonically advancing load generation,
   document revision, processing snapshot, and viewport restoration choice. It owns the existing
   `RecentImageLoadState` and temporary clipboard-return viewport while keeping the last committed
-  Recents owner distinct from a pending selection. Snapshot decisions select cached JPEG dimensions,
-  an asynchronous header request, or the full decode fallback, and suppress decoded work while a
-  display frame, spread deferral, or header request owns preparation. It returns value effects for
-  clearing the prior presentation, restoring the captured viewport, and preparing the selected source;
-  Viewer applies those effects through its SDL and cache adapters.
+  Recents owner distinct from a pending selection. Its selected-load stages cover asynchronous
+  JPEG-header or full-source decode, display preparation, renderer-ready upload, commit, and failure.
+  A selected-decode mailbox accepts only the active source key and load generation, including
+  A-to-B-to-A reversals. Snapshot decisions suppress duplicate decoded work while an exact display
+  frame, spread deferral, or header request owns preparation. Viewer commits selected history only
+  after the matching prepared frame becomes a renderer texture; failure leaves the previous committed
+  history owner intact. It returns value effects for clearing the prior presentation, restoring the
+  captured viewport, and preparing the selected source; Viewer applies those effects through its SDL
+  and cache adapters.
 - `display_preparation_controller`: the display-prefetch planner lifetime, viewport and request-batch
   generations, and a bounded channel of owned `DisplayImageRequest` completions. Worker callbacks
   retain the channel and captured generation, never a raw display-cache pointer. Viewer drains the
@@ -237,26 +241,28 @@ should normally be added to one of these focused modules and covered by `tests/t
   validation and cache freshness use the backing container. The recent database is independent from
   viewer settings and performs no image or directory scans while loading. `RecentImageLoadState`
   tracks the selected pending path and its viewport separately from the last successfully loaded
-  history owner. It commits the Recents row and loaded-path ownership only after `LoadCurrent`
-  succeeds; the outgoing owner's viewport and D/J modes are saved once while that owner remains
+  history owner. It commits the Recents row and loaded-path ownership only after the selected frame
+  is uploaded and accepted by the renderer; `LoadCurrent` only starts asynchronous preparation. The
+  outgoing owner's viewport and D/J modes are saved once while that owner remains
   committed, so a cold-image continuation or replacement cannot overwrite them with the pending
   image's restored modes. Direct snapshot writes require the selected path to remain the committed
   owner. Viewport restoration resolves the selected identity before retiring its pending request:
   a matching pending selection keeps its snapshot, while reversing to the committed owner restores
-  that owner's saved snapshot. Viewport mode changes update the pending snapshot so a cold-image
+  that owner's saved snapshot. Viewport mode changes update the pending snapshot so a selected-image
   continuation applies the latest user intent. Viewport and rotate/mirror actions share one
-  source- and generation-bound sequence and replay in original order from the incoming snapshot
-  after header dimensions arrive, so unknown geometry never substitutes the outgoing image's scale.
+  source- and generation-bound sequence and replay from the incoming snapshot after the required
+  dimensions or pixels arrive, so unknown geometry never substitutes the outgoing image's scale.
   The queue admits at most 256 actions; at capacity it rejects later actions without altering
   accepted state and exposes that limit in the pending title. Startup catalog completion keeps a
   matching provisional cold-header request and its
   queued input when selected path and source identity still match. Header continuation preserves the
-  effective picture-level processing selected while the request was pending. While the matching
-  header request is pending, generic title refreshes retain its loading status. A successful commit
-  starts snapshot saving for the new owner; canceling or replacing a cold JPEG header request drops
-  only its pending snapshot and intents.
+  effective picture-level processing selected while the request was pending. While matching header,
+  decode, or display-frame work is pending, generic title refreshes retain its loading status. A
+  successful renderer commit starts snapshot saving for the new owner; canceling or replacing selected
+  work drops only its pending snapshot and intents.
 - `pending_image_intents`: ordered viewport and rotate/mirror actions plus slideshow-transition
-  requests attached to the active cold-header source and load generation, with a 256-action cap and
+  requests attached to the active selected-source generation across header, decode, and display
+  stages, with a 256-action cap and
   deterministic rejection of overflow, plus deferred EXIF-date actions attached to the
   metadata generation. Header and metadata work can finish in either order; an EXIF-date update waits
   for both matching metadata and successful image commit so it cannot invalidate an in-flight header
@@ -350,6 +356,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   with pending foreground source work.
 - `work_batch_gate`: serializes completion publication with batch deactivation. Once an owner deactivates
   a prefetch batch, callbacks already copied by a worker cannot enqueue new work after cache cancellation.
+- `display_texture_pins`: pure pin selection and scoped borrowed-texture handoff. A borrowed outgoing
+  display texture receives a temporary capture pin before an old transition is cleared, then the new
+  transition takes its pin before that temporary pin is released. All SDL texture operations remain on
+  the renderer thread.
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
   validation and single-pass expansion for the configurable window-title pattern. It caches title
   and information-line formatting by the relevant source, catalog, metadata, and display state, and
@@ -729,8 +739,13 @@ reads, JPEG dimension lookup, decode, and resampling do not run on the event thr
 at most one request active and two queued requests; thumbnail results carry generation, file
 list, source-key, and target-geometry identities for validation before renderer-thread upload. This
 leaves renderer upload and display preparation ahead of thumbnail work. Static images backed by a
-ready display texture defer full-pixel materialization
-until an edit, copy, save, histogram, or another pixel-consuming operation actually needs it.
+ready display texture defer full-pixel materialization until an edit, copy, save, or another
+pixel-consuming operation actually needs it. When the visible histogram is enabled, display
+preparation computes its grayscale spectrum from full-source processed pixels on the worker and
+carries that compact result with the prepared frame and texture. File-backed JPEG requests use a
+full-resolution decode in this optional mode to preserve histogram values; ordinary fitted-JPEG
+requests retain reduced-DCT decoding. Painting does not materialize source pixels or rescan the image.
+Edited images compute a replacement spectrum when their renderer texture updates.
 For fitted JPEGs, header dimensions are cached by file size and modification time and workers decode
 the smallest native libjpeg scale that covers the stable viewport. This makes renderer-ready textures,
 rather than ~96 MiB source frames, the primary navigation cache for high-resolution photo folders.

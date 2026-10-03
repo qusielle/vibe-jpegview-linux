@@ -4,6 +4,7 @@
 #include "image_decoder.h"
 #include "cache_budget.h"
 #include "perf_diagnostics.h"
+#include "work_context.h"
 
 #include <chrono>
 #include <cstddef>
@@ -76,6 +77,8 @@ public:
 	// reports a decode failure; decoded pixels are delivered even when retention
 	// is refused.
 	using Completion = std::function<void(const std::filesystem::path&, const ImagePtr&)>;
+	using DetailedCompletion = std::function<void(const SourceDescriptor&,
+		const ImagePtr&, const WorkerFailure&)>;
 	using DimensionsCompletion = std::function<void(const std::filesystem::path&,
 		bool, int, int)>;
 	using Filter = std::function<bool(const std::filesystem::path&)>;
@@ -109,6 +112,12 @@ public:
 		Completion completion, PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
 	void RequestBackground(const SourceDescriptor& source,
 		Completion completion, PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
+	// Foreground selected-image requests publish structured decoder failures as
+	// well as pixels. The callback may run on a worker thread and must not touch
+	// renderer or Viewer-owned state.
+	void RequestSelectedSource(const SourceDescriptor& source,
+		DetailedCompletion completion,
+		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
 	// Reads only JPEG header dimensions on the existing worker, without retaining
 	// or materializing full-resolution decoded pixels.
 	void RequestJpegDimensions(const std::filesystem::path& filename,

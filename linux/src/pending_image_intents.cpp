@@ -27,11 +27,11 @@ bool PendingImageIntents::MatchesSelection(const std::filesystem::path& filename
 		pending_->source == source && pending_->loadGeneration == loadGeneration;
 }
 
-bool PendingImageIntents::MatchesStartupLoad(bool startupScan, bool headerPending,
-	bool dimensionsRequestPending, bool startupLoad,
+bool PendingImageIntents::MatchesStartupLoad(bool startupScan,
+	bool selectedLoadPending, bool startupLoad,
 	const std::filesystem::path& filename, const SourceKey& source,
 	std::uint64_t loadGeneration) const {
-	return startupScan && headerPending && dimensionsRequestPending && startupLoad &&
+	return startupScan && selectedLoadPending && startupLoad &&
 		MatchesSelection(filename, source, loadGeneration);
 }
 
@@ -52,12 +52,65 @@ bool PendingImageIntents::QueueTransform(const std::filesystem::path& filename,
 	return true;
 }
 
+bool PendingImageIntents::QueueCopySelection(
+	const std::filesystem::path& filename, const SourceKey& source,
+	std::uint64_t loadGeneration, int left, int top, int right, int bottom) {
+	if (!CanQueue(filename, source, loadGeneration) || left < 0 || top < 0 ||
+		right <= left || bottom <= top) return false;
+	PendingImageIntent action;
+	action.type = PendingImageIntentType::CopySelection;
+	action.selectionLeft = left;
+	action.selectionTop = top;
+	action.selectionRight = right;
+	action.selectionBottom = bottom;
+	pending_->actions.push_back(action);
+	return true;
+}
+
+bool PendingImageIntents::QueueCopyImage(const std::filesystem::path& filename,
+	const SourceKey& source, std::uint64_t loadGeneration, bool fullSize) {
+	if (!CanQueue(filename, source, loadGeneration)) return false;
+	PendingImageIntent action;
+	action.type = PendingImageIntentType::CopyImage;
+	action.fullSize = fullSize;
+	pending_->actions.push_back(action);
+	return true;
+}
+
+bool PendingImageIntents::QueueCropSelection(
+	const std::filesystem::path& filename, const SourceKey& source,
+	std::uint64_t loadGeneration, int left, int top, int right, int bottom) {
+	if (!CanQueue(filename, source, loadGeneration) || left < 0 || top < 0 ||
+		right <= left || bottom <= top) return false;
+	PendingImageIntent action;
+	action.type = PendingImageIntentType::CropSelection;
+	action.selectionLeft = left;
+	action.selectionTop = top;
+	action.selectionRight = right;
+	action.selectionBottom = bottom;
+	pending_->actions.push_back(action);
+	return true;
+}
+
 bool PendingImageIntents::RequestTransition(const SourceKey& source,
 	std::uint64_t loadGeneration) {
 	if (!pending_.has_value() || pending_->source != source ||
 		pending_->loadGeneration != loadGeneration) return false;
 	pending_->startTransition = true;
 	return true;
+}
+
+std::optional<PendingImageIntentBatch> PendingImageIntents::Drain(
+	const SourceKey& source, std::uint64_t loadGeneration) {
+	if (!pending_.has_value() || pending_->source != source ||
+		pending_->loadGeneration != loadGeneration) return std::nullopt;
+	std::vector<PendingImageIntent> actions = std::move(pending_->actions);
+	pending_->actions.clear();
+	PendingImageIntentBatch result{pending_->filename, pending_->source,
+		pending_->loadGeneration, std::move(actions),
+		pending_->startTransition};
+	pending_->startTransition = false;
+	return result;
 }
 
 std::optional<PendingImageIntentBatch> PendingImageIntents::Take(
