@@ -67,6 +67,24 @@ should normally be added to one of these focused modules and covered by `tests/t
   spread geometry, whole-spread quarter-turn placement, page-step navigation, and configurable
   physical-key direction in manga reading order. It owns no image pixels, filesystem work, or SDL
   resources.
+- `image_session_controller`: the selected source ticket, monotonically advancing load generation,
+  document revision, processing snapshot, and viewport restoration choice. It owns the existing
+  `RecentImageLoadState` and temporary clipboard-return viewport while keeping the last committed
+  Recents owner distinct from a pending selection. Snapshot decisions select cached JPEG dimensions,
+  an asynchronous header request, or the full decode fallback, and suppress decoded work while a
+  display frame, spread deferral, or header request owns preparation. It returns value effects for
+  clearing the prior presentation, restoring the captured viewport, and preparing the selected source;
+  Viewer applies those effects through its SDL and cache adapters.
+- `display_preparation_controller`: the display-prefetch planner lifetime, viewport and request-batch
+  generations, and a bounded channel of owned `DisplayImageRequest` completions. Worker callbacks
+  retain the channel and captured generation, never a raw display-cache pointer. Viewer drains the
+  channel on the event thread and submits requests to `DisplayImageCache`; explicit shutdown closes
+  the channel and joins the planner before renderer and cache teardown.
+- `presentation_controller`: presentation and held-navigation readiness layered over
+  `DoublePagePresentationModel`. It accepts selected-load, JPEG-header, spread, texture-readiness, and
+  first-frame acknowledgement values; it also plans single-page fallback, dimension waits, rotated
+  spread geometry, and pair-request admission from value snapshots. It owns no SDL resources. The
+  renderer acknowledges the spread only after `SDL_RenderPresent` returns.
 - `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
   and on-demand member access. ZIP and CBZ containers share the central-directory reader and member
   access path; CBZ retains its own display label. 7z and CB7 containers share libarchive's seekable
@@ -128,7 +146,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   Existing libjpeg cleanup and error handling remain in place, and callbacks are never thrown across C
   codec frames. Decoded frames carry alpha-presence metadata so opaque-image textures can keep blending
   disabled.
-- `cache_budget`, `image_cache`, `display_image_cache`, `display_prefetch_planner`, and
+- `cache_budget`, `image_cache`, `display_image_cache`, `display_prefetch_planner`,
+  `display_preparation_controller`, and
   `display_upload_scheduler`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
   processing/scaling of renderer-ready frames. Decoded, display, and thumbnail caches use the same
@@ -381,7 +400,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   are sampled once per second to keep their thumbnail accounting scan out of the ordinary frame path.
 
 `main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
-and invoking desktop integrations. It forwards relevant input and capture changes to
+and invoking desktop integrations. Image-session, display-preparation, and presentation controllers
+hold source, generation, and readiness state and return value effects. Viewer preserves their
+operation order while applying viewport, cache, status, and texture effects. It forwards relevant
+input and capture changes to
 `InteractionWorkPolicy`, then applies its work-class plan to neighbor admission, thumbnail scheduling,
 completed-frame uploads, and the low-priority scan worker. Speculative display and thumbnail work is
 cooperatively canceled when it becomes irrelevant; active image and spread preparation retains priority.

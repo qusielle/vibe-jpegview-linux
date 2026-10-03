@@ -2,6 +2,7 @@
 #include "file_list.h"
 #include "file_list_scan_worker.h"
 #include "display_prefetch_planner.h"
+#include "display_preparation_controller.h"
 #include "exif_metadata_worker.h"
 #include "pending_image_intents.h"
 #include "image_decoder.h"
@@ -47,6 +48,8 @@
 #include "bitmap_font.h"
 #include "playback_scheduler.h"
 #include "double_page_model.h"
+#include "presentation_controller.h"
+#include "image_session_controller.h"
 #include "archive_source.h"
 #include "rar_backend.h"
 #include "seven_zip_backend.h"
@@ -2766,6 +2769,124 @@ void TestDoublePagePresentationCommitsSpreadAtomically() {
 		presentation.Phase() == DoublePagePresentationPhase::FailedSpread &&
 		!presentation.SuppressSinglePage(5),
 		"failed spread texture did not release the single-page fallback");
+}
+
+void TestPresentationControllerGatesHeldNavigationOnFirstFrame() {
+	using jpegview_linux::PresentationController;
+	using jpegview_linux::PresentationNavigationState;
+	PresentationController presentation;
+	Expect(presentation.BeginSpread(3, 4, "anchor", "partner"),
+		"presentation controller did not begin the selected spread");
+	PresentationNavigationState state{3, true, false, true, false, false};
+	Expect(!presentation.CanRepeatNavigation(state) &&
+		presentation.MarkTextureReady("anchor") &&
+		!presentation.CanRepeatNavigation(state),
+		"held navigation advanced before both pages had renderer textures");
+	Expect(presentation.MarkTextureReady("partner") &&
+		!presentation.CanRepeatNavigation(state),
+		"held navigation advanced before the first complete spread frame was presented");
+	Expect(presentation.AcknowledgeFramePresented(3, true) &&
+		presentation.CanRepeatNavigation({3, true, false, true, true, true}),
+		"held navigation did not resume after the first complete spread frame was presented");
+
+	Expect(presentation.BeginSpread(5, 6, "failed-anchor", "failed-partner") &&
+		presentation.MarkTextureFailed("failed-partner") &&
+		presentation.CanRepeatNavigation({5, true, false, false, false, false}),
+		"a failed spread did not return navigation to its single-page fallback");
+	Expect(!presentation.CanRepeatNavigation({5, false, false, false, false, false}) &&
+		!presentation.CanRepeatNavigation({5, true, true, false, false, false}),
+		"pending selection or JPEG header completion allowed repeat navigation");
+}
+
+void TestPresentationControllerPlansSpreadPreparationWithoutRenderer() {
+	using jpegview_linux::PresentationController;
+	using jpegview_linux::SpreadPreparationAction;
+	using jpegview_linux::SpreadPreparationSnapshot;
+	PresentationController presentation;
+	SpreadPreparationSnapshot snapshot;
+	Expect(presentation.PlanSpreadPreparation(snapshot).action ==
+		SpreadPreparationAction::UseSinglePage,
+		"empty image list did not choose the single-page presentation");
+
+	snapshot.selectedIndex = 1;
+	snapshot.pageCount = 4;
+	snapshot.modes.enabled = true;
+	snapshot.cacheAvailable = true;
+	Expect(presentation.PlanSpreadPreparation(snapshot).action ==
+		SpreadPreparationAction::AwaitDimensions,
+		"pending anchor selection did not wait for its spread dimensions");
+	snapshot.cacheAvailable = false;
+	Expect(presentation.PlanSpreadPreparation(snapshot).action ==
+		SpreadPreparationAction::UseSinglePage,
+		"disabled cache admitted pending spread work");
+
+	snapshot.selectedImageCommitted = true;
+	snapshot.cacheAvailable = true;
+	snapshot.anchorPixelsAvailable = true;
+	Expect(presentation.PlanSpreadPreparation(snapshot).action ==
+		SpreadPreparationAction::CapturePageDimensions,
+		"committed image did not request its page-dimension snapshot");
+	snapshot.pageDimensionsCaptured = true;
+	snapshot.anchorDimensions = jpegview_linux::PageDimensions{600, 900};
+	Expect(presentation.PlanSpreadPreparation(snapshot).action ==
+		SpreadPreparationAction::AwaitDimensions,
+		"unknown partner dimensions did not keep spread preparation pending");
+	snapshot.partnerDecodeFailed = true;
+	const auto failedPartner = presentation.PlanSpreadPreparation(snapshot);
+	Expect(failedPartner.action == SpreadPreparationAction::UseSinglePageAfterPartnerFailure &&
+		failedPartner.preserveDeferredDisplay,
+		"failed partner decode did not preserve the anchor's deferred display fallback");
+
+	snapshot.partnerDecodeFailed = false;
+	snapshot.partnerDimensions = jpegview_linux::PageDimensions{720, 1080};
+	snapshot.anchorRotationQuarterTurns = 1;
+	const auto rotated = presentation.PlanSpreadPreparation(snapshot);
+	Expect(rotated.action == SpreadPreparationAction::PrepareSpread &&
+		rotated.layout.has_value() && rotated.layout->firstIndex == 1 &&
+		rotated.layout->secondIndex == 2 &&
+		rotated.layout->clockwiseQuarterTurns == 1 &&
+		rotated.layout->canvasWidth == 1080 && rotated.layout->canvasHeight == 1440,
+		"spread planning lost rotated geometry or adjacent source identity");
+
+	snapshot.anchorRotationQuarterTurns = 0;
+	snapshot.partnerDimensions = jpegview_linux::PageDimensions{1080, 720};
+	const auto landscapePartner = presentation.PlanSpreadPreparation(snapshot);
+	Expect(landscapePartner.action == SpreadPreparationAction::UseSinglePageAfterPartnerFailure &&
+		landscapePartner.preserveDeferredDisplay,
+		"ineligible partner geometry did not select the deferred single-page fallback");
+	snapshot.anchorDimensions = jpegview_linux::PageDimensions{900, 600};
+	Expect(presentation.PlanSpreadPreparation(snapshot).action ==
+		SpreadPreparationAction::UseSinglePage,
+		"landscape anchor incorrectly entered spread request planning");
+}
+
+void TestPresentationControllerPlansSpreadRequestsAndFallbacks() {
+	using jpegview_linux::PresentationController;
+	using jpegview_linux::SpreadRequestAction;
+	using jpegview_linux::SpreadRequestSnapshot;
+	PresentationController presentation;
+	const auto missingPartner = presentation.PlanSpreadRequests({false, 100, 100, 1000, false});
+	Expect(missingPartner.action == SpreadRequestAction::ReturnToSinglePage &&
+		missingPartner.preserveDeferredDisplay,
+		"unavailable partner request did not retain the anchor fallback");
+	const auto overBudget = presentation.PlanSpreadRequests({true, 600, 500, 1000, false});
+	Expect(overBudget.action == SpreadRequestAction::ReturnToSinglePage &&
+		!overBudget.preserveDeferredDisplay,
+		"over-budget spread requests did not return to ordinary single-page preparation");
+	SpreadRequestSnapshot failedPair{true, 400, 500, 1000, true};
+	const auto deferredFailure = presentation.PlanSpreadRequests(failedPair);
+	Expect(deferredFailure.action == SpreadRequestAction::KeepFailedSpreadDeferred &&
+		deferredFailure.preserveDeferredDisplay,
+		"previously failed spread did not keep its deferred fallback while rejecting retries");
+	failedPair.pairPreviouslyFailed = false;
+	const auto admittedPair = presentation.PlanSpreadRequests(failedPair);
+	Expect(admittedPair.action == SpreadRequestAction::StartSpreadRequests &&
+		!admittedPair.preserveDeferredDisplay,
+		"eligible spread pair did not start its two texture requests");
+	const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+	const auto overflowPair = presentation.PlanSpreadRequests({true, maximum, 1, maximum, false});
+	Expect(overflowPair.action == SpreadRequestAction::ReturnToSinglePage,
+		"overflowed spread texture accounting was admitted");
 }
 
 void TestDoublePageRefreshInvalidatesVisiblePartnerGeometry() {
@@ -6211,6 +6332,84 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 		retriedAdmissionResults.front().dimensions.size() == 1 &&
 		admissionDimensionReads.load() == 1,
 		"planner admission exception escaped its worker or prevented a valid retry");
+}
+
+void TestDisplayPreparationControllerOwnsGenerationTaggedCompletions() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "controller-neighbor.jpg";
+	WriteText(filename, "captured JPEG descriptor");
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(filename);
+	std::atomic<int> dimensionReads{0};
+	jpegview_linux::DisplayPreparationController controller(
+		[&dimensionReads](const jpegview_linux::SourceDescriptor&, int& width, int& height,
+			std::string&, const jpegview_linux::DisplayPrefetchPlannerWorker::Continue& keepGoing) {
+			if (!keepGoing()) return false;
+			++dimensionReads;
+			width = 640;
+			height = 480;
+			return keepGoing();
+		});
+
+	jpegview_linux::DisplayPrefetchPlannerRequest plan;
+	plan.catalogRevision = 4;
+	plan.descriptorRevision = 7;
+	plan.viewportRevision = controller.AdvanceViewportRevision();
+	plan.currentIndex = 0;
+	plan.pageCount = 2;
+	plan.imageAreaWidth = 800;
+	plan.imageAreaHeight = 600;
+	plan.maximumCount = 1;
+	plan.neighbors.push_back({filename, source, 1, 1, {}, false, true});
+	const std::uint64_t planGeneration = controller.RequestPlan(plan);
+	Expect(planGeneration != 0 && controller.WaitUntilPlanIdle(std::chrono::seconds(2)),
+		"display-preparation controller did not complete its captured plan");
+	const auto planned = controller.TakePlanResults();
+	Expect(planned.size() == 1 && planned.front().generation == planGeneration &&
+		planned.front().dimensions.size() == 1 && dimensionReads.load() == 1,
+		"display-preparation controller lost the planner generation or dimensions result");
+
+	const std::uint64_t firstBatch = controller.BeginRequestBatch();
+	const auto channel = controller.RequestChannel();
+	jpegview_linux::DisplayImageRequest firstRequest;
+	firstRequest.key = "first-generation-request";
+	Expect(firstBatch != 0 && channel && channel->Publish(firstBatch, firstRequest),
+		"active display batch rejected a generation-matched request completion");
+	const auto firstReady = controller.TakeRequestBatch(firstBatch);
+	Expect(firstReady.size() == 1 && firstReady.front().key == firstRequest.key,
+		"event-thread drain did not transfer the owned request completion");
+
+	const std::uint64_t replacementBatch = controller.BeginRequestBatch();
+	jpegview_linux::DisplayImageRequest staleRequest;
+	staleRequest.key = "stale-generation-request";
+	jpegview_linux::DisplayImageRequest replacementRequest;
+	replacementRequest.key = "replacement-generation-request";
+	Expect(replacementBatch > firstBatch && !channel->Publish(firstBatch, staleRequest) &&
+		channel->Publish(replacementBatch, replacementRequest),
+		"replaced batch accepted stale work or rejected its current generation");
+	controller.CancelRequestBatch(replacementBatch);
+	Expect(controller.TakeRequestBatch(replacementBatch).empty() &&
+		!channel->Publish(replacementBatch, replacementRequest),
+		"canceled batch published or retained a late completion");
+	const std::uint64_t boundedBatch = controller.BeginRequestBatch();
+	bool acceptedAllBoundedRequests = boundedBatch != 0;
+	for (std::size_t index = 0;
+		index < jpegview_linux::kMaximumDisplayPreparationCompletions; ++index) {
+		jpegview_linux::DisplayImageRequest request;
+		request.key = "bounded-request-" + std::to_string(index);
+		acceptedAllBoundedRequests = acceptedAllBoundedRequests &&
+			channel->Publish(boundedBatch, std::move(request));
+	}
+	jpegview_linux::DisplayImageRequest overflowRequest;
+	overflowRequest.key = "overflow-request";
+	Expect(acceptedAllBoundedRequests &&
+		!channel->Publish(boundedBatch, std::move(overflowRequest)) &&
+		controller.TakeRequestBatch(boundedBatch).size() ==
+			jpegview_linux::kMaximumDisplayPreparationCompletions,
+		"display-preparation channel exceeded its explicit completion bound");
+	controller.Shutdown();
+	Expect(!channel->Publish(boundedBatch, replacementRequest),
+		"a retained worker channel accepted work after explicit shutdown");
 }
 
 void TestViewportInvalidationRetainsCurrentActiveSpreadBatch() {
@@ -17893,6 +18092,139 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 		"recent-file database path did not follow XDG_STATE_HOME");
 }
 
+void TestImageSessionControllerSnapshotsNavigationAndClipboardState() {
+	TemporaryDirectory temporary;
+	const fs::path first = temporary.path() / "loaded" / "first.png";
+	const fs::path second = temporary.path() / "recent" / "second.png";
+	const fs::path clipboard = temporary.path() / "clipboard.png";
+	fs::create_directories(first.parent_path());
+	fs::create_directories(second.parent_path());
+	WriteTinyImage(first);
+	WriteTinyImage(second);
+	WriteTinyImage(clipboard);
+	const jpegview_linux::SourceDescriptor firstSource =
+		jpegview_linux::DescribeImageSource(first);
+	const jpegview_linux::SourceDescriptor secondSource =
+		jpegview_linux::DescribeImageSource(second);
+	const jpegview_linux::SourceDescriptor clipboardSource =
+		jpegview_linux::DescribeImageSource(clipboard);
+	const jpegview_linux::ViewportSnapshot firstView{false, false, false, 1.5, 1.0};
+	const jpegview_linux::ViewportSnapshot clipboardReturn{false, true, false, 2.75, 1.25};
+	const jpegview_linux::ViewportSnapshot navigation{true, false, true, 0.75, 1.0};
+	const jpegview_linux::ViewportSnapshot savedSecond{false, false, false, 3.0, 2.0};
+	jpegview_linux::ImageProcessingPreset firstProcessing;
+	firstProcessing.processing.contrast = 0.2;
+	firstProcessing.autoContrast = true;
+	jpegview_linux::RecentFiles recentFiles;
+	recentFiles.RememberViewport(second, savedSecond);
+	recentFiles.RememberDoublePageMode(second, {true, true});
+	jpegview_linux::ImageSessionController session;
+
+	const jpegview_linux::ImageSessionStart firstStart = session.BeginSelection(
+		firstSource, first, firstView, firstProcessing, true);
+	Expect(firstStart.selection.generation == session.Generation() &&
+		firstStart.selection.source.Key() == firstSource.Key() &&
+		firstStart.selection.viewport.zoom == firstView.zoom &&
+		firstStart.selection.processing.processing.contrast == 0.2 &&
+		firstStart.selection.processing.autoContrast &&
+		firstStart.selection.tracksRecentHistory &&
+		firstStart.effects.clearPreviousPresentation && firstStart.effects.restoreViewport &&
+		firstStart.effects.requestSelectedSourcePreparation &&
+		session.MatchesSelection(firstStart.selection.generation, firstSource.Key()),
+		"image-session start did not capture its source, generation, viewport, processing, and effects");
+	Expect(session.MarkDocumentChanged() == 1 && session.CommitLoad(first, recentFiles) &&
+		session.DocumentRevision() == 1 && session.LoadedPath() ==
+		fs::absolute(first).lexically_normal(),
+		"successful image-session commit did not retain document revision and Recents ownership");
+
+	session.SetClipboardReturnViewport(clipboardReturn);
+	Expect(session.ResolveViewportForSelection(first, false, navigation, navigation,
+		recentFiles).zoom == clipboardReturn.zoom &&
+		session.ResolveViewportForSelection(clipboard, true, clipboardReturn, navigation,
+			recentFiles).zoom == navigation.zoom &&
+		session.ResolveViewportForSelection(second, false, navigation, navigation,
+			recentFiles).zoom == savedSecond.zoom &&
+		recentFiles.FindDoublePageMode(second).has_value() &&
+		recentFiles.FindDoublePageMode(second)->mangaReadingOrder,
+		"clipboard return or per-image Recents restoration changed during selection planning");
+
+	const jpegview_linux::ImageSessionStart clipboardStart = session.BeginSelection(
+		clipboardSource, clipboard, navigation, {}, false);
+	Expect(clipboardStart.selection.generation > firstStart.selection.generation &&
+		!session.MatchesSelection(firstStart.selection.generation, firstSource.Key()) &&
+		session.MatchesSelection(clipboardStart.selection.generation, clipboardSource.Key()) &&
+		session.DocumentRevision() == 0 && session.LoadedPath() ==
+		fs::absolute(first).lexically_normal() && session.OwnsLoadedPath(first) &&
+		!session.CommitLoad(clipboard, recentFiles),
+		"clipboard selection replaced committed history or retained the previous document revision");
+	const jpegview_linux::ImageProcessingPreset updatedProcessing{{}, false};
+	session.UpdateProcessing(updatedProcessing);
+	Expect(session.Processing().autoContrast == false &&
+		session.Selection()->processing.autoContrast == false,
+		"current processing state was not updated in the selected session snapshot");
+	session.ClearClipboardReturnViewport();
+	Expect(!session.ClipboardReturnViewport().has_value(),
+		"completed return from clipboard mode retained its temporary viewport snapshot");
+}
+
+void TestImageSessionControllerPlansSelectedSourcePreparation() {
+	using jpegview_linux::ImageSessionController;
+	using jpegview_linux::SelectedSourcePreparationAction;
+	using jpegview_linux::SelectedSourcePreparationSnapshot;
+	ImageSessionController session;
+	SelectedSourcePreparationSnapshot snapshot;
+	snapshot.jpegSource = true;
+	snapshot.displayCacheEnabled = true;
+	snapshot.sourceValid = true;
+	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
+		SelectedSourcePreparationAction::RequestJpegDimensions,
+		"cold valid JPEG did not choose asynchronous dimension preparation");
+	snapshot.cachedJpegDimensions = true;
+	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
+		SelectedSourcePreparationAction::UseCachedJpegDimensions,
+		"cached JPEG dimensions did not bypass the header request");
+	snapshot.cachedJpegDimensions = false;
+	snapshot.jpegDimensionProbeFailed = true;
+	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
+		SelectedSourcePreparationAction::DecodeSelectedSource,
+		"failed JPEG header did not choose the full decode fallback");
+	snapshot.jpegDimensionProbeFailed = false;
+	snapshot.sourceValid = false;
+	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
+		SelectedSourcePreparationAction::DecodeSelectedSource,
+		"invalid JPEG descriptor did not avoid another header request");
+	snapshot.sourceValid = true;
+	snapshot.preparationRequested = false;
+	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
+		SelectedSourcePreparationAction::Skip,
+		"disabled source preparation still admitted image work");
+	snapshot.preparationRequested = true;
+	snapshot.jpegSource = false;
+	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
+		SelectedSourcePreparationAction::DecodeSelectedSource,
+		"non-JPEG source did not use the decoded-image path");
+	snapshot.jpegSource = true;
+	snapshot.displayCacheEnabled = false;
+	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
+		SelectedSourcePreparationAction::DecodeSelectedSource,
+		"zero cache budget requested JPEG header preparation");
+
+	jpegview_linux::DecodedSourcePreparationSnapshot decoded;
+	Expect(session.ShouldPrepareDecodedSource(decoded),
+		"ready source with no display fallback did not prepare decoded pixels");
+	decoded.cachedDisplayReady = true;
+	Expect(!session.ShouldPrepareDecodedSource(decoded),
+		"cached display frame caused an unnecessary decoded-source load");
+	decoded.cachedDisplayReady = false;
+	decoded.deferredForPossibleSpread = true;
+	Expect(!session.ShouldPrepareDecodedSource(decoded),
+		"spread deferral did not suppress ordinary decoded-source preparation");
+	decoded.deferredForPossibleSpread = false;
+	decoded.waitingForJpegDimensions = true;
+	Expect(!session.ShouldPrepareDecodedSource(decoded),
+		"pending JPEG dimensions allowed a competing decoded-source load");
+}
+
 void TestRecentImageLoadHistoryCommitsOnlyAfterSuccess() {
 	TemporaryDirectory temporary;
 	const fs::path firstFolder = temporary.path() / "first-folder";
@@ -19172,6 +19504,12 @@ int main(int argc, char** argv) {
 		TestDoublePagePairingNavigationAndReadingOrder, failures);
 	RunTest("double-page-presentation-atomic-commit",
 		TestDoublePagePresentationCommitsSpreadAtomically, failures);
+	RunTest("presentation-controller-first-frame-navigation-gate",
+		TestPresentationControllerGatesHeldNavigationOnFirstFrame, failures);
+	RunTest("presentation-controller-plans-spread-preparation-without-renderer",
+		TestPresentationControllerPlansSpreadPreparationWithoutRenderer, failures);
+	RunTest("presentation-controller-plans-spread-requests-and-fallbacks",
+		TestPresentationControllerPlansSpreadRequestsAndFallbacks, failures);
 	RunTest("double-page-refresh-invalidates-visible-partner-geometry",
 		TestDoublePageRefreshInvalidatesVisiblePartnerGeometry, failures);
 	RunTest("full-list-replacement-rebuilds-spread-from-new-neighbor",
@@ -19231,6 +19569,8 @@ int main(int argc, char** argv) {
 		TestDecodedPrefetchWorkClassAttribution, failures);
 	RunTest("display-prefetch-planner-worker-snapshots-and-cancellation",
 		TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation, failures);
+	RunTest("display-preparation-controller-generation-channel",
+		TestDisplayPreparationControllerOwnsGenerationTaggedCompletions, failures);
 	RunTest("viewport-invalidation-retains-current-active-spread-batch",
 		TestViewportInvalidationRetainsCurrentActiveSpreadBatch, failures);
 	RunTest("display-prefetch-request-merge-completion-orders",
@@ -19435,6 +19775,10 @@ int main(int argc, char** argv) {
 	RunTest("playback-scheduler-timing-and-modes", TestPlaybackSchedulerTimingAndModes, failures);
 	RunTest("recent-files-mru-uniqueness-persistence-and-viewports",
 		TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots, failures);
+	RunTest("image-session-controller-navigation-and-clipboard-state",
+		TestImageSessionControllerSnapshotsNavigationAndClipboardState, failures);
+	RunTest("image-session-controller-selected-source-preparation",
+		TestImageSessionControllerPlansSelectedSourcePreparation, failures);
 	RunTest("recent-image-load-history-commits-only-after-success",
 		TestRecentImageLoadHistoryCommitsOnlyAfterSuccess, failures);
 	RunTest("viewport-snapshot-follows-selected-identity-during-cancellation",
