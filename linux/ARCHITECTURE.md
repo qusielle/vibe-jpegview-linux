@@ -483,10 +483,11 @@ publication on both pages: a transformed anchor is marked ready from its existin
 the spread stays hidden until the partner's rotated frame is uploaded. Rotated partner frames are not
 reused as source-orientation thumbnails.
 
-The move-to-trash confirmation draws a small preview from the active-file thumbnail cache when
-available, otherwise from the already-rendered current-image texture. It creates no preview decode or
-pixel resize on the SDL event/render thread; if no matching renderer resource is ready yet, the dialog
-shows a no-preview placeholder alongside the filename.
+The move-to-trash confirmation draws a small preview from the active-file thumbnail texture when
+available, otherwise from the already-rendered current-image texture. An existing thumbnail texture
+may be pinned while confirmation is open. It creates no preview decode or pixel resize on the SDL
+event/render thread; if no matching renderer resource is ready yet, the dialog shows a no-preview
+placeholder alongside the filename.
 
 The Advanced configuration modal is a thin adapter over `AdvancedConfigurationModel`: its category
 tabs, visible row count, hit testing, text input, and painting stay in Viewer, while the model owns
@@ -758,8 +759,22 @@ very-low-priority thumbnail-resampling queue before their CPU pixels are retired
 thumbnail requests use that same worker when no display frame is available, so independent thumbnail
 reads, JPEG dimension lookup, decode, and resampling do not run on the event thread. The worker keeps
 at most one request active and two queued requests; thumbnail results carry generation, file
-list, source-key, and target-geometry identities for validation before renderer-thread upload. This
-leaves renderer upload and display preparation ahead of thumbnail work. Static images backed by a
+list, source-key, and target-geometry identities for validation before retention or renderer-thread
+upload. `ThumbnailPixelRepository` owns the prepared BGRA pixels for generated thumbnails in the
+active catalog, keyed by exact `SourceKey` and cleared when required panel geometry changes. Sorting
+and navigation preserve those CPU pixels. Removed or replaced source identities are evicted from the
+repository, and large buffers are handed to the thumbnail retirement worker before the SDL thread
+drops its final repository reference.
+
+The separate SDL texture map is renderer-thread owned and contains only the visible thumbnail rows,
+one viewport of rows above and below, and any selected thumbnail preview pinned by an open delete
+confirmation. `ThumbnailTextureWindowIndices` computes this bounded set from panel geometry; moving
+the current row destroys textures outside the new set without evicting their CPU pixels. A revisit can
+therefore upload directly from `ThumbnailPixelRepository` without another source read, decode, or
+resample. Upload failures keep the pixels available for retry. Cache diagnostics report retained
+thumbnail pixel bytes/count separately from resident thumbnail texture bytes/count. This storage is
+independent of the configured large-image cache budget and can approach 1 GiB for 15,000 default-size
+thumbnails. This leaves renderer upload and display preparation ahead of thumbnail work. Static images backed by a
 ready display texture defer full-pixel materialization until an edit, copy, save, or another
 pixel-consuming operation actually needs it. When the visible histogram is enabled, display
 preparation computes its grayscale spectrum from full-source processed pixels on the worker and

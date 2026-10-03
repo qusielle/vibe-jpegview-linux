@@ -16479,6 +16479,123 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 		"thumbnail row added horizontal margins or incorrect vertical margins");
 }
 
+void TestThumbnailPixelRetentionAndTextureWindow() {
+	using Image = jpegview_linux::PreparedThumbnailImage;
+	using Repository = jpegview_linux::ThumbnailPixelRepository;
+	const auto MakeImage = [](const jpegview_linux::SourceKey& key,
+		int width, int height, std::uint8_t value) {
+		auto image = std::make_shared<Image>();
+		image->key = key;
+		image->width = width;
+		image->height = height;
+		if (width > 0 && height > 0) {
+			image->bgra.assign(static_cast<std::size_t>(width) *
+				static_cast<std::size_t>(height) * 4, value);
+		}
+		return std::shared_ptr<const Image>(std::move(image));
+	};
+
+	Repository repository;
+	std::size_t retiredOnGeometryChange = 0;
+	repository.SetGeometry(164, 109);
+	const jpegview_linux::SourceKey firstKey("first-source");
+	const auto firstImage = MakeImage(firstKey, 164, 109, 17);
+	Expect(repository.Store(firstImage) ==
+		jpegview_linux::ThumbnailPixelStoreOutcome::Stored &&
+		repository.Find(firstKey) == firstImage &&
+		repository.Diagnostics().imageCount == 1 &&
+		repository.Diagnostics().pixelBytes == 164u * 109u * 4u,
+		"thumbnail pixel repository did not retain prepared pixels and account their exact bytes");
+	Expect(repository.Store(firstImage) ==
+		jpegview_linux::ThumbnailPixelStoreOutcome::AlreadyPresent &&
+		repository.Find(firstKey) == firstImage,
+		"duplicate thumbnail preparation replaced the retained source allocation");
+
+	const auto malformed = MakeImage(jpegview_linux::SourceKey("malformed"), 2, 2, 0);
+	auto shortPixels = std::make_shared<Image>(*malformed);
+	shortPixels->bgra.pop_back();
+	Expect(repository.Store(shortPixels) ==
+		jpegview_linux::ThumbnailPixelStoreOutcome::InvalidImage &&
+		!repository.Find(shortPixels->key),
+		"thumbnail repository retained a malformed pixel allocation");
+	Expect(repository.Store(MakeImage(jpegview_linux::SourceKey("oversized"), 165, 1, 0)) ==
+		jpegview_linux::ThumbnailPixelStoreOutcome::InvalidImage,
+		"thumbnail repository accepted pixels outside its configured geometry");
+
+	const auto released = repository.Erase(firstKey);
+	Expect(released == firstImage && !repository.Find(firstKey) &&
+		repository.Diagnostics().imageCount == 0 &&
+		repository.Diagnostics().pixelBytes == 0,
+		"erasing a thumbnail did not transfer its pixel owner or release accounting");
+	Expect(repository.Store(firstImage) == jpegview_linux::ThumbnailPixelStoreOutcome::Stored,
+		"thumbnail repository could not retain a source after an exact-key replacement");
+	const jpegview_linux::SourceKey replacementKey("replacement-source");
+	Expect(repository.Store(MakeImage(replacementKey, 1, 1, 42)) ==
+		jpegview_linux::ThumbnailPixelStoreOutcome::Stored &&
+		!repository.Find(jpegview_linux::SourceKey("old-source")) &&
+		repository.Find(replacementKey) != nullptr,
+		"source replacement reused thumbnail pixels under the former source identity");
+
+	std::vector<jpegview_linux::SourceKey> keys;
+	keys.reserve(15000);
+	for (std::size_t index = 0; index < 15000; ++index) {
+		keys.emplace_back("retained-" + std::to_string(index));
+	}
+	Repository largeRepository;
+	largeRepository.SetGeometry(164, 109);
+	for (const auto& key : keys) {
+		Expect(largeRepository.Store(MakeImage(key, 1, 1, 7)) ==
+			jpegview_linux::ThumbnailPixelStoreOutcome::Stored,
+			"thumbnail pixel repository stopped retaining an active-list image");
+	}
+	const auto largeDiagnostics = largeRepository.Diagnostics();
+	Expect(largeDiagnostics.imageCount == keys.size() &&
+		largeDiagnostics.pixelBytes == keys.size() * 4 &&
+		largeRepository.Find(keys.front()) != nullptr &&
+		largeRepository.Find(keys.back()) != nullptr,
+		"15,000 retained thumbnail pixels were lost or misaccounted");
+
+	const std::vector<std::size_t> middleWindow =
+		jpegview_linux::ThumbnailTextureWindowIndices(15000, 7500, 900, 112, true);
+	const std::vector<std::size_t> firstWindow =
+		jpegview_linux::ThumbnailTextureWindowIndices(15000, 0, 900, 112, true);
+	const std::vector<std::size_t> lastWindow =
+		jpegview_linux::ThumbnailTextureWindowIndices(15000, 14999, 900, 112, true);
+	Expect(!middleWindow.empty() && middleWindow.size() <= 40 &&
+		middleWindow.front() > 0 && middleWindow.back() < 15000 &&
+		!firstWindow.empty() && firstWindow.front() == 0 && firstWindow.back() < 40 &&
+		!lastWindow.empty() && lastWindow.back() == 14999 && lastWindow.front() > 14959,
+		"thumbnail texture window scaled with catalog size or failed at a list boundary");
+	const std::vector<std::size_t> pinnedWindow =
+		jpegview_linux::ThumbnailTextureWindowIndices(15000, 7500, 900, 112, true, 14999);
+	Expect(std::binary_search(pinnedWindow.begin(), pinnedWindow.end(), 14999) &&
+		pinnedWindow.size() == middleWindow.size() + 1 &&
+		jpegview_linux::ThumbnailTextureWindowIndices(15000, 7500, 900, 112, false).empty() &&
+		jpegview_linux::ThumbnailTextureWindowIndices(15000, 7500, 900, 112,
+			false, 14999) == std::vector<std::size_t>({14999}),
+		"hidden thumbnail panel or confirmation preview pin selected the wrong texture set");
+	const std::vector<std::size_t> revisitedWindow =
+		jpegview_linux::ThumbnailTextureWindowIndices(15000, 0, 900, 112, true);
+	Expect(largeRepository.Find(keys.front()) != nullptr &&
+		largeRepository.Find(keys.back()) != nullptr &&
+		!revisitedWindow.empty() && revisitedWindow.size() <= 40 &&
+		largeRepository.Diagnostics().imageCount == keys.size(),
+		"moving the bounded texture window discarded reusable thumbnail pixels");
+
+	std::size_t retiredOnClear = 0;
+	largeRepository.SetGeometry(240, 159, [&retiredOnGeometryChange](const auto&) {
+		++retiredOnGeometryChange;
+	});
+	Expect(retiredOnGeometryChange == keys.size() &&
+		largeRepository.Diagnostics().imageCount == 0 &&
+		largeRepository.Diagnostics().pixelBytes == 0,
+		"incompatible thumbnail geometry did not release every retained pixel allocation");
+	largeRepository.Store(MakeImage(keys.front(), 1, 1, 9));
+	largeRepository.Clear([&retiredOnClear](const auto&) { ++retiredOnClear; });
+	Expect(retiredOnClear == 1 && largeRepository.Diagnostics().imageCount == 0,
+		"thumbnail repository clear did not hand its final pixel owner to retirement");
+}
+
 void TestThumbnailCacheSchedulingAndEviction() {
 	const auto Configure = [](jpegview_linux::ThumbnailCacheScheduler& scheduler,
 		const std::vector<std::string>& keys, std::size_t current, std::size_t capacity) {
@@ -20583,6 +20700,9 @@ int main(int argc, char** argv) {
 	RunTest("overlay-layout-content-width-and-margins", TestOverlayLayoutUsesContentWidthAndComfortableMargins, failures);
 	RunTest("viewer-chrome-paint-plans", TestViewerChromePaintPlans, failures);
 	RunTest("thumbnail-panel-layout-preload-and-sizing", TestThumbnailPanelLayoutPreloadAndSizing, failures);
+	RunTest("thumbnail-pixel-retention-and-texture-window", TestThumbnailPixelRetentionAndTextureWindow, failures);
+	RunTest("thumbnail-preparation-retry-preserves-identity",
+		TestThumbnailPreparationRetryPreservesIdentityAcrossRepeatedFailuresAndRecovery, failures);
 	RunTest("thumbnail-cache-scheduling-and-eviction", TestThumbnailCacheSchedulingAndEviction, failures);
 	RunTest("thumbnail-catalog-replacement-identity", TestThumbnailCatalogReplacementIdentity, failures);
 	RunTest("thumbnail-source-identity-replacement-invalidates",
