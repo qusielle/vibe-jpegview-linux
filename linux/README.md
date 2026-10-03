@@ -32,7 +32,9 @@ they support.
    sharpening path was ported, with Catmull–Rom bicubic enlargement and a shared 1 GiB image-cache
    budget.
    Fitted JPEGs use libjpeg-turbo's native reduced DCT decode, avoiding full 4000×6000 pixel buffers
-   when the screen needs only a smaller image. Up to four hardware-aware, low-priority workers prepare
+   when the screen needs only a smaller image. With the optional histogram visible, a worker uses
+   full-source pixels once to preserve its histogram values, then caches the result with the display
+   frame. Up to four hardware-aware, low-priority workers prepare
    the closest forward/backward pairs concurrently; the prefetch window is derived from the configured
    cache size and current viewport,
    so the default 1 GiB budget can cover roughly 128 full-HD neighbors. Large JPEG input is memory-mapped,
@@ -49,12 +51,17 @@ they support.
    preparation stays admissible when those limits are full.
    Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
-   Fit, fill, actual-size, and manual modes survive navigation appropriately. While a cold JPEG header
-   is pending, fit, fill, no-enlarge, actual-size, zoom-step, zoom-preset, and pan commands retain
-   their original order across viewport and transform commands and replay against the incoming image;
-   rotate and mirror commands wait for that image to become ready. At most 256 actions are retained
-   while the header is pending; later actions are rejected without changing the accepted sequence,
-   and the window title reports when the limit is reached. Temporary zoom on one
+   Fit, fill, actual-size, and manual modes survive navigation appropriately. Selected JPEG header
+   and display preparation, plus non-JPEG decoding, run asynchronously. The window keeps a loading
+   title while selected work is pending, accepts navigation to replace it, and rejects completions
+   from older source generations. A source change clears the former image; a lower-resolution texture
+   for the same source can remain visible while its replacement prepares. Recents and loaded-image
+   history update only after the first renderer-ready frame commits. Fit, fill, no-enlarge,
+   actual-size, zoom-step, zoom-preset, pan, rotate, and mirror commands are retained for the pending
+   source and applied in accepted order when the required geometry or source pixels are available.
+   This includes copy and crop actions that need full-resolution source pixels. At most 256 actions are
+   retained; later actions are rejected without changing the accepted sequence, and the window title
+   reports when the limit is reached. Temporary zoom on one
    image resets to the selected mode by default. The opt-in `fit_relative_zoom_mode=1` instead defines
    the window-fit scale as 100%: zoom presets and steps keep the same relative effect on differently
    sized images, a zoom step pauses/snaps at that 100% fit anchor, and the relative zoom is carried
@@ -239,8 +246,9 @@ they support.
    parent folder, with the folder path on the left and filename on the right; its filter matches
    both path and filename. Browse and Recents keep their own selection and filter while switching.
    A bounded per-file history restores that image's last zoom and fit/fill/actual-size mode when it
-   is opened again. Images enter Recents after loading succeeds; a cold JPEG that fails or is
-   replaced while its header is checked leaves its saved viewport unchanged. Selecting a picture
+   is opened again. Images enter Recents after their first frame is ready; a selected image that fails
+   decoding or is replaced during asynchronous preparation leaves the last committed history owner
+   and the failed image's saved viewport unchanged. Selecting a picture
    from Recents also restores its saved double-page and manga
    modes; those modes then carry through normal image navigation. Actual Size, Fit to Window, and
    zoom changes made while a cold JPEG header is pending are applied when that image continues
@@ -324,7 +332,8 @@ they support.
     dialog previews radius, amount, and threshold before applying. Adjustments are non-destructive
     until save; per-image levels can be saved/removed in the parameter database, set as defaults for
     images without a saved entry, or kept between images. Automatic histogram correction remains
-    available with F5. Animated GIF,
+    available with F5. The optional grayscale histogram uses full-source pixels prepared on workers
+    and cached with the display frame, so painting does not repeatedly scan pixels. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
     rates and folder advancement, slideshow transitions are rendered natively after cold images are
     presented, and slideshow/movie timers resume from each successful display commit. Alt+R resumes, and
@@ -334,9 +343,11 @@ they support.
     neighbors take the reduced-resolution display path directly, while full pixels remain lazy.
     Decode completions feed a
     separate display-preparation worker pool, and both decoded and display caches reject stale source
-    identities. Cold JPEG header probes and optional EXIF/comment reads run on background workers.
-    Initial JPEG presentation waits asynchronously for its header and keeps its loading title until
-    that request completes; optional EXIF/comment data does not block it. EXIF-date updates wait for
+    identities. Selected JPEG header probes and display preparation, non-JPEG decoding, and optional
+    EXIF/comment reads run on background workers. Initial presentation keeps its loading title until
+    a matching frame is uploaded on the renderer thread; stale generations cannot commit Recents or
+    loaded-image history. Archive password failures return to the password-capable Open dialog.
+    Optional EXIF/comment data does not block presentation. EXIF-date updates wait for
     both matching metadata and the image display commit so
     changing the file timestamp cannot stale an active cold-header read. Neighbor plans are
     invalidated when their captured catalog, descriptor, viewport, or source state no longer matches;
@@ -836,7 +847,8 @@ validation, in-memory credential reuse/clearing, relocking and locked previews, 
 output-callback failure, and cancellation,
 cancellable archive indexing, all PNM variants, malformed input, batch-copy planning,
 desktop-application command expansion, and JPEG metadata. The optional X11 smoke suite covers the
-open browser's filtering, folder counts, sorting, direct-folder opening, ZIP/CBZ/TGZ/7z/CB7/RAR browsing and
+open browser's filtering, folder counts, sorting, direct-folder opening, responsive navigation during
+a blocked selected-image decode, queued rotation after a blocked JPEG header, ZIP/CBZ/TGZ/7z/CB7/RAR browsing and
 recent reopening, encrypted-ZIP prompt/retry/session reuse and clipboard paste shortcuts, and
 header-encrypted 7z password entry/cancel/reselect plus RAR password retry when optional plugins are
 bundled; focus restoration, paging, Home/End, held-key movement, wheel and scrollbar scrolling/dragging, and

@@ -31,6 +31,7 @@ void PlaybackScheduler::NotifyInteraction(std::uint32_t now) {
 }
 
 void PlaybackScheduler::SetImageReady(bool ready, std::uint32_t now) {
+	if (imageReady_ == ready) return;
 	imageReady_ = ready;
 	if (!ready) return;
 	lastInteractionTick_ = now;
@@ -129,6 +130,7 @@ PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 
 void PlaybackScheduler::FrameDisplayFailed() {
 	animationPlaying_ = false;
+	imageReady_ = true;
 	nextTick_ = 0;
 }
 

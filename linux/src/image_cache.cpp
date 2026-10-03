@@ -155,6 +155,7 @@ struct DecodedImageCache::Impl {
 		PerfWorkClass workClass = PerfWorkClass::Unspecified;
 		bool dimensionsOnly = false;
 		Completion completion;
+		DetailedCompletion detailedCompletion;
 		DimensionsCompletion dimensionsCompletion;
 		std::shared_ptr<std::atomic<bool>> cancellation;
 		bool foregroundAtStart = false;
@@ -516,8 +517,10 @@ struct DecodedImageCache::Impl {
 
 			ImagePtr completedImage;
 			Completion completion;
+			DetailedCompletion detailedCompletion;
 			DimensionsCompletion dimensionsCompletion;
 			PerfWorkClass effectiveWorkClass = work.workClass;
+			bool retryQueued = false;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				if (sourceChanged) {
@@ -538,9 +541,21 @@ struct DecodedImageCache::Impl {
 				const bool foreground = foregroundKeys.erase(work.key) != 0;
 				inFlightCancellation.erase(work.key);
 				const auto desired = desiredWork.find(work.key);
-				const bool stillDesired = desired != desiredWork.end() &&
+				const bool sameDesiredRequest = desired != desiredWork.end() &&
 					desired->second.generation >= work.generation &&
 					desired->second.source.Key() == work.source.Key();
+				const bool stillDesired = sameDesiredRequest &&
+					desired->second.cancellation == work.cancellation;
+				if (!stopping && workerFailure.kind == WorkerFailureKind::Cancelled &&
+					sameDesiredRequest &&
+					queuedKeys.find(work.key) == queuedKeys.end()) {
+					Work retry = desired->second;
+					retry.cancellation = std::make_shared<std::atomic<bool>>(false);
+					queue.push_front(std::move(retry));
+					desired->second = queue.front();
+					queuedKeys.insert(work.key);
+					retryQueued = true;
+				}
 				if (!stopping && (foreground || stillDesired) && completed &&
 					currentSource && !work.dimensionsOnly) {
 					// Speculative work must never evict an image the user has
@@ -588,13 +603,18 @@ struct DecodedImageCache::Impl {
 						dimensionsCompletion = desired->second.dimensionsCompletion;
 					} else {
 						completion = desired->second.completion;
+						detailedCompletion = desired->second.detailedCompletion;
 					}
 				}
 				--activeWorkers;
 				idle.notify_all();
 			}
+			if (retryQueued) workAvailable.notify_one();
 			try {
 				if (completion) completion(work.filename, completedImage);
+				if (detailedCompletion) {
+					detailedCompletion(work.source, completedImage, workerFailure);
+				}
 			} catch (const std::exception& error) {
 				std::lock_guard<std::mutex> lock(mutex);
 				lastWorkerFailure = {WorkerFailureKind::Exception, error.what()};
@@ -864,13 +884,16 @@ void DecodedImageCache::RequestBackground(const SourceDescriptor& source,
 				queued->generation = work.generation;
 				queued->workClass = work.workClass;
 				queued->completion = work.completion;
+				queued->detailedCompletion = work.detailedCompletion;
 				queued->cancellation = work.cancellation;
 				work = *queued;
 			} else if (impl_->inFlightKeys.find(work.key) != impl_->inFlightKeys.end()) {
 				impl_->inFlightWorkClasses[work.key] = work.workClass;
 				const auto cancellation = impl_->inFlightCancellation.find(work.key);
 				if (cancellation != impl_->inFlightCancellation.end()) {
-					if (const auto token = cancellation->second.lock()) token->store(false);
+					if (const auto token = cancellation->second.lock()) {
+						if (!token->load()) work.cancellation = token;
+					}
 				}
 			} else {
 				impl_->queue.push_front(work);
@@ -882,6 +905,72 @@ void DecodedImageCache::RequestBackground(const SourceDescriptor& source,
 	}
 	if (queuedWork) impl_->workAvailable.notify_one();
 	if (alreadyCached && work.completion) work.completion(work.filename, alreadyCached);
+}
+
+void DecodedImageCache::RequestSelectedSource(const SourceDescriptor& source,
+	DetailedCompletion completion, PerfWorkClass workClass) {
+	Impl::Work work;
+	work.filename = source.LogicalPath();
+	work.key = WorkKey(source);
+	work.source = source;
+	work.workClass = workClass;
+	work.detailedCompletion = std::move(completion);
+	work.cancellation = std::make_shared<std::atomic<bool>>(false);
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->EraseOtherSourceIdentities(work.key.source);
+	}
+	if (!work.key.source.Valid()) {
+		if (work.detailedCompletion) {
+			work.detailedCompletion(source, {}, WorkerFailure{
+				WorkerFailureKind::SourceUnavailable, "image source identity is unavailable"});
+		}
+		return;
+	}
+
+	ImagePtr alreadyCached;
+	bool queuedWork = false;
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
+		work.generation = impl_->generation;
+		const auto cached = impl_->entries.find(work.key.source);
+		if (cached != impl_->entries.end()) {
+			impl_->Touch(cached);
+			impl_->SetProtection(cached,
+				CacheProtectionForWorkClass(work.workClass));
+			alreadyCached = cached->second.image;
+		} else {
+			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
+				[&work](const Impl::Work& candidate) { return candidate.key == work.key; });
+			if (queued != impl_->queue.end()) {
+				if (queued->cancellation) queued->cancellation->store(false);
+				queued->generation = work.generation;
+				queued->workClass = work.workClass;
+				queued->completion = {};
+				queued->detailedCompletion = work.detailedCompletion;
+				queued->cancellation = work.cancellation;
+				work = *queued;
+			} else if (impl_->inFlightKeys.find(work.key) != impl_->inFlightKeys.end()) {
+				impl_->inFlightWorkClasses[work.key] = work.workClass;
+				const auto cancellation = impl_->inFlightCancellation.find(work.key);
+				if (cancellation != impl_->inFlightCancellation.end()) {
+					if (const auto token = cancellation->second.lock()) {
+						if (!token->load()) work.cancellation = token;
+					}
+				}
+			} else {
+				impl_->queue.push_front(work);
+				impl_->queuedKeys.insert(work.key);
+				queuedWork = true;
+			}
+			impl_->desiredWork[work.key] = work;
+		}
+	}
+	if (queuedWork) impl_->workAvailable.notify_one();
+	if (alreadyCached && work.detailedCompletion) {
+		work.detailedCompletion(source, alreadyCached, {});
+	}
 }
 
 void DecodedImageCache::RequestJpegDimensions(const fs::path& filename,
@@ -920,7 +1009,9 @@ void DecodedImageCache::RequestJpegDimensions(const SourceDescriptor& source,
 			impl_->inFlightWorkClasses[work.key] = work.workClass;
 			const auto cancellation = impl_->inFlightCancellation.find(work.key);
 			if (cancellation != impl_->inFlightCancellation.end()) {
-				if (const auto token = cancellation->second.lock()) token->store(false);
+				if (const auto token = cancellation->second.lock()) {
+					if (!token->load()) work.cancellation = token;
+				}
 			}
 		} else {
 			impl_->queue.push_front(work);
@@ -1020,13 +1111,12 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 			if (impl_->foregroundKeys.find(active.first) != impl_->foregroundKeys.end() ||
 				(workClass != impl_->inFlightWorkClasses.end() &&
 					workClass->second == PerfWorkClass::ActiveImageSpread)) {
-				if (const auto cancellation = active.second.lock()) cancellation->store(false);
 				continue;
 			}
 			const bool remainsDesired = std::any_of(prepared.begin(), prepared.end(),
 				[&active](const Impl::Work& work) { return work.key == active.first; });
-			if (const auto cancellation = active.second.lock()) {
-				cancellation->store(!remainsDesired);
+			if (!remainsDesired) {
+				if (const auto cancellation = active.second.lock()) cancellation->store(true);
 			}
 		}
 		impl_->queuedKeys.clear();
@@ -1072,7 +1162,12 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 			if (impl_->inFlightKeys.find(work.key) != impl_->inFlightKeys.end()) {
 				const auto cancellation = impl_->inFlightCancellation.find(work.key);
 				if (cancellation != impl_->inFlightCancellation.end()) {
-					if (const auto token = cancellation->second.lock()) token->store(false);
+					if (const auto token = cancellation->second.lock()) {
+						if (!token->load()) {
+							work.cancellation = token;
+							impl_->desiredWork[work.key] = work;
+						}
+					}
 				}
 				continue;
 			}

@@ -102,12 +102,16 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
 - Asynchronous completions must reconcile user intent issued while work is pending, and apply it only
   to the captured owner and source generation.
 - Deferred user-action queues need explicit capacity and overflow behavior, and must preserve accepted
-  action order across categories.
+  action order across categories. Capture action arguments at enqueue time and bind the sequence to
+  its owner/generation; if replay pauses for asynchronous work, retain the blocked action and its
+  successors instead of dropping them or replaying categories in batches.
 - Unrelated updates must not present pending work as complete; its visible status remains owned by
   the active operation until that operation commits or fails.
 - Scope cancellation to the work's dependencies. Detach requests when ownership is promoted; a
   viewport-only change rejects viewport-bound results while preserving still-current source-only
-  work. Source or owner replacement still cancels that work.
+  work. Source or owner replacement still cancels that work. Once cancellation may have been
+  observed, do not revive that worker by clearing its token; carry promoted foreground intent in a
+  fresh request and preserve its retry across later scheduling updates.
 - Do not make worker destruction depend on the renderer or event loop continuing to run. Join workers
   safely during owner destruction.
 - Every transition that can make a worker condition-variable predicate true must update state under

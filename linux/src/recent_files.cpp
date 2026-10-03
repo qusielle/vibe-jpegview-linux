@@ -243,7 +243,8 @@ void RecentImageLoadState::SaveCurrentBeforeLoad(const fs::path& target,
 
 bool RecentImageLoadState::OwnsLoadedPath(const fs::path& selectedFilename) const {
 	const fs::path selectedPath = NormalizeAbsolute(selectedFilename);
-	return !selectedPath.empty() && !loadedPath_.empty() && selectedPath == loadedPath_ &&
+	return !loadedOwnerSnapshotSaved_ && !selectedPath.empty() && !loadedPath_.empty() &&
+		selectedPath == loadedPath_ &&
 		(!pendingLoad_.has_value() || pendingLoad_->filename == loadedPath_);
 }
 
@@ -255,7 +256,8 @@ ViewportSnapshot RecentImageLoadState::ViewportForSelection(
 	if (pendingLoad_.has_value() && pendingLoad_->filename == selectedPath) {
 		return pendingLoad_->viewportSnapshot;
 	}
-	if (!pendingLoad_.has_value() && selectedPath == loadedPath_) {
+	if (!pendingLoad_.has_value() && !loadedOwnerSnapshotSaved_ &&
+		selectedPath == loadedPath_) {
 		return currentViewport;
 	}
 	const std::optional<ViewportSnapshot> savedViewport =
@@ -308,7 +310,6 @@ bool RecentImageLoadState::CommitLoad(const fs::path& filename, RecentFiles& rec
 bool RecentImageLoadState::FailLoad(const fs::path& filename) {
 	const fs::path path = NormalizeAbsolute(filename);
 	if (path.empty() || !pendingLoad_.has_value() || pendingLoad_->filename != path) return false;
-	loadedPath_.clear();
 	pendingLoad_.reset();
 	return true;
 }

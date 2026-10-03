@@ -19,6 +19,7 @@
 #include <locale>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
@@ -215,13 +216,15 @@ ImageProcessingParams EffectiveProcessing(const ImageProcessingParams& processin
 
 DisplayImageCacheKey MakeCacheKey(const SourceDescriptor& source,
 	std::size_t frameIndex, int width, int height, bool autoContrast,
-	const ImageProcessingParams& processing, int rotationQuarterTurns) {
+	const ImageProcessingParams& processing, int rotationQuarterTurns,
+	bool includeSpectrum) {
 	DisplayImageCacheKey key;
 	key.source = source.Key();
 	key.frameIndex = frameIndex;
 	key.targetWidth = width;
 	key.targetHeight = height;
 	key.autoContrast = autoContrast;
+	key.includeSpectrum = includeSpectrum;
 	key.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	key.processing = EffectiveProcessing(processing, autoContrast);
 	return key;
@@ -239,7 +242,7 @@ std::string SerializeCacheKey(const DisplayImageCacheKey& key) {
 		<< key.source.backingIdentity.modifiedSeconds << ':'
 		<< key.source.backingIdentity.modifiedNanoseconds << ':' << key.frameIndex << ':'
 		<< key.targetWidth << 'x' << key.targetHeight << ':' << key.autoContrast << ':'
-		<< key.rotationQuarterTurns << ':' << std::hexfloat
+		<< key.rotationQuarterTurns << ':' << key.includeSpectrum << ':' << std::hexfloat
 		<< key.processing.contrast << ':' << key.processing.gamma << ':'
 		<< key.processing.saturation << ':' << key.processing.cyanRed << ':'
 		<< key.processing.magentaGreen << ':' << key.processing.yellowBlue << ':'
@@ -279,13 +282,31 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		int sourceWidth = 0;
 		int sourceHeight = 0;
 		std::string errorMessage;
-		const bool swapsAxes = (request.rotationQuarterTurns & 1) != 0;
-		const int decodeTargetWidth = swapsAxes ? request.targetHeight : request.targetWidth;
-		const int decodeTargetHeight = swapsAxes ? request.targetWidth : request.targetHeight;
-		if (!DecodeJpegForDisplay(request.filename, decodeTargetWidth, decodeTargetHeight,
-			displayDecoded, sourceWidth, sourceHeight, errorMessage, workContext) ||
-			displayDecoded.frames.empty() || sourceWidth != request.sourceWidth ||
-			sourceHeight != request.sourceHeight || cancelled()) return {};
+		bool decoded = false;
+		if (request.includeSpectrum) {
+			// Preserve the full-source histogram while keeping its decode and scan off
+			// the event thread. The ordinary fitted-JPEG path remains reduced-DCT.
+			decoded = DecodeImage(request.filename, displayDecoded, errorMessage, workContext);
+			if (decoded && !displayDecoded.frames.empty()) {
+				sourceWidth = displayDecoded.frames.front().width;
+				sourceHeight = displayDecoded.frames.front().height;
+			}
+		} else {
+			const bool swapsAxes = (request.rotationQuarterTurns & 1) != 0;
+			const int decodeTargetWidth = swapsAxes ? request.targetHeight : request.targetWidth;
+			const int decodeTargetHeight = swapsAxes ? request.targetWidth : request.targetHeight;
+			decoded = DecodeJpegForDisplay(request.filename, decodeTargetWidth,
+				decodeTargetHeight, displayDecoded, sourceWidth, sourceHeight,
+				errorMessage, workContext);
+		}
+		if (!decoded || displayDecoded.frames.empty() ||
+			sourceWidth != request.sourceWidth || sourceHeight != request.sourceHeight ||
+			cancelled()) {
+			if (!cancelled() && !errorMessage.empty()) {
+				throw std::runtime_error(errorMessage);
+			}
+			return {};
+		}
 		decodedFrame = &displayDecoded.frames.front();
 	}
 	CpuWorkLease cpuLease;
@@ -328,6 +349,10 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		break;
 	}
 	if (cancelled()) return {};
+	GrayscaleSpectrum spectrum{};
+	if (request.includeSpectrum) {
+		spectrum = BuildGrayscaleSpectrum(image.bgra, image.width, image.height);
+	}
 	if (request.targetWidth < image.width || request.targetHeight < image.height) {
 		PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Resampling);
 		if (!image.Resize(request.targetWidth, request.targetHeight, 3,
@@ -344,6 +369,9 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	prepared->height = image.height;
 	prepared->hasTransparency = image.hasTransparency;
 	prepared->bgra = std::move(image.bgra);
+	if (request.includeSpectrum) {
+		prepared->spectrum = std::make_shared<const GrayscaleSpectrum>(spectrum);
+	}
 	prepared->priority = request.priority;
 	prepared->workClass = request.workClass;
 	prepared->rotationQuarterTurns = request.rotationQuarterTurns;
@@ -362,6 +390,7 @@ bool operator==(const DisplayImageCacheKey& left, const DisplayImageCacheKey& ri
 		left.targetWidth == right.targetWidth && left.targetHeight == right.targetHeight &&
 		left.rotationQuarterTurns == right.rotationQuarterTurns &&
 		left.autoContrast == right.autoContrast &&
+		left.includeSpectrum == right.includeSpectrum &&
 		EqualProcessingKeyValues(left.processing, right.processing);
 }
 
@@ -380,6 +409,7 @@ std::size_t DisplayImageCacheKeyHash::operator()(const DisplayImageCacheKey& key
 	value = combine(value, std::hash<int>{}(key.targetHeight));
 	value = combine(value, std::hash<int>{}(key.rotationQuarterTurns));
 	value = combine(value, std::hash<bool>{}(key.autoContrast));
+	value = combine(value, std::hash<bool>{}(key.includeSpectrum));
 	const ImageProcessingParams& processing = key.processing;
 	for (const double parameter : {processing.contrast, processing.gamma,
 		processing.saturation, processing.cyanRed, processing.magentaGreen,
@@ -407,16 +437,18 @@ bool DisplayImageRequest::Valid() const {
 DisplayImageRequest MakeDisplayImageRequest(const fs::path& filename,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority,
-	const ImageProcessingParams& processing, int rotationQuarterTurns) {
+	const ImageProcessingParams& processing, int rotationQuarterTurns,
+	bool includeSpectrum) {
 	return MakeDisplayImageRequest(DescribeImageSource(filename), decoded, frameIndex,
 		targetWidth, targetHeight, autoContrast, priority, processing,
-		rotationQuarterTurns);
+		rotationQuarterTurns, includeSpectrum);
 }
 
 DisplayImageRequest MakeDisplayImageRequest(const SourceDescriptor& source,
 	const std::shared_ptr<const DecodedImage>& decoded, std::size_t frameIndex,
 	int targetWidth, int targetHeight, bool autoContrast, std::size_t priority,
-	const ImageProcessingParams& processing, int rotationQuarterTurns) {
+	const ImageProcessingParams& processing, int rotationQuarterTurns,
+	bool includeSpectrum) {
 	DisplayImageRequest request;
 	request.source = source;
 	request.filename = source.LogicalPath();
@@ -426,6 +458,7 @@ DisplayImageRequest MakeDisplayImageRequest(const SourceDescriptor& source,
 	request.targetHeight = targetHeight;
 	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	request.autoContrast = autoContrast;
+	request.includeSpectrum = includeSpectrum;
 	request.processing = processing;
 	request.priority = priority;
 	if (!decoded || frameIndex >= decoded->frames.size() || targetWidth <= 0 || targetHeight <= 0) {
@@ -434,7 +467,7 @@ DisplayImageRequest MakeDisplayImageRequest(const SourceDescriptor& source,
 	request.sourceWidth = decoded->frames[frameIndex].width;
 	request.sourceHeight = decoded->frames[frameIndex].height;
 	request.cacheKey = MakeCacheKey(source, frameIndex, targetWidth, targetHeight,
-		autoContrast, processing, request.rotationQuarterTurns);
+		autoContrast, processing, request.rotationQuarterTurns, includeSpectrum);
 	request.key = SerializeCacheKey(request.cacheKey);
 	return request;
 }
@@ -442,16 +475,16 @@ DisplayImageRequest MakeDisplayImageRequest(const SourceDescriptor& source,
 DisplayImageRequest MakeJpegDisplayImageRequest(const fs::path& filename,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing,
-	int rotationQuarterTurns) {
+	int rotationQuarterTurns, bool includeSpectrum) {
 	return MakeJpegDisplayImageRequest(DescribeImageSource(filename), sourceWidth,
-		sourceHeight, targetWidth, targetHeight, autoContrast, priority, processing,
-		rotationQuarterTurns);
+			sourceHeight, targetWidth, targetHeight, autoContrast, priority, processing,
+		rotationQuarterTurns, includeSpectrum);
 }
 
 DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing,
-	int rotationQuarterTurns) {
+	int rotationQuarterTurns, bool includeSpectrum) {
 	DisplayImageRequest request;
 	request.source = source;
 	request.filename = source.LogicalPath();
@@ -461,18 +494,20 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	request.targetHeight = targetHeight;
 	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
 	request.autoContrast = autoContrast;
+	request.includeSpectrum = includeSpectrum;
 	request.processing = processing;
 	request.priority = priority;
 	if (!IsJpegPath(request.filename) || sourceWidth <= 0 || sourceHeight <= 0 ||
 		targetWidth <= 0 || targetHeight <= 0) return request;
 	request.cacheKey = MakeCacheKey(source, 0, targetWidth, targetHeight,
-		autoContrast, processing, request.rotationQuarterTurns);
+		autoContrast, processing, request.rotationQuarterTurns, includeSpectrum);
 	request.key = SerializeCacheKey(request.cacheKey);
 	return request;
 }
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image) {
-	return image.bgra.size();
+	return image.bgra.size() +
+		(image.spectrum ? sizeof(*image.spectrum) : 0);
 }
 
 std::size_t DisplayPrefetchCount(std::size_t cacheBytes, int viewportWidth,
@@ -530,6 +565,7 @@ struct DisplayImageCache::Impl {
 		ImagePtr image;
 		std::size_t priority = 0;
 		PerfWorkClass workClass = PerfWorkClass::Unspecified;
+		std::uint64_t selectionGeneration = 0;
 		bool speculative = false;
 		std::size_t reservedBytes = 0;
 		CacheReservation temporaryReservation;
@@ -675,8 +711,8 @@ struct DisplayImageCache::Impl {
 			return;
 		}
 		if (speculative) ReserveSpeculative(bytes);
-		completed.push_back({image, effectivePriority, effectiveWorkClass, speculative,
-			speculative ? bytes : 0, {}});
+		completed.push_back({image, effectivePriority, effectiveWorkClass, 0,
+			speculative, speculative ? bytes : 0, {}});
 		pendingCachedCompletions.erase(image->cacheKey);
 	}
 
@@ -752,6 +788,7 @@ struct DisplayImageCache::Impl {
 				completed.pop_front();
 			}
 			pendingCachedCompletions.clear();
+			pendingForegroundRetries.clear();
 			while (!entries.empty()) Erase(entries.begin());
 		}
 		workAvailable.notify_all();
@@ -940,6 +977,9 @@ struct DisplayImageCache::Impl {
 		for (const Completion& completion : completed) {
 			if (completion.image && matches(completion.image->cacheKey)) return true;
 		}
+		for (const DisplayImageFailureInfo& failure : failedCompletions) {
+			if (matches(failure.cacheKey)) return true;
+		}
 		for (const DisplayImageCacheKey& candidate : inFlightKeys) if (matches(candidate)) return true;
 		return false;
 	}
@@ -1107,7 +1147,8 @@ struct DisplayImageCache::Impl {
 			const DisplayImageCacheKey currentKey = MakeCacheKey(work.request.source,
 				work.request.frameIndex, work.request.targetWidth,
 				work.request.targetHeight, work.request.autoContrast,
-				work.request.processing, work.request.rotationQuarterTurns);
+				work.request.processing, work.request.rotationQuarterTurns,
+				work.request.includeSpectrum);
 
 			{
 				std::lock_guard<std::mutex> lock(mutex);
@@ -1134,6 +1175,13 @@ struct DisplayImageCache::Impl {
 				if (activeWorkClass != inFlightWorkClasses.end()) {
 					effectiveWorkClass = activeWorkClass->second;
 					inFlightWorkClasses.erase(activeWorkClass);
+				}
+				std::uint64_t selectionGeneration = work.request.selectionGeneration;
+				const auto activeSelectionGeneration =
+					inFlightSelectionGenerations.find(work.request.cacheKey);
+				if (activeSelectionGeneration != inFlightSelectionGenerations.end()) {
+					selectionGeneration = activeSelectionGeneration->second;
+					inFlightSelectionGenerations.erase(activeSelectionGeneration);
 				}
 				--activeWorkers;
 				const bool foreground = work.foreground ||
@@ -1189,7 +1237,7 @@ struct DisplayImageCache::Impl {
 							PreparedAllocationIdentity(image));
 					}
 					completed.push_back({image, completionPriority, effectiveWorkClass,
-						reservation.speculative, reservation.bytes,
+						selectionGeneration, reservation.speculative, reservation.bytes,
 						std::move(temporaryReservation)});
 				} else {
 					if (reservation.speculative) ReleaseSpeculative(reservation.bytes);
@@ -1200,6 +1248,39 @@ struct DisplayImageCache::Impl {
 					}
 					QueueRetirement(std::move(image));
 					}
+					if (!stopping && foreground && stillCurrentForeground &&
+						work.epoch == epoch && workerFailure.Failed() &&
+						workerFailure.kind != WorkerFailureKind::Cancelled) {
+						failedCompletions.erase(std::remove_if(failedCompletions.begin(),
+							failedCompletions.end(), [&work](
+								const DisplayImageFailureInfo& failure) {
+								return failure.key == work.request.key;
+							}), failedCompletions.end());
+						if (failedCompletions.size() >= 8) failedCompletions.pop_front();
+						failedCompletions.push_back({work.request.cacheKey,
+							work.request.key, workerFailure, completionPriority,
+							effectiveWorkClass, selectionGeneration});
+					}
+				}
+				const auto retry = pendingForegroundRetries.find(work.request.cacheKey);
+				if (!stopping && !publish && workerFailure.kind == WorkerFailureKind::Cancelled &&
+					foreground && stillCurrentForeground && work.epoch == epoch &&
+					retry != pendingForegroundRetries.end() &&
+					queuedKeys.find(work.request.cacheKey) == queuedKeys.end()) {
+					Work retryWork = std::move(retry->second);
+					retryWork.epoch = epoch;
+					retryWork.foreground = true;
+					retryWork.request.workClass = effectiveWorkClass;
+					retryWork.request.selectionGeneration = selectionGeneration;
+					retryWork.request.cancellation =
+						std::make_shared<std::atomic<bool>>(false);
+					queue.push_front(std::move(retryWork));
+					queuedKeys.insert(work.request.cacheKey);
+					pendingForegroundRetries.erase(retry);
+				} else if (retry != pendingForegroundRetries.end() &&
+					(publish || workerFailure.kind != WorkerFailureKind::Cancelled ||
+						!stillCurrentForeground || work.epoch != epoch)) {
+					pendingForegroundRetries.erase(retry);
 				}
 				FillPendingCachedCompletions();
 				idle.notify_all();
@@ -1280,6 +1361,7 @@ struct DisplayImageCache::Impl {
 	std::array<LruList, 3> lru;
 	std::deque<Work> queue;
 	std::deque<Completion> completed;
+	std::deque<DisplayImageFailureInfo> failedCompletions;
 	std::unordered_map<DisplayImageCacheKey, PendingCachedCompletion,
 		DisplayImageCacheKeyHash> pendingCachedCompletions;
 	std::vector<SourceChangeNotice> changedSources;
@@ -1294,6 +1376,10 @@ struct DisplayImageCache::Impl {
 		DisplayImageCacheKeyHash> inFlightCancellation;
 	std::unordered_map<DisplayImageCacheKey, PerfWorkClass,
 		DisplayImageCacheKeyHash> inFlightWorkClasses;
+	std::unordered_map<DisplayImageCacheKey, std::uint64_t,
+		DisplayImageCacheKeyHash> inFlightSelectionGenerations;
+	std::unordered_map<DisplayImageCacheKey, Work, DisplayImageCacheKeyHash>
+		pendingForegroundRetries;
 	std::unordered_set<DisplayImageCacheKey, DisplayImageCacheKeyHash> desiredPrefetchKeys;
 	std::unordered_map<DisplayImageCacheKey, std::size_t,
 		DisplayImageCacheKeyHash> desiredPrefetchPriorities;
@@ -1322,7 +1408,7 @@ DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& r
 	if (!request.Valid()) return {};
 	if (request.cacheKey != MakeCacheKey(request.source, request.frameIndex,
 		request.targetWidth, request.targetHeight, request.autoContrast,
-		request.processing, request.rotationQuarterTurns) ||
+		request.processing, request.rotationQuarterTurns, request.includeSpectrum) ||
 		request.key != SerializeCacheKey(request.cacheKey)) return {};
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	const auto found = impl_->entries.find(request.cacheKey);
@@ -1348,13 +1434,18 @@ bool DisplayImageCache::HasPendingOrCached(const std::string& key) const {
 		std::any_of(impl_->completed.begin(), impl_->completed.end(),
 			[&cacheKey](const Impl::Completion& completion) {
 				return completion.image && completion.image->cacheKey == cacheKey;
+			}) ||
+		std::any_of(impl_->failedCompletions.begin(), impl_->failedCompletions.end(),
+			[&key](const DisplayImageFailureInfo& completion) {
+				return completion.key == key;
 			});
 }
 
 void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
 		request.frameIndex, request.targetWidth, request.targetHeight,
-		request.autoContrast, request.processing, request.rotationQuarterTurns) ||
+		request.autoContrast, request.processing, request.rotationQuarterTurns,
+		request.includeSpectrum) ||
 		request.key != SerializeCacheKey(request.cacheKey)) return;
 	const DisplayImageCacheKey& cacheKey = request.cacheKey;
 	DisplayImageRequest foregroundRequest = request;
@@ -1373,8 +1464,23 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 		const bool startableBefore = impl_->HasStartableWork();
 		const std::size_t reservedImagesBefore = impl_->speculativeReservedImages;
 		const std::size_t reservedBytesBefore = impl_->speculativeReservedBytes;
+		auto failed = std::find_if(impl_->failedCompletions.begin(),
+			impl_->failedCompletions.end(), [&request](
+				const DisplayImageFailureInfo& completion) {
+				return completion.key == request.key;
+			});
+		if (failed != impl_->failedCompletions.end()) {
+			if (request.selectionGeneration != 0 &&
+				failed->selectionGeneration == request.selectionGeneration) return;
+			impl_->failedCompletions.erase(failed);
+		}
 		if (impl_->latestForegroundKey != cacheKey) {
 			impl_->latestForegroundKey = cacheKey;
+			for (auto retry = impl_->pendingForegroundRetries.begin();
+				retry != impl_->pendingForegroundRetries.end();) {
+				if (retry->first == cacheKey) ++retry;
+				else retry = impl_->pendingForegroundRetries.erase(retry);
+			}
 			for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
 				if (queued->foreground && queued->request.cacheKey != cacheKey) {
 					RecordDisplayCancellation(queued->request.workClass);
@@ -1403,30 +1509,37 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 				return completion.image && completion.image->cacheKey == cacheKey;
 			});
 		if (completed != impl_->completed.end()) {
+			impl_->pendingForegroundRetries.erase(cacheKey);
 			impl_->PromoteCompletion(*completed, foregroundWorkClass);
+			completed->selectionGeneration = foregroundRequest.selectionGeneration;
 			impl_->pendingCachedCompletions.erase(cacheKey);
 		} else if (const auto cached = impl_->entries.find(cacheKey); cached != impl_->entries.end()) {
+			impl_->pendingForegroundRetries.erase(cacheKey);
 			// A speculative frame can become the foreground between worker
 			// completion and renderer upload. Promote the shared completion object
 			// so it cannot wait behind any neighboring frame.
 			impl_->pendingCachedCompletions.erase(cacheKey);
 		impl_->completed.push_front({cached->second.image, 0,
-			foregroundWorkClass, false, 0, {}});
+			foregroundWorkClass, foregroundRequest.selectionGeneration,
+			false, 0, {}});
 		} else if (impl_->inFlightKeys.find(cacheKey) != impl_->inFlightKeys.end()) {
 			impl_->foregroundKeys.insert(cacheKey);
 			impl_->inFlightPriorities[cacheKey] = 0;
 			impl_->inFlightWorkClasses[cacheKey] = foregroundWorkClass;
+			impl_->inFlightSelectionGenerations[cacheKey] =
+				foregroundRequest.selectionGeneration;
 			const auto reservation = impl_->inFlightReservations.find(cacheKey);
 			if (reservation != impl_->inFlightReservations.end() &&
 				reservation->second.speculative) {
 				impl_->ReleaseSpeculative(reservation->second.bytes);
 				reservation->second = {};
 			}
-			const auto cancellation = impl_->inFlightCancellation.find(cacheKey);
-			if (cancellation != impl_->inFlightCancellation.end()) {
-				if (const auto token = cancellation->second.lock()) token->store(false);
-			}
+			// Keep a fresh foreground request in case the active processor has
+			// already observed cancellation and cannot be revived in place.
+			impl_->pendingForegroundRetries[cacheKey] = Impl::Work{
+				foregroundRequest, 0, impl_->epoch, true};
 		} else if (impl_->queuedKeys.find(cacheKey) != impl_->queuedKeys.end()) {
+			impl_->pendingForegroundRetries.erase(cacheKey);
 			const auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
 				[&cacheKey](const Impl::Work& work) { return work.request.cacheKey == cacheKey; });
 			if (queued != impl_->queue.end()) {
@@ -1436,11 +1549,14 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 				promoted.foreground = true;
 				promoted.epoch = impl_->epoch;
 				promoted.request.workClass = foregroundWorkClass;
+				promoted.request.selectionGeneration =
+					foregroundRequest.selectionGeneration;
 				promoted.request.cancellation = foregroundRequest.cancellation;
 				impl_->queue.push_front(std::move(promoted));
 				hasQueuedWork = true;
 			}
 		} else {
+			impl_->pendingForegroundRetries.erase(cacheKey);
 			foregroundRequest.workClass = foregroundWorkClass;
 			impl_->queue.push_front(Impl::Work{
 				std::move(foregroundRequest), 0, impl_->epoch, true});
@@ -1473,7 +1589,8 @@ void DisplayImageCache::RequestBackgroundBatch(
 		for (const DisplayImageRequest& request : requests) {
 			if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
 				request.frameIndex, request.targetWidth, request.targetHeight,
-				request.autoContrast, request.processing, request.rotationQuarterTurns) ||
+				request.autoContrast, request.processing, request.rotationQuarterTurns,
+				request.includeSpectrum) ||
 				request.key != SerializeCacheKey(request.cacheKey)) continue;
 			const DisplayImageCacheKey& cacheKey = request.cacheKey;
 			DisplayImageRequest classifiedRequest = request;
@@ -1534,7 +1651,10 @@ void DisplayImageCache::RequestBackgroundBatch(
 					reservation->second = {};
 				}
 				const auto cancellation = impl_->inFlightCancellation.find(cacheKey);
-				if (cancellation != impl_->inFlightCancellation.end()) {
+				const bool hasForegroundRetry =
+					impl_->pendingForegroundRetries.find(cacheKey) !=
+						impl_->pendingForegroundRetries.end();
+				if (!hasForegroundRetry && cancellation != impl_->inFlightCancellation.end()) {
 					if (const auto token = cancellation->second.lock()) token->store(false);
 				}
 				continue;
@@ -1744,7 +1864,15 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 				impl_->desiredPrefetchKeys.insert(active.first);
 				impl_->desiredPrefetchPriorities[active.first] = keepForeground ? 0 :
 					(priority == impl_->inFlightPriorities.end() ? 1 : priority->second);
-				if (const auto cancellation = active.second.lock()) cancellation->store(false);
+				const bool hasForegroundRetry =
+					impl_->pendingForegroundRetries.find(active.first) !=
+						impl_->pendingForegroundRetries.end();
+				// Foreground promotion leaves a fresh request behind when the active
+				// speculative generation may already have observed cancellation. Do not
+				// revive that generation while preserving it through a prefetch update.
+				if (!hasForegroundRetry) {
+					if (const auto cancellation = active.second.lock()) cancellation->store(false);
+				}
 				continue;
 			}
 			const bool remainsDesired = std::any_of(prioritizedRequests.begin(),
@@ -1777,7 +1905,8 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 		for (const DisplayImageRequest& request : prioritizedRequests) {
 			if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
 				request.frameIndex, request.targetWidth, request.targetHeight,
-				request.autoContrast, request.processing, request.rotationQuarterTurns) ||
+				request.autoContrast, request.processing, request.rotationQuarterTurns,
+				request.includeSpectrum) ||
 				request.key != SerializeCacheKey(request.cacheKey)) continue;
 			const DisplayImageCacheKey& cacheKey = request.cacheKey;
 			const std::size_t requestPriority = std::max<std::size_t>(1, request.priority);
@@ -1892,7 +2021,8 @@ std::vector<DisplayImageCompletionInfo> DisplayImageCache::TakeCompletedWithMeta
 		if (outstandingPriority < next->priority) break;
 		const std::size_t effectivePriority = next->priority;
 		const PerfWorkClass effectiveWorkClass = next->workClass;
-		result.push_back({std::move(next->image), effectivePriority, effectiveWorkClass});
+		result.push_back({std::move(next->image), effectivePriority,
+			effectiveWorkClass, next->selectionGeneration});
 		if (result.back().image) {
 			CacheReservation temporary = std::move(next->temporaryReservation);
 			if (impl_->diagnosticsEnabled || temporary) {
@@ -1908,6 +2038,17 @@ std::vector<DisplayImageCompletionInfo> DisplayImageCache::TakeCompletedWithMeta
 	impl_->FillPendingCachedCompletions();
 	impl_->workAvailable.notify_all();
 	impl_->idle.notify_all();
+	return result;
+}
+
+std::vector<DisplayImageFailureInfo> DisplayImageCache::TakeFailedCompletions() {
+	std::vector<DisplayImageFailureInfo> result;
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	result.reserve(impl_->failedCompletions.size());
+	while (!impl_->failedCompletions.empty()) {
+		result.push_back(std::move(impl_->failedCompletions.front()));
+		impl_->failedCompletions.pop_front();
+	}
 	return result;
 }
 
@@ -2006,10 +2147,13 @@ void DisplayImageCache::Clear() {
 		impl_->completed.pop_front();
 	}
 	impl_->pendingCachedCompletions.clear();
+	impl_->pendingForegroundRetries.clear();
+	impl_->failedCompletions.clear();
 	impl_->queuedKeys.clear();
 	impl_->desiredPrefetchKeys.clear();
 	impl_->desiredPrefetchPriorities.clear();
-	impl_->foregroundKeys.clear();
+		impl_->foregroundKeys.clear();
+		impl_->inFlightSelectionGenerations.clear();
 	impl_->latestForegroundKey = {};
 	while (!impl_->entries.empty()) impl_->Erase(impl_->entries.begin());
 	impl_->idle.notify_all();

@@ -1,11 +1,14 @@
 #pragma once
 
 #include "archive_source.h"
+#include "image_decoder.h"
 #include "image_processing.h"
 #include "recent_files.h"
+#include "work_context.h"
 
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -18,6 +21,41 @@ struct ImageSessionSelection {
 	ViewportSnapshot viewport;
 	ImageProcessingPreset processing;
 	bool tracksRecentHistory = false;
+};
+
+enum class ImageSessionStage {
+	Selected,
+	AwaitingJpegDimensions,
+	AwaitingDecodedSource,
+	AwaitingDisplayFrame,
+	DisplayFrameReady,
+	Committed,
+	Failed,
+};
+
+struct SelectedSourceDecodeResult {
+	std::uint64_t generation = 0;
+	SourceDescriptor source;
+	std::shared_ptr<const DecodedImage> image;
+	WorkerFailure failure;
+};
+
+// A one-result mailbox for the currently selected decode. Activation replaces
+// the owner generation; stale A->B->A completions cannot overwrite the newest A.
+class SelectedSourceDecodeChannel {
+public:
+	void Activate(std::uint64_t generation, const SourceKey& source);
+	bool Publish(SelectedSourceDecodeResult result);
+	std::optional<SelectedSourceDecodeResult> Take(
+		std::uint64_t generation, const SourceKey& source);
+	void Shutdown();
+
+private:
+	std::mutex mutex_;
+	std::optional<SelectedSourceDecodeResult> ready_;
+	std::uint64_t activeGeneration_ = 0;
+	SourceKey activeSource_;
+	bool active_ = true;
 };
 
 struct ImageSessionEffects {
@@ -69,6 +107,14 @@ public:
 	bool ShouldPrepareDecodedSource(
 		const DecodedSourcePreparationSnapshot& snapshot) const;
 	bool MatchesSelection(std::uint64_t generation, const SourceKey& source) const;
+	ImageSessionStage Stage() const { return stage_; }
+	bool SetStage(std::uint64_t generation, const SourceKey& source,
+		ImageSessionStage stage);
+	bool MarkDisplayFrameReady(std::uint64_t generation, const SourceKey& source);
+	bool CommitSelectedLoad(std::uint64_t generation, const SourceKey& source,
+		const std::filesystem::path& filename, RecentFiles& recentFiles);
+	bool FailSelectedLoad(std::uint64_t generation, const SourceKey& source,
+		const std::filesystem::path& filename);
 	const std::optional<ImageSessionSelection>& Selection() const { return selection_; }
 	std::uint64_t Generation() const { return generation_; }
 	std::uint64_t DocumentRevision() const { return documentRevision_; }
@@ -119,6 +165,7 @@ private:
 	ImageProcessingPreset processing_;
 	std::uint64_t generation_ = 0;
 	std::uint64_t documentRevision_ = 0;
+	ImageSessionStage stage_ = ImageSessionStage::Selected;
 };
 
 } // namespace jpegview_linux

@@ -251,17 +251,19 @@ stop_viewer() {
 	if [ "$perf_trace_active" -eq 1 ]; then
 		if ! awk -F, '
 			NR == 1 { if ($6 != "work_class") exit 1; next }
-			$2 == "source_read" && $4 == "event_thread" &&
-				$6 == "active_image_spread" { source_read = 1 }
+			$2 == "source_read" && $4 == "worker_thread" &&
+				$6 == "active_image_spread" { worker_source_read = 1 }
+			$2 == "source_read" && $4 == "event_thread" { event_source_read = 1 }
 			$2 == "processing" && $4 == "worker_thread" &&
 				$6 == "active_image_spread" { worker_processing = 1 }
 			$2 == "decode" && $4 == "worker_thread" &&
 				$6 == "focused_preview" { preview_decode = 1 }
 			$2 == "texture_upload" && $4 == "event_thread" &&
 				$6 == "focused_preview" { preview_upload = 1 }
-			END { exit !(source_read && worker_processing && preview_decode && preview_upload) }
+			END { exit !(worker_source_read && !event_source_read && worker_processing &&
+				preview_decode && preview_upload) }
 		' "$perf_trace_path"; then
-			echo "UI smoke test: trace omitted event-thread source reads, worker processing, or focused-preview decode/upload attribution" >&2
+			echo "UI smoke test: trace omitted worker source reads/processing or focused-preview decode/upload attribution, or recorded a source read on the event thread" >&2
 			cat "$temporary/viewer.log" >&2
 			exit 1
 		fi
@@ -600,8 +602,9 @@ if [ -n "$perf_trace_path" ]; then
 		exit 1
 	fi
 
-	# Disable prepared display frames, then rotate an oversized source so the
-	# renderer-thread fallback must exercise foreground resizing and texture upload.
+	# With retained caching disabled, load and rotate an oversized source. Decode,
+	# processing, and resampling must stay on workers; only texture upload belongs
+	# to the renderer thread. The rotation queued during loading must still apply.
 	mkdir -p "$temporary/perf-sync-config/jpegview-linux"
 	printf 'scale_mode=fit\ncache_size_mb=0\ndouble_page_mode_enabled=0\n' \
 		> "$temporary/perf-sync-config/jpegview-linux/settings.conf"
@@ -631,45 +634,49 @@ if [ -n "$perf_trace_path" ]; then
 	fi
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
 	DISPLAY=":$display_number" xdotool key Down
-	sync_fallback_seen=0
+	async_foreground_seen=0
 	for _ in $(seq 1 100); do
 		if awk -F, '
-			$2 == "resampling" && $4 == "event_thread" && \
-				$6 == "active_image_spread" { resampling_time = $1 }
-			$2 == "texture_upload" && $4 == "event_thread" && \
-				$6 == "active_image_spread" && resampling_time != "" && \
-				$1 >= resampling_time { found = 1 }
-			END { exit !found }
+			$2 == "source_read" && $4 == "worker_thread" &&
+				$6 == "active_image_spread" { worker_source_read = 1 }
+			$2 == "decode" && $4 == "worker_thread" &&
+				$6 == "active_image_spread" { worker_decode = 1 }
+			$2 == "processing" && $4 == "worker_thread" &&
+				$6 == "active_image_spread" { worker_processing = 1 }
+			$2 == "resampling" && $4 == "worker_thread" &&
+				$6 == "active_image_spread" { worker_resampling_time = $1 }
+			$2 == "processing" && $4 == "event_thread" &&
+				$6 == "active_image_spread" { transform_processing_time = $1 }
+			$2 == "texture_upload" && $4 == "event_thread" &&
+				$6 == "active_image_spread" {
+				if (worker_resampling_time != "" && $1 >= worker_resampling_time) {
+					prepared_upload = 1
+				}
+				if (transform_processing_time != "" && $1 >= transform_processing_time) {
+					transform_upload = 1
+				}
+			}
+			$2 == "source_read" && $4 == "event_thread" { event_source_read = 1 }
+			$2 == "decode" && $4 == "event_thread" { event_decode = 1 }
+			$2 == "resampling" && $4 == "event_thread" { event_resampling = 1 }
+			END {
+				exit !(worker_source_read && worker_decode && worker_processing &&
+					worker_resampling_time != "" && prepared_upload &&
+					transform_processing_time != "" && transform_upload &&
+					!event_source_read && !event_decode && !event_resampling)
+			}
 		' \
 			"$perf_sync_trace" 2>/dev/null; then
-			sync_fallback_seen=1
+			async_foreground_seen=1
 			break
 		fi
 		sleep 0.05
 	done
 	stop_viewer
-	if [ "$sync_fallback_seen" -ne 1 ]; then
-		echo "UI smoke test: synchronous foreground resize/upload rows did not both retain active-image attribution" >&2
+	if [ "$async_foreground_seen" -ne 1 ]; then
+		echo "UI smoke test: selected foreground work did not stay on workers or its queued transform did not upload" >&2
 		cat "$temporary/perf-sync-viewer.log" >&2
-		exit 1
-	fi
-	read -r sync_processing_count sync_resampling_count sync_upload_count <<EOF
-$(awk -F, '
-	$2 == "processing" && $4 == "event_thread" && $6 == "active_image_spread" { processing++ }
-	$2 == "resampling" && $4 == "event_thread" && $6 == "active_image_spread" {
-		resampling++
-		awaiting_upload = 1
-	}
-	$2 == "texture_upload" && $4 == "event_thread" && $6 == "active_image_spread" && awaiting_upload {
-		upload++
-		awaiting_upload = 0
-	}
-	END { print processing + 0, resampling + 0, upload + 0 }
-' "$perf_sync_trace")
-EOF
-	if [ "$sync_processing_count" -ne 1 ] || [ "$sync_resampling_count" -ne 1 ] || \
-		[ "$sync_upload_count" -ne 1 ]; then
-		echo "UI smoke test: synchronous foreground processing/resampling/upload trace counts were not one ($sync_processing_count/$sync_resampling_count/$sync_upload_count)" >&2
+		if [ -f "$perf_sync_trace" ]; then cat "$perf_sync_trace" >&2; fi
 		exit 1
 	fi
 fi
@@ -739,6 +746,48 @@ assert_title_prefix "00-cover.ppm" "configured Shift+Space key did not navigate 
 stop_viewer
 XDG_STATE_HOME="$temporary/state"
 export XDG_STATE_HOME
+
+# Reopening an already decoded non-JPEG can commit synchronously from the
+# renderer cache. The selected-load continuation must not overwrite that
+# committed title with a stale loading status.
+cached_title_directory="$temporary/cached-title"
+cached_title_config="$temporary/cached-title-config"
+mkdir -p "$cached_title_directory" "$cached_title_config/jpegview-linux"
+write_solid_ppm "$cached_title_directory/01-first.ppm" 220 40 40
+write_solid_ppm "$cached_title_directory/02-second.ppm" 40 180 80
+printf 'scale_mode=fit\ncache_size_mb=8\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+	> "$cached_title_config/jpegview-linux/settings.conf"
+VIEWER_TEST_HOME="$temporary/cached-title-home" \
+	VIEWER_TEST_CONFIG_HOME="$cached_title_config" \
+	launch_viewer "$cached_title_directory/01-first.ppm"
+cached_title_first_ready=0
+for _ in $(seq 1 100); do
+	cached_title=$(DISPLAY=":$display_number" window_title_without_position)
+	case "$cached_title" in
+		'01-first.ppm ('*) cached_title_first_ready=1; break ;;
+	esac
+	sleep 0.025
+done
+if [ "$cached_title_first_ready" -ne 1 ]; then
+	echo "UI smoke test: first cached-title image did not finish loading ($cached_title)" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "02-second.ppm" "cached-title fixture did not navigate to its second image"
+DISPLAY=":$display_number" xdotool key Left
+cached_title_reopened_ready=0
+for _ in $(seq 1 100); do
+	cached_title=$(DISPLAY=":$display_number" window_title_without_position)
+	case "$cached_title" in
+		'01-first.ppm ('*) cached_title_reopened_ready=1; break ;;
+	esac
+	sleep 0.025
+done
+if [ "$cached_title_reopened_ready" -ne 1 ]; then
+	echo "UI smoke test: cached non-JPEG reopen remained in a loading title ($cached_title)" >&2
+	exit 1
+fi
+stop_viewer
 
 # Starting with a directory that has no direct images should leave the viewer
 # open in Browse at that directory, rather than exiting or falling back to cwd.
@@ -831,9 +880,415 @@ fi
 stop_viewer
 
 if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+	cc -shared -fPIC "$SCRIPT_DIR/delay_mmap.c" -o "$temporary/slow_map.so" -ldl -pthread
+	# Reloading an unchanged source must reset a locally rotated document while
+	# keeping the asynchronous renderer commit live.
+	same_reload_directory="$temporary/same-source-reload"
+	same_reload_config="$temporary/same-source-reload-config"
+	mkdir -p "$same_reload_directory" "$same_reload_config/jpegview-linux"
+	convert -size 600x300 xc:red -fill blue -draw 'rectangle 300,0 599,299' \
+		"$same_reload_directory/01-reload.png"
+	printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$same_reload_config/jpegview-linux/settings.conf"
+	VIEWER_TEST_HOME="$temporary/same-source-reload-home" \
+		VIEWER_TEST_CONFIG_HOME="$same_reload_config" \
+		launch_viewer "$same_reload_directory/01-reload.png"
+	assert_title_prefix "01-reload.png" "same-source reload fixture did not load"
+	if [ "$visual_assertions" -eq 1 ]; then
+		viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+		viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+		DISPLAY=":$display_number" xdotool key Down
+		reload_rotated=0
+		for _ in $(seq 1 60); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/reload-rotated.png"
+			reload_top=$(convert "$temporary/reload-rotated.png" -format \
+				"%[fx:p{$((viewer_width / 2)),$((viewer_height / 2 - 60))}.r>0.75&&p{$((viewer_width / 2)),$((viewer_height / 2 - 60))}.b<0.25]" info:)
+			reload_bottom=$(convert "$temporary/reload-rotated.png" -format \
+				"%[fx:p{$((viewer_width / 2)),$((viewer_height / 2 + 60))}.b>0.75&&p{$((viewer_width / 2)),$((viewer_height / 2 + 60))}.r<0.25]" info:)
+			if [ "$reload_top:$reload_bottom" = "1:1" ]; then reload_rotated=1; break; fi
+			sleep 0.05
+		done
+		if [ "$reload_rotated" -ne 1 ]; then
+			echo "UI smoke test: same-source reload fixture did not rotate before reload ($reload_top:$reload_bottom)" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool key ctrl+r
+		reload_restored=0
+		for _ in $(seq 1 80); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/reload-restored.png"
+			reload_left=$(convert "$temporary/reload-restored.png" -format \
+				"%[fx:p{$((viewer_width / 2 - 60)),$((viewer_height / 2))}.r>0.75&&p{$((viewer_width / 2 - 60)),$((viewer_height / 2))}.b<0.25]" info:)
+			reload_right=$(convert "$temporary/reload-restored.png" -format \
+				"%[fx:p{$((viewer_width / 2 + 60)),$((viewer_height / 2))}.b>0.75&&p{$((viewer_width / 2 + 60)),$((viewer_height / 2))}.r<0.25]" info:)
+			if [ "$reload_left:$reload_right" = "1:1" ]; then reload_restored=1; break; fi
+			sleep 0.05
+		done
+		if [ "$reload_restored" -ne 1 ]; then
+			echo "UI smoke test: same-source reload did not restore the unmodified source frame ($reload_left:$reload_right)" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+
+	# A same-source resolution replacement must retain the last presented texture
+	# for every renderer tick while the replacement decode is blocked.
+	fallback_directory="$temporary/same-source-texture-fallback"
+	fallback_config="$temporary/same-source-texture-fallback-config"
+	mkdir -p "$fallback_directory" "$fallback_config/jpegview-linux"
+	convert -size 2400x1200 xc:red -fill blue -draw 'rectangle 1200,0 2399,1199' \
+		-quality 95 "$fallback_directory/01-fallback.jpg"
+	printf 'scale_mode=fit\ncache_size_mb=32\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$fallback_config/jpegview-linux/settings.conf"
+	fallback_started="$temporary/fallback.started"
+	fallback_release="$temporary/fallback.release"
+	fallback_active="$temporary/fallback.active"
+	DISPLAY=":$display_number" HOME="$temporary/fallback-home" \
+		XDG_CONFIG_HOME="$fallback_config" XDG_STATE_HOME="$temporary/fallback-state" \
+		LD_PRELOAD="$temporary/slow_map.so" \
+		JPEGVIEW_TEST_SLOW_MAP="$fallback_directory/01-fallback.jpg" \
+		JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
+		JPEGVIEW_TEST_SLOW_MAP_STARTED="$fallback_started" \
+		JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$fallback_active" \
+		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$fallback_release" \
+		JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=1200 \
+		"$BINARY" "$fallback_directory/01-fallback.jpg" \
+		>"$temporary/fallback-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.05
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: fallback viewer window was unavailable" >&2
+		exit 1
+	fi
+	fallback_initial_blocked=0
+	for _ in $(seq 1 100); do
+		if [ -f "$fallback_started" ] && [ -f "$fallback_active" ]; then
+			fallback_initial_blocked=1
+			break
+		fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ "$fallback_initial_blocked" -ne 1 ]; then
+		echo "UI smoke test: initial JPEG presentation did not reach the controlled map barrier" >&2
+		cat "$temporary/fallback-viewer.log" >&2
+		exit 1
+	fi
+	: > "$fallback_release"
+	fallback_initial_rendered=0
+	for _ in $(seq 1 100); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/fallback-initial.png"
+		fallback_left=$(convert "$temporary/fallback-initial.png" -format \
+			"%[fx:p{320,400}.r>0.75&&p{320,400}.b<0.25]" info:)
+		fallback_right=$(convert "$temporary/fallback-initial.png" -format \
+			"%[fx:p{960,400}.b>0.75&&p{960,400}.r<0.25]" info:)
+		if [ "$fallback_left:$fallback_right" = "1:1" ] && [ ! -f "$fallback_active" ]; then
+			fallback_initial_rendered=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$fallback_initial_rendered" -ne 1 ]; then
+		echo "UI smoke test: controlled JPEG did not produce its initial cached texture ($fallback_left:$fallback_right)" >&2
+		cat "$temporary/fallback-viewer.log" >&2
+		exit 1
+	fi
+	# Drain any startup metadata access while the release file still exists.
+	sleep 0.2
+	rm -f -- "$fallback_started" "$fallback_release"
+	fallback_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+	fallback_width=$(printf '%s\n' "$fallback_geometry" | sed -n 's/^WIDTH=//p')
+	fallback_height=$(printf '%s\n' "$fallback_geometry" | sed -n 's/^HEIGHT=//p')
+	DISPLAY=":$display_number" xdotool windowsize "$window_id" \
+		$((fallback_width + 80)) $((fallback_height + 40))
+	fallback_replacement_blocked=0
+	for _ in $(seq 1 100); do
+		if [ -f "$fallback_started" ] && [ -f "$fallback_active" ]; then
+			fallback_replacement_blocked=1
+			break
+		fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ "$fallback_replacement_blocked" -ne 1 ]; then
+		echo "UI smoke test: same-source resolution replacement did not reach the controlled map barrier" >&2
+		cat "$temporary/fallback-viewer.log" >&2
+		exit 1
+	fi
+	sleep 0.25
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/fallback-blocked.png"
+	fallback_left=$(convert "$temporary/fallback-blocked.png" -format \
+		"%[fx:p{320,400}.r>0.75&&p{320,400}.b<0.25]" info:)
+	fallback_right=$(convert "$temporary/fallback-blocked.png" -format \
+		"%[fx:p{960,400}.b>0.75&&p{960,400}.r<0.25]" info:)
+	if [ "$fallback_left:$fallback_right" != "1:1" ]; then
+		echo "UI smoke test: prior same-source texture disappeared while replacement was blocked ($fallback_left:$fallback_right)" >&2
+		cat "$temporary/fallback-viewer.log" >&2
+		exit 1
+	fi
+	: > "$fallback_release"
+	stop_viewer
+
+	# Materializing one animation frame for Copy must not make later frames reuse
+	# that frame's full-resolution pixels.
+	if command -v xclip >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
+		animation_directory="$temporary/animation-materialization"
+		animation_config="$temporary/animation-materialization-config"
+		mkdir -p "$animation_directory" "$animation_config/jpegview-linux"
+		convert -delay 200 -size 160x120 xc:red -delay 200 -size 160x120 xc:blue \
+			-loop 0 "$animation_directory/01-animated.gif"
+		printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+			> "$animation_config/jpegview-linux/settings.conf"
+		VIEWER_TEST_HOME="$temporary/animation-materialization-home" \
+			VIEWER_TEST_CONFIG_HOME="$animation_config" \
+			launch_viewer "$animation_directory/01-animated.gif"
+		assert_title_prefix "01-animated.gif" "animated frame materialization fixture did not load"
+		viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+		viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+		animation_color=''
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/animation-frame.png"
+			animation_color=$(convert "$temporary/animation-frame.png" -format \
+				"%[hex:p{$((viewer_width / 2)),$((viewer_height / 2))}]" info:)
+			case "$animation_color" in FF0000|0000FF) break ;; esac
+			sleep 0.05
+		done
+		if [ "$animation_color" != FF0000 ] && [ "$animation_color" != 0000FF ]; then
+			echo "UI smoke test: animated frame was not visible ($animation_color)" >&2
+			exit 1
+		fi
+		first_animation_color=$animation_color
+		DISPLAY=":$display_number" xdotool key ctrl+c
+		copied_animation_color=''
+		for _ in $(seq 1 30); do
+			if DISPLAY=":$display_number" xclip -selection clipboard -t image/png -o \
+				> "$temporary/animation-copy-first.png" 2>/dev/null; then
+				copied_animation_color=$(convert "$temporary/animation-copy-first.png" \
+					-format '%[hex:p{0,0}]' info: 2>/dev/null || true)
+				if [ "${#copied_animation_color}" -eq 8 ]; then
+					copied_animation_color=${copied_animation_color%??}
+				fi
+				if [ "$copied_animation_color" = "$first_animation_color" ]; then break; fi
+			fi
+			sleep 0.05
+		done
+		if [ "$copied_animation_color" != "$first_animation_color" ]; then
+			echo "UI smoke test: copied animation frame did not match its visible frame ($first_animation_color/$copied_animation_color)" >&2
+			exit 1
+		fi
+		second_animation_color=''
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/animation-frame.png"
+			second_animation_color=$(convert "$temporary/animation-frame.png" -format \
+				"%[hex:p{$((viewer_width / 2)),$((viewer_height / 2))}]" info:)
+			if [ "$second_animation_color" != "$first_animation_color" ]; then break; fi
+			sleep 0.05
+		done
+		if [ "$second_animation_color" = "$first_animation_color" ]; then
+			echo "UI smoke test: animated fixture did not advance to another frame" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool key ctrl+c
+		copied_animation_color=''
+		for _ in $(seq 1 30); do
+			if DISPLAY=":$display_number" xclip -selection clipboard -t image/png -o \
+				> "$temporary/animation-copy-second.png" 2>/dev/null; then
+				copied_animation_color=$(convert "$temporary/animation-copy-second.png" \
+					-format '%[hex:p{0,0}]' info: 2>/dev/null || true)
+				if [ "${#copied_animation_color}" -eq 8 ]; then
+					copied_animation_color=${copied_animation_color%??}
+				fi
+				if [ "$copied_animation_color" = "$second_animation_color" ]; then break; fi
+			fi
+			sleep 0.05
+		done
+		if [ "$copied_animation_color" != "$second_animation_color" ]; then
+			echo "UI smoke test: second copied animation frame reused stale pixels ($second_animation_color/$copied_animation_color)" >&2
+			exit 1
+		fi
+		stop_viewer
+	else
+		echo "UI smoke test: SKIP animation materialization (missing xclip or visual tools)"
+	fi
+
+	# With a controlled two-file list, hold the selected JPEG read and verify
+	# the loading state paints while navigation replaces the pending selection.
+	async_decode_directory="$temporary/async-decode"
+	async_decode_config="$temporary/async-decode-config"
+	mkdir -p "$async_decode_directory" "$async_decode_config/jpegview-linux"
+	write_solid_ppm "$async_decode_directory/01-fast.ppm" 20 220 80
+	convert "$temporary/images/01-red.ppm" "$async_decode_directory/00-slow.jpg"
+	printf 'scale_mode=fit\nsort_mode=file_name\nsort_ascending=1\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$async_decode_config/jpegview-linux/settings.conf"
+	async_decode_started="$temporary/async-decode.started"
+	async_decode_release="$temporary/async-decode.release"
+	DISPLAY=":$display_number" HOME="$temporary/async-decode-home" \
+		XDG_CONFIG_HOME="$async_decode_config" \
+		LD_PRELOAD="$temporary/slow_map.so" \
+		JPEGVIEW_TEST_SLOW_MAP="$async_decode_directory/00-slow.jpg" \
+		JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
+		JPEGVIEW_TEST_SLOW_MAP_STARTED="$async_decode_started" \
+		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$async_decode_release" \
+		JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=1000 \
+		"$BINARY" "$async_decode_directory/00-slow.jpg" \
+		"$async_decode_directory/01-fast.ppm" \
+		>"$temporary/async-decode.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 40); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.05
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: async-decode viewer window was unavailable while decode was blocked" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	async_decode_blocked=0
+	for _ in $(seq 1 100); do
+		if [ -f "$async_decode_started" ]; then async_decode_blocked=1; break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ "$async_decode_blocked" -ne 1 ]; then
+		echo "UI smoke test: selected JPEG decode did not reach the controlled mmap barrier" >&2
+		cat "$temporary/async-decode.log" >&2
+		exit 1
+	fi
+	async_decode_loading_visible=0
+	for _ in $(seq 1 40); do
+		async_decode_title=$(DISPLAY=":$display_number" window_title_without_position)
+		case "$async_decode_title" in
+			*00-slow.jpg*Loading*) async_decode_loading_visible=1 ;;
+		esac
+		if [ "$async_decode_loading_visible" -eq 1 ]; then break; fi
+		sleep 0.05
+	done
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Right
+	async_decode_navigation_ready=0
+	for _ in $(seq 1 40); do
+		async_decode_title=$(DISPLAY=":$display_number" window_title_without_position)
+		case "$async_decode_title" in
+			01-fast.ppm\ *) async_decode_navigation_ready=1; break ;;
+		esac
+		sleep 0.05
+	done
+	: > "$async_decode_release"
+	if [ "$async_decode_loading_visible" -ne 1 ]; then
+		echo "UI smoke test: blocked selected JPEG did not retain its loading state ($async_decode_title)" >&2
+		cat "$temporary/async-decode.log" >&2
+		exit 1
+	fi
+	if [ "$async_decode_navigation_ready" -ne 1 ]; then
+		echo "UI smoke test: navigation waited for selected-source decoding ($async_decode_title)" >&2
+		cat "$temporary/async-decode.log" >&2
+		exit 1
+	fi
+	stop_viewer
+
+	# Rotate a cold JPEG while its header is blocked. The command must survive
+	# the header continuation and be applied after the selected source is ready.
+	async_rotate_directory="$temporary/async-rotate"
+	async_rotate_config="$temporary/async-rotate-config"
+	mkdir -p "$async_rotate_directory" "$async_rotate_config/jpegview-linux"
+	convert -size 240x320 xc:red -fill '#00ff00' \
+		-draw 'rectangle 0,160 239,319' -sampling-factor 1x1 -quality 100 \
+		"$async_rotate_directory/01-rotate.jpg"
+	printf 'scale_mode=fit\ncache_size_mb=1\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$async_rotate_config/jpegview-linux/settings.conf"
+	async_rotate_started="$temporary/async-rotate.started"
+	async_rotate_release="$temporary/async-rotate.release"
+	DISPLAY=":$display_number" HOME="$temporary/async-rotate-home" \
+		XDG_CONFIG_HOME="$async_rotate_config" \
+		LD_PRELOAD="$temporary/slow_map.so" \
+		JPEGVIEW_TEST_SLOW_MAP="$async_rotate_directory/01-rotate.jpg" \
+		JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
+		JPEGVIEW_TEST_SLOW_MAP_STARTED="$async_rotate_started" \
+		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$async_rotate_release" \
+		JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=1000 \
+		"$BINARY" "$async_rotate_directory/01-rotate.jpg" \
+		>"$temporary/async-rotate.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 40); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.05
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: async-rotate viewer window was unavailable" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	async_rotate_blocked=0
+	for _ in $(seq 1 100); do
+		if [ -f "$async_rotate_started" ]; then async_rotate_blocked=1; break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ "$async_rotate_blocked" -ne 1 ]; then
+		echo "UI smoke test: selected JPEG header did not reach the controlled mmap barrier" >&2
+		cat "$temporary/async-rotate.log" >&2
+		exit 1
+	fi
+	async_rotate_loading_visible=0
+	for _ in $(seq 1 40); do
+		async_rotate_title=$(DISPLAY=":$display_number" window_title_without_position)
+		case "$async_rotate_title" in
+			01-rotate.jpg\ *Loading*) async_rotate_loading_visible=1; break ;;
+		esac
+		sleep 0.05
+	done
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Up
+	sleep 0.05
+	: > "$async_rotate_release"
+	if [ "$async_rotate_loading_visible" -ne 1 ]; then
+		echo "UI smoke test: blocked JPEG did not show a loading state ($async_rotate_title)" >&2
+		cat "$temporary/async-rotate.log" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		async_rotate_applied=0
+		viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+		viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+		async_rotate_left_x=$((viewer_width / 2 - 40))
+		async_rotate_right_x=$((viewer_width / 2 + 40))
+		async_rotate_center_y=$((viewer_height / 2))
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/async-rotate.png"
+			async_rotate_left=$(convert "$temporary/async-rotate.png" \
+				-format "%[hex:p{$async_rotate_left_x,$async_rotate_center_y}]" info:)
+			async_rotate_right=$(convert "$temporary/async-rotate.png" \
+				-format "%[hex:p{$async_rotate_right_x,$async_rotate_center_y}]" info:)
+			if [ "$async_rotate_left" != "$async_rotate_right" ]; then
+				async_rotate_applied=1
+				break
+			fi
+			if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+			sleep 0.05
+		done
+		if [ "$async_rotate_applied" -ne 1 ]; then
+			echo "UI smoke test: rotate queued during JPEG loading was not applied ($async_rotate_left:$async_rotate_right)" >&2
+			cat "$temporary/async-rotate.log" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+
 	# Hold the decoder's memory map until the harness has observed the visible
 	# loading window, then release it through an explicit file signal.
-	cc -shared -fPIC "$SCRIPT_DIR/delay_mmap.c" -o "$temporary/slow_map.so" -ldl -pthread
 	convert "$temporary/images/01-red.ppm" "$temporary/startup-delay.jpg"
 	startup_map_started="$temporary/startup-map.started"
 	startup_map_release="$temporary/startup-map.release"
@@ -1048,16 +1503,19 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		echo "UI smoke test: cold JPEG header barrier ended before pending commands" >&2
 		exit 1
 	}
+	clear_clipboard_text
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" ctrl+c
 	# Queue a transform before viewport commands. The wide-short fixture makes
-	# grouped viewport-first replay clamp both vertical pans before rotation.
+	# replay order visible because rotating first changes the vertical pan range.
 	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Down
-	# Fill the remaining 255 slots with 252 Fits, Actual Size, and two pans. On
+	# Fill the remaining 254 slots with 251 Fits, Actual Size, two pans, and the
+	# pending whole-image copy. On
 	# the wide-short fixture, ordered replay rotates before the vertical pans;
 	# grouped replay clamps them against the original short height. The next pan
 	# is rejected at capacity and must not cancel the two accepted pans.
 	# xdotool treats each argument as a distinct press/release pair; SDL does
 	# not count OS autorepeat keydowns for these non-navigation commands.
-	send_repeated_keypresses 252 Return "$window_id"
+	send_repeated_keypresses 251 Return "$window_id"
 	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" space
 	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" shift+Up
 	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" shift+Up
@@ -1119,6 +1577,24 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		cat "$temporary/cold-jpeg-intents.log" >&2
 		exit 1
 	fi
+	cold_copy_ready=0
+	for _ in $(seq 1 100); do
+		if DISPLAY=":$display_number" xclip -selection clipboard -t image/png -o \
+			> "$temporary/cold-pending-copy.png" 2>/dev/null; then
+			cold_copy_width=$(identify -format '%w' "$temporary/cold-pending-copy.png" 2>/dev/null || true)
+			cold_copy_height=$(identify -format '%h' "$temporary/cold-pending-copy.png" 2>/dev/null || true)
+			case "$cold_copy_width:$cold_copy_height" in
+				0:*|*:0|:*) ;;
+				*) cold_copy_ready=1; break ;;
+			esac
+		fi
+		sleep 0.025
+	done
+	if [ "$cold_copy_ready" -ne 1 ]; then
+		echo "UI smoke test: whole-image copy queued during a cold load did not reach the clipboard ($cold_copy_width x $cold_copy_height)" >&2
+		cat "$temporary/cold-jpeg-intents.log" >&2
+		exit 1
+	fi
 	if [ "$visual_assertions" -eq 1 ]; then
 		cold_intent_rendered=0
 		cold_pan_pixel=0
@@ -1139,10 +1615,86 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		done
 		if [ "$cold_intent_rendered" -ne 1 ]; then
 			echo "UI smoke test: interleaved rotate/Actual Size/pan replay or bounded rejection failed ($cold_pan_pixel)" >&2
+			cat "$temporary/cold-jpeg-intents.log" >&2
 			exit 1
 		fi
 	fi
 	stop_viewer
+
+	# Clipboard image loading is asynchronous too; its viewport commands must be
+	# queued against the temporary source and replayed after the decode commits.
+	if command -v xclip >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
+		clipboard_config="$temporary/clipboard-intents-config"
+		clipboard_data="$temporary/clipboard-intents-data"
+		mkdir -p "$clipboard_config/jpegview-linux" "$clipboard_data"
+		printf 'scale_mode=fit\nspacebar_navigates_images=0\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+			> "$clipboard_config/jpegview-linux/settings.conf"
+		clipboard_image="$temporary/clipboard-intents.png"
+		convert -size 1600x400 xc:black -fill white -draw 'rectangle 775,0 824,399' \
+			"$clipboard_image"
+		DISPLAY=":$display_number" xclip -selection clipboard -t image/png -i \
+			"$clipboard_image"
+		clipboard_map_started="$temporary/clipboard-map.started"
+		clipboard_map_active="$temporary/clipboard-map.active"
+		clipboard_map_release="$temporary/clipboard-map.release"
+		VIEWER_TEST_HOME="$temporary/clipboard-intents-home" \
+			VIEWER_TEST_CONFIG_HOME="$clipboard_config" XDG_DATA_DIRS="$clipboard_data" \
+			LD_PRELOAD="$temporary/slow_map.so" \
+			JPEGVIEW_TEST_SLOW_MAP_PREFIX=/tmp/jpegview-paste- \
+			JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
+			JPEGVIEW_TEST_SLOW_MAP_STARTED="$clipboard_map_started" \
+			JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$clipboard_map_active" \
+			JPEGVIEW_TEST_SLOW_MAP_RELEASE="$clipboard_map_release" \
+			JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=12000 \
+			launch_viewer "$temporary/images/01-red.ppm"
+		DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+v
+		clipboard_map_blocked=0
+		for _ in $(seq 1 200); do
+			if [ -f "$clipboard_map_started" ] && [ -f "$clipboard_map_active" ]; then
+				clipboard_map_blocked=1
+				break
+			fi
+			if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+			sleep 0.025
+		done
+		if [ "$clipboard_map_blocked" -ne 1 ]; then
+			echo "UI smoke test: pasted PNG decode did not reach the controlled map barrier" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+		DISPLAY=":$display_number" xdotool key --window "$window_id" space
+		send_repeated_keypresses 8 shift+Right "$window_id"
+		: > "$clipboard_map_release"
+		clipboard_pan_rendered=0
+		clipboard_title=''
+		clipboard_center_pixel=''
+		for _ in $(seq 1 160); do
+			clipboard_title=$(DISPLAY=":$display_number" window_title_without_position)
+			case "$clipboard_title" in
+				clipboard.png\ *)
+					DISPLAY=":$display_number" import -window "$window_id" \
+						"$temporary/clipboard-intents-rendered.png"
+					clipboard_center_pixel=$(convert "$temporary/clipboard-intents-rendered.png" \
+						-format "%[fx:p{640,400}.r<0.15&&p{640,400}.g<0.15&&p{640,400}.b<0.15]" info:)
+					if [ "$clipboard_center_pixel" = 1 ]; then
+						clipboard_pan_rendered=1
+						break
+					fi
+				;;
+			esac
+			if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+			sleep 0.025
+		done
+		if [ "$clipboard_pan_rendered" -ne 1 ]; then
+			echo "UI smoke test: fit, actual-size, and pan intents were lost during clipboard loading ($clipboard_title, center=$clipboard_center_pixel)" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		stop_viewer
+	else
+		echo "UI smoke test: SKIP pending clipboard viewport intents (missing xclip or visual tools)"
+	fi
 
 	# Reverse to the committed owner while another image's JPEG header is
 	# blocked. The stale read must drain without carrying its 3x view into A.
@@ -3169,12 +3721,13 @@ if command -v convert >/dev/null 2>&1; then
 			fi
 			sleep 0.1
 		done
+		copied_selection_title=$(DISPLAY=":$display_number" window_title_without_position)
 		if [ ! -s "$temporary/copied-selection.png" ] || \
 			[ "$copied_selection_dimensions" != "64x48" ]; then
-			echo "UI smoke test: Copy Selection did not place its source-size crop on the clipboard" >&2
+			echo "UI smoke test: Copy Selection did not place its source-size crop on the clipboard ($copied_selection_dimensions; $copied_selection_title)" >&2
+			cat "$temporary/crop-viewer.log" >&2
 			exit 1
 		fi
-		copied_selection_title=$(DISPLAY=":$display_number" window_title_without_position)
 		case "$copied_selection_title" in
 			"Copied selection to clipboard"*) ;;
 			*) echo "UI smoke test: Copy Selection did not complete ($copied_selection_title)" >&2; exit 1 ;;

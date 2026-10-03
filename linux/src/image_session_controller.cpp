@@ -18,10 +18,47 @@ fs::path NormalizeAbsolutePath(const fs::path& path) {
 
 } // namespace
 
+void SelectedSourceDecodeChannel::Activate(std::uint64_t generation,
+	const SourceKey& source) {
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (!active_) return;
+	activeGeneration_ = generation;
+	activeSource_ = source;
+	ready_.reset();
+}
+
+bool SelectedSourceDecodeChannel::Publish(SelectedSourceDecodeResult result) {
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (!active_ || result.generation != activeGeneration_ ||
+		result.source.Key() != activeSource_) return false;
+	ready_ = std::move(result);
+	return true;
+}
+
+std::optional<SelectedSourceDecodeResult> SelectedSourceDecodeChannel::Take(
+	std::uint64_t generation, const SourceKey& source) {
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (!active_ || generation != activeGeneration_ || source != activeSource_ ||
+		!ready_.has_value()) return std::nullopt;
+	std::optional<SelectedSourceDecodeResult> result(std::move(ready_));
+	ready_.reset();
+	return result;
+}
+
+void SelectedSourceDecodeChannel::Shutdown() {
+	std::lock_guard<std::mutex> lock(mutex_);
+	active_ = false;
+	activeGeneration_ = 0;
+	activeSource_ = {};
+	ready_.reset();
+}
+
 ImageSessionStart ImageSessionController::BeginSelection(
 	const SourceDescriptor& source, const fs::path& filename,
 	const ViewportSnapshot& viewport, const ImageProcessingPreset& processing,
 	bool trackRecentHistory) {
+	const bool sameSource = selection_.has_value() &&
+		selection_->source.Key() == source.Key();
 	if (generation_ == std::numeric_limits<std::uint64_t>::max()) generation_ = 1;
 	else ++generation_;
 	documentRevision_ = 0;
@@ -29,8 +66,9 @@ ImageSessionStart ImageSessionController::BeginSelection(
 	const fs::path selectedPath = NormalizeAbsolutePath(filename);
 	selection_ = ImageSessionSelection{generation_, selectedPath, source,
 		viewport, processing, trackRecentHistory};
+	stage_ = ImageSessionStage::Selected;
 	if (trackRecentHistory) history_.BeginLoad(selectedPath, viewport);
-	return {*selection_, {true, true, true}};
+	return {*selection_, {!sameSource, true, true}};
 }
 
 SelectedSourcePreparationAction ImageSessionController::PlanSelectedSourcePreparation(
@@ -58,6 +96,51 @@ bool ImageSessionController::MatchesSelection(std::uint64_t generation,
 	const SourceKey& source) const {
 	return selection_.has_value() && selection_->generation == generation &&
 		selection_->source.Key() == source;
+}
+
+bool ImageSessionController::SetStage(std::uint64_t generation,
+	const SourceKey& source, ImageSessionStage stage) {
+	if (!MatchesSelection(generation, source) ||
+		stage_ == ImageSessionStage::Committed || stage_ == ImageSessionStage::Failed ||
+		stage == ImageSessionStage::Committed || stage == ImageSessionStage::Failed) {
+		return false;
+	}
+	stage_ = stage;
+	return true;
+}
+
+bool ImageSessionController::MarkDisplayFrameReady(std::uint64_t generation,
+	const SourceKey& source) {
+	if (!MatchesSelection(generation, source) ||
+		stage_ == ImageSessionStage::Committed || stage_ == ImageSessionStage::Failed) {
+		return false;
+	}
+	stage_ = ImageSessionStage::DisplayFrameReady;
+	return true;
+}
+
+bool ImageSessionController::CommitSelectedLoad(std::uint64_t generation,
+	const SourceKey& source, const fs::path& filename, RecentFiles& recentFiles) {
+	if (!MatchesSelection(generation, source) ||
+		stage_ != ImageSessionStage::DisplayFrameReady || !selection_.has_value() ||
+		selection_->filename != NormalizeAbsolutePath(filename)) return false;
+	if (selection_->tracksRecentHistory && !history_.CommitLoad(filename, recentFiles)) {
+		return false;
+	}
+	stage_ = ImageSessionStage::Committed;
+	return true;
+}
+
+bool ImageSessionController::FailSelectedLoad(std::uint64_t generation,
+	const SourceKey& source, const fs::path& filename) {
+	if (!MatchesSelection(generation, source) || !selection_.has_value() ||
+		selection_->filename != NormalizeAbsolutePath(filename) ||
+		stage_ == ImageSessionStage::Committed || stage_ == ImageSessionStage::Failed) {
+		return false;
+	}
+	if (selection_->tracksRecentHistory) (void)history_.FailLoad(filename);
+	stage_ = ImageSessionStage::Failed;
+	return true;
 }
 
 std::uint64_t ImageSessionController::MarkDocumentChanged() {

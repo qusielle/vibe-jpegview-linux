@@ -17,12 +17,20 @@ inline constexpr std::size_t kMaximumPendingImageIntents = 256;
 enum class PendingImageIntentType {
 	Viewport,
 	Transform,
+	CopySelection,
+	CopyImage,
+	CropSelection,
 };
 
 struct PendingImageIntent {
 	PendingImageIntentType type = PendingImageIntentType::Viewport;
 	ViewportIntent viewport;
 	int transform = 0;
+	int selectionLeft = 0;
+	int selectionTop = 0;
+	int selectionRight = 0;
+	int selectionBottom = 0;
+	bool fullSize = false;
 };
 
 struct PendingImageIntentBatch {
@@ -43,18 +51,33 @@ public:
 		std::uint64_t loadGeneration) const;
 	bool MatchesSelection(const std::filesystem::path& filename,
 		const SourceKey& source, std::uint64_t loadGeneration) const;
-	bool MatchesStartupLoad(bool startupScan, bool headerPending,
-		bool dimensionsRequestPending, bool startupLoad,
+	bool MatchesStartupLoad(bool startupScan, bool selectedLoadPending,
+		bool startupLoad,
 		const std::filesystem::path& filename, const SourceKey& source,
 		std::uint64_t loadGeneration) const;
 	bool QueueViewport(const std::filesystem::path& filename, const SourceKey& source,
 		std::uint64_t loadGeneration, const ViewportIntent& intent);
 	bool QueueTransform(const std::filesystem::path& filename, const SourceKey& source,
 		std::uint64_t loadGeneration, int command);
+	bool QueueCopySelection(const std::filesystem::path& filename,
+		const SourceKey& source, std::uint64_t loadGeneration,
+		int left, int top, int right, int bottom);
+	bool QueueCopyImage(const std::filesystem::path& filename,
+		const SourceKey& source, std::uint64_t loadGeneration, bool fullSize);
+	bool QueueCropSelection(const std::filesystem::path& filename,
+		const SourceKey& source, std::uint64_t loadGeneration,
+		int left, int top, int right, int bottom);
 	bool RequestTransition(const SourceKey& source, std::uint64_t loadGeneration);
+	// Drains actions already captured for this selection while keeping the
+	// generation owner active for input received during the next async stage.
+	std::optional<PendingImageIntentBatch> Drain(
+		const SourceKey& source, std::uint64_t loadGeneration);
 	std::optional<PendingImageIntentBatch> Take(const SourceKey& source,
 		std::uint64_t loadGeneration);
 	std::size_t ActionCount() const;
+	const std::vector<PendingImageIntent>* Actions() const {
+		return pending_.has_value() ? &pending_->actions : nullptr;
+	}
 	void Cancel();
 
 private:
