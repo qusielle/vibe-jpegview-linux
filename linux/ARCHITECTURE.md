@@ -261,9 +261,13 @@ should normally be added to one of these focused modules and covered by `tests/t
   outgoing owner's viewport and D/J modes are saved once while that owner remains
   committed, so a cold-image continuation or replacement cannot overwrite them with the pending
   image's restored modes. Direct snapshot writes require the selected path to remain the committed
-  owner. Viewport restoration resolves the selected identity before retiring its pending request:
-  a matching pending selection keeps its snapshot, while reversing to the committed owner restores
-  that owner's saved snapshot. Viewport mode changes update the pending snapshot so a selected-image
+  owner. Saved per-image viewport snapshots are restored only for explicit Recents-tab opens;
+  ordinary previous/next navigation carries the current fit/zoom/actual-size mode and scale even
+  when the target has an older snapshot. Double-page and manga-mode restoration remains a separate
+  policy. Viewport restoration resolves the selected identity before retiring its pending request:
+  a matching pending selection keeps its captured snapshot, while an ordinary reversal uses the
+  current navigation snapshot; only an explicit Recents open reads the selected path's saved view.
+  Viewport mode changes update the pending snapshot so a selected-image
   continuation applies the latest user intent. Viewport and rotate/mirror actions share one
   source- and generation-bound sequence and replay from the incoming snapshot after the required
   dimensions or pixels arrive, so unknown geometry never substitutes the outgoing image's scale.
@@ -593,9 +597,10 @@ presentation and rapid navigation path. The file-dialog workers, viewer-list sca
 thumbnail-resampling worker start only when their first request arrives; the decoded-image and
 display-preparation pools remain ready before the first image load so foreground rendering and
 neighbor preparation are not delayed. `LoadCurrent` captures the outgoing file's exact viewport
-snapshot when the path changes, restores that file's saved snapshot before sizing a new display
-request, and records the path only after decoding and presentation setup succeed. New paths use the
-shared navigation snapshot. Clipboard temporary paths never become recent entries, while the
+snapshot when the path changes, restores a saved per-image snapshot only for an explicit Recents
+open, and records the path only after decoding and presentation setup succeed. Ordinary navigation
+uses the shared current mode and scale, even for a path with saved Recents state. Clipboard temporary
+paths never become recent entries, while the
 ordinary file dialog's Recents tab shows one MRU image per parent folder and reuses the cancellable
 preview worker; separate Browse and Recents dialog models preserve each tab's filter and selection.
 With no positional startup arguments, the viewer skips the initial image-list scan and keeps the

@@ -126,7 +126,7 @@ public:
 		const std::filesystem::path& filename, bool clipboardMode,
 		const ViewportSnapshot& currentViewport,
 		const ViewportSnapshot& navigationViewport,
-		const RecentFiles& recentFiles) const;
+		const RecentFiles& recentFiles, bool restoreRecentViewport = false) const;
 	void SetClipboardReturnViewport(const ViewportSnapshot& viewport);
 	void ClearClipboardReturnViewport() { clipboardReturnViewport_.reset(); }
 	const std::optional<ViewportSnapshot>& ClipboardReturnViewport() const {

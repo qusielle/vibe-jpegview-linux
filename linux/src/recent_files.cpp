@@ -250,7 +250,8 @@ bool RecentImageLoadState::OwnsLoadedPath(const fs::path& selectedFilename) cons
 
 ViewportSnapshot RecentImageLoadState::ViewportForSelection(
 	const fs::path& selectedFilename, const ViewportSnapshot& currentViewport,
-	const ViewportSnapshot& navigationViewport, const RecentFiles& recentFiles) const {
+	const ViewportSnapshot& navigationViewport, const RecentFiles& recentFiles,
+	bool restoreRecentViewport) const {
 	const fs::path selectedPath = NormalizeAbsolute(selectedFilename);
 	if (selectedPath.empty()) return navigationViewport;
 	if (pendingLoad_.has_value() && pendingLoad_->filename == selectedPath) {
@@ -260,6 +261,7 @@ ViewportSnapshot RecentImageLoadState::ViewportForSelection(
 		selectedPath == loadedPath_) {
 		return currentViewport;
 	}
+	if (!restoreRecentViewport) return navigationViewport;
 	const std::optional<ViewportSnapshot> savedViewport =
 		recentFiles.FindViewport(selectedPath);
 	return savedViewport.has_value() ? *savedViewport : navigationViewport;

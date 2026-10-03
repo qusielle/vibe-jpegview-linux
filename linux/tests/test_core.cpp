@@ -18830,15 +18830,29 @@ void TestImageSessionControllerSnapshotsNavigationAndClipboardState() {
 		"successful image-session commit did not retain document revision and Recents ownership");
 
 	session.SetClipboardReturnViewport(clipboardReturn);
+	const jpegview_linux::ViewportSnapshot ordinaryNavigation =
+		session.ResolveViewportForSelection(second, false, navigation, navigation,
+			recentFiles);
+	const jpegview_linux::ViewportSnapshot recentOpen =
+		session.ResolveViewportForSelection(second, false, navigation, navigation,
+			recentFiles, true);
 	Expect(session.ResolveViewportForSelection(first, false, navigation, navigation,
 		recentFiles).zoom == clipboardReturn.zoom &&
 		session.ResolveViewportForSelection(clipboard, true, clipboardReturn, navigation,
 			recentFiles).zoom == navigation.zoom &&
-		session.ResolveViewportForSelection(second, false, navigation, navigation,
-			recentFiles).zoom == savedSecond.zoom &&
+		ordinaryNavigation.fitToWindow == navigation.fitToWindow &&
+		ordinaryNavigation.fillWithCrop == navigation.fillWithCrop &&
+		ordinaryNavigation.noEnlarge == navigation.noEnlarge &&
+		ordinaryNavigation.zoom == navigation.zoom &&
+		ordinaryNavigation.relativeZoom == navigation.relativeZoom &&
+		recentOpen.fitToWindow == savedSecond.fitToWindow &&
+		recentOpen.fillWithCrop == savedSecond.fillWithCrop &&
+		recentOpen.noEnlarge == savedSecond.noEnlarge &&
+		recentOpen.zoom == savedSecond.zoom &&
+		recentOpen.relativeZoom == savedSecond.relativeZoom &&
 		recentFiles.FindDoublePageMode(second).has_value() &&
 		recentFiles.FindDoublePageMode(second)->mangaReadingOrder,
-		"clipboard return or per-image Recents restoration changed during selection planning");
+		"ordinary navigation or explicit Recents open applied the wrong viewport policy");
 
 	const jpegview_linux::ImageSessionStart clipboardStart = session.BeginSelection(
 		clipboardSource, clipboard, navigation, {}, false);
@@ -19028,10 +19042,15 @@ void TestRecentImageLoadHistoryCommitsOnlyAfterSuccess() {
 	const jpegview_linux::ViewportSnapshot transientView{false, false, false, 0.75, 0.5};
 	const jpegview_linux::ViewportSnapshot restoredAfterFailure = state.ViewportForSelection(
 		loaded, transientView, defaultView, recents);
-	Expect(restoredAfterFailure.zoom == loadedView.zoom &&
-		restoredAfterFailure.relativeZoom == loadedView.relativeZoom &&
-		restoredAfterFailure.fitToWindow == loadedView.fitToWindow,
-		"reversing after a failed replacement reused its transient viewport");
+	const jpegview_linux::ViewportSnapshot recentAfterFailure = state.ViewportForSelection(
+		loaded, transientView, defaultView, recents, true);
+	Expect(restoredAfterFailure.zoom == defaultView.zoom &&
+		restoredAfterFailure.relativeZoom == defaultView.relativeZoom &&
+		restoredAfterFailure.fitToWindow == defaultView.fitToWindow &&
+		recentAfterFailure.zoom == loadedView.zoom &&
+		recentAfterFailure.relativeZoom == loadedView.relativeZoom &&
+		recentAfterFailure.fitToWindow == loadedView.fitToWindow,
+		"ordinary navigation or explicit Recents open applied the wrong failure-reversal viewport");
 
 	const fs::path followup = temporary.path() / "followup" / "followup.jpg";
 	const jpegview_linux::ViewportSnapshot pendingView{false, false, false, 3.25, 2.5};
@@ -19123,14 +19142,18 @@ void TestViewportSnapshotFollowsSelectedIdentityDuringCancellation() {
 
 	const jpegview_linux::ViewportSnapshot reversedSelection =
 		state.ViewportForSelection(committed, pendingView, navigationView, recentFiles);
+	const jpegview_linux::ViewportSnapshot restoredRecentSelection =
+		state.ViewportForSelection(committed, pendingView, navigationView, recentFiles, true);
 	Expect(!state.OwnsLoadedPath(committed) && state.LoadedPath() ==
 		fs::absolute(committed).lexically_normal() &&
-		reversedSelection.fitToWindow == committedView.fitToWindow &&
-		reversedSelection.fillWithCrop == committedView.fillWithCrop &&
-		reversedSelection.noEnlarge == committedView.noEnlarge &&
-		reversedSelection.zoom == 2.0 &&
-		reversedSelection.relativeZoom == committedView.relativeZoom,
-		"reversing to the committed identity reused the pending selection's viewport");
+		reversedSelection.fitToWindow == navigationView.fitToWindow &&
+		reversedSelection.fillWithCrop == navigationView.fillWithCrop &&
+		reversedSelection.noEnlarge == navigationView.noEnlarge &&
+		reversedSelection.zoom == navigationView.zoom &&
+		reversedSelection.relativeZoom == navigationView.relativeZoom &&
+		restoredRecentSelection.zoom == committedView.zoom &&
+		restoredRecentSelection.relativeZoom == committedView.relativeZoom,
+		"normal reversal or explicit Recents opening applied the wrong viewport policy");
 
 	state.CancelPendingLoad();
 	Expect(!state.TakePendingLoad(pending).has_value() &&

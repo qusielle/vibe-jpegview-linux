@@ -466,10 +466,10 @@ public:
 			fileList_.SetProvisionalInputs(startupInputs_);
 			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Initialize,
 				0, FileListScanHandling::Startup, true, false, {},
-				DisplayModeLoadPolicy::UseDefaults);
+				ImageLoadStatePolicy::UseDefaults);
 			startupInputs_.clear();
 			if (!fileList_.Empty() && !LoadCurrent(0,
-				DisplayModeLoadPolicy::UseDefaults, false, true)) {
+				ImageLoadStatePolicy::UseDefaults, false, true)) {
 				startupImageLoadFailed_ = true;
 			} else if (fileList_.Empty()) {
 				SetTitle("JPEGView — Scanning folder");
@@ -513,7 +513,7 @@ public:
 	}
 
 private:
-	enum class DisplayModeLoadPolicy {
+	enum class ImageLoadStatePolicy {
 		PreserveCurrent,
 		UseDefaults,
 		RestoreRecent,
@@ -1260,7 +1260,7 @@ private:
 				failedJpegDimensionKeys_.insert(result.source);
 			}
 			const bool loaded = LoadCurrent(pending.prefetchDirection,
-				DisplayModeLoadPolicy::PreserveCurrent, true, pending.startupLoad,
+				ImageLoadStatePolicy::PreserveCurrent, true, pending.startupLoad,
 				pendingLoad, intents.has_value() && !intents->actions.empty());
 			if (!loaded && pending.startupLoad) {
 				startupImageLoadFailed_ = true;
@@ -1983,7 +1983,7 @@ private:
 	}
 
 	bool LoadCurrent(int prefetchDirection = 0,
-		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent,
+		ImageLoadStatePolicy loadStatePolicy = ImageLoadStatePolicy::PreserveCurrent,
 		bool preserveExifMetadataRequest = false, bool startupLoad = false,
 		std::optional<jpegview_linux::PendingRecentImageLoad> resumePendingLoad = std::nullopt,
 		bool replayPendingIntents = false) {
@@ -2003,9 +2003,9 @@ private:
 				{doublePageModeEnabled_, mangaReadingOrderEnabled_}, recentFiles_);
 		}
 		if (!clipboardMode_ && pathChanged &&
-			modeLoadPolicy != DisplayModeLoadPolicy::PreserveCurrent) {
+			loadStatePolicy != ImageLoadStatePolicy::PreserveCurrent) {
 			const std::optional<jpegview_linux::DoublePageModeState> savedModes =
-				modeLoadPolicy == DisplayModeLoadPolicy::RestoreRecent ?
+				loadStatePolicy == ImageLoadStatePolicy::RestoreRecent ?
 					recentFiles_.FindDoublePageMode(targetPath) : std::nullopt;
 			doublePageModeEnabled_ = savedModes.has_value() ? savedModes->enabled :
 				doublePageModeDefault_;
@@ -2025,7 +2025,8 @@ private:
 				resumePendingLoad->intentBaseSnapshot : resumePendingLoad->viewportSnapshot;
 		} else {
 			viewportSnapshot = imageSession_.ResolveViewportForSelection(targetPath,
-				clipboardMode_, viewport_.Snapshot(), viewport_.NavigationSnapshot(), recentFiles_);
+				clipboardMode_, viewport_.Snapshot(), viewport_.NavigationSnapshot(), recentFiles_,
+				loadStatePolicy == ImageLoadStatePolicy::RestoreRecent);
 		}
 		// Resolve the snapshot while the previous selected identity is still known. A
 		// cancellation here would otherwise make a reversal look like the committed
@@ -4058,7 +4059,7 @@ private:
 	}
 
 	void OpenDroppedFiles(const std::vector<std::string>& droppedFiles,
-		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::UseDefaults) {
+		ImageLoadStatePolicy loadStatePolicy = ImageLoadStatePolicy::UseDefaults) {
 		if (droppedFiles.empty()) {
 			return;
 		}
@@ -4220,7 +4221,7 @@ private:
 		} else {
 			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
 				0, FileListScanHandling::Reload, true, false, {},
-				DisplayModeLoadPolicy::PreserveCurrent, {}, "Saved lossless crop: " + savedName);
+				ImageLoadStatePolicy::PreserveCurrent, {}, "Saved lossless crop: " + savedName);
 		}
 	}
 
@@ -4701,7 +4702,7 @@ private:
 	void SubmitFileListScan(jpegview_linux::FileList::ScanRequest request,
 		FileListScanHandling handling, bool force, bool forceImageReload,
 		int direction = 0, const fs::path& preferredPath = {},
-		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent,
+		ImageLoadStatePolicy loadStatePolicy = ImageLoadStatePolicy::PreserveCurrent,
 		const fs::path& markedToggleReturnPath = {},
 		std::string completionTitle = {}) {
 		if (!force && pendingFileListScanOperation_.has_value() &&
@@ -4728,11 +4729,11 @@ private:
 		int direction = 0, FileListScanHandling handling = FileListScanHandling::Navigation,
 		bool force = false, bool forceImageReload = false,
 		const fs::path& preferredPath = {},
-		DisplayModeLoadPolicy modeLoadPolicy = DisplayModeLoadPolicy::PreserveCurrent,
+		ImageLoadStatePolicy loadStatePolicy = ImageLoadStatePolicy::PreserveCurrent,
 		const fs::path& markedToggleReturnPath = {},
 		std::string completionTitle = {}) {
 		SubmitFileListScan(fileList_.MakeScanRequest(operation, direction), handling,
-			force, forceImageReload, direction, preferredPath, modeLoadPolicy,
+			force, forceImageReload, direction, preferredPath, loadStatePolicy,
 			markedToggleReturnPath, std::move(completionTitle));
 	}
 
@@ -4743,7 +4744,7 @@ private:
 		pendingFileListScanDirection_ = 0;
 		pendingFileListScanForceImageReload_ = false;
 		pendingFileListScanPreferredPath_.clear();
-		pendingFileListScanModeLoadPolicy_ = DisplayModeLoadPolicy::PreserveCurrent;
+		pendingFileListScanLoadStatePolicy_ = ImageLoadStatePolicy::PreserveCurrent;
 		pendingMarkedToggleReturnPath_.clear();
 		pendingFileListScanCompletionTitle_.clear();
 	}
@@ -4791,7 +4792,7 @@ private:
 				continue;
 			}
 			const bool forceImageReload = pendingFileListScanForceImageReload_;
-			const DisplayModeLoadPolicy modeLoadPolicy = pendingFileListScanModeLoadPolicy_;
+			const ImageLoadStatePolicy loadStatePolicy = pendingFileListScanLoadStatePolicy_;
 			const int direction = pendingFileListScanDirection_;
 			const std::string completionTitle = pendingFileListScanCompletionTitle_;
 			const fs::path previousPath = fileList_.Current();
@@ -4930,7 +4931,7 @@ private:
 		if (!fileList_.Empty()) RequestFileListScan(
 			jpegview_linux::FileList::ScanOperation::Reload,
 			0, FileListScanHandling::Reload, true, true, {},
-			DisplayModeLoadPolicy::PreserveCurrent, {}, completionTitle);
+			ImageLoadStatePolicy::PreserveCurrent, {}, completionTitle);
 	}
 
 	void TouchCurrentImage(bool useExifDate) {
@@ -5081,7 +5082,7 @@ private:
 		quitAfterEmptyScan_ = true;
 		RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
 			0, FileListScanHandling::Reload, true, true, {},
-			DisplayModeLoadPolicy::PreserveCurrent, {}, "Moved image to trash");
+			ImageLoadStatePolicy::PreserveCurrent, {}, "Moved image to trash");
 	}
 
 	void HandleConfirmationEvents(const SDL_Event& event) {
@@ -6816,7 +6817,7 @@ private:
 					RequestFileListScan(
 						jpegview_linux::FileList::ScanOperation::MarkedToggleTarget,
 						0, FileListScanHandling::MarkedToggle, true, false,
-						markedTarget, DisplayModeLoadPolicy::PreserveCurrent, previousPath);
+						markedTarget, ImageLoadStatePolicy::PreserveCurrent, previousPath);
 				} else if (fileList_.ToggleBetweenMarkedAndCurrent()) {
 					LoadCurrent();
 				}
@@ -9146,7 +9147,7 @@ private:
 		if (selected == nullptr) return;
 		const FileDialogEntry entry = *selected;
 		if (fileDialogTab_ == FileDialogTab::Recents) {
-			OpenDroppedFiles({entry.path.string()}, DisplayModeLoadPolicy::RestoreRecent);
+			OpenDroppedFiles({entry.path.string()}, ImageLoadStatePolicy::RestoreRecent);
 			CloseFileDialog(false);
 			return;
 		}
@@ -11458,7 +11459,7 @@ private:
 	bool pendingFileListScanForceImageReload_ = false;
 	fs::path pendingFileListScanPreferredPath_;
 	fs::path pendingMarkedToggleReturnPath_;
-	DisplayModeLoadPolicy pendingFileListScanModeLoadPolicy_ = DisplayModeLoadPolicy::PreserveCurrent;
+	ImageLoadStatePolicy pendingFileListScanLoadStatePolicy_ = ImageLoadStatePolicy::PreserveCurrent;
 	std::string pendingFileListScanCompletionTitle_;
 	bool startupImageLoadFailed_ = false;
 	bool quitAfterEmptyScan_ = false;
