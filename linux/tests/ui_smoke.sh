@@ -297,6 +297,36 @@ window_title_without_position() {
 		sed -E 's/^\[[0-9]+(-[0-9]+)?\/[0-9]+\] //'
 }
 
+assert_idle_frame_count_stable() {
+	if [ "$perf_trace_active" -ne 1 ]; then return 0; fi
+	previous=-1
+	stable_samples=0
+	current=0
+	for _ in $(seq 1 50); do
+		current=$(awk -F, '$2 == "frame_build" { count++ } END { print count + 0 }' \
+			"$perf_trace_path")
+		if [ "$current" -eq "$previous" ]; then
+			stable_samples=$((stable_samples + 1))
+		else
+			stable_samples=0
+		fi
+		if [ "$stable_samples" -ge 4 ]; then break; fi
+		previous=$current
+		sleep 0.1
+	done
+	if [ "$current" -eq 0 ] || [ "$stable_samples" -lt 4 ]; then
+		echo "UI smoke test: initial presentation did not settle before the idle redraw check" >&2
+		exit 1
+	fi
+	sleep 0.3
+	final_count=$(awk -F, '$2 == "frame_build" { count++ } END { print count + 0 }' \
+		"$perf_trace_path")
+	if [ "$final_count" -ne "$current" ]; then
+		echo "UI smoke test: idle image continued building frames ($current to $final_count)" >&2
+		exit 1
+	fi
+}
+
 assert_window_title_exact() {
 	expected_title=$1
 	failure_message=$2
@@ -333,6 +363,7 @@ VIEWER_TEST_HOME="$temporary/double-page-home" \
 	launch_viewer "$temporary/double-page-fixtures"
 assert_title_prefix "00-cover.ppm" "double-page fixture did not start on its standalone cover"
 assert_title_prefix "[1/4] " "window title did not show the initial image position"
+assert_idle_frame_count_stable
 DISPLAY=":$display_number" xdotool key d
 sleep 0.15
 DISPLAY=":$display_number" xdotool key Right
@@ -2553,17 +2584,41 @@ grep -Fqx 'window_title_pattern=%f - [%p] - %a' "$advanced_config_settings"
 assert_title_prefix "01-red.ppm" "applying advanced configuration did not return to the viewer"
 assert_title_prefix "01-red.ppm - [1/" "advanced configuration did not apply the reordered title pattern"
 if [ "$visual_assertions" -eq 1 ]; then
-	DISPLAY=":$display_number" xdotool key ctrl+Up
-	sleep 0.15
-	DISPLAY=":$display_number" import -window "$window_id" "$temporary/fit-relative-zoom.png"
-	zoom_capture_width=$(identify -format '%w' "$temporary/fit-relative-zoom.png")
-	zoom_capture_height=$(identify -format '%h' "$temporary/fit-relative-zoom.png")
-	zoom_readout_border=$(convert "$temporary/fit-relative-zoom.png" -format \
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/fit-relative-before.png"
+	zoom_capture_width=$(identify -format '%w' "$temporary/fit-relative-before.png")
+	zoom_capture_height=$(identify -format '%h' "$temporary/fit-relative-before.png")
+	zoom_readout_base=$(convert "$temporary/fit-relative-before.png" -format \
 		"%[hex:p{$((zoom_capture_width - 7)),$((zoom_capture_height - 9))}]" info:)
-	case "$zoom_readout_border" in
-		787878*) ;;
-		*) echo "UI smoke test: fit-relative zoom action did not draw its readout (pixel $zoom_readout_border)" >&2; exit 1 ;;
-	esac
+	DISPLAY=":$display_number" xdotool key ctrl+Up
+	zoom_readout_visible=0
+	for _ in $(seq 1 20); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/fit-relative-zoom.png"
+		zoom_readout_border=$(convert "$temporary/fit-relative-zoom.png" -format \
+			"%[hex:p{$((zoom_capture_width - 7)),$((zoom_capture_height - 9))}]" info:)
+		case "$zoom_readout_border" in
+			787878*) zoom_readout_visible=1; break ;;
+		esac
+		sleep 0.05
+	done
+	if [ "$zoom_readout_visible" -ne 1 ]; then
+		echo "UI smoke test: fit-relative zoom action did not draw its readout (pixel $zoom_readout_border)" >&2
+		exit 1
+	fi
+	zoom_readout_expired=0
+	for _ in $(seq 1 50); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/fit-relative-expired.png"
+		zoom_readout_after=$(convert "$temporary/fit-relative-expired.png" -format \
+			"%[hex:p{$((zoom_capture_width - 7)),$((zoom_capture_height - 9))}]" info:)
+		if [ "$zoom_readout_after" = "$zoom_readout_base" ]; then
+			zoom_readout_expired=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$zoom_readout_expired" -ne 1 ]; then
+		echo "UI smoke test: fit-relative zoom readout did not expire and restore the prior pixel" >&2
+		exit 1
+	fi
 fi
 DISPLAY=":$display_number" xdotool key Left
 sleep 0.1
@@ -3156,6 +3211,28 @@ esac
 DISPLAY=":$display_number" xdotool key Left
 sleep 0.2
 
+# The known 01 -> 02 -> 01 sequence leaves a valid next image in the active
+# directory. Exercise held navigation here, before later dialog interactions
+# can leave a standalone image or an endpoint selected.
+title_before_hold=$(DISPLAY=":$display_number" window_title_without_position)
+DISPLAY=":$display_number" xdotool keydown Right
+# Xvfb's default initial keyboard-repeat delay is near 0.7 seconds. Leave a
+# wider margin so the assertion observes repeat events under load.
+sleep 1.3
+DISPLAY=":$display_number" xdotool keyup Right
+sleep 0.2
+title_after_hold=$(DISPLAY=":$display_number" window_title_without_position)
+if [ "$title_before_hold" = "$title_after_hold" ]; then
+	echo "UI smoke test: held Right key did not repeat navigation (before '$title_before_hold'; after '$title_after_hold')" >&2
+	exit 1
+fi
+sleep 0.3
+title_after_release_settled=$(DISPLAY=":$display_number" window_title_without_position)
+if [ "$title_after_hold" != "$title_after_release_settled" ]; then
+	echo "UI smoke test: navigation continued after Right was released" >&2
+	exit 1
+fi
+
 title_before=$(DISPLAY=":$display_number" window_title_without_position)
 DISPLAY=":$display_number" xdotool mousemove 640 400
 DISPLAY=":$display_number" xdotool click 4
@@ -3163,23 +3240,6 @@ sleep 0.4
 title_after_wheel=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$title_before" = "$title_after_wheel" ]; then
 	echo "UI smoke test: plain wheel did not navigate" >&2
-	exit 1
-fi
-
-title_before_hold=$title_after_wheel
-DISPLAY=":$display_number" xdotool keydown Right
-sleep 0.7
-DISPLAY=":$display_number" xdotool keyup Right
-sleep 0.2
-title_after_hold=$(DISPLAY=":$display_number" window_title_without_position)
-if [ "$title_before_hold" = "$title_after_hold" ]; then
-	echo "UI smoke test: held Right key did not repeat navigation" >&2
-	exit 1
-fi
-sleep 0.3
-title_after_release_settled=$(DISPLAY=":$display_number" window_title_without_position)
-if [ "$title_after_hold" != "$title_after_release_settled" ]; then
-	echo "UI smoke test: navigation continued after Right was released" >&2
 	exit 1
 fi
 

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -57,6 +58,7 @@ public:
 	void SetCaptureActive(bool active);
 	InteractionWorkPlan Plan(bool foregroundPending,
 		std::vector<std::size_t> visibleThumbnailIndices) const;
+	std::optional<std::chrono::steady_clock::time_point> NextIdleDeadline() const;
 
 	static constexpr std::chrono::milliseconds IdleDelay() {
 		return std::chrono::milliseconds(250);

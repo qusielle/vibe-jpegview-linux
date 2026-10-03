@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace jpegview_linux {
@@ -35,6 +36,7 @@ public:
 	void Stop(std::uint32_t now);
 	PlaybackAction Resume(std::uint32_t now);
 	PlaybackAction Tick(std::uint32_t now);
+	std::optional<std::uint32_t> NextDeadline() const;
 	void FrameDisplayFailed();
 
 	PlaybackMode Mode() const { return mode_; }

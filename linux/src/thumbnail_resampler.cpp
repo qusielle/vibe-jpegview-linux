@@ -1,5 +1,6 @@
 #include "thumbnail_resampler.h"
 
+#include "event_loop_model.h"
 #include "image_decoder.h"
 #include "perf_diagnostics.h"
 #include "source_work_coordinator.h"
@@ -542,6 +543,7 @@ struct ThumbnailPreparationWorker::Impl {
 			result.maximumHeight = work.request.maximumHeight;
 			result.workClass = work.request.workClass;
 			result.failure = std::move(processingFailure);
+			bool published = false;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				--activeWorkers;
@@ -579,6 +581,7 @@ struct ThumbnailPreparationWorker::Impl {
 						ImagePtr publicationGuard = result.image;
 						try {
 							completed.push_back({std::move(result), work.reservedBytes});
+							published = true;
 						} catch (...) {
 							ReleaseReservation(work.reservedBytes, true);
 							retiredResult = std::move(publicationGuard);
@@ -605,6 +608,7 @@ struct ThumbnailPreparationWorker::Impl {
 				completedSource = std::move(activeSource);
 				idle.notify_all();
 			}
+			if (published) UiCompletionWakeup().Notify();
 			QueueRetirement(std::move(retiredResult));
 			completedSource.reset();
 			workAvailable.notify_all();

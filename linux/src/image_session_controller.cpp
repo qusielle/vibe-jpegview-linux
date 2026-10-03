@@ -1,5 +1,6 @@
 #include "image_session_controller.h"
 
+#include "event_loop_model.h"
 #include <limits>
 #include <system_error>
 #include <utility>
@@ -28,10 +29,13 @@ void SelectedSourceDecodeChannel::Activate(std::uint64_t generation,
 }
 
 bool SelectedSourceDecodeChannel::Publish(SelectedSourceDecodeResult result) {
-	std::lock_guard<std::mutex> lock(mutex_);
-	if (!active_ || result.generation != activeGeneration_ ||
-		result.source.Key() != activeSource_) return false;
-	ready_ = std::move(result);
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (!active_ || result.generation != activeGeneration_ ||
+			result.source.Key() != activeSource_) return false;
+		ready_ = std::move(result);
+	}
+	UiCompletionWakeup().Notify();
 	return true;
 }
 

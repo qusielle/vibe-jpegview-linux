@@ -128,6 +128,19 @@ PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 	return {};
 }
 
+std::optional<std::uint32_t> PlaybackScheduler::NextDeadline() const {
+	if (!imageReady_) return std::nullopt;
+	if (nextTick_ != 0 && (animationPlaying_ || mode_ == PlaybackMode::Movie)) {
+		return nextTick_;
+	}
+	if (mode_ == PlaybackMode::Slideshow && slideshowSeconds_ > 0.0) {
+		const double delay = std::min(slideshowSeconds_ * 1000.0,
+			static_cast<double>(std::numeric_limits<std::uint32_t>::max()));
+		return lastInteractionTick_ + static_cast<std::uint32_t>(delay);
+	}
+	return std::nullopt;
+}
+
 void PlaybackScheduler::FrameDisplayFailed() {
 	animationPlaying_ = false;
 	imageReady_ = true;

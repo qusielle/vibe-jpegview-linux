@@ -1,6 +1,7 @@
 #include "image_cache.h"
 #include "archive_source.h"
 #include "cache_policy.h"
+#include "event_loop_model.h"
 #include "source_work_coordinator.h"
 
 #include <algorithm>
@@ -610,9 +611,14 @@ struct DecodedImageCache::Impl {
 				idle.notify_all();
 			}
 			if (retryQueued) workAvailable.notify_one();
+			bool deliveredCompletion = false;
 			try {
-				if (completion) completion(work.filename, completedImage);
+				if (completion) {
+					deliveredCompletion = true;
+					completion(work.filename, completedImage);
+				}
 				if (detailedCompletion) {
+					deliveredCompletion = true;
 					detailedCompletion(work.source, completedImage, workerFailure);
 				}
 			} catch (const std::exception& error) {
@@ -624,8 +630,11 @@ struct DecodedImageCache::Impl {
 					"unknown decoded-image completion callback failure"};
 			}
 			try {
-				if (dimensionsCompletion) dimensionsCompletion(work.filename,
-					completed && currentSource, sourceWidth, sourceHeight);
+				if (dimensionsCompletion) {
+					deliveredCompletion = true;
+					dimensionsCompletion(work.filename,
+						completed && currentSource, sourceWidth, sourceHeight);
+				}
 			} catch (const std::exception& error) {
 				std::lock_guard<std::mutex> lock(mutex);
 				lastWorkerFailure = {WorkerFailureKind::Exception, error.what()};
@@ -634,6 +643,7 @@ struct DecodedImageCache::Impl {
 				lastWorkerFailure = {WorkerFailureKind::Exception,
 					"unknown JPEG dimensions callback failure"};
 			}
+			if (deliveredCompletion) UiCompletionWakeup().Notify();
 		}
 	}
 

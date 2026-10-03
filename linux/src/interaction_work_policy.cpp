@@ -70,4 +70,12 @@ InteractionWorkPlan InteractionWorkPolicy::Plan(bool foregroundPending,
 	return plan;
 }
 
+std::optional<std::chrono::steady_clock::time_point>
+InteractionWorkPolicy::NextIdleDeadline() const {
+	if (!hasActivity_ || captureActive_) return std::nullopt;
+	const auto deadline = lastActivity_ + IdleDelay();
+	return Now() < deadline ? std::optional<std::chrono::steady_clock::time_point>(deadline) :
+		std::nullopt;
+}
+
 } // namespace jpegview_linux

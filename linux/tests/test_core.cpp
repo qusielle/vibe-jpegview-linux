@@ -40,6 +40,7 @@
 #include "work_batch_gate.h"
 #include "source_work_coordinator.h"
 #include "perf_diagnostics.h"
+#include "event_loop_model.h"
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "spectrum_model.h"
@@ -3072,6 +3073,8 @@ void TestInteractionWorkPolicyIdleDeadlineAndCapture() {
 	jpegview_linux::InteractionWorkPolicy policy([&now] { return now; });
 	const std::vector<std::size_t> visible = {4, 5, 6};
 	const auto initial = policy.Plan(false, visible);
+	Expect(!policy.NextIdleDeadline().has_value(),
+		"inactive work policy exposed a spurious idle timer");
 	Expect(!initial.interactionActive && initial.Allows(jpegview_linux::PerfWorkClass::ActiveImageSpread) &&
 		initial.Allows(jpegview_linux::PerfWorkClass::FocusedPreview) &&
 		initial.Allows(jpegview_linux::PerfWorkClass::VisibleThumbnail) &&
@@ -3082,6 +3085,8 @@ void TestInteractionWorkPolicyIdleDeadlineAndCapture() {
 		"visible-thumbnail permissions did not use the supplied indices");
 
 	policy.NotifyActivity(jpegview_linux::InteractionActivity::Pan);
+	Expect(policy.NextIdleDeadline() == now + jpegview_linux::InteractionWorkPolicy::IdleDelay(),
+		"pan activity did not expose its quiet-period deadline");
 	const auto panning = policy.Plan(false, visible);
 	Expect(panning.interactionActive && panning.Allows(jpegview_linux::PerfWorkClass::ActiveImageSpread) &&
 		panning.Allows(jpegview_linux::PerfWorkClass::FocusedPreview) &&
@@ -3096,6 +3101,8 @@ void TestInteractionWorkPolicyIdleDeadlineAndCapture() {
 	// speculation based on the first event in a burst.
 	now += std::chrono::milliseconds(200);
 	policy.NotifyActivity(jpegview_linux::InteractionActivity::Wheel);
+	Expect(policy.NextIdleDeadline() == now + jpegview_linux::InteractionWorkPolicy::IdleDelay(),
+		"later interaction did not move the event-loop idle deadline");
 	now += std::chrono::milliseconds(200);
 	Expect(policy.Plan(false, visible).interactionActive,
 		"a later wheel event did not restart the idle deadline");
@@ -3105,6 +3112,8 @@ void TestInteractionWorkPolicyIdleDeadlineAndCapture() {
 		resumed.Allows(jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) &&
 		resumed.Allows(jpegview_linux::PerfWorkClass::DistantSpeculation),
 		"speculation did not resume exactly 250 ms after the last wheel event");
+	Expect(!policy.NextIdleDeadline().has_value(),
+		"an expired idle deadline would keep the SDL wait loop spinning");
 
 	// Every activity source uses the same deadline, including held navigation.
 	const std::array<jpegview_linux::InteractionActivity, 5> activities = {{
@@ -3125,10 +3134,14 @@ void TestInteractionWorkPolicyIdleDeadlineAndCapture() {
 		"work policy remained active after all interaction input stopped");
 
 	policy.SetCaptureActive(true);
+	Expect(!policy.NextIdleDeadline().has_value(),
+		"active capture exposed an idle deadline while the pointer was held");
 	now += std::chrono::seconds(2);
 	Expect(policy.Plan(false, visible).interactionActive,
 		"explicit drag capture expired while the pointer was stationary");
 	policy.SetCaptureActive(false);
+	Expect(policy.NextIdleDeadline() == now + jpegview_linux::InteractionWorkPolicy::IdleDelay(),
+		"capture release did not expose a new quiet-period deadline");
 	now += std::chrono::milliseconds(249);
 	Expect(policy.Plan(false, visible).interactionActive,
 		"capture release did not start a fresh idle interval");
@@ -18839,18 +18852,25 @@ void TestPlaybackSchedulerTimingAndModes() {
 
 	jpegview_linux::PlaybackScheduler pendingSlideshow;
 	pendingSlideshow.StartSlideshow(1.0, 0);
+	Expect(pendingSlideshow.NextDeadline() == 1000,
+		"slideshow did not expose its idle event-loop deadline");
 	pendingSlideshow.SetImageReady(false, 100);
-	Expect(pendingSlideshow.Tick(5000).type == PlaybackActionType::None,
+	Expect(!pendingSlideshow.NextDeadline().has_value() &&
+		pendingSlideshow.Tick(5000).type == PlaybackActionType::None,
 		"slideshow advanced while the current JPEG header was pending");
 	pendingSlideshow.SetImageReady(true, 5000);
-	Expect(pendingSlideshow.Tick(5999).type == PlaybackActionType::None &&
+	Expect(pendingSlideshow.NextDeadline() == 6000 &&
+		pendingSlideshow.Tick(5999).type == PlaybackActionType::None &&
 		pendingSlideshow.Tick(6000).type == PlaybackActionType::NextImage,
 		"slideshow deadline did not restart when the cold image committed");
 
 	jpegview_linux::PlaybackScheduler pendingMovie;
 	pendingMovie.StartMovie(25.0, 0);
+	Expect(pendingMovie.NextDeadline() == 40,
+		"movie mode did not expose its event-loop deadline");
 	pendingMovie.SetImageReady(false, 10);
-	Expect(pendingMovie.Tick(1000).type == PlaybackActionType::None,
+	Expect(!pendingMovie.NextDeadline().has_value() &&
+		pendingMovie.Tick(1000).type == PlaybackActionType::None,
 		"movie advanced while the current JPEG header was pending");
 	pendingMovie.SetImageReady(true, 1000);
 	Expect(pendingMovie.Tick(1039).type == PlaybackActionType::None &&
@@ -18867,6 +18887,72 @@ void TestPlaybackSchedulerTimingAndModes() {
 	Expect(wrapping.Tick(83).type == PlaybackActionType::None &&
 		wrapping.Tick(84).type == PlaybackActionType::NextImage,
 		"slideshow elapsed time failed across tick wraparound");
+}
+
+void TestEventLoopInvalidationDeadlinesWakeupsAndMotion() {
+	using jpegview_linux::FrameInvalidationReason;
+	using jpegview_linux::FrameInvalidator;
+	FrameInvalidator invalidator;
+	Expect(!invalidator.NeedsRender() && invalidator.Consume() == 0,
+		"a clean presentation requested an idle redraw");
+	invalidator.Mark(FrameInvalidationReason::Input);
+	invalidator.Mark(FrameInvalidationReason::Viewport);
+	invalidator.Mark(FrameInvalidationReason::Input);
+	Expect(invalidator.NeedsRender() && invalidator.Consume() ==
+		(jpegview_linux::FrameInvalidationBit(FrameInvalidationReason::Input) |
+			jpegview_linux::FrameInvalidationBit(FrameInvalidationReason::Viewport)) &&
+		!invalidator.NeedsRender(),
+		"frame invalidation did not coalesce reasons or clear after presentation");
+
+	Expect(jpegview_linux::EventWaitTimeoutMs(100, {}, 100) == 100 &&
+		jpegview_linux::EventWaitTimeoutMs(100, {140, 125}, 100) == 25 &&
+		jpegview_linux::EventWaitTimeoutMs(125, {125}, 100) == 0 &&
+		jpegview_linux::EventWaitTimeoutMs(0xfffffff0u, {0x10u}, 100) == 32 &&
+		jpegview_linux::EventWaitTimeoutMs(100, {}, 0) == 1,
+		"event wait deadline selection lost the finite fallback or tick-wrap behavior");
+
+	jpegview_linux::CoalescedCompletionWakeup wakeup;
+	int posts = 0;
+	wakeup.SetPostFunction([&posts] {
+		++posts;
+		return true;
+	});
+	Expect(wakeup.Notify() && wakeup.Notify() && posts == 1 && wakeup.Pending(),
+		"completion wakeups did not coalesce while the SDL event was pending");
+	wakeup.Consume();
+	Expect(wakeup.Notify() && posts == 2,
+		"completion wakeup was not rearmed after the event loop consumed it");
+	wakeup.Consume();
+	wakeup.SetPostFunction([&posts] {
+		++posts;
+		return false;
+	});
+	Expect(!wakeup.Notify() && wakeup.Pending() && wakeup.Notify() && posts == 3,
+		"failed event posting did not preserve pending work for the finite fallback");
+	wakeup.Consume();
+	Expect(!wakeup.Notify() && wakeup.Pending() && posts == 4,
+		"completion wakeup did not retry after fallback queue consumption");
+	wakeup.SetPostFunction({});
+	Expect(!wakeup.Notify() && wakeup.Pending(),
+		"an unconfigured completion wakeup did not preserve work for fallback polling");
+	wakeup.Consume();
+	Expect(!wakeup.Pending(),
+		"fallback polling could not clear an unconfigured completion notification");
+
+	jpegview_linux::MouseMotionSample motion{10, 20, 3, -4, 1};
+	Expect(jpegview_linux::CoalesceMouseMotion(motion,
+		jpegview_linux::MouseMotionSample{17, 15, 7, -5, 1}) &&
+		motion.x == 17 && motion.y == 15 && motion.xrel == 10 && motion.yrel == -9,
+		"consecutive pan motion was not accumulated at its latest pointer position");
+	Expect(!jpegview_linux::CoalesceMouseMotion(motion,
+		jpegview_linux::MouseMotionSample{22, 20, 5, 5, 0}) &&
+		motion.x == 17 && motion.y == 15 && motion.xrel == 10 && motion.yrel == -9,
+		"motion coalescing crossed a mouse-button state boundary");
+	motion.xrel = std::numeric_limits<std::int32_t>::max() - 1;
+	Expect(jpegview_linux::CoalesceMouseMotion(motion,
+		jpegview_linux::MouseMotionSample{24, 22, 10, 0, 1}) &&
+		motion.xrel == std::numeric_limits<std::int32_t>::max(),
+		"large motion accumulation overflowed the SDL relative-coordinate range");
 }
 
 void TestFileDialogFiltering() {
@@ -20915,6 +21001,8 @@ int main(int argc, char** argv) {
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
 	RunTest("playback-scheduler-timing-and-modes", TestPlaybackSchedulerTimingAndModes, failures);
+	RunTest("event-loop-invalidation-deadlines-wakeups-and-motion",
+		TestEventLoopInvalidationDeadlinesWakeupsAndMotion, failures);
 	RunTest("recent-files-mru-uniqueness-persistence-and-viewports",
 		TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots, failures);
 	RunTest("image-session-controller-navigation-and-clipboard-state",

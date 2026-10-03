@@ -177,6 +177,24 @@ pixel_difference() {
 	printf '%s\n' "$difference"
 }
 
+wait_for_stable_image_area() {
+	image=$1
+	previous="$image.previous.png"
+	stable_samples=0
+	for _ in $(seq 1 40); do
+		capture_image_area "$image"
+		if [ -f "$previous" ] && [ "$(pixel_difference "$previous" "$image")" -eq 0 ]; then
+			stable_samples=$((stable_samples + 1))
+		else
+			stable_samples=0
+		fi
+		if [ "$stable_samples" -ge 3 ]; then return 0; fi
+		cp "$image" "$previous"
+		sleep 0.05
+	done
+	return 1
+}
+
 presented_actual_size=0
 presented_bare_shift=0
 presented_pan=0
@@ -186,7 +204,11 @@ if wait_for_presentation_after "$before_actual_size"; then
 	presented_actual_size=1
 fi
 if [ "$presented_actual_size" -eq 1 ]; then
-	capture_image_area "$temporary/actual-size.png"
+	if ! wait_for_stable_image_area "$temporary/actual-size.png"; then
+		: > "$release_file"
+		echo "thumbnail pan smoke test: actual-size presentation did not settle while an unrelated thumbnail read was blocked" >&2
+		exit 1
+	fi
 	fit_to_actual_difference=$(pixel_difference "$fit_image" "$temporary/actual-size.png")
 	if [ "$fit_to_actual_difference" -le 10000 ]; then
 		: > "$release_file"
@@ -199,7 +221,11 @@ if [ "$presented_actual_size" -eq 1 ]; then
 		presented_bare_shift=1
 	fi
 	if [ "$presented_bare_shift" -eq 1 ]; then
-		capture_image_area "$temporary/bare-shift.png"
+		if ! wait_for_stable_image_area "$temporary/bare-shift.png"; then
+			: > "$release_file"
+			echo "thumbnail pan smoke test: bare-Shift presentation did not settle while an unrelated thumbnail read was blocked" >&2
+			exit 1
+		fi
 		bare_shift_difference=$(pixel_difference "$temporary/actual-size.png" "$temporary/bare-shift.png")
 		if [ "$bare_shift_difference" -ne 0 ]; then
 			: > "$release_file"

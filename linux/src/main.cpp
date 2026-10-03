@@ -54,6 +54,7 @@
 #include "spectrum_model.h"
 #include "desktop_association.h"
 #include "perf_diagnostics.h"
+#include "event_loop_model.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -378,6 +379,15 @@ public:
 			std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
 			return 1;
 		}
+		completionWakeEventType_ = SDL_RegisterEvents(1);
+		if (completionWakeEventType_ != std::numeric_limits<Uint32>::max()) {
+			const Uint32 eventType = completionWakeEventType_;
+			jpegview_linux::UiCompletionWakeup().SetPostFunction([eventType] {
+				SDL_Event event{};
+				event.type = eventType;
+				return SDL_PushEvent(&event) == 1;
+			});
+		}
 		// Keep the window hidden while SDL and the window manager apply the
 		// initial state.  Showing it first makes a restored maximized window
 		// visibly appear in its normal size before it is maximized.
@@ -387,6 +397,7 @@ public:
 			kDefaultWidth, kDefaultHeight, windowFlags);
 		if (window_ == nullptr) {
 			std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << '\n';
+			jpegview_linux::UiCompletionWakeup().SetPostFunction({});
 			SDL_Quit();
 			return 1;
 		}
@@ -410,6 +421,7 @@ public:
 			if (renderer_ == nullptr) {
 				std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << '\n';
 				SDL_DestroyWindow(window_);
+				jpegview_linux::UiCompletionWakeup().SetPostFunction({});
 				SDL_Quit();
 				return 1;
 			}
@@ -486,8 +498,14 @@ public:
 		UpdateNavigationPanelVisibility(mouseX, mouseY);
 
 		bool running = true;
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::WindowExposure);
 		while (running) {
-			HandleEvents(running);
+			const int waitTimeoutMs = frameInvalidator_.NeedsRender() ? 0 :
+				NextEventWaitTimeoutMs(SDL_GetTicks());
+			HandleEvents(running, waitTimeoutMs);
+			if (jpegview_linux::UiCompletionWakeup().Pending()) {
+				jpegview_linux::UiCompletionWakeup().Consume();
+			}
 			if (quitRequested_) running = false;
 			TickPlayback();
 			UpdateInteractionWorkPolicy();
@@ -495,13 +513,26 @@ public:
 			TickFileDialogArchiveDirectory();
 			TickFileDialogDirectorySummaries();
 			TickFileDialogFileSizes();
+			UpdateFileDialogPreview();
 			ApplyWorkerDetectedSourceChanges();
 			TickDisplayPrefetchPlanner();
 			TickDisplayPreparationRequests();
 			TickExifMetadata();
 			TickCurrentJpegDimensions();
 			TickCurrentSelectedDecode();
-			Render();
+			TickActiveSpreadDimensions();
+			TickTimedPresentationEffects(SDL_GetTicks());
+			if (frameInvalidator_.NeedsRender()) {
+				UpdatePresentationState();
+				TouchVisibleThumbnailRows();
+				const PresentedFrame presented = Render();
+				frameInvalidator_.Consume();
+				if (presentationController_.AcknowledgeFramePresented(
+					presented.selectedIndex, presented.spreadTexturesReady)) {
+					// Acknowledgement unlocks queued navigation after a complete pair
+					// has actually reached SDL_RenderPresent.
+				}
+			}
 			// Present the current image before doing renderer-thread cache uploads.
 			// Held navigation then advances only after the closest ready neighbor
 			// has had an opportunity to become a retained SDL texture.
@@ -510,8 +541,12 @@ public:
 			TickDisplayTexturePreload();
 			TickThumbnailPreload(heldNavigation_.Scancode() < 0 &&
 				!displayImageCache_.HasPendingWork());
+			const fs::path selectedBeforeHeldNavigation = fileList_.Current();
 			TickHeldNavigation();
-			SDL_Delay(4);
+			if (selectedBeforeHeldNavigation != fileList_.Current()) {
+				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+			}
+			RecordPeriodicPerformanceSnapshots();
 		}
 
 		Cleanup();
@@ -540,6 +575,11 @@ private:
 		int x = 0;
 		int width = 260;
 		int height = 0;
+	};
+
+	struct PresentedFrame {
+		std::size_t selectedIndex = 0;
+		bool spreadTexturesReady = false;
 	};
 
 	struct ThumbnailTextureEntry {
@@ -625,6 +665,7 @@ private:
 			jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner;
 		jpegview_linux::WorkBatchGate gate;
 		std::unordered_map<std::string, jpegview_linux::PageDimensions> decodedPageDimensions;
+		bool pageDimensionsChanged = false;
 		std::unordered_map<std::string, std::pair<jpegview_linux::SourceKey,
 			jpegview_linux::DecodedImageCache::ImagePtr>> decodedImages;
 		std::unordered_set<std::string> failedDecodeFilenames;
@@ -730,6 +771,7 @@ private:
 	}
 
 	void Cleanup() {
+		jpegview_linux::UiCompletionWakeup().SetPostFunction({});
 		DeactivateDisplayPrefetchBatch();
 		displayPreparationController_.Shutdown();
 		exifMetadataWorker_.Stop();
@@ -984,11 +1026,17 @@ private:
 		imageCache_.RequestJpegDimensions(source,
 			[mailbox, loadGeneration, sourceKey = source.Key()](
 				const fs::path&, bool succeeded, int width, int height) {
-				std::lock_guard<std::mutex> lock(mailbox->mutex);
-				if (!mailbox->active) return;
-				mailbox->ready.push_back(CurrentJpegDimensionsResult{
-					loadGeneration, sourceKey,
-					succeeded, width, height});
+				bool published = false;
+				try {
+					std::lock_guard<std::mutex> lock(mailbox->mutex);
+					if (!mailbox->active) return;
+					mailbox->ready.push_back(CurrentJpegDimensionsResult{
+						loadGeneration, sourceKey, succeeded, width, height});
+					published = true;
+				} catch (...) {
+					return;
+				}
+				if (published) jpegview_linux::UiCompletionWakeup().Notify();
 			}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
 	}
 
@@ -1179,6 +1227,7 @@ private:
 			selectedSource.Key());
 		if (!result.has_value() || !imageSession_.MatchesSelection(
 			result->generation, result->source.Key())) return;
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 		pendingCurrentDecodedSource_.reset();
 		if (!result->image || result->image->frames.empty() || result->failure.Failed()) {
 			const std::string errorMessage = result->failure.message.empty() ?
@@ -1259,6 +1308,7 @@ private:
 			const std::optional<jpegview_linux::PendingRecentImageLoad> pendingLoad =
 				imageSession_.TakePendingLoad(AbsoluteNormalized(fileList_.Current()));
 			if (!pendingLoad.has_value()) continue;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 			const PendingCurrentJpegDimensions pending =
 				std::move(*pendingCurrentJpegDimensions_);
 			pendingCurrentJpegDimensions_.reset();
@@ -1313,6 +1363,9 @@ private:
 			metadata_ = std::move(result.metadata);
 			jpegComment_ = std::move(result.jpegComment);
 			++imageInfoMetadataRevision_;
+			if (infoVisible_) {
+				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+			}
 			const jpegview_linux::ExifDateActionCompletion deferredAction =
 				deferredExifDateAction_.Complete(result,
 					AbsoluteNormalized(fileList_.Current()), current.Key());
@@ -1419,6 +1472,11 @@ private:
 					dimensions.width <= 0 || dimensions.height <= 0) continue;
 				jpegDimensionCache_[dimensions.source] = {
 					dimensions.width, dimensions.height};
+				if (doublePageModeEnabled_ &&
+					dimensions.index == fileList_.CurrentIndex() + 1) {
+					frameInvalidator_.Mark(
+						jpegview_linux::FrameInvalidationReason::ImageResource);
+				}
 			}
 			const std::shared_ptr<DisplayPrefetchBatch> batch = displayPrefetchBatch_;
 			if (!batch) continue;
@@ -2427,9 +2485,11 @@ private:
 				std::lock_guard<std::mutex> lock(batch->mutex);
 				if (!succeeded || width <= 0 || height <= 0) {
 					batch->failedDecodeFilenames.insert(filename.string());
+					batch->pageDimensionsChanged = true;
 					return;
 				}
 				batch->decodedPageDimensions[filename.string()] = {width, height};
+				batch->pageDimensionsChanged = true;
 				const auto retained = jpegview_linux::RetainDisplayPrefetchDecodedImage(
 					batch->owner, decoded);
 				if (retained) batch->decodedImages[filename.string()] =
@@ -2448,6 +2508,22 @@ private:
 				const int height = succeeded ? decoded->frames.front().height : 0;
 				publishDimensions(filename, succeeded, width, height, decoded);
 			}, jpegview_linux::PerfWorkClass::ActiveImageSpread);
+		}
+	}
+
+	void TickActiveSpreadDimensions() {
+		const std::shared_ptr<DisplayPrefetchBatch> batch = displayPrefetchBatch_;
+		if (!batch || batch->owner != jpegview_linux::DisplayPrefetchBatchOwner::ActiveSpread) {
+			return;
+		}
+		bool dimensionsChanged = false;
+		{
+			std::lock_guard<std::mutex> lock(batch->mutex);
+			dimensionsChanged = batch->pageDimensionsChanged;
+			batch->pageDimensionsChanged = false;
+		}
+		if (dimensionsChanged) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 		}
 	}
 
@@ -2919,6 +2995,11 @@ private:
 		return found->second.texture;
 	}
 
+	SDL_Texture* PeekDisplayTexture(const std::string& key) const {
+		const auto found = displayTextureCache_.find(key);
+		return found == displayTextureCache_.end() ? nullptr : found->second.texture;
+	}
+
 	void SetDisplayTextureProtection(const std::string& key,
 		jpegview_linux::CacheProtectionTier protection) {
 		if (key.empty()) return;
@@ -3345,6 +3426,7 @@ private:
 			HandleCurrentDisplayFailure(failure.selectionGeneration,
 				currentDisplayRequest_->source.Key(), failure.key,
 				failure.failure.message);
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 		}
 		const jpegview_linux::InteractionWorkPlan workPlan = CurrentInteractionWorkPlan();
 		const std::size_t uploadLimit =
@@ -3433,6 +3515,7 @@ private:
 				QueuePendingTextureUpload(std::move(pending));
 			} else if (outcome == TextureCacheOutcome::Cached) {
 				presentationController_.MarkTextureReady(prepared->key);
+				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 				if (pending.selectionGeneration != 0) {
 					MarkSelectedDisplayFrameReady(pending.selectionGeneration,
 						prepared->source.Key(), prepared->key);
@@ -3449,6 +3532,7 @@ private:
 					doublePagePartnerRequest_.reset();
 					deferredCurrentDisplayPreparation_ = true;
 				}
+				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 			}
 		}
 		for (std::size_t index = 0; index < candidates.size(); ++index) {
@@ -3466,6 +3550,9 @@ private:
 		changed.insert(changed.end(),
 			std::make_move_iterator(decodedChanges.begin()),
 			std::make_move_iterator(decodedChanges.end()));
+		if (!changed.empty()) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+		}
 		for (const jpegview_linux::SourceChangeNotice& notice : changed) {
 			ApplySourceChange(notice.previous, notice.observed);
 		}
@@ -3691,6 +3778,63 @@ private:
 		return texture_;
 	}
 
+	SDL_Texture* DisplayTextureForRender() const {
+		const jpegview_linux::DisplayImageRequest* request =
+			currentDisplayRequest_.has_value() && currentDisplayRequest_->Valid() ?
+				&*currentDisplayRequest_ : nullptr;
+		if (request == nullptr) return texture_;
+		if (request->key == failedCurrentDisplayKey_) {
+			if (texture_ != nullptr) return texture_;
+			return LastPresentedTextureMatches(request->source.Key()) ?
+				PeekDisplayTexture(lastPresentedDisplayKey_) : nullptr;
+		}
+		if (SDL_Texture* cached = PeekDisplayTexture(request->key)) return cached;
+		if (texture_ == nullptr && lastPresentedDisplayKey_ != request->key &&
+			LastPresentedTextureMatches(request->source.Key())) {
+			if (SDL_Texture* previous = PeekDisplayTexture(lastPresentedDisplayKey_)) {
+				return previous;
+			}
+		}
+		return texture_;
+	}
+
+	void UpdateCurrentDisplayTextureRequest() {
+		if (fileList_.Empty() || (!clipboardMode_ && imageSession_.LoadedPath() !=
+			AbsoluteNormalized(fileList_.Current())) ||
+			presentationController_.SuppressSinglePage(fileList_.CurrentIndex())) return;
+		const std::string previousKey = currentDisplayRequest_.has_value() ?
+			currentDisplayRequest_->key : std::string();
+		const SDL_Rect destination = CurrentPageScreenRect(ImageAreaRect());
+		(void)DisplayTextureFor(destination.w, destination.h);
+		if (currentDisplayRequest_.has_value() &&
+			currentDisplayRequest_->key != previousKey) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+		}
+	}
+
+	void UpdatePresentationState() {
+		const SDL_Rect area = ImageAreaRect();
+		imageCenterX_ = area.x + area.w / 2;
+		imageCenterY_ = area.y + area.h / 2;
+		renderContextMenuNeedsCleanFrame_ = contextMenuNeedsCleanFrame_;
+		contextMenuNeedsCleanFrame_ = false;
+		RefreshDoublePageRenderState();
+		UpdateCurrentDisplayTextureRequest();
+		UpdateMagnifyingGlassRequest();
+		UpdateMagnifyingGlassCursor(
+			fileList_.Empty() || presentationController_.SuppressSinglePage(
+				fileList_.CurrentIndex()) ? -1 : lastMouseX_,
+			fileList_.Empty() || presentationController_.SuppressSinglePage(
+				fileList_.CurrentIndex()) ? -1 : lastMouseY_);
+	}
+
+	void RenderPendingPresentationWithoutConsumingInvalidation() {
+		if (!frameInvalidator_.NeedsRender()) return;
+		UpdatePresentationState();
+		TouchVisibleThumbnailRows();
+		(void)Render();
+	}
+
 	void ClearTransition() {
 		if (transitionTexture_ != nullptr && transitionTextureOwned_) {
 			DestroyTextureMeasured(transitionTexture_);
@@ -3710,6 +3854,7 @@ private:
 		transitionHeight_ = 0;
 		transitionHasTransparency_ = false;
 		transitionStartTick_ = 0;
+		transitionFrameTick_ = 0;
 		ClearActiveWorkingDisplayTextures();
 	}
 
@@ -4112,6 +4257,7 @@ private:
 			if (thumbnailUploadRetryKey_ && *thumbnailUploadRetryKey_ == key) {
 				thumbnailUploadRetryKey_.reset();
 			}
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 			break;
 		}
 
@@ -4190,6 +4336,8 @@ private:
 			SDL_SetTextureBlendMode(current, SDL_BLENDMODE_BLEND);
 		}
 		transitionStartTick_ = SDL_GetTicks();
+		transitionFrameTick_ = transitionStartTick_;
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Transition);
 	}
 
 	bool TransformImage(Image& image, int command) {
@@ -5167,6 +5315,7 @@ private:
 			if (!result.error.empty()) {
 				ClearPendingFileListScan();
 				SetTitle("Directory scan failed: " + result.error);
+				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 				if (handling == FileListScanHandling::Startup) {
 					deferredExitCode_ = 2;
 					quitRequested_ = true;
@@ -5199,6 +5348,7 @@ private:
 				if (!result.prepared.completed || !targetFound || result.prepared.replacement.Empty()) {
 					ClearPendingFileListScan();
 					SetTitle("No supported images in dropped input");
+					frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 					continue;
 				}
 			}
@@ -5228,6 +5378,7 @@ private:
 					preferredPath, loadStatePolicy, markedToggleReturnPath, completionTitle);
 				continue;
 			}
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 			if (fileList_.Empty()) CancelPendingCurrentJpegDimensions();
 			if (handling == FileListScanHandling::DroppedInputs) {
 				thumbnailCatalogRevisionTracker_.NoteReplacement();
@@ -6083,11 +6234,13 @@ private:
 
 	void ShowZoomNavigatorTemporarily() {
 		zoomNavigatorVisibleUntil_ = SDL_GetTicks() + 1200;
+		zoomNavigatorTimedVisible_ = true;
 	}
 
 	void ShowZoomReadoutTemporarily() {
 		if (!viewport_.FitRelativeZoomMode()) return;
 		zoomReadoutVisibleUntil_ = SDL_GetTicks() + 1200;
+		zoomReadoutTimedVisible_ = true;
 	}
 
 	std::size_t PendingImageIntentCount() const {
@@ -6302,7 +6455,7 @@ private:
 		transitionCaptureDisplayKey_ = previousFrame.displayKey;
 		SetTitle();
 		if (showPendingNavigation) {
-			Render();
+			RenderPendingPresentationWithoutConsumingInvalidation();
 		}
 		const bool loaded = LoadCurrent(1);
 		if (loaded && animate) {
@@ -6345,7 +6498,7 @@ private:
 		transitionCaptureDisplayKey_ = previousFrame.displayKey;
 		SetTitle();
 		if (showPendingNavigation) {
-			Render();
+			RenderPendingPresentationWithoutConsumingInvalidation();
 		}
 		const bool loaded = LoadCurrent(-1);
 		if (loaded && animate) {
@@ -6456,12 +6609,83 @@ private:
 		SetTitle();
 	}
 
+	int NextEventWaitTimeoutMs(Uint32 now) const {
+		std::vector<Uint32> deadlines;
+		if (const auto playbackDeadline = playback_.NextDeadline();
+			playbackDeadline.has_value()) {
+			deadlines.push_back(*playbackDeadline);
+		}
+		if (transitionTexture_ != nullptr) {
+			if (now - transitionStartTick_ >= transitionDurationMs_) {
+				deadlines.push_back(now);
+			} else {
+				deadlines.push_back(transitionFrameTick_ + 16u);
+			}
+		}
+		if (heldNavigation_.Scancode() >= 0) deadlines.push_back(now + 16u);
+		if (zoomNavigatorTimedVisible_) deadlines.push_back(zoomNavigatorVisibleUntil_);
+		if (zoomReadoutTimedVisible_) deadlines.push_back(zoomReadoutVisibleUntil_);
+		if (thumbnailPixelStoreRetry_) deadlines.push_back(thumbnailPixelStoreRetryTick_);
+		if (thumbnailUploadRetryKey_.has_value()) deadlines.push_back(thumbnailUploadRetryTick_);
+		int timeout = jpegview_linux::EventWaitTimeoutMs(now, deadlines, 100);
+		if (const auto idleDeadline = interactionWorkPolicy_.NextIdleDeadline();
+			idleDeadline.has_value()) {
+			const auto remaining = *idleDeadline - std::chrono::steady_clock::now();
+			const auto rounded = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
+			const int idleTimeout = rounded <= 0 ? 0 : static_cast<int>(
+				std::min<std::int64_t>(rounded, std::numeric_limits<int>::max()));
+			timeout = std::min(timeout, idleTimeout);
+		}
+		return timeout;
+	}
+
+	void TickTimedPresentationEffects(Uint32 now) {
+		bool navigatorExpired = false;
+		if (zoomNavigatorTimedVisible_ &&
+			static_cast<Sint32>(now - zoomNavigatorVisibleUntil_) >= 0) {
+			zoomNavigatorVisibleUntil_ = 0;
+			zoomNavigatorTimedVisible_ = false;
+			navigatorExpired = true;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+		}
+		if (zoomReadoutTimedVisible_ &&
+			static_cast<Sint32>(now - zoomReadoutVisibleUntil_) >= 0) {
+			zoomReadoutVisibleUntil_ = 0;
+			zoomReadoutTimedVisible_ = false;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+		}
+		if (navigatorExpired) {
+			UpdateZoomNavigatorCursor(lastMouseX_, lastMouseY_);
+			UpdateMagnifyingGlassCursor(lastMouseX_, lastMouseY_);
+		}
+		if (thumbnailPixelStoreRetry_ &&
+			static_cast<Sint32>(now - thumbnailPixelStoreRetryTick_) >= 0) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+		}
+		if (thumbnailUploadRetryKey_.has_value() &&
+			static_cast<Sint32>(now - thumbnailUploadRetryTick_) >= 0) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+		}
+		if (transitionTexture_ == nullptr) return;
+		if (now - transitionStartTick_ >= transitionDurationMs_) {
+			ClearTransition();
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Transition);
+			return;
+		}
+		if (now - transitionFrameTick_ >= 16u) {
+			transitionFrameTick_ = now;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Transition);
+		}
+	}
+
 	void TickPlayback() {
 		const jpegview_linux::PlaybackAction action = playback_.Tick(SDL_GetTicks());
 		if (action.type == jpegview_linux::PlaybackActionType::ShowFrame) {
 			if (!SetAnimationFrame(action.frameIndex)) playback_.FrameDisplayFailed();
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
 		} else if (action.type == jpegview_linux::PlaybackActionType::NextImage) {
 			NextImage();
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
 		}
 	}
 
@@ -8933,6 +9157,7 @@ private:
 
 		for (jpegview_linux::FileDialogPreviewResult& result : fileDialogPreviewLoader_.TakeReady()) {
 			if (result.generation != fileDialogPreviewGeneration_) continue;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 			if (!result.observedSource.LogicalPath().empty()) {
 				const bool requestedSourceMatches =
 					!result.requestedSourceDescriptor.LogicalPath().empty() &&
@@ -9078,6 +9303,7 @@ private:
 			if (!fileDialogOpen_ || fileDialogSave_ || fileDialogParameterRestore_ ||
 				result.generation != fileDialogSummaryGeneration_) continue;
 			fileDialogDirectorySummaries_[result.directory.string()] = result.summary;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 		}
 	}
 
@@ -9108,6 +9334,7 @@ private:
 		for (const jpegview_linux::FileDialogFileSizeResult& result :
 			fileDialogFileSizeLoader_.TakeReady()) {
 			if (!fileDialogOpen_ || result.generation != fileDialogFileSizeGeneration_) continue;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 			if (!result.observedSource.LogicalPath().empty()) {
 				const jpegview_linux::SourceKey previous = result.requestedSource.Key();
 				fileDialogModel_.RefreshSourceDescriptor(previous, result.observedSource);
@@ -9125,6 +9352,7 @@ private:
 				(result.passwordValidation ?
 					result.directory != archivePasswordDialogTarget_ :
 					result.directory != fileDialogDirectory_)) continue;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 			if (result.passwordValidation) {
 				archivePasswordValidationPending_ = false;
 				if (result.error.empty()) {
@@ -9713,7 +9941,6 @@ private:
 
 	void RenderFileDialog() {
 		if (!fileDialogOpen_) return;
-		UpdateFileDialogPreview();
 		const SDL_Rect dialog = FileDialogRect();
 		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
 		SDL_RenderFillRect(renderer_, &dialog);
@@ -10370,6 +10597,36 @@ private:
 		magnifyingGlassRequest_.reset();
 	}
 
+	void UpdateMagnifyingGlassRequest() {
+		if (!magnifyingGlass_.Enabled() || activeDoublePageRender_.has_value() ||
+			!IsMagnifyingGlassVisibleAt(lastMouseX_, lastMouseY_)) {
+			ClearMagnifyingGlassRequest();
+			return;
+		}
+		const auto request = MagnifyingGlassDisplayRequest();
+		if (!request.has_value() || (currentDisplayRequest_.has_value() &&
+			request->key == currentDisplayRequest_->key)) {
+			ClearMagnifyingGlassRequest();
+			return;
+		}
+		if (magnifyingGlassRequestKey_ != request->key) {
+			DiscardMagnifyingGlassRequest(magnifyingGlassRequestKey_);
+			magnifyingGlassRequestKey_ = request->key;
+			magnifyingGlassBackgroundRequestedKey_.clear();
+		}
+		SetDisplayTextureProtection(request->key,
+			jpegview_linux::CacheProtectionTier::Neighbor);
+		if (PeekDisplayTexture(request->key) == nullptr &&
+			magnifyingGlassBackgroundRequestedKey_ != request->key &&
+			request->targetHeight > 0 &&
+			cacheBudget_->Capacity() / 4 /
+				static_cast<std::size_t>(request->targetHeight) >=
+				static_cast<std::size_t>(request->targetWidth)) {
+			displayImageCache_.RequestBackground(*request);
+			magnifyingGlassBackgroundRequestedKey_ = request->key;
+		}
+	}
+
 	void SetMagnifyingGlassEnabled(bool enabled) {
 		magnifyingGlass_.SetEnabled(enabled);
 		if (!enabled) ClearMagnifyingGlassRequest();
@@ -10440,15 +10697,8 @@ private:
 	}
 
 	void RenderMagnifyingGlass(SDL_Texture* fallbackTexture) {
-		if (!magnifyingGlass_.Enabled()) {
-			if (!magnifyingGlassRequestKey_.empty() || magnifyingGlassRequest_.has_value() ||
-				!magnifyingGlassBackgroundRequestedKey_.empty()) ClearMagnifyingGlassRequest();
-			return;
-		}
-		if (!IsMagnifyingGlassVisibleAt(lastMouseX_, lastMouseY_)) {
-			ClearMagnifyingGlassRequest();
-			return;
-		}
+		if (!magnifyingGlass_.Enabled() ||
+			!IsMagnifyingGlassVisibleAt(lastMouseX_, lastMouseY_)) return;
 		const SDL_Rect area = ImageAreaRect();
 		SDL_Rect displayed = CurrentPageScreenRect(area);
 		SDL_Texture* lensTexture = fallbackTexture;
@@ -10469,7 +10719,7 @@ private:
 		}
 		if (activeDoublePageRender_.has_value() &&
 			PointInRect(lastMouseX_, lastMouseY_, NextPageScreenRect(area))) {
-			lensTexture = FindDisplayTexture(doublePagePartnerDisplayKey_);
+			lensTexture = PeekDisplayTexture(doublePagePartnerDisplayKey_);
 			displayed = NextPageScreenRect(area);
 			const auto partner = displayTextureCache_.find(doublePagePartnerDisplayKey_);
 			if (partner != displayTextureCache_.end()) {
@@ -10479,39 +10729,18 @@ private:
 			}
 		}
 
-		if (!activeDoublePageRender_.has_value()) {
-			if (const auto request = MagnifyingGlassDisplayRequest(); request.has_value() &&
-				request->key != (currentDisplayRequest_.has_value() ?
-					currentDisplayRequest_->key : std::string())) {
-				if (magnifyingGlassRequestKey_ != request->key) {
-					DiscardMagnifyingGlassRequest(magnifyingGlassRequestKey_);
-					magnifyingGlassRequestKey_ = request->key;
-					magnifyingGlassBackgroundRequestedKey_.clear();
+		if (!activeDoublePageRender_.has_value() && magnifyingGlassRequest_.has_value() &&
+			magnifyingGlassRequest_->key != (currentDisplayRequest_.has_value() ?
+				currentDisplayRequest_->key : std::string())) {
+			const jpegview_linux::DisplayImageRequest& request = *magnifyingGlassRequest_;
+			if (SDL_Texture* cached = PeekDisplayTexture(request.key)) {
+				lensTexture = cached;
+				const auto dimensions = displayTextureCache_.find(request.key);
+				if (dimensions != displayTextureCache_.end()) {
+					textureWidth = dimensions->second.width;
+					textureHeight = dimensions->second.height;
 				}
-				SetDisplayTextureProtection(request->key,
-					jpegview_linux::CacheProtectionTier::Neighbor);
-				if (SDL_Texture* cached = FindDisplayTexture(request->key)) {
-					lensTexture = cached;
-					const auto dimensions = displayTextureCache_.find(request->key);
-					if (dimensions != displayTextureCache_.end()) {
-						textureWidth = dimensions->second.width;
-						textureHeight = dimensions->second.height;
-					}
-				} else {
-					if (magnifyingGlassBackgroundRequestedKey_ != request->key &&
-						request->targetHeight > 0 &&
-						cacheBudget_->Capacity() / 4 /
-							static_cast<std::size_t>(request->targetHeight) >=
-							static_cast<std::size_t>(request->targetWidth)) {
-						displayImageCache_.RequestBackground(*request);
-						magnifyingGlassBackgroundRequestedKey_ = request->key;
-					}
-				}
-			} else {
-				ClearMagnifyingGlassRequest();
 			}
-		} else {
-			ClearMagnifyingGlassRequest();
 		}
 
 		if (lensTexture == nullptr || textureWidth <= 0 || textureHeight <= 0) return;
@@ -10815,6 +11044,30 @@ private:
 		SaveSettings();
 	}
 
+	void TouchVisibleThumbnailRows() {
+		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
+		const SDL_Rect panel = ThumbnailPanelRect();
+		if (panel.w <= 0 || panel.h <= 0) return;
+		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w,
+			kThumbnailVerticalMargin);
+		const std::optional<std::size_t> doublePagePartnerIndex =
+			activeDoublePageRender_.has_value() ?
+				std::optional<std::size_t>(activeDoublePageRender_->layout.secondIndex) :
+				std::nullopt;
+		const std::vector<jpegview_linux::ThumbnailSlot> slots =
+			jpegview_linux::ThumbnailPanelSlots(fileList_.Size(), fileList_.CurrentIndex(),
+				panel.h, rowHeight, fileList_.MarkedIndex(), doublePagePartnerIndex);
+		for (const jpegview_linux::ThumbnailSlot& slot : slots) {
+			const jpegview_linux::SourceDescriptor* source = fileList_.DescriptorAt(slot.fileIndex);
+			if (source == nullptr) continue;
+			const jpegview_linux::SourceKey key = source->Key();
+			const auto cached = thumbnailTextureCache_.find(key);
+			if (cached != thumbnailTextureCache_.end() && cached->second.texture != nullptr) {
+				thumbnailScheduler_.Touch(key);
+			}
+		}
+	}
+
 	void RenderThumbnailPanel() {
 		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
 		const SDL_Rect panel = ThumbnailPanelRect();
@@ -10840,7 +11093,6 @@ private:
 			const jpegview_linux::SourceKey key = source->Key();
 			auto cached = thumbnailTextureCache_.find(key);
 			if (cached != thumbnailTextureCache_.end() && cached->second.texture != nullptr) {
-				thumbnailScheduler_.Touch(key);
 				const jpegview_linux::ThumbnailRect thumbnail = jpegview_linux::ThumbnailImageRect(
 					cached->second.width, cached->second.height,
 					panel.w, row.y, row.h, kThumbnailVerticalMargin);
@@ -11086,7 +11338,7 @@ private:
 	}
 
 	void RenderImageTransition(const SDL_Rect& destination, const SDL_Rect& imageArea, SDL_Texture* currentTexture) {
-		if (transitionTexture_ == nullptr || transitionStartTick_ == 0) {
+		if (transitionTexture_ == nullptr) {
 			SDL_RenderCopy(renderer_, currentTexture, nullptr, &destination);
 			return;
 		}
@@ -11094,7 +11346,6 @@ private:
 		const double progress = std::min(1.0, static_cast<double>(elapsed) /
 			static_cast<double>(transitionDurationMs_));
 		if (progress >= 1.0) {
-			ClearTransition();
 			SDL_RenderCopy(renderer_, currentTexture, nullptr, &destination);
 			return;
 		}
@@ -11250,9 +11501,45 @@ private:
 		}
 	}
 
-	void HandleEvents(bool& running) {
+	void HandleEvents(bool& running, int waitTimeoutMs) {
 		SDL_Event event{};
-		while (SDL_PollEvent(&event) != 0) {
+		SDL_Event deferredEvent{};
+		bool deferredReady = false;
+		bool firstRead = true;
+		const auto readNextEvent = [&] {
+			if (deferredReady) {
+				event = deferredEvent;
+				deferredReady = false;
+				return true;
+			}
+			if (firstRead) {
+				firstRead = false;
+				if (waitTimeoutMs > 0) return SDL_WaitEventTimeout(&event, waitTimeoutMs) == 1;
+			}
+			return SDL_PollEvent(&event) != 0;
+		};
+		while (readNextEvent()) {
+			if (event.type == SDL_MOUSEMOTION) {
+				jpegview_linux::MouseMotionSample motion{event.motion.x, event.motion.y,
+					event.motion.xrel, event.motion.yrel, event.motion.state};
+				SDL_Event next{};
+				while (SDL_PollEvent(&next) != 0) {
+					if (next.type != SDL_MOUSEMOTION ||
+						next.motion.windowID != event.motion.windowID ||
+						next.motion.which != event.motion.which ||
+						!jpegview_linux::CoalesceMouseMotion(motion,
+							{next.motion.x, next.motion.y, next.motion.xrel,
+								next.motion.yrel, next.motion.state})) {
+						deferredEvent = next;
+						deferredReady = true;
+						break;
+					}
+				}
+				event.motion.x = motion.x;
+				event.motion.y = motion.y;
+				event.motion.xrel = motion.xrel;
+				event.motion.yrel = motion.yrel;
+			}
 			auto& diagnostics = jpegview_linux::PerfDiagnostics::Instance();
 			jpegview_linux::PerfScopedTimer eventTimer(diagnostics,
 				jpegview_linux::PerfMetric::EventHandling, event.type);
@@ -11274,7 +11561,26 @@ private:
 					break;
 				}
 			}
-			playback_.NotifyInteraction(SDL_GetTicks());
+			const bool completionWake = completionWakeEventType_ !=
+				std::numeric_limits<Uint32>::max() && event.type == completionWakeEventType_;
+			if (completionWake) {
+				jpegview_linux::UiCompletionWakeup().Consume();
+			} else {
+				if (event.type == SDL_WINDOWEVENT &&
+					event.window.event == SDL_WINDOWEVENT_EXPOSED) {
+					frameInvalidator_.Mark(
+						jpegview_linux::FrameInvalidationReason::WindowExposure);
+				} else if (event.type == SDL_WINDOWEVENT &&
+					(event.window.event == SDL_WINDOWEVENT_RESIZED ||
+						event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)) {
+					frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Viewport);
+				} else if (fileDialogOpen_) {
+					frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+				} else {
+					frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Input);
+				}
+				playback_.NotifyInteraction(SDL_GetTicks());
+			}
 			if (pendingMenuMnemonicTextInput_ != '\0') {
 				if (event.type == SDL_KEYDOWN) {
 					pendingMenuMnemonicTextInput_ = '\0';
@@ -11663,29 +11969,25 @@ private:
 		}
 	}
 
-	void RenderFrame() {
+	PresentedFrame RenderFrame() {
 		auto& diagnostics = jpegview_linux::PerfDiagnostics::Instance();
 		const std::uint64_t frameStart = diagnostics.Begin();
-		RefreshDoublePageRenderState();
 		const SDL_Rect imageArea = ImageAreaRect();
-		imageCenterX_ = imageArea.x + imageArea.w / 2;
-		imageCenterY_ = imageArea.y + imageArea.h / 2;
 		const std::size_t currentIndex = fileList_.Empty() ? 0 : fileList_.CurrentIndex();
 		const bool selectedImageLoaded = !fileList_.Empty() && (clipboardMode_ ||
 			imageSession_.LoadedPath() == AbsoluteNormalized(fileList_.Current()));
 		const bool spreadModelReady = !fileList_.Empty() &&
 			presentationController_.SpreadReady(currentIndex);
 		const SDL_Rect destination = CurrentPageScreenRect(imageArea);
-		const int renderWidth = destination.w;
-		const int renderHeight = destination.h;
 		SDL_Texture* renderTexture = nullptr;
 		SDL_Texture* nextPageTexture = nullptr;
 		if (activeDoublePageRender_.has_value() && spreadModelReady) {
-			renderTexture = ActiveDoublePageAnchorTexture();
-			nextPageTexture = FindDisplayTexture(presentationController_.PartnerTextureKey());
+			renderTexture = activeDoublePageRender_->transformedAnchorTexture ? texture_ :
+				PeekDisplayTexture(presentationController_.AnchorTextureKey());
+			nextPageTexture = PeekDisplayTexture(presentationController_.PartnerTextureKey());
 		} else if (!activeDoublePageRender_.has_value() && selectedImageLoaded &&
 			!presentationController_.SuppressSinglePage(currentIndex)) {
-			renderTexture = DisplayTextureFor(renderWidth, renderHeight);
+			renderTexture = DisplayTextureForRender();
 		}
 		const bool spreadTexturesReady = activeDoublePageRender_.has_value() &&
 			spreadModelReady && renderTexture != nullptr && nextPageTexture != nullptr;
@@ -11719,8 +12021,6 @@ private:
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		if (!suppressSingleImage) RenderCropSelection();
 		RenderZoomNavigator(renderTexture, nextPageTexture);
-		if (suppressSingleImage) UpdateMagnifyingGlassCursor(-1, -1);
-		else UpdateMagnifyingGlassCursor(lastMouseX_, lastMouseY_);
 		RenderMagnifyingGlass(renderTexture);
 		SDL_RenderSetClipRect(renderer_, nullptr);
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
@@ -11749,88 +12049,85 @@ private:
 			SDL_RenderPresent(renderer_);
 		}
 		diagnostics.RecordPresentation();
-		presentationController_.AcknowledgeFramePresented(currentIndex,
-			spreadTexturesReady);
-		if (diagnostics.Enabled()) {
-			const std::uint64_t sampleStart = diagnostics.Begin();
-			if (sampleStart - lastPerfSnapshotUs_ >= 1000000u) {
-				lastPerfSnapshotUs_ = sampleStart;
-				std::uint64_t thumbnailTextureBytes = 0;
-				for (const auto& cached : thumbnailTextureCache_) {
-					if (cached.second.texture != nullptr) {
-						thumbnailTextureBytes += static_cast<std::uint64_t>(cached.second.width) *
-							static_cast<std::uint64_t>(cached.second.height) * 4;
-					}
-				}
-				const jpegview_linux::ThumbnailPixelRepositoryDiagnostics thumbnailPixels =
-					thumbnailPixelRepository_.Diagnostics();
-				const jpegview_linux::DecodedImageCacheDiagnostics decodedStats =
-					imageCache_.GetDiagnostics();
-				const jpegview_linux::DisplayImageCacheDiagnostics displayStats =
-					displayImageCache_.GetDiagnostics();
-				const jpegview_linux::ThumbnailPreparationDiagnostics thumbnailStats =
-					thumbnailPreparation_.GetDiagnostics();
-				const jpegview_linux::CacheBudgetSnapshot budgetStats =
-					cacheBudget_->Snapshot();
-				diagnostics.End(jpegview_linux::PerfMetric::CacheSnapshot, sampleStart,
-					budgetStats.capacityBytes, budgetStats.retainedBytes,
-					budgetStats.decodedPixelBytes, budgetStats.preparedFrameBytes,
-					budgetStats.imageTextureBytes, budgetStats.uploadStagingBytes);
-				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
-					budgetStats.capacityBytes, budgetStats.retainedBytes,
-					budgetStats.decodedPixelBytes, budgetStats.preparedFrameBytes,
-					budgetStats.imageTextureBytes, budgetStats.uploadStagingBytes, "budget");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
-					budgetStats.activeWorkingBytes, budgetStats.releaseRevision,
-					0, 0, 0, 0, "budget_working");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
-					speculativeDisplayTextureBytes_,
-					jpegview_linux::SpeculativeDisplayTextureBudgetBytes(
-						cacheBudget_->Capacity()),
-					retiredSpeculativeDisplayTextureBytes_, retiredDisplayTextures_.size(),
-					displayTextureCacheBytes_, displayTextureCache_.size(),
-					"display_texture_residency");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
-					decodedStats.cachedBytes, decodedStats.cachedImages, decodedStats.retiredBytes,
-					decodedStats.retiredImages, decodedStats.foregroundQueued,
-					decodedStats.backgroundQueued, "decoded");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
-					decodedStats.foregroundActive, decodedStats.backgroundActive, 0, 0, 0, 0,
-					"decoded_active");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
-					displayStats.cachedBytes, displayStats.preparedBytes,
-					displayStats.borrowedBytes, displayStats.retiredBytes,
-					displayStats.cachedImages, displayStats.preparedImages, "display");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
-					displayStats.foregroundQueued, displayStats.backgroundQueued,
-					displayStats.foregroundActive, displayStats.backgroundActive,
-					displayStats.retiredImages, displayStats.borrowedImages, "display");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
-					displayStats.borrowedBytes, displayStats.borrowedImages,
-					displayStats.retiredBytes, displayStats.retiredImages,
-					displayStats.activeRetiredBytes, 0, "display_lifetime");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
-					thumbnailPixels.pixelBytes, thumbnailPixels.imageCount,
-					thumbnailStats.completedBytes, thumbnailStats.completedImages,
-					thumbnailStats.retiredSourceBytes, thumbnailStats.retiredSources,
-					"thumbnail_pixels");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
-					thumbnailTextureBytes, thumbnailTextureCache_.size(),
-					thumbnailTextureWindowKeys_.size(), 0, 0, 0, "thumbnail_textures");
-				diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
-					thumbnailStats.queued, thumbnailStats.active,
-					thumbnailStats.retainedSourceBytes, thumbnailStats.retiredSourceBytes,
-					thumbnailStats.completedImages, thumbnailStats.retiredSources,
-					"thumbnail");
-			}
-		}
+		return {currentIndex, spreadTexturesReady};
 	}
 
-	void Render() {
-		const bool needsCleanContextMenuFrame = contextMenuNeedsCleanFrame_;
-		contextMenuNeedsCleanFrame_ = false;
-		RenderFrame();
-		if (needsCleanContextMenuFrame) RenderFrame();
+	void RecordPeriodicPerformanceSnapshots() {
+		auto& diagnostics = jpegview_linux::PerfDiagnostics::Instance();
+		if (!diagnostics.Enabled()) return;
+		const std::uint64_t sampleStart = diagnostics.Begin();
+		if (sampleStart - lastPerfSnapshotUs_ < 1000000u) return;
+		lastPerfSnapshotUs_ = sampleStart;
+		std::uint64_t thumbnailTextureBytes = 0;
+		for (const auto& cached : thumbnailTextureCache_) {
+			if (cached.second.texture != nullptr) {
+				thumbnailTextureBytes += static_cast<std::uint64_t>(cached.second.width) *
+					static_cast<std::uint64_t>(cached.second.height) * 4;
+			}
+		}
+		const jpegview_linux::ThumbnailPixelRepositoryDiagnostics thumbnailPixels =
+			thumbnailPixelRepository_.Diagnostics();
+		const jpegview_linux::DecodedImageCacheDiagnostics decodedStats =
+			imageCache_.GetDiagnostics();
+		const jpegview_linux::DisplayImageCacheDiagnostics displayStats =
+			displayImageCache_.GetDiagnostics();
+		const jpegview_linux::ThumbnailPreparationDiagnostics thumbnailStats =
+			thumbnailPreparation_.GetDiagnostics();
+		const jpegview_linux::CacheBudgetSnapshot budgetStats = cacheBudget_->Snapshot();
+		diagnostics.End(jpegview_linux::PerfMetric::CacheSnapshot, sampleStart,
+			budgetStats.capacityBytes, budgetStats.retainedBytes,
+			budgetStats.decodedPixelBytes, budgetStats.preparedFrameBytes,
+			budgetStats.imageTextureBytes, budgetStats.uploadStagingBytes);
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			budgetStats.capacityBytes, budgetStats.retainedBytes,
+			budgetStats.decodedPixelBytes, budgetStats.preparedFrameBytes,
+			budgetStats.imageTextureBytes, budgetStats.uploadStagingBytes, "budget");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			budgetStats.activeWorkingBytes, budgetStats.releaseRevision,
+			0, 0, 0, 0, "budget_working");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			speculativeDisplayTextureBytes_,
+			jpegview_linux::SpeculativeDisplayTextureBudgetBytes(cacheBudget_->Capacity()),
+			retiredSpeculativeDisplayTextureBytes_, retiredDisplayTextures_.size(),
+			displayTextureCacheBytes_, displayTextureCache_.size(),
+			"display_texture_residency");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			decodedStats.cachedBytes, decodedStats.cachedImages, decodedStats.retiredBytes,
+			decodedStats.retiredImages, decodedStats.foregroundQueued,
+			decodedStats.backgroundQueued, "decoded");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
+			decodedStats.foregroundActive, decodedStats.backgroundActive, 0, 0, 0, 0,
+			"decoded_active");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			displayStats.cachedBytes, displayStats.preparedBytes,
+			displayStats.borrowedBytes, displayStats.retiredBytes,
+			displayStats.cachedImages, displayStats.preparedImages, "display");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
+			displayStats.foregroundQueued, displayStats.backgroundQueued,
+			displayStats.foregroundActive, displayStats.backgroundActive,
+			displayStats.retiredImages, displayStats.borrowedImages, "display");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			displayStats.borrowedBytes, displayStats.borrowedImages,
+			displayStats.retiredBytes, displayStats.retiredImages,
+			displayStats.activeRetiredBytes, 0, "display_lifetime");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			thumbnailPixels.pixelBytes, thumbnailPixels.imageCount,
+			thumbnailStats.completedBytes, thumbnailStats.completedImages,
+			thumbnailStats.retiredSourceBytes, thumbnailStats.retiredSources,
+			"thumbnail_pixels");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			thumbnailTextureBytes, thumbnailTextureCache_.size(),
+			thumbnailTextureWindowKeys_.size(), 0, 0, 0, "thumbnail_textures");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::QueueSnapshot,
+			thumbnailStats.queued, thumbnailStats.active,
+			thumbnailStats.retainedSourceBytes, thumbnailStats.retiredSourceBytes,
+			thumbnailStats.completedImages, thumbnailStats.retiredSources, "thumbnail");
+	}
+
+	PresentedFrame Render() {
+		PresentedFrame presented = RenderFrame();
+		if (renderContextMenuNeedsCleanFrame_) presented = RenderFrame();
+		return presented;
 	}
 
 	void PresentStartupFrame() {
@@ -11906,12 +12203,14 @@ private:
 	std::size_t cacheSizeMiB_ = jpegview_linux::kDefaultCacheSizeMiB;
 	double initialSlideshowSeconds_ = 0.0;
 	jpegview_linux::PlaybackScheduler playback_;
+	jpegview_linux::FrameInvalidator frameInvalidator_;
 	jpegview_linux::WindowTitleFormatCache windowTitleFormatCache_;
 	jpegview_linux::AppliedWindowTitle appliedWindowTitle_;
 	jpegview_linux::ImageInfoLineCache imageInfoLineCache_;
 	int transitionEffect_ = IDM_EFFECT_NONE;
 	Uint32 transitionDurationMs_ = 500;
 	Uint32 transitionStartTick_ = 0;
+	Uint32 transitionFrameTick_ = 0;
 	bool startFullscreen_ = false;
 	Image image_;
 	Image correctionBase_;
@@ -11927,6 +12226,7 @@ private:
 	bool correctionBaseValid_ = false;
 	SDL_Window* window_ = nullptr;
 	SDL_Renderer* renderer_ = nullptr;
+	Uint32 completionWakeEventType_ = std::numeric_limits<Uint32>::max();
 	SDL_Texture* texture_ = nullptr;
 	Image displayImage_;
 	SDL_Texture* displayTexture_ = nullptr;
@@ -11980,6 +12280,8 @@ private:
 	bool zoomNavigatorDragging_ = false;
 	Uint32 zoomNavigatorVisibleUntil_ = 0;
 	Uint32 zoomReadoutVisibleUntil_ = 0;
+	bool zoomNavigatorTimedVisible_ = false;
+	bool zoomReadoutTimedVisible_ = false;
 	bool cropDragWasNew_ = false;
 	bool cropZoomOnRelease_ = false;
 	bool cropDragMoved_ = false;
@@ -12047,6 +12349,7 @@ private:
 	bool contextMenuCropOnly_ = false;
 	bool contextMenuPositionLocked_ = false;
 	bool contextMenuNeedsCleanFrame_ = false;
+	bool renderContextMenuNeedsCleanFrame_ = false;
 	bool contextMenuRightKeyDown_ = false;
 	char pendingMenuMnemonicTextInput_ = '\0';
 	int contextMenuX_ = 0;

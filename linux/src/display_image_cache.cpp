@@ -4,6 +4,7 @@
 #include "image.h"
 #include "image_cache.h"
 #include "cache_policy.h"
+#include "event_loop_model.h"
 #include "perf_diagnostics.h"
 #include "source_work_coordinator.h"
 
@@ -1183,6 +1184,7 @@ struct DisplayImageCache::Impl {
 				work.request.processing, work.request.rotationQuarterTurns,
 				work.request.includeSpectrum);
 
+			bool publishedCompletion = false;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				if (sourceChanged) {
@@ -1192,6 +1194,7 @@ struct DisplayImageCache::Impl {
 						});
 					if (existing == changedSources.end()) changedSources.push_back(sourceChange);
 					else *existing = sourceChange;
+					publishedCompletion = true;
 				}
 				inFlightKeys.erase(work.request.cacheKey);
 				inFlightPriorities.erase(work.request.cacheKey);
@@ -1272,6 +1275,7 @@ struct DisplayImageCache::Impl {
 					completed.push_back({image, completionPriority, effectiveWorkClass,
 						selectionGeneration, reservation.speculative, reservation.bytes,
 						std::move(temporaryReservation)});
+					publishedCompletion = true;
 				} else {
 					if (reservation.speculative) ReleaseSpeculative(reservation.bytes);
 					if (image) {
@@ -1293,6 +1297,7 @@ struct DisplayImageCache::Impl {
 						failedCompletions.push_back({work.request.cacheKey,
 							work.request.key, workerFailure, completionPriority,
 							effectiveWorkClass, selectionGeneration});
+						publishedCompletion = true;
 					}
 				}
 				const auto retry = pendingForegroundRetries.find(work.request.cacheKey);
@@ -1319,6 +1324,7 @@ struct DisplayImageCache::Impl {
 				idle.notify_all();
 				workAvailable.notify_all();
 			}
+			if (publishedCompletion) UiCompletionWakeup().Notify();
 		}
 	}
 

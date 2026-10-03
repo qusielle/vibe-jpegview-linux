@@ -73,6 +73,12 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   `main.cpp` and should be covered by `linux/tests/test_core.cpp`.
 - SDL renderer resources are main-thread objects. Create, upload, render, and destroy SDL textures on
   the renderer thread.
+- Keep drawing read-only over prepared presentation state. Render methods must not probe sources,
+  materialize or process pixels, schedule cache/worker work, apply completions, change readiness or
+  controller state, or update display/thumbnail cache recency. Put those effects in the event/update
+  phase, then render from non-mutating resource lookups. Invalidate frames for actual presentation
+  changes and wait for events or the next timed deadline instead of continuously redrawing a static
+  image. The bounded text-texture cache remains renderer-thread-owned.
 - Do not publish an incomplete banded image texture. Keep its upload state private until every band
   and final texture setup succeeds; cancellation or any band/setup failure must retire the partial
   texture and release its reservation only after renderer-thread destruction.

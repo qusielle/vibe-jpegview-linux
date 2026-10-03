@@ -1,5 +1,6 @@
 #include "exif_metadata_worker.h"
 
+#include "event_loop_model.h"
 #include "perf_diagnostics.h"
 #include "source_work_coordinator.h"
 
@@ -195,6 +196,7 @@ struct ExifMetadataWorker::Impl {
 				result.jpegComment.clear();
 			}
 
+			bool published = false;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				active = false;
@@ -205,9 +207,11 @@ struct ExifMetadataWorker::Impl {
 						sourceUnavailableFailure)) {
 					ready.clear();
 					ready.push_back(std::move(result));
+					published = true;
 				}
 				idle.notify_all();
 			}
+			if (published) UiCompletionWakeup().Notify();
 		}
 	}
 

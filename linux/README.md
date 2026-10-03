@@ -145,7 +145,11 @@ they support.
    Work that needs both source access and CPU processing receives both admissions together, and a
    queued request promoted by navigation joins foreground admission. Worker failures are reported
    through structured results or cache diagnostics, and canceled work releases its admission and memory
-   reservations.
+   reservations. Drawing reads prepared presentation state; source work, cache scheduling, completion
+   application, and cache-recency updates run in the event/update phase. A static image is not
+   continuously redrawn: the event loop waits for input, coalesced completion notifications, timed
+   playback/transition/overlay deadlines, and a bounded fallback poll. Consecutive pointer-motion
+   events are accumulated only while their button state and event target remain unchanged.
 
 4. **Folder navigation and ordering.** The Windows `CFileList` behavior was ported for first,
    previous, next, and last navigation; multiple inputs; folder looping; recursive subfolders;

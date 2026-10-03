@@ -1,5 +1,6 @@
 #include "display_preparation_controller.h"
 
+#include "event_loop_model.h"
 #include <limits>
 #include <utility>
 
@@ -15,11 +16,14 @@ void DisplayPreparationRequestChannel::Activate(std::uint64_t generation) {
 
 bool DisplayPreparationRequestChannel::Publish(std::uint64_t generation,
 	DisplayImageRequest request) {
-	std::lock_guard<std::mutex> lock(mutex_);
-	if (shutdown_ || !active_ || generation == 0 ||
-		generation != activeGeneration_ ||
-		ready_.size() >= kMaximumDisplayPreparationCompletions) return false;
-	ready_.push_back(std::move(request));
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (shutdown_ || !active_ || generation == 0 ||
+			generation != activeGeneration_ ||
+			ready_.size() >= kMaximumDisplayPreparationCompletions) return false;
+		ready_.push_back(std::move(request));
+	}
+	UiCompletionWakeup().Notify();
 	return true;
 }
 

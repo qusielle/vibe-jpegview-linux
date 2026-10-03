@@ -1,4 +1,5 @@
 #include "file_dialog_model.h"
+#include "event_loop_model.h"
 #include "archive_source.h"
 #include "image_formats.h"
 #include "image_decoder.h"
@@ -770,8 +771,15 @@ struct ArchiveDirectoryLoader::Impl {
 			}
 			if (!isCurrent()) continue;
 
-			std::lock_guard<std::mutex> lock(mutex);
-			if (isCurrent()) ready.push_back(std::move(result));
+			bool published = false;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				if (isCurrent()) {
+					ready.push_back(std::move(result));
+					published = true;
+				}
+			}
+			if (published) UiCompletionWakeup().Notify();
 		}
 	}
 
@@ -865,12 +873,17 @@ struct FileDialogFileSizeLoader::Impl {
 
 	void Publish(std::vector<FileDialogFileSizeResult>& batch, std::uint64_t requestedGeneration) {
 		if (batch.empty() || !IsCurrent(requestedGeneration)) return;
-		std::lock_guard<std::mutex> lock(mutex);
-		if (IsCurrent(requestedGeneration)) {
-			ready.insert(ready.end(), std::make_move_iterator(batch.begin()),
-				std::make_move_iterator(batch.end()));
+		bool published = false;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (IsCurrent(requestedGeneration)) {
+				ready.insert(ready.end(), std::make_move_iterator(batch.begin()),
+					std::make_move_iterator(batch.end()));
+				published = true;
+			}
 		}
 		batch.clear();
+		if (published) UiCompletionWakeup().Notify();
 	}
 
 	void Run() {
@@ -1090,11 +1103,16 @@ struct DirectorySummaryLoader::Impl {
 			}
 			if (stopping.load() || currentGeneration.load() != task.generation) continue;
 
-			std::lock_guard<std::mutex> lock(mutex);
-			if (currentGeneration.load() == task.generation) {
-				ready.push_back(DirectorySummaryResult{task.directory, task.generation,
-					summary, failure});
+			bool published = false;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				if (currentGeneration.load() == task.generation) {
+					ready.push_back(DirectorySummaryResult{task.directory, task.generation,
+						summary, failure});
+					published = true;
+				}
 			}
+			if (published) UiCompletionWakeup().Notify();
 		}
 	}
 
@@ -1422,14 +1440,20 @@ struct FileDialogPreviewLoader::Impl {
 			}
 			result.generation = task.generation;
 
-			std::lock_guard<std::mutex> lock(mutex);
-			if (IsCurrent(task.generation)) {
-				ready.clear();
-				ready.push_back(std::move(result));
-			} else {
+			bool published = false;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				if (IsCurrent(task.generation)) {
+					ready.clear();
+					ready.push_back(std::move(result));
+					published = true;
+				}
+			}
+			if (!published) {
 				RecordPreviewCancellation(task.generation,
 					PreviewCancellationReason::StaleWorkerResult, PerfExecution::WorkerThread);
 			}
+			if (published) UiCompletionWakeup().Notify();
 		}
 	}
 

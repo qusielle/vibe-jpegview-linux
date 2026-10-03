@@ -405,6 +405,17 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `external_commands`: pure argv plans and fallback order for printing, wallpaper, clipboard,
   desktop opening, trash, lossless JPEG crop, and lossless JPEG transforms.
 - `exif_reader`: JPEG metadata parsing.
+- `event_loop_model`: renderer-thread frame invalidation reasons, wrapping SDL tick-deadline
+  selection, adjacent pointer-motion accumulation, and a process-wide coalesced completion wake.
+  Workers publish their owned payloads to their normal generation-checked queues before notifying;
+  the SDL user event carries no payload. `SDL_WaitEventTimeout` sleeps until input or the next
+  playback, transition, overlay, held-navigation, retry, or interaction-idle deadline, with a 100 ms
+  fallback that drains queues if SDL rejects a wake. Drawing uses non-touching display-cache peeks
+  and does not schedule work, apply completions, update readiness, or touch display/thumbnail cache
+  recency. Timed effects and visible-thumbnail LRU touches run in the event/update phase. A clean
+  static frame therefore leaves the renderer idle until an invalidation or deadline requires another
+  frame. Opt-in periodic cache and queue snapshots are sampled from the update phase, independently
+  of drawing.
 - `perf_diagnostics`: opt-in monotonic timing and cache/queue snapshots. It is inactive unless
   `JPEGVIEW_PERF_TRACE` names a CSV output file; enabled samples enter a fixed-capacity ring and a
   writer thread handles formatting and file I/O. A stack-only `PerfContextScope` carries one of five

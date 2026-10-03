@@ -1,4 +1,5 @@
 #include "file_list_scan_worker.h"
+#include "event_loop_model.h"
 #include "source_work_coordinator.h"
 
 #include <atomic>
@@ -114,8 +115,15 @@ struct FileListScanWorker::Impl {
 			if (!IsCurrent(task.generation) ||
 				(!result.prepared.completed && result.error.empty())) continue;
 
-			std::lock_guard<std::mutex> lock(mutex);
-			if (IsCurrent(task.generation)) ready = std::move(result);
+			bool published = false;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				if (IsCurrent(task.generation)) {
+					ready = std::move(result);
+					published = true;
+				}
+			}
+			if (published) UiCompletionWakeup().Notify();
 		}
 	}
 

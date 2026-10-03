@@ -124,6 +124,15 @@ struct SDL_DropEvent {
 	Uint32 windowID;
 };
 
+struct SDL_UserEvent {
+	Uint32 type;
+	Uint32 timestamp;
+	Uint32 windowID;
+	Sint32 code;
+	void* data1;
+	void* data2;
+};
+
 union SDL_Event {
 	Uint32 type;
 	SDL_KeyboardEvent key;
@@ -133,6 +142,7 @@ union SDL_Event {
 	SDL_MouseWheelEvent wheel;
 	SDL_TextInputEvent text;
 	SDL_DropEvent drop;
+	SDL_UserEvent user;
 	Uint8 padding[56];
 };
 
@@ -146,6 +156,7 @@ static_assert(sizeof(SDL_MouseMotionEvent) == 36, "unexpected SDL_MouseMotionEve
 static_assert(sizeof(SDL_MouseButtonEvent) == 28, "unexpected SDL_MouseButtonEvent layout");
 static_assert(sizeof(SDL_MouseWheelEvent) == 28, "unexpected SDL_MouseWheelEvent layout");
 static_assert(sizeof(SDL_TextInputEvent) == 44, "unexpected SDL_TextInputEvent layout");
+static_assert(sizeof(SDL_UserEvent) == 32, "unexpected SDL_UserEvent layout");
 static_assert(offsetof(SDL_DropEvent, file) == sizeof(Uint32) * 2, "unexpected SDL drop offset");
 static_assert(offsetof(SDL_KeyboardEvent, keysym) == 16, "unexpected SDL keyboard offset");
 static_assert(offsetof(SDL_MouseMotionEvent, x) == 20, "unexpected SDL motion offset");
@@ -202,6 +213,7 @@ enum : Uint32 {
 enum : Uint8 {
 	SDL_WINDOWEVENT_RESIZED = 0x05u,
 	SDL_WINDOWEVENT_SIZE_CHANGED = 0x06u,
+	SDL_WINDOWEVENT_EXPOSED = 0x03u,
 	SDL_WINDOWEVENT_MAXIMIZED = 0x08u,
 	SDL_WINDOWEVENT_RESTORED = 0x09u,
 	SDL_WINDOWEVENT_FOCUS_LOST = 0x0Du,
@@ -310,6 +322,9 @@ int SDL_SetRenderDrawBlendMode(SDL_Renderer* renderer, int blendMode);
 void SDL_RenderPresent(SDL_Renderer* renderer);
 int SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
 int SDL_PollEvent(SDL_Event* event);
+int SDL_WaitEventTimeout(SDL_Event* event, int timeout);
+Uint32 SDL_RegisterEvents(Uint32 numevents);
+int SDL_PushEvent(SDL_Event* event);
 void SDL_PumpEvents();
 const Uint8* SDL_GetKeyboardState(int* numkeys);
 void SDL_Delay(Uint32 ms);

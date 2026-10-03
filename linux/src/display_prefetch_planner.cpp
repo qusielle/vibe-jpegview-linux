@@ -1,6 +1,7 @@
 #include "display_prefetch_planner.h"
 
 #include "archive_source.h"
+#include "event_loop_model.h"
 #include "image_cache.h"
 #include "image_decoder.h"
 #include "perf_diagnostics.h"
@@ -261,6 +262,7 @@ struct DisplayPrefetchPlannerWorker::Impl {
 				result.viewportRevision = work.request.viewportRevision;
 				result.currentIndex = work.request.currentIndex;
 			}
+			bool published = false;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				active = false;
@@ -269,9 +271,11 @@ struct DisplayPrefetchPlannerWorker::Impl {
 					work.generation == generation) {
 					ready.clear();
 					ready.push_back(std::move(result));
+					published = true;
 				}
 				idle.notify_all();
 			}
+			if (published) UiCompletionWakeup().Notify();
 		}
 	}
 
