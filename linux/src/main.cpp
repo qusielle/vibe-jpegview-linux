@@ -4071,7 +4071,7 @@ private:
 		request.expectedRevision = fileList_.MutationRevision();
 		request.expectedDescriptorRevision = fileList_.DescriptorRevision();
 		SubmitFileListScan(std::move(request), FileListScanHandling::DroppedInputs,
-			true, false, 0, {}, modeLoadPolicy);
+			true, false, 0, {}, loadStatePolicy);
 		if (fileDialogOpen_) SetTitle("JPEGView — Opening selection");
 	}
 
@@ -4719,7 +4719,7 @@ private:
 		pendingFileListScanDirection_ = direction;
 		pendingFileListScanForceImageReload_ = forceImageReload;
 		pendingFileListScanPreferredPath_ = preferredPath;
-		pendingFileListScanModeLoadPolicy_ = modeLoadPolicy;
+		pendingFileListScanLoadStatePolicy_ = loadStatePolicy;
 		pendingMarkedToggleReturnPath_ = markedToggleReturnPath;
 		pendingFileListScanCompletionTitle_ = std::move(completionTitle);
 		fileListScanGeneration_ = fileListScanWorker_.Request(std::move(request));
@@ -4832,7 +4832,7 @@ private:
 					jpegview_linux::FileList::ScanRequest retry = *pendingDroppedScanRequest_;
 					retry.expectedRevision = fileList_.MutationRevision();
 					retry.expectedDescriptorRevision = fileList_.DescriptorRevision();
-					SubmitFileListScan(std::move(retry), handling, true, false, 0, {}, modeLoadPolicy);
+					SubmitFileListScan(std::move(retry), handling, true, false, 0, {}, loadStatePolicy);
 					continue;
 				}
 				if (handling == FileListScanHandling::DroppedInputs) {
@@ -4843,7 +4843,7 @@ private:
 				const jpegview_linux::FileList::ScanOperation operation = *pendingFileListScanOperation_;
 				const fs::path preferredPath = pendingFileListScanPreferredPath_;
 				RequestFileListScan(operation, direction, handling, true, forceImageReload,
-					preferredPath, modeLoadPolicy, markedToggleReturnPath, completionTitle);
+					preferredPath, loadStatePolicy, markedToggleReturnPath, completionTitle);
 				continue;
 			}
 			if (fileList_.Empty()) CancelPendingCurrentJpegDimensions();
@@ -4852,7 +4852,7 @@ private:
 				ClearPendingFileListScan();
 				dragging_ = false;
 				CloseFileDialog();
-				LoadCurrent(0, modeLoadPolicy);
+				LoadCurrent(0, loadStatePolicy);
 				continue;
 			}
 			ClearPendingFileListScan();
@@ -4890,7 +4890,7 @@ private:
 					continue;
 				}
 				if (currentPathChanged || currentSourceChanged) {
-					if (!LoadCurrent(0, modeLoadPolicy, false, true)) {
+					if (!LoadCurrent(0, loadStatePolicy, false, true)) {
 						deferredExitCode_ = 1;
 						quitRequested_ = true;
 						continue;
