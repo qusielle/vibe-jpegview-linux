@@ -119,6 +119,52 @@ bool EqualImageProcessing(const ImageProcessingParams& left,
 		std::abs(left.unsharpThreshold - right.unsharpThreshold) <= kEqualityEpsilon;
 }
 
+ImageProcessingParams EffectiveImageProcessingParams(
+	const ImageProcessingParams& processing, bool autoContrast) {
+	ImageProcessingParams effective = processing;
+	const bool localDensity = processing.localDensityEnabled &&
+		(processing.lightenShadows > 0.0 || processing.darkenHighlights > 0.0);
+	if (!localDensity) {
+		effective.lightenShadows = 0.0;
+		effective.darkenHighlights = 0.0;
+		effective.deepShadows = 0.0;
+	}
+	effective.localDensityEnabled = localDensity;
+	if (!autoContrast) {
+		effective.colorCorrection = 0.0;
+		effective.contrastCorrection = 0.0;
+	}
+	if (!(processing.unsharpRadius > 0.0 && processing.unsharpAmount > 0.0)) {
+		effective.unsharpRadius = 0.0;
+		effective.unsharpAmount = 0.0;
+		effective.unsharpThreshold = 0.0;
+	}
+	for (double* value : {&effective.contrast, &effective.gamma,
+		&effective.saturation, &effective.cyanRed, &effective.magentaGreen,
+		&effective.yellowBlue, &effective.lightenShadows, &effective.darkenHighlights,
+		&effective.deepShadows, &effective.colorCorrection, &effective.contrastCorrection,
+		&effective.sharpen, &effective.unsharpRadius, &effective.unsharpAmount,
+		&effective.unsharpThreshold}) {
+		if (*value == 0.0) *value = 0.0;
+	}
+	return effective;
+}
+
+bool EqualEffectiveImageProcessingParams(const ImageProcessingParams& left,
+	const ImageProcessingParams& right) {
+	return left.contrast == right.contrast && left.gamma == right.gamma &&
+		left.saturation == right.saturation && left.cyanRed == right.cyanRed &&
+		left.magentaGreen == right.magentaGreen && left.yellowBlue == right.yellowBlue &&
+	left.lightenShadows == right.lightenShadows &&
+	left.darkenHighlights == right.darkenHighlights &&
+	left.deepShadows == right.deepShadows && left.colorCorrection == right.colorCorrection &&
+	left.contrastCorrection == right.contrastCorrection && left.sharpen == right.sharpen &&
+	left.unsharpRadius == right.unsharpRadius &&
+	left.unsharpAmount == right.unsharpAmount &&
+	left.unsharpThreshold == right.unsharpThreshold &&
+	left.localDensityEnabled == right.localDensityEnabled;
+}
+
 ImageProcessingPreset ResolveImageProcessingForFile(const ImageProcessingPreset& current,
 	const ImageProcessingPreset* saved, bool keepCurrent, bool defaultAutoContrast,
 	const ImageProcessingParams& defaultProcessing) {

@@ -98,6 +98,10 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   does not prevent cleanup from removing a required spread texture.
 - Background workers may perform filesystem access, decoding, and pixel processing. Their requests
   must support cancellation or generation checks so obsolete results cannot replace current state.
+- A worker may borrow mutable main-thread image pixels only with an explicit ownership boundary:
+  cancel and join that work before any mutation, replacement, or destruction. Avoid image-sized
+  pixel scans on the render path. Cache font measurement and clipping by content and geometry, and
+  publish generation-keyed worker results for the update phase to apply.
 - For new or extracted asynchronous controllers, keep request batches free of raw pointers or
   references to the composition root and renderer/cache owners. Pass owned service handles and
   generation-tagged value completions through an explicit channel; the owner drains effects and

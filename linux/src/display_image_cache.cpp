@@ -167,57 +167,10 @@ bool FiniteProcessingValues(const ImageProcessingParams& processing) {
 	return true;
 }
 
-bool EqualProcessingKeyValues(const ImageProcessingParams& left,
-	const ImageProcessingParams& right) {
-	return left.contrast == right.contrast && left.gamma == right.gamma &&
-		left.saturation == right.saturation && left.cyanRed == right.cyanRed &&
-		left.magentaGreen == right.magentaGreen && left.yellowBlue == right.yellowBlue &&
-		left.lightenShadows == right.lightenShadows &&
-		left.darkenHighlights == right.darkenHighlights &&
-		left.deepShadows == right.deepShadows &&
-		left.colorCorrection == right.colorCorrection &&
-		left.contrastCorrection == right.contrastCorrection &&
-		left.sharpen == right.sharpen && left.unsharpRadius == right.unsharpRadius &&
-		left.unsharpAmount == right.unsharpAmount &&
-		left.unsharpThreshold == right.unsharpThreshold &&
-		left.localDensityEnabled == right.localDensityEnabled;
-}
-
 int NormalizeQuarterTurns(int turns) {
 	turns %= 4;
 	if (turns < 0) turns += 4;
 	return turns;
-}
-
-ImageProcessingParams EffectiveProcessing(const ImageProcessingParams& processing,
-	bool autoContrast) {
-	ImageProcessingParams effective = processing;
-	const bool localDensity = processing.localDensityEnabled &&
-		(processing.lightenShadows > 0.0 || processing.darkenHighlights > 0.0);
-	if (!localDensity) {
-		effective.lightenShadows = 0.0;
-		effective.darkenHighlights = 0.0;
-		effective.deepShadows = 0.0;
-	}
-	effective.localDensityEnabled = localDensity;
-	if (!autoContrast) {
-		effective.colorCorrection = 0.0;
-		effective.contrastCorrection = 0.0;
-	}
-	if (!(processing.unsharpRadius > 0.0 && processing.unsharpAmount > 0.0)) {
-		effective.unsharpRadius = 0.0;
-		effective.unsharpAmount = 0.0;
-		effective.unsharpThreshold = 0.0;
-	}
-	for (double* value : {&effective.contrast, &effective.gamma,
-		&effective.saturation, &effective.cyanRed, &effective.magentaGreen,
-		&effective.yellowBlue, &effective.lightenShadows, &effective.darkenHighlights,
-		&effective.deepShadows, &effective.colorCorrection, &effective.contrastCorrection,
-		&effective.sharpen, &effective.unsharpRadius, &effective.unsharpAmount,
-		&effective.unsharpThreshold}) {
-		if (*value == 0.0) *value = 0.0;
-	}
-	return effective;
 }
 
 DisplayImageCacheKey MakeCacheKey(const SourceDescriptor& source,
@@ -232,7 +185,7 @@ DisplayImageCacheKey MakeCacheKey(const SourceDescriptor& source,
 	key.autoContrast = autoContrast;
 	key.includeSpectrum = includeSpectrum;
 	key.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
-	key.processing = EffectiveProcessing(processing, autoContrast);
+	key.processing = EffectiveImageProcessingParams(processing, autoContrast);
 	return key;
 }
 
@@ -357,7 +310,11 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	if (cancelled()) return {};
 	GrayscaleSpectrum spectrum{};
 	if (request.includeSpectrum) {
-		spectrum = BuildGrayscaleSpectrum(image.bgra, image.width, image.height);
+		const std::optional<GrayscaleSpectrum> preparedSpectrum =
+			TryBuildGrayscaleSpectrum(image.bgra, image.width, image.height,
+				shouldContinue);
+		if (!preparedSpectrum || cancelled()) return {};
+		spectrum = *preparedSpectrum;
 	}
 	if (request.targetWidth < image.width || request.targetHeight < image.height) {
 		PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Resampling);
@@ -397,7 +354,7 @@ bool operator==(const DisplayImageCacheKey& left, const DisplayImageCacheKey& ri
 		left.rotationQuarterTurns == right.rotationQuarterTurns &&
 		left.autoContrast == right.autoContrast &&
 		left.includeSpectrum == right.includeSpectrum &&
-		EqualProcessingKeyValues(left.processing, right.processing);
+		EqualEffectiveImageProcessingParams(left.processing, right.processing);
 }
 
 bool operator!=(const DisplayImageCacheKey& left, const DisplayImageCacheKey& right) {
@@ -414,7 +371,7 @@ bool CanReuseDisplayImageRepresentation(const DisplayImageCacheKey& requested,
 		requested.rotationQuarterTurns == available.rotationQuarterTurns &&
 		requested.autoContrast == available.autoContrast &&
 		requested.includeSpectrum == available.includeSpectrum &&
-		EqualProcessingKeyValues(requested.processing, available.processing);
+		EqualEffectiveImageProcessingParams(requested.processing, available.processing);
 }
 
 std::size_t DisplayImageCacheKeyHash::operator()(const DisplayImageCacheKey& key) const {

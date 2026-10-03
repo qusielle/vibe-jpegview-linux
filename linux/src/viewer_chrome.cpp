@@ -256,6 +256,37 @@ InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 	return result;
 }
 
+const InformationOverlayPaintPlan& InformationOverlayPaintPlanCache::GetOrBuild(
+	const std::string& key, int mouseX, int mouseY,
+	const std::function<InformationOverlayPaintPlan()>& builder) {
+	if (!valid_ || key_ != key) {
+		InformationOverlayPaintPlan plan = builder ? builder() :
+			InformationOverlayPaintPlan{};
+		key_ = key;
+		plan_ = std::move(plan);
+		valid_ = true;
+		buttonHovered_ = false;
+	}
+	const bool hovered = Contains(plan_.spectrumButton, mouseX, mouseY);
+	if (hovered != buttonHovered_) {
+		const UiColor buttonColor = hovered ? UiColor{255, 255, 255, 255} : kGuiColor;
+		const std::size_t buttonLineCount = std::min<std::size_t>(2,
+			plan_.spectrumLines.size());
+		for (std::size_t index = 0; index < buttonLineCount; ++index) {
+			plan_.spectrumLines[index].color = buttonColor;
+		}
+		buttonHovered_ = hovered;
+	}
+	return plan_;
+}
+
+void InformationOverlayPaintPlanCache::Clear() {
+	key_.clear();
+	plan_ = {};
+	valid_ = false;
+	buttonHovered_ = false;
+}
+
 NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight,
 	int mouseX, int mouseY, bool fitToWindow, FileList::SortMode sortMode,
 	int sortLabelWidth, int oneToOneLabelWidth, int textLineHeight,

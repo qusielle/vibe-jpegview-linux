@@ -818,7 +818,14 @@ preparation computes its grayscale spectrum from full-source processed pixels on
 carries that compact result with the prepared frame and texture. File-backed JPEG requests use a
 full-resolution decode in this optional mode to preserve histogram values; ordinary fitted-JPEG
 requests retain reduced-DCT decoding. Painting does not materialize source pixels or rescan the image.
-Edited images compute a replacement spectrum when their renderer texture updates.
+Edited images compute a replacement spectrum on a generation-keyed CPU worker only while the
+histogram is requested. The worker reads the current mutable image buffer under an explicit borrow;
+the owner cancels and joins it before any pixel mutation, replacement, or teardown. Stale source,
+document, frame, and processing results are discarded. The overlay displays a loading or unavailable
+line while no matching result exists. Formatted information lines and the complete clipped paint plan
+are cached by source/document state and window geometry; pointer motion only recolors the cached
+histogram button. Pango measurement and text clipping remain on the SDL thread and run only when that
+cache key changes.
 For fitted JPEGs, header dimensions are cached by file size and modification time and workers decode
 the smallest native libjpeg scale that covers the stable viewport. This makes renderer-ready textures,
 rather than ~96 MiB source frames, the primary navigation cache for high-resolution photo folders.

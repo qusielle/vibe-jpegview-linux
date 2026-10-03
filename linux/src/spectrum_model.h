@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <vector>
 
 namespace jpegview_linux {
@@ -19,6 +21,9 @@ using GrayscaleSpectrum = std::array<std::uint64_t, kSpectrumBinCount>;
 // Large images are sampled on a regular grid to bound the work per frame.
 GrayscaleSpectrum BuildGrayscaleSpectrum(const std::vector<std::uint8_t>& bgra,
 	int width, int height);
+std::optional<GrayscaleSpectrum> TryBuildGrayscaleSpectrum(
+	const std::vector<std::uint8_t>& bgra, int width, int height,
+	const std::function<bool()>& shouldContinue);
 
 std::array<int, kSpectrumBinCount> GrayscaleSpectrumBarHeights(
 	const GrayscaleSpectrum& spectrum, int maximumHeight);

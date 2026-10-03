@@ -55,6 +55,7 @@
 #include "desktop_association.h"
 #include "perf_diagnostics.h"
 #include "event_loop_model.h"
+#include "image_spectrum_worker.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -520,6 +521,7 @@ public:
 			TickExifMetadata();
 			TickCurrentJpegDimensions();
 			TickCurrentSelectedDecode();
+			TickImageSpectrum();
 			TickActiveSpreadDimensions();
 			TickTimedPresentationEffects(SDL_GetTicks());
 			if (frameInvalidator_.NeedsRender()) {
@@ -772,6 +774,7 @@ private:
 
 	void Cleanup() {
 		jpegview_linux::UiCompletionWakeup().SetPostFunction({});
+		imageSpectrumWorker_.Stop();
 		DeactivateDisplayPrefetchBatch();
 		displayPreparationController_.Shutdown();
 		exifMetadataWorker_.Stop();
@@ -1087,6 +1090,7 @@ private:
 		pendingMaterializationIntents_.clear();
 		currentMaterializationRequested_ = false;
 		currentDisplayRequest_.reset();
+		CancelImageSpectrumBeforeImageMutation();
 		image_ = {};
 		currentDecoded_.reset();
 		currentSourcePageDimensions_.reset();
@@ -1201,6 +1205,7 @@ private:
 		SetDisplayTextureProtection(request->key,
 			jpegview_linux::CacheProtectionTier::Active);
 		if (FindDisplayTexture(request->key) != nullptr) {
+			CaptureCachedDisplaySpectrum(request->key);
 			MarkSelectedDisplayFrameReady(generation, source, request->key);
 			return;
 		}
@@ -1209,6 +1214,7 @@ private:
 			displayImageCache_.Request(*request);
 			return;
 		}
+		CapturePreparedSourceSpectrum(*prepared);
 		PendingTextureUpload pending;
 		pending.image = prepared;
 		pending.priority = {request->workClass, request->priority};
@@ -1992,6 +1998,7 @@ private:
 		if (currentPixelsMaterialized_ &&
 			jpegview_linux::EqualImageProcessing(materializedProcessing_, imageProcessing_) &&
 			materializedAutoContrast_ == autoContrastEnabled_) return true;
+		CancelImageSpectrumBeforeImageMutation();
 		if (currentPixelsMaterialized_ && correctionBaseValid_) {
 			image_ = correctionBase_;
 			jpegview_linux::PerfScopedTimer processingTimer(
@@ -2069,6 +2076,7 @@ private:
 			CancelPendingCurrentJpegDimensions();
 			return false;
 		}
+		CancelImageSpectrumBeforeImageMutation();
 		const fs::path targetPath = AbsoluteNormalized(fileList_.Current());
 		const bool pathChanged = imageSession_.LoadedPath().empty() ||
 			targetPath != imageSession_.LoadedPath();
@@ -2802,12 +2810,6 @@ private:
 				jpegview_linux::CacheProtectionTier::DistantSpeculation);
 			lastPresentedDisplayKey_.clear();
 		}
-		editedImageSpectrumValid_ = false;
-		if (showHistogram_ && infoVisible_) {
-			editedImageSpectrum_ = jpegview_linux::BuildGrayscaleSpectrum(
-				image_.bgra, image_.width, image_.height);
-			editedImageSpectrumValid_ = true;
-		}
 		return true;
 	}
 
@@ -3419,6 +3421,28 @@ private:
 		RefreshCacheProtectionSnapshotsForBatch();
 		for (const jpegview_linux::DisplayImageFailureInfo& failure :
 			displayImageCache_.TakeFailedCompletions()) {
+			if (failure.cacheKey.includeSpectrum &&
+				currentSourceSpectrumRequestKey_.has_value()) {
+				const std::optional<jpegview_linux::ImageSpectrumKey> currentKey =
+					CurrentImageSpectrumKey();
+				if (currentKey.has_value() && !UsesEditedImageSpectrum() &&
+					*currentSourceSpectrumRequestKey_ == *currentKey &&
+					failure.cacheKey.source == currentKey->source &&
+					failure.cacheKey.frameIndex == currentKey->frameIndex &&
+					failure.cacheKey.rotationQuarterTurns == currentKey->rotationQuarterTurns &&
+					failure.cacheKey.autoContrast == currentKey->autoContrast &&
+					jpegview_linux::EqualEffectiveImageProcessingParams(failure.cacheKey.processing,
+						currentKey->processing)) {
+					currentSourceSpectrumRequestKey_.reset();
+					currentSourceSpectrumDisplayCacheKey_.clear();
+					if (failure.failure.kind != jpegview_linux::WorkerFailureKind::Cancelled) {
+						currentSourceSpectrumUnavailableKey_ = *currentKey;
+					}
+					++imageSpectrumPresentationRevision_;
+					frameInvalidator_.Mark(
+						jpegview_linux::FrameInvalidationReason::Overlay);
+				}
+			}
 			if (currentSelectedLoadPending_ &&
 				failure.key != pendingSelectedDisplayKey_) continue;
 			if (!currentDisplayRequest_.has_value() ||
@@ -3456,6 +3480,7 @@ private:
 			jpegview_linux::DisplayImageCompletionInfo completion =
 				readyBatch.TakeCompletion(index);
 			if (completion.image) {
+				CapturePreparedSourceSpectrum(*completion.image);
 				PendingTextureUpload pending;
 				pending.image = std::move(completion.image);
 				pending.priority = {completion.workClass, completion.priority};
@@ -3671,9 +3696,43 @@ private:
 		const jpegview_linux::DisplayImageTarget resolution =
 			jpegview_linux::ClampDisplayImageTarget(sourceWidth, sourceHeight,
 				width, height);
+		const bool histogramRequested = showHistogram_ && infoVisible_;
+		const std::optional<jpegview_linux::ImageSpectrumKey> histogramKey =
+			histogramRequested ? CurrentImageSpectrumKey() : std::nullopt;
+		if (histogramKey.has_value() && currentSourceSpectrumRequestKey_.has_value() &&
+			*currentSourceSpectrumRequestKey_ != *histogramKey) {
+			currentSourceSpectrumRequestKey_.reset();
+			currentSourceSpectrumDisplayCacheKey_.clear();
+			++imageSpectrumPresentationRevision_;
+		}
+		const bool spectrumAvailable = histogramKey.has_value() &&
+			currentSourceSpectrumValid_ && currentSourceSpectrumKey_.has_value() &&
+			*currentSourceSpectrumKey_ == *histogramKey;
+		const bool spectrumPending = histogramKey.has_value() &&
+			currentSourceSpectrumRequestKey_.has_value() &&
+			*currentSourceSpectrumRequestKey_ == *histogramKey;
+		const bool spectrumUnavailable = histogramKey.has_value() &&
+			currentSourceSpectrumUnavailableKey_.has_value() &&
+			*currentSourceSpectrumUnavailableKey_ == *histogramKey;
 		const bool failedRequestNeedsNewResolution = currentDisplayRequest_.has_value() &&
 			jpegview_linux::FailedDisplayRequestNeedsNewResolution(
 				*currentDisplayRequest_, failedCurrentDisplayKey_, resolution);
+		const bool pendingSpectrumRepresentationFits = spectrumPending &&
+			currentDisplayRequest_.has_value() && !failedRequestNeedsNewResolution &&
+			currentDisplayRequest_->includeSpectrum &&
+			currentDisplayRequest_->source.Key() == source.Key() &&
+			currentDisplayRequest_->frameIndex == currentAnimationFrame_ &&
+			currentDisplayRequest_->targetWidth >= resolution.width &&
+			currentDisplayRequest_->targetHeight >= resolution.height &&
+			currentDisplayRequest_->autoContrast == autoContrastEnabled_ &&
+			jpegview_linux::EqualEffectiveImageProcessingParams(
+				currentDisplayRequest_->cacheKey.processing,
+				jpegview_linux::EffectiveImageProcessingParams(imageProcessing_,
+					autoContrastEnabled_));
+		const bool needsSpectrumWork = histogramRequested && histogramKey.has_value() &&
+			!spectrumAvailable && !spectrumUnavailable;
+		const bool includeSpectrum = needsSpectrumWork &&
+			(!spectrumPending || pendingSpectrumRepresentationFits);
 		const bool currentRepresentationSufficient = currentDisplayRequest_.has_value() &&
 			!failedRequestNeedsNewResolution &&
 			currentDisplayRequest_->source.Key() == source.Key() &&
@@ -3683,10 +3742,11 @@ private:
 			currentDisplayRequest_->targetHeight >= resolution.height &&
 			currentDisplayRequest_->rotationQuarterTurns == 0 &&
 			currentDisplayRequest_->autoContrast == autoContrastEnabled_ &&
-			currentDisplayRequest_->includeSpectrum ==
-				(showHistogram_ && infoVisible_) &&
-			jpegview_linux::EqualImageProcessing(currentDisplayRequest_->processing,
-				imageProcessing_);
+			(!includeSpectrum || currentDisplayRequest_->includeSpectrum) &&
+			jpegview_linux::EqualEffectiveImageProcessingParams(
+				currentDisplayRequest_->cacheKey.processing,
+				jpegview_linux::EffectiveImageProcessingParams(imageProcessing_,
+					autoContrastEnabled_));
 		if (!currentRepresentationSufficient) {
 			failedCurrentDisplayKey_.clear();
 			jpegview_linux::DisplayImageRequest requested;
@@ -3695,13 +3755,13 @@ private:
 					source, currentDecoded_, currentAnimationFrame_,
 					resolution.width, resolution.height,
 					autoContrastEnabled_, 0, imageProcessing_, 0,
-					showHistogram_ && infoVisible_);
+					includeSpectrum);
 			} else {
 				requested = jpegview_linux::MakeJpegDisplayImageRequest(
 					source, image_.originalWidth, image_.originalHeight,
 					resolution.width, resolution.height,
 					autoContrastEnabled_, 0, imageProcessing_, 0,
-					showHistogram_ && infoVisible_);
+					includeSpectrum);
 			}
 			currentDisplayRequest_ = std::move(requested);
 			std::size_t bestBytes = std::numeric_limits<std::size_t>::max();
@@ -3722,7 +3782,7 @@ private:
 						bestRepresentation->cacheKey.targetHeight,
 						autoContrastEnabled_, 0, imageProcessing_,
 						bestRepresentation->cacheKey.rotationQuarterTurns,
-						showHistogram_ && infoVisible_);
+						includeSpectrum);
 				} else {
 					currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
 						source, image_.originalWidth, image_.originalHeight,
@@ -3730,11 +3790,21 @@ private:
 						bestRepresentation->cacheKey.targetHeight,
 						autoContrastEnabled_, 0, imageProcessing_,
 						bestRepresentation->cacheKey.rotationQuarterTurns,
-						showHistogram_ && infoVisible_);
+						includeSpectrum);
 				}
 			}
 			currentDisplayRequest_->workClass =
 				jpegview_linux::PerfWorkClass::ActiveImageSpread;
+		}
+		if (includeSpectrum && histogramKey.has_value() &&
+			currentDisplayRequest_->Valid() &&
+			(!currentSourceSpectrumRequestKey_.has_value() ||
+			*currentSourceSpectrumRequestKey_ != *histogramKey)) {
+			currentSourceSpectrumRequestKey_ = *histogramKey;
+			currentSourceSpectrumDisplayCacheKey_ = currentDisplayRequest_->key;
+			currentSourceSpectrumUnavailableKey_.reset();
+			++imageSpectrumPresentationRevision_;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
 		}
 		currentDisplayRequest_->selectionGeneration =
 			imageSession_.Selection().has_value() &&
@@ -3760,6 +3830,7 @@ private:
 				return nullptr;
 			}
 			if (SDL_Texture* cached = FindDisplayTexture(request->key)) {
+				CaptureCachedDisplaySpectrum(request->key);
 				MarkSelectedDisplayFrameReady(request->selectionGeneration,
 					request->source.Key(), request->key);
 				return cached;
@@ -4369,6 +4440,7 @@ private:
 			return;
 		}
 		ClearCropSelection();
+		CancelImageSpectrumBeforeImageMutation();
 		const bool canKeepSpreadRotation = currentSpreadRotationValid_ || !imageModified_;
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		if (!TransformImage(image_, command) ||
@@ -4974,6 +5046,7 @@ private:
 		}
 		correctionBase_ = std::move(croppedBase);
 		correctionBaseValid_ = true;
+		CancelImageSpectrumBeforeImageMutation();
 		image_ = std::move(croppedImage);
 		currentPixelsMaterialized_ = true;
 		materializedProcessing_ = imageProcessing_;
@@ -6729,6 +6802,7 @@ private:
 
 	bool SetAnimationFrame(std::size_t index) {
 		if (!currentDecoded_ || index >= currentDecoded_->frames.size()) return false;
+		CancelImageSpectrumBeforeImageMutation();
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		const jpegview_linux::DecodedFrame& frame = currentDecoded_->frames[index];
 		image_ = {};
@@ -6875,44 +6949,246 @@ private:
 			fileList_.Size(), spreadPartnerIndex);
 	}
 
-	jpegview_linux::InformationOverlayPaintPlan BuildImageInfoPaintPlan() {
-		std::vector<std::string> lines = CachedImageInfoLines();
-		if (lines.empty()) return {};
-		int contentWidth = 0;
-		for (std::string& line : lines) {
-			line = InfoText(line);
-			contentWidth = std::max(contentWidth, TextWidth(line, kUiTextScale));
+	std::optional<jpegview_linux::ImageSpectrumKey> CurrentImageSpectrumKey() const {
+		if (fileList_.Empty()) return std::nullopt;
+		const jpegview_linux::SourceDescriptor source =
+			SourceDescriptorForPath(fileList_.Current());
+		if (!source.Key().Valid()) return std::nullopt;
+		return jpegview_linux::ImageSpectrumKey{source.Key(),
+			imageSession_.DocumentRevision(), currentAnimationFrame_,
+			jpegview_linux::EffectiveImageProcessingParams(imageProcessing_,
+				autoContrastEnabled_),
+			autoContrastEnabled_, currentImageRotationQuarterTurns_};
+	}
+
+	void CaptureSourceSpectrum(
+		const jpegview_linux::DisplayImageCacheKey& cacheKey,
+		const jpegview_linux::GrayscaleSpectrum* spectrum) {
+		if (spectrum == nullptr || !cacheKey.includeSpectrum ||
+			UsesEditedImageSpectrum() ||
+			!currentSourceSpectrumRequestKey_.has_value()) return;
+		const std::optional<jpegview_linux::ImageSpectrumKey> currentKey =
+			CurrentImageSpectrumKey();
+		if (!currentKey.has_value() ||
+			*currentSourceSpectrumRequestKey_ != *currentKey ||
+			cacheKey.source != currentKey->source ||
+			cacheKey.frameIndex != currentKey->frameIndex ||
+			cacheKey.rotationQuarterTurns != currentKey->rotationQuarterTurns ||
+			cacheKey.autoContrast != currentKey->autoContrast ||
+			!jpegview_linux::EqualEffectiveImageProcessingParams(cacheKey.processing,
+				currentKey->processing)) return;
+		currentSourceSpectrum_ = *spectrum;
+		currentSourceSpectrumKey_ = *currentKey;
+		currentSourceSpectrumValid_ = true;
+		currentSourceSpectrumRequestKey_.reset();
+		currentSourceSpectrumDisplayCacheKey_.clear();
+		currentSourceSpectrumUnavailableKey_.reset();
+		++imageSpectrumPresentationRevision_;
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+	}
+
+	void CapturePreparedSourceSpectrum(
+		const jpegview_linux::PreparedDisplayImage& prepared) {
+		CaptureSourceSpectrum(prepared.cacheKey,
+			prepared.spectrum ? prepared.spectrum.get() : nullptr);
+	}
+
+	void CaptureCachedDisplaySpectrum(const std::string& key) {
+		const auto cached = displayTextureCache_.find(key);
+		if (cached == displayTextureCache_.end()) return;
+		CaptureSourceSpectrum(cached->second.cacheKey,
+			cached->second.spectrum ? cached->second.spectrum.get() : nullptr);
+	}
+
+	bool UsesEditedImageSpectrum() const {
+		return imageModified_ || currentPixelsDetachedFromSource_;
+	}
+
+	void CancelImageSpectrumBeforeImageMutation() {
+		imageSpectrumWorker_.CancelAndWait();
+		editedImageSpectrumValid_ = false;
+		editedImageSpectrumKey_.reset();
+		editedImageSpectrumUnavailableKey_.reset();
+		editedImageSpectrumRequestKey_.reset();
+		editedImageSpectrumRequestGeneration_ = 0;
+		currentSourceSpectrumRequestKey_.reset();
+		currentSourceSpectrumDisplayCacheKey_.clear();
+		++imageSpectrumPresentationRevision_;
+	}
+
+	void TickImageSpectrum() {
+		const bool requested = showHistogram_ && infoVisible_;
+		const bool editedPixels = UsesEditedImageSpectrum();
+		if (currentSourceSpectrumRequestKey_.has_value()) {
+			const std::optional<jpegview_linux::ImageSpectrumKey> selectedKey =
+				CurrentImageSpectrumKey();
+			if (editedPixels || !selectedKey.has_value() ||
+				*selectedKey != *currentSourceSpectrumRequestKey_) {
+				currentSourceSpectrumRequestKey_.reset();
+				currentSourceSpectrumDisplayCacheKey_.clear();
+				++imageSpectrumPresentationRevision_;
+			} else if (!currentSourceSpectrumDisplayCacheKey_.empty() &&
+				displayTextureCache_.find(currentSourceSpectrumDisplayCacheKey_) ==
+					displayTextureCache_.end() &&
+				!displayImageCache_.HasPendingOrCached(
+					currentSourceSpectrumDisplayCacheKey_)) {
+				currentSourceSpectrumRequestKey_.reset();
+				currentSourceSpectrumDisplayCacheKey_.clear();
+				++imageSpectrumPresentationRevision_;
+			}
+		}
+		const std::optional<jpegview_linux::ImageSpectrumKey> currentKey =
+			editedPixels ? CurrentImageSpectrumKey() : std::nullopt;
+		const std::optional<jpegview_linux::ImageSpectrumResult> result =
+			imageSpectrumWorker_.TakeReady();
+		if (result.has_value() && editedImageSpectrumRequestKey_.has_value() &&
+			currentKey.has_value() && jpegview_linux::IsCurrentImageSpectrumResult(
+				*result, editedImageSpectrumRequestGeneration_, *currentKey)) {
+			editedImageSpectrumRequestKey_.reset();
+			editedImageSpectrumRequestGeneration_ = 0;
+			if (result->spectrum.has_value()) {
+				editedImageSpectrum_ = *result->spectrum;
+				editedImageSpectrumKey_ = result->key;
+				editedImageSpectrumValid_ = true;
+				editedImageSpectrumUnavailableKey_.reset();
+			} else {
+				editedImageSpectrumValid_ = false;
+				editedImageSpectrumKey_.reset();
+				editedImageSpectrumUnavailableKey_ = result->key;
+			}
+			++imageSpectrumPresentationRevision_;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+		} else if (result.has_value() && editedImageSpectrumRequestKey_.has_value() &&
+			result->generation == editedImageSpectrumRequestGeneration_) {
+			editedImageSpectrumRequestKey_.reset();
+			editedImageSpectrumRequestGeneration_ = 0;
+		}
+
+		if (!requested) {
+			if (editedImageSpectrumRequestKey_.has_value()) {
+				imageSpectrumWorker_.Cancel();
+				editedImageSpectrumRequestKey_.reset();
+				editedImageSpectrumRequestGeneration_ = 0;
+				++imageSpectrumPresentationRevision_;
+			}
+			return;
+		}
+		if (currentSelectedLoadPending_) return;
+		if (!editedPixels) {
+			if (editedImageSpectrumRequestKey_.has_value()) {
+				imageSpectrumWorker_.Cancel();
+				editedImageSpectrumRequestKey_.reset();
+				editedImageSpectrumRequestGeneration_ = 0;
+				++imageSpectrumPresentationRevision_;
+			}
+			const std::optional<jpegview_linux::ImageSpectrumKey> sourceKey =
+				CurrentImageSpectrumKey();
+			if (!sourceKey.has_value()) return;
+			if (currentSourceSpectrumValid_ && currentSourceSpectrumKey_.has_value() &&
+				*currentSourceSpectrumKey_ == *sourceKey) return;
+			if (currentSourceSpectrumUnavailableKey_.has_value() &&
+				*currentSourceSpectrumUnavailableKey_ == *sourceKey) return;
+			if (currentSourceSpectrumRequestKey_.has_value() &&
+				*currentSourceSpectrumRequestKey_ == *sourceKey) return;
+			if (image_.width > 0) RequestCurrentDisplayFrame();
+			return;
+		}
+		if (!currentKey.has_value()) return;
+		if (editedImageSpectrumValid_ && editedImageSpectrumKey_.has_value() &&
+			*editedImageSpectrumKey_ == *currentKey) return;
+		if (editedImageSpectrumUnavailableKey_.has_value() &&
+			*editedImageSpectrumUnavailableKey_ == *currentKey) return;
+		if (editedImageSpectrumRequestKey_.has_value() &&
+			*editedImageSpectrumRequestKey_ == *currentKey) {
+			if (imageSpectrumWorker_.IsPendingFor(*currentKey)) return;
+			imageSpectrumWorker_.Cancel();
+			editedImageSpectrumRequestKey_.reset();
+			editedImageSpectrumRequestGeneration_ = 0;
+		}
+		const std::uint64_t generation = imageSpectrumWorker_.Request(image_, *currentKey);
+		if (generation == 0) {
+			editedImageSpectrumUnavailableKey_ = *currentKey;
+		} else {
+			editedImageSpectrumRequestKey_ = *currentKey;
+			editedImageSpectrumRequestGeneration_ = generation;
+			editedImageSpectrumUnavailableKey_.reset();
+		}
+		++imageSpectrumPresentationRevision_;
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+	}
+
+	const jpegview_linux::InformationOverlayPaintPlan& BuildImageInfoPaintPlan() {
+		const std::vector<std::string>& sourceLines = CachedImageInfoLines();
+		const bool editedPixels = UsesEditedImageSpectrum();
+		const std::optional<jpegview_linux::ImageSpectrumKey> spectrumKey =
+			showHistogram_ ? CurrentImageSpectrumKey() : std::nullopt;
+		const jpegview_linux::GrayscaleSpectrum* spectrumPointer = nullptr;
+		int spectrumState = 0;
+		std::string spectrumStatus;
+		if (showHistogram_) {
+			spectrumState = 1;
+			if (editedPixels) {
+				if (spectrumKey.has_value() && editedImageSpectrumValid_ &&
+					editedImageSpectrumKey_.has_value() &&
+					*editedImageSpectrumKey_ == *spectrumKey) {
+					spectrumPointer = &editedImageSpectrum_;
+					spectrumState = 0;
+				} else if (spectrumKey.has_value() &&
+					editedImageSpectrumUnavailableKey_.has_value() &&
+					*editedImageSpectrumUnavailableKey_ == *spectrumKey) {
+					spectrumState = 2;
+				}
+			} else if (!spectrumKey.has_value()) {
+				spectrumState = 2;
+			} else if (currentSourceSpectrumValid_ && currentSourceSpectrumKey_.has_value() &&
+				*currentSourceSpectrumKey_ == *spectrumKey) {
+				spectrumPointer = &currentSourceSpectrum_;
+				spectrumState = 0;
+			} else if (currentSourceSpectrumUnavailableKey_.has_value() &&
+				*currentSourceSpectrumUnavailableKey_ == *spectrumKey) {
+				spectrumState = 2;
+			}
+			if (spectrumState == 1) spectrumStatus = "Histogram loading...";
+			else if (spectrumState == 2) spectrumStatus = "Histogram unavailable";
 		}
 
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const jpegview_linux::OverlayLayout layout = jpegview_linux::InformationOverlayLayout(
-			contentWidth, lines.size(), windowWidth, windowHeight, showFileName_,
-			kOverlayInset, kOverlayTextPadding, OverlayLineHeight(), FilenameOverlayHeight(),
-			showHistogram_);
-		for (std::string& line : lines) {
-			if (TextWidth(line, kUiTextScale) <= layout.textWidth) continue;
-			line = ClipText(line, layout.textWidth);
-		}
-
-		const jpegview_linux::GrayscaleSpectrum* spectrumPointer = nullptr;
-		if (showHistogram_) {
-			if (imageModified_ || currentPixelsDetachedFromSource_) {
-				if (editedImageSpectrumValid_) spectrumPointer = &editedImageSpectrum_;
-			} else if (currentDisplayRequest_.has_value()) {
-				const auto prepared = displayTextureCache_.find(currentDisplayRequest_->key);
-				if (prepared != displayTextureCache_.end() &&
-					prepared->second.spectrum) {
-					spectrumPointer = prepared->second.spectrum.get();
+		std::ostringstream cacheKey;
+		const std::string& linesKey = imageInfoLineCache_.Key();
+		cacheKey << linesKey.size() << ':' << linesKey << '|'
+			<< windowWidth << ':' << windowHeight << '|'
+			<< showFileName_ << ':' << showHistogram_ << '|'
+			<< OverlayLineHeight() << ':' << FilenameOverlayHeight() << '|'
+			<< imageSession_.DocumentRevision() << ':' << currentAnimationFrame_ << ':'
+			<< currentImageRotationQuarterTurns_ << ':' << imageSpectrumPresentationRevision_ << '|'
+			<< spectrumState;
+		const std::string key = cacheKey.str();
+		return imageInfoPaintPlanCache_.GetOrBuild(key, lastMouseX_, lastMouseY_,
+			[this, &sourceLines, windowWidth, windowHeight, spectrumPointer,
+				spectrumStatus] {
+				if (sourceLines.empty()) return jpegview_linux::InformationOverlayPaintPlan{};
+				std::vector<std::string> lines = sourceLines;
+				if (!spectrumStatus.empty()) lines.insert(lines.begin(), spectrumStatus);
+				int contentWidth = 0;
+				for (std::string& line : lines) {
+					line = InfoText(line);
+					contentWidth = std::max(contentWidth, TextWidth(line, kUiTextScale));
 				}
-			}
-		}
-		const jpegview_linux::UiRect button = jpegview_linux::InformationOverlaySpectrumButton(
-			layout, kOverlayTextPadding);
-		const bool buttonHovered = jpegview_linux::Contains(button, lastMouseX_, lastMouseY_);
-		return jpegview_linux::InformationOverlayPaint(layout, lines, OverlayLineHeight(),
-			kOverlayTextPadding, showHistogram_, spectrumPointer, buttonHovered);
+				const jpegview_linux::OverlayLayout layout =
+					jpegview_linux::InformationOverlayLayout(contentWidth, lines.size(),
+						windowWidth, windowHeight, showFileName_, kOverlayInset,
+						kOverlayTextPadding, OverlayLineHeight(), FilenameOverlayHeight(),
+						showHistogram_);
+				for (std::string& line : lines) {
+					if (TextWidth(line, kUiTextScale) <= layout.textWidth) continue;
+					line = ClipText(line, layout.textWidth);
+				}
+				return jpegview_linux::InformationOverlayPaint(layout, lines,
+					OverlayLineHeight(), kOverlayTextPadding, showHistogram_,
+					spectrumPointer, false);
+			});
 	}
 
 	jpegview_linux::NavigationPanelPaint CurrentNavigationPanelPaint() const {
@@ -7561,10 +7837,12 @@ private:
 			break;
 		case IDM_SHOW_FILEINFO:
 			infoVisible_ = !infoVisible_;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
 			SaveSettings();
 			break;
 		case IDM_SHOW_FILENAME:
 			showFileName_ = !showFileName_;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
 			SaveSettings();
 			break;
 		case IDM_SHOW_NAVPANEL:
@@ -8545,6 +8823,7 @@ private:
 		resizedImage.originalHeight = height;
 		correctionBase_ = std::move(resizedImage);
 		correctionBaseValid_ = true;
+		CancelImageSpectrumBeforeImageMutation();
 		image_ = correctionBase_;
 		if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) {
 			resizeDialog_.SetMessage("Image processing failed");
@@ -10326,7 +10605,7 @@ private:
 	void RenderImageInfo() {
 		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ || advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
-		const jpegview_linux::InformationOverlayPaintPlan paint = BuildImageInfoPaintPlan();
+		const jpegview_linux::InformationOverlayPaintPlan& paint = BuildImageInfoPaintPlan();
 		if (paint.overlay.panel.width <= 0 || paint.overlay.panel.height <= 0) return;
 		RenderOverlayPaint(paint.overlay);
 		const SDL_Rect panel = SdlRect(paint.overlay.panel);
@@ -11155,16 +11434,10 @@ private:
 		if (!infoVisible_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
 			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return false;
-		const jpegview_linux::InformationOverlayPaintPlan paint = BuildImageInfoPaintPlan();
+		const jpegview_linux::InformationOverlayPaintPlan& paint = BuildImageInfoPaintPlan();
 		if (!jpegview_linux::Contains(paint.spectrumButton, x, y)) return false;
 		showHistogram_ = !showHistogram_;
-		if (showHistogram_ && infoVisible_ &&
-			(imageModified_ || currentPixelsDetachedFromSource_) &&
-			!editedImageSpectrumValid_ && image_.width > 0 && image_.height > 0) {
-			editedImageSpectrum_ = jpegview_linux::BuildGrayscaleSpectrum(
-				image_.bgra, image_.width, image_.height);
-			editedImageSpectrumValid_ = true;
-		}
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
 		SaveSettings();
 		return true;
 	}
@@ -12207,6 +12480,7 @@ private:
 	jpegview_linux::WindowTitleFormatCache windowTitleFormatCache_;
 	jpegview_linux::AppliedWindowTitle appliedWindowTitle_;
 	jpegview_linux::ImageInfoLineCache imageInfoLineCache_;
+	jpegview_linux::InformationOverlayPaintPlanCache imageInfoPaintPlanCache_;
 	int transitionEffect_ = IDM_EFFECT_NONE;
 	Uint32 transitionDurationMs_ = 500;
 	Uint32 transitionStartTick_ = 0;
@@ -12214,6 +12488,7 @@ private:
 	bool startFullscreen_ = false;
 	Image image_;
 	Image correctionBase_;
+	jpegview_linux::ImageSpectrumWorker imageSpectrumWorker_;
 	std::optional<jpegview_linux::PageDimensions> currentSourcePageDimensions_;
 	int currentImageRotationQuarterTurns_ = 0;
 	bool currentSpreadRotationValid_ = false;
@@ -12335,6 +12610,17 @@ private:
 	bool showHistogram_ = false;
 	bool editedImageSpectrumValid_ = false;
 	jpegview_linux::GrayscaleSpectrum editedImageSpectrum_{};
+	std::optional<jpegview_linux::ImageSpectrumKey> editedImageSpectrumKey_;
+	std::optional<jpegview_linux::ImageSpectrumKey> editedImageSpectrumUnavailableKey_;
+	std::optional<jpegview_linux::ImageSpectrumKey> editedImageSpectrumRequestKey_;
+	std::uint64_t editedImageSpectrumRequestGeneration_ = 0;
+	jpegview_linux::GrayscaleSpectrum currentSourceSpectrum_{};
+	bool currentSourceSpectrumValid_ = false;
+	std::optional<jpegview_linux::ImageSpectrumKey> currentSourceSpectrumKey_;
+	std::optional<jpegview_linux::ImageSpectrumKey> currentSourceSpectrumUnavailableKey_;
+	std::optional<jpegview_linux::ImageSpectrumKey> currentSourceSpectrumRequestKey_;
+	std::string currentSourceSpectrumDisplayCacheKey_;
+	std::uint64_t imageSpectrumPresentationRevision_ = 0;
 	bool showFileName_ = false;
 	jpegview_linux::HeldNavigationController heldNavigation_;
 	bool confirmationOpen_ = false;

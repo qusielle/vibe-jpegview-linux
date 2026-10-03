@@ -65,6 +65,11 @@ double LevelControlPosition(const ImageProcessingParams& params, LevelControl co
 bool IsDefaultImageProcessing(const ImageProcessingParams& params);
 bool EqualImageProcessing(const ImageProcessingParams& left,
 	const ImageProcessingParams& right);
+// Canonical pixel-affecting parameters for results shared across render sizes.
+ImageProcessingParams EffectiveImageProcessingParams(
+	const ImageProcessingParams& processing, bool autoContrast);
+bool EqualEffectiveImageProcessingParams(const ImageProcessingParams& left,
+	const ImageProcessingParams& right);
 ImageProcessingPreset ResolveImageProcessingForFile(const ImageProcessingPreset& current,
 	const ImageProcessingPreset* saved, bool keepCurrent, bool defaultAutoContrast,
 	const ImageProcessingParams& defaultProcessing = {});

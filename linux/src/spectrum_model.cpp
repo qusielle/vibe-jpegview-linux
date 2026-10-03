@@ -8,14 +8,21 @@ namespace jpegview_linux {
 
 GrayscaleSpectrum BuildGrayscaleSpectrum(const std::vector<std::uint8_t>& bgra,
 	int width, int height) {
+	const auto result = TryBuildGrayscaleSpectrum(bgra, width, height, {});
+	return result.value_or(GrayscaleSpectrum{});
+}
+
+std::optional<GrayscaleSpectrum> TryBuildGrayscaleSpectrum(
+	const std::vector<std::uint8_t>& bgra, int width, int height,
+	const std::function<bool()>& shouldContinue) {
 	GrayscaleSpectrum spectrum{};
-	if (width <= 0 || height <= 0) return spectrum;
+	if (width <= 0 || height <= 0) return std::nullopt;
 
 	const std::size_t imageWidth = static_cast<std::size_t>(width);
 	const std::size_t imageHeight = static_cast<std::size_t>(height);
 	if (imageWidth > std::numeric_limits<std::size_t>::max() / imageHeight / 4 ||
 		bgra.size() < imageWidth * imageHeight * 4) {
-		return spectrum;
+		return std::nullopt;
 	}
 
 	const std::size_t pixelCount = imageWidth * imageHeight;
@@ -24,6 +31,15 @@ GrayscaleSpectrum BuildGrayscaleSpectrum(const std::vector<std::uint8_t>& bgra,
 	const std::size_t pixelsPerLine = std::max<std::size_t>(1, imageWidth / grid);
 	const std::size_t lines = std::max<std::size_t>(1, imageHeight / grid);
 	for (std::size_t row = 0; row < lines; ++row) {
+		if (shouldContinue) {
+			bool keepGoing = false;
+			try {
+				keepGoing = shouldContinue();
+			} catch (...) {
+				keepGoing = false;
+			}
+			if (!keepGoing) return std::nullopt;
+		}
 		const std::size_t y = row * grid;
 		for (std::size_t column = 0; column < pixelsPerLine; ++column) {
 			const std::size_t x = column * grid;

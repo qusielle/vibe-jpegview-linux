@@ -354,8 +354,10 @@ they support.
     dialog previews radius, amount, and threshold before applying. Adjustments are non-destructive
     until save; per-image levels can be saved/removed in the parameter database, set as defaults for
     images without a saved entry, or kept between images. Automatic histogram correction remains
-    available with F5. The optional grayscale histogram uses full-source pixels prepared on workers
-    and cached with the display frame, so painting does not repeatedly scan pixels. Animated GIF,
+    available with F5. The optional grayscale histogram uses full-source processed pixels prepared
+    on workers, including edited images; it shows a loading state while a matching result is pending.
+    Pan, zoom, and pointer movement reuse the current histogram and cached overlay layout. Window
+    resizing keeps the histogram and recalculates layout only when its geometry changes. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
     rates and folder advancement, slideshow transitions are rendered natively after cold images are
     presented, and slideshow/movie timers resume from each successful display commit. Alt+R resumes, and

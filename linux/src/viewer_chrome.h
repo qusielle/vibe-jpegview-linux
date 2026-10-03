@@ -5,6 +5,7 @@
 #include "spectrum_model.h"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,21 @@ InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 	const std::vector<std::string>& lines, int lineHeight, int textPadding = 6,
 	bool spectrumVisible = false, const GrayscaleSpectrum* spectrum = nullptr,
 	bool buttonHovered = false);
+
+class InformationOverlayPaintPlanCache {
+public:
+	const InformationOverlayPaintPlan& GetOrBuild(const std::string& key,
+		int mouseX, int mouseY,
+		const std::function<InformationOverlayPaintPlan()>& builder);
+	void Clear();
+
+private:
+	std::string key_;
+	InformationOverlayPaintPlan plan_;
+	bool valid_ = false;
+	bool buttonHovered_ = false;
+};
+
 UiRect InformationOverlaySpectrumButton(const OverlayLayout& layout, int textPadding = 6);
 
 struct NavigationButtonPaint {

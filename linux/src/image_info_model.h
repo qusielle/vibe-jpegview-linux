@@ -75,6 +75,7 @@ class ImageInfoLineCache {
 public:
 	const std::vector<std::string>& GetOrBuild(const std::string& key,
 		const std::function<std::vector<std::string>()>& builder);
+	const std::string& Key() const { return key_; }
 	void Clear();
 
 private:

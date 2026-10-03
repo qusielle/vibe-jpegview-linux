@@ -12,6 +12,7 @@
 #include "cache_budget.h"
 #include "cache_policy.h"
 #include "display_upload_scheduler.h"
+#include "image_spectrum_worker.h"
 #include "image.h"
 #include "image_processing.h"
 #include "image_processing_store.h"
@@ -10787,6 +10788,11 @@ void TestDisplayImageCacheBackgroundPreparation() {
 		jpegview_linux::DisplayImageCacheKeyHash{}(inactiveRequest.cacheKey) ==
 			jpegview_linux::DisplayImageCacheKeyHash{}(scaled.cacheKey),
 		"disabled processing controls changed structured-key equality or its hash");
+	Expect(jpegview_linux::EqualImageProcessing(
+		jpegview_linux::EffectiveImageProcessingParams(inactiveLevels, false),
+		jpegview_linux::EffectiveImageProcessingParams(
+			jpegview_linux::ImageProcessingParams{}, false)),
+		"effective image processing retained controls that cannot affect source pixels");
 	inactiveLevels.unsharpAmount = 1.0;
 	const auto activeUnsharpRequest = jpegview_linux::MakeDisplayImageRequest(
 		firstFile, decoded, 0, 2, 2, false, 0, inactiveLevels);
@@ -16439,6 +16445,34 @@ void TestViewerChromePaintPlans() {
 		infoPaint.spectrumLines[0].y1 > infoPaint.spectrumLines[0].y2 &&
 		infoPaint.spectrumLines[0].color.red == 255,
 		"expanded EXIF spectrum or collapse button was laid out incorrectly");
+	int planBuilds = 0;
+	jpegview_linux::InformationOverlayPaintPlanCache planCache;
+	const auto planBuilder = [&planBuilds, &infoLayout] {
+		++planBuilds;
+		return jpegview_linux::InformationOverlayPaint(infoLayout,
+			{"heading", "details"}, 18, 6);
+	};
+	const jpegview_linux::InformationOverlayPaintPlan& idlePlan =
+		planCache.GetOrBuild("same-geometry", 0, 0, planBuilder);
+	const int idleButtonRed = idlePlan.spectrumLines[0].color.red;
+	const int idleButtonGreen = idlePlan.spectrumLines[0].color.green;
+	const jpegview_linux::InformationOverlayPaintPlan& hoveredPlan =
+		planCache.GetOrBuild("same-geometry", idlePlan.spectrumButton.x,
+			idlePlan.spectrumButton.y, planBuilder);
+	Expect(planBuilds == 1 && hoveredPlan.spectrumButton.x == idlePlan.spectrumButton.x &&
+		hoveredPlan.spectrumLines[0].color.red == 255 &&
+		(idleButtonRed != hoveredPlan.spectrumLines[0].color.red ||
+			idleButtonGreen != hoveredPlan.spectrumLines[0].color.green),
+		"hovering the histogram control rebuilt its layout or failed to recolor the cached icon");
+	(void)planCache.GetOrBuild("same-geometry", 0, 0, planBuilder);
+	const auto resizedPlan = planCache.GetOrBuild("resized", 0, 0,
+		[&planBuilds, &spectrumLayout] {
+			++planBuilds;
+			return jpegview_linux::InformationOverlayPaint(spectrumLayout,
+				{"heading", "details"}, 18, 6, true);
+		});
+	Expect(planBuilds == 2 && resizedPlan.overlay.panel.width == spectrumLayout.width,
+		"overlay geometry changes did not rebuild the cached text and paint plan exactly once");
 
 	jpegview_linux::NavigationPanelPaint navigation = jpegview_linux::BuildNavigationPanelPaint(
 		800, 600, 341, 585, true, FileList::SortMode::LastModificationTime, 7, 18, 11);
@@ -18521,6 +18555,167 @@ void TestGrayscaleSpectrumCalculationAndScaling() {
 		jpegview_linux::GrayscaleSpectrumBarHeights(distribution, 0) ==
 		std::array<int, jpegview_linux::kSpectrumBinCount>{},
 		"grayscale spectrum bars did not use square-root scaling or handle empty height");
+	std::size_t cancellationChecks = 0;
+	const auto canceled = jpegview_linux::TryBuildGrayscaleSpectrum(largeImage, 1000, 1000,
+		[&cancellationChecks] { return ++cancellationChecks < 3; });
+	Expect(!canceled && cancellationChecks == 3,
+		"grayscale histogram did not stop at a sampled-row cancellation boundary");
+	const auto uncanceled = jpegview_linux::TryBuildGrayscaleSpectrum(
+		largeImage, 1000, 1000, [] { return true; });
+	Expect(uncanceled.has_value() && *uncanceled == sampled,
+		"cancellable full-source histogram changed the existing sampled output");
+}
+
+void TestImageSpectrumWorkerGenerationDeduplicationAndShutdown() {
+	jpegview_linux::Image image;
+	image.width = image.originalWidth = 8;
+	image.height = image.originalHeight = 4;
+	image.bgra.resize(static_cast<std::size_t>(image.width * image.height * 4));
+	for (std::size_t offset = 0; offset < image.bgra.size(); offset += 4) {
+		const std::uint8_t value = static_cast<std::uint8_t>((offset / 4) * 7);
+		image.bgra[offset] = value;
+		image.bgra[offset + 1] = static_cast<std::uint8_t>(value / 2);
+		image.bgra[offset + 2] = static_cast<std::uint8_t>(255 - value);
+		image.bgra[offset + 3] = 255;
+	}
+	const jpegview_linux::ImageSpectrumKey key{
+		jpegview_linux::SourceKey("/spectrum/full-source.jpg",
+			jpegview_linux::SourceIdentity{1, 2, 3, 4, 5, true}),
+		9, 0, jpegview_linux::EffectiveImageProcessingParams(
+			jpegview_linux::ImageProcessingParams{}, false), false, 0};
+	jpegview_linux::ImageProcessingParams inactiveProcessing;
+	inactiveProcessing.colorCorrection = 0.25;
+	inactiveProcessing.contrastCorrection = 0.5;
+	inactiveProcessing.deepShadows = 0.75;
+	inactiveProcessing.unsharpRadius = 4.0;
+	inactiveProcessing.unsharpThreshold = 10.0;
+	jpegview_linux::ImageSpectrumKey inactiveState = key;
+	inactiveState.processing = jpegview_linux::EffectiveImageProcessingParams(
+		inactiveProcessing, false);
+	jpegview_linux::ImageSpectrumKey activeState = key;
+	activeState.frameIndex = 1;
+	jpegview_linux::ImageSpectrumKey processingState = key;
+	jpegview_linux::ImageProcessingParams changedProcessing;
+	changedProcessing.contrast = 0.2;
+	processingState.processing = jpegview_linux::EffectiveImageProcessingParams(
+		changedProcessing, false);
+	jpegview_linux::ImageSpectrumKey subEpsilonState = key;
+	changedProcessing.contrast = 0.0000000005;
+	subEpsilonState.processing = jpegview_linux::EffectiveImageProcessingParams(
+		changedProcessing, false);
+	Expect(inactiveState == key && activeState != key && processingState != key &&
+		subEpsilonState != key,
+		"histogram identity split on inactive controls or ignored frame and processing changes");
+	const jpegview_linux::GrayscaleSpectrum expected =
+		jpegview_linux::BuildGrayscaleSpectrum(image.bgra, image.width, image.height);
+	jpegview_linux::ImageSpectrumWorker worker;
+	const std::uint64_t generation = worker.Request(image, key);
+	Expect(generation != 0 && worker.Request(image, key) == generation,
+		"identical histogram requests were not deduplicated by source and document state");
+	Expect(worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"full-source histogram worker did not finish within its bounded deadline");
+	const auto result = worker.TakeReady();
+	Expect(result.has_value() && result->spectrum.has_value() &&
+		*result->spectrum == expected &&
+		jpegview_linux::IsCurrentImageSpectrumResult(*result, generation, key),
+		"histogram worker did not preserve the existing processed-pixel calculation");
+	Expect(worker.Request(image, key) == generation &&
+		!worker.TakeReady().has_value(),
+		"repeated viewport-independent requests restarted a completed histogram");
+	worker.Stop();
+	Expect(worker.Request(image, key) == 0,
+		"stopped histogram worker accepted a request without scheduling it");
+	jpegview_linux::UiCompletionWakeup().Consume();
+
+	std::mutex mutex;
+	std::condition_variable startedCondition;
+	std::condition_variable releaseCondition;
+	bool firstStarted = false;
+	bool releaseFirst = false;
+	std::atomic<int> computations{0};
+	jpegview_linux::ImageSpectrumWorker replacingWorker(
+		[&](const jpegview_linux::Image& source,
+			const std::function<bool()>&) -> std::optional<jpegview_linux::GrayscaleSpectrum> {
+			const int computation = ++computations;
+			if (computation == 1) {
+				std::unique_lock<std::mutex> lock(mutex);
+				firstStarted = true;
+				startedCondition.notify_all();
+				if (!releaseCondition.wait_for(lock, std::chrono::seconds(2),
+					[&releaseFirst] { return releaseFirst; })) return std::nullopt;
+			}
+			return jpegview_linux::BuildGrayscaleSpectrum(
+				source.bgra, source.width, source.height);
+		});
+	const std::uint64_t obsoleteGeneration = replacingWorker.Request(image, key);
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(startedCondition.wait_for(lock, std::chrono::seconds(2),
+			[&firstStarted] { return firstStarted; }),
+			"replacement test did not reach its controlled worker boundary");
+	}
+	const std::uint64_t duplicateGeneration = replacingWorker.Request(image, key);
+	jpegview_linux::ImageSpectrumKey replacementKey = key;
+	++replacementKey.documentRevision;
+	const std::uint64_t currentGeneration =
+		replacingWorker.Request(image, replacementKey);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseFirst = true;
+	}
+	releaseCondition.notify_all();
+	Expect(duplicateGeneration == obsoleteGeneration &&
+		currentGeneration > obsoleteGeneration &&
+		replacingWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"new document revision did not replace the obsolete in-flight histogram");
+	const auto currentResult = replacingWorker.TakeReady();
+	Expect(computations.load() == 2 && currentResult.has_value() &&
+		currentResult->generation == currentGeneration &&
+		currentResult->key == replacementKey &&
+		jpegview_linux::IsCurrentImageSpectrumResult(
+			*currentResult, currentGeneration, replacementKey) &&
+		!jpegview_linux::IsCurrentImageSpectrumResult(
+			*currentResult, currentGeneration, activeState) &&
+		!jpegview_linux::IsCurrentImageSpectrumResult(
+			*currentResult, currentGeneration, processingState) &&
+		!jpegview_linux::IsCurrentImageSpectrumResult(
+			*currentResult, currentGeneration, subEpsilonState) &&
+		!jpegview_linux::IsCurrentImageSpectrumResult(
+			*currentResult, obsoleteGeneration, key),
+		"obsolete histogram output escaped generation and source-state validation");
+	replacingWorker.CancelAndWait();
+	replacingWorker.Stop();
+	jpegview_linux::UiCompletionWakeup().Consume();
+
+	std::atomic<int> failureComputations{0};
+	jpegview_linux::ImageSpectrumWorker failureWorker(
+		[&failureComputations](const jpegview_linux::Image& source,
+			const std::function<bool()>& keepGoing)
+			-> std::optional<jpegview_linux::GrayscaleSpectrum> {
+			if (++failureComputations == 1) {
+				throw std::runtime_error("controlled histogram failure");
+			}
+		return jpegview_linux::TryBuildGrayscaleSpectrum(source.bgra,
+			source.width, source.height, keepGoing);
+		});
+	const std::uint64_t failedGeneration = failureWorker.Request(image, key);
+	Expect(failedGeneration != 0 &&
+		failureWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"throwing histogram processor did not finish within its bounded deadline");
+	const auto failedResult = failureWorker.TakeReady();
+	jpegview_linux::ImageSpectrumKey retryKey = key;
+	++retryKey.documentRevision;
+	const std::uint64_t retryGeneration = failureWorker.Request(image, retryKey);
+	Expect(failedResult.has_value() && failedResult->failure.kind ==
+		jpegview_linux::WorkerFailureKind::Exception && retryGeneration > failedGeneration &&
+		failureWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"histogram exception escaped the worker or prevented a later valid request");
+	const auto retryResult = failureWorker.TakeReady();
+	Expect(retryResult.has_value() && retryResult->spectrum.has_value() &&
+		!retryResult->failure.Failed(),
+		"histogram worker did not resume after publishing a structured failure");
+	failureWorker.Stop();
+	jpegview_linux::UiCompletionWakeup().Consume();
 }
 
 void TestImageInfoFormatting() {
@@ -20998,6 +21193,8 @@ int main(int argc, char** argv) {
 		TestThumbnailFileBackedPreparationAndShutdown, failures);
 	RunTest("thumbnail-downsampling-antialiasing", TestThumbnailDownsamplingAntialiasing, failures);
 	RunTest("grayscale-spectrum-calculation-and-scaling", TestGrayscaleSpectrumCalculationAndScaling, failures);
+	RunTest("image-spectrum-worker-generation-deduplication-and-shutdown",
+		TestImageSpectrumWorkerGenerationDeduplicationAndShutdown, failures);
 	RunTest("image-info-formatting", TestImageInfoFormatting, failures);
 	RunTest("system-font-resolution-and-unicode-rendering", TestSystemFontResolutionAndUnicodeRendering, failures);
 	RunTest("playback-scheduler-timing-and-modes", TestPlaybackSchedulerTimingAndModes, failures);
