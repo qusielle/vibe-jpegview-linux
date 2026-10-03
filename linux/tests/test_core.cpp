@@ -19059,6 +19059,23 @@ void TestPlaybackSchedulerTimingAndModes() {
 		pendingSlideshow.Tick(6000).type == PlaybackActionType::NextImage,
 		"slideshow deadline did not restart when the cold image committed");
 
+	jpegview_linux::PlaybackScheduler stoppedAtBoundary;
+	stoppedAtBoundary.StartSlideshow(0.1, 100);
+	Expect(stoppedAtBoundary.Tick(200).type == PlaybackActionType::NextImage,
+		"slideshow did not become due before the folder boundary");
+	stoppedAtBoundary.SetImageReady(false, 200);
+	stoppedAtBoundary.Stop(210);
+	stoppedAtBoundary.SetImageReady(true, 210);
+	Expect(stoppedAtBoundary.Mode() == PlaybackMode::None &&
+		!stoppedAtBoundary.NextDeadline().has_value() &&
+		stoppedAtBoundary.Tick(500).type == PlaybackActionType::None,
+		"stopping a slideshow at a failed folder boundary left an expired deadline");
+	stoppedAtBoundary.StartSlideshow(0.1, 500);
+	Expect(stoppedAtBoundary.NextDeadline() == 600 &&
+		stoppedAtBoundary.Tick(599).type == PlaybackActionType::None &&
+		stoppedAtBoundary.Tick(600).type == PlaybackActionType::NextImage,
+		"slideshow could not be restarted after reaching a non-wrapping boundary");
+
 	jpegview_linux::PlaybackScheduler pendingMovie;
 	pendingMovie.StartMovie(25.0, 0);
 	Expect(pendingMovie.NextDeadline() == 40,

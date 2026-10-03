@@ -505,6 +505,101 @@ if [ -n "$perf_trace_path" ]; then
 fi
 stop_viewer
 
+# A slideshow that reaches the end of a non-wrapping folder must stop its
+# expired deadline instead of repeatedly invalidating and rebuilding frames.
+boundary_directory="$temporary/slideshow-boundary"
+boundary_config="$temporary/slideshow-boundary-config/jpegview-linux"
+boundary_trace="$temporary/slideshow-boundary.csv"
+boundary_log="$temporary/slideshow-boundary-viewer.log"
+mkdir -p "$boundary_directory" "$boundary_config"
+write_ppm "$boundary_directory/01-first.ppm" 220 40 30
+write_ppm "$boundary_directory/02-last.ppm" 30 220 40
+printf 'scale_mode=fit\nsort_mode=file_name\nfolder_wrap_around=0\ndouble_page_mode_enabled=0\nthumbnail_panel_visible=0\n' \
+	> "$boundary_config/settings.conf"
+DISPLAY=":$display_number" HOME="$temporary/slideshow-boundary-home" \
+	XDG_CONFIG_HOME="$temporary/slideshow-boundary-config" \
+	XDG_STATE_HOME="$temporary/slideshow-boundary-state" \
+	JPEGVIEW_PERF_TRACE="$boundary_trace" \
+	"$BINARY" --slideshow 0.1 "$boundary_directory" >"$boundary_log" 2>&1 &
+viewer_pid=$!
+window_id=''
+for _ in $(seq 1 50); do
+	window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+		--class jpegview-linux 2>/dev/null | head -1 || true)
+	if [ -n "$window_id" ]; then break; fi
+	sleep 0.1
+done
+if [ -z "$window_id" ]; then
+	echo "UI smoke test: non-wrapping slideshow fixture did not create its window" >&2
+	cat "$boundary_log" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+assert_title_prefix "[2/2] " "non-wrapping slideshow did not advance to the final image"
+sleep 0.35
+boundary_frames_before=$(awk -F, '$2 == "frame_build" { count++ } END { print count + 0 }' \
+	"$boundary_trace" 2>/dev/null || true)
+sleep 0.3
+boundary_frames_after=$(awk -F, '$2 == "frame_build" { count++ } END { print count + 0 }' \
+	"$boundary_trace" 2>/dev/null || true)
+if ! kill -0 "$viewer_pid" 2>/dev/null || [ "$boundary_frames_before" -eq 0 ] || \
+	[ "$boundary_frames_after" -ne "$boundary_frames_before" ]; then
+	echo "UI smoke test: slideshow kept rebuilding frames after a non-wrapping folder boundary ($boundary_frames_before to $boundary_frames_after)" >&2
+	cat "$boundary_log" >&2
+	cat "$boundary_trace" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool key q || true
+wait "$viewer_pid" || true
+viewer_pid=''
+
+# Wrapping a one-image folder is a successful navigation with no new content.
+# It must restart the slideshow deadline without rebuilding that unchanged frame.
+wrap_directory="$temporary/slideshow-wrap"
+wrap_config="$temporary/slideshow-wrap-config/jpegview-linux"
+wrap_trace="$temporary/slideshow-wrap.csv"
+wrap_log="$temporary/slideshow-wrap-viewer.log"
+mkdir -p "$wrap_directory" "$wrap_config"
+write_ppm "$wrap_directory/only-image.ppm" 90 110 210
+printf 'scale_mode=fit\nsort_mode=file_name\nfolder_wrap_around=1\ndouble_page_mode_enabled=0\nthumbnail_panel_visible=0\n' \
+	> "$wrap_config/settings.conf"
+DISPLAY=":$display_number" HOME="$temporary/slideshow-wrap-home" \
+	XDG_CONFIG_HOME="$temporary/slideshow-wrap-config" \
+	XDG_STATE_HOME="$temporary/slideshow-wrap-state" \
+	JPEGVIEW_PERF_TRACE="$wrap_trace" \
+	"$BINARY" --slideshow 0.1 "$wrap_directory" >"$wrap_log" 2>&1 &
+viewer_pid=$!
+window_id=''
+for _ in $(seq 1 50); do
+	window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+		--class jpegview-linux 2>/dev/null | head -1 || true)
+	if [ -n "$window_id" ]; then break; fi
+	sleep 0.1
+done
+if [ -z "$window_id" ]; then
+	echo "UI smoke test: wrapping slideshow fixture did not create its window" >&2
+	cat "$wrap_log" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+assert_title_prefix "[1/1] " "one-image wrapping slideshow did not present its image"
+sleep 0.35
+wrap_frames_before=$(awk -F, '$2 == "frame_build" { count++ } END { print count + 0 }' \
+	"$wrap_trace" 2>/dev/null || true)
+sleep 0.3
+wrap_frames_after=$(awk -F, '$2 == "frame_build" { count++ } END { print count + 0 }' \
+	"$wrap_trace" 2>/dev/null || true)
+if ! kill -0 "$viewer_pid" 2>/dev/null || [ "$wrap_frames_before" -eq 0 ] || \
+	[ "$wrap_frames_after" -ne "$wrap_frames_before" ]; then
+	echo "UI smoke test: one-image wrapping slideshow rebuilt its unchanged frame ($wrap_frames_before to $wrap_frames_after)" >&2
+	cat "$wrap_log" >&2
+	cat "$wrap_trace" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool key q || true
+wait "$viewer_pid" || true
+viewer_pid=''
+
 # A 4 MiB retained budget must still show both fitted pages after the selected
 # anchor has been requested at actual size and only its larger texture remains.
 spread_budget_directory="$temporary/spread-budget-fixtures"

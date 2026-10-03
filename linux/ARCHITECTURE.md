@@ -469,6 +469,10 @@ Timed playback produces no navigation while the current JPEG header is pending a
 slideshow or movie interval from the successful display commit. Rotate and mirror commands wait for
 the matching header continuation before materializing pixels; a pending slideshow transition retains
 the outgoing frame and starts when the incoming image is ready.
+Navigation reports a completed move, a hard boundary, or a pending directory scan separately. A timed
+advance suspends readiness while its forward-boundary scan runs; if the scan finds no target or fails,
+playback stops so its expired deadline cannot drive repeated redraws. Replacing or abandoning that scan
+re-arms playback only when no selected-image load owns readiness.
 Neighbor planning receives a bounded captured source and processing snapshot, including valid cached
 JPEG dimensions, then applies only results matching current catalog, descriptor, and viewport revisions.
 Pan invalidates pending neighbor planning without reading source metadata. A changed-source notice

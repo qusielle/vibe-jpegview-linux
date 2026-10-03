@@ -571,6 +571,13 @@ private:
 		MarkedToggle,
 	};
 
+	enum class NavigationAttemptResult {
+		Moved,
+		WrappedToSameImage,
+		PendingDirectoryScan,
+		Blocked,
+	};
+
 	struct ContextMenuColumn {
 		std::size_t begin = 0;
 		std::size_t end = 0;
@@ -5312,12 +5319,14 @@ private:
 			*pendingFileListScanOperation_ == request.operation &&
 			pendingFileListScanHandling_ == handling &&
 				pendingFileListScanDirection_ == direction) return;
+		SettlePendingPlaybackBoundaryScan();
 		if (!preferredPath.empty()) request.selectedPath = preferredPath;
 		pendingDroppedScanRequest_.reset();
 		if (handling == FileListScanHandling::DroppedInputs) {
 			pendingDroppedScanRequest_ = request;
 		}
 		pendingFileListScanOperation_ = request.operation;
+		pendingFileListScanSourcePath_ = request.selectedPath;
 		pendingFileListScanHandling_ = handling;
 		pendingFileListScanDirection_ = direction;
 		pendingFileListScanForceImageReload_ = forceImageReload;
@@ -5341,7 +5350,9 @@ private:
 	}
 
 	void ClearPendingFileListScan() {
+		SettlePendingPlaybackBoundaryScan();
 		pendingFileListScanOperation_.reset();
+		pendingFileListScanSourcePath_.clear();
 		pendingDroppedScanRequest_.reset();
 		pendingFileListScanHandling_ = FileListScanHandling::None;
 		pendingFileListScanDirection_ = 0;
@@ -5350,6 +5361,26 @@ private:
 		pendingFileListScanLoadStatePolicy_ = ImageLoadStatePolicy::PreserveCurrent;
 		pendingMarkedToggleReturnPath_.clear();
 		pendingFileListScanCompletionTitle_.clear();
+	}
+
+	bool IsPendingPlaybackBoundaryScan(std::uint64_t generation) const {
+		return generation != 0 && playbackBoundaryScanGeneration_ == generation &&
+			pendingFileListScanSourcePath_ == fileList_.Current();
+	}
+
+	void SettlePendingPlaybackBoundaryScan() {
+		if (playbackBoundaryScanGeneration_ == 0 ||
+			playbackBoundaryScanGeneration_ != fileListScanGeneration_) return;
+		playbackBoundaryScanGeneration_ = 0;
+		if (!currentSelectedLoadPending_) {
+			playback_.SetImageReady(true, SDL_GetTicks());
+		}
+	}
+
+	void StopPlaybackAfterFailedBoundaryScan() {
+		const std::uint32_t now = SDL_GetTicks();
+		playback_.Stop(now);
+		if (!currentSelectedLoadPending_) playback_.SetImageReady(true, now);
 	}
 
 	void RetireFileListBoundPresentation() {
@@ -5384,9 +5415,12 @@ private:
 		for (jpegview_linux::FileListScanResult& result : fileListScanWorker_.TakeReady()) {
 			if (result.generation != fileListScanGeneration_ ||
 				!pendingFileListScanOperation_.has_value()) continue;
+			const bool playbackBoundaryScan =
+				IsPendingPlaybackBoundaryScan(result.generation);
 			const FileListScanHandling handling = pendingFileListScanHandling_;
 			if (!result.error.empty()) {
 				ClearPendingFileListScan();
+				if (playbackBoundaryScan) StopPlaybackAfterFailedBoundaryScan();
 				SetTitle("Directory scan failed: " + result.error);
 				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 				if (handling == FileListScanHandling::Startup) {
@@ -5449,6 +5483,10 @@ private:
 				const fs::path preferredPath = pendingFileListScanPreferredPath_;
 				RequestFileListScan(operation, direction, handling, true, forceImageReload,
 					preferredPath, loadStatePolicy, markedToggleReturnPath, completionTitle);
+				if (playbackBoundaryScan) {
+					playbackBoundaryScanGeneration_ = fileListScanGeneration_;
+					playback_.SetImageReady(false, SDL_GetTicks());
+				}
 				continue;
 			}
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
@@ -5462,7 +5500,10 @@ private:
 				continue;
 			}
 			ClearPendingFileListScan();
-			if (!targetFound) continue;
+			if (!targetFound) {
+				if (playbackBoundaryScan) StopPlaybackAfterFailedBoundaryScan();
+				continue;
+			}
 			if (handling == FileListScanHandling::MarkedToggle) {
 				if (fileList_.CompleteMarkedToggle(markedToggleReturnPath)) LoadCurrent(direction);
 				continue;
@@ -6241,10 +6282,12 @@ private:
 		SetTitle();
 	}
 
-	bool NavigateByPageStep(int direction, bool& needsDirectoryScan) {
-		needsDirectoryScan = false;
-		if (fileList_.Empty() || (direction != -1 && direction != 1)) return false;
+	NavigationAttemptResult NavigateByPageStep(int direction) {
+		if (fileList_.Empty() || (direction != -1 && direction != 1)) {
+			return NavigationAttemptResult::Blocked;
+		}
 		const std::size_t currentIndex = fileList_.CurrentIndex();
+		const fs::path currentPath = fileList_.Current();
 		const std::optional<jpegview_linux::PageDimensions> current =
 			PageDimensionsAt(currentIndex);
 		const std::optional<jpegview_linux::PageDimensions> next = direction > 0 &&
@@ -6261,15 +6304,15 @@ private:
 				fileList_.NextLoaded() : fileList_.PreviousLoaded();
 			if (moved == jpegview_linux::FileList::LoadedNavigationResult::NeedsDirectoryScan) {
 				if (fileList_.CurrentIndex() != currentIndex) fileList_.Select(currentIndex);
-				needsDirectoryScan = true;
-				return false;
+				return NavigationAttemptResult::PendingDirectoryScan;
 			}
 			if (moved == jpegview_linux::FileList::LoadedNavigationResult::NoMove) {
 				if (fileList_.CurrentIndex() != currentIndex) fileList_.Select(currentIndex);
-				return false;
+				return NavigationAttemptResult::Blocked;
 			}
 		}
-		return fileList_.CurrentIndex() != currentIndex;
+		return fileList_.CurrentIndex() == currentIndex && fileList_.Current() == currentPath ?
+			NavigationAttemptResult::WrappedToSameImage : NavigationAttemptResult::Moved;
 	}
 
 	void PanActualSize(int command) {
@@ -6502,7 +6545,7 @@ private:
 		SetTitle();
 	}
 
-	void NextImage(bool showPendingNavigation = false) {
+	NavigationAttemptResult NextImage(bool showPendingNavigation = false) {
 		if (clipboardMode_) RestoreClipboardImage();
 		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
 			transitionEffect_ != IDM_EFFECT_NONE;
@@ -6510,8 +6553,8 @@ private:
 		if (animate && !currentSelectedLoadPending_) {
 			previousFrame = CaptureTransitionFrame();
 		}
-		bool needsDirectoryScan = false;
-		if (!NavigateByPageStep(1, needsDirectoryScan)) {
+		const NavigationAttemptResult navigation = NavigateByPageStep(1);
+		if (navigation != NavigationAttemptResult::Moved) {
 			if (previousFrame.ownsTexture && previousFrame.texture != nullptr) {
 				texture_ = previousFrame.texture;
 				previousFrame.texture = nullptr;
@@ -6520,10 +6563,10 @@ private:
 			ReleaseTransitionFrame(previousFrame);
 			transitionCaptureDisplayKey_.clear();
 			ClearActiveWorkingDisplayTextures();
-			if (needsDirectoryScan) RequestFileListScan(
+			if (navigation == NavigationAttemptResult::PendingDirectoryScan) RequestFileListScan(
 				jpegview_linux::FileList::ScanOperation::ForwardBoundary,
 				1, FileListScanHandling::Navigation);
-			return;
+			return navigation;
 		}
 		transitionCaptureDisplayKey_ = previousFrame.displayKey;
 		SetTitle();
@@ -6546,6 +6589,7 @@ private:
 		ReleaseTransitionFrame(previousFrame);
 		transitionCaptureDisplayKey_.clear();
 		ClearActiveWorkingDisplayTextures();
+		return NavigationAttemptResult::Moved;
 	}
 
 	void PreviousImage(bool showPendingNavigation = false) {
@@ -6556,8 +6600,7 @@ private:
 		if (animate && !currentSelectedLoadPending_) {
 			previousFrame = CaptureTransitionFrame();
 		}
-		bool needsDirectoryScan = false;
-		if (!NavigateByPageStep(-1, needsDirectoryScan)) {
+		if (NavigateByPageStep(-1) != NavigationAttemptResult::Moved) {
 			if (previousFrame.ownsTexture && previousFrame.texture != nullptr) {
 				texture_ = previousFrame.texture;
 				previousFrame.texture = nullptr;
@@ -6669,6 +6712,7 @@ private:
 	}
 
 	void StopPlayback() {
+		SettlePendingPlaybackBoundaryScan();
 		playback_.Stop(SDL_GetTicks());
 		SetTitle();
 	}
@@ -6773,8 +6817,17 @@ private:
 			if (!SetAnimationFrame(action.frameIndex)) playback_.FrameDisplayFailed();
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
 		} else if (action.type == jpegview_linux::PlaybackActionType::NextImage) {
-			NextImage();
-			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
+			const NavigationAttemptResult navigation = NextImage();
+			if (navigation == NavigationAttemptResult::Blocked) {
+				StopPlaybackAfterFailedBoundaryScan();
+			} else if (navigation == NavigationAttemptResult::PendingDirectoryScan) {
+				playback_.SetImageReady(false, SDL_GetTicks());
+				playbackBoundaryScanGeneration_ = fileListScanGeneration_;
+			} else if (navigation == NavigationAttemptResult::WrappedToSameImage) {
+				playback_.NotifyInteraction(SDL_GetTicks());
+			} else {
+				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
+			}
 		}
 	}
 
@@ -12436,6 +12489,8 @@ private:
 	bool prefetchRefreshNeeded_ = false;
 	int pendingPrefetchDirection_ = 0;
 	std::uint64_t fileListScanGeneration_ = 0;
+	std::uint64_t playbackBoundaryScanGeneration_ = 0;
+	fs::path pendingFileListScanSourcePath_;
 	std::optional<jpegview_linux::FileList::ScanOperation> pendingFileListScanOperation_;
 	std::optional<jpegview_linux::FileList::ScanRequest> pendingDroppedScanRequest_;
 	FileListScanHandling pendingFileListScanHandling_ = FileListScanHandling::None;

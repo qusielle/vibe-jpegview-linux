@@ -361,8 +361,9 @@ they support.
     resizing keeps the histogram and recalculates layout only when its geometry changes. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
     rates and folder advancement, slideshow transitions are rendered natively after cold images are
-    presented, and slideshow/movie timers resume from each successful display commit. Alt+R resumes, and
-    Escape stops active playback before quitting. Decoded pixels, prepared display frames, and
+    presented, and slideshow/movie timers resume from each successful display commit. Timed playback
+    stops cleanly when it reaches a non-wrapping folder boundary. Alt+R resumes, and Escape stops active
+    playback before quitting. Decoded pixels, prepared display frames, and
     retained renderer textures share one memory budget with per-layer LRU retention, while a
     low-contention background workers predecode nearby non-JPEG files in both directions. JPEG
     neighbors take the reduced-resolution display path directly, while full pixels remain lazy.
@@ -1165,7 +1166,9 @@ Animated GIF, APNG, WebP, AVIF, and JPEG XL images start playing automatically a
 delays. The `Movie` menu plays animated or multi-page images at a selected fixed rate (5, 10, 25,
 30, 50, or 100 fps), and advances a folder of still images when the current image has no frames.
 The original frame loop count is honored when a format provides one. `Alt+R` resumes stopped playback.
-`Esc` stops animation, movie, or slideshow playback before it closes the viewer.
+When automatic slideshow or movie advancement reaches a non-wrapping folder boundary, playback stops
+instead of repeatedly rebuilding the final image. `Esc` stops animation, movie, or slideshow playback
+before it closes the viewer.
 
 ### Known Windows-parity gaps
 
