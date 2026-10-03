@@ -40,6 +40,10 @@ struct DisplayImageCacheKey {
 
 bool operator==(const DisplayImageCacheKey& left, const DisplayImageCacheKey& right);
 bool operator!=(const DisplayImageCacheKey& left, const DisplayImageCacheKey& right);
+// A prepared representation can serve a lower-resolution request only when
+// every source and pixel-processing input matches and both dimensions suffice.
+bool CanReuseDisplayImageRepresentation(const DisplayImageCacheKey& requested,
+	const DisplayImageCacheKey& available);
 
 struct DisplayImageCacheKeyHash {
 	std::size_t operator()(const DisplayImageCacheKey& key) const;
@@ -72,6 +76,17 @@ struct DisplayImageRequest {
 
 	bool Valid() const;
 };
+
+struct DisplayImageTarget {
+	int width = 0;
+	int height = 0;
+};
+
+// A failed selected request remains suppressed until its canonical target size
+// changes, at which point the viewer should build a new request.
+bool FailedDisplayRequestNeedsNewResolution(const DisplayImageRequest& request,
+	const std::string& failedRequestKey,
+	const DisplayImageTarget& requestedResolution);
 
 struct PreparedDisplayImage {
 	std::filesystem::path filename;
@@ -132,6 +147,8 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	bool includeSpectrum = false);
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
+DisplayImageTarget ClampDisplayImageTarget(int sourceWidth, int sourceHeight,
+	int targetWidth, int targetHeight, int rotationQuarterTurns = 0);
 
 struct DisplayImageCacheDiagnostics {
 	std::size_t cachedBytes = 0;
@@ -154,11 +171,12 @@ struct DisplayImageCacheDiagnostics {
 	WorkerFailure lastWorkerFailure;
 };
 
-// Conservative number of neighboring full-viewport textures that fit beside
-// the current image. The cap prevents a very large configured budget from
-// scheduling an unbounded directory in one speculative batch.
-std::size_t DisplayPrefetchCount(std::size_t cacheBytes, int viewportWidth,
-	int viewportHeight, std::size_t fileCount);
+// A byte-bounded planner still needs a finite source-probe window. This cap
+// bounds metadata work; actual frame-byte estimates decide which results fit.
+std::size_t DisplayPrefetchCandidateLimit(std::size_t cacheBytes,
+	std::size_t fileCount);
+bool EstimateDisplayImageBytes(const DisplayImageRequest& request,
+	std::size_t& bytes);
 
 // Threaded CPU-side display-frame cache. Workers perform correction, copying,
 // and high-quality scaling. SDL texture creation deliberately remains outside

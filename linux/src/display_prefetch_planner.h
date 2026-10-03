@@ -9,10 +9,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace jpegview_linux {
@@ -49,6 +49,15 @@ struct DisplayPrefetchCandidate {
 	bool jpeg = false;
 };
 
+struct RetainedDisplayTexture {
+	std::string key;
+	DisplayImageCacheKey cacheKey;
+};
+
+const RetainedDisplayTexture* FindReusableRetainedDisplayTexture(
+	const DisplayImageCacheKey& requested,
+	const std::vector<RetainedDisplayTexture>& retainedTextures);
+
 struct DisplayPrefetchPlannerRequest {
 	std::uint64_t catalogRevision = 0;
 	std::uint64_t descriptorRevision = 0;
@@ -59,11 +68,12 @@ struct DisplayPrefetchPlannerRequest {
 	ViewportSnapshot viewport;
 	int imageAreaWidth = 0;
 	int imageAreaHeight = 0;
+	std::size_t maximumPreparedBytes = std::numeric_limits<std::size_t>::max();
 	DoublePageModeState doublePageMode;
 	std::optional<PageDimensions> currentPageDimensions;
 	std::size_t maximumCount = 0;
 	std::vector<DisplayPrefetchCandidate> neighbors;
-	std::unordered_set<std::string> retainedTextureKeys;
+	std::vector<RetainedDisplayTexture> retainedTextures;
 };
 
 struct DisplayPrefetchPlannedDimensions {

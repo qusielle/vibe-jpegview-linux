@@ -32,12 +32,21 @@ they support.
    sharpening path was ported, with Catmull–Rom bicubic enlargement and a shared 1 GiB image-cache
    budget.
    Fitted JPEGs use libjpeg-turbo's native reduced DCT decode, avoiding full 4000×6000 pixel buffers
-   when the screen needs only a smaller image. With the optional histogram visible, a worker uses
-   full-source pixels once to preserve its histogram values, then caches the result with the display
-   frame. Up to four hardware-aware, low-priority workers prepare
-   the closest forward/backward pairs concurrently; the prefetch window is derived from the configured
-   cache size and current viewport,
-   so the default 1 GiB budget can cover roughly 128 full-HD neighbors. Large JPEG input is memory-mapped,
+   when the screen needs only a smaller image. Actual-size viewing prepares source-resolution pixels;
+   compatible cached frames with matching source, orientation, and processing settings can serve a
+   lower-resolution view without another preparation. Enlargement reuses source-resolution pixels and
+   lets the renderer scale the same texture, while panning changes its destination without repeating
+   display preparation. Rotated double-page partners follow the same
+   source-resolution limit, and spread admission estimates those prepared dimensions. When a retained
+   higher-resolution anchor would make the pair exceed the shared budget, the viewer retries with a
+   fitted anchor texture before falling back to single-page display. Neighbor images
+   use their fitted navigation representation even when the selected image is zoomed. If selection
+   needs more pixels, its foreground request prepares them after selection. With the optional histogram
+   visible, a worker uses full-source pixels once to preserve its values, then retains the result with
+   the display frame. Up to four hardware-aware, low-priority workers prepare
+   nearby images concurrently. A bounded planner estimates each fitted frame's bytes and admits the
+   nearest requests within the shared cache budget after reserving the selected source-resolution frame;
+   this avoids sizing every neighbor from the selected image's zoom. Large JPEG input is memory-mapped,
    letting native decoding and repeated neighboring access use the kernel page cache without an extra
    stdio copy layer. Prepared frames are then uploaded incrementally and retained as renderer-ready
    textures. The closest next and previous files take

@@ -474,8 +474,8 @@ if [ -n "$perf_trace_path" ]; then
 fi
 stop_viewer
 
-# A 4 MiB retained budget must still show both fitted pages even while the
-# selected anchor's decoded source pixels remain available as working data.
+# A 4 MiB retained budget must still show both fitted pages after the selected
+# anchor has been requested at actual size and only its larger texture remains.
 spread_budget_directory="$temporary/spread-budget-fixtures"
 mkdir -p "$spread_budget_directory" \
 	"$temporary/spread-budget-config/jpegview-linux"
@@ -506,15 +506,73 @@ PY
 write_solid_png "$spread_budget_directory/01-cover.png" 35 75 220
 write_solid_png "$spread_budget_directory/02-anchor.png" 30 220 60
 write_solid_png "$spread_budget_directory/03-partner.png" 220 40 30
-printf 'scale_mode=fit\ncache_size_mb=4\ndouble_page_mode_enabled=1\nthumbnail_panel_visible=0\nmanga_reading_order_enabled=0\n' \
+printf 'scale_mode=fit\ncache_size_mb=4\ndouble_page_mode_enabled=0\nthumbnail_panel_visible=0\nmanga_reading_order_enabled=0\n' \
 	> "$temporary/spread-budget-config/jpegview-linux/settings.conf"
-VIEWER_TEST_HOME="$temporary/spread-budget-home" \
-	VIEWER_TEST_CONFIG_HOME="$temporary/spread-budget-config" \
-	launch_viewer "$spread_budget_directory"
+spread_budget_trace="$temporary/spread-budget.csv"
+spread_budget_log="$temporary/spread-budget-viewer.log"
+perf_trace_active=0
+DISPLAY=":$display_number" HOME="$temporary/spread-budget-home" \
+	XDG_CONFIG_HOME="$temporary/spread-budget-config" \
+	XDG_STATE_HOME="$XDG_STATE_HOME" \
+	JPEGVIEW_PERF_TRACE="$spread_budget_trace" \
+	"$BINARY" "$spread_budget_directory" >"$spread_budget_log" 2>&1 &
+viewer_pid=$!
+window_id=''
+for _ in $(seq 1 50); do
+	window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+		--class jpegview-linux 2>/dev/null | head -1 || true)
+	if [ -n "$window_id" ]; then break; fi
+	sleep 0.1
+done
+if [ -z "$window_id" ]; then
+	echo "UI smoke test: 4 MiB spread fixture did not create its window" >&2
+	cat "$spread_budget_log" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool windowactivate "$window_id"
 assert_title_prefix "01-cover.png" "4 MiB spread fixture did not start on its standalone cover"
-sleep 0.25
 DISPLAY=":$display_number" xdotool key Right
-assert_title_prefix "[2-3/3] " "4 MiB fixture did not select the two-page spread"
+assert_title_prefix "[2/3] " "4 MiB fixture did not select the single-page anchor"
+count_spread_budget_uploads() {
+	awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+		$6 == "active_image_spread" { count++ } END { print count + 0 }' \
+		"$spread_budget_trace" 2>/dev/null || true
+}
+anchor_fit_ready=0
+for _ in $(seq 1 100); do
+	if [ "$(count_spread_budget_uploads)" -gt 0 ]; then
+		anchor_fit_ready=1
+		break
+	fi
+	sleep 0.05
+done
+if [ "$anchor_fit_ready" -ne 1 ]; then
+	echo "UI smoke test: fitted anchor did not upload before actual-size navigation" >&2
+	cat "$spread_budget_log" >&2
+	cat "$spread_budget_trace" >&2
+	exit 1
+fi
+baseline_uploads=$(count_spread_budget_uploads)
+DISPLAY=":$display_number" xdotool key space
+actual_anchor_ready=0
+for _ in $(seq 1 100); do
+	actual_uploads=$(count_spread_budget_uploads)
+	if [ "$actual_uploads" -gt "$baseline_uploads" ]; then
+		actual_anchor_ready=1
+		break
+	fi
+	sleep 0.05
+done
+if [ "$actual_anchor_ready" -ne 1 ]; then
+	echo "UI smoke test: actual-size anchor did not produce a prepared texture" >&2
+	cat "$spread_budget_log" >&2
+	cat "$spread_budget_trace" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool key space
+DISPLAY=":$display_number" xdotool key d
+assert_title_prefix "[2-3/3] " \
+	"actual-size anchor prevented a fitted double-page pair that fits the retained budget"
 if [ "$visual_assertions" -eq 1 ]; then
 	spread_budget_rendered=0
 	for _ in $(seq 1 50); do
@@ -531,7 +589,7 @@ if [ "$visual_assertions" -eq 1 ]; then
 	done
 	if [ "$spread_budget_rendered" -ne 1 ]; then
 		echo "UI smoke test: 4 MiB active decoded pixels blocked the fitted spread ($spread_budget_left:$spread_budget_right)" >&2
-		cat "$temporary/viewer.log" >&2
+		cat "$spread_budget_log" >&2
 		exit 1
 	fi
 else
@@ -677,6 +735,98 @@ if [ -n "$perf_trace_path" ]; then
 		echo "UI smoke test: selected foreground work did not stay on workers or its queued transform did not upload" >&2
 		cat "$temporary/perf-sync-viewer.log" >&2
 		if [ -f "$perf_sync_trace" ]; then cat "$perf_sync_trace" >&2; fi
+		exit 1
+	fi
+
+	# A source-resolution frame remains sufficient through further enlargement
+	# and pan. Neither interaction should start another pixel-processing pass or
+	# renderer upload for the selected image.
+	zoom_pan_directory="$temporary/zoom-pan-images"
+	zoom_pan_config="$temporary/zoom-pan-config/jpegview-linux"
+	zoom_pan_trace="$perf_trace_path.zoom-pan"
+	mkdir -p "$zoom_pan_directory" "$zoom_pan_config"
+	printf 'scale_mode=fit\ncache_size_mb=128\ndouble_page_mode_enabled=0\nshow_histogram=0\n' \
+		> "$zoom_pan_config/settings.conf"
+	zoom_pan_image="$zoom_pan_directory/zoom-pan.ppm"
+	{
+		printf 'P6\n1600 1200\n255\n'
+		head -c "$((1600 * 1200 * 3))" /dev/zero
+	} > "$zoom_pan_image"
+	DISPLAY=":$display_number" HOME="$temporary/zoom-pan-home" \
+		XDG_CONFIG_HOME="$temporary/zoom-pan-config" \
+		XDG_STATE_HOME="$temporary/zoom-pan-state" \
+		JPEGVIEW_PERF_TRACE="$zoom_pan_trace" \
+		"$BINARY" "$zoom_pan_image" >"$temporary/zoom-pan-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: source-resolution zoom fixture did not open" >&2
+		cat "$temporary/zoom-pan-viewer.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	initial_uploads=0
+	initial_ready=0
+	for _ in $(seq 1 100); do
+		initial_uploads=$(awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+			$6 == "active_image_spread" { count++ } END { print count + 0 }' "$zoom_pan_trace" 2>/dev/null || true)
+		if [ "$initial_uploads" -gt 0 ]; then initial_ready=1; break; fi
+		sleep 0.05
+	done
+	if [ "$initial_ready" -ne 1 ]; then
+		echo "UI smoke test: fitted source-resolution fixture did not upload" >&2
+		cat "$temporary/zoom-pan-viewer.log" >&2
+		cat "$zoom_pan_trace" >&2
+		exit 1
+	fi
+	baseline_uploads=$initial_uploads
+	baseline_processing=$(awk -F, '$2 == "processing" && $4 == "worker_thread" && \
+		$6 == "active_image_spread" { count++ } END { print count + 0 }' "$zoom_pan_trace")
+	DISPLAY=":$display_number" xdotool key space
+	actual_ready=0
+	for _ in $(seq 1 100); do
+		actual_uploads=$(awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+			$6 == "active_image_spread" { count++ } END { print count + 0 }' "$zoom_pan_trace")
+		actual_processing=$(awk -F, '$2 == "processing" && $4 == "worker_thread" && \
+			$6 == "active_image_spread" { count++ } END { print count + 0 }' "$zoom_pan_trace")
+		if [ "$actual_uploads" -gt "$baseline_uploads" ] && \
+			[ "$actual_processing" -gt "$baseline_processing" ]; then
+			actual_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$actual_ready" -ne 1 ]; then
+		echo "UI smoke test: actual-size source-resolution frame did not become renderer-ready" >&2
+		cat "$temporary/zoom-pan-viewer.log" >&2
+		cat "$zoom_pan_trace" >&2
+		exit 1
+	fi
+	baseline_uploads=$actual_uploads
+	baseline_processing=$actual_processing
+	DISPLAY=":$display_number" xdotool key plus
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 512 mousedown 1
+	DISPLAY=":$display_number" xdotool mousemove --sync --window "$window_id" 690 562 mouseup 1
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+	sleep 0.4
+	final_uploads=$(awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+		$6 == "active_image_spread" { count++ } END { print count + 0 }' "$zoom_pan_trace")
+	final_processing=$(awk -F, '$2 == "processing" && $4 == "worker_thread" && \
+		$6 == "active_image_spread" { count++ } END { print count + 0 }' "$zoom_pan_trace")
+	DISPLAY=":$display_number" xdotool key q || true
+	wait "$viewer_pid" || true
+	viewer_pid=''
+	if [ "$final_uploads" -ne "$baseline_uploads" ] || \
+		[ "$final_processing" -ne "$baseline_processing" ]; then
+		echo "UI smoke test: source-resolution enlargement or pan repeated display preparation/upload ($baseline_processing/$final_processing processing; $baseline_uploads/$final_uploads uploads)" >&2
+		cat "$temporary/zoom-pan-viewer.log" >&2
+		cat "$zoom_pan_trace" >&2
 		exit 1
 	fi
 fi
