@@ -7,9 +7,12 @@ namespace jpegview_linux {
 inline bool IsDisplayTexturePinned(const std::string& key,
 	const std::string& transitionKey, const std::string& pendingTransitionKey,
 	const std::string& captureKey, const std::string& lastPresentedKey,
-	bool lastPresentedMatchesCurrentSource) {
+	bool lastPresentedMatchesCurrentSource,
+	const std::string& activeSpreadAnchorKey = {},
+	const std::string& activeSpreadPartnerKey = {}) {
 	return !key.empty() && (key == transitionKey || key == pendingTransitionKey ||
-		key == captureKey ||
+		key == captureKey || key == activeSpreadAnchorKey ||
+		key == activeSpreadPartnerKey ||
 		(key == lastPresentedKey && lastPresentedMatchesCurrentSource));
 }
 

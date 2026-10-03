@@ -132,6 +132,11 @@ constexpr std::size_t kMagnifyingGlassDisplayPriority = 1000000;
 constexpr std::size_t kDecodedImagePrefetchCount = 32;
 constexpr std::size_t kDisplayTextureUploadsPerTick = 1;
 constexpr std::size_t kMaximumPendingTextureUploads = 4;
+constexpr std::size_t kMaximumSynchronousDisplayTextureUploadBytes = 8u * 1024u * 1024u;
+constexpr std::size_t kDisplayTextureUploadBandBytes = 4u * 1024u * 1024u;
+constexpr std::size_t kDisplayTextureRetirementsPerTick = 1;
+constexpr std::size_t kDisplayTextureRetirementInteractionPressureThreshold =
+	kMaximumPendingTextureUploads;
 constexpr std::size_t kMaximumThumbnailSourcePixels = 4u * 1024u * 1024u;
 constexpr double kKeyboardPanStep = 48.0;
 constexpr int kBatchSelectAll = 0;
@@ -501,6 +506,7 @@ public:
 			// Held navigation then advances only after the closest ready neighbor
 			// has had an opportunity to become a retained SDL texture.
 			UpdateInteractionWorkPolicy();
+			TickRendererTextureRetirement();
 			TickDisplayTexturePreload();
 			TickThumbnailPreload(heldNavigation_.Scancode() < 0 &&
 				!displayImageCache_.HasPendingWork());
@@ -564,6 +570,15 @@ private:
 			jpegview_linux::CacheProtectionTier::DistantSpeculation;
 		jpegview_linux::CacheReservation reservation;
 		std::list<std::string>::iterator lru;
+	};
+
+	struct RetiredDisplayTexture {
+		SDL_Texture* texture = nullptr;
+		std::size_t bytes = 0;
+		jpegview_linux::PerfWorkClass workClass =
+			jpegview_linux::PerfWorkClass::Unspecified;
+		jpegview_linux::CacheReservation reservation;
+		bool countsTowardSpeculativeLimit = false;
 	};
 
 	struct JpegDimensionCacheEntry {
@@ -655,6 +670,14 @@ private:
 		bool attempted = false;
 		bool uploadStaged = false;
 		std::uint64_t selectionGeneration = 0;
+		SDL_Texture* incompleteTexture = nullptr;
+		jpegview_linux::DisplayTextureUploadPlan uploadPlan;
+		jpegview_linux::CacheReservation textureReservation;
+		jpegview_linux::CacheProtectionTier textureProtection =
+			jpegview_linux::CacheProtectionTier::DistantSpeculation;
+		bool textureActiveWorking = false;
+		bool countsTowardSpeculativeLimit = false;
+		bool thumbnailQueued = false;
 	};
 
 	struct TransitionFrame {
@@ -669,6 +692,7 @@ private:
 	enum class TextureCacheOutcome {
 		Cached,
 		Deferred,
+		NotRetained,
 		Failed,
 	};
 
@@ -742,7 +766,7 @@ private:
 			if (!clipboardTempDirectory_.empty()) fs::remove(clipboardTempDirectory_, removeError);
 		}
 		if (texture_ != nullptr) {
-			SDL_DestroyTexture(texture_);
+			DestroyTextureMeasured(texture_);
 			texture_ = nullptr;
 		}
 		ClearDisplayTexture();
@@ -750,6 +774,7 @@ private:
 		ClearDisplayTextureCache();
 		ClearThumbnailCache();
 		ClearTextTextureCache();
+		DrainRetiredDisplayTextures();
 		if (renderer_ != nullptr) {
 			SDL_DestroyRenderer(renderer_);
 			renderer_ = nullptr;
@@ -1136,21 +1161,13 @@ private:
 			displayImageCache_.Request(*request);
 			return;
 		}
-		const TextureCacheOutcome outcome = CacheDisplayTexture(prepared,
-			{request->workClass, request->priority});
-		if (outcome == TextureCacheOutcome::Cached) {
-			presentationController_.MarkTextureReady(request->key);
-			MarkSelectedDisplayFrameReady(generation, source, request->key);
-		} else if (outcome == TextureCacheOutcome::Deferred) {
-			QueuePendingTextureUpload({prepared,
-				{request->workClass, request->priority},
-				cacheBudget_->RetainedCapacityRevision(), false, false,
-				currentSelectedLoadPending_ ? generation : 0});
-		} else {
-			displayImageCache_.Retire(prepared);
-			HandleCurrentDisplayFailure(generation, source, request->key,
-				"display texture upload failed");
-		}
+		PendingTextureUpload pending;
+		pending.image = prepared;
+		pending.priority = {request->workClass, request->priority};
+		pending.lastAttemptRetainedCapacityRevision =
+			cacheBudget_->RetainedCapacityRevision();
+		pending.selectionGeneration = currentSelectedLoadPending_ ? generation : 0;
+		QueuePendingTextureUpload(std::move(pending));
 	}
 
 	void TickCurrentSelectedDecode() {
@@ -2067,7 +2084,7 @@ private:
 		failedCurrentDisplayKey_.clear();
 
 		if (sessionStart.effects.clearPreviousPresentation) {
-			if (texture_ != nullptr) SDL_DestroyTexture(texture_);
+			if (texture_ != nullptr) DestroyTextureMeasured(texture_);
 			texture_ = nullptr;
 			ClearDisplayTexture();
 			ClearDisplayTextureProtections();
@@ -2096,7 +2113,7 @@ private:
 			const bool discardEditedPresentation = imageModified_ ||
 				currentPixelsDetachedFromSource_;
 			if (discardEditedPresentation && texture_ != nullptr) {
-				SDL_DestroyTexture(texture_);
+				DestroyTextureMeasured(texture_);
 				texture_ = nullptr;
 			}
 			currentAnimationFrame_ = 0;
@@ -2700,7 +2717,7 @@ private:
 			return false;
 		}
 		ClearDisplayTexture();
-		if (texture_ != nullptr) SDL_DestroyTexture(texture_);
+		if (texture_ != nullptr) DestroyTextureMeasured(texture_);
 		texture_ = newTexture;
 		if (!lastPresentedDisplayKey_.empty() &&
 			lastPresentedDisplayKey_ != transitionDisplayKey_ &&
@@ -2742,23 +2759,115 @@ private:
 		}
 		if (updateResult != 0) {
 			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
-			SDL_DestroyTexture(result);
+			DestroyTextureMeasured(result);
 			return nullptr;
 		}
 		if (SDL_SetTextureBlendMode(result,
 			hasTransparency ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE) != 0) {
 			std::cerr << "SDL_SetTextureBlendMode failed: " << SDL_GetError() << '\n';
-			SDL_DestroyTexture(result);
+			DestroyTextureMeasured(result);
 			return nullptr;
 		}
 		return result;
 	}
 
+	void DestroyTextureMeasured(SDL_Texture* texture, std::size_t bytes = 0) {
+		if (texture == nullptr) return;
+		jpegview_linux::PerfScopedTimer destroyTimer(
+			jpegview_linux::PerfDiagnostics::Instance(),
+			jpegview_linux::PerfMetric::TextureDestroy, bytes);
+		SDL_DestroyTexture(texture);
+	}
+
+	SDL_Texture* CreateIncompleteDisplayTexture(
+		const jpegview_linux::PreparedDisplayImage& prepared) {
+		if (prepared.width <= 0 || prepared.height <= 0 ||
+			prepared.bgra.size() != jpegview_linux::PreparedDisplayImageBytes(prepared)) {
+			return nullptr;
+		}
+		return SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888,
+			SDL_TEXTUREACCESS_STATIC, prepared.width, prepared.height);
+	}
+
+	void QueueRendererTextureRetirement(SDL_Texture* texture, std::size_t bytes,
+		jpegview_linux::PerfWorkClass workClass,
+		jpegview_linux::CacheReservation reservation,
+		bool countsTowardSpeculativeLimit) {
+		if (texture == nullptr) return;
+		RetiredDisplayTexture retired;
+		retired.texture = texture;
+		retired.bytes = bytes;
+		retired.workClass = workClass;
+		retired.reservation = std::move(reservation);
+		retired.countsTowardSpeculativeLimit = countsTowardSpeculativeLimit;
+		try {
+			retiredDisplayTextures_.push_back(std::move(retired));
+			if (countsTowardSpeculativeLimit) retiredSpeculativeDisplayTextureBytes_ += bytes;
+		} catch (...) {
+			jpegview_linux::PerfContextScope workContext(workClass,
+				jpegview_linux::PerfExecution::EventThread);
+			DestroyTextureMeasured(retired.texture, bytes);
+			if (countsTowardSpeculativeLimit) {
+				speculativeDisplayTextureBytes_ -= std::min(
+					bytes, speculativeDisplayTextureBytes_);
+			}
+			retired.reservation.Reset();
+		}
+	}
+
+	void RetireIncompleteDisplayTexture(PendingTextureUpload& pending) {
+		if (pending.incompleteTexture == nullptr) return;
+		const std::size_t bytes = pending.textureReservation.Bytes();
+		const bool wasSpeculative = pending.countsTowardSpeculativeLimit;
+		QueueRendererTextureRetirement(pending.incompleteTexture, bytes,
+			pending.priority.workClass, std::move(pending.textureReservation),
+			wasSpeculative);
+		pending.incompleteTexture = nullptr;
+		pending.countsTowardSpeculativeLimit = false;
+		pending.textureActiveWorking = false;
+	}
+
+	void DestroyRetiredDisplayTexture(RetiredDisplayTexture& retired) {
+		if (retired.texture != nullptr) {
+			jpegview_linux::PerfContextScope workContext(retired.workClass,
+				jpegview_linux::PerfExecution::EventThread);
+			DestroyTextureMeasured(retired.texture, retired.bytes);
+			retired.texture = nullptr;
+		}
+		if (retired.countsTowardSpeculativeLimit) {
+			speculativeDisplayTextureBytes_ -= std::min(
+				retired.bytes, speculativeDisplayTextureBytes_);
+			retiredSpeculativeDisplayTextureBytes_ -= std::min(
+				retired.bytes, retiredSpeculativeDisplayTextureBytes_);
+			retired.countsTowardSpeculativeLimit = false;
+		}
+		retired.reservation.Reset();
+	}
+
+	void TickRendererTextureRetirement() {
+		const std::size_t retireCount = jpegview_linux::DisplayTextureRetirementsForTick(
+			retiredDisplayTextures_.size(),
+			CurrentInteractionWorkPlan().interactionActive,
+			kDisplayTextureRetirementsPerTick,
+			kDisplayTextureRetirementInteractionPressureThreshold);
+		for (std::size_t retiredCount = 0; retiredCount < retireCount; ++retiredCount) {
+			RetiredDisplayTexture retired = std::move(retiredDisplayTextures_.front());
+			retiredDisplayTextures_.pop_front();
+			DestroyRetiredDisplayTexture(retired);
+		}
+	}
+
+	void DrainRetiredDisplayTextures() {
+		while (!retiredDisplayTextures_.empty()) {
+			RetiredDisplayTexture retired = std::move(retiredDisplayTextures_.front());
+			retiredDisplayTextures_.pop_front();
+			DestroyRetiredDisplayTexture(retired);
+		}
+	}
+
 	void ClearDisplayTextureCache() {
 		ClearPendingTextureUploads();
-		for (auto& cached : displayTextureCache_)
-			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
-		displayTextureCache_.clear();
+		while (!displayTextureCache_.empty()) EraseDisplayTexture(displayTextureCache_.begin());
 		for (auto& list : displayTextureLru_) list.clear();
 		displayTextureProtectedKeys_.clear();
 		displayTextureActiveKeys_.clear();
@@ -2772,9 +2881,18 @@ private:
 		std::unordered_map<std::string, DisplayTextureCacheEntry>::iterator entry) {
 		if (entry == displayTextureCache_.end()) return;
 		if (entry->first == lastPresentedDisplayKey_) lastPresentedDisplayKey_.clear();
-		if (entry->second.texture != nullptr) SDL_DestroyTexture(entry->second.texture);
+		const jpegview_linux::CacheProtectionTier protection = entry->second.protection;
+		const std::size_t bytes = entry->second.bytes;
+		QueueRendererTextureRetirement(entry->second.texture, bytes,
+			protection == jpegview_linux::CacheProtectionTier::Active ?
+				jpegview_linux::PerfWorkClass::ActiveImageSpread :
+			(protection == jpegview_linux::CacheProtectionTier::Neighbor ?
+				jpegview_linux::PerfWorkClass::NearestNavigationNeighbor :
+				jpegview_linux::PerfWorkClass::DistantSpeculation),
+			std::move(entry->second.reservation),
+			protection != jpegview_linux::CacheProtectionTier::Active);
 		if (!entry->second.activeWorking) {
-			displayTextureCacheBytes_ -= entry->second.bytes;
+			displayTextureCacheBytes_ -= bytes;
 		}
 		displayTextureLru_[static_cast<std::size_t>(entry->second.protection)].erase(
 			entry->second.lru);
@@ -2818,6 +2936,33 @@ private:
 		jpegview_linux::CacheProtectionTier protection) {
 		auto found = displayTextureCache_.find(key);
 		if (found == displayTextureCache_.end() || found->second.protection == protection) return;
+		const bool wasSpeculative = found->second.protection !=
+			jpegview_linux::CacheProtectionTier::Active;
+		bool becomesSpeculative = protection !=
+			jpegview_linux::CacheProtectionTier::Active;
+		if (!wasSpeculative && becomesSpeculative &&
+			!jpegview_linux::CanRetainSpeculativeDisplayTexture(
+				speculativeDisplayTextureBytes_, found->second.bytes,
+				jpegview_linux::SpeculativeDisplayTextureBudgetBytes(
+					cacheBudget_->Capacity()))) {
+			if (IsPinnedDisplayTexture(key)) {
+				protection = jpegview_linux::CacheProtectionTier::Active;
+				becomesSpeculative = false;
+				displayTextureProtectedKeys_.erase(key);
+				displayTextureActiveKeys_.insert(key);
+			} else {
+				EraseDisplayTexture(found);
+				return;
+			}
+		}
+		if (wasSpeculative != becomesSpeculative) {
+			if (becomesSpeculative) {
+				speculativeDisplayTextureBytes_ += found->second.bytes;
+			} else {
+				speculativeDisplayTextureBytes_ -= std::min(
+					found->second.bytes, speculativeDisplayTextureBytes_);
+			}
+		}
 		displayTextureLru_[static_cast<std::size_t>(found->second.protection)].erase(
 			found->second.lru);
 		auto& list = displayTextureLru_[static_cast<std::size_t>(protection)];
@@ -2922,9 +3067,32 @@ private:
 
 	void ClearPendingTextureUploads() {
 		for (PendingTextureUpload& pending : pendingTextureUploads_) {
-			displayImageCache_.Retire(pending.image);
+			DiscardPendingTextureUpload(pending);
 		}
 		pendingTextureUploads_.clear();
+	}
+
+	void SetPendingTextureProtection(PendingTextureUpload& pending,
+		jpegview_linux::CacheProtectionTier protection) {
+		pending.textureProtection = protection;
+		if (pending.incompleteTexture == nullptr) return;
+		const bool speculative = protection !=
+			jpegview_linux::CacheProtectionTier::Active;
+		if (pending.countsTowardSpeculativeLimit == speculative) return;
+		const std::size_t bytes = pending.textureReservation.Bytes();
+		if (speculative) {
+			speculativeDisplayTextureBytes_ += bytes;
+		} else {
+			speculativeDisplayTextureBytes_ -= std::min(
+				bytes, speculativeDisplayTextureBytes_);
+		}
+		pending.countsTowardSpeculativeLimit = speculative;
+	}
+
+	void DiscardPendingTextureUpload(PendingTextureUpload& pending) {
+		RetireIncompleteDisplayTexture(pending);
+		if (pending.image) displayImageCache_.Retire(pending.image);
+		pending.image.reset();
 	}
 
 	jpegview_linux::DisplayUploadPriority TextureUploadPriority(
@@ -2939,7 +3107,10 @@ private:
 	}
 
 	void QueuePendingTextureUpload(PendingTextureUpload pending) {
-		if (!pending.image) return;
+		if (!pending.image) {
+			RetireIncompleteDisplayTexture(pending);
+			return;
+		}
 		const auto duplicate = std::find_if(pendingTextureUploads_.begin(),
 			pendingTextureUploads_.end(), [&pending](const PendingTextureUpload& queued) {
 			return queued.image && queued.image->key == pending.image->key;
@@ -2948,21 +3119,29 @@ private:
 			if (pending.selectionGeneration != 0) {
 				duplicate->selectionGeneration = pending.selectionGeneration;
 			}
-			if (jpegview_linux::MergeDisplayUploadPriority(
-				duplicate->priority, pending.priority)) {
+			const bool promoted = jpegview_linux::MergeDisplayUploadPriority(
+				duplicate->priority, pending.priority);
+			if (duplicate->incompleteTexture == nullptr &&
+				pending.incompleteTexture != nullptr) {
+				duplicate->incompleteTexture = pending.incompleteTexture;
+				pending.incompleteTexture = nullptr;
+				duplicate->uploadPlan = std::move(pending.uploadPlan);
+				duplicate->textureReservation = std::move(pending.textureReservation);
+				duplicate->textureProtection = pending.textureProtection;
+				duplicate->textureActiveWorking = pending.textureActiveWorking;
+				duplicate->countsTowardSpeculativeLimit =
+					pending.countsTowardSpeculativeLimit;
+				pending.countsTowardSpeculativeLimit = false;
+			}
+			if (promoted) {
 				duplicate->attempted = false;
 				duplicate->lastAttemptRetainedCapacityRevision = 0;
-				PendingTextureUpload promoted = std::move(*duplicate);
-				pendingTextureUploads_.erase(duplicate);
-				auto insertion = std::find_if(pendingTextureUploads_.begin(),
-					pendingTextureUploads_.end(), [this, &promoted](
-						const PendingTextureUpload& queued) {
-						return queued.image && jpegview_linux::DisplayUploadHasHigherPriority(
-							TextureUploadPriority(promoted), TextureUploadPriority(queued));
-					});
-				pendingTextureUploads_.insert(insertion, std::move(promoted));
 			}
-			displayImageCache_.Retire(pending.image);
+			if (duplicate->incompleteTexture != nullptr) {
+				SetPendingTextureProtection(*duplicate,
+					TextureProtectionFor(duplicate->image, duplicate->priority.workClass));
+			}
+			DiscardPendingTextureUpload(pending);
 			return;
 		}
 		if (pendingTextureUploads_.size() >= kMaximumPendingTextureUploads) {
@@ -2977,10 +3156,10 @@ private:
 			if (worst == pendingTextureUploads_.end() || !worst->image ||
 				!jpegview_linux::DisplayUploadHasHigherPriority(
 					TextureUploadPriority(pending), TextureUploadPriority(*worst))) {
-				displayImageCache_.Retire(pending.image);
+				DiscardPendingTextureUpload(pending);
 				return;
 			}
-			displayImageCache_.Retire(worst->image);
+			DiscardPendingTextureUpload(*worst);
 			pendingTextureUploads_.erase(worst);
 		}
 		auto insertion = std::find_if(pendingTextureUploads_.begin(),
@@ -2989,19 +3168,27 @@ private:
 					TextureUploadPriority(pending), TextureUploadPriority(queued));
 		});
 		StagePendingTextureUpload(pending);
-		pendingTextureUploads_.insert(insertion, std::move(pending));
+		try {
+			pendingTextureUploads_.insert(insertion, std::move(pending));
+		} catch (...) {
+			DiscardPendingTextureUpload(pending);
+		}
 	}
 
 	TextureCacheOutcome CacheDisplayTexture(
-		const jpegview_linux::DisplayImageCache::ImagePtr& prepared,
-		jpegview_linux::DisplayUploadPriority uploadPriority,
+		PendingTextureUpload& pending,
 		bool mayEvict = true,
 		std::uint64_t* retainedRevisionBeforeAdmission = nullptr) {
+		const jpegview_linux::DisplayImageCache::ImagePtr prepared = pending.image;
 		if (!prepared || prepared->key.empty()) return TextureCacheOutcome::Failed;
-		jpegview_linux::PerfContextScope workContext(uploadPriority.workClass,
+		jpegview_linux::PerfContextScope workContext(pending.priority.workClass,
 			jpegview_linux::PerfExecution::EventThread);
-		if (prepared->rotationQuarterTurns == 0) QueuePreparedThumbnail(prepared);
+		if (!pending.thumbnailQueued && prepared->rotationQuarterTurns == 0) {
+			QueuePreparedThumbnail(prepared);
+			pending.thumbnailQueued = true;
+		}
 		if (FindDisplayTexture(prepared->key) != nullptr) {
+			RetireIncompleteDisplayTexture(pending);
 			displayImageCache_.ReleaseForActiveUse(prepared);
 			return TextureCacheOutcome::Cached;
 		}
@@ -3010,47 +3197,128 @@ private:
 			displayImageCache_.ReleaseForActiveUse(prepared);
 			return TextureCacheOutcome::Failed;
 		}
-		// Keep the prepared allocation charged as staging while retained-cache
-		// admission may evict other owners and while SDL copies the pixels.
-		displayImageCache_.ReleaseForUpload(prepared);
 		if (retainedRevisionBeforeAdmission != nullptr) {
 			*retainedRevisionBeforeAdmission = cacheBudget_->RetainedCapacityRevision();
 		}
-		const jpegview_linux::CacheProtectionTier protection =
-			TextureProtectionFor(prepared, uploadPriority.workClass);
-		jpegview_linux::CacheReservation reservation;
-		bool activeWorking = false;
-		if (bytes <= cacheBudget_->Capacity()) {
-			reservation = ReserveDisplayTextureBytes(bytes, protection, mayEvict);
+		if (pending.incompleteTexture == nullptr) {
+			// Keep the prepared allocation charged as staging while retained-cache
+			// admission may evict other owners and while SDL copies the pixels.
+			StagePendingTextureUpload(pending);
+			const jpegview_linux::CacheProtectionTier protection =
+				TextureProtectionFor(prepared, pending.priority.workClass);
+			if (protection != jpegview_linux::CacheProtectionTier::Active) {
+				const std::size_t speculativeLimit =
+					jpegview_linux::SpeculativeDisplayTextureBudgetBytes(
+						cacheBudget_->Capacity());
+				if (!jpegview_linux::CanRetainSpeculativeDisplayTexture(
+						speculativeDisplayTextureBytes_, bytes, speculativeLimit)) {
+					if (bytes > speculativeLimit) return TextureCacheOutcome::NotRetained;
+					if (protection == jpegview_linux::CacheProtectionTier::Neighbor &&
+						(EvictOldestDisplayTexture(protection) ||
+							retiredSpeculativeDisplayTextureBytes_ != 0)) {
+						return TextureCacheOutcome::Deferred;
+					}
+					return TextureCacheOutcome::NotRetained;
+				}
+			}
+			if (bytes <= cacheBudget_->Capacity()) {
+				pending.textureReservation = ReserveDisplayTextureBytes(
+					bytes, protection, mayEvict);
+			}
+			if (!pending.textureReservation && pending.priority.workClass ==
+				jpegview_linux::PerfWorkClass::ActiveImageSpread) {
+				pending.textureReservation = cacheBudget_->TrackTemporary(bytes,
+					jpegview_linux::CacheMemoryCategory::ActiveWorkingData);
+				pending.textureActiveWorking =
+					static_cast<bool>(pending.textureReservation);
+			}
+			if (!pending.textureReservation) {
+				const jpegview_linux::CacheBudgetSnapshot snapshot = cacheBudget_->Snapshot();
+				jpegview_linux::PerfDiagnostics::Instance().RecordText(
+					jpegview_linux::PerfMetric::CacheSnapshot, bytes, cacheBudget_->Available(),
+					snapshot.retainedBytes, static_cast<std::uint64_t>(protection),
+					snapshot.releaseRevision, 0, "texture_admission_deferred");
+				return TextureCacheOutcome::Deferred;
+			}
+			jpegview_linux::DisplayTextureUploadPlan uploadPlan(prepared->width,
+				prepared->height, bytes, kMaximumSynchronousDisplayTextureUploadBytes,
+				kDisplayTextureUploadBandBytes);
+			if (!uploadPlan.Valid()) return TextureCacheOutcome::Failed;
+			SDL_Texture* incomplete = CreateIncompleteDisplayTexture(*prepared);
+			if (incomplete == nullptr) return TextureCacheOutcome::Failed;
+			pending.incompleteTexture = incomplete;
+			pending.uploadPlan = std::move(uploadPlan);
+			SetPendingTextureProtection(pending, protection);
 		}
-		if (!reservation && uploadPriority.workClass ==
-			jpegview_linux::PerfWorkClass::ActiveImageSpread) {
-			reservation = cacheBudget_->TrackTemporary(bytes,
-				jpegview_linux::CacheMemoryCategory::ActiveWorkingData);
-			activeWorking = static_cast<bool>(reservation);
+
+		const std::optional<jpegview_linux::DisplayTextureUploadBand> band =
+			pending.uploadPlan.CurrentBand();
+		if (!band.has_value()) return TextureCacheOutcome::Failed;
+		SDL_Rect destination{0, band->y, prepared->width, band->height};
+		const std::size_t rowBytes = static_cast<std::size_t>(prepared->width) * 4;
+		const std::size_t offset = static_cast<std::size_t>(band->y) * rowBytes;
+		const std::size_t bandBytes = static_cast<std::size_t>(band->height) * rowBytes;
+		int updateResult = 0;
+		{
+			jpegview_linux::PerfScopedTimer uploadTimer(
+				jpegview_linux::PerfDiagnostics::Instance(),
+				jpegview_linux::PerfMetric::TextureUpload, bandBytes,
+				static_cast<std::uint64_t>(prepared->width),
+				static_cast<std::uint64_t>(band->height));
+			updateResult = SDL_UpdateTexture(pending.incompleteTexture, &destination,
+				prepared->bgra.data() + offset, prepared->width * 4);
 		}
-		if (!reservation) {
-			const jpegview_linux::CacheBudgetSnapshot snapshot = cacheBudget_->Snapshot();
-			jpegview_linux::PerfDiagnostics::Instance().RecordText(
-				jpegview_linux::PerfMetric::CacheSnapshot, bytes, cacheBudget_->Available(),
-				snapshot.retainedBytes, static_cast<std::uint64_t>(protection),
-				snapshot.releaseRevision, 0, "texture_admission_deferred");
-			return TextureCacheOutcome::Deferred;
+		if (updateResult != 0) {
+			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
+			pending.uploadPlan.Fail();
+			RetireIncompleteDisplayTexture(pending);
+			return TextureCacheOutcome::Failed;
 		}
-		SDL_Texture* texture = CreateTexture(prepared->bgra, prepared->width,
-			prepared->height, prepared->hasTransparency);
-		if (texture == nullptr) return TextureCacheOutcome::Failed;
+		if (!pending.uploadPlan.MarkCurrentBandUploaded()) {
+			pending.uploadPlan.Fail();
+			RetireIncompleteDisplayTexture(pending);
+			return TextureCacheOutcome::Failed;
+		}
+		if (!pending.uploadPlan.Complete()) return TextureCacheOutcome::Deferred;
+		if (SDL_SetTextureBlendMode(pending.incompleteTexture,
+			prepared->hasTransparency ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE) != 0) {
+			std::cerr << "SDL_SetTextureBlendMode failed: " << SDL_GetError() << '\n';
+			RetireIncompleteDisplayTexture(pending);
+			return TextureCacheOutcome::Failed;
+		}
+
+		const jpegview_linux::CacheProtectionTier protection = pending.textureProtection;
 		auto& list = displayTextureLru_[static_cast<std::size_t>(protection)];
-		list.push_back(prepared->key);
-		displayTextureCache_.emplace(prepared->key,
-			DisplayTextureCacheEntry{texture, bytes, prepared->source.Key(),
-				prepared->cacheKey, prepared->width, prepared->height,
-				prepared->hasTransparency,
-				prepared->spectrum, activeWorking, protection,
-				std::move(reservation),
-				std::prev(list.end())});
-		if (!activeWorking) displayTextureCacheBytes_ += bytes;
-		if (activeWorking) {
+		std::list<std::string>::iterator lruPosition;
+		bool lruInserted = false;
+		try {
+			list.push_back(prepared->key);
+			lruPosition = std::prev(list.end());
+			lruInserted = true;
+			DisplayTextureCacheEntry entry{pending.incompleteTexture, bytes,
+				prepared->source.Key(), prepared->cacheKey, prepared->width,
+				prepared->height, prepared->hasTransparency, prepared->spectrum,
+				pending.textureActiveWorking, protection,
+				pending.textureReservation.ShareAlias(), lruPosition};
+			const auto inserted = displayTextureCache_.emplace(prepared->key,
+				std::move(entry));
+			if (!inserted.second) {
+				list.erase(lruPosition);
+				lruInserted = false;
+				RetireIncompleteDisplayTexture(pending);
+				displayImageCache_.ReleaseForActiveUse(prepared);
+				return TextureCacheOutcome::Cached;
+			}
+		} catch (...) {
+			if (lruInserted) list.erase(lruPosition);
+			RetireIncompleteDisplayTexture(pending);
+			return TextureCacheOutcome::Failed;
+		}
+		pending.textureReservation.Reset();
+		pending.incompleteTexture = nullptr;
+		pending.countsTowardSpeculativeLimit = false;
+		if (!pending.textureActiveWorking) displayTextureCacheBytes_ += bytes;
+		if (pending.textureActiveWorking) {
 			for (auto entry = displayTextureCache_.begin();
 				entry != displayTextureCache_.end();) {
 				if (entry->first == prepared->key || !entry->second.activeWorking ||
@@ -3106,11 +3374,13 @@ private:
 			jpegview_linux::DisplayImageCompletionInfo completion =
 				readyBatch.TakeCompletion(index);
 			if (completion.image) {
-				candidates.push_back({PendingTextureUpload{
-					std::move(completion.image),
-					{completion.workClass, completion.priority},
-					cacheBudget_->RetainedCapacityRevision(), false, false,
-					completion.selectionGeneration}});
+				PendingTextureUpload pending;
+				pending.image = std::move(completion.image);
+				pending.priority = {completion.workClass, completion.priority};
+				pending.lastAttemptRetainedCapacityRevision =
+					cacheBudget_->RetainedCapacityRevision();
+				pending.selectionGeneration = completion.selectionGeneration;
+				candidates.push_back({std::move(pending)});
 			}
 		}
 		std::vector<jpegview_linux::DisplayUploadPriority> priorities;
@@ -3119,7 +3389,7 @@ private:
 			priorities.push_back(TextureUploadPriority(candidate.pending));
 		}
 		const std::vector<std::size_t> order = jpegview_linux::PlanDisplayTextureUploads(
-			priorities, workPlan.permittedWorkClasses, uploadLimit);
+			priorities, workPlan.permittedWorkClasses, uploadLimit, 1);
 		std::vector<bool> selected(candidates.size(), false);
 		for (const std::size_t index : order) selected[index] = true;
 		std::vector<jpegview_linux::DisplayImageCache::ImagePtr> newlyDeferredImages;
@@ -3145,7 +3415,7 @@ private:
 			if (pending.selectionGeneration != 0 &&
 				!IsCurrentSelectedDisplayRequest(pending.selectionGeneration,
 					prepared->source.Key(), prepared->key)) {
-				displayImageCache_.Retire(prepared);
+				DiscardPendingTextureUpload(pending);
 				continue;
 			}
 			std::uint64_t retainedRevision = cacheBudget_->RetainedCapacityRevision();
@@ -3154,7 +3424,7 @@ private:
 				cacheBudget_->Available() >=
 					jpegview_linux::PreparedDisplayImageBytes(*prepared);
 			const TextureCacheOutcome outcome = CacheDisplayTexture(
-				prepared, pending.priority, mayEvict,
+				pending, mayEvict,
 				&retainedRevision);
 			if (outcome == TextureCacheOutcome::Deferred) {
 				pending.lastAttemptRetainedCapacityRevision = retainedRevision;
@@ -3167,8 +3437,10 @@ private:
 					MarkSelectedDisplayFrameReady(pending.selectionGeneration,
 						prepared->source.Key(), prepared->key);
 				}
+			} else if (outcome == TextureCacheOutcome::NotRetained) {
+				DiscardPendingTextureUpload(pending);
 			} else {
-				displayImageCache_.Retire(prepared);
+				DiscardPendingTextureUpload(pending);
 				HandleCurrentDisplayFailure(pending.selectionGeneration,
 					prepared->source.Key(), prepared->key,
 					"display texture upload failed");
@@ -3288,7 +3560,7 @@ private:
 
 	void ClearDisplayTexture() {
 		if (displayTexture_ != nullptr) {
-			SDL_DestroyTexture(displayTexture_);
+			DestroyTextureMeasured(displayTexture_);
 			displayTexture_ = nullptr;
 		}
 		displayTextureWidth_ = 0;
@@ -3421,7 +3693,7 @@ private:
 
 	void ClearTransition() {
 		if (transitionTexture_ != nullptr && transitionTextureOwned_) {
-			SDL_DestroyTexture(transitionTexture_);
+			DestroyTextureMeasured(transitionTexture_);
 		} else if (!transitionDisplayKey_.empty()) {
 			if (transitionTexture_ != nullptr) {
 				SDL_SetTextureBlendMode(transitionTexture_, transitionOriginalBlendMode_);
@@ -3442,7 +3714,7 @@ private:
 	}
 
 	void ReleaseTransitionFrame(TransitionFrame& frame) {
-		if (frame.ownsTexture && frame.texture != nullptr) SDL_DestroyTexture(frame.texture);
+		if (frame.ownsTexture && frame.texture != nullptr) DestroyTextureMeasured(frame.texture);
 		if (!frame.displayKey.empty()) SetDisplayTextureProtection(frame.displayKey,
 			jpegview_linux::CacheProtectionTier::DistantSpeculation);
 		frame = {};
@@ -3494,7 +3766,9 @@ private:
 	bool IsPinnedDisplayTexture(const std::string& key) const {
 		return jpegview_linux::IsDisplayTexturePinned(key, transitionDisplayKey_,
 			pendingTransitionFrame_.displayKey, transitionCaptureDisplayKey_,
-			lastPresentedDisplayKey_, LastPresentedTextureMatchesCurrentSource());
+			lastPresentedDisplayKey_, LastPresentedTextureMatchesCurrentSource(),
+			presentationController_.AnchorTextureKey(),
+			presentationController_.PartnerTextureKey());
 	}
 
 	TransitionFrame CaptureTransitionFrame() {
@@ -3529,7 +3803,7 @@ private:
 
 	void DestroyThumbnailTextures() {
 		for (auto& cached : thumbnailTextureCache_) {
-			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
+			if (cached.second.texture != nullptr) DestroyTextureMeasured(cached.second.texture);
 		}
 		thumbnailTextureCache_.clear();
 	}
@@ -3552,7 +3826,7 @@ private:
 		for (const jpegview_linux::SourceKey& key : keys) {
 			const auto texture = thumbnailTextureCache_.find(key);
 			if (texture != thumbnailTextureCache_.end()) {
-				if (texture->second.texture != nullptr) SDL_DestroyTexture(texture->second.texture);
+				if (texture->second.texture != nullptr) DestroyTextureMeasured(texture->second.texture);
 				thumbnailTextureCache_.erase(texture);
 			}
 			const jpegview_linux::ThumbnailPixelRepository::ImagePtr pixels =
@@ -3587,7 +3861,7 @@ private:
 				++texture;
 				continue;
 			}
-			if (texture->second.texture != nullptr) SDL_DestroyTexture(texture->second.texture);
+			if (texture->second.texture != nullptr) DestroyTextureMeasured(texture->second.texture);
 			texture = thumbnailTextureCache_.erase(texture);
 		}
 		thumbnailTextureWindowKeys_.swap(desiredKeys);
@@ -3828,9 +4102,9 @@ private:
 			entry.hasTransparency = prepared->hasTransparency;
 			try {
 				const auto inserted = thumbnailTextureCache_.emplace(key, std::move(entry));
-				if (!inserted.second) SDL_DestroyTexture(texture);
+				if (!inserted.second) DestroyTextureMeasured(texture);
 			} catch (...) {
-				SDL_DestroyTexture(texture);
+				DestroyTextureMeasured(texture);
 				thumbnailUploadRetryKey_ = key;
 				thumbnailUploadRetryTick_ = now + 50;
 				break;
@@ -5155,6 +5429,7 @@ private:
 		confirmationOpen_ = true;
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
+		ReconcileThumbnailTextureWindow();
 	}
 
 	void MoveCurrentToTrash() {
@@ -5201,9 +5476,11 @@ private:
 					pendingParameterDbRestoreSource_.clear();
 				}
 				confirmationOpen_ = false;
+				ReconcileThumbnailTextureWindow();
 			} else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_SPACE) {
 				const int command = confirmationCommand_;
 				confirmationOpen_ = false;
+				ReconcileThumbnailTextureWindow();
 				if (command == kConfirmRestoreParameterDb) {
 					RestorePendingParameterDb();
 				} else if (command == IDM_MOVE_TO_RECYCLE_BIN || command == IDM_MOVE_TO_RECYCLE_BIN_CONFIRM ||
@@ -8571,7 +8848,7 @@ private:
 
 	void ClearFileDialogPreview() {
 		fileDialogPreviewLoader_.Clear();
-		if (fileDialogPreviewTexture_ != nullptr) SDL_DestroyTexture(fileDialogPreviewTexture_);
+		if (fileDialogPreviewTexture_ != nullptr) DestroyTextureMeasured(fileDialogPreviewTexture_);
 		fileDialogPreviewTexture_ = nullptr;
 		fileDialogPreviewWidth_ = 0;
 		fileDialogPreviewHeight_ = 0;
@@ -8622,7 +8899,7 @@ private:
 			fileDialogDragMode_ == FileDialogDragMode::None) {
 			const bool sameContent = contentKey == fileDialogPreviewContentKey_;
 			if (!sameContent) {
-				if (fileDialogPreviewTexture_ != nullptr) SDL_DestroyTexture(fileDialogPreviewTexture_);
+				if (fileDialogPreviewTexture_ != nullptr) DestroyTextureMeasured(fileDialogPreviewTexture_);
 				fileDialogPreviewTexture_ = nullptr;
 				fileDialogPreviewWidth_ = 0;
 				fileDialogPreviewHeight_ = 0;
@@ -8678,7 +8955,7 @@ private:
 							result.sourceDescriptor.Key(), result.observedSource);
 					}
 					if (fileDialogPreviewTexture_ != nullptr) {
-						SDL_DestroyTexture(fileDialogPreviewTexture_);
+						DestroyTextureMeasured(fileDialogPreviewTexture_);
 						fileDialogPreviewTexture_ = nullptr;
 					}
 					fileDialogPreviewWidth_ = 0;
@@ -8717,7 +8994,7 @@ private:
 					fileDialogPreviewMessage_ = "Cannot create preview";
 				} else {
 					if (fileDialogPreviewTexture_ != nullptr) {
-						SDL_DestroyTexture(fileDialogPreviewTexture_);
+						DestroyTextureMeasured(fileDialogPreviewTexture_);
 					}
 					fileDialogPreviewTexture_ = previewTexture;
 					fileDialogPreviewWidth_ = result.width;
@@ -9656,7 +9933,7 @@ private:
 
 	void ClearTextTextureCache() {
 		for (auto& cached : textTextureCache_) {
-			if (cached.second.texture != nullptr) SDL_DestroyTexture(cached.second.texture);
+			if (cached.second.texture != nullptr) DestroyTextureMeasured(cached.second.texture);
 		}
 		textTextureCache_.clear();
 	}
@@ -9682,7 +9959,7 @@ private:
 		if (bitmapText) SDL_SetHint(kRenderScaleQualityHint, kImageTextureScaleQuality);
 		if (texture == nullptr) return nullptr;
 		if (SDL_UpdateTexture(texture, nullptr, raster.argb.data(), raster.width * 4) != 0) {
-			SDL_DestroyTexture(texture);
+			DestroyTextureMeasured(texture);
 			return nullptr;
 		}
 		SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
@@ -9695,7 +9972,7 @@ private:
 				if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
 			}
 			if (oldest != inserted) {
-				SDL_DestroyTexture(oldest->second.texture);
+				DestroyTextureMeasured(oldest->second.texture);
 				textTextureCache_.erase(oldest);
 			}
 		}
@@ -11507,6 +11784,13 @@ private:
 					budgetStats.activeWorkingBytes, budgetStats.releaseRevision,
 					0, 0, 0, 0, "budget_working");
 				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+					speculativeDisplayTextureBytes_,
+					jpegview_linux::SpeculativeDisplayTextureBudgetBytes(
+						cacheBudget_->Capacity()),
+					retiredSpeculativeDisplayTextureBytes_, retiredDisplayTextures_.size(),
+					displayTextureCacheBytes_, displayTextureCache_.size(),
+					"display_texture_residency");
+				diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
 					decodedStats.cachedBytes, decodedStats.cachedImages, decodedStats.retiredBytes,
 					decodedStats.retiredImages, decodedStats.foregroundQueued,
 					decodedStats.backgroundQueued, "decoded");
@@ -11650,12 +11934,15 @@ private:
 	int displayTextureHeight_ = 0;
 	std::unordered_map<std::string, DisplayTextureCacheEntry> displayTextureCache_;
 	std::deque<PendingTextureUpload> pendingTextureUploads_;
+	std::deque<RetiredDisplayTexture> retiredDisplayTextures_;
 	std::unordered_set<std::string> displayTextureProtectedKeys_;
 	std::unordered_set<std::string> displayTextureActiveKeys_;
 	std::array<std::list<std::string>, 3> displayTextureLru_;
 	std::unordered_map<jpegview_linux::SourceKey, JpegDimensionCacheEntry,
 		jpegview_linux::SourceKeyHash> jpegDimensionCache_;
 	std::size_t displayTextureCacheBytes_ = 0;
+	std::size_t speculativeDisplayTextureBytes_ = 0;
+	std::size_t retiredSpeculativeDisplayTextureBytes_ = 0;
 	std::string lastPresentedDisplayKey_;
 	std::string failedCurrentDisplayKey_;
 	std::string transitionDisplayKey_;

@@ -57,7 +57,13 @@ they support.
    nanosecond modification time. After a source refresh, cache lookups use its new identity and miss
    pixels retained under the old one. Speculative display preparation reserves room for at most two
    in-flight or unconsumed frames and 64 MiB of pixels; current-image and active-spread
-   preparation stays admissible when those limits are full.
+   preparation stays admissible when those limits are full. Retained speculative image textures use
+   at most the smaller of half the shared cache budget and 256 MiB; this is an internal limit, not a
+   separate setting. Active spreads take priority, and no more than one speculative image upload runs
+   in each renderer-maintenance opportunity. Interaction pauses speculative uploads. Image textures
+   larger than 8 MiB upload in private bands of at most 4 MiB and become visible only after the full
+   texture succeeds. Obsolete image textures are retired incrementally after presentation, with their
+   cache reservation held until renderer destruction completes.
    Fit mode
    uses the full client area without artificial top/bottom gaps and does not enlarge small images.
    Fit, fill, actual-size, and manual modes survive navigation appropriately. Selected JPEG header
@@ -513,7 +519,9 @@ JPEGVIEW_PERF_TRACE="$PWD/out/perf-run.csv" \
 
 The trace records per-event handling time, frame construction time before SDL presentation,
 `SDL_RenderPresent` time, dispatch-to-presentation latency after keyboard/mouse input, metadata and
-source-read/map/decode timing, image processing, resampling, and `SDL_UpdateTexture` time. Each row
+source-read/map/decode timing, image processing, resampling, `SDL_UpdateTexture` time, and renderer
+texture destruction time. Large image updates appear as separate `texture_upload` rows for each band;
+`texture_destroy` rows measure `SDL_DestroyTexture` independently. Each row
 includes execution (`event_thread` or `worker_thread`) and an opaque numeric thread identifier.
 Resource-work rows use one of five classes: `active_image_spread`, `focused_preview`,
 `visible_thumbnail`, `nearest_navigation_neighbor`, or `distant_speculation`; generic event, frame,
@@ -531,7 +539,12 @@ the event thread.
 observed it. Count rows by class when comparing workloads.
 
 The trace also records the SDL version, renderer backend and flags, maximum texture dimensions, and
-cache/queue snapshots. Display lifetime rows report borrowed bytes by image identity and retired bytes
+cache/queue snapshots. The `display_texture_residency` snapshot reports retained speculative image
+texture bytes, their internal limit, bytes awaiting destruction, and live/retiring entry counts.
+Renderer cleanup normally removes one obsolete image texture after presentation; during sustained
+interaction, it starts a one-per-tick drain after four obsolete textures queue so GPU residency stays
+bounded without running a destruction on every low-pressure interaction frame.
+Display lifetime rows report borrowed bytes by image identity and retired bytes
 from the pending queue plus active retirement owner; thumbnail queue rows include source display pixels
 retained by active and queued requests. Cache snapshots run at most once per second; the cache-snapshot
 row includes its own duration. The event thread enqueues fixed-size records into a 4,096-row bounded

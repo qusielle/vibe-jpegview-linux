@@ -41,6 +41,7 @@ const char* MetricName(PerfMetric metric) {
 	case PerfMetric::Processing: return "processing";
 	case PerfMetric::Resampling: return "resampling";
 	case PerfMetric::TextureUpload: return "texture_upload";
+	case PerfMetric::TextureDestroy: return "texture_destroy";
 	case PerfMetric::Cancellation: return "cancellation";
 	case PerfMetric::CacheSnapshot: return "cache_snapshot";
 	case PerfMetric::QueueSnapshot: return "queue_snapshot";
