@@ -1242,8 +1242,9 @@ displayed screen-size result. The additional output formats listed above are sel
 filename extension, with the default filename following Windows JPEGView's `<name>_proc.jpg`
 convention. Existing files require a second Enter to confirm replacement. Saving over the selected
 source materializes and retains the current image in the viewer while refreshing its source identity,
-so later edits remain available and picture-level adjustments are not applied to the saved pixels a
-second time.
+including when the save name is a symlink to the selected file. Later edits remain available and
+picture-level adjustments are not applied to the saved pixels a second time. Saving an animated
+source over itself writes the currently displayed frame; playback stops after the save succeeds.
 
 The Linux command dispatcher uses the original numeric `IDM_*` values from
 `src/JPEGView/resource.h`, and the supported keyboard bindings follow the corresponding entries

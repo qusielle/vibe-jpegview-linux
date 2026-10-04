@@ -253,6 +253,15 @@ fs::path AbsoluteNormalized(const fs::path& path) {
 	return (error ? path : absolute).lexically_normal();
 }
 
+bool SameResolvedPath(const fs::path& left, const fs::path& right) {
+	if (left.empty() || right.empty()) return false;
+	std::error_code leftError;
+	std::error_code rightError;
+	const fs::path resolvedLeft = fs::weakly_canonical(left, leftError);
+	const fs::path resolvedRight = fs::weakly_canonical(right, rightError);
+	return !leftError && !rightError && resolvedLeft == resolvedRight;
+}
+
 fs::path CurrentViewerExecutable() {
 	if (const char* appImage = std::getenv("APPIMAGE"); appImage != nullptr && *appImage != '\0') {
 		return AbsoluteNormalized(fs::path(appImage));
@@ -542,6 +551,9 @@ private:
 		bool selectionSensitive = true;
 		bool cropDialogSave = false;
 		bool batchDialog = false;
+		bool inPlaceSave = false;
+		bool flattenAnimationOnSuccess = false;
+		bool resumeAnimationOnCompletion = false;
 	};
 
 	struct TemporaryCleanupRequest {
@@ -3103,8 +3115,19 @@ private:
 			} else {
 				switch (pending.purpose) {
 				case ImageOperationPurpose::Save:
-					CompleteImageSave(pending.output, result->outputPixels,
-						result->outputReservation.ShareAlias());
+					{
+						const bool deferPlaybackResume =
+							pending.operation.preserveDocumentPixels && pending.document.animated &&
+							pending.pausedAnimationPlayback;
+						const bool queued = CompleteImageSave(pending.output, result->outputPixels,
+							result->outputReservation.ShareAlias(),
+							pending.operation.preserveDocumentPixels,
+							pending.operation.preserveDocumentPixels && pending.document.animated,
+							deferPlaybackResume);
+						if (queued && deferPlaybackResume) {
+							pending.pausedAnimationPlayback = false;
+						}
+					}
 					break;
 				case ImageOperationPurpose::CopyImage:
 					CopyPreparedImage(result->outputPixels,
@@ -3876,7 +3899,7 @@ private:
 			jpegview_linux::RefreshFileListSource(fileList_, previous, observed, true);
 		const bool ownedInPlaceSave = pendingFileOperation_.has_value() &&
 			pendingFileOperation_->kind == jpegview_linux::FileOperationKind::SaveImage &&
-			pendingFileOperation_->outputPath == changedPath &&
+			pendingFileOperation_->inPlaceSave &&
 			FileOperationOwnerStillCurrent(*pendingFileOperation_) &&
 			!fileList_.Empty() && AbsoluteNormalized(fileList_.Current()) == changedPath &&
 			observed.Valid();
@@ -5153,7 +5176,7 @@ private:
 		jpegview_linux::ImageOperationSpec operation;
 		operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
 		operation.preserveDocumentPixels = !fileList_.Empty() &&
-			output == AbsoluteNormalized(fileList_.Current());
+			SameResolvedPath(output, fileList_.Current());
 		if (!fileDialogSaveFullSize_) {
 			operation.width = std::max(1, static_cast<int>(std::round(
 				CurrentImage().width * viewport_.Zoom())));
@@ -5248,9 +5271,17 @@ private:
 		switch (result->kind) {
 		case jpegview_linux::FileOperationKind::SaveImage:
 			if (result->success && ownerCurrent) {
-				CompleteImageSaveOnUi(pending.outputPath);
+				const bool flattenAnimation = result->replacedSelectedSource &&
+					pending.flattenAnimationOnSuccess;
+				CompleteImageSaveOnUi(pending.outputPath,
+					result->replacedSelectedSource, flattenAnimation);
 			} else if (!result->success) {
 				reportFailure("image output could not be written");
+			}
+			if (pending.resumeAnimationOnCompletion && ownerCurrent &&
+				!(result->success && result->replacedSelectedSource &&
+					pending.flattenAnimationOnSuccess)) {
+				playback_.SetImageReady(true, SDL_GetTicks());
 			}
 			break;
 		case jpegview_linux::FileOperationKind::CopyImage:
@@ -5382,12 +5413,17 @@ private:
 		ScheduleTemporaryCleanup();
 	}
 
-	void CompleteImageSave(const fs::path& output,
+	bool CompleteImageSave(const fs::path& output,
 		std::shared_ptr<const Image> outputImage,
-		jpegview_linux::CacheReservation imageReservation) {
+		jpegview_linux::CacheReservation imageReservation,
+		bool inPlaceSave, bool flattenAnimationOnSuccess,
+		bool resumeAnimationOnCompletion) {
 		jpegview_linux::ImageWriteOptions options;
 		jpegview_linux::SaveImageOperation operation;
 		operation.output = output;
+		if (inPlaceSave && !fileList_.Empty()) {
+			operation.selectedSourcePath = fileList_.Current();
+		}
 		operation.image = std::move(outputImage);
 		operation.imageReservation = std::move(imageReservation);
 		operation.options = options;
@@ -5396,34 +5432,53 @@ private:
 		pending.outputPath = output;
 		pending.successTitle = "Saved processed image: " + output.filename().string();
 		pending.failurePrefix = "Save failed: ";
+		pending.inPlaceSave = inPlaceSave;
+		pending.flattenAnimationOnSuccess = flattenAnimationOnSuccess;
+		pending.resumeAnimationOnCompletion = resumeAnimationOnCompletion;
 		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
 			fileDialogMessage_ = "Save failed: another file operation is still in progress";
-			return;
+			return false;
 		}
 		fileDialogMessage_ = "Saving processed image…";
+		return true;
 	}
 
-	void CompleteImageSaveOnUi(const fs::path& output) {
+	void StopAnimationAfterSavedSourceReplacement() {
+		if (!imageDocument_.Animated()) return;
+		imageDocument_.SetAnimation(false);
+		imageDocument_.SetFrameIndex(0);
+		currentAnimationFrame_ = 0;
+		playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
+		jpegview_linux::RetiredImageBuffers retired;
+		retired.decoded = std::move(currentDecoded_);
+		imageOperationWorker_.Retire(std::move(retired));
+	}
+
+	void CompleteImageSaveOnUi(const fs::path& output,
+		bool replacedSelectedSource, bool flattenAnimation) {
 		const std::string savedName = output.filename().string();
-		const bool replacedCurrentSource = !fileList_.Empty() &&
-			output == AbsoluteNormalized(fileList_.Current());
 		const std::optional<std::size_t> outputIndex = fileList_.IndexOf(output);
-		const jpegview_linux::SourceKey previousOutputKey = outputIndex.has_value() &&
-			fileList_.DescriptorAt(*outputIndex) != nullptr ?
-			fileList_.DescriptorAt(*outputIndex)->Key() : jpegview_linux::SourceKey{};
 		CloseFileDialog();
-		if (replacedCurrentSource) {
+		if (replacedSelectedSource && !fileList_.Empty()) {
+			const std::size_t selectedIndex = fileList_.CurrentIndex();
+			const jpegview_linux::SourceDescriptor* selectedDescriptor =
+				fileList_.DescriptorAt(selectedIndex);
+			const jpegview_linux::SourceKey previousSourceKey = selectedDescriptor != nullptr ?
+				selectedDescriptor->Key() : imageDocument_.Source();
 			const jpegview_linux::SourceDescriptor observed =
-				jpegview_linux::DescribeImageSource(output);
-			const bool alreadyReconciled = observed.Valid() && outputIndex.has_value() &&
-				fileList_.DescriptorAt(*outputIndex) != nullptr &&
-				fileList_.DescriptorAt(*outputIndex)->Key() == observed.Key() &&
+				jpegview_linux::DescribeImageSource(fileList_.Current());
+			const bool alreadyReconciled = observed.Valid() && selectedDescriptor != nullptr &&
+				selectedDescriptor->Key() == observed.Key() &&
 				imageDocument_.Source() == observed.Key() && imageDocument_.Detached();
 			if (!alreadyReconciled) {
-				(void)ApplySourceChange(previousOutputKey, observed, true);
+				(void)ApplySourceChange(previousSourceKey, observed, true);
 			}
+			if (flattenAnimation) StopAnimationAfterSavedSourceReplacement();
 			SetTitle("Saved processed image: " + savedName);
-		} else if (outputIndex.has_value()) {
+		} else if (outputIndex.has_value() &&
+			fileList_.DescriptorAt(*outputIndex) != nullptr) {
+			const jpegview_linux::SourceKey previousOutputKey =
+				fileList_.DescriptorAt(*outputIndex)->Key();
 			const jpegview_linux::SourceDescriptor observed =
 				jpegview_linux::DescribeImageSource(output);
 			(void)ApplySourceChange(previousOutputKey, observed);

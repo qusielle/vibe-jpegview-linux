@@ -129,7 +129,9 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
 - An in-place save of the selected image must materialize and retain the document's source and
   presentation pixels before handing output to the file worker. After publication, rebind the
   document to the refreshed source identity while preserving its correction base; verify that the
-  image remains visible and a later edit still succeeds.
+  image remains visible and a later edit still succeeds. Detect symlink aliases to the selected path,
+  verify the resolved destination again in the file worker, and keep animated playback paused until
+  publication either succeeds or fails.
 - File existence checks and overwrite prompts do not reserve a path. Publish new targets with an
   atomic no-replace operation so a file created during encoding cannot be silently overwritten;
   reserve replacement publication for a target whose overwrite was explicitly confirmed.

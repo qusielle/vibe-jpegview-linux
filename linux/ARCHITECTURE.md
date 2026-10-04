@@ -934,14 +934,17 @@ With keep-between-images enabled, current values take precedence; otherwise a sa
 restored. `image_processing` provides clamped ranges and identity defaults for the panel.
 Unsharp-mask parameters are included in display request keys so changing its preview cannot reuse
 stale prepared pixels.
-When Save processed overwrites the selected source, the output-preparation worker also materializes
-the lazy document's source and processed presentation pixels before the file worker publishes them.
-Viewer refreshes the file-list descriptor and thumbnail catalog, rebinds the retained document to the
-new source identity, and keeps its correction base. This preserves the image on screen and lets later
-edits use the current document without pairing old pixels with a stale source key or applying the
-active picture-level preset twice. Ordinary `LoadCurrent` clears the detached state. While the image
-is detached, source-coordinate lossless JPEG crop is unavailable because it operates on the refreshed
-source; reloading restores that operation.
+When Save processed overwrites the selected source, including through a symlink alias, the
+output-preparation worker also materializes the lazy document's source and processed presentation
+pixels before the file worker publishes them. The file worker resolves the destination again and
+reports whether it still targets the selected source. Viewer refreshes the file-list descriptor and
+thumbnail catalog, rebinds the retained document to the new source identity, and keeps its correction
+base. This preserves the image on screen and lets later edits use the current document without pairing
+old pixels with a stale source key or applying the active picture-level preset twice. For animated
+sources, playback remains paused through publication; a successful in-place save keeps the captured
+frame and stops playback, while a failed save resumes it. Ordinary `LoadCurrent` clears the detached
+state. While the image is detached, source-coordinate lossless JPEG crop is unavailable because it
+operates on the refreshed source; reloading restores that operation.
 
 Crop selection remains in source-image coordinates while the SDL adapter maps pointer gestures and
 the dotted/handled overlay through the current viewport destination. Crop and copy actions first

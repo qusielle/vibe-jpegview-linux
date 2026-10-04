@@ -1418,6 +1418,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	mkdir -p "$in_place_directory" "$in_place_config/jpegview-linux"
 	convert -size 600x300 xc:red -fill blue -draw 'rectangle 300,0 599,299' \
 		"$in_place_directory/01-inplace.png"
+	ln -s 01-inplace.png "$in_place_directory/alias.png"
 	printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
 		> "$in_place_config/jpegview-linux/settings.conf"
 	VIEWER_TEST_HOME="$temporary/in-place-save-home" \
@@ -1428,10 +1429,11 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	in_place_original_inode=$(stat -c '%i' "$in_place_directory/01-inplace.png")
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
 	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+s
-	# The default name is `01-inplace_proc.jpg` (19 code points). Backspace
-	# exactly that many times so the last key cannot navigate to the parent.
+	# Save through a symlink alias to the selected source. The default name is
+	# `01-inplace_proc.jpg` (19 code points); clear it exactly so the last key
+	# cannot navigate to the parent.
 	send_repeated_keypresses 19 BackSpace "$window_id"
-	DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 25 '01-inplace.png'
+	DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 25 'alias.png'
 	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
 	sleep 0.1
 	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
@@ -1676,6 +1678,165 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		done
 		if [ "$copied_animation_color" != "$second_animation_color" ]; then
 			echo "UI smoke test: second copied animation frame reused stale pixels ($second_animation_color/$copied_animation_color)" >&2
+			exit 1
+		fi
+		stop_viewer
+
+		# Saving the selected animated source replaces it with the captured frame.
+		# Playback stays paused through file publication, then the materialized
+		# document remains available for a later edit.
+		animation_save_directory="$temporary/animation-save"
+		animation_save_config="$temporary/animation-save-config"
+		mkdir -p "$animation_save_directory" "$animation_save_config/jpegview-linux"
+		convert -size 600x300 xc:red -fill blue -draw 'rectangle 300,0 599,299' \
+			"$temporary/animation-save-first.png"
+		convert -size 600x300 xc:green -fill yellow -draw 'rectangle 300,0 599,299' \
+			"$temporary/animation-save-second.png"
+		convert -delay 1 "$temporary/animation-save-first.png" \
+			-delay 1 "$temporary/animation-save-second.png" -loop 0 \
+			"$animation_save_directory/01-animated-save.gif"
+		printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+			> "$animation_save_config/jpegview-linux/settings.conf"
+		VIEWER_TEST_HOME="$temporary/animation-save-home" \
+			VIEWER_TEST_CONFIG_HOME="$animation_save_config" \
+			launch_viewer "$animation_save_directory/01-animated-save.gif"
+		assert_title_prefix "01-animated-save.gif" "animated in-place save fixture did not load"
+		if [ "$(identify "$animation_save_directory/01-animated-save.gif" | wc -l)" -lt 2 ]; then
+			echo "UI smoke test: animated in-place save fixture has fewer than two frames" >&2
+			exit 1
+		fi
+		animation_save_name='01-animated-save.gif'
+		animation_save_default="${animation_save_name%.*}_proc.jpg"
+		DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+s
+		send_repeated_keypresses "${#animation_save_default}" BackSpace "$window_id"
+		DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 25 "$animation_save_name"
+		DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+		sleep 0.1
+		DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+		animation_save_flattened=0
+		for _ in $(seq 1 100); do
+			if [ "$(identify "$animation_save_directory/01-animated-save.gif" | wc -l)" -eq 1 ]; then
+				animation_save_flattened=1
+				break
+			fi
+			sleep 0.05
+		done
+		if [ "$animation_save_flattened" -ne 1 ]; then
+			echo "UI smoke test: successful animated in-place save did not publish one captured frame" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		assert_title_prefix "Saved processed image: 01-animated-save.gif" \
+			"animated in-place save did not complete"
+		viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+		viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+		animation_save_left_x=$((viewer_width * 35 / 100))
+		animation_save_right_x=$((viewer_width * 65 / 100))
+		animation_save_center_x=$((viewer_width / 2))
+		animation_save_center_y=$((viewer_height / 2))
+		animation_save_top_y=$((viewer_height / 3))
+		animation_save_bottom_y=$((viewer_height * 2 / 3))
+		animation_save_pixels=''
+		for _ in $(seq 1 60); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/animation-save-after.png"
+			animation_save_left=$(convert "$temporary/animation-save-after.png" \
+				-format "%[hex:p{$animation_save_left_x,$animation_save_center_y}]" info:)
+			animation_save_right=$(convert "$temporary/animation-save-after.png" \
+				-format "%[hex:p{$animation_save_right_x,$animation_save_center_y}]" info:)
+			case "$animation_save_left:$animation_save_right" in
+				FF0000:0000FF|008000:FFFF00)
+					animation_save_pixels="$animation_save_left:$animation_save_right"
+					break
+					;;
+			esac
+			sleep 0.05
+		done
+		if [ -z "$animation_save_pixels" ]; then
+			echo "UI smoke test: animated in-place save lost its captured presentation ($animation_save_left:$animation_save_right)" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		sleep 0.15
+		DISPLAY=":$display_number" xdotool key --window "$window_id" Down
+		animation_save_rotated=0
+		for _ in $(seq 1 60); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/animation-save-rotated.png"
+			animation_save_rotated_top=$(convert "$temporary/animation-save-rotated.png" \
+				-format "%[hex:p{$animation_save_center_x,$animation_save_top_y}]" info:)
+			animation_save_rotated_bottom=$(convert "$temporary/animation-save-rotated.png" \
+				-format "%[hex:p{$animation_save_center_x,$animation_save_bottom_y}]" info:)
+			if [ "$animation_save_rotated_top:$animation_save_rotated_bottom" = \
+				"$animation_save_pixels" ]; then
+				animation_save_rotated=1
+				break
+			fi
+			sleep 0.05
+		done
+		if [ "$animation_save_rotated" -ne 1 ]; then
+			echo "UI smoke test: edit after animated in-place save did not preserve the captured pixels ($animation_save_pixels -> $animation_save_rotated_top:$animation_save_rotated_bottom)" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		stop_viewer
+
+		# A failed in-place save must hand a paused animation back to playback.
+		animation_failure_directory="$temporary/animation-save-failure"
+		animation_failure_config="$temporary/animation-save-failure-config"
+		mkdir -p "$animation_failure_directory" "$animation_failure_config/jpegview-linux"
+		convert -delay 5 -size 160x120 xc:red -delay 5 -size 160x120 xc:blue \
+			-loop 0 "$animation_failure_directory/01-animated-failure.gif"
+		ln -s 01-animated-failure.gif "$animation_failure_directory/fail.xyz"
+		printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+			> "$animation_failure_config/jpegview-linux/settings.conf"
+		VIEWER_TEST_HOME="$temporary/animation-failure-home" \
+			VIEWER_TEST_CONFIG_HOME="$animation_failure_config" \
+			launch_viewer "$animation_failure_directory/01-animated-failure.gif"
+		assert_title_prefix "01-animated-failure.gif" \
+			"animated save-failure fixture did not load"
+		animation_failure_name='fail.xyz'
+		animation_failure_default='01-animated-failure_proc.jpg'
+		DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+s
+		send_repeated_keypresses "${#animation_failure_default}" BackSpace "$window_id"
+		DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 25 \
+			"$animation_failure_name"
+		DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+		sleep 0.1
+		DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+		sleep 0.5
+		DISPLAY=":$display_number" xdotool key --window "$window_id" Escape
+		if [ "$(identify "$animation_failure_directory/01-animated-failure.gif" | wc -l)" -ne 2 ]; then
+			echo "UI smoke test: unsupported in-place save changed the animated source" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+		viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+		animation_failure_color=''
+		animation_failure_advanced=0
+		for _ in $(seq 1 120); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/animation-save-failure.png"
+			animation_failure_next=$(convert "$temporary/animation-save-failure.png" \
+				-format "%[hex:p{$((viewer_width / 2)),$((viewer_height / 2))}]" info:)
+			case "$animation_failure_next" in
+				FF0000|0000FF)
+					if [ -n "$animation_failure_color" ] && \
+						[ "$animation_failure_color" != "$animation_failure_next" ]; then
+						animation_failure_advanced=1
+						break
+					fi
+					animation_failure_color=$animation_failure_next
+					;;
+			esac
+			sleep 0.05
+		done
+		if [ "$animation_failure_advanced" -ne 1 ]; then
+			echo "UI smoke test: failed in-place save did not resume animation ($animation_failure_color/$animation_failure_next)" >&2
+			cat "$temporary/viewer.log" >&2
 			exit 1
 		fi
 		stop_viewer

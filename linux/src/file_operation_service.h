@@ -38,6 +38,10 @@ void SetImageSavePublicationTestHookForTesting(
 
 struct SaveImageOperation {
 	std::filesystem::path output;
+	// Set when the viewer captured pixels because this output resolves to the
+	// selected source. The worker verifies the resolved destination again before
+	// reporting that the selected source was replaced.
+	std::filesystem::path selectedSourcePath;
 	std::shared_ptr<const Image> image;
 	CacheReservation imageReservation;
 	ImageWriteOptions options;
@@ -159,6 +163,7 @@ struct FileOperationResult {
 	FileOperationKind kind = FileOperationKind::SaveImage;
 	bool success = false;
 	bool cancelled = false;
+	bool replacedSelectedSource = false;
 	bool irreversibleCommandFinished = false;
 	std::string message;
 	std::filesystem::path path;

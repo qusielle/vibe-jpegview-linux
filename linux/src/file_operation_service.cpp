@@ -325,7 +325,9 @@ bool ResolveOutputPath(const fs::path& output, fs::path& resolved,
 
 bool WriteImageWithSourceCpuAdmission(const fs::path& output, const Image& image,
 	const ImageWriteOptions& options, std::string& errorMessage,
-	const std::function<bool()>& shouldContinue, bool overwriteConfirmed = true) {
+	const std::function<bool()>& shouldContinue, bool overwriteConfirmed = true,
+	const fs::path& selectedSourcePath = {}, bool* replacedSelectedSource = nullptr) {
+	if (replacedSelectedSource != nullptr) *replacedSelectedSource = false;
 	FileOperationResult stagedOutput;
 	ScopedTemporaryOutputs temporaryCleanup(stagedOutput);
 	WorkContext context;
@@ -338,6 +340,15 @@ bool WriteImageWithSourceCpuAdmission(const fs::path& output, const Image& image
 	ScopedWorkContext workContext(context);
 	fs::path publicationPath;
 	if (!ResolveOutputPath(output, publicationPath, errorMessage)) return false;
+	bool targetsSelectedSource = false;
+	if (!selectedSourcePath.empty()) {
+		fs::path selectedPublicationPath;
+		std::string ignoredError;
+		if (ResolveOutputPath(selectedSourcePath, selectedPublicationPath,
+			ignoredError)) {
+			targetsSelectedSource = publicationPath == selectedPublicationPath;
+		}
+	}
 	std::error_code statusError;
 	const bool targetExists = fs::exists(publicationPath, statusError);
 	if (statusError) {
@@ -387,6 +398,9 @@ bool WriteImageWithSourceCpuAdmission(const fs::path& output, const Image& image
 	} else if (!PublishWithoutReplacing(stagedOutput.temporaryFile,
 		publicationPath, errorMessage)) {
 		return false;
+	}
+	if (replacedSelectedSource != nullptr) {
+		*replacedSelectedSource = targetsSelectedSource;
 	}
 	return true;
 }
@@ -519,7 +533,8 @@ FileOperationResult Execute(const SaveImageOperation& operation,
 	std::string errorMessage;
 	if (!WriteImageWithSourceCpuAdmission(operation.output, *operation.image,
 		operation.options, errorMessage, shouldContinue,
-		operation.overwriteConfirmed)) {
+		operation.overwriteConfirmed, operation.selectedSourcePath,
+		&result.replacedSelectedSource)) {
 		Fail(result, errorMessage, shouldContinue);
 		return result;
 	}

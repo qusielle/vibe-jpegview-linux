@@ -15476,6 +15476,7 @@ void TestFileOperationSaveAndBatchPolicies() {
 
 	jpegview_linux::SaveImageOperation confirmedSave;
 	confirmedSave.output = output;
+	confirmedSave.selectedSourcePath = output;
 	confirmedSave.image = image;
 	confirmedSave.overwriteConfirmed = true;
 	Expect(::chmod(output.c_str(), 0604) == 0,
@@ -15485,7 +15486,8 @@ void TestFileOperationSaveAndBatchPolicies() {
 		alwaysContinue);
 	const std::vector<std::uint8_t> savedBytes = ReadBytes(output);
 	struct stat savedStatus{};
-	Expect(saved.success && saved.path == output && savedBytes.size() > 8 &&
+	Expect(saved.success && saved.replacedSelectedSource && saved.path == output &&
+		savedBytes.size() > 8 &&
 		savedBytes[0] == 0x89 && savedBytes[1] == 'P' && savedBytes[2] == 'N' &&
 		savedBytes[3] == 'G' && ::stat(output.c_str(), &savedStatus) == 0 &&
 		(savedStatus.st_mode & 0777) == 0604,
@@ -15497,13 +15499,29 @@ void TestFileOperationSaveAndBatchPolicies() {
 	fs::create_symlink(symlinkTarget.filename(), symlinkOutput);
 	jpegview_linux::SaveImageOperation symlinkSave;
 	symlinkSave.output = symlinkOutput;
+	symlinkSave.selectedSourcePath = symlinkTarget;
 	symlinkSave.image = image;
 	symlinkSave.overwriteConfirmed = true;
 	const auto symlinkSaved = jpegview_linux::ExecuteFileOperation(
 		jpegview_linux::FileOperationPayload{std::move(symlinkSave)}, 5, alwaysContinue);
-	Expect(symlinkSaved.success && fs::is_symlink(symlinkOutput) &&
+	Expect(symlinkSaved.success && symlinkSaved.replacedSelectedSource &&
+		fs::is_symlink(symlinkOutput) &&
 		ReadBytes(symlinkTarget).size() > 8 && ReadBytes(symlinkTarget)[0] == 0x89,
 		"atomic image save replaced the output symlink instead of updating its target");
+
+	const fs::path hardLinkOutput = temporary.path() / "hard-link output.png";
+	const std::vector<std::uint8_t> beforeHardLinkSave = ReadBytes(symlinkTarget);
+	fs::create_hard_link(symlinkTarget, hardLinkOutput);
+	jpegview_linux::SaveImageOperation hardLinkSave;
+	hardLinkSave.output = hardLinkOutput;
+	hardLinkSave.selectedSourcePath = symlinkTarget;
+	hardLinkSave.image = image;
+	hardLinkSave.overwriteConfirmed = true;
+	const auto hardLinkSaved = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(hardLinkSave)}, 5, alwaysContinue);
+	Expect(hardLinkSaved.success && !hardLinkSaved.replacedSelectedSource &&
+		ReadBytes(symlinkTarget) == beforeHardLinkSave,
+		"replacing a separate hard-link name was reported as replacing the selected path");
 
 	const fs::path danglingTarget = temporary.path() / "dangling target.png";
 	const fs::path danglingOutput = temporary.path() / "dangling output.png";
@@ -15557,7 +15575,8 @@ void TestFileOperationSaveAndBatchPolicies() {
 	for (const fs::directory_entry& entry : fs::directory_iterator(temporary.path(),
 		saveIteratorError)) {
 		Expect(entry.path() == output || entry.path() == symlinkTarget ||
-			entry.path() == symlinkOutput || entry.path() == danglingTarget ||
+			entry.path() == symlinkOutput || entry.path() == hardLinkOutput ||
+			entry.path() == danglingTarget ||
 			entry.path() == danglingOutput || entry.path() == newOutput ||
 			entry.path() == failedOutput,
 			"image save left a temporary output beside its destination");
