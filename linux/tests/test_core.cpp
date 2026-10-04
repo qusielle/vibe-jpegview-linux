@@ -13953,6 +13953,58 @@ void TestImageResizeFiltersAndLimits() {
 	Expect(multipass.Resize(3, 1, 3) && multipass.width == 3 && multipass.height == 1 &&
 		multipass.originalWidth == 30 && multipass.originalHeight == 2,
 		"large reduction did not complete through the multi-pass resize path");
+
+	const auto resizeOracleInput = [](int width, int height) {
+		std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+		for (int index = 0; index < width * height; ++index) {
+			const std::size_t offset = static_cast<std::size_t>(index) * 4;
+			pixels[offset] = static_cast<std::uint8_t>((index * 31 + 3) % 256);
+			pixels[offset + 1] = static_cast<std::uint8_t>((index * 17 + 19) % 256);
+			pixels[offset + 2] = static_cast<std::uint8_t>((index * 13 + 79) % 256);
+			pixels[offset + 3] = static_cast<std::uint8_t>((index * 23 + 7) % 256);
+		}
+		jpegview_linux::Image image;
+		if (!image.StoreBGRA(pixels.data(), width, height, true)) {
+			throw TestFailure("could not create resize-output oracle fixture");
+		}
+		return image;
+	};
+	const auto pixelHash = [](const std::vector<std::uint8_t>& pixels) {
+		std::uint64_t hash = 14695981039346656037ull;
+		for (const std::uint8_t value : pixels) {
+			hash ^= value;
+			hash *= 1099511628211ull;
+		}
+		return hash;
+	};
+	struct ResizeOracleCase {
+		int sourceWidth;
+		int sourceHeight;
+		int targetWidth;
+		int targetHeight;
+		int filter;
+		std::uint64_t expectedHash;
+	};
+	const std::vector<ResizeOracleCase> resizeOracleCases = {
+		{5, 4, 3, 2, 1, 0xf702f7abe1db8b38ull},
+		{5, 4, 3, 2, 2, 0xc5249a1d78cc1cddull},
+		{5, 4, 3, 2, 3, 0xf3f213dac576c858ull},
+		{5, 4, 5, 2, 3, 0x4f38d395416a2441ull},
+		{5, 4, 3, 4, 2, 0x66397571be4b076cull},
+		{40, 13, 4, 2, 3, 0xf1bb4fbc2593c573ull},
+	};
+	for (const ResizeOracleCase& oracle : resizeOracleCases) {
+		jpegview_linux::Image first = resizeOracleInput(oracle.sourceWidth,
+			oracle.sourceHeight);
+		jpegview_linux::Image repeated = first;
+		Expect(first.Resize(oracle.targetWidth, oracle.targetHeight, oracle.filter) &&
+			pixelHash(first.bgra) == oracle.expectedHash,
+			"resize changed its characterized scalar output for a filter or pass geometry");
+		Expect(repeated.Resize(oracle.targetWidth, oracle.targetHeight, oracle.filter) &&
+			pixelHash(repeated.bgra) == oracle.expectedHash,
+			"repeated resize changed its characterized scalar output");
+	}
+
 	const jpegview_linux::Image beforeFailure = multipass;
 	Expect(!multipass.Resize(0, 1) && !multipass.Resize(65535, 65535) &&
 		multipass.width == beforeFailure.width && multipass.height == beforeFailure.height &&
@@ -14126,6 +14178,57 @@ void TestPictureLevelsModelAndProcessing() {
 	jpegview_linux::Image inactive = original;
 	Expect(inactive.ApplyProcessing(color, false) && inactive.bgra == original.bgra,
 		"inactive correction controls needlessly changed image pixels");
+}
+
+void TestColorCastMatchesScalarPixelOracle() {
+	const std::vector<std::array<double, 3>> controls = {
+		{0.43, -0.28, 0.35}, {-0.8, 0.6, -0.4}, {1.0, 1.0, 1.0},
+	};
+	std::vector<std::uint8_t> source(256u * 4u);
+	for (int value = 0; value < 256; ++value) {
+		const std::size_t offset = static_cast<std::size_t>(value) * 4;
+		source[offset] = static_cast<std::uint8_t>(value);
+		source[offset + 1] = static_cast<std::uint8_t>(255 - value);
+		source[offset + 2] = static_cast<std::uint8_t>((value * 73 + 29) % 256);
+		source[offset + 3] = static_cast<std::uint8_t>((value * 11 + 3) % 256);
+	}
+	for (const auto& values : controls) {
+		jpegview_linux::ImageProcessingParams params;
+		params.cyanRed = values[0];
+		params.magentaGreen = values[1];
+		params.yellowBlue = values[2];
+		jpegview_linux::Image image;
+		Expect(image.StoreBGRA(source.data(), 256, 1, true),
+			"could not create scalar color-cast oracle fixture");
+		std::vector<std::uint8_t> expected = source;
+		const double cyanRed = std::clamp(params.cyanRed, -1.0, 1.0);
+		const double magentaGreen = std::clamp(params.magentaGreen, -1.0, 1.0);
+		const double yellowBlue = std::clamp(params.yellowBlue, -1.0, 1.0);
+		const auto scalarColorCast = [cyanRed, magentaGreen, yellowBlue](int channel,
+			int value) {
+			const double midtone = 1.0 - std::pow((value - 127.5) / 127.5, 2.0);
+			double amount = 0.0;
+			if (channel == 2) amount = 0.18 * cyanRed + 0.12 * yellowBlue -
+				0.06 * magentaGreen;
+			else if (channel == 1) amount = 0.18 * magentaGreen +
+				0.12 * yellowBlue - 0.06 * cyanRed;
+			else amount = -0.18 * yellowBlue - 0.06 * cyanRed - 0.06 * magentaGreen;
+			return static_cast<int>(std::lround(amount * midtone * 255.0));
+		};
+		for (std::size_t offset = 0; offset < expected.size(); offset += 4) {
+			const int blue = source[offset];
+			const int green = source[offset + 1];
+			const int red = source[offset + 2];
+			expected[offset] = static_cast<std::uint8_t>(std::clamp(
+				blue + scalarColorCast(0, blue), 0, 255));
+			expected[offset + 1] = static_cast<std::uint8_t>(std::clamp(
+				green + scalarColorCast(1, green), 0, 255));
+			expected[offset + 2] = static_cast<std::uint8_t>(std::clamp(
+				red + scalarColorCast(2, red), 0, 255));
+		}
+		Expect(image.ApplyProcessing(params, false) && image.bgra == expected,
+			"color-cast table output differs from the previous scalar per-pixel calculation");
+	}
 }
 
 void TestImageDocumentRejectsStaleOperationsAndOwnsCurrentPixels() {
@@ -20261,6 +20364,22 @@ void TestThumbnailDownsamplingAntialiasing() {
 
 	Expect(jpegview_linux::DownsampleThumbnailBgra(transparentEdge, 2, 1, 2, 1, filtered) &&
 		filtered == transparentEdge, "same-size thumbnails were modified");
+
+	std::vector<std::uint8_t> opaquePixels(7u * 5u * 4u);
+	for (int index = 0; index < 7 * 5; ++index) {
+		const std::size_t offset = static_cast<std::size_t>(index) * 4;
+		opaquePixels[offset] = static_cast<std::uint8_t>((index * 31 + 3) % 256);
+		opaquePixels[offset + 1] = static_cast<std::uint8_t>((index * 17 + 19) % 256);
+		opaquePixels[offset + 2] = static_cast<std::uint8_t>((index * 13 + 79) % 256);
+		opaquePixels[offset + 3] = 255;
+	}
+	const std::vector<std::uint8_t> opaqueExpected = {
+		133, 75, 110, 255, 79, 114, 140, 255, 136, 153, 169, 255,
+		156, 97, 123, 255, 161, 92, 153, 255, 57, 131, 139, 255};
+	Expect(jpegview_linux::DownsampleThumbnailBgra(opaquePixels, 7, 5, 3, 2, filtered) &&
+		filtered == opaqueExpected,
+		"scalar opaque thumbnail output changed for an irregular source geometry");
+
 	int cancellationChecks = 0;
 	Expect(!jpegview_linux::DownsampleThumbnailBgra(checkerboard, 8, 8, 2, 2,
 		filtered, [&cancellationChecks] { return ++cancellationChecks < 1; }) &&
@@ -23492,6 +23611,8 @@ int main(int argc, char** argv) {
 	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
 	RunTest("image-auto-contrast-invariants", TestImageAutoContrastInvariants, failures);
 	RunTest("picture-levels-model-and-processing", TestPictureLevelsModelAndProcessing, failures);
+	RunTest("color-cast-matches-scalar-pixel-oracle",
+		TestColorCastMatchesScalarPixelOracle, failures);
 	RunTest("image-document-rejects-stale-operations-and-owns-current-pixels",
 		TestImageDocumentRejectsStaleOperationsAndOwnsCurrentPixels, failures);
 	RunTest("image-operation-worker-runs-crop-and-flattens-captured-frame",
