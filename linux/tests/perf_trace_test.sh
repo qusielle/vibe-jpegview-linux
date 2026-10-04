@@ -2,12 +2,13 @@
 set -eu
 
 trace_file=${1:?usage: perf_trace_test.sh TRACE.csv}
+expect_giflib=${JPEGVIEW_TEST_EXPECT_GIFLIB:-1}
 if [ ! -s "$trace_file" ]; then
 	echo "performance trace test: trace file is missing or empty: $trace_file" >&2
 	exit 1
 fi
 
-awk -F, '
+awk -v expect_giflib="$expect_giflib" -F, '
 NR == 1 {
 	if ($0 != "monotonic_us,metric,duration_us,execution,thread_id,work_class,value_a,value_b,value_c,value_d,value_e,value_f,detail") {
 		print "performance trace test: unexpected CSV header" > "/dev/stderr"
@@ -52,7 +53,8 @@ NR == 1 {
 		$13 == "\"active_working_charge\"") active_working_charge = 1
 }
 END {
-	if (!nearest_read || !distant_read || !stb_direct_read || !giflib_direct_read || !worker_processing ||
+	if (!nearest_read || !distant_read || !stb_direct_read ||
+		(expect_giflib == "1" && !giflib_direct_read) || !worker_processing ||
 		!worker_resampling || !active_cancellation || !preview_decode ||
 		!visible_thumbnail_resampling || !distant_thumbnail_resampling ||
 		!preview_pending_cancellation || !preview_stale_cancellation ||

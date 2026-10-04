@@ -101,8 +101,14 @@ should normally be added to one of these focused modules and covered by `tests/t
   first-frame acknowledgement values; it also plans single-page fallback, dimension waits, rotated
   spread geometry, and pair-request admission from value snapshots. It owns no SDL resources. The
   renderer acknowledges the spread only after `SDL_RenderPresent` returns.
-- `archive_source`: generic container/member recognition, virtual-directory listings, source identity,
-  and on-demand member access. ZIP and CBZ containers share the central-directory reader and member
+- `archive_source` and its internal modules: `archive_source.cpp` owns the public generic
+  container/member API, source identity, session-password lifecycle, and bounded temporary-member
+  extraction. `archive_source_catalog.cpp` owns catalog-cache/coalescing policy, while
+  `archive_source_readers.cpp` owns ZIP/libarchive traversal and the optional 7-Zip/RAR reader
+  boundaries. The private `archive_source_internal.h` shares catalog and location records without
+  exposing format-specific readers to navigation or preview consumers. Temporary extracted members
+  remain owned by `PrivateMemberFile`, whose destructor removes the link and closes the descriptor.
+  ZIP and CBZ containers share the central-directory reader and member
   access path; CBZ retains its own display label. 7z and CB7 containers share libarchive's seekable
   reader and member path; CB7 retains its own display label. TAR/TGZ catalogs stream header metadata.
   Encrypted 7z and CB7 use the focused `seven_zip_backend` adapter described below. Ordinary

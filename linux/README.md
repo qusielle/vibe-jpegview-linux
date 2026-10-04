@@ -732,7 +732,8 @@ The save dialog can write JPEG, PNG, BMP, TGA, WebP, GIF, TIFF, PSD, PNM, QOI, H
 JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is view-only.
 JPEG uses the linked libjpeg implementation (libjpeg-turbo in the supported builds), common
 single-frame formats use the vendored public-domain/MIT `stb_image` single-header library, and the
-additional formats use their native codec libraries.
+additional formats use their native codec libraries. Builds without giflib retain GIF still-image
+decoding through stb_image's first-frame fallback; animated GIF playback requires giflib.
 
 Display resizing follows JPEGView's high-quality path: downsampling uses its integrated
 best-quality filter with the default sharpening value, and enlargement uses endpoint-preserving

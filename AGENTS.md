@@ -69,6 +69,10 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
 
 - Follow the module boundaries documented in `linux/ARCHITECTURE.md`. Extend an existing module when
   it already owns the behavior; create a focused module when the behavior is independently testable.
+- When codec or archive implementations grow, keep validation, cancellation, admission, and dispatch
+  in the generic boundary; move format-specific work into focused translation units behind a private
+  internal header. Use scoped ownership for mappings and C-library handles, while keeping explicit
+  cleanup at `setjmp`/`longjmp` recovery points where stack unwinding cannot run safely.
 - Pure calculations, state transitions, ordering, filtering, and command planning belong outside
   `main.cpp` and should be covered by `linux/tests/test_core.cpp`.
 - SDL renderer resources are main-thread objects. Create, upload, render, and destroy SDL textures on

@@ -6355,6 +6355,7 @@ void TestAnimatedImageDecoders() {
 	WriteBytes(gifFile, gif);
 	error.clear();
 	decoded = {};
+#if JPEGVIEW_HAVE_GIF
 	bool decodedGif = false;
 	std::thread gifWorker([&] {
 		jpegview_linux::PerfContextScope attribution(
@@ -6370,6 +6371,12 @@ void TestAnimatedImageDecoders() {
 		"GIF animation metadata is incorrect");
 	Expect(decoded.frames[0].delayMs == 100 && decoded.frames[1].delayMs == 100,
 		"GIF frame delay was not clamped to the viewer minimum");
+#else
+	Expect(jpegview_linux::DecodeImage(gifFile, decoded, error),
+		"stb fallback could not decode the first GIF frame: " + error);
+	Expect(!decoded.animation && decoded.frames.size() == 1,
+		"stb fallback did not preserve its documented first-frame GIF behavior");
+#endif
 }
 
 void TestDecoderFailures() {
