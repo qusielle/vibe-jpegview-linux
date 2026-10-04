@@ -3032,6 +3032,25 @@ if [ -f "$temporary/images/10-archive.rar" ]; then
 	assert_title_prefix "03-blue.ppm" "open dialog could not leave RAR and return to a filesystem image"
 fi
 
+# A large ordinary folder is enumerated off the event thread. Escape must
+# close the dialog while that replaceable listing is still in progress.
+slow_browse_directory="$temporary/images/00-slow-browse"
+mkdir -p "$slow_browse_directory"
+for index in $(seq 0 14999); do
+	filename=$(printf '%05d' "$index")
+	: > "$slow_browse_directory/$filename.jpg"
+done
+DISPLAY=":$display_number" xdotool key ctrl+o
+sleep 0.5
+DISPLAY=":$display_number" xdotool type --delay 1 '00-slow-browse'
+DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool key Escape
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "04-yellow.ppm" "Escape did not close Browse during a large-directory listing"
+DISPLAY=":$display_number" xdotool key Left
+assert_title_prefix "03-blue.ppm" "large-directory Escape test did not restore the starting image"
+rm -rf -- "$slow_browse_directory"
+
 DISPLAY=":$display_number" xdotool key ctrl+o
 click_file_dialog_sort
 DISPLAY=":$display_number" xdotool key Home

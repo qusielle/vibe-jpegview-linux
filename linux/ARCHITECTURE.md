@@ -321,14 +321,18 @@ should normally be added to one of these focused modules and covered by `tests/t
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
   restoration, pane-aware preview image sizing and testable filename/details footer allocation,
-  cancellable background archive listings and directory
-  summaries (including supported archive containers in the directory count), replaceable background
-  file-size lookup for Browse and Recents rows, encrypted-row marking, caller-preserved row order for
-  recent MRU entries, and replaceable previews for a focused image or a directory's first image.
+  one authoritative entry collection with exact path lookup and filtered/sorted row indices,
+  cancellable background filesystem/archive listings with both row orders prepared on the worker,
+  and directory summaries (including supported archive containers in the directory count), bounded
+  background source-metadata lookup for Browse and Recents rows, encrypted-row marking,
+  caller-preserved row order for recent MRU entries, and replaceable previews for a focused image or
+  a directory's first image.
   Preview results carry original source dimensions and byte size; archive-member sizes come from
-  uncompressed member metadata. Descriptor/catalog capture for Browse and Recents stays on the
-  file-size and preview workers; event-thread row rebuilds use path placeholders rather than opening
-  cold archive catalogs. Each preview request carries its requested descriptor and validates a valid
+  uncompressed member metadata. Filesystem row sizes and modification times are captured during
+  directory enumeration. Descriptor/catalog capture for Browse and Recents stays on the file-size
+  and preview workers; event-thread row rebuilds use path placeholders rather than opening cold
+  archive catalogs. File-size work starts with the selected and visible rows and completion delivery
+  is capped per UI update. Each preview request carries its requested descriptor and validates a valid
   identity before and after reading; a stale completion returns both the requested and observed
   descriptors for exact refresh. The SDL owner refreshes and invalidates only when their `SourceKey`s
   differ; an unchanged invalid key keeps its terminal missing-source error without resubmitting it.
@@ -598,11 +602,16 @@ The Ubuntu 20 and 22 `highway-jxl` stages fetch the pinned `skcms` snapshot from
 mirror instead of the frequently failing Gitiles archive endpoint. Its SHA-256 is checked before
 extraction so the alternate mirror does not weaken source integrity.
 
-The Open dialog routes cold archive-directory scans through `ArchiveDirectoryLoader`; viewer-list
-startup and folder transitions route archive catalogs through `FileListScanWorker`, so even a
-sequential TGZ catalog or a 7z/RAR catalog cannot block the SDL event thread. The Open dialog's
-ordinary filesystem Browse refresh remains a separate synchronous path; this worker specifically
-owns the viewer's `FileList` scans. The async result/cancellation pattern was cross-checked against
+The Open dialog routes filesystem and generic archive directory listings through
+`FileDialogDirectoryLoader`; archive password validation remains on `ArchiveDirectoryLoader`.
+Viewer-list startup and folder transitions use `FileListScanWorker`, so even a sequential TGZ catalog
+or a 7z/RAR catalog cannot block the SDL event thread. Listing generations replace older work, sorting
+is prepared by the directory worker, and Escape clears the listing and its dependent metadata,
+summary, and preview requests. A Browse activation pressed while rows are loading is held until that
+listing is applied; folder changes, tab switches, and dialog close clear the pending activation.
+File-size and directory-summary completions are drained in bounded batches so a large Recents list or
+a directory with many child folders cannot monopolize one UI update. The async result/cancellation
+pattern was cross-checked against
 the large-folder reports in [upstream issues #194](https://github.com/sylikc/jpegview/issues/194) and
 [#263](https://github.com/sylikc/jpegview/issues/263), and the worker/result approach in
 [Masir01/jpegview_up's `dev-up` FileList](https://github.com/Masir01/jpegview_up/blob/dev-up/src/JPEGView/FileList.cpp).
@@ -718,8 +727,9 @@ the thumbnail resampler's source-area antialiasing. A pane resize replaces the t
 the generation check prevents stale work from replacing the current preview. Preview pixels remain
 outside the persistent viewer caches, and their SDL texture is uploaded and destroyed by Viewer.
 The same worker returns full source dimensions (including for reduced-DCT JPEG previews) and file
-size; a separate replaceable file-size worker fills Browse and Recents rows using archive
-central-directory/header metadata for virtual members. For a nonempty image path, the preview worker
+size; a separate replaceable file-size worker captures source descriptors for Browse and Recents rows
+using archive central-directory/header metadata for virtual members. Ordinary Browse sizes are reused
+from the directory-entry listing. For a nonempty image path, the preview worker
 recaptures an invalid requested descriptor before decoding and publishes pixels only under a valid,
 still-current source identity. Both reject stale generations, and neither adds image decoding to the
 event thread.

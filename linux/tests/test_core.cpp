@@ -77,6 +77,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iomanip>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -20383,6 +20384,14 @@ void TestFileDialogModelStateAndNavigation() {
 				return entry.path == sizedEntry && entry.fileSizeKnown && entry.fileSize == 1536;
 			}),
 		"file-size updates did not reach the sorted and filtered open-dialog rows");
+	model.AppendFilter("03-last.jpg");
+	model.ToggleSortMode(2);
+	Expect(model.Entries().size() == 2 && model.Entries()[0].parent &&
+		model.Entries()[1].path == sizedEntry && model.Entries()[1].fileSizeKnown &&
+		model.Entries()[1].fileSize == 1536,
+		"filtering or changing sort after metadata arrival detached the indexed row size");
+	model.ClearFilter();
+	model.ToggleSortMode(2);
 	const fs::path encryptedArchivePath = "/pictures/locked.7z";
 	jpegview_linux::FileDialogModel encryptedModel;
 	encryptedModel.SetEntries({
@@ -20499,6 +20508,39 @@ void TestFileDialogModelStateAndNavigation() {
 		"UTF-8 erasure damaged valid text before a malformed trailing byte");
 }
 
+void TestFileDialogModelIndexedLargeCatalogUpdates() {
+	using Entry = jpegview_linux::FileDialogEntry;
+	constexpr std::size_t entryCount = 15000;
+	const fs::path directory = fs::temp_directory_path() / "jpegview-indexed-dialog-catalog";
+	std::vector<Entry> entries;
+	entries.reserve(entryCount);
+	std::vector<fs::path> paths;
+	paths.reserve(entryCount);
+	for (std::size_t index = 0; index < entryCount; ++index) {
+		std::ostringstream name;
+		name << "photo-" << std::setw(5) << std::setfill('0') << index << ".jpg";
+		paths.push_back(directory / name.str());
+		entries.emplace_back(paths.back(), false, false);
+	}
+	jpegview_linux::FileDialogModel model;
+	model.SetEntriesInOrder(std::move(entries));
+	bool allUpdated = true;
+	for (std::size_t index = 0; index < entryCount; ++index) {
+		allUpdated = model.SetFileSize(paths[index], index + 1) && allUpdated;
+	}
+	std::size_t knownSizeCount = 0;
+	for (const Entry& entry : model.AllEntries()) {
+		if (entry.fileSizeKnown && entry.fileSize > 0) ++knownSizeCount;
+	}
+	const std::string finalName = paths.back().filename().string();
+	model.AppendFilter(finalName);
+	const auto filtered = model.Entries();
+	Expect(allUpdated && knownSizeCount == entryCount && filtered.size() == 1 &&
+		filtered[0].path == paths.back() && filtered[0].fileSizeKnown &&
+		filtered[0].fileSize == entryCount && model.Focus(paths.back(), 10),
+		"15,000 exact-index metadata updates lost a size during later filtering or focus");
+}
+
 void TestFileDialogDirectorySummaries() {
 	TemporaryDirectory temporary;
 	const fs::path album = temporary.path() / "album";
@@ -20531,9 +20573,26 @@ void TestFileDialogDirectorySummaries() {
 		results[0].directory == album && results[0].summary.imageCount == 2 &&
 		results[0].summary.subdirectoryCount == 3,
 		"background directory summary loader did not publish the requested result");
-
 	const fs::path empty = temporary.path() / "empty";
 	fs::create_directory(empty);
+	loader.Request({album, empty, album, empty, album}, 23);
+	results.clear();
+	bool summaryDrainWasBounded = true;
+	std::size_t drainedSummaryCount = 0;
+	const auto boundedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (drainedSummaryCount < 5 && std::chrono::steady_clock::now() < boundedDeadline) {
+		std::vector<jpegview_linux::DirectorySummaryResult> batch = loader.TakeReady(2);
+		if (batch.size() > 2) summaryDrainWasBounded = false;
+		drainedSummaryCount += batch.size();
+		results.insert(results.end(), std::make_move_iterator(batch.begin()),
+			std::make_move_iterator(batch.end()));
+		if (results.size() < 5) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Expect(summaryDrainWasBounded && results.size() == 5 &&
+		std::all_of(results.begin(), results.end(), [](const auto& result) {
+			return result.generation == 23;
+		}), "directory summary result draining exceeded its per-update bound");
+
 	loader.Request({album}, 18);
 	loader.Request({empty}, 19);
 	results.clear();
@@ -20682,6 +20741,214 @@ void TestFileDialogDirectorySummaries() {
 		"directory summary destruction waited for foreground work or renderer progress");
 }
 
+void TestFileDialogDirectoryLoader() {
+	using namespace std::chrono_literals;
+	using Entry = jpegview_linux::FileDialogEntry;
+	TemporaryDirectory temporary;
+	const fs::path album = temporary.path() / "album";
+	const fs::path subdirectory = album / "subdirectory";
+	fs::create_directories(subdirectory);
+	const fs::path image = album / "photo.jpg";
+	WriteText(image, "directory listing size fixture");
+	WriteText(album / "notes.txt", "not an image");
+	const fs::path archive = album / "bundle.zip";
+	WriteZipArchive(archive, {{"inside.jpg", image}});
+	const fs::path empty = temporary.path() / "empty";
+	fs::create_directory(empty);
+	const fs::path missing = temporary.path() / "missing";
+	const jpegview_linux::FileDialogListingPolicy policy{};
+	jpegview_linux::FileDialogDirectoryLoader loader;
+	const auto waitForResult = [](jpegview_linux::FileDialogDirectoryLoader& source) {
+		std::vector<jpegview_linux::FileDialogDirectoryResult> results;
+		const auto deadline = std::chrono::steady_clock::now() + 4s;
+		while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+			results = source.TakeReady();
+			if (results.empty()) std::this_thread::sleep_for(1ms);
+		}
+		return results;
+	};
+
+	loader.Request(album, 71, policy);
+	std::vector<jpegview_linux::FileDialogDirectoryResult> results = waitForResult(loader);
+	Expect(results.size() == 1 && results.front().generation == 71 &&
+		results.front().directory == album && !results.front().archiveLocation &&
+		results.front().error.empty(),
+		"filesystem Browse listing did not publish a completed generation");
+	if (!results.empty()) {
+		jpegview_linux::FileDialogModel model;
+		model.SetEntriesWithPreparedOrder(std::move(results.front().entries),
+			std::move(results.front().sortOrders));
+		const auto findEntry = [&model](const fs::path& path) -> const Entry* {
+			for (const Entry& entry : model.AllEntries()) {
+				if (entry.path == path) return &entry;
+			}
+			return nullptr;
+		};
+		const Entry* imageEntry = findEntry(image);
+		const Entry* archiveEntry = findEntry(archive);
+		Expect(model.AllEntries().size() == 4 && model.AllEntries().front().parent &&
+			imageEntry != nullptr && imageEntry->fileSizeKnown &&
+			imageEntry->fileSize == fs::file_size(image) &&
+			archiveEntry != nullptr && archiveEntry->directory &&
+			archiveEntry->archiveContainer,
+			"filesystem listing lost its parent, immediate folders, archive rows, or file sizes");
+	}
+
+	loader.Request(archive, 72, policy);
+	results = waitForResult(loader);
+	const auto member = results.empty() ?
+		std::vector<jpegview_linux::FileDialogEntry>::const_iterator{} :
+		std::find_if(results.front().entries.begin(), results.front().entries.end(),
+			[](const Entry& entry) { return entry.path.filename() == "inside.jpg"; });
+	Expect(results.size() == 1 && results.front().generation == 72 &&
+		results.front().archiveLocation && results.front().error.empty() &&
+		member != results.front().entries.end() && member->archiveMember &&
+		member->fileSizeKnown && member->fileSize == fs::file_size(image) &&
+		member->sourceDescriptor.Valid(),
+		"generic Browse directory loader did not preserve archive member identity and size");
+
+	loader.Request(empty, 73, policy);
+	results = waitForResult(loader);
+	Expect(results.size() == 1 && results.front().generation == 73 &&
+		results.front().error.empty() && results.front().entries.size() == 1 &&
+		results.front().entries.front().parent,
+		"empty filesystem listing did not return only its parent row");
+	loader.Request(missing, 74, policy);
+	results = waitForResult(loader);
+	Expect(results.size() == 1 && results.front().generation == 74 &&
+		!results.front().error.empty() && results.front().entries.size() == 1 &&
+		results.front().entries.front().parent,
+		"unreadable or missing filesystem listing did not publish a useful failure");
+	jpegview_linux::FileDialogListingPolicy savePolicy;
+	savePolicy.saveDialog = true;
+	savePolicy.includeArchives = false;
+	loader.Request(album, 75, savePolicy);
+	results = waitForResult(loader);
+	Expect(results.size() == 1 && results.front().policy.saveDialog &&
+		std::none_of(results.front().entries.begin(), results.front().entries.end(),
+			[&archive](const Entry& entry) { return entry.path == archive; }) &&
+		std::none_of(results.front().entries.begin(), results.front().entries.end(),
+			[](const Entry& entry) { return entry.path.filename() == "notes.txt"; }),
+		"save-dialog listing policy exposed archives or non-image files");
+	jpegview_linux::FileDialogListingPolicy restorePolicy;
+	restorePolicy.includeNonImageFiles = true;
+	restorePolicy.includeArchives = false;
+	loader.Request(album, 76, restorePolicy);
+	results = waitForResult(loader);
+	Expect(results.size() == 1 && results.front().policy.includeNonImageFiles &&
+		std::any_of(results.front().entries.begin(), results.front().entries.end(),
+			[](const Entry& entry) { return entry.path.filename() == "notes.txt"; }) &&
+		std::none_of(results.front().entries.begin(), results.front().entries.end(),
+			[&archive](const Entry& entry) { return entry.path == archive; }),
+		"parameter-restore listing did not include files while hiding archives");
+	const fs::path throwingPath = temporary.path() / "throwing-listing";
+	const fs::path recoveredPath = temporary.path() / "recovered-listing";
+	const auto exceptionEnumerator = [&throwingPath](const fs::path& directory,
+		jpegview_linux::FileDialogListingPolicy, const std::function<bool()>&) {
+		if (directory == throwingPath) throw std::runtime_error("synthetic listing failure");
+		jpegview_linux::FileDialogDirectoryResult result;
+		result.directory = directory;
+		result.entries.emplace_back(directory / "recovered.jpg", false, false);
+		return result;
+	};
+	jpegview_linux::FileDialogDirectoryLoader exceptionLoader(exceptionEnumerator);
+	exceptionLoader.Request(throwingPath, 80, policy);
+	results = waitForResult(exceptionLoader);
+	Expect(results.size() == 1 && results.front().generation == 80 &&
+		results.front().directory == throwingPath &&
+		results.front().error == "synthetic listing failure",
+		"directory listing callback exception was not published as a current failure");
+	exceptionLoader.Request(recoveredPath, 81, policy);
+	results = waitForResult(exceptionLoader);
+	Expect(results.size() == 1 && results.front().generation == 81 &&
+		results.front().directory == recoveredPath && results.front().error.empty() &&
+		results.front().entries.size() == 1,
+		"directory listing worker did not service a valid request after callback failure");
+
+	const fs::path slow = temporary.path() / "slow";
+	const fs::path replacement = temporary.path() / "replacement";
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool entered = false;
+	bool release = false;
+	const auto enumerator = [&mutex, &changed, &entered, &release, &slow](
+		const fs::path& directory, jpegview_linux::FileDialogListingPolicy,
+		const std::function<bool()>&) {
+		if (directory == slow) {
+			std::unique_lock<std::mutex> lock(mutex);
+			entered = true;
+			changed.notify_all();
+			changed.wait(lock, [&release] { return release; });
+		}
+		jpegview_linux::FileDialogDirectoryResult result;
+		result.directory = directory;
+		result.entries.emplace_back(directory / "listed.jpg", false, false);
+		return result;
+	};
+	jpegview_linux::FileDialogDirectoryLoader replacing(enumerator);
+	auto slowRequest = std::async(std::launch::async, [&replacing, &slow, policy] {
+		replacing.Request(slow, 77, policy);
+	});
+	const bool requestReturned =
+		slowRequest.wait_for(2s) == std::future_status::ready;
+	if (requestReturned) slowRequest.get();
+	bool slowEnumerationEntered = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		slowEnumerationEntered = changed.wait_for(lock, 2s, [&entered] { return entered; });
+	}
+	replacing.Request(replacement, 78, policy);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		release = true;
+	}
+	changed.notify_all();
+	results = waitForResult(replacing);
+	Expect(requestReturned && slowEnumerationEntered && results.size() == 1 &&
+		results.front().generation == 78 && results.front().directory == replacement,
+		"slow listing blocked request submission or published a replaced directory result");
+
+	std::mutex cancelMutex;
+	std::condition_variable cancelChanged;
+	bool cancelEntered = false;
+	bool cancelRelease = false;
+	const fs::path cancelPath = temporary.path() / "cancel";
+	const fs::path afterClear = temporary.path() / "after-clear";
+	const auto cancelEnumerator = [&cancelMutex, &cancelChanged, &cancelEntered,
+		&cancelRelease, &cancelPath](const fs::path& directory,
+		jpegview_linux::FileDialogListingPolicy, const std::function<bool()>&) {
+		if (directory == cancelPath) {
+			std::unique_lock<std::mutex> lock(cancelMutex);
+			cancelEntered = true;
+			cancelChanged.notify_all();
+			cancelChanged.wait(lock, [&cancelRelease] { return cancelRelease; });
+		}
+		jpegview_linux::FileDialogDirectoryResult result;
+		result.directory = directory;
+		result.entries.emplace_back(directory / "listed.jpg", false, false);
+		return result;
+	};
+	jpegview_linux::FileDialogDirectoryLoader cleared(cancelEnumerator);
+	cleared.Request(cancelPath, 77, policy);
+	bool cancellationEntered = false;
+	{
+		std::unique_lock<std::mutex> lock(cancelMutex);
+		cancellationEntered = cancelChanged.wait_for(lock, 2s,
+			[&cancelEntered] { return cancelEntered; });
+	}
+	cleared.Clear(78);
+	cleared.Request(afterClear, 79, policy);
+	{
+		std::lock_guard<std::mutex> lock(cancelMutex);
+		cancelRelease = true;
+	}
+	cancelChanged.notify_all();
+	results = waitForResult(cleared);
+	Expect(cancellationEntered && results.size() == 1 &&
+		results.front().generation == 79 && results.front().directory == afterClear,
+		"clearing a blocked listing failed to cancel it before the next directory completed");
+}
+
 void TestColdArchiveRowDescriptorsAreCapturedOffThread() {
 	TemporaryDirectory temporary;
 	const fs::path browseFile = temporary.path() / "browse-row.png";
@@ -20768,6 +21035,36 @@ void TestColdArchiveRowDescriptorsAreCapturedOffThread() {
 		recentResult->observedSource.Metadata().archiveMember &&
 		recentResult->size == fs::file_size(archivePayload),
 		"Browse/Recents row placeholders did not receive worker-captured source metadata");
+
+	std::vector<fs::path> boundedPaths;
+	std::vector<jpegview_linux::SourceDescriptor> boundedSources;
+	for (int index = 0; index < 5; ++index) {
+		const fs::path path = temporary.path() / ("bounded-" + std::to_string(index) + ".jpg");
+		WriteBytes(path, {static_cast<std::uint8_t>(index)});
+		boundedPaths.push_back(path);
+		boundedSources.emplace_back(path, jpegview_linux::SourceIdentity{},
+			jpegview_linux::SourceMetadata{});
+	}
+	jpegview_linux::FileDialogFileSizeLoader boundedLoader;
+	boundedLoader.RequestSources(boundedSources, 83);
+	std::vector<jpegview_linux::FileDialogFileSizeResult> boundedResults;
+	bool sizeDrainWasBounded = true;
+	const auto boundedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (boundedResults.size() < boundedPaths.size() &&
+		std::chrono::steady_clock::now() < boundedDeadline) {
+		std::vector<jpegview_linux::FileDialogFileSizeResult> batch =
+			boundedLoader.TakeReady(2);
+		if (batch.size() > 2) sizeDrainWasBounded = false;
+		boundedResults.insert(boundedResults.end(), std::make_move_iterator(batch.begin()),
+			std::make_move_iterator(batch.end()));
+		if (boundedResults.size() < boundedPaths.size()) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
+	Expect(sizeDrainWasBounded && boundedResults.size() == boundedPaths.size() &&
+		std::all_of(boundedResults.begin(), boundedResults.end(), [](const auto& result) {
+			return result.generation == 83 && result.observedSource.Valid();
+		}), "file-size result draining exceeded its per-update bound or lost a row");
 }
 
 void TestFileDialogPreviewSelectionAndBackgroundLoading() {
@@ -21511,7 +21808,10 @@ int main(int argc, char** argv) {
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
 	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
 	RunTest("file-dialog-model-state-and-navigation", TestFileDialogModelStateAndNavigation, failures);
+	RunTest("file-dialog-model-indexed-large-catalog-updates",
+		TestFileDialogModelIndexedLargeCatalogUpdates, failures);
 	RunTest("file-dialog-directory-summaries", TestFileDialogDirectorySummaries, failures);
+	RunTest("file-dialog-directory-loader", TestFileDialogDirectoryLoader, failures);
 	RunTest("cold-archive-row-descriptors-are-captured-off-thread",
 		TestColdArchiveRowDescriptorsAreCapturedOffThread, failures);
 	RunTest("file-dialog-preview-selection-and-background-loading",

@@ -513,6 +513,7 @@ public:
 			UpdateInteractionWorkPolicy();
 			TickFileListScan();
 			TickFileListSort();
+			TickFileDialogDirectoryListing();
 			TickFileDialogArchiveDirectory();
 			TickFileDialogDirectorySummaries();
 			TickFileDialogFileSizes();
@@ -4708,6 +4709,11 @@ private:
 		fileDialogDragMode_ = FileDialogDragMode::None;
 		SDL_SetCursor(SDL_GetDefaultCursor());
 		ClearFileDialogPreview();
+		fileDialogDirectoryLoader_.Clear(++fileDialogDirectoryGeneration_);
+		fileDialogListingPending_ = false;
+		fileDialogFocusAfterListing_.clear();
+		fileDialogActivateAfterListing_ = false;
+		fileDialogOpenDirectoryAfterListing_ = false;
 		fileDialogArchiveLoader_.Clear(++fileDialogArchiveGeneration_);
 		++fileDialogSummaryGeneration_;
 		fileDialogSummaryLoader_.Request({}, fileDialogSummaryGeneration_);
@@ -9472,6 +9478,10 @@ private:
 			if (!fileDialogPreviewRequestKey_.empty()) ClearFileDialogPreview();
 			return;
 		}
+		if (fileDialogTab_ == FileDialogTab::Browse && fileDialogListingPending_) {
+			if (!fileDialogPreviewRequestKey_.empty()) ClearFileDialogPreview();
+			return;
+		}
 
 		const SDL_Rect previewRect = FileDialogPreviewRect();
 		const jpegview_linux::FileDialogPreviewSize previewSize =
@@ -9686,21 +9696,31 @@ private:
 		++fileDialogFileSizeGeneration_;
 		std::vector<jpegview_linux::SourceDescriptor> sources;
 		std::unordered_set<std::string> seen;
-		const auto appendUnknownFiles = [&sources, &seen](
-			const std::vector<FileDialogEntry>& entries) {
-			for (const FileDialogEntry& entry : entries) {
-				if (entry.directory || entry.fileSizeKnown) continue;
-				const std::string identity = entry.path.lexically_normal().string();
-				if (seen.insert(identity).second) {
-					sources.push_back(entry.sourceDescriptor.LogicalPath().empty() ?
-						jpegview_linux::SourceDescriptor(entry.path, {}, {}) :
-						entry.sourceDescriptor);
-				}
+		const auto appendUnknownEntry = [&sources, &seen](const FileDialogEntry& entry) {
+			if (entry.directory || (entry.sourceDescriptor.Valid() && entry.fileSizeKnown)) return;
+			const std::string identity = entry.path.lexically_normal().string();
+			if (!seen.insert(identity).second) return;
+			sources.push_back(entry.sourceDescriptor.LogicalPath().empty() ?
+				jpegview_linux::SourceDescriptor(entry.path, {}, {}) : entry.sourceDescriptor);
+		};
+		const auto appendUnknownFiles = [this, &appendUnknownEntry](
+			const jpegview_linux::FileDialogModel& model) {
+			if (const FileDialogEntry* selected = model.SelectedEntry()) {
+				appendUnknownEntry(*selected);
 			}
+			const auto rows = model.Entries();
+			const int begin = std::clamp(model.Scroll(), 0, static_cast<int>(rows.size()));
+			const int end = std::min(static_cast<int>(rows.size()),
+				begin + FileDialogVisibleRows());
+			for (int index = begin; index < end; ++index) {
+				appendUnknownEntry(rows[static_cast<std::size_t>(index)]);
+			}
+			for (const FileDialogEntry& entry : model.AllEntries()) appendUnknownEntry(entry);
 		};
 		if (!fileDialogSave_ && !fileDialogParameterBackup_ && !fileDialogParameterRestore_) {
-			appendUnknownFiles(fileDialogModel_.AllEntries());
-			appendUnknownFiles(recentFileDialogModel_.AllEntries());
+			appendUnknownFiles(ActiveFileDialogModel());
+			appendUnknownFiles(fileDialogTab_ == FileDialogTab::Browse ?
+				recentFileDialogModel_ : fileDialogModel_);
 		}
 		fileDialogFileSizeLoader_.RequestSources(sources, fileDialogFileSizeGeneration_);
 	}
@@ -9715,6 +9735,87 @@ private:
 				fileDialogModel_.RefreshSourceDescriptor(previous, result.observedSource);
 				recentFileDialogModel_.RefreshSourceDescriptor(previous,
 					result.observedSource);
+			}
+			if (result.observedSource.Metadata().hasFileSize) {
+				fileDialogModel_.SetFileSize(result.path, result.size);
+				recentFileDialogModel_.SetFileSize(result.path, result.size);
+			}
+		}
+	}
+
+	void TickFileDialogDirectoryListing() {
+		for (jpegview_linux::FileDialogDirectoryResult& result :
+			fileDialogDirectoryLoader_.TakeReady()) {
+			const bool includeNonImageFiles = fileDialogParameterBackup_ ||
+				fileDialogParameterRestore_;
+			const bool includeArchives = !fileDialogSave_ && !includeNonImageFiles;
+			if (!fileDialogOpen_ || result.generation != fileDialogDirectoryGeneration_ ||
+				result.directory != fileDialogDirectory_ || result.directory.empty() ||
+				result.policy.saveDialog != fileDialogSave_ ||
+				result.policy.includeNonImageFiles != includeNonImageFiles ||
+				result.policy.includeArchives != includeArchives) continue;
+			fileDialogListingPending_ = false;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			if (result.containsEncryptedEntries) {
+				const fs::path backing = jpegview_linux::ArchiveBackingFile(result.directory);
+				encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
+			}
+			if (!result.error.empty()) {
+				if (result.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired ||
+					result.errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword) {
+					if (result.errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword) {
+						jpegview_linux::ForgetSessionArchivePassword(result.directory);
+					}
+					const fs::path backing = jpegview_linux::ArchiveBackingFile(result.directory);
+					encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
+					result.entries.push_back(FileDialogEntry{result.directory, true, false, {},
+						true, false, true});
+					fileDialogMessage_ = result.errorKind ==
+						jpegview_linux::ArchiveErrorKind::PasswordRequired ?
+						"Archive contents are encrypted" : "Saved archive password is incorrect";
+				} else {
+					fileDialogMessage_ = result.archiveLocation ?
+						"Cannot read archive: " + result.error :
+						"Cannot read folder: " + result.error;
+				}
+			} else {
+				fileDialogMessage_.clear();
+			}
+			if (result.entries.size() != result.sortOrders.name.size() ||
+				result.entries.size() != result.sortOrders.modificationDate.size()) {
+				result.sortOrders = jpegview_linux::BuildFileDialogEntrySortOrders(result.entries);
+			}
+			fileDialogModel_.SetEntriesWithPreparedOrder(std::move(result.entries),
+				std::move(result.sortOrders));
+			if (result.policy.saveDialog || result.policy.includeNonImageFiles) {
+				fileDialogModel_.ClearSelection();
+			} else if (!fileDialogFocusAfterListing_.empty()) {
+				fileDialogModel_.Focus(fileDialogFocusAfterListing_, FileDialogVisibleRows());
+			} else if (!fileList_.Empty() &&
+				fileList_.Current().parent_path() == fileDialogDirectory_) {
+				fileDialogModel_.Focus(AbsoluteNormalized(fileList_.Current()),
+					FileDialogVisibleRows());
+			}
+			fileDialogFocusAfterListing_.clear();
+			RequestFileDialogFileSizes();
+			RequestFileDialogDirectorySummaries();
+			if (result.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired &&
+				!jpegview_linux::HasSessionArchivePassword(result.directory)) {
+				BeginArchivePasswordDialog(result.directory);
+			} else if (result.errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword) {
+				BeginArchivePasswordDialog(result.directory,
+					"Saved password is incorrect; try again");
+			} else if (result.error.empty() && result.containsEncryptedEntries &&
+				!jpegview_linux::HasSessionArchivePassword(result.directory)) {
+				BeginArchivePasswordDialog(result.directory);
+			}
+			if (fileDialogActivateAfterListing_) {
+				const bool openDirectoryImmediately = fileDialogOpenDirectoryAfterListing_;
+				fileDialogActivateAfterListing_ = false;
+				fileDialogOpenDirectoryAfterListing_ = false;
+				if (fileDialogOpen_ && !archivePasswordDialog_.IsOpen()) {
+					ActivateFileDialogSelection(openDirectoryImmediately);
+				}
 			}
 		}
 	}
@@ -9871,53 +9972,29 @@ private:
 
 	void RefreshFileDialog() {
 		InvalidateFileDialogPreview();
+		fileDialogDirectoryLoader_.Clear(++fileDialogDirectoryGeneration_);
 		fileDialogArchiveLoader_.Clear(++fileDialogArchiveGeneration_);
 		std::vector<FileDialogEntry> entries;
 		const fs::path parent = fileDialogDirectory_.parent_path();
 		if (!parent.empty() && parent != fileDialogDirectory_) {
 			entries.push_back(FileDialogEntry{parent, true, true});
 		}
-		if (jpegview_linux::IsArchiveLocation(fileDialogDirectory_)) {
-			fileDialogMessage_ = "Reading archive contents…";
-			fileDialogModel_.SetEntries(std::move(entries));
-			RequestFileDialogDirectorySummaries();
-			RequestFileDialogFileSizes();
-			fileDialogArchiveLoader_.Request(fileDialogDirectory_, fileDialogArchiveGeneration_);
-			return;
-		}
-		fileDialogMessage_.clear();
-		std::error_code error;
-
-		for (const fs::directory_entry& entry : fs::directory_iterator(fileDialogDirectory_, error)) {
-			if (error) break;
-			std::error_code statusError;
-			const bool directory = entry.is_directory(statusError);
-			const bool archive = !statusError && !directory &&
-				entry.is_regular_file(statusError) && !statusError &&
-				jpegview_linux::IsArchiveContainerName(entry.path());
-			if (statusError || (!directory && !archive && (!entry.is_regular_file(statusError) ||
-				(!(fileDialogParameterBackup_ || fileDialogParameterRestore_) &&
-					!jpegview_linux::IsSupportedImagePath(entry.path()))))) {
-				continue;
-			}
-			if (archive && (fileDialogSave_ || fileDialogParameterBackup_ ||
-				fileDialogParameterRestore_)) continue;
-			std::error_code modificationError;
-			const fs::file_time_type modificationTime = entry.last_write_time(modificationError);
-			const fs::path normalizedPath = AbsoluteNormalized(entry.path());
-			const bool encrypted = archive && encryptedArchivePaths_.count(normalizedPath.string()) != 0;
-			FileDialogEntry dialogEntry{normalizedPath, directory || archive,
-				false, modificationError ? fs::file_time_type{} : modificationTime,
-				archive, false, encrypted};
-			if (!directory && !archive) {
-				dialogEntry.sourceDescriptor = jpegview_linux::SourceDescriptor(
-					normalizedPath, {}, {});
-			}
-			entries.push_back(std::move(dialogEntry));
-		}
-
-		fileDialogModel_.SetEntries(std::move(entries));
-		RequestFileDialogDirectorySummaries();
+		fileDialogMessage_ = "Reading contents…";
+		fileDialogListingPending_ = true;
+		fileDialogModel_.SetEntriesInOrder(std::move(entries));
+		fileDialogModel_.ClearSelection();
+		++fileDialogSummaryGeneration_;
+		fileDialogDirectorySummaries_.clear();
+		fileDialogSummaryLoader_.Request({}, fileDialogSummaryGeneration_);
+		fileDialogFileSizeLoader_.Clear(++fileDialogFileSizeGeneration_);
+		jpegview_linux::FileDialogListingPolicy policy;
+		policy.saveDialog = fileDialogSave_;
+		policy.includeNonImageFiles = fileDialogParameterBackup_ ||
+			fileDialogParameterRestore_;
+		policy.includeArchives = !policy.saveDialog && !policy.includeNonImageFiles;
+		policy.encryptedArchivePaths = encryptedArchivePaths_;
+		fileDialogDirectoryLoader_.Request(fileDialogDirectory_,
+			fileDialogDirectoryGeneration_, policy);
 		RequestFileDialogFileSizes();
 	}
 
@@ -9952,20 +10029,26 @@ private:
 		recentFileDialogModel_.SelectFirst(FileDialogVisibleRows());
 		fileDialogMessage_.clear();
 		fileDialogOpen_ = true;
+		fileDialogActivateAfterListing_ = false;
+		fileDialogOpenDirectoryAfterListing_ = false;
 		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
 		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
 		contextMenuOpen_ = false;
-		RefreshFileDialog();
-		if (!fileList_.Empty()) {
-			fileDialogModel_.Focus(AbsoluteNormalized(fileList_.Current()), FileDialogVisibleRows());
+		fileDialogFocusAfterListing_.clear();
+		if (!fileList_.Empty() && fileList_.Current().parent_path() == fileDialogDirectory_) {
+			fileDialogFocusAfterListing_ = AbsoluteNormalized(fileList_.Current());
 		}
+		RefreshFileDialog();
 		SDL_StartTextInput();
 	}
 
 	void SwitchFileDialogTab(FileDialogTab tab) {
 		if (!FileDialogHasTabs() || fileDialogTab_ == tab) return;
 		fileDialogTab_ = tab;
+		fileDialogActivateAfterListing_ = false;
+		fileDialogOpenDirectoryAfterListing_ = false;
 		InvalidateFileDialogPreview();
+		RequestFileDialogFileSizes();
 	}
 
 	void RebuildRecentFileDialogEntries() {
@@ -10030,6 +10113,8 @@ private:
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
 		fileDialogOpen_ = true;
+		fileDialogActivateAfterListing_ = false;
+		fileDialogOpenDirectoryAfterListing_ = false;
 		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
 		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
 		contextMenuOpen_ = false;
@@ -10056,6 +10141,8 @@ private:
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
 		fileDialogOpen_ = true;
+		fileDialogActivateAfterListing_ = false;
+		fileDialogOpenDirectoryAfterListing_ = false;
 		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
 		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
 		contextMenuOpen_ = false;
@@ -10082,6 +10169,8 @@ private:
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
 		fileDialogOpen_ = true;
+		fileDialogActivateAfterListing_ = false;
+		fileDialogOpenDirectoryAfterListing_ = false;
 		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
 		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
 		contextMenuOpen_ = false;
@@ -10110,18 +10199,23 @@ private:
 
 	void NavigateFileDialogDirectory(const fs::path& directory, bool returningToParent) {
 		const fs::path previousDirectory = fileDialogDirectory_;
+		fileDialogActivateAfterListing_ = false;
+		fileDialogOpenDirectoryAfterListing_ = false;
 		fileDialogDirectory_ = directory;
 		if (!fileDialogSave_) fileDialogModel_.ClearFilter();
+		fileDialogFocusAfterListing_ = returningToParent ? previousDirectory : fs::path{};
 		RefreshFileDialog();
-		if (fileDialogSave_) {
-			fileDialogModel_.ClearSelection();
-		} else if (returningToParent) {
-			fileDialogModel_.Focus(previousDirectory, FileDialogVisibleRows());
-		}
+		if (fileDialogSave_) fileDialogModel_.ClearSelection();
 		fileDialogOverwriteConfirmed_ = false;
 	}
 
 	void ActivateFileDialogSelection(bool openDirectoryImmediately = false) {
+		if (fileDialogListingPending_ && fileDialogTab_ == FileDialogTab::Browse &&
+			!fileDialogSave_) {
+			fileDialogActivateAfterListing_ = true;
+			fileDialogOpenDirectoryAfterListing_ = openDirectoryImmediately;
+			return;
+		}
 		jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
 		if (fileDialogSave_ && fileDialogOverwriteConfirmed_ && !fileDialogFilename_.empty()) {
 			SaveImageFromDialog();
@@ -10388,7 +10482,8 @@ private:
 		for (int row = 0; row < rows; ++row) {
 			const int item = model.Scroll() + row;
 			if (item >= static_cast<int>(model.Entries().size())) break;
-			const FileDialogEntry& entry = model.Entries()[item];
+			const auto visibleEntries = model.Entries();
+			const FileDialogEntry& entry = visibleEntries[static_cast<std::size_t>(item)];
 			const int rowTop = listTop + row * 26;
 			if (item == model.SelectedIndex()) {
 				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
@@ -12795,13 +12890,19 @@ private:
 	fs::path archivePasswordDialogTarget_;
 	std::string archivePasswordPendingValue_;
 	bool archivePasswordValidationPending_ = false;
+	bool fileDialogListingPending_ = false;
+	bool fileDialogActivateAfterListing_ = false;
+	bool fileDialogOpenDirectoryAfterListing_ = false;
+	fs::path fileDialogFocusAfterListing_;
 	jpegview_linux::DirectorySummaryLoader fileDialogSummaryLoader_;
+	jpegview_linux::FileDialogDirectoryLoader fileDialogDirectoryLoader_;
 	jpegview_linux::FileDialogFileSizeLoader fileDialogFileSizeLoader_;
 	jpegview_linux::ArchiveDirectoryLoader fileDialogArchiveLoader_;
 	jpegview_linux::FileDialogPreviewLoader fileDialogPreviewLoader_;
 	std::unordered_map<std::string, jpegview_linux::DirectorySummary> fileDialogDirectorySummaries_;
 	std::unordered_set<std::string> encryptedArchivePaths_;
 	std::uint64_t fileDialogSummaryGeneration_ = 0;
+	std::uint64_t fileDialogDirectoryGeneration_ = 0;
 	std::uint64_t fileDialogFileSizeGeneration_ = 0;
 	std::uint64_t fileDialogArchiveGeneration_ = 0;
 	SDL_Texture* fileDialogPreviewTexture_ = nullptr;

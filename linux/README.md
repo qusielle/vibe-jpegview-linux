@@ -184,13 +184,15 @@ they support.
    visible double-page partner refreshes the spread dimensions and keeps the selected page anchored.
    Metadata-based reordering also keeps the selected file in place. A full-list reload rebuilds visible
    spread geometry against the refreshed order while keeping the selected page and its current pixels.
-   The Open-dialog Browse listing remains on its separate refresh path; this worker covers the viewer's
-   active file list. Sorting an already loaded list uses a separate CPU-admitted worker: the current
-   order remains navigable until a complete sorted result is ready, and the source selected when that
-   result is applied stays selected. A metadata refresh that changes the active sort key follows the
-   same path. Filename comparison keys are computed once per entry, and ordinary-file identity, size,
-   modification time, and available creation time are requested together through `statx`, with a stat
-   fallback when the kernel cannot provide the required fields.
+   Browse folder enumeration and both row orders now run in a cancellable background loader, like
+   archive catalogs; replacing the folder or pressing Escape rejects the old result. The viewer's
+   active file list uses a separate scanner. Sorting an already loaded list uses a separate
+   CPU-admitted worker: the current order remains navigable until a complete sorted result is ready,
+   and the source selected when that result is applied stays selected. A metadata refresh that
+   changes the active sort key follows the same path. Filename comparison keys are computed once per
+   entry, and ordinary-file identity, size, modification time, and available creation time are
+   requested together through `statx`, with a fallback to `stat` when the kernel cannot provide the
+   required fields.
 
 5. **Responsive keyboard and mouse navigation.** Left/Right image navigation and menu/browser
    selection repeat while held. The open browser supports repeating Up/Down, PageUp/PageDown, and
@@ -251,7 +253,11 @@ they support.
    filtering, name/newest-modification-date listing order, Ctrl+Return direct folder opening, and
    non-blocking direct image/directory counts for folder rows (supported archive containers count as
    directories), plus a focused-item preview that
-   shows the selected image or the first image in a selected folder. The dialog can be resized from
+   shows the selected image or the first image in a selected folder. Ordinary Browse listing and
+   sorting run in the background, so the viewer can still process Escape while a large folder is
+   opening. File sizes are reused from that listing; missing source descriptors are captured in the
+   background with the selected and visible rows ahead of distant rows. A filter and Return entered
+   while Browse is loading are applied when its current rows arrive. The dialog can be resized from
    its lower-right corner, its preview width can be adjusted by dragging the list/preview divider,
    and the mouse wheel scrolls an overflowing file list. A visible proportional scrollbar supports
    thumb dragging and track clicks that page by one viewport, synchronized with wheel and keyboard

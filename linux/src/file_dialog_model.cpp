@@ -17,6 +17,7 @@
 #include <functional>
 #include <iterator>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -79,6 +80,133 @@ bool AcquireDirectoryEnumerationLease(const std::filesystem::path& directory,
 void ReleaseDirectoryEnumerationLease(WorkContext& context, SourceWorkLease& lease) {
 	context.sourceAccessAlreadyAdmitted = false;
 	lease.Reset();
+}
+
+std::filesystem::path NormalizeDialogPath(const std::filesystem::path& path) {
+	std::error_code error;
+	const std::filesystem::path absolute = std::filesystem::absolute(path, error);
+	return (error ? path : absolute).lexically_normal();
+}
+
+FileDialogDirectoryResult EnumerateFileDialogDirectory(
+	const std::filesystem::path& directory, FileDialogListingPolicy policy,
+	const std::function<bool()>& shouldContinue, bool& interruptedForForeground) {
+	FileDialogDirectoryResult result;
+	result.directory = directory;
+	const std::filesystem::path parent = directory.parent_path();
+	if (!parent.empty() && parent != directory) {
+		result.entries.emplace_back(parent, true, true);
+	}
+
+	bool archiveLocation = false;
+	WorkContext classificationContext;
+	SourceWorkLease classificationLease;
+	if (!AcquireDirectoryEnumerationLease(directory, shouldContinue,
+		interruptedForForeground, classificationContext, classificationLease)) {
+		return result;
+	}
+	{
+		ScopedWorkContext activeContext(classificationContext);
+		if (classificationContext.Continue()) archiveLocation = IsArchiveLocation(directory);
+		ReleaseDirectoryEnumerationLease(classificationContext, classificationLease);
+	}
+	if (interruptedForForeground || !shouldContinue()) return result;
+	result.archiveLocation = archiveLocation;
+
+	if (archiveLocation) {
+		std::vector<ArchiveEntryInfo> archiveEntries;
+		WorkContext archiveContext = MakePathWorkContext(directory,
+			SourceWorkPriority::Metadata, shouldContinue);
+		archiveContext.onForegroundYield = [&interruptedForForeground] {
+			interruptedForForeground = true;
+		};
+		ScopedWorkContext activeContext(archiveContext);
+		if (!ListArchiveDirectoryCancellable(directory, archiveEntries, shouldContinue,
+			result.error, &result.errorKind, &result.containsEncryptedEntries)) {
+			return result;
+		}
+		for (const ArchiveEntryInfo& archiveEntry : archiveEntries) {
+			if (!shouldContinue()) break;
+			if (!archiveEntry.directory && !IsSupportedImagePath(archiveEntry.path)) continue;
+			const std::filesystem::file_time_type modified = ArchiveFileModificationTime(
+				archiveEntry.modificationTime);
+			FileDialogEntry entry{archiveEntry.path, archiveEntry.directory, false, modified,
+				false, true, archiveEntry.encrypted,
+				archiveEntry.directory ? 0 : archiveEntry.size, !archiveEntry.directory};
+			if (!archiveEntry.directory) {
+				entry.sourceDescriptor = DescribeArchiveMember(archiveEntry.path,
+					archiveEntry.backingIdentity, archiveEntry.size,
+					archiveEntry.modificationTime, archiveEntry.encrypted);
+			}
+			result.entries.push_back(std::move(entry));
+		}
+		if (!shouldContinue()) return result;
+		return result;
+	}
+
+	std::error_code iteratorError;
+	std::filesystem::directory_iterator iterator;
+	const std::filesystem::directory_iterator end;
+	bool iteratorStarted = false;
+	while (!iteratorStarted || (!iteratorError && iterator != end)) {
+		WorkContext context;
+		SourceWorkLease sourceLease;
+		if (!AcquireDirectoryEnumerationLease(directory, shouldContinue,
+			interruptedForForeground, context, sourceLease)) break;
+		{
+			ScopedWorkContext activeContext(context);
+			if (!iteratorStarted) {
+				iterator = std::filesystem::directory_iterator(directory, iteratorError);
+				iteratorStarted = true;
+			}
+			std::size_t batchEntries = 0;
+			while (!iteratorError && iterator != end &&
+				batchEntries < kDirectoryEnumerationBatchSize) {
+				if (!context.Continue()) break;
+				const std::filesystem::path entryPath = iterator->path();
+				std::error_code statusError;
+				const bool isDirectory = iterator->is_directory(statusError);
+				const bool regularFile = !statusError && !isDirectory &&
+					iterator->is_regular_file(statusError) && !statusError;
+				const bool archiveCandidate = regularFile &&
+					IsArchiveContainerName(entryPath);
+				const bool archive = archiveCandidate && policy.includeArchives &&
+					!policy.saveDialog && !policy.includeNonImageFiles;
+				const bool showFile = regularFile && (archive || (!archiveCandidate &&
+					(policy.includeNonImageFiles || IsSupportedImagePath(entryPath))));
+				if (!statusError && (isDirectory || showFile)) {
+					std::error_code modificationError;
+					const std::filesystem::file_time_type modificationTime =
+						iterator->last_write_time(modificationError);
+					const std::filesystem::path normalizedPath = NormalizeDialogPath(entryPath);
+					FileDialogEntry entry{normalizedPath, isDirectory || archive, false,
+						modificationError ? std::filesystem::file_time_type{} : modificationTime,
+						archive, false, archive &&
+							policy.encryptedArchivePaths.count(normalizedPath.string()) != 0};
+					if (regularFile && !archive && !policy.includeNonImageFiles &&
+						IsSupportedImagePath(entryPath)) {
+						entry.sourceDescriptor = SourceDescriptor(normalizedPath, {}, {});
+						std::error_code sizeError;
+						entry.fileSize = iterator->file_size(sizeError);
+						entry.fileSizeKnown = !sizeError;
+					}
+					result.entries.push_back(std::move(entry));
+				}
+				iterator.increment(iteratorError);
+				++batchEntries;
+			}
+			ReleaseDirectoryEnumerationLease(context, sourceLease);
+		}
+		if (interruptedForForeground || !shouldContinue()) break;
+	}
+	if (!shouldContinue()) return result;
+	if (iteratorError) {
+		result.error = iteratorError.message();
+		return result;
+	}
+	if (interruptedForForeground) return result;
+	if (!shouldContinue()) return result;
+	return result;
 }
 
 bool CapturePreviewSource(const SourceDescriptor& requested,
@@ -346,17 +474,51 @@ std::filesystem::path FirstImageInDirectoryWhile(
 } // namespace
 
 void SortFileDialogEntries(std::vector<FileDialogEntry>& entries, FileDialogSortMode mode) {
-	std::sort(entries.begin(), entries.end(), [mode](const FileDialogEntry& left, const FileDialogEntry& right) {
+	const FileDialogEntrySortOrders orders = BuildFileDialogEntrySortOrders(entries);
+	const std::vector<std::size_t>& order = mode == FileDialogSortMode::Name ?
+		orders.name : orders.modificationDate;
+	std::vector<FileDialogEntry> sorted;
+	sorted.reserve(entries.size());
+	for (std::size_t index : order) sorted.push_back(std::move(entries[index]));
+	entries = std::move(sorted);
+}
+
+FileDialogEntrySortOrders BuildFileDialogEntrySortOrders(
+	const std::vector<FileDialogEntry>& entries) {
+	FileDialogEntrySortOrders orders;
+	orders.name.resize(entries.size());
+	orders.modificationDate.resize(entries.size());
+	std::iota(orders.name.begin(), orders.name.end(), 0);
+	std::iota(orders.modificationDate.begin(), orders.modificationDate.end(), 0);
+	std::vector<std::string> foldedNames;
+	std::vector<std::string> fullPaths;
+	foldedNames.reserve(entries.size());
+	fullPaths.reserve(entries.size());
+	for (const FileDialogEntry& entry : entries) {
+		foldedNames.push_back(Lower(entry.path.filename().string()));
+		fullPaths.push_back(entry.path.string());
+	}
+	const auto less = [&entries, &foldedNames, &fullPaths](FileDialogSortMode mode,
+		std::size_t leftIndex, std::size_t rightIndex) {
+		const FileDialogEntry& left = entries[leftIndex];
+		const FileDialogEntry& right = entries[rightIndex];
 		if (left.parent != right.parent) return left.parent;
 		if (left.directory != right.directory) return left.directory;
 		if (mode == FileDialogSortMode::ModificationDate &&
 			left.modificationTime != right.modificationTime) {
 			return left.modificationTime > right.modificationTime;
 		}
-		const std::string leftName = Lower(left.path.filename().string());
-		const std::string rightName = Lower(right.path.filename().string());
-		return leftName == rightName ? left.path.string() < right.path.string() : leftName < rightName;
-	});
+		return foldedNames[leftIndex] == foldedNames[rightIndex] ?
+			fullPaths[leftIndex] < fullPaths[rightIndex] :
+			foldedNames[leftIndex] < foldedNames[rightIndex];
+	};
+	std::sort(orders.name.begin(), orders.name.end(), [&less](std::size_t left,
+		std::size_t right) { return less(FileDialogSortMode::Name, left, right); });
+	std::sort(orders.modificationDate.begin(), orders.modificationDate.end(),
+		[&less](std::size_t left, std::size_t right) {
+			return less(FileDialogSortMode::ModificationDate, left, right);
+		});
+	return orders;
 }
 
 bool EraseLastUtf8CodePoint(std::string& text) {
@@ -488,7 +650,10 @@ void FileDialogModel::Begin(bool saveDialog) {
 	saveDialog_ = saveDialog;
 	filter_.clear();
 	allEntries_.clear();
-	entries_.clear();
+	sortOrders_ = {};
+	visibleIndices_.clear();
+	visiblePositionByEntry_.clear();
+	entryIndexByPath_.clear();
 	selected_ = -1;
 	scroll_ = 0;
 	matchFullPath_ = false;
@@ -499,15 +664,39 @@ void FileDialogModel::Clear() {
 }
 
 void FileDialogModel::SetEntries(std::vector<FileDialogEntry> entries) {
-	allEntries_ = std::move(entries);
-	matchFullPath_ = false;
-	SortFileDialogEntries(allEntries_, saveDialog_ ? FileDialogSortMode::Name : sortMode_);
-	ApplyFilter();
+	FileDialogEntrySortOrders orders = BuildFileDialogEntrySortOrders(entries);
+	SetEntriesWithPreparedOrder(std::move(entries), std::move(orders));
 }
 
 void FileDialogModel::SetEntriesInOrder(std::vector<FileDialogEntry> entries, bool matchFullPath) {
 	allEntries_ = std::move(entries);
+	sortOrders_.name.resize(allEntries_.size());
+	std::iota(sortOrders_.name.begin(), sortOrders_.name.end(), 0);
+	sortOrders_.modificationDate = sortOrders_.name;
 	matchFullPath_ = matchFullPath;
+	RebuildPathIndex();
+	ApplyFilter();
+}
+
+void FileDialogModel::SetEntriesWithPreparedOrder(std::vector<FileDialogEntry> entries,
+	FileDialogEntrySortOrders orders) {
+	const auto isPermutation = [size = entries.size()](
+		const std::vector<std::size_t>& order) {
+		if (order.size() != size) return false;
+		std::vector<bool> seen(size, false);
+		for (std::size_t index : order) {
+			if (index >= size || seen[index]) return false;
+			seen[index] = true;
+		}
+		return true;
+	};
+	if (!isPermutation(orders.name) || !isPermutation(orders.modificationDate)) {
+		orders = BuildFileDialogEntrySortOrders(entries);
+	}
+	allEntries_ = std::move(entries);
+	sortOrders_ = std::move(orders);
+	matchFullPath_ = false;
+	RebuildPathIndex();
 	ApplyFilter();
 }
 
@@ -535,14 +724,14 @@ void FileDialogModel::ToggleSortMode(int visibleRows) {
 	if (const FileDialogEntry* selected = SelectedEntry()) selectedPath = selected->path;
 	sortMode_ = sortMode_ == FileDialogSortMode::Name ?
 		FileDialogSortMode::ModificationDate : FileDialogSortMode::Name;
-	SortFileDialogEntries(allEntries_, sortMode_);
 	ApplyFilter();
 	if (!selectedPath.empty()) Focus(selectedPath, visibleRows);
 }
 
 void FileDialogModel::MoveSelection(int direction, int visibleRows) {
-	if (entries_.empty()) return;
-	selected_ = std::clamp(selected_ + direction, 0, static_cast<int>(entries_.size()) - 1);
+	if (visibleIndices_.empty()) return;
+	selected_ = std::clamp(selected_ + direction, 0,
+		static_cast<int>(visibleIndices_.size()) - 1);
 	EnsureSelectionVisible(visibleRows);
 }
 
@@ -552,14 +741,14 @@ void FileDialogModel::MoveSelectionByPage(int direction, int visibleRows) {
 
 void FileDialogModel::ScrollBy(int rows, int visibleRows) {
 	visibleRows = std::max(1, visibleRows);
-	const int maximumScroll = std::max(0, static_cast<int>(entries_.size()) - visibleRows);
+	const int maximumScroll = std::max(0, static_cast<int>(visibleIndices_.size()) - visibleRows);
 	const std::int64_t nextScroll = static_cast<std::int64_t>(scroll_) + rows;
 	scroll_ = static_cast<int>(std::clamp<std::int64_t>(nextScroll, 0, maximumScroll));
 }
 
 void FileDialogModel::ScrollTo(int rows, int visibleRows) {
 	visibleRows = std::max(1, visibleRows);
-	const int maximumScroll = std::max(0, static_cast<int>(entries_.size()) - visibleRows);
+	const int maximumScroll = std::max(0, static_cast<int>(visibleIndices_.size()) - visibleRows);
 	scroll_ = std::clamp(rows, 0, maximumScroll);
 }
 
@@ -568,73 +757,55 @@ void FileDialogModel::SelectFirst(int visibleRows) {
 }
 
 void FileDialogModel::SelectLast(int visibleRows) {
-	Select(static_cast<int>(entries_.size()) - 1, visibleRows);
+	Select(static_cast<int>(visibleIndices_.size()) - 1, visibleRows);
 }
 
 void FileDialogModel::Select(int index, int visibleRows) {
-	if (index < 0 || index >= static_cast<int>(entries_.size())) return;
+	if (index < 0 || index >= static_cast<int>(visibleIndices_.size())) return;
 	selected_ = index;
 	EnsureSelectionVisible(visibleRows);
 }
 
 bool FileDialogModel::Focus(const std::filesystem::path& path, int visibleRows) {
-	const auto entry = std::find_if(entries_.begin(), entries_.end(), [&path](const FileDialogEntry& candidate) {
-		return candidate.path == path;
-	});
-	if (entry == entries_.end()) return false;
-	Select(static_cast<int>(std::distance(entries_.begin(), entry)), visibleRows);
+	const auto found = entryIndexByPath_.find(PathIndexKey(path));
+	if (found == entryIndexByPath_.end()) return false;
+	const std::size_t entryIndex = found->second;
+	if (entryIndex >= visiblePositionByEntry_.size() ||
+		visiblePositionByEntry_[entryIndex] < 0) return false;
+	Select(visiblePositionByEntry_[entryIndex], visibleRows);
 	return true;
 }
 
 bool FileDialogModel::MarkEncrypted(const std::filesystem::path& path) {
-	bool marked = false;
-	const std::filesystem::path normalizedPath = path.lexically_normal();
-	for (FileDialogEntry& entry : allEntries_) {
-		if (entry.path.lexically_normal() == normalizedPath) {
-			entry.encrypted = true;
-			marked = true;
-		}
-	}
-	for (FileDialogEntry& entry : entries_) {
-		if (entry.path.lexically_normal() == normalizedPath) entry.encrypted = true;
-	}
-	return marked;
+	const auto found = entryIndexByPath_.find(PathIndexKey(path));
+	if (found == entryIndexByPath_.end()) return false;
+	allEntries_[found->second].encrypted = true;
+	return true;
 }
 
 bool FileDialogModel::SetFileSize(const std::filesystem::path& path, std::uintmax_t size) {
-	bool updated = false;
-	const std::filesystem::path normalizedPath = path.lexically_normal();
-	const auto update = [&normalizedPath, size, &updated](FileDialogEntry& entry) {
-		if (entry.path.lexically_normal() == normalizedPath) {
-			entry.fileSize = size;
-			entry.fileSizeKnown = true;
-			updated = true;
-		}
-	};
-	for (FileDialogEntry& entry : allEntries_) update(entry);
-	for (FileDialogEntry& entry : entries_) update(entry);
-	return updated;
+	const auto found = entryIndexByPath_.find(PathIndexKey(path));
+	if (found == entryIndexByPath_.end()) return false;
+	FileDialogEntry& entry = allEntries_[found->second];
+	entry.fileSize = size;
+	entry.fileSizeKnown = true;
+	return true;
 }
 
 bool FileDialogModel::RefreshSourceDescriptor(const SourceKey& expected,
 	const SourceDescriptor& observed) {
-	bool updated = false;
 	const std::filesystem::path normalizedPath = observed.LogicalPath().lexically_normal();
-	const auto update = [&expected, &observed, &normalizedPath, &updated](
-		FileDialogEntry& entry) {
-		if (entry.path.lexically_normal() != normalizedPath ||
-			entry.sourceDescriptor.Key() != expected) return;
-		entry.sourceDescriptor = observed;
-		entry.archiveMember = observed.Metadata().archiveMember;
-		entry.encrypted = observed.Metadata().archiveMemberEncrypted;
-		entry.fileSizeKnown = observed.Metadata().hasFileSize;
-		entry.fileSize = observed.Metadata().hasFileSize ?
-			static_cast<std::uintmax_t>(observed.Metadata().fileSize) : 0;
-		updated = true;
-	};
-	for (FileDialogEntry& entry : allEntries_) update(entry);
-	for (FileDialogEntry& entry : entries_) update(entry);
-	return updated;
+	const auto found = entryIndexByPath_.find(PathIndexKey(normalizedPath));
+	if (found == entryIndexByPath_.end()) return false;
+	FileDialogEntry& entry = allEntries_[found->second];
+	if (entry.sourceDescriptor.Key() != expected) return false;
+	entry.sourceDescriptor = observed;
+	entry.archiveMember = observed.Metadata().archiveMember;
+	entry.encrypted = observed.Metadata().archiveMemberEncrypted;
+	entry.fileSizeKnown = observed.Metadata().hasFileSize;
+	entry.fileSize = observed.Metadata().hasFileSize ?
+		static_cast<std::uintmax_t>(observed.Metadata().fileSize) : 0;
+	return true;
 }
 
 void FileDialogModel::ClearSelection() {
@@ -642,24 +813,50 @@ void FileDialogModel::ClearSelection() {
 }
 
 const FileDialogEntry* FileDialogModel::SelectedEntry() const {
-	return selected_ >= 0 && selected_ < static_cast<int>(entries_.size()) ? &entries_[selected_] : nullptr;
+	return selected_ >= 0 && selected_ < static_cast<int>(visibleIndices_.size()) ?
+		&allEntries_[visibleIndices_[static_cast<std::size_t>(selected_)]] : nullptr;
+}
+
+std::string FileDialogModel::PathIndexKey(const std::filesystem::path& path) {
+	return path.lexically_normal().string();
+}
+
+void FileDialogModel::RebuildPathIndex() {
+	entryIndexByPath_.clear();
+	entryIndexByPath_.reserve(allEntries_.size());
+	for (std::size_t index = 0; index < allEntries_.size(); ++index) {
+		entryIndexByPath_.emplace(PathIndexKey(allEntries_[index].path), index);
+	}
 }
 
 void FileDialogModel::ApplyFilter() {
-	entries_ = FilterFileDialogEntries(allEntries_,
-		saveDialog_ ? std::string_view{} : std::string_view(filter_), matchFullPath_);
+	visibleIndices_.clear();
+	visiblePositionByEntry_.assign(allEntries_.size(), -1);
+	const std::vector<std::size_t>& order =
+		(saveDialog_ || sortMode_ == FileDialogSortMode::Name) ?
+		sortOrders_.name : sortOrders_.modificationDate;
+	const std::string loweredFilter = saveDialog_ ? std::string() : Lower(filter_);
+	visibleIndices_.reserve(order.size());
+	for (std::size_t entryIndex : order) {
+		const FileDialogEntry& entry = allEntries_[entryIndex];
+		const std::string candidate = matchFullPath_ ? entry.path.string() :
+			entry.path.filename().string();
+		if (!entry.parent && !loweredFilter.empty() &&
+			Lower(candidate).find(loweredFilter) == std::string::npos) continue;
+		visiblePositionByEntry_[entryIndex] = static_cast<int>(visibleIndices_.size());
+		visibleIndices_.push_back(entryIndex);
+	}
 	scroll_ = 0;
-	if (entries_.empty()) {
+	if (visibleIndices_.empty()) {
 		selected_ = -1;
 		return;
 	}
 	selected_ = 0;
 	if (saveDialog_) return;
-	const auto firstChild = std::find_if(entries_.begin(), entries_.end(), [](const FileDialogEntry& entry) {
-		return !entry.parent;
-	});
-	if (firstChild != entries_.end()) {
-		selected_ = static_cast<int>(std::distance(entries_.begin(), firstChild));
+	const auto firstChild = std::find_if(visibleIndices_.begin(), visibleIndices_.end(),
+		[this](std::size_t index) { return !allEntries_[index].parent; });
+	if (firstChild != visibleIndices_.end()) {
+		selected_ = static_cast<int>(std::distance(visibleIndices_.begin(), firstChild));
 	} else if (!filter_.empty()) {
 		selected_ = -1;
 	}
@@ -669,8 +866,152 @@ void FileDialogModel::EnsureSelectionVisible(int visibleRows) {
 	visibleRows = std::max(1, visibleRows);
 	if (selected_ < scroll_) scroll_ = selected_;
 	if (selected_ >= scroll_ + visibleRows) scroll_ = selected_ - visibleRows + 1;
-	const int maximumScroll = std::max(0, static_cast<int>(entries_.size()) - visibleRows);
+	const int maximumScroll = std::max(0, static_cast<int>(visibleIndices_.size()) - visibleRows);
 	scroll_ = std::clamp(scroll_, 0, maximumScroll);
+}
+
+struct FileDialogDirectoryLoader::Impl {
+	struct Task {
+		std::filesystem::path directory;
+		std::uint64_t generation = 0;
+		FileDialogListingPolicy policy;
+	};
+
+	explicit Impl(FileDialogDirectoryLoader::Enumerator customEnumerator)
+		: enumerator(std::move(customEnumerator)) {}
+
+	~Impl() {
+		stopping.store(true);
+		currentGeneration.fetch_add(1);
+		condition.notify_one();
+		SourceWorkCoordinator::Global().NotifyWaiters();
+		if (worker.joinable()) worker.join();
+	}
+
+	bool IsCurrent(std::uint64_t generation) const {
+		return !stopping.load() && currentGeneration.load() == generation;
+	}
+
+	void Run() {
+		while (!stopping.load()) {
+			Task task;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				condition.wait(lock, [this] { return stopping.load() || !pending.empty(); });
+				if (stopping.load()) return;
+				task = std::move(pending.front());
+				pending.pop_front();
+			}
+
+			try {
+				FileDialogDirectoryResult result;
+				bool interruptedForForeground = false;
+				const auto shouldContinue = [this, generation = task.generation] {
+					return IsCurrent(generation);
+				};
+				for (;;) {
+					interruptedForForeground = false;
+					result = {};
+					try {
+						result.directory = task.directory;
+						if (enumerator) {
+							result = enumerator(task.directory, task.policy, shouldContinue);
+						} else {
+							result = EnumerateFileDialogDirectory(task.directory, task.policy,
+								shouldContinue, interruptedForForeground);
+						}
+					} catch (const std::exception& error) {
+						result.entries.clear();
+						result.error = error.what();
+					} catch (...) {
+						result.entries.clear();
+						result.error = "listing failed";
+					}
+					if (!IsCurrent(task.generation)) break;
+					if (!interruptedForForeground) break;
+					result = {};
+					SourceWorkCoordinator& coordinator = SourceWorkCoordinator::Global();
+					(void)coordinator.WaitForSnapshot(
+						[this, generation = task.generation](const SourceWorkSnapshot& snapshot) {
+							return !IsCurrent(generation) || !snapshot.foregroundPending;
+						}, std::chrono::hours(24));
+					if (!IsCurrent(task.generation)) break;
+				}
+				if (!IsCurrent(task.generation)) continue;
+				result.directory = task.directory;
+				result.generation = task.generation;
+				result.policy = task.policy;
+				try {
+					result.sortOrders = BuildFileDialogEntrySortOrders(result.entries);
+				} catch (...) {
+					result.entries.clear();
+					result.sortOrders = {};
+					result.error = "sort failed";
+				}
+
+				bool published = false;
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+					if (IsCurrent(task.generation)) {
+						ready.push_back(std::move(result));
+						published = true;
+					}
+				}
+				if (published) UiCompletionWakeup().Notify();
+			}
+			catch (...) {
+				// Keep the worker alive when completion assembly or delivery fails.
+			}
+		}
+	}
+
+	void StartWorkerLocked() {
+		if (!worker.joinable()) worker = std::thread([this] { Run(); });
+	}
+
+	std::mutex mutex;
+	std::condition_variable condition;
+	FileDialogDirectoryLoader::Enumerator enumerator;
+	std::deque<Task> pending;
+	std::vector<FileDialogDirectoryResult> ready;
+	std::atomic<std::uint64_t> currentGeneration{0};
+	std::atomic<bool> stopping{false};
+	std::thread worker;
+};
+
+FileDialogDirectoryLoader::FileDialogDirectoryLoader(Enumerator enumerator)
+	: impl_(std::make_unique<Impl>(std::move(enumerator))) {}
+FileDialogDirectoryLoader::~FileDialogDirectoryLoader() = default;
+
+void FileDialogDirectoryLoader::Request(const std::filesystem::path& directory,
+	std::uint64_t generation, FileDialogListingPolicy policy) {
+	impl_->currentGeneration.store(generation);
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->pending.clear();
+		impl_->ready.clear();
+		impl_->StartWorkerLocked();
+		impl_->pending.push_back(Impl::Task{directory, generation, policy});
+	}
+	SourceWorkCoordinator::Global().NotifyWaiters();
+	impl_->condition.notify_one();
+}
+
+void FileDialogDirectoryLoader::Clear(std::uint64_t generation) {
+	impl_->currentGeneration.store(generation);
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		impl_->pending.clear();
+		impl_->ready.clear();
+	}
+	SourceWorkCoordinator::Global().NotifyWaiters();
+}
+
+std::vector<FileDialogDirectoryResult> FileDialogDirectoryLoader::TakeReady() {
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	std::vector<FileDialogDirectoryResult> results;
+	results.swap(impl_->ready);
+	return results;
 }
 
 struct ArchiveDirectoryLoader::Impl {
@@ -965,7 +1306,7 @@ struct FileDialogFileSizeLoader::Impl {
 	std::condition_variable condition;
 	FileDialogFileSizeLoader::SourceCapture sourceCapture;
 	std::optional<Task> pending;
-	std::vector<FileDialogFileSizeResult> ready;
+	std::deque<FileDialogFileSizeResult> ready;
 	std::atomic<std::uint64_t> currentGeneration{0};
 	std::atomic<bool> stopping{false};
 	std::thread worker;
@@ -1011,10 +1352,21 @@ void FileDialogFileSizeLoader::Clear(std::uint64_t generation) {
 	SourceWorkCoordinator::Global().NotifyWaiters();
 }
 
-std::vector<FileDialogFileSizeResult> FileDialogFileSizeLoader::TakeReady() {
-	std::lock_guard<std::mutex> lock(impl_->mutex);
+std::vector<FileDialogFileSizeResult> FileDialogFileSizeLoader::TakeReady(
+	std::size_t maximumResults) {
 	std::vector<FileDialogFileSizeResult> results;
-	results.swap(impl_->ready);
+	if (maximumResults == 0) return results;
+	bool hasMore = false;
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		results.reserve(std::min(maximumResults, impl_->ready.size()));
+		while (results.size() < maximumResults && !impl_->ready.empty()) {
+			results.push_back(std::move(impl_->ready.front()));
+			impl_->ready.pop_front();
+		}
+		hasMore = !impl_->ready.empty();
+	}
+	if (hasMore) UiCompletionWakeup().Notify();
 	return results;
 }
 
@@ -1123,7 +1475,7 @@ struct DirectorySummaryLoader::Impl {
 	std::mutex mutex;
 	std::condition_variable condition;
 	std::deque<Task> pending;
-	std::vector<DirectorySummaryResult> ready;
+	std::deque<DirectorySummaryResult> ready;
 	std::atomic<std::uint64_t> currentGeneration{0};
 	std::atomic<bool> stopping{false};
 	std::atomic<bool> yieldingForForeground{false};
@@ -1155,10 +1507,21 @@ bool DirectorySummaryLoader::IsYieldingForForeground() const {
 	return impl_->yieldingForForeground.load();
 }
 
-std::vector<DirectorySummaryResult> DirectorySummaryLoader::TakeReady() {
-	std::lock_guard<std::mutex> lock(impl_->mutex);
+std::vector<DirectorySummaryResult> DirectorySummaryLoader::TakeReady(
+	std::size_t maximumResults) {
 	std::vector<DirectorySummaryResult> results;
-	results.swap(impl_->ready);
+	if (maximumResults == 0) return results;
+	bool hasMore = false;
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		results.reserve(std::min(maximumResults, impl_->ready.size()));
+		while (results.size() < maximumResults && !impl_->ready.empty()) {
+			results.push_back(std::move(impl_->ready.front()));
+			impl_->ready.pop_front();
+		}
+		hasMore = !impl_->ready.empty();
+	}
+	if (hasMore) UiCompletionWakeup().Notify();
 	return results;
 }
 

@@ -7,9 +7,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -42,6 +45,16 @@ enum class FileDialogSortMode {
 	Name,
 	ModificationDate,
 };
+
+struct FileDialogEntrySortOrders {
+	std::vector<std::size_t> name;
+	std::vector<std::size_t> modificationDate;
+};
+
+// Builds both row orders without moving or copying the authoritative
+// entries. Directory workers can prepare them before publishing the listing.
+FileDialogEntrySortOrders BuildFileDialogEntrySortOrders(
+	const std::vector<FileDialogEntry>& entries);
 
 // Keeps the parent entry first and directories before files. Names are sorted
 // case-insensitively in ascending order; modification dates are newest first,
@@ -122,10 +135,58 @@ bool ShouldRefreshFileDialogPreviewSource(const SourceKey& requested,
 
 class FileDialogModel {
 public:
+	class EntryView {
+	public:
+		class const_iterator {
+		public:
+			using iterator_category = std::forward_iterator_tag;
+			using value_type = FileDialogEntry;
+			using difference_type = std::ptrdiff_t;
+			using pointer = const FileDialogEntry*;
+			using reference = const FileDialogEntry&;
+
+			const_iterator() = default;
+			const_iterator(const std::vector<FileDialogEntry>* entries,
+				const std::vector<std::size_t>* indices, std::size_t position)
+				: entries_(entries), indices_(indices), position_(position) {}
+			reference operator*() const { return (*entries_)[(*indices_)[position_]]; }
+			pointer operator->() const { return &operator*(); }
+			const_iterator& operator++() { ++position_; return *this; }
+			const_iterator operator++(int) { const_iterator copy = *this; ++*this; return copy; }
+			bool operator==(const const_iterator& other) const {
+				return entries_ == other.entries_ && indices_ == other.indices_ &&
+					position_ == other.position_;
+			}
+			bool operator!=(const const_iterator& other) const { return !(*this == other); }
+
+		private:
+			const std::vector<FileDialogEntry>* entries_ = nullptr;
+			const std::vector<std::size_t>* indices_ = nullptr;
+			std::size_t position_ = 0;
+		};
+
+		EntryView(const std::vector<FileDialogEntry>& entries,
+			const std::vector<std::size_t>& indices)
+			: entries_(&entries), indices_(&indices) {}
+		std::size_t size() const { return indices_->size(); }
+		bool empty() const { return indices_->empty(); }
+		const FileDialogEntry& operator[](std::size_t index) const {
+			return (*entries_)[(*indices_)[index]];
+		}
+		const_iterator begin() const { return {entries_, indices_, 0}; }
+		const_iterator end() const { return {entries_, indices_, indices_->size()}; }
+
+	private:
+		const std::vector<FileDialogEntry>* entries_;
+		const std::vector<std::size_t>* indices_;
+	};
+
 	void Begin(bool saveDialog);
 	void Clear();
 	void SetEntries(std::vector<FileDialogEntry> entries);
 	void SetEntriesInOrder(std::vector<FileDialogEntry> entries, bool matchFullPath = false);
+	void SetEntriesWithPreparedOrder(std::vector<FileDialogEntry> entries,
+		FileDialogEntrySortOrders orders);
 
 	void AppendFilter(std::string_view text);
 	bool BackspaceFilter();
@@ -147,7 +208,7 @@ public:
 	void ClearSelection();
 
 	const std::vector<FileDialogEntry>& AllEntries() const { return allEntries_; }
-	const std::vector<FileDialogEntry>& Entries() const { return entries_; }
+	EntryView Entries() const { return EntryView(allEntries_, visibleIndices_); }
 	const FileDialogEntry* SelectedEntry() const;
 	const std::string& Filter() const { return filter_; }
 	FileDialogSortMode SortMode() const { return sortMode_; }
@@ -156,11 +217,16 @@ public:
 	bool SaveDialog() const { return saveDialog_; }
 
 private:
+	static std::string PathIndexKey(const std::filesystem::path& path);
+	void RebuildPathIndex();
 	void ApplyFilter();
 	void EnsureSelectionVisible(int visibleRows);
 
 	std::vector<FileDialogEntry> allEntries_;
-	std::vector<FileDialogEntry> entries_;
+	FileDialogEntrySortOrders sortOrders_;
+	std::vector<std::size_t> visibleIndices_;
+	std::vector<int> visiblePositionByEntry_;
+	std::unordered_map<std::string, std::size_t> entryIndexByPath_;
 	std::string filter_;
 	FileDialogSortMode sortMode_ = FileDialogSortMode::Name;
 	int selected_ = -1;
@@ -174,6 +240,48 @@ struct DirectorySummaryResult {
 	std::uint64_t generation = 0;
 	DirectorySummary summary;
 	WorkerFailure failure;
+};
+
+struct FileDialogListingPolicy {
+	bool saveDialog = false;
+	bool includeNonImageFiles = false;
+	bool includeArchives = true;
+	std::unordered_set<std::string> encryptedArchivePaths;
+};
+
+struct FileDialogDirectoryResult {
+	std::filesystem::path directory;
+	std::uint64_t generation = 0;
+	FileDialogListingPolicy policy;
+	std::vector<FileDialogEntry> entries;
+	FileDialogEntrySortOrders sortOrders;
+	std::string error;
+	ArchiveErrorKind errorKind = ArchiveErrorKind::None;
+	bool archiveLocation = false;
+	bool containsEncryptedEntries = false;
+};
+
+// Replaceable one-at-a-time directory listing for Browse. Filesystem metadata,
+// archive catalogs, and both row orders are prepared away from the UI thread.
+class FileDialogDirectoryLoader {
+public:
+	using Enumerator = std::function<FileDialogDirectoryResult(
+		const std::filesystem::path&, FileDialogListingPolicy,
+		const std::function<bool()>&)>;
+
+	explicit FileDialogDirectoryLoader(Enumerator enumerator = {});
+	~FileDialogDirectoryLoader();
+	FileDialogDirectoryLoader(const FileDialogDirectoryLoader&) = delete;
+	FileDialogDirectoryLoader& operator=(const FileDialogDirectoryLoader&) = delete;
+
+	void Request(const std::filesystem::path& directory, std::uint64_t generation,
+		FileDialogListingPolicy policy);
+	void Clear(std::uint64_t generation);
+	std::vector<FileDialogDirectoryResult> TakeReady();
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> impl_;
 };
 
 struct FileDialogFileSizeResult {
@@ -201,7 +309,7 @@ public:
 	void RequestSources(const std::vector<SourceDescriptor>& sources,
 		std::uint64_t generation);
 	void Clear(std::uint64_t generation);
-	std::vector<FileDialogFileSizeResult> TakeReady();
+	std::vector<FileDialogFileSizeResult> TakeReady(std::size_t maximumResults = 128);
 
 private:
 	struct Impl;
@@ -250,7 +358,7 @@ public:
 
 	void Request(const std::vector<std::filesystem::path>& directories, std::uint64_t generation);
 	bool IsYieldingForForeground() const;
-	std::vector<DirectorySummaryResult> TakeReady();
+	std::vector<DirectorySummaryResult> TakeReady(std::size_t maximumResults = 64);
 
 private:
 	struct Impl;
