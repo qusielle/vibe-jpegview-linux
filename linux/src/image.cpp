@@ -5,7 +5,11 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
+#include <iterator>
+#include <list>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -510,48 +514,160 @@ bool Image::Resize(int newWidth, int newHeight, int filter,
 		}
 		return kernels;
 	};
+	struct CachedKernelSet {
+		int sourceSize = 0;
+		int targetSize = 0;
+		int filter = 0;
+		std::size_t bytes = 0;
+		std::shared_ptr<const std::vector<Kernel>> kernels;
+	};
+	struct KernelCacheState {
+		std::mutex mutex;
+		std::list<CachedKernelSet> entries;
+		std::size_t bytes = 0;
+	};
+	using KernelSet = std::vector<Kernel>;
+	struct KernelSetSelection {
+		std::shared_ptr<const KernelSet> cached;
+		const KernelSet* local = nullptr;
+
+		const KernelSet& Get() const { return cached != nullptr ? *cached : *local; }
+		explicit operator bool() const { return cached != nullptr || local != nullptr; }
+	};
+	static KernelCacheState kernelCache;
+	constexpr std::size_t maximumKernelCacheBytes = 8 * 1024 * 1024;
+	const auto getKernels = [&](int sourceSize, int targetSize, KernelSet& uncached) {
+		if (!ContinueWork(shouldContinue)) return KernelSetSelection{};
+		{
+			std::lock_guard<std::mutex> lock(kernelCache.mutex);
+			for (auto entry = kernelCache.entries.begin(); entry != kernelCache.entries.end(); ++entry) {
+				if (entry->sourceSize == sourceSize && entry->targetSize == targetSize &&
+					entry->filter == filter) {
+					const std::shared_ptr<const KernelSet> kernels = entry->kernels;
+					kernelCache.entries.splice(kernelCache.entries.begin(), kernelCache.entries, entry);
+					return KernelSetSelection{kernels, nullptr};
+				}
+			}
+		}
+
+		std::shared_ptr<const KernelSet> kernels;
+		KernelSet built;
+		std::size_t kernelBytes = 0;
+		try {
+			built = buildKernels(sourceSize, targetSize);
+		} catch (const std::exception&) {
+			return KernelSetSelection{};
+		}
+		if (built.empty() || !ContinueWork(shouldContinue)) return KernelSetSelection{};
+		try {
+			kernels = std::make_shared<KernelSet>(std::move(built));
+		} catch (const std::exception&) {
+			uncached = std::move(built);
+			return KernelSetSelection{nullptr, &uncached};
+		}
+		try {
+			const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+			if (kernels->capacity() > maximum / sizeof(Kernel)) {
+				kernelBytes = maximum;
+			} else {
+				kernelBytes = kernels->capacity() * sizeof(Kernel);
+				for (const Kernel& kernel : *kernels) {
+					if (kernel.samples.capacity() > (maximum - kernelBytes) / sizeof(Sample)) {
+						kernelBytes = maximum;
+						break;
+					}
+					kernelBytes += kernel.samples.capacity() * sizeof(Sample);
+				}
+			}
+		} catch (const std::exception&) {
+			return KernelSetSelection{kernels, nullptr};
+		}
+		if (kernelBytes > maximumKernelCacheBytes) return KernelSetSelection{kernels, nullptr};
+
+		std::list<CachedKernelSet> retired;
+		{
+			std::lock_guard<std::mutex> lock(kernelCache.mutex);
+			for (auto entry = kernelCache.entries.begin(); entry != kernelCache.entries.end(); ++entry) {
+				if (entry->sourceSize == sourceSize && entry->targetSize == targetSize &&
+					entry->filter == filter) {
+					const std::shared_ptr<const KernelSet> cached = entry->kernels;
+					kernelCache.entries.splice(kernelCache.entries.begin(), kernelCache.entries, entry);
+					return KernelSetSelection{cached, nullptr};
+				}
+			}
+			while (kernelCache.bytes > maximumKernelCacheBytes - kernelBytes) {
+				auto last = std::prev(kernelCache.entries.end());
+				kernelCache.bytes -= last->bytes;
+				retired.splice(retired.end(), kernelCache.entries, last);
+			}
+			try {
+				kernelCache.entries.push_front(CachedKernelSet{
+					sourceSize, targetSize, filter, kernelBytes, kernels});
+				kernelCache.bytes += kernelBytes;
+			} catch (const std::exception&) {
+				// The completed kernels remain usable even when cache metadata cannot be allocated.
+			}
+		}
+		return KernelSetSelection{kernels, nullptr};
+	};
 
 	const std::size_t bytesPerPixel = 4;
 	const std::size_t maximum = std::numeric_limits<std::size_t>::max();
 	if (static_cast<std::size_t>(newWidth) > maximum / bytesPerPixel ||
 		static_cast<std::size_t>(height) > maximum / (static_cast<std::size_t>(newWidth) * bytesPerPixel) ||
 		static_cast<std::size_t>(newHeight) > maximum / (static_cast<std::size_t>(newWidth) * bytesPerPixel)) return false;
-	const std::size_t horizontalBytes = static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(height) * bytesPerPixel;
+	const bool resizeWidth = width != newWidth;
+	const bool resizeHeight = height != newHeight;
+	const std::size_t horizontalBytes = resizeWidth ?
+		static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(height) * bytesPerPixel : 0;
 	const std::size_t outputBytes = static_cast<std::size_t>(newWidth) * static_cast<std::size_t>(newHeight) * bytesPerPixel;
 	std::vector<std::uint8_t> horizontal;
 	std::vector<std::uint8_t> resized;
+	KernelSet horizontalKernelsUncached;
+	KernelSet verticalKernelsUncached;
 	try {
-		horizontal.resize(horizontalBytes);
-		resized.resize(outputBytes);
+		if (resizeWidth) horizontal.resize(horizontalBytes);
+		if (resizeHeight) resized.resize(outputBytes);
 	} catch (const std::exception&) {
 		return false;
 	}
-	const std::vector<Kernel> horizontalKernels = buildKernels(width, newWidth);
-	const std::vector<Kernel> verticalKernels = buildKernels(height, newHeight);
-	if (!ContinueWork(shouldContinue) || horizontalKernels.empty() ||
-		verticalKernels.empty()) return false;
-	for (int y = 0; y < height; ++y) {
-		if (!ContinueAtRow(y, shouldContinue)) return false;
-		for (int x = 0; x < newWidth; ++x) {
-			std::array<double, 4> values{};
-			for (const Sample& sample : horizontalKernels[static_cast<std::size_t>(x)].samples) {
-				const std::size_t sourceOffset = (static_cast<std::size_t>(y) * width + sample.index) * 4;
-				for (int channel = 0; channel < 4; ++channel) values[static_cast<std::size_t>(channel)] +=
-					sample.weight * bgra[sourceOffset + static_cast<std::size_t>(channel)];
+	const KernelSetSelection horizontalKernels = resizeWidth ?
+		getKernels(width, newWidth, horizontalKernelsUncached) : KernelSetSelection{};
+	const KernelSetSelection verticalKernels = resizeHeight ?
+		getKernels(height, newHeight, verticalKernelsUncached) : KernelSetSelection{};
+	if (!ContinueWork(shouldContinue) || (resizeWidth && !horizontalKernels) ||
+		(resizeHeight && !verticalKernels)) return false;
+	if (resizeWidth) {
+		for (int y = 0; y < height; ++y) {
+			if (!ContinueAtRow(y, shouldContinue)) return false;
+			for (int x = 0; x < newWidth; ++x) {
+				std::array<double, 4> values{};
+				for (const Sample& sample : horizontalKernels.Get()[static_cast<std::size_t>(x)].samples) {
+					const std::size_t sourceOffset = (static_cast<std::size_t>(y) * width + sample.index) * 4;
+					for (int channel = 0; channel < 4; ++channel) values[static_cast<std::size_t>(channel)] +=
+						sample.weight * bgra[sourceOffset + static_cast<std::size_t>(channel)];
+				}
+				const std::size_t targetOffset = (static_cast<std::size_t>(y) * newWidth + x) * 4;
+				for (int channel = 0; channel < 4; ++channel) horizontal[targetOffset + static_cast<std::size_t>(channel)] =
+					static_cast<std::uint8_t>(std::clamp(std::lround(values[static_cast<std::size_t>(channel)]), 0l, 255l));
 			}
-			const std::size_t targetOffset = (static_cast<std::size_t>(y) * newWidth + x) * 4;
-			for (int channel = 0; channel < 4; ++channel) horizontal[targetOffset + static_cast<std::size_t>(channel)] =
-				static_cast<std::uint8_t>(std::clamp(std::lround(values[static_cast<std::size_t>(channel)]), 0l, 255l));
 		}
 	}
+	if (!resizeHeight) {
+		if (!ContinueWork(shouldContinue)) return false;
+		width = newWidth;
+		bgra.swap(horizontal);
+		return true;
+	}
+	const std::vector<std::uint8_t>& verticalSource = resizeWidth ? horizontal : bgra;
 	for (int y = 0; y < newHeight; ++y) {
 		if (!ContinueAtRow(y, shouldContinue)) return false;
 		for (int x = 0; x < newWidth; ++x) {
 			std::array<double, 4> values{};
-			for (const Sample& sample : verticalKernels[static_cast<std::size_t>(y)].samples) {
+			for (const Sample& sample : verticalKernels.Get()[static_cast<std::size_t>(y)].samples) {
 				const std::size_t sourceOffset = (static_cast<std::size_t>(sample.index) * newWidth + x) * 4;
 				for (int channel = 0; channel < 4; ++channel) values[static_cast<std::size_t>(channel)] +=
-					sample.weight * horizontal[sourceOffset + static_cast<std::size_t>(channel)];
+					sample.weight * verticalSource[sourceOffset + static_cast<std::size_t>(channel)];
 			}
 			const std::size_t targetOffset = (static_cast<std::size_t>(y) * newWidth + x) * 4;
 			for (int channel = 0; channel < 4; ++channel) resized[targetOffset + static_cast<std::size_t>(channel)] =
@@ -755,14 +871,19 @@ bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContra
 	const double cyanRed = std::clamp(params.cyanRed, -1.0, 1.0);
 	const double magentaGreen = std::clamp(params.magentaGreen, -1.0, 1.0);
 	const double yellowBlue = std::clamp(params.yellowBlue, -1.0, 1.0);
-	const auto colorCast = [cyanRed, magentaGreen, yellowBlue](int channel, int value) {
+	const std::array<double, 3> colorCastAmounts = {{
+		-0.18 * yellowBlue - 0.06 * cyanRed - 0.06 * magentaGreen,
+		0.18 * magentaGreen + 0.12 * yellowBlue - 0.06 * cyanRed,
+		0.18 * cyanRed + 0.12 * yellowBlue - 0.06 * magentaGreen,
+	}};
+	std::array<std::array<int, 256>, 3> colorCastLut{};
+	for (int value = 0; value < 256; ++value) {
 		const double midtone = 1.0 - std::pow((value - 127.5) / 127.5, 2.0);
-		double amount = 0.0;
-		if (channel == 2) amount = 0.18 * cyanRed + 0.12 * yellowBlue - 0.06 * magentaGreen;
-		else if (channel == 1) amount = 0.18 * magentaGreen + 0.12 * yellowBlue - 0.06 * cyanRed;
-		else amount = -0.18 * yellowBlue - 0.06 * cyanRed - 0.06 * magentaGreen;
-		return static_cast<int>(std::lround(amount * midtone * 255.0));
-	};
+		for (std::size_t channel = 0; channel < colorCastAmounts.size(); ++channel) {
+			colorCastLut[channel][static_cast<std::size_t>(value)] =
+				static_cast<int>(std::lround(colorCastAmounts[channel] * midtone * 255.0));
+		}
+	}
 
 	LocalDensityMap densityMap;
 	std::array<int, 256> densityResponse{};
@@ -819,9 +940,9 @@ bool Image::ApplyProcessing(const ImageProcessingParams& params, bool autoContra
 			outBlue = toneLut[static_cast<std::size_t>(std::clamp(outBlue, 0, 255))];
 			outGreen = toneLut[static_cast<std::size_t>(std::clamp(outGreen, 0, 255))];
 			outRed = toneLut[static_cast<std::size_t>(std::clamp(outRed, 0, 255))];
-			outRed = std::clamp(outRed + colorCast(2, outRed), 0, 255);
-			outGreen = std::clamp(outGreen + colorCast(1, outGreen), 0, 255);
-			outBlue = std::clamp(outBlue + colorCast(0, outBlue), 0, 255);
+			outRed = std::clamp(outRed + colorCastLut[2][static_cast<std::size_t>(outRed)], 0, 255);
+			outGreen = std::clamp(outGreen + colorCastLut[1][static_cast<std::size_t>(outGreen)], 0, 255);
+			outBlue = std::clamp(outBlue + colorCastLut[0][static_cast<std::size_t>(outBlue)], 0, 255);
 			if (!densityMap.values.empty()) {
 				const int mask = SampleDensityMap(densityMap, x, y, width, height) - 127;
 				const int strength = mask >= 0 ? static_cast<int>(std::lround(params.lightenShadows * 65536.0)) :

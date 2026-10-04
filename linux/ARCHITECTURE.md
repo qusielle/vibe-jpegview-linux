@@ -169,14 +169,30 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `crop_size_dialog_model`: fixed-crop dimension text, focus/unit transitions, and validation.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
   pixel processing, the atomic native per-image levels database, and its portable backup/restore.
-- `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy. Image
-  decoders resolve archive-member paths through `archive_source` before invoking the existing codec
+- `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
+  `image_decoder.cpp` owns validation, append/conversion helpers, source admission, and codec dispatch;
+  `image_decoder_stb.cpp`, `image_decoder_jpeg.cpp`, `image_decoder_apng.cpp`,
+  `image_decoder_builtin.cpp`, and `image_decoder_optional.cpp` isolate the corresponding reader
+  families behind the shared internal interface. `image_writer.cpp` owns validation and dispatch;
+  `image_writer_jpeg_png.cpp`, `image_writer_basic.cpp`, and `image_writer_optional.cpp` hold codec
+  implementations. Decoder-owned pixel buffers move into `DecodedImage` when the decoder has finished
+  using them. Mapped JPEG inputs and non-longjmp codec handles use scope ownership; libjpeg/libpng
+  retain explicit cleanup at their `setjmp` recovery points because those C APIs report failures with
+  `longjmp`. Image decoders resolve archive-member paths through `archive_source` before invoking the existing codec
   path, retaining ordinary-file and reduced-DCT JPEG behavior. JPEG cancellation is checked before
   opening, after header parsing, between 16-row scanline batches, before color conversion/resampling,
   and before publication; opaque codec calls are checked before and after their supported boundaries.
-  Existing libjpeg cleanup and error handling remain in place, and callbacks are never thrown across C
-  codec frames. Decoded frames carry alpha-presence metadata so opaque-image textures can keep blending
-  disabled.
+  callback exception boundaries remain in place, and callbacks are never thrown across C codec frames.
+  Decoded frames carry alpha-presence metadata so opaque-image textures can keep blending
+  disabled. If giflib is unavailable, the built-in `stb_image` path still returns a GIF's first frame;
+  animation delays and compositing require the giflib decoder.
+- `image.cpp` keeps the scalar resize algorithm as the pixel oracle while caching complete resampling
+  kernel sets in a shared 8 MiB LRU keyed by source axis, target axis, and filter. Kernel construction
+  and eviction destruction happen outside the cache lock, incomplete/canceled kernels are not retained,
+  and unchanged axes skip their scratch buffer and resampling pass. Color-cast response values are
+  computed once per channel value before the pixel loop. `thumbnail_resampler` retains its transparent
+  path and selects an opaque path only when source metadata proves every alpha sample is opaque; both
+  paths preserve the characterized output bytes.
 - `cache_budget`, `image_cache`, `display_image_cache`, `display_prefetch_planner`,
   `display_preparation_controller`, and
   `display_upload_scheduler`: aggregate cache accounting,

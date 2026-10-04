@@ -13930,6 +13930,22 @@ void TestImageResizeFiltersAndLimits() {
 	jpegview_linux::Image unchanged = source;
 	Expect(unchanged.Resize(4, 1, 3) && unchanged.bgra == source.bgra,
 		"same-size resize modified source pixels");
+	const jpegview_linux::Image sharedKernelSource = MakeIndexedImage(257, 193);
+	jpegview_linux::Image concurrentResizeA = sharedKernelSource;
+	jpegview_linux::Image concurrentResizeB = sharedKernelSource;
+	bool concurrentResizeAOk = false;
+	bool concurrentResizeBOk = false;
+	std::thread concurrentResizeThreadA([&] {
+		concurrentResizeAOk = concurrentResizeA.Resize(91, 71, 1);
+	});
+	std::thread concurrentResizeThreadB([&] {
+		concurrentResizeBOk = concurrentResizeB.Resize(91, 71, 1);
+	});
+	concurrentResizeThreadA.join();
+	concurrentResizeThreadB.join();
+	Expect(concurrentResizeAOk && concurrentResizeBOk &&
+		concurrentResizeA.bgra == concurrentResizeB.bgra,
+		"concurrent resizes with a shared kernel key produced different pixels");
 	jpegview_linux::Image highFilter = source;
 	jpegview_linux::Image defaultFilter = source;
 	Expect(highFilter.Resize(3, 1, 999) && defaultFilter.Resize(3, 1, 3) &&
@@ -20386,6 +20402,10 @@ void TestThumbnailDownsamplingAntialiasing() {
 	Expect(jpegview_linux::DownsampleThumbnailBgra(opaquePixels, 7, 5, 3, 2, filtered) &&
 		filtered == opaqueExpected,
 		"scalar opaque thumbnail output changed for an irregular source geometry");
+	std::vector<std::uint8_t> opaqueFastPath;
+	Expect(jpegview_linux::DownsampleThumbnailBgra(opaquePixels, 7, 5, 3, 2,
+		opaqueFastPath, {}, false) && opaqueFastPath == opaqueExpected,
+		"opaque thumbnail path changed scalar output for an irregular source geometry");
 
 	int cancellationChecks = 0;
 	Expect(!jpegview_linux::DownsampleThumbnailBgra(checkerboard, 8, 8, 2, 2,

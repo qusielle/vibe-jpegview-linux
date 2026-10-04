@@ -25,7 +25,8 @@ namespace jpegview_linux {
 bool DownsampleThumbnailBgra(const std::vector<std::uint8_t>& source,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	std::vector<std::uint8_t>& target,
-	const std::function<bool()>& shouldContinue = {});
+	const std::function<bool()>& shouldContinue = {},
+	bool sourceHasTransparency = true);
 
 // Bounds the display-sized source retained while a background thumbnail is
 // derived, including overflow-safe handling of invalid dimensions.

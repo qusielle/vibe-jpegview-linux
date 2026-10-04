@@ -55,7 +55,7 @@ bool EstimateThumbnailBytes(const ThumbnailPreparationRequest& request,
 bool DownsampleThumbnailBgra(const std::vector<std::uint8_t>& source,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	std::vector<std::uint8_t>& target,
-	const std::function<bool()>& shouldContinue) {
+	const std::function<bool()>& shouldContinue, bool sourceHasTransparency) {
 	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Resampling,
 		static_cast<std::uint64_t>(sourceWidth) * static_cast<std::uint64_t>(sourceHeight),
 		static_cast<std::uint64_t>(targetWidth) * static_cast<std::uint64_t>(targetHeight));
@@ -101,21 +101,40 @@ bool DownsampleThumbnailBgra(const std::vector<std::uint8_t>& source,
 			double weightedBlue = 0.0;
 			double weightedGreen = 0.0;
 			double weightedRed = 0.0;
-			for (int sourceY = firstY; sourceY <= lastY; ++sourceY) {
-				const double verticalCoverage = std::max(0.0,
-					std::min(sourceBottom, sourceY + 1.0) - std::max(sourceTop, static_cast<double>(sourceY)));
-				for (int sourceX = firstX; sourceX <= lastX; ++sourceX) {
-					const double horizontalCoverage = std::max(0.0,
-						std::min(sourceRight, sourceX + 1.0) - std::max(sourceLeft, static_cast<double>(sourceX)));
-					const double coverage = horizontalCoverage * verticalCoverage;
-					const std::size_t offset =
-						(static_cast<std::size_t>(sourceY) * sourceWidth + sourceX) * 4;
-					const double alpha = source[offset + 3];
-					const double alphaCoverage = alpha * coverage;
-					weightedAlpha += alphaCoverage;
-					weightedBlue += source[offset] * alphaCoverage;
-					weightedGreen += source[offset + 1] * alphaCoverage;
-					weightedRed += source[offset + 2] * alphaCoverage;
+			if (sourceHasTransparency) {
+				for (int sourceY = firstY; sourceY <= lastY; ++sourceY) {
+					const double verticalCoverage = std::max(0.0,
+						std::min(sourceBottom, sourceY + 1.0) - std::max(sourceTop, static_cast<double>(sourceY)));
+					for (int sourceX = firstX; sourceX <= lastX; ++sourceX) {
+						const double horizontalCoverage = std::max(0.0,
+							std::min(sourceRight, sourceX + 1.0) - std::max(sourceLeft, static_cast<double>(sourceX)));
+						const double coverage = horizontalCoverage * verticalCoverage;
+						const std::size_t offset =
+							(static_cast<std::size_t>(sourceY) * sourceWidth + sourceX) * 4;
+						const double alpha = source[offset + 3];
+						const double alphaCoverage = alpha * coverage;
+						weightedAlpha += alphaCoverage;
+						weightedBlue += source[offset] * alphaCoverage;
+						weightedGreen += source[offset + 1] * alphaCoverage;
+						weightedRed += source[offset + 2] * alphaCoverage;
+					}
+				}
+			} else {
+				for (int sourceY = firstY; sourceY <= lastY; ++sourceY) {
+					const double verticalCoverage = std::max(0.0,
+						std::min(sourceBottom, sourceY + 1.0) - std::max(sourceTop, static_cast<double>(sourceY)));
+					for (int sourceX = firstX; sourceX <= lastX; ++sourceX) {
+						const double horizontalCoverage = std::max(0.0,
+							std::min(sourceRight, sourceX + 1.0) - std::max(sourceLeft, static_cast<double>(sourceX)));
+						const double coverage = horizontalCoverage * verticalCoverage;
+						const std::size_t offset =
+							(static_cast<std::size_t>(sourceY) * sourceWidth + sourceX) * 4;
+						const double alphaCoverage = 255.0 * coverage;
+						weightedAlpha += alphaCoverage;
+						weightedBlue += source[offset] * alphaCoverage;
+						weightedGreen += source[offset + 1] * alphaCoverage;
+						weightedRed += source[offset + 2] * alphaCoverage;
+					}
 				}
 			}
 			const std::size_t output =
@@ -297,7 +316,7 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 		size.width, size.height, prepared->bgra,
 		[&workContext, &shouldContinue] {
 			return workContext.Continue() && shouldContinue();
-		})) return {};
+		}, hasTransparency)) return {};
 	return prepared;
 }
 
