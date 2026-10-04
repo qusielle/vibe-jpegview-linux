@@ -20675,6 +20675,24 @@ void TestPlaybackSchedulerTimingAndModes() {
 		repeatedReady.FrameIndex() == 1,
 		"repeated renderer-ready notifications postponed an animation frame indefinitely");
 
+	jpegview_linux::PlaybackScheduler flattenedAnimation;
+	flattenedAnimation.ConfigureImage({20, 20}, 0, true, 100);
+	flattenedAnimation.StartMovie(25.0, 100);
+	flattenedAnimation.SetImageReady(false, 110);
+	flattenedAnimation.ConfigureStillImage(120);
+	Expect(flattenedAnimation.Mode() == PlaybackMode::None &&
+		!flattenedAnimation.HasAnimation() && !flattenedAnimation.AnimationPlaying() &&
+		!flattenedAnimation.NextDeadline().has_value(),
+		"flattening a saved animation should stop active playback and clear its frames");
+	flattenedAnimation.StartMovie(25.0, 130);
+	Expect(flattenedAnimation.NextDeadline() == 170 &&
+		flattenedAnimation.Tick(170).type == PlaybackActionType::NextImage,
+		"movie playback could not restart after an animated source was flattened");
+	flattenedAnimation.StartSlideshow(0.1, 180);
+	Expect(flattenedAnimation.NextDeadline() == 280 &&
+		flattenedAnimation.Tick(280).type == PlaybackActionType::NextImage,
+		"slideshow playback could not restart after an animated source was flattened");
+
 	scheduler.ConfigureImage({}, 0, false, 400);
 	scheduler.StartMovie(25.0, 400);
 	Expect(scheduler.Mode() == PlaybackMode::Movie && scheduler.NextTick() == 440 &&

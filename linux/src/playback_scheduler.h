@@ -28,6 +28,7 @@ class PlaybackScheduler {
 public:
 	void ConfigureImage(std::vector<int> frameDelaysMs, int loopCount,
 		bool animated, std::uint32_t now);
+	void ConfigureStillImage(std::uint32_t now);
 	void NotifyInteraction(std::uint32_t now);
 	void SetImageReady(bool ready, std::uint32_t now);
 

@@ -5448,7 +5448,7 @@ private:
 		imageDocument_.SetAnimation(false);
 		imageDocument_.SetFrameIndex(0);
 		currentAnimationFrame_ = 0;
-		playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
+		playback_.ConfigureStillImage(SDL_GetTicks());
 		jpegview_linux::RetiredImageBuffers retired;
 		retired.decoded = std::move(currentDecoded_);
 		imageOperationWorker_.Retire(std::move(retired));

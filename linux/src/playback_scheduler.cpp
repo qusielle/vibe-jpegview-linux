@@ -26,6 +26,12 @@ void PlaybackScheduler::ConfigureImage(std::vector<int> frameDelaysMs,
 	}
 }
 
+void PlaybackScheduler::ConfigureStillImage(std::uint32_t now) {
+	ConfigureImage({}, 0, false, now);
+	Stop(now);
+	SetImageReady(true, now);
+}
+
 void PlaybackScheduler::NotifyInteraction(std::uint32_t now) {
 	lastInteractionTick_ = now;
 }

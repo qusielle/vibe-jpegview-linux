@@ -537,6 +537,8 @@ revision, and animation frame before publication. The SDL thread creates a repla
 then applies the new pixels and retires replaced buffers through the shared cache retirement service.
 For animated sources, frame-bound operations pause readiness while the captured frame is processed;
 failure or cancellation resumes playback, while a successful edit keeps that frame as a still image.
+After an in-place save flattens an animation, the scheduler clears active playback and marks the still
+ready, allowing a later slideshow or movie to start without loading another image.
 Viewport pan/zoom can continue during work and final fit/manual mode restoration uses the live viewport
 snapshot. Failure leaves the current document and texture intact; replacing the selected source cancels
 the operation. A direct pixel operation cannot pass an earlier queued image intent; if it is accepted
