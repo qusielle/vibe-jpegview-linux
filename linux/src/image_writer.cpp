@@ -787,8 +787,16 @@ bool WriteJxl(const std::filesystem::path& filename, const std::uint8_t* bgra,
 
 bool WriteImage(const std::filesystem::path& filename, const std::uint8_t* bgra,
 	int width, int height, const ImageWriteOptions& options, std::string& errorMessage) {
+	return WriteImageWithFormat(filename, filename.extension().string(), bgra,
+		width, height, options, errorMessage);
+}
+
+bool WriteImageWithFormat(const std::filesystem::path& filename,
+	const std::string& formatExtension, const std::uint8_t* bgra,
+	int width, int height, const ImageWriteOptions& options,
+	std::string& errorMessage) {
 	if (!Validate(bgra, width, height, errorMessage)) return false;
-	const std::string extension = Lower(filename.extension().string());
+	const std::string extension = Lower(formatExtension);
 	if (extension == ".jpg" || extension == ".jpeg" || extension == ".jpe") {
 		return WriteJpeg(filename, bgra, width, height, options.jpegQuality, errorMessage);
 	}

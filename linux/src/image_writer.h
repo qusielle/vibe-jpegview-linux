@@ -17,4 +17,11 @@ struct ImageWriteOptions {
 bool WriteImage(const std::filesystem::path& filename, const std::uint8_t* bgra,
 	int width, int height, const ImageWriteOptions& options, std::string& errorMessage);
 
+// Writes using an explicit format extension while retaining a non-image
+// staging filename, for example a hidden .tmp sibling before atomic publish.
+bool WriteImageWithFormat(const std::filesystem::path& filename,
+	const std::string& formatExtension, const std::uint8_t* bgra,
+	int width, int height, const ImageWriteOptions& options,
+	std::string& errorMessage);
+
 } // namespace jpegview_linux

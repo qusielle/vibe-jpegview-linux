@@ -27,6 +27,8 @@
 #include "sort_mode.h"
 #include "desktop_applications.h"
 #include "external_commands.h"
+#include "external_process.h"
+#include "file_operation_service.h"
 #include "batch_copy.h"
 #include "image_formats.h"
 #include "input_commands.h"
@@ -67,7 +69,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -78,8 +79,6 @@
 #include <deque>
 #include <exception>
 #include <filesystem>
-#include <fstream>
-#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -91,12 +90,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <sys/wait.h>
-#include <sys/stat.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <unistd.h>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -285,86 +281,8 @@ std::string FormatUnixTime(std::int64_t seconds) {
 	return formatted;
 }
 
-std::time_t FileModificationTime(const fs::path& filename) {
-	struct stat status{};
-	if (stat(filename.c_str(), &status) != 0) return 0;
-	return status.st_mtime;
-}
-
 bool HasExecutable(const std::string& executable) {
-	const char* path = std::getenv("PATH");
-	if (path == nullptr) return false;
-	const std::string searchPath(path);
-	std::size_t begin = 0;
-	while (begin <= searchPath.size()) {
-		const std::size_t end = searchPath.find(':', begin);
-		const fs::path directory = searchPath.substr(begin,
-			end == std::string::npos ? std::string::npos : end - begin);
-		const fs::path candidate = (directory.empty() ? fs::path(".") : directory) / executable;
-		if (access(candidate.c_str(), X_OK) == 0) return true;
-		if (end == std::string::npos) break;
-		begin = end + 1;
-	}
-	return false;
-}
-
-[[noreturn]] void ExecProcess(const jpegview_linux::ExternalCommand& command) {
-	std::vector<char*> argv;
-	argv.reserve(command.arguments.size() + 2);
-	argv.push_back(const_cast<char*>(command.executable.c_str()));
-	for (const std::string& argument : command.arguments) argv.push_back(const_cast<char*>(argument.c_str()));
-	argv.push_back(nullptr);
-	execvp(command.executable.c_str(), argv.data());
-	_exit(127);
-}
-
-bool RunProcess(const jpegview_linux::ExternalCommand& command, std::string& errorMessage) {
-	if (!command.Valid() || !HasExecutable(command.executable)) {
-		errorMessage = command.executable.empty() ? "invalid external command" :
-			command.executable + " is not installed";
-		return false;
-	}
-	const pid_t child = fork();
-	if (child < 0) {
-		errorMessage = "cannot start " + command.executable;
-		return false;
-	}
-	if (child == 0) ExecProcess(command);
-	int status = 0;
-	while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		errorMessage = command.executable + " failed";
-		return false;
-	}
-	return true;
-}
-
-bool StartDetachedProcess(const jpegview_linux::ExternalCommand& command,
-	std::string& errorMessage) {
-	if (!command.Valid() || !HasExecutable(command.executable)) {
-		errorMessage = command.executable.empty() ? "invalid external command" :
-			command.executable + " is not installed";
-		return false;
-	}
-	const pid_t child = fork();
-	if (child < 0) {
-		errorMessage = "cannot start " + command.executable;
-		return false;
-	}
-	if (child == 0) {
-		const pid_t detached = fork();
-		if (detached < 0) _exit(127);
-		if (detached > 0) _exit(0);
-		setsid();
-		ExecProcess(command);
-	}
-	int status = 0;
-	while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		errorMessage = command.executable + " failed to start";
-		return false;
-	}
-	return true;
+	return jpegview_linux::ExternalCommandAvailable(executable);
 }
 
 class Viewer {
@@ -527,6 +445,7 @@ public:
 			TickCurrentJpegDimensions();
 			TickCurrentSelectedDecode();
 			TickImageOperation();
+			TickFileOperation();
 			TickImageSpectrum();
 			TickActiveSpreadDimensions();
 			TickTimedPresentationEffects(SDL_GetTicks());
@@ -607,6 +526,27 @@ private:
 		bool keepSpreadRotation = false;
 		bool pausedAnimationPlayback = false;
 		fs::path output;
+	};
+
+	struct PendingFileOperationUi {
+		std::uint64_t id = 0;
+		std::uint64_t ownerGeneration = 0;
+		jpegview_linux::FileOperationKind kind =
+			jpegview_linux::FileOperationKind::SaveImage;
+		fs::path ownerPath;
+		fs::path sourcePath;
+		fs::path outputPath;
+		fs::path directoryPath;
+		std::string successTitle;
+		std::string failurePrefix;
+		bool selectionSensitive = true;
+		bool cropDialogSave = false;
+		bool batchDialog = false;
+	};
+
+	struct TemporaryCleanupRequest {
+		fs::path file;
+		fs::path directory;
 	};
 
 	struct ContextMenuColumn {
@@ -812,6 +752,7 @@ private:
 
 	void Cleanup() {
 		jpegview_linux::UiCompletionWakeup().SetPostFunction({});
+		fileOperationService_.Stop();
 		imageSpectrumWorker_.Stop();
 		CancelPendingImageOperation();
 		jpegview_linux::RetiredImageBuffers retiredDocument = imageDocument_.ClearPixels();
@@ -829,6 +770,17 @@ private:
 		selectedSourceDecodeChannel_->Shutdown();
 		CancelPendingCurrentJpegDimensions();
 		fileListScanWorker_.Clear();
+		std::error_code temporaryCleanupError;
+		if (!clipboardTempFile_.empty()) fs::remove(clipboardTempFile_, temporaryCleanupError);
+		if (!clipboardTempDirectory_.empty()) {
+			fs::remove_all(clipboardTempDirectory_, temporaryCleanupError);
+		}
+		for (const TemporaryCleanupRequest& cleanup : pendingTemporaryCleanups_) {
+			if (!cleanup.file.empty()) fs::remove(cleanup.file, temporaryCleanupError);
+			if (!cleanup.directory.empty()) fs::remove_all(cleanup.directory,
+				temporaryCleanupError);
+		}
+		pendingTemporaryCleanups_.clear();
 		SaveSettings();
 		if (magnifyingGlassCursorActive_) {
 			SDL_ShowCursor(magnifyingGlassPreviousCursorVisibility_);
@@ -3143,22 +3095,26 @@ private:
 			if (!result->outputPixels) {
 				ReportImageOperationFailure(pending.purpose, "no output pixels were produced");
 			} else {
-				const Image& output = *result->outputPixels;
 				switch (pending.purpose) {
 				case ImageOperationPurpose::Save:
-					CompleteImageSave(pending.output, output);
+					CompleteImageSave(pending.output, result->outputPixels,
+						result->outputReservation.ShareAlias());
 					break;
 				case ImageOperationPurpose::CopyImage:
-					CopyPreparedImage(output, pending.fullSize, false);
+					CopyPreparedImage(result->outputPixels,
+						result->outputReservation.ShareAlias(), pending.fullSize, false);
 					break;
 				case ImageOperationPurpose::CopySelection:
-					CopyPreparedImage(output, true, true);
+					CopyPreparedImage(result->outputPixels,
+						result->outputReservation.ShareAlias(), true, true);
 					break;
 				case ImageOperationPurpose::Print:
-					PrintPreparedImage(output);
+					PrintPreparedImage(result->outputPixels,
+						result->outputReservation.ShareAlias());
 					break;
 				case ImageOperationPurpose::Wallpaper:
-					SetWallpaperFromPreparedImage(output);
+					SetWallpaperFromPreparedImage(result->outputPixels,
+						result->outputReservation.ShareAlias());
 					break;
 				default:
 					break;
@@ -4896,37 +4852,18 @@ private:
 			break;
 		}
 		if (!operation.has_value()) return;
-		if (!HasExecutable("jpegtran")) {
-			SetTitle("Lossless JPEG transformation requires jpegtran");
+		jpegview_linux::LosslessTransformOperation fileOperation;
+		fileOperation.source = fileList_.Current();
+		fileOperation.transform = *operation;
+		PendingFileOperationUi pending;
+		pending.sourcePath = fileOperation.source;
+		pending.successTitle = "Applied lossless JPEG transformation";
+		pending.failurePrefix = "Lossless JPEG transformation failed: ";
+		if (!SubmitFileOperation(std::move(fileOperation), std::move(pending))) {
+			SetTitle("Lossless JPEG transformation failed: another file operation is still in progress");
 			return;
 		}
-
-		char temporaryDirectoryName[] = "/tmp/jpegview-jpegtran-XXXXXX";
-		if (mkdtemp(temporaryDirectoryName) == nullptr) {
-			SetTitle("Lossless JPEG transformation failed: cannot create temporary file");
-			return;
-		}
-		const fs::path temporaryDirectory(temporaryDirectoryName);
-		const fs::path temporaryFile = temporaryDirectory / "transformed.jpg";
-		const jpegview_linux::ExternalCommand transform = jpegview_linux::LosslessJpegCommand(
-			*operation, fileList_.Current(), temporaryFile);
-		std::string errorMessage;
-		const bool transformed = RunProcess(transform, errorMessage);
-		if (!transformed) {
-			std::error_code removeError;
-			fs::remove_all(temporaryDirectory, removeError);
-			SetTitle("Lossless JPEG transformation failed: " + errorMessage);
-			return;
-		}
-		if (::rename(temporaryFile.c_str(), fileList_.Current().c_str()) != 0) {
-			std::error_code removeError;
-			fs::remove_all(temporaryDirectory, removeError);
-			SetTitle("Lossless JPEG transformation failed: cannot replace original file");
-			return;
-		}
-		std::error_code removeError;
-		fs::remove_all(temporaryDirectory, removeError);
-		ReloadAfterFileChange("Applied lossless JPEG transformation");
+		SetTitle("Applying lossless JPEG transformation…");
 	}
 
 	void SetTitle(const std::string& title) {
@@ -5025,6 +4962,11 @@ private:
 		if (pendingImageOperation_.has_value() &&
 			pendingImageOperation_->purpose == ImageOperationPurpose::Save) {
 			CancelPendingImageOperation();
+		}
+		if (pendingFileOperation_.has_value() &&
+			(pendingFileOperation_->kind == jpegview_linux::FileOperationKind::SaveImage ||
+			 pendingFileOperation_->kind == jpegview_linux::FileOperationKind::LosslessCrop)) {
+			fileOperationService_.Cancel(pendingFileOperation_->id);
 		}
 		if (cancelPendingDrop &&
 			pendingFileListScanHandling_ == FileListScanHandling::DroppedInputs) {
@@ -5126,58 +5068,26 @@ private:
 			fileDialogMessage_ = "Cannot check output file: " + existsError.message();
 			return;
 		}
-		std::string pattern = (output.parent_path() / ".jpegview-crop-XXXXXX").string();
-		std::vector<char> temporaryName(pattern.begin(), pattern.end());
-		temporaryName.push_back('\0');
-		const int descriptor = mkstemp(temporaryName.data());
-		if (descriptor < 0) {
-			fileDialogMessage_ = "Lossless crop failed: cannot create a temporary output";
-			return;
-		}
-		struct stat existingOutputStatus{};
-		mode_t outputMode = 0;
-		if (::stat(output.c_str(), &existingOutputStatus) == 0) {
-			outputMode = existingOutputStatus.st_mode & 0777;
-		} else {
-			const mode_t processMask = ::umask(0);
-			::umask(processMask);
-			outputMode = static_cast<mode_t>(0666 & ~processMask);
-		}
-		::close(descriptor);
-		const fs::path temporary(temporaryName.data());
 		const jpegview_linux::SelectionRect bounds = fileDialogLosslessCropRect_;
-		const jpegview_linux::ExternalCommand command = jpegview_linux::LosslessJpegCropCommand(
-			fileList_.Current(), temporary, bounds.left, bounds.top,
-			bounds.Width(), bounds.Height());
-		std::string errorMessage;
-		if (!RunProcess(command, errorMessage)) {
-			std::error_code removeError;
-			fs::remove(temporary, removeError);
-			fileDialogMessage_ = "Lossless crop failed: " + errorMessage;
+		jpegview_linux::LosslessCropOperation operation;
+		operation.source = AbsoluteNormalized(fileList_.Current());
+		operation.output = output;
+		operation.x = bounds.left;
+		operation.y = bounds.top;
+		operation.width = bounds.Width();
+		operation.height = bounds.Height();
+		operation.overwriteConfirmed = fileDialogOverwriteConfirmed_;
+		PendingFileOperationUi pending;
+		pending.sourcePath = operation.source;
+		pending.outputPath = output;
+		pending.cropDialogSave = true;
+		pending.successTitle = "Saved lossless crop: " + output.filename().string();
+		pending.failurePrefix = "Lossless crop failed: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			fileDialogMessage_ = "Lossless crop failed: another file operation is still in progress";
 			return;
 		}
-		if (::chmod(temporary.c_str(), outputMode) != 0) {
-			std::error_code removeError;
-			fs::remove(temporary, removeError);
-			fileDialogMessage_ = "Lossless crop failed: cannot set output permissions";
-			return;
-		}
-		if (::rename(temporary.c_str(), output.c_str()) != 0) {
-			std::error_code removeError;
-			fs::remove(temporary, removeError);
-			fileDialogMessage_ = "Lossless crop failed: cannot finalize output";
-			return;
-		}
-		const fs::path source = AbsoluteNormalized(fileList_.Current());
-		const std::string savedName = output.filename().string();
-		CloseFileDialog();
-		if (output == source) {
-			ReloadAfterFileChange("Saved lossless crop: " + savedName);
-		} else {
-			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
-				0, FileListScanHandling::Reload, true, false, {},
-				ImageLoadStatePolicy::PreserveCurrent, {}, "Saved lossless crop: " + savedName);
-		}
+		fileDialogMessage_ = "Writing lossless crop…";
 	}
 
 	void SaveImageFromDialog() {
@@ -5241,15 +5151,244 @@ private:
 		}
 	}
 
-	void CompleteImageSave(const fs::path& output, const Image& outputImage) {
-		jpegview_linux::ImageWriteOptions options;
-		std::string errorMessage;
-		if (!jpegview_linux::WriteImage(output, outputImage.bgra.data(), outputImage.width,
-			outputImage.height, options, errorMessage)) {
-			fileDialogMessage_ = "Save failed: " + errorMessage;
+	bool SubmitFileOperation(jpegview_linux::FileOperationPayload payload,
+		PendingFileOperationUi pending) {
+		if (pendingFileOperation_.has_value() || fileOperationService_.Busy()) return false;
+		pending.kind = jpegview_linux::KindOf(payload);
+		pending.ownerGeneration = imageSession_.Generation();
+		pending.ownerPath = fileList_.Empty() ? fs::path{} : fileList_.Current();
+		const std::uint64_t id = fileOperationService_.Request(std::move(payload),
+			pending.ownerGeneration);
+		if (id == 0) return false;
+		pending.id = id;
+		pendingFileOperation_ = std::move(pending);
+		return true;
+	}
+
+	bool FileOperationOwnerStillCurrent(const PendingFileOperationUi& pending) const {
+		if (!pending.selectionSensitive) return true;
+		if (pending.ownerGeneration != imageSession_.Generation()) return false;
+		if (pending.ownerPath.empty()) return fileList_.Empty();
+		return !fileList_.Empty() && fileList_.Current() == pending.ownerPath;
+	}
+
+	void QueueTemporaryCleanup(fs::path file, fs::path directory) {
+		if (file.empty() && directory.empty()) return;
+		pendingTemporaryCleanups_.push_back(
+			TemporaryCleanupRequest{std::move(file), std::move(directory)});
+	}
+
+	void ScheduleTemporaryCleanup() {
+		if (pendingTemporaryCleanups_.empty() || pendingFileOperation_.has_value() ||
+			fileOperationService_.Busy()) return;
+		const TemporaryCleanupRequest& cleanup = pendingTemporaryCleanups_.front();
+		PendingFileOperationUi pending;
+		pending.selectionSensitive = false;
+		if (!SubmitFileOperation(jpegview_linux::RemoveTemporaryFilesOperation{
+			cleanup.file, cleanup.directory}, std::move(pending))) return;
+		pendingTemporaryCleanups_.pop_front();
+	}
+
+	void ReloadCurrentDirectoryAfterFileOperation(const fs::path& directory,
+		bool forceImageReload, const fs::path& preferredPath,
+		const std::string& completionTitle) {
+		if (fileList_.Empty() || AbsoluteNormalized(fileList_.Current().parent_path()) !=
+			AbsoluteNormalized(directory)) return;
+		RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
+			0, FileListScanHandling::Reload, true, forceImageReload, preferredPath,
+			ImageLoadStatePolicy::PreserveCurrent, {}, completionTitle);
+	}
+
+	void TickFileOperation() {
+		std::optional<jpegview_linux::FileOperationResult> result =
+			fileOperationService_.TakeReady();
+		if (!result.has_value()) {
+			ScheduleTemporaryCleanup();
 			return;
 		}
+		if (!pendingFileOperation_.has_value() ||
+			pendingFileOperation_->id != result->id) {
+			QueueTemporaryCleanup(std::move(result->temporaryFile),
+				std::move(result->temporaryDirectory));
+			ScheduleTemporaryCleanup();
+			return;
+		}
+		PendingFileOperationUi pending = std::move(*pendingFileOperation_);
+		pendingFileOperation_.reset();
+		const bool ownerCurrent = FileOperationOwnerStillCurrent(pending);
+		const auto reportFailure = [this, &pending, ownerCurrent,
+			&result](const std::string& fallback) {
+			if (!ownerCurrent) return;
+			const std::string detail = result->message.empty() ? fallback : result->message;
+			if (pending.cropDialogSave && fileDialogOpen_) {
+				fileDialogMessage_ = pending.failurePrefix + detail;
+			} else if (pending.kind == jpegview_linux::FileOperationKind::SaveImage &&
+				fileDialogOpen_) {
+				fileDialogMessage_ = pending.failurePrefix + detail;
+			} else if (!pending.failurePrefix.empty()) {
+				SetTitle(pending.failurePrefix + detail);
+			}
+		};
 
+		switch (result->kind) {
+		case jpegview_linux::FileOperationKind::SaveImage:
+			if (result->success && ownerCurrent) {
+				CompleteImageSaveOnUi(pending.outputPath);
+			} else if (!result->success) {
+				reportFailure("image output could not be written");
+			}
+			break;
+		case jpegview_linux::FileOperationKind::CopyImage:
+			if (result->success) {
+				if (ownerCurrent && !pending.successTitle.empty()) SetTitle(pending.successTitle);
+			} else {
+				reportFailure("clipboard image copy failed");
+			}
+			break;
+		case jpegview_linux::FileOperationKind::PasteImage:
+			if (result->success && ownerCurrent && !result->temporaryFile.empty()) {
+				ActivateClipboardImage(result->temporaryFile, result->temporaryDirectory);
+			} else {
+				if (result->success) {
+					QueueTemporaryCleanup(std::move(result->temporaryFile),
+						std::move(result->temporaryDirectory));
+				} else {
+					reportFailure("clipboard does not contain a usable image");
+				}
+			}
+			break;
+		case jpegview_linux::FileOperationKind::LosslessTransform:
+			if (result->success) {
+				ReloadCurrentDirectoryAfterFileOperation(pending.sourcePath.parent_path(),
+					ownerCurrent, ownerCurrent ? pending.sourcePath :
+						(fileList_.Empty() ? fs::path{} : fileList_.Current()),
+					ownerCurrent ? pending.successTitle : std::string());
+			} else {
+				reportFailure("external JPEG transform failed");
+			}
+			break;
+		case jpegview_linux::FileOperationKind::LosslessCrop:
+			if (result->success) {
+				if (pending.cropDialogSave && fileDialogOpen_ && ownerCurrent) CloseFileDialog();
+				ReloadCurrentDirectoryAfterFileOperation(pending.sourcePath.parent_path(),
+					pending.outputPath == pending.sourcePath,
+					fileList_.Empty() ? fs::path{} : fileList_.Current(),
+					ownerCurrent ? pending.successTitle : std::string());
+				if (ownerCurrent && fileList_.Empty()) SetTitle(pending.successTitle);
+			} else {
+				reportFailure("external JPEG crop failed");
+			}
+			break;
+		case jpegview_linux::FileOperationKind::BatchCopy: {
+			const jpegview_linux::BatchCopySummary& batch = result->batch;
+			const bool changed = batch.renamed != 0 || batch.copied != 0;
+			if (changed) {
+				ReloadCurrentDirectoryAfterFileOperation(pending.directoryPath, true,
+					ownerCurrent ? batch.preferredCurrentPath :
+						(fileList_.Empty() ? fs::path{} : fileList_.Current()), {});
+			}
+			if (pending.batchDialog && batchCopyDialog_.IsOpen()) {
+				batchCopyDialog_.ReplaceItems(CollectBatchCopyEntries(),
+					fileList_.CurrentIndex(), BatchCopyVisibleRows());
+				batchCopyDialog_.Preview();
+				std::string message = result->cancelled ?
+					"Cancelled after " + std::to_string(batch.completed) + " completed item(s): " :
+					"Completed: ";
+				message += std::to_string(batch.renamed) + " renamed, " +
+					std::to_string(batch.copied) + " copied, " +
+					std::to_string(batch.createdDirectories) + " folder(s) created";
+				if (batch.failed != 0) {
+					message += "; " + std::to_string(batch.failed) + " failed";
+					if (!batch.firstFailure.empty()) message += ": " + batch.firstFailure;
+				}
+				batchCopyDialog_.SetMessage(std::move(message));
+			}
+			break;
+		}
+		case jpegview_linux::FileOperationKind::SetModificationTime:
+			if (result->success) {
+				ReloadCurrentDirectoryAfterFileOperation(pending.sourcePath.parent_path(),
+					false, fileList_.Empty() ? fs::path{} : fileList_.Current(),
+					ownerCurrent ? pending.successTitle : std::string());
+			} else {
+				reportFailure("file timestamp update failed");
+			}
+			break;
+		case jpegview_linux::FileOperationKind::TouchFolderExifDates:
+			if (result->updatedFiles != 0) {
+				ReloadCurrentDirectoryAfterFileOperation(pending.directoryPath, false,
+					fileList_.Empty() ? fs::path{} : fileList_.Current(), {});
+			}
+			if (ownerCurrent) {
+				std::string message = result->cancelled ? "Cancelled after updating " :
+					"Set EXIF dates for ";
+				message += std::to_string(result->updatedFiles) + " image(s)";
+				if (!result->success && !result->message.empty()) message += ": " + result->message;
+				SetTitle(std::move(message));
+			}
+			break;
+		case jpegview_linux::FileOperationKind::PrintImage:
+		case jpegview_linux::FileOperationKind::WallpaperImage:
+		case jpegview_linux::FileOperationKind::WallpaperFile:
+		case jpegview_linux::FileOperationKind::LaunchDesktop:
+		case jpegview_linux::FileOperationKind::RegisterDefaultViewer:
+			if (result->success) {
+				if (ownerCurrent && !pending.successTitle.empty()) SetTitle(pending.successTitle);
+			} else {
+				reportFailure("file operation failed");
+			}
+			break;
+		case jpegview_linux::FileOperationKind::MoveToTrash:
+			if (result->success) {
+				if (!fileList_.Empty() && AbsoluteNormalized(
+					fileList_.Current().parent_path()) ==
+					AbsoluteNormalized(pending.directoryPath)) {
+					const bool removedCurrent = AbsoluteNormalized(fileList_.Current()) ==
+						AbsoluteNormalized(pending.sourcePath);
+					quitAfterEmptyScan_ = removedCurrent;
+					const fs::path preferredPath = removedCurrent ? fs::path{} :
+						fileList_.Current();
+					RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
+						0, FileListScanHandling::Reload, true, true, preferredPath,
+						ImageLoadStatePolicy::PreserveCurrent, {},
+						ownerCurrent ? "Moved image to trash" : std::string());
+				}
+			} else {
+				reportFailure("trash operation failed");
+			}
+			break;
+		case jpegview_linux::FileOperationKind::RemoveTemporaryFiles:
+			if (!result->success && !result->message.empty()) {
+				std::cerr << result->message << '\n';
+			}
+			break;
+		}
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+		ScheduleTemporaryCleanup();
+	}
+
+	void CompleteImageSave(const fs::path& output,
+		std::shared_ptr<const Image> outputImage,
+		jpegview_linux::CacheReservation imageReservation) {
+		jpegview_linux::ImageWriteOptions options;
+		jpegview_linux::SaveImageOperation operation;
+		operation.output = output;
+		operation.image = std::move(outputImage);
+		operation.imageReservation = std::move(imageReservation);
+		operation.options = options;
+		operation.overwriteConfirmed = fileDialogOverwriteConfirmed_;
+		PendingFileOperationUi pending;
+		pending.outputPath = output;
+		pending.successTitle = "Saved processed image: " + output.filename().string();
+		pending.failurePrefix = "Save failed: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			fileDialogMessage_ = "Save failed: another file operation is still in progress";
+			return;
+		}
+		fileDialogMessage_ = "Saving processed image…";
+	}
+
+	void CompleteImageSaveOnUi(const fs::path& output) {
 		const std::string savedName = output.filename().string();
 		const bool replacedCurrentSource = !fileList_.Empty() &&
 			output == AbsoluteNormalized(fileList_.Current());
@@ -5339,17 +5478,22 @@ private:
 		}
 	}
 
-	void CopyPreparedImage(const Image& copied, bool fullSize, bool selection) {
-		std::string errorMessage;
-		if (jpegview_linux::CopyImageToClipboard(copied.bgra.data(), copied.width,
-			copied.height, errorMessage)) {
-			SetTitle(selection ? "Copied selection to clipboard" : (fullSize ?
-				"Copied original-size image to clipboard" :
-				"Copied displayed image to clipboard"));
-		} else {
-			SetTitle(selection ? "Copy selection failed: " + errorMessage :
-				"Copy image failed: " + errorMessage);
+	void CopyPreparedImage(std::shared_ptr<const Image> copied,
+		jpegview_linux::CacheReservation imageReservation, bool fullSize, bool selection) {
+		if (!copied) return;
+		jpegview_linux::CopyImageOperation operation;
+		operation.image = std::move(copied);
+		operation.imageReservation = std::move(imageReservation);
+		PendingFileOperationUi pending;
+		pending.successTitle = selection ? "Copied selection to clipboard" : (fullSize ?
+			"Copied original-size image to clipboard" : "Copied displayed image to clipboard");
+		pending.failurePrefix = selection ? "Copy selection failed: " : "Copy image failed: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle(selection ? "Copy selection failed: another file operation is still in progress" :
+				"Copy image failed: another file operation is still in progress");
+			return;
 		}
+		SetTitle(selection ? "Copying selection to clipboard…" : "Copying image to clipboard…");
 	}
 
 	bool CropCurrentSelection() {
@@ -5468,19 +5612,13 @@ private:
 		const fs::path current = fileList_.Current();
 		const fs::path directory = jpegview_linux::IsArchiveMemberLocation(current) ?
 			jpegview_linux::ArchiveBackingFile(current).parent_path() : current.parent_path();
-		std::string errorMessage;
-		bool started = false;
-		for (const jpegview_linux::ExternalCommand& command :
-			jpegview_linux::OpenContainingFolderCommands(directory)) {
-			if (StartDetachedProcess(command, errorMessage)) {
-				started = true;
-				break;
-			}
-		}
-		if (started) {
-			SetTitle("Opened containing folder");
-		} else {
-			SetTitle("Cannot open containing folder: " + errorMessage);
+		jpegview_linux::LaunchDesktopOperation operation;
+		operation.fallbacks = jpegview_linux::OpenContainingFolderCommands(directory);
+		PendingFileOperationUi pending;
+		pending.successTitle = "Opened containing folder";
+		pending.failurePrefix = "Cannot open containing folder: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Cannot open containing folder: another file operation is still in progress");
 		}
 	}
 
@@ -5499,10 +5637,15 @@ private:
 			return;
 		}
 
-		std::string errorMessage;
-		const bool started = StartDetachedProcess(*command, errorMessage);
-		SetTitle(started ? "Opened image with " + application.name :
-			"Cannot open image with " + application.name + ": " + errorMessage);
+		jpegview_linux::LaunchDesktopOperation operation;
+		operation.fallbacks.push_back(*command);
+		PendingFileOperationUi pending;
+		pending.successTitle = "Opened image with " + application.name;
+		pending.failurePrefix = "Cannot open image with " + application.name + ": ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Cannot open image with " + application.name +
+				": another file operation is still in progress");
+		}
 	}
 
 	void SetAsDefaultViewer() {
@@ -5526,12 +5669,16 @@ private:
 			SetTitle("Cannot determine the running JPEGView executable path");
 			return;
 		}
-		std::string errorMessage;
-		if (!jpegview_linux::RegisterDefaultViewer(executable, dataHome, configHome, errorMessage)) {
-			SetTitle("Default viewer registration failed: " + errorMessage);
-			return;
+		jpegview_linux::RegisterDefaultViewerOperation operation;
+		operation.executable = executable;
+		operation.dataHome = dataHome;
+		operation.configHome = configHome;
+		PendingFileOperationUi pending;
+		pending.successTitle = "JPEGView is now the default viewer for common image formats";
+		pending.failurePrefix = "Default viewer registration failed: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Default viewer registration failed: another file operation is still in progress");
 		}
-		SetTitle("JPEGView is now the default viewer for common image formats");
 	}
 
 	void PrintCurrentImage() {
@@ -5547,59 +5694,20 @@ private:
 		}
 	}
 
-	void PrintPreparedImage(const Image& image) {
-		char temporaryDirectoryName[] = "/tmp/jpegview-print-XXXXXX";
-		if (mkdtemp(temporaryDirectoryName) == nullptr) {
-			SetTitle("Print failed: cannot create temporary file");
+	void PrintPreparedImage(std::shared_ptr<const Image> image,
+		jpegview_linux::CacheReservation imageReservation) {
+		if (!image) return;
+		jpegview_linux::PrintImageOperation operation;
+		operation.image = std::move(image);
+		operation.imageReservation = std::move(imageReservation);
+		PendingFileOperationUi pending;
+		pending.successTitle = "Sent image to the default printer";
+		pending.failurePrefix = "Print failed: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Print failed: another file operation is still in progress");
 			return;
 		}
-		const fs::path temporaryDirectory(temporaryDirectoryName);
-		const fs::path temporaryFile = temporaryDirectory / "image.png";
-		jpegview_linux::ImageWriteOptions options;
-		std::string errorMessage;
-		const bool written = jpegview_linux::WriteImage(temporaryFile, image.bgra.data(),
-			image.width, image.height, options, errorMessage);
-		if (!written) {
-			std::error_code removeError;
-			fs::remove_all(temporaryDirectory, removeError);
-			SetTitle("Print failed: " + errorMessage);
-			return;
-		}
-		const bool printed = RunProcess(jpegview_linux::PrintCommand(temporaryFile), errorMessage);
-		std::error_code removeError;
-		fs::remove_all(temporaryDirectory, removeError);
-		SetTitle(printed ? "Sent image to the default printer" : "Print failed: " + errorMessage);
-	}
-
-	static bool ParseExifTimestamp(const std::string& value, std::time_t& result) {
-		int year = 0;
-		int month = 0;
-		int day = 0;
-		int hour = 0;
-		int minute = 0;
-		int second = 0;
-		if (std::sscanf(value.c_str(), "%d:%d:%d %d:%d:%d", &year, &month, &day,
-			&hour, &minute, &second) != 6) return false;
-		std::tm localTime{};
-		localTime.tm_year = year - 1900;
-		localTime.tm_mon = month - 1;
-		localTime.tm_mday = day;
-		localTime.tm_hour = hour;
-		localTime.tm_min = minute;
-		localTime.tm_sec = second;
-		localTime.tm_isdst = -1;
-		const std::time_t converted = std::mktime(&localTime);
-		if (converted == static_cast<std::time_t>(-1)) return false;
-		result = converted;
-		return true;
-	}
-
-	static bool SetFileModificationTime(const fs::path& filename, std::time_t timestamp) {
-		const timespec times[2] = {
-			{0, UTIME_OMIT},
-			{timestamp, 0},
-		};
-		return utimensat(AT_FDCWD, filename.c_str(), times, 0) == 0;
+		SetTitle("Preparing image for printing…");
 	}
 
 	void SubmitFileListScan(jpegview_linux::FileList::ScanRequest request,
@@ -5941,17 +6049,24 @@ private:
 				return;
 			}
 			const std::string& exifDate = !metadata_.acquisitionDate.empty() ? metadata_.acquisitionDate : metadata_.dateTime;
-			if (exifDate.empty() || !ParseExifTimestamp(exifDate, timestamp)) {
+			if (exifDate.empty() ||
+				!jpegview_linux::ParseLocalExifTimestamp(exifDate, timestamp)) {
 				SetTitle("Cannot set date: image has no usable EXIF date");
 				return;
 			}
 		}
-		if (!SetFileModificationTime(fileList_.Current(), timestamp)) {
-			SetTitle("Cannot set image modification date");
+		const fs::path path = fileList_.Current();
+		PendingFileOperationUi pending;
+		pending.sourcePath = path;
+		pending.successTitle = useExifDate ? "Set modification date to EXIF date" :
+			"Set modification date to current date";
+		pending.failurePrefix = "Cannot set image modification date: ";
+		jpegview_linux::SetModificationTimeOperation operation{path, timestamp};
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Cannot set image modification date: another file operation is still in progress");
 			return;
 		}
-		ReloadAfterFileChange(useExifDate ? "Set modification date to EXIF date" :
-			"Set modification date to current date");
+		SetTitle("Updating image modification date…");
 	}
 
 	void TouchFolderImagesToExifDate() {
@@ -5961,23 +6076,17 @@ private:
 			return;
 		}
 		const fs::path directory = fileList_.Current().parent_path();
-		int updated = 0;
-		std::error_code iteratorError;
-		for (const fs::directory_entry& entry : fs::directory_iterator(directory, iteratorError)) {
-			if (iteratorError) break;
-			if (!entry.is_regular_file(iteratorError) || iteratorError ||
-				!jpegview_linux::IsSupportedImagePath(entry.path())) continue;
-			jpegview_linux::ExifInfo info;
-			std::string comment;
-			jpegview_linux::ReadJpegMetadata(entry.path(), info, comment);
-			const std::string& exifDate = !info.acquisitionDate.empty() ? info.acquisitionDate : info.dateTime;
-			std::time_t timestamp = 0;
-			if (!exifDate.empty() && ParseExifTimestamp(exifDate, timestamp) &&
-				SetFileModificationTime(entry.path(), timestamp)) {
-				++updated;
-			}
+		PendingFileOperationUi pending;
+		pending.sourcePath = fileList_.Current();
+		pending.directoryPath = directory;
+		pending.successTitle = "Set EXIF dates for folder";
+		pending.failurePrefix = "Cannot set EXIF dates: ";
+		if (!SubmitFileOperation(jpegview_linux::TouchFolderExifDatesOperation{directory},
+			std::move(pending))) {
+			SetTitle("Cannot set EXIF dates: another file operation is still in progress");
+			return;
 		}
-		ReloadAfterFileChange("Set EXIF dates for " + std::to_string(updated) + " image(s)");
+		SetTitle("Reading EXIF dates in folder…");
 	}
 
 	void SetWallpaper(bool processed) {
@@ -5998,7 +6107,9 @@ private:
 		ApplyWallpaperFile(fileList_.Current());
 	}
 
-	void SetWallpaperFromPreparedImage(const Image& image) {
+	void SetWallpaperFromPreparedImage(std::shared_ptr<const Image> image,
+		jpegview_linux::CacheReservation imageReservation) {
+		if (!image) return;
 		const char* cacheHome = std::getenv("XDG_CACHE_HOME");
 		fs::path cacheDirectory;
 		if (cacheHome != nullptr && *cacheHome != '\0') {
@@ -6011,37 +6122,32 @@ private:
 			}
 			cacheDirectory = fs::path(home) / ".cache" / "jpegview-linux";
 		}
-		std::error_code error;
-		fs::create_directories(cacheDirectory, error);
-		if (error) {
-			SetTitle("Set wallpaper failed: cannot create cache directory");
-			return;
-		}
-		const fs::path wallpaperFile = cacheDirectory / "wallpaper.png";
+		jpegview_linux::WallpaperImageOperation operation;
+		operation.image = std::move(image);
+		operation.imageReservation = std::move(imageReservation);
+		operation.cacheDirectory = std::move(cacheDirectory);
 		jpegview_linux::ImageWriteOptions options;
-		std::string writeError;
-		if (!jpegview_linux::WriteImage(wallpaperFile, image.bgra.data(), image.width,
-			image.height, options, writeError)) {
-			SetTitle("Set wallpaper failed: " + writeError);
+		operation.options = options;
+		PendingFileOperationUi pending;
+		pending.successTitle = "Set desktop wallpaper";
+		pending.failurePrefix = "Set wallpaper failed: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Set wallpaper failed: another file operation is still in progress");
 			return;
 		}
-		ApplyWallpaperFile(wallpaperFile);
+		SetTitle("Preparing desktop wallpaper…");
 	}
 
 	void ApplyWallpaperFile(const fs::path& wallpaperFile) {
-		std::string errorMessage;
-		bool applied = false;
-		for (const jpegview_linux::ExternalCommandSequence& sequence :
-			jpegview_linux::WallpaperCommandSequences(wallpaperFile)) {
-			if (!RunProcess(sequence.required, errorMessage)) continue;
-			applied = true;
-			for (const jpegview_linux::ExternalCommand& command : sequence.afterSuccess) {
-				std::string ignoredError;
-				RunProcess(command, ignoredError);
-			}
-			break;
+		PendingFileOperationUi pending;
+		pending.successTitle = "Set desktop wallpaper";
+		pending.failurePrefix = "Set wallpaper failed: ";
+		if (!SubmitFileOperation(jpegview_linux::WallpaperFileOperation{wallpaperFile},
+			std::move(pending))) {
+			SetTitle("Set wallpaper failed: another file operation is still in progress");
+			return;
 		}
-		SetTitle(applied ? "Set desktop wallpaper" : "Set wallpaper failed: install gsettings, feh, or nitrogen");
+		SetTitle("Applying desktop wallpaper…");
 	}
 
 	void RequestConfirmation(int command, const std::string& message) {
@@ -6060,33 +6166,19 @@ private:
 			return;
 		}
 		const fs::path filename = fileList_.Current();
-		std::string errorMessage;
-		bool moved = false;
-		bool helperAvailable = false;
-		for (const jpegview_linux::ExternalCommand& command : jpegview_linux::TrashCommands(filename)) {
-			if (!HasExecutable(command.executable)) continue;
-			helperAvailable = true;
-			if (RunProcess(command, errorMessage)) {
-				moved = true;
-				break;
-			}
-		}
-		if (!moved && !helperAvailable) {
-			// The confirmation dialog has already made this an explicit user
-			// action.  This fallback keeps the key binding useful on minimal
-			// systems that do not ship a freedesktop trash helper.
-			std::error_code removeError;
-			moved = fs::remove(filename, removeError);
-			if (!moved) errorMessage = "cannot remove file";
-		}
-		if (!moved) {
-			SetTitle("Delete failed: " + errorMessage);
+		jpegview_linux::MoveToTrashOperation operation;
+		operation.path = filename;
+		operation.commands = jpegview_linux::TrashCommands(filename);
+		operation.allowPermanentFallback = true;
+		PendingFileOperationUi pending;
+		pending.sourcePath = filename;
+		pending.directoryPath = filename.parent_path();
+		pending.failurePrefix = "Delete failed: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Delete failed: another file operation is still in progress");
 			return;
 		}
-		quitAfterEmptyScan_ = true;
-		RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
-			0, FileListScanHandling::Reload, true, true, {},
-			ImageLoadStatePolicy::PreserveCurrent, {}, "Moved image to trash");
+		SetTitle("Moving image to trash…");
 	}
 
 	void HandleConfirmationEvents(const SDL_Event& event) {
@@ -6455,15 +6547,14 @@ private:
 	}
 
 	void OpenRepositoryPage() {
-		std::string errorMessage;
-		for (const jpegview_linux::ExternalCommand& command :
-			jpegview_linux::OpenUrlCommands(kRepositoryUrl)) {
-			if (StartDetachedProcess(command, errorMessage)) {
-				SetTitle("About JPEGView Linux");
-				return;
-			}
+		jpegview_linux::LaunchDesktopOperation operation;
+		operation.fallbacks = jpegview_linux::OpenUrlCommands(kRepositoryUrl);
+		PendingFileOperationUi pending;
+		pending.successTitle = "About JPEGView Linux";
+		pending.failurePrefix = "Cannot open project page: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Cannot open project page: another file operation is still in progress");
 		}
-		SetTitle("Cannot open project page: " + errorMessage);
 	}
 
 	void HandleAboutEvents(const SDL_Event& event) {
@@ -6517,37 +6608,23 @@ private:
 		clipboardMode_ = false;
 		clipboardTempFile_.clear();
 		clipboardTempDirectory_.clear();
-		std::error_code removeError;
-		if (!temporaryFile.empty()) fs::remove(temporaryFile, removeError);
-		if (!temporaryDirectory.empty()) fs::remove(temporaryDirectory, removeError);
+		QueueTemporaryCleanup(temporaryFile, temporaryDirectory);
 	}
 
 	void PasteCurrentImage() {
-		std::vector<std::uint8_t> encodedPng;
-		std::string errorMessage;
-		if (!jpegview_linux::PasteImageFromClipboard(encodedPng, errorMessage)) {
-			SetTitle("Paste image failed: " + errorMessage);
+		PendingFileOperationUi pending;
+		pending.successTitle = "Clipboard image — press next/previous to return to the file list";
+		pending.failurePrefix = "Paste image failed: ";
+		if (!SubmitFileOperation(jpegview_linux::PasteImageOperation{},
+			std::move(pending))) {
+			SetTitle("Paste image failed: another file operation is still in progress");
 			return;
 		}
-		char temporaryDirectoryName[] = "/tmp/jpegview-paste-XXXXXX";
-		if (mkdtemp(temporaryDirectoryName) == nullptr) {
-			SetTitle("Paste image failed: cannot create temporary file");
-			return;
-		}
-		const fs::path temporaryDirectory(temporaryDirectoryName);
-		const fs::path temporaryFile = temporaryDirectory / "clipboard.png";
-		std::ofstream output(temporaryFile, std::ios::binary);
-		output.write(reinterpret_cast<const char*>(encodedPng.data()), static_cast<std::streamsize>(encodedPng.size()));
-		const bool written = static_cast<bool>(output);
-		output.close();
-		std::error_code removeError;
-		if (!written) {
-			fs::remove(temporaryFile, removeError);
-			fs::remove(temporaryDirectory, removeError);
-			SetTitle("Paste image failed: cannot write temporary file");
-			return;
-		}
+		SetTitle("Reading image from clipboard…");
+	}
 
+	void ActivateClipboardImage(const fs::path& temporaryFile,
+		const fs::path& temporaryDirectory) {
 		if (!clipboardMode_) {
 			imageSession_.SetClipboardReturnViewport(viewport_.Snapshot());
 			if (!fileList_.Empty() &&
@@ -8870,10 +8947,15 @@ private:
 
 	std::vector<BatchCopyItem> CollectBatchCopyEntries() const {
 		std::vector<BatchCopyItem> entries;
-		for (const fs::path& filename : fileList_.Files()) {
+		entries.reserve(fileList_.Size());
+		for (std::size_t index = 0; index < fileList_.Size(); ++index) {
 			BatchCopyItem item;
-			item.source = filename;
-			item.modificationTime = FileModificationTime(filename);
+			item.source = fileList_.Files()[index];
+			const jpegview_linux::SourceDescriptor* descriptor = fileList_.DescriptorAt(index);
+			if (descriptor != nullptr && descriptor->Metadata().hasModificationTime) {
+				item.modificationTime = static_cast<std::time_t>(
+					descriptor->Metadata().modificationTimeNanoseconds / 1000000000LL);
+			}
 			entries.push_back(std::move(item));
 		}
 		return entries;
@@ -8899,65 +8981,21 @@ private:
 			return;
 		}
 		batchCopyDialog_.Preview();
-		fs::path preferredCurrentPath = fileList_.Current();
-		int renamed = 0;
-		int copied = 0;
-		int createdDirectories = 0;
-		int failed = 0;
-		std::string firstFailure;
-		for (BatchCopyItem& item : batchCopyDialog_.Items()) {
-			if (!item.selected) continue;
-			if (item.destination.empty() || item.destination == item.source) {
-				++failed;
-				if (firstFailure.empty()) firstFailure = item.source.filename().string() + " has no distinct target";
-				continue;
-			}
-			std::error_code error;
-			if (fs::exists(item.destination, error) || error) {
-				++failed;
-				if (firstFailure.empty()) firstFailure = item.destination.filename().string() + " already exists";
-				continue;
-			}
-			if (item.copy) {
-				const fs::path parent = item.destination.parent_path();
-				if (!parent.empty()) {
-					const bool created = fs::create_directories(parent, error);
-					if (error) {
-						++failed;
-						if (firstFailure.empty()) firstFailure = "cannot create " + parent.string();
-						continue;
-					}
-					if (created) ++createdDirectories;
-				}
-				if (!fs::copy_file(item.source, item.destination, fs::copy_options::none, error) || error) {
-					++failed;
-					if (firstFailure.empty()) firstFailure = "cannot copy " + item.source.filename().string();
-					continue;
-				}
-				++copied;
-			} else {
-				fs::rename(item.source, item.destination, error);
-				if (error) {
-					++failed;
-					if (firstFailure.empty()) firstFailure = "cannot rename " + item.source.filename().string();
-					continue;
-				}
-				if (item.source == preferredCurrentPath) preferredCurrentPath = item.destination;
-				++renamed;
-			}
+		jpegview_linux::BatchCopyOperation operation;
+		operation.preferredCurrentPath = fileList_.Current();
+		for (const BatchCopyItem& item : batchCopyDialog_.Items()) {
+			if (item.selected) operation.items.push_back(item);
 		}
-
-		if (renamed > 0 || copied > 0) {
-			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
-				0, FileListScanHandling::Reload, true, true, preferredCurrentPath);
+		if (operation.items.empty()) return;
+		PendingFileOperationUi pending;
+		pending.sourcePath = fileList_.Current();
+		pending.directoryPath = fileList_.Current().parent_path();
+		pending.batchDialog = true;
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			batchCopyDialog_.SetMessage("Another file operation is still in progress");
+			return;
 		}
-		batchCopyDialog_.ReplaceItems(CollectBatchCopyEntries(), fileList_.CurrentIndex(), BatchCopyVisibleRows());
-		batchCopyDialog_.Preview();
-		std::string message = "Completed: " + std::to_string(renamed) + " renamed, " +
-			std::to_string(copied) + " copied, " + std::to_string(createdDirectories) + " folder(s) created";
-		if (failed > 0) message += "; " + std::to_string(failed) + " failed" +
-			(firstFailure.empty() ? std::string() : ": " + firstFailure);
-		batchCopyDialog_.SetMessage(std::move(message));
+		batchCopyDialog_.SetMessage("Applying selected file operations… Press ESC to cancel");
 	}
 
 	void OpenBatchCopyDialog() {
@@ -8974,6 +9012,12 @@ private:
 	}
 
 	void CloseBatchCopyDialog() {
+		if (pendingFileOperation_.has_value() &&
+			pendingFileOperation_->kind == jpegview_linux::FileOperationKind::BatchCopy) {
+			fileOperationService_.Cancel(pendingFileOperation_->id);
+			batchCopyDialog_.SetMessage("Cancelling after the current file operation…");
+			return;
+		}
 		SDL_StopTextInput();
 		batchCopyDialog_.Close();
 	}
@@ -9004,6 +9048,19 @@ private:
 	}
 
 	void HandleBatchCopyEvents(const SDL_Event& event, bool& running) {
+		if (pendingFileOperation_.has_value() &&
+			pendingFileOperation_->kind == jpegview_linux::FileOperationKind::BatchCopy) {
+			if (event.type == SDL_QUIT) {
+				running = false;
+			} else if ((event.type == SDL_KEYDOWN && event.key.repeat == 0 &&
+				event.key.keysym.sym == SDLK_ESCAPE) ||
+				(event.type == SDL_MOUSEBUTTONDOWN &&
+					PointInRect(event.button.x, event.button.y,
+						BatchCopyButtonRect(kBatchClose)))) {
+				CloseBatchCopyDialog();
+			}
+			return;
+		}
 		switch (event.type) {
 		case SDL_QUIT:
 			running = false;
@@ -12912,6 +12969,9 @@ private:
 		std::numeric_limits<std::size_t>::max(), {}, cacheBudget_, 2};
 	jpegview_linux::ImageDocument imageDocument_;
 	jpegview_linux::ImageOperationWorker imageOperationWorker_{cacheBudget_};
+	jpegview_linux::FileOperationService fileOperationService_;
+	std::optional<PendingFileOperationUi> pendingFileOperation_;
+	std::deque<TemporaryCleanupRequest> pendingTemporaryCleanups_;
 	std::shared_ptr<DisplayPrefetchBatch> displayPrefetchBatch_;
 	std::shared_ptr<CurrentJpegDimensionsMailbox> currentJpegDimensionsMailbox_ =
 		std::make_shared<CurrentJpegDimensionsMailbox>();

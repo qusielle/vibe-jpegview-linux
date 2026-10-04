@@ -1,21 +1,40 @@
 #include "clipboard.h"
 
 #include "external_commands.h"
+#include "external_process.h"
 #include "image_writer.h"
 #include "sdl_abi.h"
+#include "source_work_coordinator.h"
+#include "work_context.h"
 
-#include <cerrno>
-#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <sys/wait.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
 
 namespace jpegview_linux {
 namespace {
+
+class ClipboardTemporaryFiles {
+public:
+	explicit ClipboardTemporaryFiles(const char* directory)
+		: directory_(directory) {}
+	~ClipboardTemporaryFiles() { Remove(); }
+
+	void SetPng(const fs::path& png) { png_ = png; }
+	void Remove() {
+		if (!png_.empty()) (void)::unlink(png_.c_str());
+		if (directory_ != nullptr) (void)::rmdir(directory_);
+		png_.clear();
+		directory_ = nullptr;
+	}
+
+private:
+	const char* directory_ = nullptr;
+	fs::path png_;
+};
 
 bool HasExecutable(const char* executable) {
 	const char* path = std::getenv("PATH");
@@ -49,131 +68,31 @@ ExternalCommand ClipboardReader() {
 		HasExecutable("wl-paste"), HasExecutable("xclip")));
 }
 
-[[noreturn]] void ExecCommand(const ExternalCommand& command) {
-	std::vector<char*> arguments;
-	arguments.reserve(command.arguments.size() + 2);
-	arguments.push_back(const_cast<char*>(command.executable.c_str()));
-	for (const std::string& argument : command.arguments) {
-		arguments.push_back(const_cast<char*>(argument.c_str()));
-	}
-	arguments.push_back(nullptr);
-	execvp(command.executable.c_str(), arguments.data());
-	_exit(127);
-}
-
-bool WriteAll(int descriptor, const std::uint8_t* data, std::size_t size) {
-	while (size != 0) {
-		const ssize_t written = write(descriptor, data, size);
-		if (written < 0) {
-			if (errno == EINTR) continue;
-			return false;
-		}
-		if (written == 0) return false;
-		data += written;
-		size -= static_cast<std::size_t>(written);
-	}
-	return true;
-}
-
-bool WriteClipboardPayload(int descriptor, const std::vector<std::uint8_t>& data) {
-	// A clipboard manager is allowed to reject a format immediately.  Ignore
-	// SIGPIPE for this short write so that a closed helper becomes a normal
-	// error instead of terminating the viewer.
-	using SignalHandler = void (*)(int);
-	const SignalHandler previous = signal(SIGPIPE, SIG_IGN);
-	const bool written = WriteAll(descriptor, data.data(), data.size());
-	signal(SIGPIPE, previous);
-	return written;
-}
-
-bool SendToClipboard(const std::vector<std::uint8_t>& data, std::string& errorMessage) {
+bool SendToClipboard(const std::vector<std::uint8_t>& data,
+	pid_t& clipboardOwnerChild, std::string& errorMessage,
+	const std::function<bool()>& shouldContinue) {
 	const ExternalCommand command = ClipboardWriter();
 	if (!command.Valid()) {
 		errorMessage = "install xclip (X11) or wl-clipboard (Wayland) to copy images";
 		return false;
 	}
-	int descriptors[2]{};
-	if (pipe(descriptors) != 0) {
-		errorMessage = "cannot create clipboard pipe";
-		return false;
-	}
-	const pid_t child = fork();
-	if (child < 0) {
-		close(descriptors[0]);
-		close(descriptors[1]);
-		errorMessage = "cannot start clipboard helper";
-		return false;
-	}
-	if (child == 0) {
-		// Leave the clipboard owner alive after JPEGView exits.  The first child
-		// is reaped by the viewer, while the helper is adopted by init.
-		const pid_t helper = fork();
-		if (helper == 0) {
-			close(descriptors[1]);
-			if (dup2(descriptors[0], STDIN_FILENO) < 0) _exit(126);
-			close(descriptors[0]);
-			ExecCommand(command);
-		}
-		close(descriptors[0]);
-		close(descriptors[1]);
-		_exit(helper < 0 ? 127 : 0);
-	}
-	close(descriptors[0]);
-	int childStatus = 0;
-	while (waitpid(child, &childStatus, 0) < 0 && errno == EINTR) {}
-	const bool written = WriteClipboardPayload(descriptors[1], data);
-	close(descriptors[1]);
-	if (!written) {
-		errorMessage = "clipboard helper closed before receiving the image";
-		return false;
-	}
-	return true;
+	clipboardOwnerChild = -1;
+	return RunExternalCommandWithInput(command, data.data(), data.size(), clipboardOwnerChild,
+		errorMessage, shouldContinue);
 }
 
-bool CaptureFromClipboard(const ExternalCommand& command, std::vector<std::uint8_t>& data) {
-	int descriptors[2]{};
-	if (pipe(descriptors) != 0) return false;
-	const pid_t child = fork();
-	if (child < 0) {
-		close(descriptors[0]);
-		close(descriptors[1]);
-		return false;
-	}
-	if (child == 0) {
-		close(descriptors[0]);
-		if (dup2(descriptors[1], STDOUT_FILENO) < 0) _exit(126);
-		close(descriptors[1]);
-		ExecCommand(command);
-	}
-	close(descriptors[1]);
-	data.clear();
-	std::uint8_t buffer[8192];
-	for (;;) {
-		const ssize_t count = read(descriptors[0], buffer, sizeof(buffer));
-		if (count == 0) break;
-		if (count < 0) {
-			if (errno == EINTR) continue;
-			close(descriptors[0]);
-			waitpid(child, nullptr, 0);
-			return false;
-		}
-		data.insert(data.end(), buffer, buffer + count);
-		if (data.size() > 256u * 1024u * 1024u) {
-			close(descriptors[0]);
-			waitpid(child, nullptr, 0);
-			return false;
-		}
-	}
-	close(descriptors[0]);
-	int status = 0;
-	if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return false;
-	return !data.empty();
-}
-
-bool ReadFile(const fs::path& filename, std::vector<std::uint8_t>& data) {
+bool ReadFile(const fs::path& filename, std::vector<std::uint8_t>& data,
+	const std::function<bool()>& shouldContinue) {
 	std::ifstream input(filename, std::ios::binary);
 	if (!input) return false;
-	data.assign(std::istreambuf_iterator<char>(input), {});
+	data.clear();
+	std::uint8_t buffer[65536];
+	while (input) {
+		if (shouldContinue && !shouldContinue()) return false;
+		input.read(reinterpret_cast<char*>(buffer), sizeof(buffer));
+		const std::streamsize count = input.gcount();
+		if (count > 0) data.insert(data.end(), buffer, buffer + count);
+	}
 	return !data.empty();
 }
 
@@ -187,47 +106,82 @@ bool CopyTextToClipboard(const std::string& text, std::string& errorMessage) {
 	return true;
 }
 
-bool CopyImageToClipboard(const std::uint8_t* bgra, int width, int height, std::string& errorMessage) {
+bool CopyImageToClipboard(const std::uint8_t* bgra, int width, int height,
+	std::string& errorMessage, pid_t& clipboardOwnerChild,
+	const std::function<bool()>& shouldContinue) {
+	clipboardOwnerChild = -1;
 	if (bgra == nullptr || width <= 0 || height <= 0) {
 		errorMessage = "invalid image dimensions";
 		return false;
 	}
 	char temporaryName[] = "/tmp/jpegview-clipboard-XXXXXX";
-	const int descriptor = mkstemp(temporaryName);
-	if (descriptor < 0) {
+	if (mkdtemp(temporaryName) == nullptr) {
 		errorMessage = "cannot create temporary clipboard image";
 		return false;
 	}
-	close(descriptor);
-	const fs::path temporaryFile(temporaryName);
+	ClipboardTemporaryFiles temporaryFiles(temporaryName);
+	const fs::path pngFile = fs::path(temporaryName) / "image.png";
+	temporaryFiles.SetPng(pngFile);
 	ImageWriteOptions options;
 	std::string writeError;
-	const bool written = WriteImage(temporaryFile.string() + ".png", bgra, width, height, options, writeError);
-	// WriteImage selects the codec by extension, so the temporary path with a
-	// suffix is separate from the mkstemp placeholder.
-	unlink(temporaryName);
-	const fs::path pngFile = temporaryFile.string() + ".png";
+	if (shouldContinue && !shouldContinue()) {
+		errorMessage = "clipboard image copy was cancelled";
+		return false;
+	}
+	WorkContext context = MakePathWorkContext(pngFile,
+		SourceWorkPriority::Foreground, shouldContinue);
+	bool written = false;
+	{
+		SourceCpuWorkLease admission =
+			SourceWorkCoordinator::Global().AcquireSourceAndCpu(context, pngFile);
+		if (!admission || (shouldContinue && !shouldContinue())) {
+			errorMessage = "clipboard image copy was cancelled";
+			return false;
+		}
+		context.sourceAccessAlreadyAdmitted = true;
+		context.cpuProcessingAlreadyAdmitted = true;
+		ScopedWorkContext workContext(context);
+		written = WriteImage(pngFile, bgra, width, height, options, writeError);
+	}
+	// Keep the suffix in a private directory so the image writer selects PNG
+	// without exposing a predictable path in the shared temporary directory.
 	if (!written) {
 		errorMessage = writeError;
 		return false;
 	}
 	std::vector<std::uint8_t> encoded;
-	const bool read = ReadFile(pngFile, encoded);
-	unlink(pngFile.c_str());
+	context = MakePathWorkContext(pngFile, SourceWorkPriority::Foreground,
+		shouldContinue);
+	SourceWorkLease source = SourceWorkCoordinator::Global().Acquire(context, pngFile);
+	bool read = false;
+	if (source) {
+		context.sourceAccessAlreadyAdmitted = true;
+		ScopedWorkContext workContext(context);
+		read = ReadFile(pngFile, encoded, shouldContinue);
+	}
+	source.Reset();
+	temporaryFiles.Remove();
 	if (!read) {
-		errorMessage = "cannot read temporary clipboard image";
+		errorMessage = shouldContinue && !shouldContinue() ?
+			"clipboard image copy was cancelled" : "cannot read temporary clipboard image";
 		return false;
 	}
-	return SendToClipboard(encoded, errorMessage);
+	return SendToClipboard(encoded, clipboardOwnerChild, errorMessage, shouldContinue);
 }
 
-bool PasteImageFromClipboard(std::vector<std::uint8_t>& encodedPng, std::string& errorMessage) {
+bool PasteImageFromClipboard(std::vector<std::uint8_t>& encodedPng,
+	std::string& errorMessage, const std::function<bool()>& shouldContinue) {
 	const ExternalCommand command = ClipboardReader();
 	if (!command.Valid()) {
 		errorMessage = "install xclip (X11) or wl-clipboard (Wayland) to paste images";
 		return false;
 	}
-	if (!CaptureFromClipboard(command, encodedPng)) {
+	if (!RunExternalCommandWithOutput(command, encodedPng,
+		256u * 1024u * 1024u, errorMessage, shouldContinue)) {
+		if (errorMessage.empty()) errorMessage = "clipboard does not contain a PNG image";
+		return false;
+	}
+	if (encodedPng.empty()) {
 		errorMessage = "clipboard does not contain a PNG image";
 		return false;
 	}

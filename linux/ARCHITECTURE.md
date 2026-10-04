@@ -431,6 +431,37 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `desktop_applications`: non-UI discovery and planning for Open with commands.
 - `external_commands`: pure argv plans and fallback order for printing, wallpaper, clipboard,
   desktop opening, trash, lossless JPEG crop, and lossless JPEG transforms.
+- `external_process`: structured `posix_spawnp` execution, atomically close-on-exec pipes, prepared
+  spawn file actions, process-group cancellation and reaping, bounded clipboard output, and
+  detached-child launch. It does not run allocation-heavy application code after `fork`; scoped
+  pipe and child ownership also closes and reaps resources if output buffering fails. The clipboard
+  writer's owner child remains alive after its encoded input has been delivered.
+- `file_operation_service`: one worker for immutable save, clipboard, batch, lossless JPEG, print,
+  wallpaper, timestamp, trash, registration, and desktop-launch requests. Requests never wait for
+  filesystem or child-process work on the SDL thread; each completion carries an operation ID and
+  captured owner generation and is applied by Viewer only after the matching request is checked.
+  Batch cancellation stops at file boundaries and reports completed changes without rollback. Each
+  copy is prepared in a mode-0600, non-image `.tmp` sibling and atomically renamed under destination
+  admission, so readers see only complete files; failed and canceled copies leave no partial image
+  behind. Source permissions and modification times are restored before publication. Lossless JPEG
+  results use the same private `.tmp` sibling policy, then atomically rename only after the codec
+  succeeds and source or destination permissions are restored. In-progress outputs stay hidden from
+  image scans. Encoded saves, print preparation, and wallpaper-cache images also use private non-image
+  siblings and atomically publish after format encoding succeeds; the writer receives the selected
+  output format separately from the staging filename. Existing output modes and normal umask-derived
+  modes for new outputs are restored before rename, and symlink destinations continue to address
+  their target. Once printing,
+  trash, or wallpaper commands have launched an irreversible side effect, ordinary request
+  cancellation no longer terminates them; the worker waits for exit and publishes the actual success
+  or failure without relabeling that completed command as canceled.
+  Source reads share `SourceWorkCoordinator`; source-plus-CPU work is admitted as a pair, and scoped
+  context lets nested EXIF readers reuse that admission. Clipboard PNG encoding uses a source+CPU
+  pair; its subsequent temporary-file read uses source admission only. Both permits are released
+  before waiting on the clipboard helper. Pasted bytes are capped before a temporary image is
+  published. Printing releases its CPU permit after PNG encoding, then retains source admission while
+  the printer reads the prepared file. Temporary-image cleanup uses source admission for the same
+  file path, so it waits for an active reader before removing the file and its private directory;
+  unpublished operation outputs use scoped cleanup on every exit.
 - `exif_reader`: JPEG metadata parsing.
 - `event_loop_model`: renderer-thread frame invalidation reasons, wrapping SDL tick-deadline
   selection, adjacent pointer-motion accumulation, and a process-wide coalesced completion wake.
@@ -471,7 +502,10 @@ should normally be added to one of these focused modules and covered by `tests/t
   are sampled once per second to keep their thumbnail accounting scan out of the ordinary frame path.
 
 `main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
-and invoking desktop integrations. Image-session, display-preparation, and presentation controllers
+and applying file-operation completions or invoking desktop integrations. The
+`FileOperationService` owns slow filesystem operations and process waits; Viewer captures paths,
+image pixels, overwrite decisions, and owner generations before submission, then reconciles a ready
+result on the SDL thread. Image-session, display-preparation, and presentation controllers
 hold source, generation, and readiness state and return value effects. Viewer preserves their
 operation order while applying viewport, cache, status, and texture effects. It forwards relevant
 input and capture changes to

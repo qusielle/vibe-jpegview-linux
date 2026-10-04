@@ -183,6 +183,15 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   allocation as working data for the time it remains owned.
 - Avoid blocking the event thread with image decoding, resizing, directory scans, process waits, or
   destruction of very large buffers.
+- Keep external command plans as an executable and argument vector; never build shell command text
+  from file paths or user input. Run blocking child-process work behind an operation worker, with
+  cancellation and descriptor/child cleanup owned explicitly.
+- Keep private operation temporaries under scoped cleanup on every exit, and coordinate removal
+  against readers of the exact source path. Once an irreversible child command starts, wait for its
+  exit and report that command's result even if a later cancellation request arrives.
+- Publish generated or copied images from hidden non-image siblings only after they are complete.
+  Keep intermediate contents mode-0600, restore the intended output permissions before atomic
+  rename, and never let an in-progress image appear in directory scans.
 - Keep compatibility code explicit. Do not use language or library facilities newer than C++17 or
   APIs unavailable in Ubuntu 20.04 unless they are detected and have a supported fallback.
 - Extend `archive_source`'s generic container operations for new archive formats. Keep navigation,

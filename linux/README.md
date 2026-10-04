@@ -1115,6 +1115,14 @@ sorting, slideshow/movie, transform, zoom, auto-zoom, settings, and administrati
 portable commands include folder opening, printing through `lp`, modification-date updates, GNOME/
 `feh`/`nitrogen` wallpaper integration, text/image clipboard copy and paste, filename and EXIF
 overlays, slideshow transitions, window mode toggles, and `jpegtran`-backed lossless JPEG transforms.
+Image saves, image clipboard conversion, batch copy/rename, lossless JPEG work, printing, wallpaper
+preparation, EXIF timestamp changes, and desktop process waits run on a background file-operation
+worker, keeping the viewer's event thread available while they run. Batch cancellation stops between
+files and reports completed changes without undoing them. Batch copies preserve source permissions
+and modification times, and each copy appears only after its contents are complete. Lossless JPEG
+output is published from a temporary sibling only after the transform succeeds. Encoded image saves
+also use an atomic temporary sibling, preserving an existing output's permissions and symlink
+destination. Overwrite prompts are still confirmed before the operation starts.
 The `Auto correction` command uses the Windows histogram-derived RGB correction LUT and can be toggled
 with `F5`. `Edit picture levels...` opens the bottom adjustment panel; drag its sliders for live
 preview, turn on `Local density` to enable the shadow/highlight controls, and use `Reset` to restore

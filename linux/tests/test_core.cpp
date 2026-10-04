@@ -26,6 +26,8 @@
 #include "desktop_applications.h"
 #include "desktop_association.h"
 #include "external_commands.h"
+#include "external_process.h"
+#include "file_operation_service.h"
 #include "batch_copy.h"
 #include "crop_selection_model.h"
 #include "crop_size_dialog_model.h"
@@ -15243,6 +15245,785 @@ std::string FormatLocalTime(std::time_t timestamp, const char* format) {
 	return output;
 }
 
+void MakeTestExecutable(const fs::path& path) {
+	std::error_code error;
+	fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write |
+		fs::perms::owner_exec, fs::perm_options::replace, error);
+	if (error) throw TestFailure("cannot mark test command executable: " + error.message());
+}
+
+bool WaitForPath(const fs::path& path, std::chrono::milliseconds timeout) {
+	const auto deadline = std::chrono::steady_clock::now() + timeout;
+	do {
+		std::error_code error;
+		if (fs::exists(path, error) && !error) return true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	} while (std::chrono::steady_clock::now() < deadline);
+	return fs::exists(path);
+}
+
+bool WaitForChildExit(pid_t child, std::chrono::milliseconds timeout, int& status) {
+	const auto deadline = std::chrono::steady_clock::now() + timeout;
+	do {
+		const pid_t waited = waitpid(child, &status, WNOHANG);
+		if (waited == child) return true;
+		if (waited < 0 && errno != EINTR) return false;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	} while (std::chrono::steady_clock::now() < deadline);
+	return false;
+}
+
+std::shared_ptr<const jpegview_linux::Image> MakeTinyTestImage() {
+	auto image = std::make_shared<jpegview_linux::Image>();
+	const std::uint8_t pixels[] = {
+		0, 0, 255, 255, 0, 255, 0, 255,
+		255, 0, 0, 255, 255, 255, 255, 255,
+	};
+	if (!image->StoreBGRA(pixels, 2, 2)) throw TestFailure("cannot create test image pixels");
+	return image;
+}
+
+void TestExternalProcessStructuredArgumentsAndFailures() {
+	std::vector<std::uint8_t> output;
+	std::string error;
+	Expect(jpegview_linux::RunExternalCommandWithOutput(
+		{"printf", {"%s", "path with spaces and ; punctuation"}}, output, 128, error),
+		"structured command did not complete");
+	Expect(std::string(output.begin(), output.end()) == "path with spaces and ; punctuation",
+		"structured command arguments were split or interpreted by a shell");
+
+	TemporaryDirectory temporary;
+	const fs::path missing = temporary.path() / "missing command";
+	Expect(!jpegview_linux::RunExternalCommand({missing.string(), {}}, error),
+		"missing executable was reported as successful");
+	Expect(error.find("not installed") != std::string::npos,
+		"missing executable failure did not explain that the command is unavailable");
+	Expect(!jpegview_linux::RunExternalCommand({"sh", {"-c", "exit 23"}}, error),
+		"nonzero child exit was reported as successful");
+	Expect(error.find("failed") != std::string::npos,
+		"nonzero child exit did not produce a structured failure message");
+	Expect(!jpegview_linux::RunExternalCommandWithOutput(
+		{"printf", {"%s", "more than two bytes"}}, output, 2, error),
+		"external output limit was not enforced");
+	Expect(output.empty(), "oversized external output was left published to the caller");
+}
+
+void TestExternalProcessCancellationReapsSlowChild() {
+	TemporaryDirectory temporary;
+	const fs::path marker = temporary.path() / "child started";
+	const std::string script = "printf started > \"$1\"; exec sleep 30";
+	std::atomic<bool> keepRunning{true};
+	auto operation = std::async(std::launch::async, [&] {
+		std::string error;
+		const bool succeeded = jpegview_linux::RunExternalCommand(
+			{"sh", {"-c", script, "test-child", marker.string()}}, error,
+			[&] { return keepRunning.load(std::memory_order_acquire); });
+		return std::make_pair(succeeded, error);
+	});
+	const bool childStarted = WaitForPath(marker, std::chrono::seconds(2));
+	keepRunning.store(false, std::memory_order_release);
+	Expect(operation.wait_for(std::chrono::seconds(2)) == std::future_status::ready,
+		"cancellation did not reap a blocked child before the deadline");
+	const auto result = operation.get();
+	Expect(childStarted && !result.first && result.second.find("cancelled") != std::string::npos,
+		"slow child cancellation did not publish its canceled result");
+}
+
+void TestExternalProcessCancellationKillsDescendants() {
+	TemporaryDirectory temporary;
+	const fs::path script = temporary.path() / "spawn descendant";
+	const fs::path ready = temporary.path() / "descendant started";
+	const fs::path descendantPidFile = temporary.path() / "descendant pid";
+	WriteText(script,
+		"#!/bin/sh\n"
+		"(trap '' TERM; while :; do sleep 1; done) &\n"
+		"printf '%s' \"$!\" > \"$JPEGVIEW_TEST_GROUP_CHILD_PID\"\n"
+		"printf ready > \"$JPEGVIEW_TEST_GROUP_READY\"\n"
+		"wait\n");
+	MakeTestExecutable(script);
+	ScopedEnvironment childPidEnvironment("JPEGVIEW_TEST_GROUP_CHILD_PID",
+		descendantPidFile.string());
+	ScopedEnvironment readyEnvironment("JPEGVIEW_TEST_GROUP_READY", ready.string());
+	std::atomic<bool> keepRunning{true};
+	auto operation = std::async(std::launch::async, [&] {
+		std::string error;
+		const bool succeeded = jpegview_linux::RunExternalCommand(
+			{script.string(), {}}, error,
+			[&] { return keepRunning.load(std::memory_order_acquire); });
+		return std::make_pair(succeeded, error);
+	});
+	const bool childStarted = WaitForPath(ready, std::chrono::seconds(2));
+	long descendantPidValue = -1;
+	{
+		std::ifstream input(descendantPidFile);
+		input >> descendantPidValue;
+	}
+	const pid_t descendantPid = static_cast<pid_t>(descendantPidValue);
+	const pid_t processGroup = descendantPid > 0 ? ::getpgid(descendantPid) : -1;
+	keepRunning.store(false, std::memory_order_release);
+	const bool completed = operation.wait_for(std::chrono::seconds(2)) ==
+		std::future_status::ready;
+	std::pair<bool, std::string> result{false, "child operation did not finish"};
+	if (completed) result = operation.get();
+	const auto descendantStopped = [descendantPid] {
+		if (descendantPid <= 0) return false;
+		std::ifstream statusFile("/proc/" + std::to_string(descendantPid) + "/stat");
+		std::string status;
+		if (!statusFile || !std::getline(statusFile, status)) return true;
+		const std::size_t commandEnd = status.rfind(')');
+		if (commandEnd == std::string::npos || commandEnd + 2 >= status.size()) return false;
+		return status[commandEnd + 2] == 'Z' || status[commandEnd + 2] == 'X';
+	};
+	const auto stopDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!descendantStopped() && std::chrono::steady_clock::now() < stopDeadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	const bool descendantWasStopped = descendantStopped();
+	if (processGroup > 0) (void)::kill(-processGroup, SIGKILL);
+	Expect(childStarted && completed && !result.first &&
+		result.second.find("cancelled") != std::string::npos && descendantWasStopped,
+		"process-group cancellation left a spawned descendant running");
+}
+
+void TestFileOperationSaveAndBatchPolicies() {
+	TemporaryDirectory temporary;
+	const std::shared_ptr<const jpegview_linux::Image> image = MakeTinyTestImage();
+	const fs::path output = temporary.path() / "processed image.png";
+	WriteText(output, "existing output");
+	jpegview_linux::SaveImageOperation rejectedSave;
+	rejectedSave.output = output;
+	rejectedSave.image = image;
+	jpegview_linux::FileOperationPayload rejectedPayload{std::move(rejectedSave)};
+	auto alwaysContinue = [] { return true; };
+	const auto rejected = jpegview_linux::ExecuteFileOperation(rejectedPayload, 4,
+		alwaysContinue);
+	Expect(!rejected.success && !rejected.cancelled &&
+		ReadBytes(output) == std::vector<std::uint8_t>({'e', 'x', 'i', 's', 't', 'i', 'n', 'g',
+			' ', 'o', 'u', 't', 'p', 'u', 't'}),
+		"unconfirmed image overwrite changed the existing output");
+
+	jpegview_linux::SaveImageOperation confirmedSave;
+	confirmedSave.output = output;
+	confirmedSave.image = image;
+	confirmedSave.overwriteConfirmed = true;
+	Expect(::chmod(output.c_str(), 0604) == 0,
+		"cannot set output mode for the confirmed-save fixture");
+	jpegview_linux::FileOperationPayload confirmedPayload{std::move(confirmedSave)};
+	const auto saved = jpegview_linux::ExecuteFileOperation(confirmedPayload, 5,
+		alwaysContinue);
+	const std::vector<std::uint8_t> savedBytes = ReadBytes(output);
+	struct stat savedStatus{};
+	Expect(saved.success && saved.path == output && savedBytes.size() > 8 &&
+		savedBytes[0] == 0x89 && savedBytes[1] == 'P' && savedBytes[2] == 'N' &&
+		savedBytes[3] == 'G' && ::stat(output.c_str(), &savedStatus) == 0 &&
+		(savedStatus.st_mode & 0777) == 0604,
+		"confirmed image save did not atomically replace the target and preserve its mode");
+
+	const fs::path symlinkTarget = temporary.path() / "symlink target.png";
+	const fs::path symlinkOutput = temporary.path() / "symlink output.png";
+	WriteText(symlinkTarget, "prior symlink target");
+	fs::create_symlink(symlinkTarget.filename(), symlinkOutput);
+	jpegview_linux::SaveImageOperation symlinkSave;
+	symlinkSave.output = symlinkOutput;
+	symlinkSave.image = image;
+	symlinkSave.overwriteConfirmed = true;
+	const auto symlinkSaved = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(symlinkSave)}, 5, alwaysContinue);
+	Expect(symlinkSaved.success && fs::is_symlink(symlinkOutput) &&
+		ReadBytes(symlinkTarget).size() > 8 && ReadBytes(symlinkTarget)[0] == 0x89,
+		"atomic image save replaced the output symlink instead of updating its target");
+
+	const fs::path danglingTarget = temporary.path() / "dangling target.png";
+	const fs::path danglingOutput = temporary.path() / "dangling output.png";
+	fs::create_symlink(danglingTarget.filename(), danglingOutput);
+	jpegview_linux::SaveImageOperation danglingSave;
+	danglingSave.output = danglingOutput;
+	danglingSave.image = image;
+	const auto danglingSaved = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(danglingSave)}, 5, alwaysContinue);
+	Expect(danglingSaved.success && fs::is_symlink(danglingOutput) &&
+		fs::exists(danglingTarget) && ReadBytes(danglingTarget).size() > 8,
+		"atomic image save did not preserve a dangling symlink output");
+
+	const fs::path defaultModeProbe = temporary.path() / "save mode probe";
+	const int modeProbeDescriptor = ::open(defaultModeProbe.c_str(),
+		O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+	struct stat modeProbeStatus{};
+	Expect(modeProbeDescriptor >= 0 &&
+		::fstat(modeProbeDescriptor, &modeProbeStatus) == 0,
+		"cannot determine the process default mode for a new image save");
+	if (modeProbeDescriptor >= 0) (void)::close(modeProbeDescriptor);
+	std::error_code modeProbeError;
+	fs::remove(defaultModeProbe, modeProbeError);
+	Expect(!modeProbeError, "cannot remove image-save mode probe");
+	const fs::path newOutput = temporary.path() / "new output.png";
+	jpegview_linux::SaveImageOperation newSave;
+	newSave.output = newOutput;
+	newSave.image = image;
+	const auto newlySaved = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(newSave)}, 5, alwaysContinue);
+	struct stat newOutputStatus{};
+	Expect(newlySaved.success && ::stat(newOutput.c_str(), &newOutputStatus) == 0 &&
+		(newOutputStatus.st_mode & 0777) == (modeProbeStatus.st_mode & 0777),
+		"new image save did not preserve the normal umask-derived output mode");
+
+	const fs::path failedOutput = temporary.path() / "failed output.png";
+	WriteText(failedOutput, "keep on encoder failure");
+	auto invalidImage = std::make_shared<jpegview_linux::Image>();
+	invalidImage->width = 2;
+	invalidImage->height = 2;
+	jpegview_linux::SaveImageOperation failedSave;
+	failedSave.output = failedOutput;
+	failedSave.image = std::move(invalidImage);
+	failedSave.overwriteConfirmed = true;
+	const auto failedAtomicSave = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(failedSave)}, 5, alwaysContinue);
+	Expect(!failedAtomicSave.success && ReadBytes(failedOutput) ==
+		std::vector<std::uint8_t>({'k','e','e','p',' ','o','n',' ','e','n','c','o','d','e','r',' ','f','a','i','l','u','r','e'}),
+		"failed image encoding damaged the existing output");
+	std::error_code saveIteratorError;
+	for (const fs::directory_entry& entry : fs::directory_iterator(temporary.path(),
+		saveIteratorError)) {
+		Expect(entry.path() == output || entry.path() == symlinkTarget ||
+			entry.path() == symlinkOutput || entry.path() == danglingTarget ||
+			entry.path() == danglingOutput || entry.path() == newOutput ||
+			entry.path() == failedOutput,
+			"image save left a temporary output beside its destination");
+	}
+	Expect(!saveIteratorError, "cannot inspect image-save temporary cleanup");
+
+	const auto invalidTransform = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{
+			jpegview_linux::LosslessTransformOperation{output,
+				jpegview_linux::LosslessJpegOperation::Rotate90}}, 5, alwaysContinue);
+	Expect(!invalidTransform.success && !invalidTransform.cancelled &&
+		ReadBytes(output) == savedBytes,
+		"lossless JPEG service accepted a non-JPEG source or changed its contents");
+
+	const fs::path sources = temporary.path() / "source files";
+	fs::create_directories(sources);
+	const fs::path first = sources / "first.jpg";
+	const fs::path second = sources / "second.jpg";
+	const fs::path third = sources / "third.jpg";
+	const fs::path occupied = sources / "occupied.jpg";
+	const fs::path renamed = sources / "renamed.jpg";
+	const fs::path copied = sources / "new folder" / "third-copy.jpg";
+	WriteText(first, "first");
+	WriteText(second, "second");
+	WriteText(third, "third");
+	WriteText(occupied, "keep occupied target");
+	Expect(::chmod(third.c_str(), 0640) == 0,
+		"cannot set source permissions for the batch-copy fixture");
+	std::error_code modificationTimeError;
+	fs::last_write_time(third, fs::file_time_type::clock::now() - std::chrono::hours(24),
+		modificationTimeError);
+	Expect(!modificationTimeError,
+		"cannot set source modification time for the batch-copy fixture");
+	const auto thirdModificationTime = fs::last_write_time(third);
+	jpegview_linux::BatchCopyOperation batch;
+	batch.preferredCurrentPath = second;
+	auto item = [](const fs::path& source, const fs::path& destination, bool copy) {
+		jpegview_linux::BatchCopyItem result;
+		result.source = source;
+		result.destination = destination;
+		result.copy = copy;
+		result.selected = true;
+		return result;
+	};
+	batch.items.push_back(item(first, occupied, false));
+	batch.items.push_back(item(second, renamed, false));
+	batch.items.push_back(item(third, copied, true));
+	batch.items.push_back(item(sources / "missing.jpg",
+		sources / "new folder" / "missing-copy.jpg", true));
+	jpegview_linux::FileOperationPayload batchPayload{std::move(batch)};
+	const auto partial = jpegview_linux::ExecuteFileOperation(batchPayload, 6,
+		alwaysContinue);
+	Expect(partial.success && partial.batch.failed == 2 && partial.batch.completed == 2 &&
+		partial.batch.renamed == 1 && partial.batch.copied == 1 &&
+		partial.batch.createdDirectories == 1 &&
+		partial.batch.preferredCurrentPath == renamed,
+		"batch operation did not report its partial failure and completed items");
+	Expect(fs::exists(first) && !fs::exists(second) && fs::exists(renamed) &&
+		fs::exists(third) && fs::exists(copied) && ReadBytes(occupied) ==
+			std::vector<std::uint8_t>({'k','e','e','p',' ','o','c','c','u','p','i','e','d',' ','t','a','r','g','e','t'}),
+		"batch operation overwrote a target or rolled back completed filesystem work");
+	struct stat copiedStatus{};
+	Expect(::stat(copied.c_str(), &copiedStatus) == 0 &&
+		(copiedStatus.st_mode & 0777) == 0640,
+		"atomic batch copy did not preserve source permissions");
+	Expect(fs::last_write_time(copied) == thirdModificationTime,
+		"atomic batch copy did not preserve the source modification time");
+	std::error_code iteratorError;
+	for (const fs::directory_entry& entry : fs::directory_iterator(copied.parent_path(),
+		iteratorError)) {
+		Expect(entry.path() == copied,
+			"batch copy left a temporary or partial image in the destination directory");
+	}
+	Expect(!iteratorError, "cannot inspect the batch-copy destination directory");
+}
+
+void TestBatchCancellationStopsBetweenFiles() {
+	TemporaryDirectory temporary;
+	const fs::path first = temporary.path() / "first.jpg";
+	const fs::path second = temporary.path() / "second.jpg";
+	const fs::path renamed = temporary.path() / "first-renamed.jpg";
+	const fs::path secondRenamed = temporary.path() / "second-renamed.jpg";
+	WriteText(first, "first");
+	WriteText(second, "second");
+	jpegview_linux::BatchCopyOperation batch;
+	batch.preferredCurrentPath = first;
+	for (const auto& pair : {std::make_pair(first, renamed),
+		std::make_pair(second, secondRenamed)}) {
+		jpegview_linux::BatchCopyItem item;
+		item.source = pair.first;
+		item.destination = pair.second;
+		item.selected = true;
+		batch.items.push_back(std::move(item));
+	}
+	jpegview_linux::FileOperationPayload payload{std::move(batch)};
+	const auto result = jpegview_linux::ExecuteFileOperation(payload, 7, [&] {
+		return !fs::exists(renamed);
+	});
+	Expect(result.cancelled && !result.success && result.batch.completed == 1 &&
+		result.batch.renamed == 1 && fs::exists(renamed) && fs::exists(second) &&
+		!fs::exists(secondRenamed),
+		"batch cancellation did not stop between files while preserving completed work");
+}
+
+void TestFileOperationClipboardTemporaryCleanupAndFallback() {
+	TemporaryDirectory temporary;
+	const fs::path bin = temporary.path() / "bin";
+	fs::create_directories(bin);
+	const fs::path capturedClipboard = temporary.path() / "captured clipboard.png";
+	const fs::path inputClipboard = temporary.path() / "paste source.png";
+	const fs::path copier = bin / "wl-copy";
+	const fs::path paster = bin / "wl-paste";
+	WriteText(copier, "#!/bin/sh\ncat > \"$JPEGVIEW_TEST_CLIPBOARD_CAPTURE\"\n");
+	WriteText(paster, "#!/bin/sh\ncat \"$JPEGVIEW_TEST_CLIPBOARD_INPUT\"\n");
+	MakeTestExecutable(copier);
+	MakeTestExecutable(paster);
+	ScopedEnvironment path("PATH", bin.string() + ":/usr/bin:/bin");
+	ScopedEnvironment wayland("WAYLAND_DISPLAY", "jpegview-test-wayland");
+	ScopedEnvironment capture("JPEGVIEW_TEST_CLIPBOARD_CAPTURE", capturedClipboard.string());
+	ScopedEnvironment input("JPEGVIEW_TEST_CLIPBOARD_INPUT", inputClipboard.string());
+	const std::shared_ptr<const jpegview_linux::Image> image = MakeTinyTestImage();
+	jpegview_linux::CopyImageOperation copy;
+	copy.image = image;
+	jpegview_linux::FileOperationPayload copyPayload{std::move(copy)};
+	const auto copied = jpegview_linux::ExecuteFileOperation(copyPayload, 8,
+		[] { return true; });
+	Expect(copied.success && copied.detachedChild > 0,
+		"clipboard copy did not preserve the external clipboard owner process");
+	int childStatus = 0;
+	Expect(WaitForChildExit(static_cast<pid_t>(copied.detachedChild),
+		std::chrono::seconds(2), childStatus) && WIFEXITED(childStatus) &&
+		WEXITSTATUS(childStatus) == 0,
+		"clipboard helper did not finish after consuming its encoded PNG");
+	const std::vector<std::uint8_t> capturedBytes = ReadBytes(capturedClipboard);
+	Expect(capturedBytes.size() > 8 && capturedBytes[0] == 0x89 &&
+		capturedBytes[1] == 'P' && capturedBytes[2] == 'N' && capturedBytes[3] == 'G',
+		"clipboard helper did not receive a complete PNG");
+	jpegview_linux::ImageWriteOptions options;
+	std::string writeError;
+	Expect(jpegview_linux::WriteImage(inputClipboard, image->bgra.data(), image->width,
+		image->height, options, writeError), "cannot create PNG paste fixture: " + writeError);
+	const std::vector<std::uint8_t> expected = ReadBytes(inputClipboard);
+	const auto pasted = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{jpegview_linux::PasteImageOperation{}}, 9,
+		[] { return true; });
+	Expect(pasted.success && fs::exists(pasted.temporaryFile) &&
+		ReadBytes(pasted.temporaryFile) == expected,
+		"clipboard paste did not preserve its asynchronous temporary image");
+	const jpegview_linux::WorkContext activeReadContext =
+		jpegview_linux::MakePathWorkContext(pasted.temporaryFile,
+			jpegview_linux::SourceWorkPriority::Foreground, [] { return true; });
+	jpegview_linux::SourceWorkLease activeRead =
+		jpegview_linux::SourceWorkCoordinator::Global().Acquire(
+			activeReadContext, pasted.temporaryFile);
+	Expect(static_cast<bool>(activeRead),
+		"cannot acquire the source lease for temporary image cleanup coverage");
+	jpegview_linux::FileOperationService cleanupService;
+	const std::uint64_t cleanupId = cleanupService.Request(
+		jpegview_linux::FileOperationPayload{
+			jpegview_linux::RemoveTemporaryFilesOperation{
+				pasted.temporaryFile, pasted.temporaryDirectory}}, 10);
+	const bool cleanupWaiting = jpegview_linux::SourceWorkCoordinator::Global().WaitForSnapshot(
+		[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeForeground == 1 && snapshot.waitingForeground == 1;
+		}, std::chrono::seconds(2));
+	Expect(cleanupId != 0 && cleanupWaiting &&
+		fs::exists(pasted.temporaryFile),
+		"temporary cleanup raced a reader that still owned the source path");
+	activeRead.Reset();
+	Expect(cleanupService.WaitUntilIdle(std::chrono::seconds(2)),
+		"temporary cleanup did not resume after source admission was released");
+	const auto cleaned = cleanupService.TakeReady();
+	Expect(cleaned.has_value() && cleaned->success &&
+		!fs::exists(pasted.temporaryFile) &&
+		!fs::exists(pasted.temporaryDirectory),
+		"clipboard temporary image and directory were not removed");
+	cleanupService.Stop();
+
+	jpegview_linux::LaunchDesktopOperation launch;
+	launch.fallbacks.push_back({(bin / "missing opener").string(), {}});
+	launch.fallbacks.push_back({"/bin/true", {}});
+	const auto launched = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(launch)}, 11, [] { return true; });
+	Expect(launched.success && launched.detachedChild > 0,
+		"desktop launch did not fall back from the missing first executable");
+	Expect(WaitForChildExit(static_cast<pid_t>(launched.detachedChild),
+		std::chrono::seconds(2), childStatus) && WIFEXITED(childStatus) &&
+		WEXITSTATUS(childStatus) == 0,
+		"fallback desktop command did not complete successfully");
+}
+
+void TestLosslessOperationsPublishOnlySuccessfulTemporaryOutputs() {
+	TemporaryDirectory temporary;
+	const fs::path bin = temporary.path() / "bin";
+	const fs::path images = temporary.path() / "images with spaces";
+	fs::create_directories(bin);
+	fs::create_directories(images);
+	const fs::path transform = bin / "jpegtran";
+	WriteText(transform,
+		"#!/bin/sh\n"
+		"output=\n"
+		"while [ \"$#\" -gt 0 ]; do\n"
+		"  if [ \"$1\" = \"-outfile\" ]; then shift; output=$1; break; fi\n"
+		"  shift\n"
+		"done\n"
+		"[ -n \"$output\" ] || exit 2\n"
+		"printf transformed > \"$output\" || exit 3\n"
+		"[ \"${JPEGVIEW_TEST_JPEGTRAN_FAIL:-0}\" = 1 ] && exit 9\n"
+		"exit 0\n");
+	MakeTestExecutable(transform);
+	ScopedEnvironment path("PATH", bin.string() + ":/usr/bin:/bin");
+	ScopedEnvironment fail("JPEGVIEW_TEST_JPEGTRAN_FAIL", "1");
+	const fs::path source = images / "source image.jpg";
+	const fs::path crop = images / "crop output.jpg";
+	WriteText(source, "original source bytes");
+	Expect(::chmod(source.c_str(), 0640) == 0,
+		"cannot set source mode for lossless transform fixture");
+
+	const auto failedTransform = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{
+			jpegview_linux::LosslessTransformOperation{source,
+				jpegview_linux::LosslessJpegOperation::Rotate90}}, 41,
+		[] { return true; });
+	Expect(!failedTransform.success && ReadBytes(source) ==
+		std::vector<std::uint8_t>({'o','r','i','g','i','n','a','l',' ','s','o','u','r','c','e',' ','b','y','t','e','s'}),
+		"failed lossless transform replaced the original source");
+	std::error_code iteratorError;
+	for (const fs::directory_entry& entry : fs::directory_iterator(images, iteratorError)) {
+		Expect(entry.path() == source,
+			"failed lossless transform left its temporary output behind");
+	}
+	Expect(!iteratorError, "cannot inspect failed lossless transform cleanup");
+
+	fail.Clear();
+	const auto transformed = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{
+			jpegview_linux::LosslessTransformOperation{source,
+				jpegview_linux::LosslessJpegOperation::Rotate90}}, 42,
+		[] { return true; });
+	struct stat sourceStatus{};
+	Expect(transformed.success && transformed.path == source &&
+		ReadBytes(source) == std::vector<std::uint8_t>({'t','r','a','n','s','f','o','r','m','e','d'}) &&
+		::stat(source.c_str(), &sourceStatus) == 0 && (sourceStatus.st_mode & 0777) == 0640,
+		"successful lossless transform did not atomically publish pixels with source permissions");
+
+	WriteText(crop, "existing crop bytes");
+	Expect(::chmod(crop.c_str(), 0604) == 0,
+		"cannot set destination mode for lossless crop fixture");
+	jpegview_linux::LosslessCropOperation cropOperation;
+	cropOperation.source = source;
+	cropOperation.output = crop;
+	cropOperation.width = 1;
+	cropOperation.height = 1;
+	cropOperation.overwriteConfirmed = true;
+	Expect(::setenv("JPEGVIEW_TEST_JPEGTRAN_FAIL", "1", 1) == 0,
+		"cannot reactivate lossless crop failure fixture");
+	const auto failedCrop = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{cropOperation}, 43, [] { return true; });
+	Expect(!failedCrop.success && ReadBytes(crop) ==
+		std::vector<std::uint8_t>({'e','x','i','s','t','i','n','g',' ','c','r','o','p',' ','b','y','t','e','s'}),
+		"failed lossless crop replaced its confirmed destination");
+	iteratorError.clear();
+	for (const fs::directory_entry& entry : fs::directory_iterator(images, iteratorError)) {
+		Expect(entry.path() == source || entry.path() == crop,
+			"failed lossless crop left its temporary output behind");
+	}
+	Expect(!iteratorError, "cannot inspect failed lossless crop cleanup");
+
+	fail.Clear();
+	const auto cropped = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{cropOperation}, 44, [] { return true; });
+	struct stat cropStatus{};
+	Expect(cropped.success && cropped.path == crop &&
+		ReadBytes(crop) == std::vector<std::uint8_t>({'t','r','a','n','s','f','o','r','m','e','d'}) &&
+		::stat(crop.c_str(), &cropStatus) == 0 && (cropStatus.st_mode & 0777) == 0604,
+		"successful lossless crop did not publish its temporary result and prior destination mode");
+	const fs::path modeProbe = images / "mode probe";
+	const int modeProbeDescriptor = ::open(modeProbe.c_str(),
+		O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+	struct stat modeProbeStatus{};
+	Expect(modeProbeDescriptor >= 0 &&
+		::fstat(modeProbeDescriptor, &modeProbeStatus) == 0,
+		"cannot determine the process default file mode for new lossless output");
+	if (modeProbeDescriptor >= 0) (void)::close(modeProbeDescriptor);
+	std::error_code removeModeProbeError;
+	fs::remove(modeProbe, removeModeProbeError);
+	Expect(!removeModeProbeError, "cannot remove lossless output mode probe");
+	const fs::path newCrop = images / "new crop.jpg";
+	cropOperation.output = newCrop;
+	cropOperation.overwriteConfirmed = false;
+	const auto newCropped = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{cropOperation}, 45, [] { return true; });
+	struct stat newCropStatus{};
+	Expect(newCropped.success && ::stat(newCrop.c_str(), &newCropStatus) == 0 &&
+		(newCropStatus.st_mode & 0777) == (modeProbeStatus.st_mode & 0777),
+		"new lossless crop did not preserve the process default output permissions");
+}
+
+void TestFileOperationServiceStopCancelsChildWithoutEventLoop() {
+	TemporaryDirectory temporary;
+	const fs::path bin = temporary.path() / "bin";
+	const fs::path images = temporary.path() / "images";
+	fs::create_directories(bin);
+	fs::create_directories(images);
+	const fs::path marker = temporary.path() / "jpegtran started";
+	const fs::path transform = bin / "jpegtran";
+	WriteText(transform, "#!/bin/sh\nprintf started > \"$JPEGVIEW_TEST_CHILD_MARKER\"\nexec sleep 30\n");
+	MakeTestExecutable(transform);
+	const fs::path source = images / "source.jpg";
+	WriteText(source, "original jpeg fixture");
+	ScopedEnvironment path("PATH", bin.string() + ":/usr/bin:/bin");
+	ScopedEnvironment childMarker("JPEGVIEW_TEST_CHILD_MARKER", marker.string());
+	jpegview_linux::FileOperationService service;
+	const std::uint64_t id = service.Request(
+		jpegview_linux::FileOperationPayload{jpegview_linux::LosslessTransformOperation{
+			source, jpegview_linux::LosslessJpegOperation::Rotate90}}, 12);
+	Expect(id != 0, "file operation service refused a new transform request");
+	const bool childStarted = WaitForPath(marker, std::chrono::seconds(2));
+	bool temporaryIsPrivate = false;
+	std::error_code temporaryIteratorError;
+	for (const fs::directory_entry& entry : fs::directory_iterator(images,
+		temporaryIteratorError)) {
+		if (entry.path() == source) continue;
+		struct stat temporaryStatus{};
+		temporaryIsPrivate = entry.path().extension() == ".tmp" &&
+			::stat(entry.path().c_str(), &temporaryStatus) == 0 &&
+			(temporaryStatus.st_mode & 0777) == 0600;
+	}
+	Expect(childStarted && temporaryIsPrivate && !temporaryIteratorError,
+		"lossless operation exposed its in-progress image temporary to other users or scans");
+	const auto stopStart = std::chrono::steady_clock::now();
+	service.Stop();
+	const auto stopTime = std::chrono::steady_clock::now() - stopStart;
+	Expect(childStarted, "file operation worker did not launch the blocked child");
+	Expect(stopTime < std::chrono::seconds(2),
+		"application-close service shutdown waited for the blocked child to finish naturally");
+	Expect(ReadBytes(source) == std::vector<std::uint8_t>({'o','r','i','g','i','n','a','l',' ',
+		'j','p','e','g',' ','f','i','x','t','u','r','e'}),
+		"canceled lossless transform published an incomplete replacement");
+	std::error_code iteratorError;
+	for (const fs::directory_entry& entry : fs::directory_iterator(images, iteratorError)) {
+		Expect(entry.path() == source, "canceled transform left a temporary sibling file");
+	}
+	Expect(!iteratorError, "cannot inspect lossless transform temporary cleanup");
+}
+
+struct LosslessCropPublicationBarrier {
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool reached = false;
+	bool released = false;
+};
+
+void PauseLosslessCropBeforePublication(void* context) {
+	auto* barrier = static_cast<LosslessCropPublicationBarrier*>(context);
+	std::unique_lock<std::mutex> lock(barrier->mutex);
+	barrier->reached = true;
+	barrier->changed.notify_all();
+	barrier->changed.wait(lock, [barrier] { return barrier->released; });
+}
+
+void TestLosslessCropPublicationWaitsForDestinationAdmission() {
+	TemporaryDirectory temporary;
+	const fs::path bin = temporary.path() / "bin";
+	const fs::path images = temporary.path() / "images";
+	fs::create_directories(bin);
+	fs::create_directories(images);
+	const fs::path transform = bin / "jpegtran";
+	WriteText(transform,
+		"#!/bin/sh\n"
+		"output=\n"
+		"while [ \"$#\" -gt 0 ]; do\n"
+		"  if [ \"$1\" = \"-outfile\" ]; then shift; output=$1; break; fi\n"
+		"  shift\n"
+		"done\n"
+		"[ -n \"$output\" ] || exit 2\n"
+		"printf cropped > \"$output\" || exit 3\n");
+	MakeTestExecutable(transform);
+	const fs::path source = images / "source.jpg";
+	const fs::path output = images / "crop.jpg";
+	WriteText(source, "source jpeg fixture");
+	WriteText(output, "old crop output");
+	ScopedEnvironment path("PATH", bin.string() + ":/usr/bin:/bin");
+	LosslessCropPublicationBarrier barrier;
+	jpegview_linux::SetLosslessCropPublicationTestHookForTesting(
+		PauseLosslessCropBeforePublication, &barrier);
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	jpegview_linux::LosslessCropOperation crop;
+	crop.source = source;
+	crop.output = output;
+	crop.width = 1;
+	crop.height = 1;
+	crop.overwriteConfirmed = true;
+	auto operation = std::async(std::launch::async, [crop] {
+		return jpegview_linux::ExecuteFileOperation(
+			jpegview_linux::FileOperationPayload{crop}, 46, [] { return true; });
+	});
+	bool reachedPublicationBoundary = false;
+	{
+		std::unique_lock<std::mutex> lock(barrier.mutex);
+		reachedPublicationBoundary = barrier.changed.wait_for(lock,
+			std::chrono::seconds(2), [&barrier] { return barrier.reached; });
+	}
+	const jpegview_linux::WorkContext outputReadContext =
+		jpegview_linux::MakePathWorkContext(output,
+			jpegview_linux::SourceWorkPriority::Foreground, [] { return true; });
+	jpegview_linux::SourceWorkLease outputReader;
+	bool readerAcquired = false;
+	bool originalOutputStillVisible = false;
+	bool waitingForOutputAdmission = false;
+	bool stillWaiting = false;
+	jpegview_linux::SourceWorkSnapshot publicationWaitSnapshot;
+	if (reachedPublicationBoundary) {
+		outputReader = coordinator.Acquire(outputReadContext, output);
+		readerAcquired = static_cast<bool>(outputReader);
+		if (readerAcquired) {
+			originalOutputStillVisible = ReadBytes(output) ==
+				std::vector<std::uint8_t>({'o','l','d',' ','c','r','o','p',' ','o','u','t','p','u','t'});
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(barrier.mutex);
+		barrier.released = true;
+		barrier.changed.notify_all();
+	}
+	if (readerAcquired) {
+		waitingForOutputAdmission = coordinator.WaitForSnapshot(
+			[](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+				return snapshot.activeForeground == 1 && snapshot.activeCpu == 0 &&
+					snapshot.waitingForeground == 1;
+			}, std::chrono::seconds(2));
+		publicationWaitSnapshot = coordinator.Snapshot();
+		stillWaiting = operation.wait_for(std::chrono::milliseconds(0)) !=
+			std::future_status::ready;
+	}
+	outputReader.Reset();
+	const bool resumedAfterRelease = operation.wait_for(std::chrono::seconds(2)) ==
+		std::future_status::ready;
+	jpegview_linux::SetLosslessCropPublicationTestHookForTesting(nullptr, nullptr);
+	Expect(resumedAfterRelease,
+		"lossless crop did not resume after destination admission became available");
+	const auto result = operation.get();
+	std::ostringstream publicationWaitFailure;
+	publicationWaitFailure << "lossless crop publication did not wait for its admitted destination reader "
+		<< "(publicationBoundary/readerAcquired/coordinatorWait/futureBlocked/outputPreserved="
+		<< reachedPublicationBoundary << '/' << readerAcquired << '/'
+		<< waitingForOutputAdmission << '/' << stillWaiting << '/'
+		<< originalOutputStillVisible << ", foreground/cpu/waiting="
+		<< publicationWaitSnapshot.activeForeground << '/'
+		<< publicationWaitSnapshot.activeCpu << '/'
+		<< publicationWaitSnapshot.waitingForeground << ", result="
+		<< result.success << ", message=" << result.message << ')';
+	Expect(reachedPublicationBoundary && readerAcquired && waitingForOutputAdmission && stillWaiting &&
+		originalOutputStillVisible && result.success && result.path == output &&
+		ReadBytes(output) == std::vector<std::uint8_t>({'c','r','o','p','p','e','d'}),
+		publicationWaitFailure.str());
+}
+
+void TestFileOperationServicePublishesCompletionsAndResumes() {
+	jpegview_linux::FileOperationService service;
+	const std::uint64_t firstId = service.Request(
+		jpegview_linux::FileOperationPayload{jpegview_linux::LaunchDesktopOperation{
+			{{"/bin/true", {}}}}}, 21);
+	Expect(firstId != 0 && service.Busy(),
+		"file operation service did not accept its first asynchronous request");
+	Expect(service.WaitUntilIdle(std::chrono::seconds(2)),
+		"file operation service did not finish the detached command before its deadline");
+	Expect(service.Busy(),
+		"completed file operation stopped reporting busy before its result was consumed");
+	const auto first = service.TakeReady();
+	Expect(first.has_value() && first->id == firstId && first->ownerGeneration == 21 &&
+		first->kind == jpegview_linux::FileOperationKind::LaunchDesktop && first->success,
+		"file operation service did not publish the matching successful result");
+	Expect(!service.Busy(),
+		"consuming the file operation result did not return the service to idle");
+	const std::uint64_t secondId = service.Request(
+		jpegview_linux::FileOperationPayload{jpegview_linux::LaunchDesktopOperation{
+			{{"/bin/true", {}}}}}, 22);
+	Expect(secondId > firstId && service.WaitUntilIdle(std::chrono::seconds(2)),
+		"file operation service did not accept work after delivering its previous result");
+	const auto second = service.TakeReady();
+	Expect(second.has_value() && second->id == secondId &&
+		second->ownerGeneration == 22 && second->success,
+		"file operation service published a stale or incomplete second result");
+	service.Stop();
+}
+
+void TestFileOperationServiceReportsCompletedIrreversibleWorkAfterCancel() {
+	const auto verifyExit = [](bool successfulExit) {
+		TemporaryDirectory temporary;
+		const fs::path bin = temporary.path() / "bin";
+		fs::create_directories(bin);
+		const fs::path marker = temporary.path() / "print started";
+		const fs::path release = temporary.path() / "allow print exit";
+		const fs::path printer = bin / "lp";
+		WriteText(printer,
+			"#!/bin/sh\n"
+			"printf started > \"$JPEGVIEW_TEST_PRINT_MARKER\"\n"
+			"attempt=0\n"
+			"while [ \"$attempt\" -lt 100 ]; do\n"
+			"  if [ -f \"$JPEGVIEW_TEST_PRINT_RELEASE\" ]; then\n"
+			"    exit \"$JPEGVIEW_TEST_PRINT_EXIT_CODE\"\n"
+			"  fi\n"
+			"  attempt=$((attempt + 1))\n"
+			"  sleep 0.01\n"
+			"done\n"
+			"exit 9\n");
+		MakeTestExecutable(printer);
+		ScopedEnvironment path("PATH", bin.string() + ":/usr/bin:/bin");
+		ScopedEnvironment printMarker("JPEGVIEW_TEST_PRINT_MARKER", marker.string());
+		ScopedEnvironment printRelease("JPEGVIEW_TEST_PRINT_RELEASE", release.string());
+		ScopedEnvironment printExit("JPEGVIEW_TEST_PRINT_EXIT_CODE",
+			successfulExit ? "0" : "9");
+		jpegview_linux::PrintImageOperation print;
+		print.image = MakeTinyTestImage();
+		jpegview_linux::FileOperationService service;
+		const std::uint64_t id = service.Request(
+			jpegview_linux::FileOperationPayload{std::move(print)}, 23);
+		const bool started = id != 0 && WaitForPath(marker, std::chrono::seconds(2));
+		Expect(!started ||
+			jpegview_linux::SourceWorkCoordinator::Global().Snapshot().activeCpu == 0,
+			"print operation retained a CPU permit while waiting for the printer");
+		if (id != 0) service.Cancel(id);
+		WriteText(release, "finish the started print command");
+		Expect(started, "print operation did not start before the cancellation test");
+		Expect(service.WaitUntilIdle(std::chrono::seconds(2)),
+			"started print operation did not finish after cancellation was requested");
+		const auto result = service.TakeReady();
+		Expect(result.has_value() && result->id == id &&
+			result->success == successfulExit && !result->cancelled &&
+			(result->failure.has_value() == !successfulExit),
+			"an irreversible print exit was hidden by a late cancellation request");
+		service.Stop();
+	};
+	verifyExit(true);
+	verifyExit(false);
+}
+
 void TestBatchCopyPatternExpansionAndPreview() {
 	const fs::path source = fs::path("/tmp/photos/holiday12.JPG");
 	const std::time_t timestamp = 1706933106; // 2024-02-03 04:05:06 UTC.
@@ -15749,6 +16530,44 @@ void TestExifAndJpegCommentParsing() {
 	comment.clear();
 	Expect(!jpegview_linux::ReadJpegMetadata(malformed, info, comment), "malformed metadata should be treated as absent");
 	Expect(!info.hasExif, "malformed metadata was incorrectly accepted as EXIF");
+}
+
+void TestFileOperationFolderExifDatesUpdatesOnlyRegularImages() {
+	TemporaryDirectory temporary;
+	const fs::path folder = temporary.path() / "images";
+	fs::create_directories(folder);
+	const fs::path jpeg = folder / "capture.jpg";
+	const fs::path malformed = folder / "malformed.jpg";
+	const fs::path imageNamedDirectory = folder / "directory.jpg";
+	const fs::path nonImage = folder / "notes.txt";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	ImageWriteOptions options;
+	options.jpegQuality = 100;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(jpeg, pixels.data(), 2, 2, options, error),
+		"cannot create folder EXIF fixture JPEG: " + error);
+	WriteBytes(jpeg, InsertJpegSegment(ReadBytes(jpeg), 0xe1, ExifFixture().Build()));
+	SetModificationTimeNanoseconds(jpeg, 1000000000, 0);
+	WriteBytes(malformed, {0xff, 0xd8, 0xff, 0xe1, 0x00, 0x0a, 'E', 'x', 'i', 'f', 0, 0});
+	SetModificationTimeNanoseconds(malformed, 1000000000, 0);
+	fs::create_directories(imageNamedDirectory);
+	WriteText(nonImage, "not an image");
+	std::time_t expected = 0;
+	Expect(jpegview_linux::ParseLocalExifTimestamp("2024:02:03 04:05:06", expected),
+		"could not convert the fixture's EXIF timestamp");
+
+	const auto result = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{
+			jpegview_linux::TouchFolderExifDatesOperation{folder}}, 31,
+		[] { return true; });
+	struct stat updated{};
+	Expect(result.success && result.updatedFiles == 1 && result.path == folder &&
+		::stat(jpeg.c_str(), &updated) == 0 && updated.st_mtim.tv_sec == expected,
+		"folder EXIF update did not change exactly the regular JPEG with a valid date");
+	Expect(::stat(malformed.c_str(), &updated) == 0 &&
+		updated.st_mtim.tv_sec == 1000000000 && fs::is_directory(imageNamedDirectory) &&
+		fs::exists(nonImage),
+		"folder EXIF update changed a malformed source, image-named directory, or non-image");
 }
 
 void TestViewportModesAndGeometry() {
@@ -22291,10 +23110,34 @@ int main(int argc, char** argv) {
 	RunTest("sort-mode-mappings", TestSortModeMappings, failures);
 	RunTest("batch-copy-pattern-expansion-and-preview", TestBatchCopyPatternExpansionAndPreview, failures);
 	RunTest("batch-copy-dialog-controller", TestBatchCopyDialogController, failures);
+	RunTest("external-process-structured-arguments-and-failures",
+		TestExternalProcessStructuredArgumentsAndFailures, failures);
+	RunTest("external-process-cancellation-reaps-slow-child",
+		TestExternalProcessCancellationReapsSlowChild, failures);
+	RunTest("external-process-cancellation-kills-descendants",
+		TestExternalProcessCancellationKillsDescendants, failures);
+	RunTest("file-operation-save-and-batch-policies",
+		TestFileOperationSaveAndBatchPolicies, failures);
+	RunTest("batch-cancellation-stops-between-files",
+		TestBatchCancellationStopsBetweenFiles, failures);
+	RunTest("file-operation-clipboard-temporary-cleanup-and-fallback",
+		TestFileOperationClipboardTemporaryCleanupAndFallback, failures);
+	RunTest("lossless-operations-publish-only-successful-temporary-outputs",
+		TestLosslessOperationsPublishOnlySuccessfulTemporaryOutputs, failures);
+	RunTest("lossless-crop-publication-waits-for-destination-admission",
+		TestLosslessCropPublicationWaitsForDestinationAdmission, failures);
+	RunTest("file-operation-service-publishes-completions-and-resumes",
+		TestFileOperationServicePublishesCompletionsAndResumes, failures);
+	RunTest("file-operation-service-completed-irreversible-work-survives-cancel",
+		TestFileOperationServiceReportsCompletedIrreversibleWorkAfterCancel, failures);
+	RunTest("file-operation-service-stop-cancels-child-without-event-loop",
+		TestFileOperationServiceStopCancelsChildWithoutEventLoop, failures);
 	RunTest("desktop-application-parsing-and-expansion", TestDesktopApplicationParsingAndExecExpansion, failures);
 	RunTest("default-viewer-registration", TestDefaultViewerRegistration, failures);
 	RunTest("external-command-planning", TestExternalCommandPlanning, failures);
 	RunTest("exif-and-jpeg-comment-parsing", TestExifAndJpegCommentParsing, failures);
+	RunTest("file-operation-folder-exif-dates-update-only-regular-images",
+		TestFileOperationFolderExifDatesUpdatesOnlyRegularImages, failures);
 	RunTest("viewport-modes-and-geometry", TestViewportModesAndGeometry, failures);
 	RunTest("viewport-manual-zoom-pan-and-restore", TestViewportManualZoomPanAndRestore, failures);
 	RunTest("pending-viewport-intents-replay-after-dimensions",
