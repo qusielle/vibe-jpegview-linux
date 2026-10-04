@@ -258,7 +258,9 @@ they support.
    opening. File sizes are reused from that listing; missing source descriptors are captured in the
    background with the selected and visible rows ahead of distant rows. A filter and Return entered
    while Browse is loading are applied when its current rows arrive. The dialog can be resized from
-   its lower-right corner, its preview width can be adjusted by dragging the list/preview divider,
+   its lower-right corner. A pending save confirmation stays visible when listing finishes, and a
+   filtered parameter-restore Return keeps its selected backup through asynchronous loading. The
+   preview width can be adjusted by dragging the list/preview divider,
    and the mouse wheel scrolls an overflowing file list. A visible proportional scrollbar supports
    thumb dragging and track clicks that page by one viewport, synchronized with wheel and keyboard
    scrolling. Browse and Recents rows show file sizes; archive-member sizes refer to the member's

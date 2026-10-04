@@ -146,8 +146,10 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
 - Do not make worker destruction depend on the renderer or event loop continuing to run. Join workers
   safely during owner destruction.
 - Every transition that can make a worker condition-variable predicate true must update state under
-  its mutex and notify waiters. Cover promotion, capacity release, cancellation, clear, and shutdown;
-  test admission and shutdown without renderer polling or event-loop progress.
+  its mutex and notify waiters. Atomic predicate fields still require the wait mutex; atomicity alone
+  does not prevent a notify between predicate evaluation and sleeping. Cover promotion, capacity
+  release, cancellation, clear, and shutdown; test admission and shutdown without renderer polling or
+  event-loop progress.
 - Preserve the reason a traversal stopped until its retry or publication decision. Do not infer a past
   foreground interruption from a later gate snapshot, since the gate may already have cleared; retry
   current interrupted work and include owner shutdown or replacement in every blocking wait predicate.

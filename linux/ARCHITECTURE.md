@@ -350,6 +350,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   or descriptor metadata changes. The viewer pairs each `FileList::MutationRevision()` and
   `FileList::DescriptorRevision()` with a monotonically increasing owner revision whenever it
   replaces the whole `FileList`, including dropped inputs and clipboard transitions.
+  Applying a prepared background sort advances the mutation revision again, so a thumbnail catalog
+  refreshed against the old order while sorting is pending cannot remain marked current.
   `SetCurrent` updates priority without visiting a full catalog; finite cache capacities select a
   nearest-first working window, while the viewer's full-list capacity keeps every active source
   eligible. `TakeNext` emits a bounded batch, and evictions outside the working window are not
@@ -606,9 +608,13 @@ The Open dialog routes filesystem and generic archive directory listings through
 `FileDialogDirectoryLoader`; archive password validation remains on `ArchiveDirectoryLoader`.
 Viewer-list startup and folder transitions use `FileListScanWorker`, so even a sequential TGZ catalog
 or a 7z/RAR catalog cannot block the SDL event thread. Listing generations replace older work, sorting
-is prepared by the directory worker, and Escape clears the listing and its dependent metadata,
-summary, and preview requests. A Browse activation pressed while rows are loading is held until that
-listing is applied; folder changes, tab switches, and dialog close clear the pending activation.
+is prepared by the directory worker under shared CPU admission, with generation checks during name
+preparation and sorting. Shutdown changes the worker predicate under its condition-variable mutex
+before notifying and joining. Escape clears the listing and its dependent metadata, summary, and
+preview requests. A Browse activation pressed while rows are loading is held until that listing is
+applied; folder changes, tab switches, and dialog close clear the pending activation. Filtered
+parameter-restore activation retains its selected row through listing application, and listing status
+updates cannot replace an operation-owned confirmation message.
 File-size and directory-summary completions are drained in bounded batches so a large Recents list or
 a directory with many child folders cannot monopolize one UI update. The async result/cancellation
 pattern was cross-checked against

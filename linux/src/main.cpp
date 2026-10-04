@@ -9760,6 +9760,7 @@ private:
 				const fs::path backing = jpegview_linux::ArchiveBackingFile(result.directory);
 				encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
 			}
+			std::string listingMessage;
 			if (!result.error.empty()) {
 				if (result.errorKind == jpegview_linux::ArchiveErrorKind::PasswordRequired ||
 					result.errorKind == jpegview_linux::ArchiveErrorKind::InvalidPassword) {
@@ -9770,28 +9771,31 @@ private:
 					encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
 					result.entries.push_back(FileDialogEntry{result.directory, true, false, {},
 						true, false, true});
-					fileDialogMessage_ = result.errorKind ==
+					listingMessage = result.errorKind ==
 						jpegview_linux::ArchiveErrorKind::PasswordRequired ?
 						"Archive contents are encrypted" : "Saved archive password is incorrect";
 				} else {
-					fileDialogMessage_ = result.archiveLocation ?
+					listingMessage = result.archiveLocation ?
 						"Cannot read archive: " + result.error :
 						"Cannot read folder: " + result.error;
 				}
-			} else {
-				fileDialogMessage_.clear();
 			}
-			if (result.entries.size() != result.sortOrders.name.size() ||
+			jpegview_linux::UpdateFileDialogListingMessage(fileDialogMessage_, listingMessage);
+			if (!result.sortOrders.completed ||
+				result.entries.size() != result.sortOrders.name.size() ||
 				result.entries.size() != result.sortOrders.modificationDate.size()) {
 				result.sortOrders = jpegview_linux::BuildFileDialogEntrySortOrders(result.entries);
 			}
 			fileDialogModel_.SetEntriesWithPreparedOrder(std::move(result.entries),
 				std::move(result.sortOrders));
-			if (result.policy.saveDialog || result.policy.includeNonImageFiles) {
+			if (jpegview_linux::FileDialogShouldClearSelectionAfterListing(
+				result.policy.saveDialog, result.policy.includeNonImageFiles,
+				fileDialogActivateAfterListing_)) {
 				fileDialogModel_.ClearSelection();
-			} else if (!fileDialogFocusAfterListing_.empty()) {
+			} else if (!result.policy.includeNonImageFiles &&
+				!fileDialogFocusAfterListing_.empty()) {
 				fileDialogModel_.Focus(fileDialogFocusAfterListing_, FileDialogVisibleRows());
-			} else if (!fileList_.Empty() &&
+			} else if (!result.policy.includeNonImageFiles && !fileList_.Empty() &&
 				fileList_.Current().parent_path() == fileDialogDirectory_) {
 				fileDialogModel_.Focus(AbsoluteNormalized(fileList_.Current()),
 					FileDialogVisibleRows());
@@ -9979,7 +9983,7 @@ private:
 		if (!parent.empty() && parent != fileDialogDirectory_) {
 			entries.push_back(FileDialogEntry{parent, true, true});
 		}
-		fileDialogMessage_ = "Reading contents…";
+		fileDialogMessage_ = jpegview_linux::FileDialogListingLoadingMessage();
 		fileDialogListingPending_ = true;
 		fileDialogModel_.SetEntriesInOrder(std::move(entries));
 		fileDialogModel_.ClearSelection();

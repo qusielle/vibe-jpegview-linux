@@ -3519,10 +3519,13 @@ void TestFileListAsynchronousSortingKeepsLatestSelection() {
 		"could not mark a source before asynchronous sorting");
 	const jpegview_linux::FileListSortRequest request = files.MakeSortRequest(
 		FileList::SortMode::FileName, false);
+	jpegview_linux::ThumbnailCatalogRevisionTracker thumbnailCatalog;
 	const auto selectedIndex = files.IndexOf(selectedPath);
 	Expect(selectedIndex && files.Select(*selectedIndex) && files.Files() == oldOrder &&
 		files.Current() == selectedPath,
 		"pending sorting changed the active order or lost navigation before completion");
+	thumbnailCatalog.MarkUpdated(request.expectedRevision,
+		request.expectedDescriptorRevision);
 
 	FileListSortWorker worker;
 	const std::uint64_t generation = worker.Request(request);
@@ -3540,6 +3543,9 @@ void TestFileListAsynchronousSortingKeepsLatestSelection() {
 		"worker sorting mutated the active catalog before result application");
 	Expect(files.ApplyPreparedSort(prepared),
 		"current asynchronous sort result was unexpectedly rejected");
+	Expect(files.MutationRevision() > request.expectedRevision &&
+		thumbnailCatalog.NeedsUpdate(files.MutationRevision(), files.DescriptorRevision()),
+		"applying a prepared order did not invalidate thumbnail consumers that observed the old order");
 	const std::vector<fs::path> expectedDescending(oldOrder.rbegin(), oldOrder.rend());
 	const auto newMarkedIndex = files.MarkedIndex();
 	Expect(files.Files() == expectedDescending && files.Current() == selectedPath &&
@@ -20757,6 +20763,17 @@ void TestFileDialogDirectoryLoader() {
 	fs::create_directory(empty);
 	const fs::path missing = temporary.path() / "missing";
 	const jpegview_linux::FileDialogListingPolicy policy{};
+	std::vector<Entry> cancellableSortEntries;
+	for (int index = 511; index >= 0; --index) {
+		cancellableSortEntries.emplace_back(temporary.path() /
+			("sort-" + std::to_string(index) + ".jpg"), false, false);
+	}
+	int sortContinuationChecks = 0;
+	const jpegview_linux::FileDialogEntrySortOrders interruptedSort =
+		jpegview_linux::BuildFileDialogEntrySortOrders(cancellableSortEntries,
+			[&sortContinuationChecks] { return ++sortContinuationChecks < 6; });
+	Expect(!interruptedSort.completed && sortContinuationChecks == 6,
+		"directory row-order preparation did not stop from its comparison-batch cancellation check");
 	jpegview_linux::FileDialogDirectoryLoader loader;
 	const auto waitForResult = [](jpegview_linux::FileDialogDirectoryLoader& source) {
 		std::vector<jpegview_linux::FileDialogDirectoryResult> results;
@@ -20947,6 +20964,113 @@ void TestFileDialogDirectoryLoader() {
 	Expect(cancellationEntered && results.size() == 1 &&
 		results.front().generation == 79 && results.front().directory == afterClear,
 		"clearing a blocked listing failed to cancel it before the next directory completed");
+
+	auto& coordinator = jpegview_linux::SourceWorkCoordinator::Global();
+	coordinator.SetForegroundPending(false);
+	std::vector<jpegview_linux::CpuWorkLease> occupiedCpu;
+	const std::size_t cpuLimit = jpegview_linux::HardwareAwareCpuWorkerCount();
+	for (std::size_t index = 0; index < cpuLimit; ++index) {
+		jpegview_linux::WorkContext foregroundCpu;
+		foregroundCpu.sourcePriority = jpegview_linux::SourceWorkPriority::Foreground;
+		auto lease = coordinator.AcquireCpu(foregroundCpu);
+		if (lease) occupiedCpu.push_back(std::move(lease));
+	}
+	auto catalog = std::make_shared<std::vector<Entry>>();
+	for (int index = 1023; index >= 0; --index) {
+		catalog->emplace_back(temporary.path() /
+			("admitted-sort-" + std::to_string(index) + ".jpg"), false, false);
+	}
+	const auto sortEnumerator = [catalog](const fs::path& directory,
+		jpegview_linux::FileDialogListingPolicy, const std::function<bool()>&) {
+		jpegview_linux::FileDialogDirectoryResult result;
+		result.directory = directory;
+		result.entries = *catalog;
+		return result;
+	};
+	const fs::path supersededSort = temporary.path() / "superseded-sort";
+	const fs::path currentSort = temporary.path() / "current-sort";
+	jpegview_linux::FileDialogDirectoryLoader cpuAdmitted(sortEnumerator);
+	cpuAdmitted.Request(supersededSort, 91, policy);
+	const bool sortingWaitedForCpu = coordinator.WaitForSnapshot(
+		[cpuLimit](const jpegview_linux::SourceWorkSnapshot& snapshot) {
+			return snapshot.activeCpu == cpuLimit && snapshot.waitingCpu >= 1;
+		}, 2s);
+	const bool sortWithheldWithoutCpu = cpuAdmitted.TakeReady().empty();
+	cpuAdmitted.Request(currentSort, 92, policy);
+	for (jpegview_linux::CpuWorkLease& lease : occupiedCpu) lease.Reset();
+	results = waitForResult(cpuAdmitted);
+	Expect(sortingWaitedForCpu && sortWithheldWithoutCpu && results.size() == 1 &&
+		results.front().generation == 92 && results.front().directory == currentSort &&
+		results.front().sortOrders.completed,
+		"directory sorting bypassed shared CPU admission or published a superseded generation");
+
+	const auto idleEnumerator = [](const fs::path& directory,
+		jpegview_linux::FileDialogListingPolicy,
+		const std::function<bool()>&) {
+		jpegview_linux::FileDialogDirectoryResult result;
+		result.directory = directory;
+		result.entries.emplace_back(directory / "idle.jpg", false, false);
+		return result;
+	};
+	auto idleLoader = std::make_unique<jpegview_linux::FileDialogDirectoryLoader>(idleEnumerator);
+	idleLoader->Request(temporary.path() / "idle-shutdown", 90, policy);
+	results = waitForResult(*idleLoader);
+	Expect(results.size() == 1 && results.front().generation == 90,
+		"idle-shutdown listing did not finish before testing worker teardown");
+	std::promise<void> shutdownFinished;
+	std::future<void> shutdownResult = shutdownFinished.get_future();
+	std::thread shutdownThread([loader = std::move(idleLoader),
+		finished = std::move(shutdownFinished)]() mutable {
+		loader.reset();
+		finished.set_value();
+	});
+	const bool idleShutdownCompleted = shutdownResult.wait_for(2s) == std::future_status::ready;
+	if (idleShutdownCompleted) shutdownThread.join();
+	else shutdownThread.detach();
+	Expect(idleShutdownCompleted,
+		"destroying an idle directory loader did not wake and join its worker promptly");
+}
+
+void TestFileDialogListingCompletionPreservesUserState() {
+	using Entry = jpegview_linux::FileDialogEntry;
+	std::string message = jpegview_linux::FileDialogListingLoadingMessage();
+	jpegview_linux::UpdateFileDialogListingMessage(message, {});
+	Expect(message.empty(), "successful listing left its loading status visible");
+	message = "File exists; press ENTER to overwrite or ESC to cancel";
+	jpegview_linux::UpdateFileDialogListingMessage(message, {});
+	jpegview_linux::UpdateFileDialogListingMessage(message, "Cannot read folder: permission denied");
+	Expect(message == "File exists; press ENTER to overwrite or ESC to cancel",
+		"late listing completion replaced an operation-owned overwrite confirmation");
+	message = jpegview_linux::FileDialogListingLoadingMessage();
+	jpegview_linux::UpdateFileDialogListingMessage(message,
+		"Cannot read folder: permission denied");
+	Expect(message == "Cannot read folder: permission denied",
+		"directory listing failure did not replace its loading status");
+
+	jpegview_linux::FileDialogModel restoreModel;
+	restoreModel.Begin(false);
+	const fs::path root = fs::temp_directory_path() / "restore-filter-state";
+	restoreModel.SetEntriesInOrder({Entry{root / "..", true, true}});
+	restoreModel.AppendFilter("matching-backup");
+	std::vector<Entry> entries = {
+		Entry{root / "..", true, true},
+		Entry{root / "matching-backup.jvdb", false, false},
+		Entry{root / "other-backup.jvdb", false, false},
+	};
+	jpegview_linux::FileDialogEntrySortOrders orders =
+		jpegview_linux::BuildFileDialogEntrySortOrders(entries);
+	restoreModel.SetEntriesWithPreparedOrder(std::move(entries), std::move(orders));
+	if (jpegview_linux::FileDialogShouldClearSelectionAfterListing(false, true, true)) {
+		restoreModel.ClearSelection();
+	}
+	const Entry* selected = restoreModel.SelectedEntry();
+	Expect(selected != nullptr && selected->path.filename() == "matching-backup.jvdb",
+		"queued restore activation lost the row selected by its filter when listing completed");
+	Expect(jpegview_linux::FileDialogShouldClearSelectionAfterListing(true, false, true) &&
+		jpegview_linux::FileDialogShouldClearSelectionAfterListing(false, true, false) &&
+		!jpegview_linux::FileDialogShouldClearSelectionAfterListing(false, true, true) &&
+		!jpegview_linux::FileDialogShouldClearSelectionAfterListing(false, false, true),
+		"listing selection policy did not preserve only pending filtered restore activation");
 }
 
 void TestColdArchiveRowDescriptorsAreCapturedOffThread() {
@@ -21812,6 +21936,8 @@ int main(int argc, char** argv) {
 		TestFileDialogModelIndexedLargeCatalogUpdates, failures);
 	RunTest("file-dialog-directory-summaries", TestFileDialogDirectorySummaries, failures);
 	RunTest("file-dialog-directory-loader", TestFileDialogDirectoryLoader, failures);
+	RunTest("file-dialog-listing-completion-preserves-user-state",
+		TestFileDialogListingCompletionPreservesUserState, failures);
 	RunTest("cold-archive-row-descriptors-are-captured-off-thread",
 		TestColdArchiveRowDescriptorsAreCapturedOffThread, failures);
 	RunTest("file-dialog-preview-selection-and-background-loading",

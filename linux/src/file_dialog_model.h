@@ -49,12 +49,21 @@ enum class FileDialogSortMode {
 struct FileDialogEntrySortOrders {
 	std::vector<std::size_t> name;
 	std::vector<std::size_t> modificationDate;
+	bool completed = false;
 };
 
 // Builds both row orders without moving or copying the authoritative
-// entries. Directory workers can prepare them before publishing the listing.
+// entries. Directory workers can cancel between bounded batches and must not
+// publish an incomplete order.
 FileDialogEntrySortOrders BuildFileDialogEntrySortOrders(
-	const std::vector<FileDialogEntry>& entries);
+	const std::vector<FileDialogEntry>& entries,
+	const std::function<bool()>& shouldContinue = {});
+
+const std::string& FileDialogListingLoadingMessage();
+void UpdateFileDialogListingMessage(std::string& message,
+	const std::string& listingMessage);
+bool FileDialogShouldClearSelectionAfterListing(bool saveDialog,
+	bool includeNonImageFiles, bool activationPending);
 
 // Keeps the parent entry first and directories before files. Names are sorted
 // case-insensitively in ascending order; modification dates are newest first,

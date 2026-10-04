@@ -27,6 +27,10 @@ namespace jpegview_linux {
 namespace {
 
 constexpr std::size_t kDirectoryEnumerationBatchSize = 32;
+constexpr std::size_t kFileDialogSortPreparationBatchSize = 128;
+constexpr std::size_t kFileDialogSortCancellationBatchSize = 256;
+
+struct FileDialogSortCancelled {};
 
 std::string Lower(std::string value) {
 	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
@@ -475,6 +479,7 @@ std::filesystem::path FirstImageInDirectoryWhile(
 
 void SortFileDialogEntries(std::vector<FileDialogEntry>& entries, FileDialogSortMode mode) {
 	const FileDialogEntrySortOrders orders = BuildFileDialogEntrySortOrders(entries);
+	if (!orders.completed) return;
 	const std::vector<std::size_t>& order = mode == FileDialogSortMode::Name ?
 		orders.name : orders.modificationDate;
 	std::vector<FileDialogEntry> sorted;
@@ -484,17 +489,26 @@ void SortFileDialogEntries(std::vector<FileDialogEntry>& entries, FileDialogSort
 }
 
 FileDialogEntrySortOrders BuildFileDialogEntrySortOrders(
-	const std::vector<FileDialogEntry>& entries) {
+	const std::vector<FileDialogEntry>& entries,
+	const std::function<bool()>& shouldContinue) {
 	FileDialogEntrySortOrders orders;
+	const auto continueWork = [&shouldContinue] {
+		return !shouldContinue || shouldContinue();
+	};
+	if (!continueWork()) return orders;
 	orders.name.resize(entries.size());
 	orders.modificationDate.resize(entries.size());
-	std::iota(orders.name.begin(), orders.name.end(), 0);
-	std::iota(orders.modificationDate.begin(), orders.modificationDate.end(), 0);
 	std::vector<std::string> foldedNames;
 	std::vector<std::string> fullPaths;
 	foldedNames.reserve(entries.size());
 	fullPaths.reserve(entries.size());
-	for (const FileDialogEntry& entry : entries) {
+	for (std::size_t index = 0; index < entries.size(); ++index) {
+		if ((index % kFileDialogSortPreparationBatchSize) == 0 && !continueWork()) {
+			return {};
+		}
+		const FileDialogEntry& entry = entries[index];
+		orders.name[index] = index;
+		orders.modificationDate[index] = index;
 		foldedNames.push_back(Lower(entry.path.filename().string()));
 		fullPaths.push_back(entry.path.string());
 	}
@@ -512,13 +526,43 @@ FileDialogEntrySortOrders BuildFileDialogEntrySortOrders(
 			fullPaths[leftIndex] < fullPaths[rightIndex] :
 			foldedNames[leftIndex] < foldedNames[rightIndex];
 	};
-	std::sort(orders.name.begin(), orders.name.end(), [&less](std::size_t left,
-		std::size_t right) { return less(FileDialogSortMode::Name, left, right); });
-	std::sort(orders.modificationDate.begin(), orders.modificationDate.end(),
-		[&less](std::size_t left, std::size_t right) {
-			return less(FileDialogSortMode::ModificationDate, left, right);
+	std::size_t comparisons = 0;
+	const auto cancellableLess = [&less, &continueWork, &comparisons](
+		FileDialogSortMode mode, std::size_t left, std::size_t right) {
+		if ((++comparisons % kFileDialogSortCancellationBatchSize) == 0 &&
+			!continueWork()) throw FileDialogSortCancelled{};
+		return less(mode, left, right);
+	};
+	try {
+		std::sort(orders.name.begin(), orders.name.end(), [&cancellableLess](
+			std::size_t left, std::size_t right) {
+			return cancellableLess(FileDialogSortMode::Name, left, right);
 		});
+		std::sort(orders.modificationDate.begin(), orders.modificationDate.end(),
+			[&cancellableLess](std::size_t left, std::size_t right) {
+				return cancellableLess(FileDialogSortMode::ModificationDate, left, right);
+			});
+	} catch (const FileDialogSortCancelled&) {
+		return {};
+	}
+	if (!continueWork()) return {};
+	orders.completed = true;
 	return orders;
+}
+
+const std::string& FileDialogListingLoadingMessage() {
+	static const std::string message = "Reading contents…";
+	return message;
+}
+
+void UpdateFileDialogListingMessage(std::string& message,
+	const std::string& listingMessage) {
+	if (message == FileDialogListingLoadingMessage()) message = listingMessage;
+}
+
+bool FileDialogShouldClearSelectionAfterListing(bool saveDialog,
+	bool includeNonImageFiles, bool activationPending) {
+	return saveDialog || (includeNonImageFiles && !activationPending);
 }
 
 bool EraseLastUtf8CodePoint(std::string& text) {
@@ -673,6 +717,7 @@ void FileDialogModel::SetEntriesInOrder(std::vector<FileDialogEntry> entries, bo
 	sortOrders_.name.resize(allEntries_.size());
 	std::iota(sortOrders_.name.begin(), sortOrders_.name.end(), 0);
 	sortOrders_.modificationDate = sortOrders_.name;
+	sortOrders_.completed = true;
 	matchFullPath_ = matchFullPath;
 	RebuildPathIndex();
 	ApplyFilter();
@@ -690,7 +735,8 @@ void FileDialogModel::SetEntriesWithPreparedOrder(std::vector<FileDialogEntry> e
 		}
 		return true;
 	};
-	if (!isPermutation(orders.name) || !isPermutation(orders.modificationDate)) {
+	if (!orders.completed || !isPermutation(orders.name) ||
+		!isPermutation(orders.modificationDate)) {
 		orders = BuildFileDialogEntrySortOrders(entries);
 	}
 	allEntries_ = std::move(entries);
@@ -881,9 +927,12 @@ struct FileDialogDirectoryLoader::Impl {
 		: enumerator(std::move(customEnumerator)) {}
 
 	~Impl() {
-		stopping.store(true);
-		currentGeneration.fetch_add(1);
-		condition.notify_one();
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			stopping.store(true);
+			currentGeneration.fetch_add(1);
+		}
+		condition.notify_all();
 		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
@@ -942,8 +991,46 @@ struct FileDialogDirectoryLoader::Impl {
 				result.generation = task.generation;
 				result.policy = task.policy;
 				try {
-					result.sortOrders = BuildFileDialogEntrySortOrders(result.entries);
+					SourceWorkCoordinator& coordinator = SourceWorkCoordinator::Global();
+					for (;;) {
+						bool interruptedForForeground = false;
+						WorkContext sortContext;
+						sortContext.sourcePriority = SourceWorkPriority::Metadata;
+						sortContext.shouldContinue = [this, &coordinator,
+							&interruptedForForeground, generation = task.generation] {
+							if (!IsCurrent(generation)) return false;
+							if (coordinator.Snapshot().foregroundPending) {
+								interruptedForForeground = true;
+								return false;
+							}
+							return true;
+						};
+						{
+							CpuWorkLease cpu = coordinator.AcquireCpu(sortContext);
+							if (cpu && sortContext.Continue()) {
+								result.sortOrders = BuildFileDialogEntrySortOrders(result.entries,
+									sortContext.shouldContinue);
+							}
+						}
+						if (result.sortOrders.completed || !IsCurrent(task.generation)) break;
+						if (!interruptedForForeground) {
+							result.error = "sort failed";
+							break;
+						}
+						(void)coordinator.WaitForSnapshot(
+							[this, generation = task.generation](
+								const SourceWorkSnapshot& snapshot) {
+								return !IsCurrent(generation) || !snapshot.foregroundPending;
+							}, std::chrono::hours(24));
+						if (!IsCurrent(task.generation)) break;
+					}
+					if (!IsCurrent(task.generation)) continue;
+					if (!result.sortOrders.completed) {
+						result.entries.clear();
+						result.sortOrders = {};
+					}
 				} catch (...) {
+					if (!IsCurrent(task.generation)) continue;
 					result.entries.clear();
 					result.sortOrders = {};
 					result.error = "sort failed";

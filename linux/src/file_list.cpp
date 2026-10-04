@@ -1414,6 +1414,7 @@ bool FileList::ApplyPreparedSort(FileListPreparedSort& prepared) {
 	}
 	if (currentIndex_ >= entries_.size()) currentIndex_ = entries_.empty() ? 0 : entries_.size() - 1;
 	UpdateMarkedIndex();
+	++mutationRevision_;
 	return true;
 }
 
