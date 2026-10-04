@@ -300,8 +300,11 @@ void SDL_StopTextInput();
 void SDL_free(void* memory);
 SDL_Surface* SDL_CreateRGBSurfaceFrom(void* pixels, int width, int height, int depth,
 	int pitch, Uint32 redMask, Uint32 greenMask, Uint32 blueMask, Uint32 alphaMask);
+SDL_Surface* SDL_CreateRGBSurfaceWithFormat(Uint32 flags, int width, int height,
+	int depth, Uint32 format);
 void SDL_FreeSurface(SDL_Surface* surface);
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, int index, Uint32 flags);
+SDL_Renderer* SDL_CreateSoftwareRenderer(SDL_Surface* surface);
 int SDL_GetRendererInfo(SDL_Renderer* renderer, SDL_RendererInfo* info);
 int SDL_SetHint(const char* name, const char* value);
 void SDL_DestroyRenderer(SDL_Renderer* renderer);

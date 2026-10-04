@@ -926,11 +926,16 @@ struct FileDialogDirectoryLoader::Impl {
 	explicit Impl(FileDialogDirectoryLoader::Enumerator customEnumerator)
 		: enumerator(std::move(customEnumerator)) {}
 
-	~Impl() {
+	~Impl() { Shutdown(); }
+
+	void Shutdown() {
 		{
 			std::lock_guard<std::mutex> lock(mutex);
-			stopping.store(true);
-			currentGeneration.fetch_add(1);
+			if (!stopping.exchange(true)) {
+				currentGeneration.fetch_add(1);
+				pending.clear();
+				ready.clear();
+			}
 		}
 		condition.notify_all();
 		SourceWorkCoordinator::Global().NotifyWaiters();
@@ -1072,9 +1077,10 @@ FileDialogDirectoryLoader::~FileDialogDirectoryLoader() = default;
 
 void FileDialogDirectoryLoader::Request(const std::filesystem::path& directory,
 	std::uint64_t generation, FileDialogListingPolicy policy) {
-	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return;
+		impl_->currentGeneration.store(generation);
 		impl_->pending.clear();
 		impl_->ready.clear();
 		impl_->StartWorkerLocked();
@@ -1085,9 +1091,10 @@ void FileDialogDirectoryLoader::Request(const std::filesystem::path& directory,
 }
 
 void FileDialogDirectoryLoader::Clear(std::uint64_t generation) {
-	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return;
+		impl_->currentGeneration.store(generation);
 		impl_->pending.clear();
 		impl_->ready.clear();
 	}
@@ -1101,6 +1108,10 @@ std::vector<FileDialogDirectoryResult> FileDialogDirectoryLoader::TakeReady() {
 	return results;
 }
 
+void FileDialogDirectoryLoader::Shutdown() {
+	impl_->Shutdown();
+}
+
 struct ArchiveDirectoryLoader::Impl {
 	struct Task {
 		std::filesystem::path directory;
@@ -1111,10 +1122,21 @@ struct ArchiveDirectoryLoader::Impl {
 
 	Impl() = default;
 
-	~Impl() {
-		stopping.store(true);
-		currentGeneration.fetch_add(1);
-		condition.notify_one();
+	~Impl() { Shutdown(); }
+
+	void Shutdown() {
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (!stopping.exchange(true)) {
+				currentGeneration.fetch_add(1);
+				for (Task& task : pending) {
+					std::fill(task.password.begin(), task.password.end(), '\0');
+				}
+				pending.clear();
+				ready.clear();
+			}
+		}
+		condition.notify_all();
 		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
@@ -1229,9 +1251,10 @@ ArchiveDirectoryLoader::~ArchiveDirectoryLoader() = default;
 
 void ArchiveDirectoryLoader::Request(const std::filesystem::path& directory,
 	std::uint64_t generation) {
-	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return;
+		impl_->currentGeneration.store(generation);
 		impl_->pending.clear();
 		impl_->ready.clear();
 		impl_->StartWorkerLocked();
@@ -1243,9 +1266,10 @@ void ArchiveDirectoryLoader::Request(const std::filesystem::path& directory,
 
 void ArchiveDirectoryLoader::RequestPasswordValidation(const std::filesystem::path& archive,
 	const std::string& password, std::uint64_t generation) {
-	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return;
+		impl_->currentGeneration.store(generation);
 		impl_->pending.clear();
 		impl_->ready.clear();
 		impl_->StartWorkerLocked();
@@ -1256,9 +1280,10 @@ void ArchiveDirectoryLoader::RequestPasswordValidation(const std::filesystem::pa
 }
 
 void ArchiveDirectoryLoader::Clear(std::uint64_t generation) {
-	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return;
+		impl_->currentGeneration.store(generation);
 		impl_->pending.clear();
 		impl_->ready.clear();
 	}
@@ -1270,6 +1295,10 @@ std::vector<ArchiveDirectoryResult> ArchiveDirectoryLoader::TakeReady() {
 	std::vector<ArchiveDirectoryResult> results;
 	results.swap(impl_->ready);
 	return results;
+}
+
+void ArchiveDirectoryLoader::Shutdown() {
+	impl_->Shutdown();
 }
 
 struct FileDialogFileSizeLoader::Impl {
@@ -1287,10 +1316,18 @@ struct FileDialogFileSizeLoader::Impl {
 		}
 	}
 
-	~Impl() {
-		stopping.store(true);
-		currentGeneration.fetch_add(1);
-		condition.notify_one();
+	~Impl() { Shutdown(); }
+
+	void Shutdown() {
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (!stopping.exchange(true)) {
+				currentGeneration.fetch_add(1);
+				pending.reset();
+				ready.clear();
+			}
+		}
+		condition.notify_all();
 		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
@@ -1415,9 +1452,10 @@ void FileDialogFileSizeLoader::Request(
 
 void FileDialogFileSizeLoader::RequestSources(
 	const std::vector<SourceDescriptor>& sources, std::uint64_t generation) {
-	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return;
+		impl_->currentGeneration.store(generation);
 		impl_->pending.reset();
 		impl_->ready.clear();
 		if (!sources.empty()) {
@@ -1430,9 +1468,10 @@ void FileDialogFileSizeLoader::RequestSources(
 }
 
 void FileDialogFileSizeLoader::Clear(std::uint64_t generation) {
-	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return;
+		impl_->currentGeneration.store(generation);
 		impl_->pending.reset();
 		impl_->ready.clear();
 	}
@@ -1457,6 +1496,10 @@ std::vector<FileDialogFileSizeResult> FileDialogFileSizeLoader::TakeReady(
 	return results;
 }
 
+void FileDialogFileSizeLoader::Shutdown() {
+	impl_->Shutdown();
+}
+
 struct DirectorySummaryLoader::Impl {
 	struct Task {
 		std::filesystem::path directory;
@@ -1465,10 +1508,18 @@ struct DirectorySummaryLoader::Impl {
 
 	Impl() = default;
 
-	~Impl() {
-		stopping.store(true);
-		currentGeneration.fetch_add(1);
-		condition.notify_one();
+	~Impl() { Shutdown(); }
+
+	void Shutdown() {
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (!stopping.exchange(true)) {
+				currentGeneration.fetch_add(1);
+				pending.clear();
+				ready.clear();
+			}
+		}
+		condition.notify_all();
 		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
@@ -1574,9 +1625,10 @@ DirectorySummaryLoader::~DirectorySummaryLoader() = default;
 
 void DirectorySummaryLoader::Request(
 	const std::vector<std::filesystem::path>& directories, std::uint64_t generation) {
-	impl_->currentGeneration.store(generation);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return;
+		impl_->currentGeneration.store(generation);
 		impl_->pending.clear();
 		impl_->ready.clear();
 		if (!directories.empty()) {
@@ -1588,6 +1640,10 @@ void DirectorySummaryLoader::Request(
 	}
 	SourceWorkCoordinator::Global().NotifyWaiters();
 	if (!directories.empty()) impl_->condition.notify_one();
+}
+
+void DirectorySummaryLoader::Shutdown() {
+	impl_->Shutdown();
 }
 
 bool DirectorySummaryLoader::IsYieldingForForeground() const {
@@ -1752,22 +1808,26 @@ struct FileDialogPreviewLoader::Impl {
 		}
 	}
 
-	~Impl() {
+	~Impl() { Shutdown(); }
+
+	void Shutdown() {
 		{
 			std::lock_guard<std::mutex> lock(mutex);
-			stopping.store(true);
-			if (pending) {
-				RecordPreviewCancellation(pending->generation,
-					PreviewCancellationReason::PendingShutdown, PerfExecution::EventThread);
-				pending.reset();
+			if (!stopping.exchange(true)) {
+				generation.fetch_add(1);
+				if (pending) {
+					RecordPreviewCancellation(pending->generation,
+						PreviewCancellationReason::PendingShutdown, PerfExecution::EventThread);
+					pending.reset();
+				}
+				for (const FileDialogPreviewResult& result : ready) {
+					RecordPreviewCancellation(result.generation,
+						PreviewCancellationReason::ReadyShutdown, PerfExecution::EventThread);
+				}
+				ready.clear();
 			}
-			for (const FileDialogPreviewResult& result : ready) {
-				RecordPreviewCancellation(result.generation,
-					PreviewCancellationReason::ReadyShutdown, PerfExecution::EventThread);
-			}
-			ready.clear();
 		}
-		condition.notify_one();
+		condition.notify_all();
 		SourceWorkCoordinator::Global().NotifyWaiters();
 		if (worker.joinable()) worker.join();
 	}
@@ -1931,9 +1991,11 @@ FileDialogPreviewLoader::~FileDialogPreviewLoader() = default;
 std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path,
 	bool directory, FileDialogSortMode mode, int maximumWidth, int maximumHeight,
 	SourceDescriptor source) {
-	const std::uint64_t requestedGeneration = impl_->generation.fetch_add(1) + 1;
+	std::uint64_t requestedGeneration = 0;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping.load()) return impl_->generation.load();
+		requestedGeneration = impl_->generation.fetch_add(1) + 1;
 		if (impl_->pending) {
 			RecordPreviewCancellation(impl_->pending->generation,
 				PreviewCancellationReason::PendingReplaced, PerfExecution::EventThread);
@@ -1957,6 +2019,10 @@ std::uint64_t FileDialogPreviewLoader::Request(const std::filesystem::path& path
 
 void FileDialogPreviewLoader::Clear() {
 	(void)Request({}, false, FileDialogSortMode::Name, 0, 0);
+}
+
+void FileDialogPreviewLoader::Shutdown() {
+	impl_->Shutdown();
 }
 
 std::vector<FileDialogPreviewResult> FileDialogPreviewLoader::TakeReady() {

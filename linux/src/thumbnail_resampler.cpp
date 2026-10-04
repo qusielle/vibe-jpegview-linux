@@ -330,14 +330,19 @@ struct ThumbnailPreparationWorker::Impl {
 		if (!processor) processor = PrepareThumbnail;
 	}
 
-	~Impl() {
+	~Impl() { Shutdown(); }
+
+	void Shutdown() {
 		{
 			std::lock_guard<std::mutex> lock(mutex);
-			stopping = true;
-			++generation;
-			if (activeCancellation) activeCancellation->store(true);
+			if (!stopping) {
+				stopping = true;
+				++generation;
+				if (activeCancellation) activeCancellation->store(true);
+			}
 		}
-		workAvailable.notify_one();
+		workAvailable.notify_all();
+		idle.notify_all();
 		if (worker.joinable()) worker.join();
 		bool externallyOwnedRetirement = false;
 		{
@@ -856,6 +861,10 @@ void ThumbnailPreparationWorker::Clear() {
 		impl_->QueueRetirement(std::move(completion.result.image));
 	}
 	impl_->workAvailable.notify_all();
+}
+
+void ThumbnailPreparationWorker::Shutdown() {
+	impl_->Shutdown();
 }
 
 bool ThumbnailPreparationWorker::HasPendingWork() const {

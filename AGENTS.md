@@ -73,6 +73,11 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   `main.cpp` and should be covered by `linux/tests/test_core.cpp`.
 - SDL renderer resources are main-thread objects. Create, upload, render, and destroy SDL textures on
   the renderer thread.
+- When extracting renderer responsibilities, move texture creation, upload, destruction, and the
+  final teardown drain behind the same explicit owner. Keep cache policy and non-owning lookup keys
+  with their current cache owners; a thin wrapper around scattered SDL calls is not an ownership
+  boundary. Stop/join workers and retire cache references before draining textures, then destroy the
+  renderer/window pair and quit SDL.
 - Keep drawing read-only over prepared presentation state. Render methods must not probe sources,
   materialize or process pixels, schedule cache/worker work, apply completions, change readiness or
   controller state, or update display/thumbnail cache recency. Put those effects in the event/update

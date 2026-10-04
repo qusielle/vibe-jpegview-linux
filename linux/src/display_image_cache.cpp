@@ -757,9 +757,12 @@ struct DisplayImageCache::Impl {
 		retirementWorker = std::thread([state = retirementState] { Retire(state); });
 	}
 
-	~Impl() {
+	~Impl() { Shutdown(); }
+
+	void Shutdown() {
 		{
 			std::lock_guard<std::mutex> lock(mutex);
+			if (stopping) return;
 			stopping = true;
 			++generation;
 			++epoch;
@@ -783,6 +786,7 @@ struct DisplayImageCache::Impl {
 			while (!entries.empty()) Erase(entries.begin());
 		}
 		workAvailable.notify_all();
+		idle.notify_all();
 		for (std::thread& worker : workers) {
 			if (worker.joinable()) worker.join();
 		}
@@ -1457,6 +1461,7 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	bool wakeWorkers = false;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
 		const bool startableBefore = impl_->HasStartableWork();
 		const std::size_t reservedImagesBefore = impl_->speculativeReservedImages;
 		const std::size_t reservedBytesBefore = impl_->speculativeReservedBytes;
@@ -1579,6 +1584,7 @@ void DisplayImageCache::RequestBackgroundBatch(
 	bool wakeWorkers = false;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
 		const bool startableBefore = impl_->HasStartableWork();
 		const std::size_t reservedImagesBefore = impl_->speculativeReservedImages;
 		const std::size_t reservedBytesBefore = impl_->speculativeReservedBytes;
@@ -1797,6 +1803,7 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 		});
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
 		const auto previouslyDesiredKeys = impl_->desiredPrefetchKeys;
 		const auto previouslyDesiredPriorities = impl_->desiredPrefetchPriorities;
 		++impl_->generation;
@@ -2154,6 +2161,10 @@ void DisplayImageCache::Clear() {
 	while (!impl_->entries.empty()) impl_->Erase(impl_->entries.begin());
 	impl_->idle.notify_all();
 	impl_->workAvailable.notify_all();
+}
+
+void DisplayImageCache::Shutdown() {
+	impl_->Shutdown();
 }
 
 std::size_t DisplayImageCache::CachedBytes() const {

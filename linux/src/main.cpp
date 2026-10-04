@@ -58,6 +58,14 @@
 #include "desktop_association.h"
 #include "perf_diagnostics.h"
 #include "event_loop_model.h"
+#include "modal_event_router.h"
+#include "renderer_thread_resource.h"
+#include "text_renderer.h"
+#include "chrome_renderer.h"
+#include "context_menu_renderer.h"
+#include "file_dialog_renderer.h"
+#include "editing_dialog_renderer.h"
+#include "renderer_texture_owner.h"
 #include "image_spectrum_worker.h"
 #include "image_document.h"
 #include "image_operation_worker.h"
@@ -109,7 +117,6 @@ constexpr int kDefaultHeight = 800;
 constexpr int kUiTextScale = 1;
 constexpr const char* kRenderScaleQualityHint = "SDL_RENDER_SCALE_QUALITY";
 constexpr const char* kImageTextureScaleQuality = "2";
-constexpr const char* kBitmapTextScaleQuality = "0";
 constexpr int kContextMenuSeparatorHeight = 7;
 constexpr int kContextMenuVerticalPadding = 3;
 constexpr int kContextMenuWindowInset = 4;
@@ -294,7 +301,8 @@ bool HasExecutable(const std::string& executable) {
 	return jpegview_linux::ExternalCommandAvailable(executable);
 }
 
-class Viewer {
+class Viewer : private jpegview_linux::RendererWindowResources<SDL_Window, SDL_Renderer,
+	SDL_DestroyWindow, SDL_DestroyRenderer> {
 public:
 	Viewer(std::vector<std::string> inputs, double slideshowSeconds, bool startFullscreen)
 		: startupInputs_(std::move(inputs)), initialSlideshowSeconds_(slideshowSeconds),
@@ -323,7 +331,7 @@ public:
 		// initial state.  Showing it first makes a restored maximized window
 		// visibly appear in its normal size before it is maximized.
 		Uint32 windowFlags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
-		if (maximized_ && !startFullscreen_) windowFlags |= SDL_WINDOW_MAXIMIZED;
+		if (runtimeSettings_.Values().maximized && !startFullscreen_) windowFlags |= SDL_WINDOW_MAXIMIZED;
 		window_ = SDL_CreateWindow("JPEGView — Loading", 0x2FFF0000, 0x2FFF0000,
 			kDefaultWidth, kDefaultHeight, windowFlags);
 		if (window_ == nullptr) {
@@ -351,12 +359,18 @@ public:
 			renderer_ = SDL_CreateRenderer(window_, -1, 0);
 			if (renderer_ == nullptr) {
 				std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << '\n';
-				SDL_DestroyWindow(window_);
+				window_.Reset();
 				jpegview_linux::UiCompletionWakeup().SetPostFunction({});
 				SDL_Quit();
 				return 1;
 			}
 		}
+		textRenderer_.SetRenderer(renderer_);
+		textRenderer_.SetFont(UiFont());
+		chromeRenderer_.SetRenderer(renderer_);
+		fileDialogRenderer_.SetRenderer(renderer_);
+		editingDialogRenderer_.SetRenderer(renderer_);
+		imageTextureOwner_.SetRenderer(renderer_);
 		jpegview_linux::PerfDiagnostics& diagnostics =
 			jpegview_linux::PerfDiagnostics::Instance();
 		if (diagnostics.Enabled()) {
@@ -383,7 +397,7 @@ public:
 		if (startFullscreen_) {
 			fullscreen_ = true;
 			SDL_SetWindowFullscreen(window_, SDL_WINDOW_FULLSCREEN_DESKTOP);
-		} else if (maximized_) {
+		} else if (runtimeSettings_.Values().maximized) {
 			// The creation flag handles backends that can apply the state before
 			// mapping; this call covers backends that require an explicit request.
 			SDL_MaximizeWindow(window_);
@@ -561,13 +575,7 @@ private:
 		fs::path directory;
 	};
 
-	struct ContextMenuColumn {
-		std::size_t begin = 0;
-		std::size_t end = 0;
-		int x = 0;
-		int width = 260;
-		int height = 0;
-	};
+	using ContextMenuColumn = jpegview_linux::ContextMenuColumnLayout;
 
 	struct PresentedFrame {
 		std::size_t selectedIndex = 0;
@@ -729,15 +737,6 @@ private:
 		Failed,
 	};
 
-	struct TextTextureCacheEntry {
-		SDL_Texture* texture = nullptr;
-		int width = 0;
-		int height = 0;
-		int offsetX = 0;
-		int offsetY = 0;
-		std::uint64_t lastUsed = 0;
-	};
-
 	enum class FileDialogDragMode {
 		None,
 		Resize,
@@ -766,6 +765,11 @@ private:
 		jpegview_linux::UiCompletionWakeup().SetPostFunction({});
 		fileOperationService_.Stop();
 		imageSpectrumWorker_.Stop();
+		fileDialogPreviewLoader_.Shutdown();
+		fileDialogDirectoryLoader_.Shutdown();
+		fileDialogArchiveLoader_.Shutdown();
+		fileDialogFileSizeLoader_.Shutdown();
+		fileDialogSummaryLoader_.Shutdown();
 		CancelPendingImageOperation();
 		jpegview_linux::RetiredImageBuffers retiredDocument = imageDocument_.ClearPixels();
 		retiredDocument.decoded = std::move(currentDecoded_);
@@ -774,6 +778,7 @@ private:
 		DeactivateDisplayPrefetchBatch();
 		displayPreparationController_.Shutdown();
 		exifMetadataWorker_.Stop();
+		thumbnailPreparation_.Clear();
 		{
 			std::lock_guard<std::mutex> lock(currentJpegDimensionsMailbox_->mutex);
 			currentJpegDimensionsMailbox_->active = false;
@@ -781,7 +786,8 @@ private:
 		}
 		selectedSourceDecodeChannel_->Shutdown();
 		CancelPendingCurrentJpegDimensions();
-		fileListScanWorker_.Clear();
+		fileListScanWorker_.Stop();
+		fileListSortWorker_.Clear();
 		std::error_code temporaryCleanupError;
 		if (!clipboardTempFile_.empty()) fs::remove(clipboardTempFile_, temporaryCleanupError);
 		if (!clipboardTempDirectory_.empty()) {
@@ -811,6 +817,9 @@ private:
 				std::cerr << "Could not save recent-file history to " << recentFilesPath_ << '\n';
 			}
 		}
+		fileListSortWorker_.Retire(
+			std::make_shared<jpegview_linux::FileList>(std::move(fileList_)));
+		fileListSortWorker_.Stop();
 		ClearFileDialogPreview();
 		if (clipboardMode_) {
 			std::error_code removeError;
@@ -824,17 +833,23 @@ private:
 		ClearDisplayTexture();
 		ClearTransition();
 		ClearDisplayTextureCache();
+		displayImageCache_.Shutdown();
+		imageCache_.Clear();
+		imageCache_.Shutdown();
 		ClearThumbnailCache();
+		thumbnailPreparation_.Shutdown();
 		ClearTextTextureCache();
 		DrainRetiredDisplayTextures();
-		if (renderer_ != nullptr) {
-			SDL_DestroyRenderer(renderer_);
-			renderer_ = nullptr;
+		const std::size_t orphanedImageTextures = imageTextureOwner_.DestroyAll();
+		if (orphanedImageTextures != 0) {
+			std::cerr << "RendererTextureOwner reclaimed " << orphanedImageTextures
+				<< " unreferenced image textures during shutdown\n";
 		}
-		if (window_ != nullptr) {
-			SDL_DestroyWindow(window_);
-			window_ = nullptr;
-		}
+		imageTextureOwner_.SetRenderer(nullptr);
+		chromeRenderer_.SetRenderer(nullptr);
+		fileDialogRenderer_.SetRenderer(nullptr);
+		editingDialogRenderer_.SetRenderer(nullptr);
+		textRenderer_.SetRenderer(nullptr);
 		if (thumbnailResizeCursor_ != nullptr || fileDialogResizeCursor_ != nullptr ||
 			fileDialogScrollbarCursor_ != nullptr ||
 			cropCrosshairCursor_ != nullptr || cropMoveCursor_ != nullptr ||
@@ -866,9 +881,7 @@ private:
 		freeCursor(cropVerticalCursor_);
 		freeCursor(cropDiagonalDownCursor_);
 		freeCursor(cropDiagonalUpCursor_);
-		fileListSortWorker_.Retire(
-			std::make_shared<jpegview_linux::FileList>(std::move(fileList_)));
-		fileListSortWorker_.Stop();
+		RendererWindowResources::Reset();
 		SDL_Quit();
 	}
 
@@ -876,42 +889,18 @@ private:
 		jpegview_linux::LoadImageProcessingStore(
 			jpegview_linux::ImageProcessingStorePath(), imageProcessingStore_);
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
-		if (settingsPath.empty()) return;
-
-		jpegview_linux::ViewerSettings settings;
-		if (!jpegview_linux::LoadViewerSettings(settingsPath, settings)) return;
-		copyRenamePattern_ = settings.copyRenamePattern;
-		windowTitlePattern_ = settings.windowTitlePattern;
-		transparencyPattern_ = settings.transparencyPattern;
-		defaultAutoContrastEnabled_ = settings.autoContrast;
-		defaultImageProcessing_ = settings.defaultImageProcessing;
+		if (settingsPath.empty() || !runtimeSettings_.Load(settingsPath)) return;
+		const jpegview_linux::ViewerSettings& settings = runtimeSettings_.Values();
 		autoContrastEnabled_ = settings.autoContrast;
-		keepPictureLevels_ = settings.keepPictureLevels;
-		unsharpMaskRadius_ = settings.unsharpMaskRadius;
-		unsharpMaskAmount_ = settings.unsharpMaskAmount;
-		unsharpMaskThreshold_ = settings.unsharpMaskThreshold;
 		jpegview_linux::FileList::SortMode sortMode;
 		if (jpegview_linux::ParseSortMode(settings.sortMode, sortMode)) {
 			fileList_.SetSorting(sortMode, settings.sortAscending);
 		}
 		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
 
-		maximized_ = settings.maximized;
-		navigationPanelEnabled_ = settings.navigationPanelEnabled;
-		navigationPanelAutoReveal_ = settings.navigationPanelAutoReveal;
-		thumbnailPanelVisible_ = settings.thumbnailPanelVisible;
-		showZoomNavigator_ = settings.showZoomNavigator;
-		doublePageModeDefault_ = settings.doublePageModeEnabled;
-		mangaReadingOrderDefault_ = settings.mangaReadingOrderEnabled;
-		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
-		spacebarNavigatesImages_ = settings.spacebarNavigatesImages;
 		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
-		doublePageModeEnabled_ = doublePageModeDefault_;
-		mangaReadingOrderEnabled_ = mangaReadingOrderDefault_;
-		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
-		fileDialogWidth_ = settings.fileDialogWidth;
-		fileDialogHeight_ = settings.fileDialogHeight;
-		fileDialogPreviewRatio_ = settings.fileDialogPreviewRatio;
+		doublePageModeEnabled_ = settings.doublePageModeEnabled;
+		mangaReadingOrderEnabled_ = settings.mangaReadingOrderEnabled;
 		const SDL_Rect magnifyingGlassArea = ImageAreaRect();
 		magnifyingGlass_.SetParameters(settings.magnifyingGlassWidth,
 			settings.magnifyingGlassHeight, settings.magnifyingGlassZoomLevel,
@@ -919,68 +908,31 @@ private:
 		cropSelection_.SetFixedSize(settings.fixedCropWidth, settings.fixedCropHeight,
 			settings.fixedCropScreenPixels);
 		cropSelection_.SetMode(jpegview_linux::CropSelectionMode::Free);
-		cropUserAspectWidth_ = settings.userCropAspectWidth;
-		cropUserAspectHeight_ = settings.userCropAspectHeight;
-		selectionModeEnabled_ = settings.selectionModeEnabled;
-		infoVisible_ = settings.infoVisible;
-		showHistogram_ = settings.showHistogram;
-		showFileName_ = settings.showFilename;
-		autoContrastEnabled_ = settings.autoContrast;
-		cacheSizeMiB_ = settings.cacheSizeMiB;
-		cacheBudget_->SetCapacity(jpegview_linux::CacheBytesFromMiB(cacheSizeMiB_));
+		cacheBudget_->SetCapacity(jpegview_linux::CacheBytesFromMiB(runtimeSettings_.Values().cacheSizeMiB));
 		viewport_.LoadScaleMode(settings.scaleMode, settings.manualZoomSet, settings.manualZoom);
 	}
 
 	jpegview_linux::ViewerSettings CurrentViewerSettings() const {
-		jpegview_linux::ViewerSettings settings;
+		jpegview_linux::ViewerSettings settings = runtimeSettings_.Values();
 		settings.scaleMode = viewport_.NavigationScaleMode();
 		settings.sortMode = jpegview_linux::SortModeSettingName(fileList_.GetSorting());
 		settings.sortAscending = fileList_.IsSortedAscending();
 		settings.manualZoom = viewport_.NavigationZoom();
-		settings.maximized = maximized_;
-		settings.navigationPanelEnabled = navigationPanelEnabled_;
-		settings.navigationPanelAutoReveal = navigationPanelAutoReveal_;
-		settings.thumbnailPanelVisible = thumbnailPanelVisible_;
-		settings.showZoomNavigator = showZoomNavigator_;
-		settings.doublePageModeEnabled = doublePageModeDefault_;
-		settings.mangaReadingOrderEnabled = mangaReadingOrderDefault_;
-		settings.mangaModeInvertsLeftRight = mangaModeInvertsLeftRight_;
-		settings.spacebarNavigatesImages = spacebarNavigatesImages_;
 		settings.folderWrapAround = fileList_.WrapAroundFolder();
 		settings.fitRelativeZoomMode = viewport_.FitRelativeZoomMode();
-		settings.transparencyPattern = transparencyPattern_;
-		settings.thumbnailPanelWidth = thumbnailPanelWidth_;
-		settings.fileDialogWidth = fileDialogWidth_;
-		settings.fileDialogHeight = fileDialogHeight_;
-		settings.fileDialogPreviewRatio = fileDialogPreviewRatio_;
 		settings.magnifyingGlassWidth = magnifyingGlass_.Width();
 		settings.magnifyingGlassHeight = magnifyingGlass_.Height();
 		settings.magnifyingGlassZoomLevel = magnifyingGlass_.ZoomLevel();
 		settings.fixedCropWidth = cropSelection_.FixedWidth();
 		settings.fixedCropHeight = cropSelection_.FixedHeight();
 		settings.fixedCropScreenPixels = cropSelection_.FixedSizeUsesScreenPixels();
-		settings.userCropAspectWidth = cropUserAspectWidth_;
-		settings.userCropAspectHeight = cropUserAspectHeight_;
-		settings.selectionModeEnabled = selectionModeEnabled_;
-		settings.infoVisible = infoVisible_;
-		settings.showHistogram = showHistogram_;
-		settings.showFilename = showFileName_;
-		settings.autoContrast = defaultAutoContrastEnabled_;
-		settings.defaultImageProcessing = defaultImageProcessing_;
-		settings.keepPictureLevels = keepPictureLevels_;
-		settings.unsharpMaskRadius = unsharpMaskRadius_;
-		settings.unsharpMaskAmount = unsharpMaskAmount_;
-		settings.unsharpMaskThreshold = unsharpMaskThreshold_;
-		settings.cacheSizeMiB = cacheSizeMiB_;
-		settings.copyRenamePattern = copyRenamePattern_;
-		settings.windowTitlePattern = windowTitlePattern_;
 		return settings;
 	}
 
-	bool SaveSettings() const {
+	bool SaveSettings() {
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
 		if (settingsPath.empty()) return false;
-		return jpegview_linux::SaveViewerSettings(settingsPath, CurrentViewerSettings());
+		return runtimeSettings_.SaveAndAdopt(settingsPath, CurrentViewerSettings());
 	}
 
 	jpegview_linux::SourceDescriptor SourceDescriptorForPath(const fs::path& filename) const {
@@ -1410,7 +1362,7 @@ private:
 			metadata_ = std::move(result.metadata);
 			jpegComment_ = std::move(result.jpegComment);
 			++imageInfoMetadataRevision_;
-			if (infoVisible_) {
+			if (runtimeSettings_.Values().infoVisible) {
 				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
 			}
 			const jpegview_linux::ExifDateActionCompletion deferredAction =
@@ -1645,11 +1597,11 @@ private:
 		const jpegview_linux::ImageProcessingPreset filePreset =
 			jpegview_linux::ResolveImageProcessingForFile(currentPreset,
 				savedProcessing == imageProcessingStore_.end() ? nullptr : &savedProcessing->second,
-				keepPictureLevels_, defaultAutoContrastEnabled_, defaultImageProcessing_);
+				runtimeSettings_.Values().keepPictureLevels, runtimeSettings_.Values().autoContrast, runtimeSettings_.Values().defaultImageProcessing);
 		jpegview_linux::ImageProcessingParams processing = filePreset.processing;
-		processing.unsharpRadius = unsharpMaskRadius_;
+		processing.unsharpRadius = runtimeSettings_.Values().unsharpMaskRadius;
 		processing.unsharpAmount = 0.0;
-		processing.unsharpThreshold = unsharpMaskThreshold_;
+		processing.unsharpThreshold = runtimeSettings_.Values().unsharpMaskThreshold;
 		return DoublePagePartnerSpec{filename, targetWidth, targetHeight,
 			filePreset.autoContrast, processing, spread.clockwiseQuarterTurns};
 	}
@@ -2039,13 +1991,13 @@ private:
 		const jpegview_linux::ImageProcessingPreset selected =
 			jpegview_linux::ResolveImageProcessingForLoad(current,
 				saved == imageProcessingStore_.end() ? nullptr : &saved->second,
-				keepPictureLevels_, defaultAutoContrastEnabled_, defaultImageProcessing_,
+				runtimeSettings_.Values().keepPictureLevels, runtimeSettings_.Values().autoContrast, runtimeSettings_.Values().defaultImageProcessing,
 				continuingPendingLoad);
 		imageProcessing_ = selected.processing;
 		autoContrastEnabled_ = selected.autoContrast;
-		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
+		imageProcessing_.unsharpRadius = runtimeSettings_.Values().unsharpMaskRadius;
 		imageProcessing_.unsharpAmount = 0.0;
-		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
+		imageProcessing_.unsharpThreshold = runtimeSettings_.Values().unsharpMaskThreshold;
 		imageSession_.UpdateProcessing({imageProcessing_, autoContrastEnabled_});
 	}
 
@@ -2077,9 +2029,9 @@ private:
 				loadStatePolicy == ImageLoadStatePolicy::RestoreRecent ?
 					recentFiles_.FindDoublePageMode(targetPath) : std::nullopt;
 			doublePageModeEnabled_ = savedModes.has_value() ? savedModes->enabled :
-				doublePageModeDefault_;
+				runtimeSettings_.Values().doublePageModeEnabled;
 			mangaReadingOrderEnabled_ = savedModes.has_value() ? savedModes->mangaReadingOrder :
-				mangaReadingOrderDefault_;
+				runtimeSettings_.Values().mangaReadingOrderEnabled;
 		}
 		const std::size_t currentIndex = fileList_.CurrentIndex();
 		CancelPendingDoublePageRequests();
@@ -2263,7 +2215,7 @@ private:
 
 	std::vector<std::size_t> VisibleThumbnailIndices() const {
 		std::vector<std::size_t> indices;
-		if (!thumbnailPanelVisible_ || fileList_.Empty()) return indices;
+		if (!runtimeSettings_.Values().thumbnailPanelVisible || fileList_.Empty()) return indices;
 		const SDL_Rect panel = ThumbnailPanelRect();
 		const int rowHeight = std::max(1, jpegview_linux::ThumbnailRowHeight(
 			panel.w, kThumbnailVerticalMargin));
@@ -2629,7 +2581,7 @@ private:
 			const std::size_t maximum = std::numeric_limits<std::size_t>::max();
 			if (width <= maximum / height && width * height <= maximum / 4) {
 				std::size_t currentSourceBytes = width * height * 4;
-				if (showHistogram_ && infoVisible_) {
+				if (runtimeSettings_.Values().showHistogram && runtimeSettings_.Values().infoVisible) {
 					const std::size_t spectrumBytes =
 						sizeof(jpegview_linux::GrayscaleSpectrum);
 					currentSourceBytes = currentSourceBytes <= maximum - spectrumBytes ?
@@ -2674,11 +2626,11 @@ private:
 			const jpegview_linux::ImageProcessingPreset filePreset =
 				jpegview_linux::ResolveImageProcessingForFile(current,
 					savedProcessing == imageProcessingStore_.end() ? nullptr : &savedProcessing->second,
-					keepPictureLevels_, defaultAutoContrastEnabled_, defaultImageProcessing_);
+					runtimeSettings_.Values().keepPictureLevels, runtimeSettings_.Values().autoContrast, runtimeSettings_.Values().defaultImageProcessing);
 			jpegview_linux::ImageProcessingParams fileProcessing = filePreset.processing;
-			fileProcessing.unsharpRadius = unsharpMaskRadius_;
+			fileProcessing.unsharpRadius = runtimeSettings_.Values().unsharpMaskRadius;
 			fileProcessing.unsharpAmount = 0.0;
-			fileProcessing.unsharpThreshold = unsharpMaskThreshold_;
+			fileProcessing.unsharpThreshold = runtimeSettings_.Values().unsharpMaskThreshold;
 			batch->processingByFilename.emplace(filename.string(), fileProcessing);
 			batch->autoContrastByFilename.emplace(filename.string(), filePreset.autoContrast);
 			plannerRequest.neighbors.push_back({filename, source, fileIndex, position + 1,
@@ -2814,42 +2766,14 @@ private:
 
 	SDL_Texture* CreateTexture(const std::vector<std::uint8_t>& bgra, int width, int height,
 		bool hasTransparency = false) {
-		if (width <= 0 || height <= 0 || bgra.size() !=
-			static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4) return nullptr;
-		// Viewer textures are uploaded once and then sampled repeatedly. Static
-		// access lets accelerated backends place them for rendering instead of
-		// maintaining the lockable staging behavior intended for frequent writes.
-		SDL_Texture* result = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC,
-			width, height);
-		if (result == nullptr) return nullptr;
-		int updateResult = 0;
-		{
-			jpegview_linux::PerfScopedTimer uploadTimer(
-				jpegview_linux::PerfDiagnostics::Instance(),
-				jpegview_linux::PerfMetric::TextureUpload, bgra.size(),
-				static_cast<std::uint64_t>(width), static_cast<std::uint64_t>(height));
-			updateResult = SDL_UpdateTexture(result, nullptr, bgra.data(), width * 4);
-		}
-		if (updateResult != 0) {
-			std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
-			DestroyTextureMeasured(result);
-			return nullptr;
-		}
-		if (SDL_SetTextureBlendMode(result,
-			hasTransparency ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE) != 0) {
-			std::cerr << "SDL_SetTextureBlendMode failed: " << SDL_GetError() << '\n';
-			DestroyTextureMeasured(result);
-			return nullptr;
-		}
-		return result;
+		return imageTextureOwner_.CreateAndUpload(bgra, width, height, hasTransparency);
 	}
 
 	void DestroyTextureMeasured(SDL_Texture* texture, std::size_t bytes = 0) {
 		if (texture == nullptr) return;
-		jpegview_linux::PerfScopedTimer destroyTimer(
-			jpegview_linux::PerfDiagnostics::Instance(),
-			jpegview_linux::PerfMetric::TextureDestroy, bytes);
-		SDL_DestroyTexture(texture);
+		if (!imageTextureOwner_.Destroy(texture, bytes)) {
+			std::cerr << "Viewer attempted to destroy a texture outside its image owner\n";
+		}
 	}
 
 	void CancelPendingImageOperation() {
@@ -3161,8 +3085,7 @@ private:
 			prepared.bgra.size() != jpegview_linux::PreparedDisplayImageBytes(prepared)) {
 			return nullptr;
 		}
-		return SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888,
-			SDL_TEXTUREACCESS_STATIC, prepared.width, prepared.height);
+		return imageTextureOwner_.CreateEmpty(prepared.width, prepared.height);
 	}
 
 	void QueueRendererTextureRetirement(SDL_Texture* texture, std::size_t bytes,
@@ -4005,7 +3928,7 @@ private:
 		const jpegview_linux::DisplayImageTarget resolution =
 			jpegview_linux::ClampDisplayImageTarget(sourceWidth, sourceHeight,
 				width, height);
-		const bool histogramRequested = showHistogram_ && infoVisible_;
+		const bool histogramRequested = runtimeSettings_.Values().showHistogram && runtimeSettings_.Values().infoVisible;
 		const std::optional<jpegview_linux::ImageSpectrumKey> histogramKey =
 			histogramRequested ? CurrentImageSpectrumKey() : std::nullopt;
 		if (histogramKey.has_value() && currentSourceSpectrumRequestKey_.has_value() &&
@@ -4367,11 +4290,11 @@ private:
 			std::nullopt;
 		if (!fileList_.Empty()) {
 			const SDL_Rect panel = ThumbnailPanelRect();
-			const int rowHeight = thumbnailPanelVisible_ ?
+			const int rowHeight = runtimeSettings_.Values().thumbnailPanelVisible ?
 				jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin) :
 				jpegview_linux::ThumbnailRowHeight(thumbnailTargetWidth_, kThumbnailVerticalMargin);
 			indices = jpegview_linux::ThumbnailTextureWindowIndices(fileList_.Size(),
-				fileList_.CurrentIndex(), panel.h, rowHeight, thumbnailPanelVisible_,
+				fileList_.CurrentIndex(), panel.h, rowHeight, runtimeSettings_.Values().thumbnailPanelVisible,
 				confirmationPin, 1);
 		}
 		std::unordered_set<jpegview_linux::SourceKey, jpegview_linux::SourceKeyHash> desiredKeys;
@@ -4418,7 +4341,7 @@ private:
 			}
 		}
 		EvictThumbnails(thumbnailScheduler_.SetSourceCurrent(fileList_.CurrentIndex()));
-		if (!thumbnailPanelVisible_ || fileList_.Empty()) {
+		if (!runtimeSettings_.Values().thumbnailPanelVisible || fileList_.Empty()) {
 			PauseThumbnailPreparation();
 			ReconcileThumbnailTextureWindow();
 			return;
@@ -4444,7 +4367,7 @@ private:
 
 	void QueuePreparedThumbnail(
 		const jpegview_linux::DisplayImageCache::ImagePtr& prepared) {
-		if (!thumbnailPanelVisible_ || autoContrastEnabled_ || !prepared ||
+		if (!runtimeSettings_.Values().thumbnailPanelVisible || autoContrastEnabled_ || !prepared ||
 			prepared->filename.empty() || prepared->bgra.empty()) return;
 		if (!jpegview_linux::CanReuseDisplayPixelsForThumbnail(
 			prepared->width, prepared->height, kMaximumThumbnailSourcePixels)) return;
@@ -4483,7 +4406,7 @@ private:
 	}
 
 	void TickThumbnailPreload(bool allowIndependentDecode) {
-		if (thumbnailPanelVisible_) {
+		if (runtimeSettings_.Values().thumbnailPanelVisible) {
 			const SDL_Rect panel = ThumbnailPanelRect();
 			const int rowHeight = jpegview_linux::ThumbnailRowHeight(
 				panel.w, kThumbnailVerticalMargin);
@@ -4495,15 +4418,15 @@ private:
 			}
 		}
 		ReconcileThumbnailTextureWindow();
-		if (!thumbnailPanelVisible_ && !confirmationOpen_) return;
+		if (!runtimeSettings_.Values().thumbnailPanelVisible && !confirmationOpen_) return;
 
 		const jpegview_linux::InteractionWorkPlan workPlan = CurrentInteractionWorkPlan();
 		const Uint32 now = SDL_GetTicks();
 		const SDL_Rect panel = ThumbnailPanelRect();
-		const int rowHeight = thumbnailPanelVisible_ ?
+		const int rowHeight = runtimeSettings_.Values().thumbnailPanelVisible ?
 			jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin) :
 			jpegview_linux::ThumbnailRowHeight(thumbnailTargetWidth_, kThumbnailVerticalMargin);
-		const int targetWidth = thumbnailPanelVisible_ ? panel.w : thumbnailTargetWidth_;
+		const int targetWidth = runtimeSettings_.Values().thumbnailPanelVisible ? panel.w : thumbnailTargetWidth_;
 		const int targetHeight = thumbnailTargetHeight_;
 		const auto resultIsCurrent = [&](const jpegview_linux::ThumbnailPreparationResult& result,
 			std::size_t* activeIndex = nullptr) {
@@ -4558,7 +4481,7 @@ private:
 			}
 		}
 
-		if (thumbnailPanelVisible_ && !thumbnailPixelStoreRetry_) {
+		if (runtimeSettings_.Values().thumbnailPanelVisible && !thumbnailPixelStoreRetry_) {
 			auto completed = thumbnailPreparation_.TakeCompleted(1,
 				workPlan.permittedWorkClasses);
 			if (!completed.empty()) {
@@ -4597,7 +4520,7 @@ private:
 			if (thumbnailTextureCache_.find(key) != thumbnailTextureCache_.end()) continue;
 			const auto prepared = thumbnailPixelRepository_.Find(key);
 			if (!prepared) continue;
-			const bool visible = thumbnailPanelVisible_ &&
+			const bool visible = runtimeSettings_.Values().thumbnailPanelVisible &&
 				jpegview_linux::ThumbnailIndexVisible(fileList_.Size(), current,
 					index, panel.h, rowHeight);
 			const bool confirmationPin = confirmationOpen_ && index == current;
@@ -4641,7 +4564,7 @@ private:
 			break;
 		}
 
-		if (!thumbnailPanelVisible_ || thumbnailPixelStoreRetry_ || !allowIndependentDecode ||
+		if (!runtimeSettings_.Values().thumbnailPanelVisible || thumbnailPixelStoreRetry_ || !allowIndependentDecode ||
 			thumbnailPreparation_.HasPendingWork()) return;
 		const std::vector<jpegview_linux::ThumbnailLoadRequest> requests =
 			thumbnailScheduler_.TakeNext(now, 1, [&workPlan](
@@ -4832,7 +4755,7 @@ private:
 
 	void ToggleAutoContrast() {
 		autoContrastEnabled_ = !autoContrastEnabled_;
-		defaultAutoContrastEnabled_ = autoContrastEnabled_;
+		runtimeSettings_.Values().autoContrast = autoContrastEnabled_;
 		RefreshPictureLevels();
 		SaveSettings();
 	}
@@ -4962,7 +4885,7 @@ private:
 		context.applicationName = "JPEGView";
 		context.applicationVersion = JPEGVIEW_APP_VERSION;
 		std::ostringstream cacheKey;
-		cacheKey << windowTitlePattern_.size() << ':' << windowTitlePattern_ << '|'
+		cacheKey << runtimeSettings_.Values().windowTitlePattern.size() << ':' << runtimeSettings_.Values().windowTitlePattern << '|'
 			<< fileList_.MutationRevision() << ':' << fileList_.DescriptorRevision() << '|'
 			<< context.position.size() << ':' << context.position << '|'
 			<< context.currentIndex << ':' << context.imageCount << '|'
@@ -4972,7 +4895,7 @@ private:
 			<< context.applicationVersion;
 		const std::string& title = windowTitleFormatCache_.GetOrBuild(
 			cacheKey.str(), [this, &context] {
-				return jpegview_linux::FormatWindowTitle(windowTitlePattern_, context);
+				return jpegview_linux::FormatWindowTitle(runtimeSettings_.Values().windowTitlePattern, context);
 			});
 		SetTitle(title);
 	}
@@ -5521,7 +5444,7 @@ private:
 		imageProcessingStore_ = std::move(pendingParameterDbRestore_);
 		pendingParameterDbRestore_.clear();
 		pendingParameterDbRestoreSource_.clear();
-		if (!fileList_.Empty() && !keepPictureLevels_) SelectPictureLevelsForCurrentFile();
+		if (!fileList_.Empty() && !runtimeSettings_.Values().keepPictureLevels) SelectPictureLevelsForCurrentFile();
 		RefreshPictureLevels();
 		SetTitle("Restored picture-level database");
 	}
@@ -5667,8 +5590,8 @@ private:
 	}
 
 	void SetSelectionModeEnabled(bool enabled) {
-		if (selectionModeEnabled_ == enabled) return;
-		selectionModeEnabled_ = enabled;
+		if (runtimeSettings_.Values().selectionModeEnabled == enabled) return;
+		runtimeSettings_.Values().selectionModeEnabled = enabled;
 		SaveSettings();
 		UpdateCropCursor(lastMouseX_, lastMouseY_);
 	}
@@ -6301,40 +6224,23 @@ private:
 		if (!advancedConfiguration_.IsOpen()) return false;
 		if (advancedConfiguration_.IsEditing() && !advancedConfiguration_.CommitEdit()) return false;
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
-		if (settingsPath.empty() || !jpegview_linux::SaveViewerSettings(
-			settingsPath, advancedConfiguration_.Draft())) {
+		const jpegview_linux::ViewerSettings& draft = advancedConfiguration_.Draft();
+		const int previousThumbnailWidth = runtimeSettings_.Values().thumbnailPanelWidth;
+		const bool magnifierChanged = magnifyingGlass_.Width() != draft.magnifyingGlassWidth ||
+			magnifyingGlass_.Height() != draft.magnifyingGlassHeight ||
+			std::abs(magnifyingGlass_.ZoomLevel() - draft.magnifyingGlassZoomLevel) > 1e-9;
+		if (settingsPath.empty() || !runtimeSettings_.SaveAndAdopt(settingsPath, draft)) {
 			advancedConfiguration_.SetMessage("Could not save settings.conf; changes were not applied");
 			return false;
 		}
 
-		const jpegview_linux::ViewerSettings& settings = advancedConfiguration_.Draft();
-		const int previousThumbnailWidth = thumbnailPanelWidth_;
-		const bool magnifierChanged = magnifyingGlass_.Width() != settings.magnifyingGlassWidth ||
-			magnifyingGlass_.Height() != settings.magnifyingGlassHeight ||
-			std::abs(magnifyingGlass_.ZoomLevel() - settings.magnifyingGlassZoomLevel) > 1e-9;
-		transparencyPattern_ = settings.transparencyPattern;
-		windowTitlePattern_ = settings.windowTitlePattern;
-		mangaModeInvertsLeftRight_ = settings.mangaModeInvertsLeftRight;
-		spacebarNavigatesImages_ = settings.spacebarNavigatesImages;
+		const jpegview_linux::ViewerSettings& settings = runtimeSettings_.Values();
 		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
 		RefreshFitRelativeZoomBase();
 		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
 		if (fileListBeforeClipboard_) {
 			fileListBeforeClipboard_->SetWrapAroundFolder(settings.folderWrapAround);
 		}
-		showHistogram_ = settings.showHistogram;
-		thumbnailPanelWidth_ = settings.thumbnailPanelWidth;
-		fileDialogWidth_ = settings.fileDialogWidth;
-		fileDialogHeight_ = settings.fileDialogHeight;
-		fileDialogPreviewRatio_ = settings.fileDialogPreviewRatio;
-		cropUserAspectWidth_ = settings.userCropAspectWidth;
-		cropUserAspectHeight_ = settings.userCropAspectHeight;
-		defaultImageProcessing_ = settings.defaultImageProcessing;
-		unsharpMaskRadius_ = settings.unsharpMaskRadius;
-		unsharpMaskAmount_ = settings.unsharpMaskAmount;
-		unsharpMaskThreshold_ = settings.unsharpMaskThreshold;
-		cacheSizeMiB_ = settings.cacheSizeMiB;
-		copyRenamePattern_ = settings.copyRenamePattern;
 
 		if (magnifierChanged) {
 			ClearMagnifyingGlassRequest();
@@ -6343,8 +6249,8 @@ private:
 				settings.magnifyingGlassHeight, settings.magnifyingGlassZoomLevel,
 				imageArea.w, imageArea.h);
 		}
-		if (thumbnailPanelWidth_ != previousThumbnailWidth) {
-			if (thumbnailPanelVisible_) {
+		if (runtimeSettings_.Values().thumbnailPanelWidth != previousThumbnailWidth) {
+			if (runtimeSettings_.Values().thumbnailPanelVisible) {
 				PrepareThumbnailPreload();
 				if (viewport_.IsFitToWindow()) {
 					FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
@@ -7180,7 +7086,7 @@ private:
 	void FitWindowToImage() {
 		const auto dimensions = ViewportContentDimensions();
 		if (fileList_.Empty() || dimensions.first <= 0 || dimensions.second <= 0) return;
-		const int panelWidth = thumbnailPanelVisible_ ? thumbnailPanelWidth_ : 0;
+		const int panelWidth = runtimeSettings_.Values().thumbnailPanelVisible ? runtimeSettings_.Values().thumbnailPanelWidth : 0;
 		const int width = std::clamp(dimensions.first + panelWidth + 16, 160, 4096);
 		const int height = std::clamp(dimensions.second + 16, 120, 4096);
 		SDL_SetWindowSize(window_, width, height);
@@ -7405,11 +7311,11 @@ private:
 	}
 
 	void UpdateNavigationPanelVisibility(int, int mouseY) {
-		if (!navigationPanelEnabled_) {
+		if (!runtimeSettings_.Values().navigationPanelEnabled) {
 			controlsVisible_ = false;
 			return;
 		}
-		if (!navigationPanelAutoReveal_) {
+		if (!runtimeSettings_.Values().navigationPanelAutoReveal) {
 			controlsVisible_ = true;
 			return;
 		}
@@ -7591,7 +7497,7 @@ private:
 	}
 
 	void TickImageSpectrum() {
-		const bool requested = showHistogram_ && infoVisible_;
+		const bool requested = runtimeSettings_.Values().showHistogram && runtimeSettings_.Values().infoVisible;
 		const bool editedPixels = UsesEditedImageSpectrum();
 		if (currentSourceSpectrumRequestKey_.has_value()) {
 			const std::optional<jpegview_linux::ImageSpectrumKey> selectedKey =
@@ -7696,11 +7602,11 @@ private:
 		const std::vector<std::string>& sourceLines = CachedImageInfoLines();
 		const bool editedPixels = UsesEditedImageSpectrum();
 		const std::optional<jpegview_linux::ImageSpectrumKey> spectrumKey =
-			showHistogram_ ? CurrentImageSpectrumKey() : std::nullopt;
+			runtimeSettings_.Values().showHistogram ? CurrentImageSpectrumKey() : std::nullopt;
 		const jpegview_linux::GrayscaleSpectrum* spectrumPointer = nullptr;
 		int spectrumState = 0;
 		std::string spectrumStatus;
-		if (showHistogram_) {
+		if (runtimeSettings_.Values().showHistogram) {
 			spectrumState = 1;
 			if (editedPixels) {
 				if (spectrumKey.has_value() && editedImageSpectrumValid_ &&
@@ -7734,7 +7640,7 @@ private:
 		const std::string& linesKey = imageInfoLineCache_.Key();
 		cacheKey << linesKey.size() << ':' << linesKey << '|'
 			<< windowWidth << ':' << windowHeight << '|'
-			<< showFileName_ << ':' << showHistogram_ << '|'
+			<< runtimeSettings_.Values().showFilename << ':' << runtimeSettings_.Values().showHistogram << '|'
 			<< OverlayLineHeight() << ':' << FilenameOverlayHeight() << '|'
 			<< imageSession_.DocumentRevision() << ':' << currentAnimationFrame_ << ':'
 			<< currentImageRotationQuarterTurns_ << ':' << imageSpectrumPresentationRevision_ << '|'
@@ -7753,15 +7659,15 @@ private:
 				}
 				const jpegview_linux::OverlayLayout layout =
 					jpegview_linux::InformationOverlayLayout(contentWidth, lines.size(),
-						windowWidth, windowHeight, showFileName_, kOverlayInset,
+						windowWidth, windowHeight, runtimeSettings_.Values().showFilename, kOverlayInset,
 						kOverlayTextPadding, OverlayLineHeight(), FilenameOverlayHeight(),
-						showHistogram_);
+						runtimeSettings_.Values().showHistogram);
 				for (std::string& line : lines) {
 					if (TextWidth(line, kUiTextScale) <= layout.textWidth) continue;
 					line = ClipText(line, layout.textWidth);
 				}
 				return jpegview_linux::InformationOverlayPaint(layout, lines,
-					OverlayLineHeight(), kOverlayTextPadding, showHistogram_,
+					OverlayLineHeight(), kOverlayTextPadding, runtimeSettings_.Values().showHistogram,
 					spectrumPointer, false);
 			});
 	}
@@ -7775,7 +7681,7 @@ private:
 		return jpegview_linux::BuildNavigationPanelPaint(windowWidth, windowHeight,
 			lastMouseX_, lastMouseY_, viewport_.IsFitToWindow(), fileList_.GetSorting(),
 			TextWidth(sortLabel, kUiTextScale), TextWidth(scaleLabel, kUiTextScale),
-			TextLineHeight(kUiTextScale), selectionModeEnabled_,
+			TextLineHeight(kUiTextScale), runtimeSettings_.Values().selectionModeEnabled,
 			doublePageModeEnabled_, mangaReadingOrderEnabled_, viewport_.FitRelativeZoomMode());
 	}
 
@@ -7828,31 +7734,31 @@ private:
 		const int right = slider.x + slider.w - 12;
 		const double maximum = index == 0 ? 5.0 : index == 1 ? 10.0 : 20.0;
 		const double value = std::clamp(static_cast<double>(x - left) / std::max(1, right - left), 0.0, 1.0) * maximum;
-		if (index == 0) unsharpMaskRadius_ = value;
-		else if (index == 1) unsharpMaskAmount_ = value;
-		else unsharpMaskThreshold_ = value;
-		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
-		imageProcessing_.unsharpAmount = unsharpMaskAmount_;
-		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
+		if (index == 0) runtimeSettings_.Values().unsharpMaskRadius = value;
+		else if (index == 1) runtimeSettings_.Values().unsharpMaskAmount = value;
+		else runtimeSettings_.Values().unsharpMaskThreshold = value;
+		imageProcessing_.unsharpRadius = runtimeSettings_.Values().unsharpMaskRadius;
+		imageProcessing_.unsharpAmount = runtimeSettings_.Values().unsharpMaskAmount;
+		imageProcessing_.unsharpThreshold = runtimeSettings_.Values().unsharpMaskThreshold;
 		RefreshPictureLevels(false);
 	}
 
 	void OpenUnsharpMaskDialog() {
 		if (fileList_.Empty() || CurrentImage().width <= 0) return;
 		unsharpOriginalProcessing_ = imageProcessing_;
-		unsharpOriginalRadius_ = unsharpMaskRadius_;
-		unsharpOriginalAmount_ = unsharpMaskAmount_;
-		unsharpOriginalThreshold_ = unsharpMaskThreshold_;
+		unsharpOriginalRadius_ = runtimeSettings_.Values().unsharpMaskRadius;
+		unsharpOriginalAmount_ = runtimeSettings_.Values().unsharpMaskAmount;
+		unsharpOriginalThreshold_ = runtimeSettings_.Values().unsharpMaskThreshold;
 		if (imageProcessing_.unsharpAmount > 0.0) {
-			unsharpMaskRadius_ = imageProcessing_.unsharpRadius;
-			unsharpMaskAmount_ = imageProcessing_.unsharpAmount;
-			unsharpMaskThreshold_ = imageProcessing_.unsharpThreshold;
+			runtimeSettings_.Values().unsharpMaskRadius = imageProcessing_.unsharpRadius;
+			runtimeSettings_.Values().unsharpMaskAmount = imageProcessing_.unsharpAmount;
+			runtimeSettings_.Values().unsharpMaskThreshold = imageProcessing_.unsharpThreshold;
 		}
 		unsharpDialogOpen_ = true;
 		unsharpDraggingControl_ = -1;
-		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
-		imageProcessing_.unsharpAmount = unsharpMaskAmount_;
-		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
+		imageProcessing_.unsharpRadius = runtimeSettings_.Values().unsharpMaskRadius;
+		imageProcessing_.unsharpAmount = runtimeSettings_.Values().unsharpMaskAmount;
+		imageProcessing_.unsharpThreshold = runtimeSettings_.Values().unsharpMaskThreshold;
 		RefreshPictureLevels(false);
 	}
 
@@ -7860,9 +7766,9 @@ private:
 		imageProcessing_.unsharpRadius = unsharpOriginalProcessing_.unsharpRadius;
 		imageProcessing_.unsharpAmount = unsharpOriginalProcessing_.unsharpAmount;
 		imageProcessing_.unsharpThreshold = unsharpOriginalProcessing_.unsharpThreshold;
-		unsharpMaskRadius_ = unsharpOriginalRadius_;
-		unsharpMaskAmount_ = unsharpOriginalAmount_;
-		unsharpMaskThreshold_ = unsharpOriginalThreshold_;
+		runtimeSettings_.Values().unsharpMaskRadius = unsharpOriginalRadius_;
+		runtimeSettings_.Values().unsharpMaskAmount = unsharpOriginalAmount_;
+		runtimeSettings_.Values().unsharpMaskThreshold = unsharpOriginalThreshold_;
 		unsharpDialogOpen_ = false;
 		unsharpDraggingControl_ = -1;
 		RefreshPictureLevels();
@@ -7911,39 +7817,34 @@ private:
 	}
 
 	void RenderUnsharpMaskDialog() {
-		if (!unsharpDialogOpen_) return;
-		const SDL_Rect dialog = UnsharpMaskDialogRect();
-		SDL_SetRenderDrawColor(renderer_, 8, 12, 18, 248);
-		SDL_RenderFillRect(renderer_, &dialog);
-		DrawRect(dialog, 205, 210, 220);
-		DrawText("APPLY UNSHARP MASK", dialog.x + 20, dialog.y + 18, kUiTextScale, 245, 245, 250);
+		jpegview_linux::UnsharpMaskDialogPaint paint;
+		paint.visible = unsharpDialogOpen_;
+		if (!paint.visible) return;
+		paint.dialog = UnsharpMaskDialogRect();
 		const char* labels[] = {"Radius", "Amount", "Threshold"};
-		const double values[] = {unsharpMaskRadius_, unsharpMaskAmount_, unsharpMaskThreshold_};
+		const double values[] = {runtimeSettings_.Values().unsharpMaskRadius,
+			runtimeSettings_.Values().unsharpMaskAmount,
+			runtimeSettings_.Values().unsharpMaskThreshold};
 		const double maxima[] = {5.0, 10.0, 20.0};
 		for (int index = 0; index < 3; ++index) {
-			const SDL_Rect slider = UnsharpMaskSliderRect(index);
+			jpegview_linux::UnsharpSliderPaint& slider =
+				paint.sliders[static_cast<std::size_t>(index)];
+			slider.rect = UnsharpMaskSliderRect(index);
+			slider.label = labels[index];
 			std::ostringstream value;
 			value << std::fixed << std::setprecision(2) << values[index];
-			DrawText(labels[index], slider.x, slider.y + 2, kUiTextScale, 220, 225, 232);
-			DrawText(value.str(), slider.x + 72, slider.y + 2, kUiTextScale, 190, 200, 212);
-			const int left = slider.x + 156, right = slider.x + slider.w - 12, trackY = slider.y + 25;
-			DrawLine(left, trackY, right, trackY, 95, 108, 124);
-			const int knobX = left + static_cast<int>(std::lround(values[index] / maxima[index] * (right - left)));
-			SDL_Rect knob{knobX - 4, trackY - 5, 9, 11};
-			SDL_SetRenderDrawColor(renderer_, 120, 190, 235, 255);
-			SDL_RenderFillRect(renderer_, &knob);
+			slider.value = value.str();
+			const int left = slider.rect.x + 156;
+			const int right = slider.rect.x + slider.rect.w - 12;
+			slider.knobX = left + static_cast<int>(std::lround(
+				values[index] / maxima[index] * (right - left)));
 		}
-		const auto drawButton = [this](const SDL_Rect& button, const char* label) {
-			const bool hovered = PointInRect(lastMouseX_, lastMouseY_, button);
-			SDL_SetRenderDrawColor(renderer_, hovered ? 66 : 36, hovered ? 82 : 48,
-				hovered ? 104 : 62, 245);
-			SDL_RenderFillRect(renderer_, &button);
-			DrawRect(button, 130, 145, 165);
-			DrawText(label, button.x + (button.w - TextWidth(label, kUiTextScale)) / 2,
-				button.y + 8, kUiTextScale, 235, 240, 245);
-		};
-		drawButton(UnsharpMaskActionRect(false), "Cancel");
-		drawButton(UnsharpMaskActionRect(true), "Apply");
+		const int cancelIndex = 0;
+		paint.buttons[cancelIndex] = {UnsharpMaskActionRect(false), "Cancel",
+			PointInRect(lastMouseX_, lastMouseY_, UnsharpMaskActionRect(false))};
+		paint.buttons[1] = {UnsharpMaskActionRect(true), "Apply",
+			PointInRect(lastMouseX_, lastMouseY_, UnsharpMaskActionRect(true))};
+		editingDialogRenderer_.Render(paint);
 	}
 
 	SDL_Rect PictureLevelSliderRect(std::size_t index) const {
@@ -8017,7 +7918,7 @@ private:
 			}
 			for (int action = 0; action < 7; ++action) {
 				if (PointInRect(event.button.x, event.button.y, PictureLevelsActionRect(action))) {
-					if (keepPictureLevels_ && (action == 2 || action == 3)) return;
+					if (runtimeSettings_.Values().keepPictureLevels && (action == 2 || action == 3)) return;
 					HandlePictureLevelsAction(action);
 					return;
 				}
@@ -8039,7 +7940,7 @@ private:
 	}
 
 	void SaveCurrentPictureLevels() {
-		if (fileList_.Empty() || keepPictureLevels_) return;
+		if (fileList_.Empty() || runtimeSettings_.Values().keepPictureLevels) return;
 		auto updatedStore = imageProcessingStore_;
 		updatedStore[AbsoluteNormalized(fileList_.Current()).string()] =
 			jpegview_linux::ImageProcessingPreset{imageProcessing_, autoContrastEnabled_};
@@ -8054,27 +7955,27 @@ private:
 
 	void SaveCurrentPictureLevelsAsDefault() {
 		if (fileList_.Empty() || clipboardMode_) return;
-		const jpegview_linux::ImageProcessingParams previousProcessing = defaultImageProcessing_;
-		const bool previousAutoContrast = defaultAutoContrastEnabled_;
-		defaultImageProcessing_ = imageProcessing_;
-		defaultAutoContrastEnabled_ = autoContrastEnabled_;
-		defaultImageProcessing_.unsharpRadius = 1.0;
-		defaultImageProcessing_.unsharpAmount = 0.0;
-		defaultImageProcessing_.unsharpThreshold = 4.0;
+		const jpegview_linux::ImageProcessingParams previousProcessing = runtimeSettings_.Values().defaultImageProcessing;
+		const bool previousAutoContrast = runtimeSettings_.Values().autoContrast;
+		runtimeSettings_.Values().defaultImageProcessing = imageProcessing_;
+		runtimeSettings_.Values().autoContrast = autoContrastEnabled_;
+		runtimeSettings_.Values().defaultImageProcessing.unsharpRadius = 1.0;
+		runtimeSettings_.Values().defaultImageProcessing.unsharpAmount = 0.0;
+		runtimeSettings_.Values().defaultImageProcessing.unsharpThreshold = 4.0;
 		if (!SaveSettings()) {
-			defaultImageProcessing_ = previousProcessing;
-			defaultAutoContrastEnabled_ = previousAutoContrast;
+			runtimeSettings_.Values().defaultImageProcessing = previousProcessing;
+			runtimeSettings_.Values().autoContrast = previousAutoContrast;
 			SetTitle("Could not save default picture levels");
 			return;
 		}
 		PrepareImagePrefetch();
-		SetTitle(jpegview_linux::IsDefaultImageProcessing(defaultImageProcessing_) ?
+		SetTitle(jpegview_linux::IsDefaultImageProcessing(runtimeSettings_.Values().defaultImageProcessing) ?
 			"Default picture levels restored to neutral" :
 			"Current picture levels saved as defaults for other images");
 	}
 
 	void ClearCurrentPictureLevels() {
-		if (fileList_.Empty() || keepPictureLevels_) return;
+		if (fileList_.Empty() || runtimeSettings_.Values().keepPictureLevels) return;
 		auto updatedStore = imageProcessingStore_;
 		const bool hadSavedValues = updatedStore.erase(
 			AbsoluteNormalized(fileList_.Current()).string()) != 0;
@@ -8085,11 +7986,11 @@ private:
 			return;
 		}
 		imageProcessingStore_ = std::move(updatedStore);
-		imageProcessing_ = defaultImageProcessing_;
-		autoContrastEnabled_ = defaultAutoContrastEnabled_;
-		imageProcessing_.unsharpRadius = unsharpMaskRadius_;
+		imageProcessing_ = runtimeSettings_.Values().defaultImageProcessing;
+		autoContrastEnabled_ = runtimeSettings_.Values().autoContrast;
+		imageProcessing_.unsharpRadius = runtimeSettings_.Values().unsharpMaskRadius;
 		imageProcessing_.unsharpAmount = 0.0;
-		imageProcessing_.unsharpThreshold = unsharpMaskThreshold_;
+		imageProcessing_.unsharpThreshold = runtimeSettings_.Values().unsharpMaskThreshold;
 		SetTitle("Saved picture-level parameters removed");
 		RefreshPictureLevels();
 	}
@@ -8101,7 +8002,7 @@ private:
 			RefreshPictureLevels();
 			break;
 		case 1:
-			keepPictureLevels_ = !keepPictureLevels_;
+			runtimeSettings_.Values().keepPictureLevels = !runtimeSettings_.Values().keepPictureLevels;
 			SaveSettings();
 			break;
 		case 2:
@@ -8135,12 +8036,12 @@ private:
 		DrawText("PICTURE LEVELS", panel.x + 9, panel.y + 8, kUiTextScale, 235, 240, 248);
 		const char* labels[] = {
 			imageProcessing_.localDensityEnabled ? "Local density: on" : "Local density: off",
-			keepPictureLevels_ ? "Keep levels: on" : "Keep levels: off",
+			runtimeSettings_.Values().keepPictureLevels ? "Keep levels: on" : "Keep levels: off",
 			"Save to DB", "Remove from DB", "Reset", "Unsharp mask...", "Close",
 		};
 		for (int action = 0; action < 7; ++action) {
 			const SDL_Rect button = PictureLevelsActionRect(action);
-			const bool disabled = keepPictureLevels_ && (action == 2 || action == 3);
+			const bool disabled = runtimeSettings_.Values().keepPictureLevels && (action == 2 || action == 3);
 			const bool hovered = PointInRect(lastMouseX_, lastMouseY_, button);
 			const Uint8 base = disabled ? 20 : hovered ? 64 : 34;
 			SDL_SetRenderDrawColor(renderer_, base, base + 8, base + 16, 240);
@@ -8183,7 +8084,7 @@ private:
 	}
 
 	bool HandleControlClick(int x, int y) {
-		if (!navigationPanelEnabled_ || !controlsVisible_) return false;
+		if (!runtimeSettings_.Values().navigationPanelEnabled || !controlsVisible_) return false;
 		const jpegview_linux::NavigationPanelPaint panel = CurrentNavigationPanelPaint();
 		for (const jpegview_linux::NavigationButtonPaint& button : panel.buttons) {
 			if (!jpegview_linux::Contains(button.rect, x, y)) continue;
@@ -8246,7 +8147,7 @@ private:
 			SetCropAspect(16, 9);
 			break;
 		case IDM_CROPMODE_USER:
-			SetCropAspect(cropUserAspectWidth_, cropUserAspectHeight_);
+			SetCropAspect(runtimeSettings_.Values().userCropAspectWidth, runtimeSettings_.Values().userCropAspectHeight);
 			break;
 		case IDM_CROPMODE_IMAGE:
 			cropSelection_.SetMode(jpegview_linux::CropSelectionMode::ImageAspect);
@@ -8323,7 +8224,7 @@ private:
 			RefreshPictureLevels();
 			break;
 		case IDM_KEEP_PARAMETERS:
-			keepPictureLevels_ = !keepPictureLevels_;
+			runtimeSettings_.Values().keepPictureLevels = !runtimeSettings_.Values().keepPictureLevels;
 			SaveSettings();
 			break;
 		case IDM_SAVE_PARAM_DB:
@@ -8411,22 +8312,22 @@ private:
 				0, FileListScanHandling::Reload, true, true);
 			break;
 		case IDM_SHOW_FILEINFO:
-			infoVisible_ = !infoVisible_;
+			runtimeSettings_.Values().infoVisible = !runtimeSettings_.Values().infoVisible;
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
 			SaveSettings();
 			break;
 		case IDM_SHOW_FILENAME:
-			showFileName_ = !showFileName_;
+			runtimeSettings_.Values().showFilename = !runtimeSettings_.Values().showFilename;
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
 			SaveSettings();
 			break;
 		case IDM_SHOW_NAVPANEL:
-			navigationPanelEnabled_ = !navigationPanelEnabled_;
+			runtimeSettings_.Values().navigationPanelEnabled = !runtimeSettings_.Values().navigationPanelEnabled;
 			UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
 			SaveSettings();
 			break;
 		case jpegview_linux::kCommandToggleThumbnailPanel:
-			thumbnailPanelVisible_ = !thumbnailPanelVisible_;
+			runtimeSettings_.Values().thumbnailPanelVisible = !runtimeSettings_.Values().thumbnailPanelVisible;
 			PrepareThumbnailPreload();
 			UpdateThumbnailPanelCursor(lastMouseX_, lastMouseY_);
 			if (viewport_.IsFitToWindow()) {
@@ -8437,7 +8338,7 @@ private:
 			SaveSettings();
 			break;
 		case jpegview_linux::kCommandToggleZoomNavigator:
-			showZoomNavigator_ = !showZoomNavigator_;
+			runtimeSettings_.Values().showZoomNavigator = !runtimeSettings_.Values().showZoomNavigator;
 			SaveSettings();
 			UpdateCropCursor(lastMouseX_, lastMouseY_);
 			UpdateZoomNavigatorCursor(lastMouseX_, lastMouseY_);
@@ -8450,7 +8351,7 @@ private:
 			break;
 		case jpegview_linux::kCommandToggleDoublePageMode:
 			doublePageModeEnabled_ = !doublePageModeEnabled_;
-			doublePageModeDefault_ = doublePageModeEnabled_;
+			runtimeSettings_.Values().doublePageModeEnabled = doublePageModeEnabled_;
 			ClearTransition();
 			if (!clipboardMode_ && !fileList_.Empty() &&
 				imageSession_.OwnsLoadedPath(fileList_.Current())) {
@@ -8465,7 +8366,7 @@ private:
 			break;
 		case jpegview_linux::kCommandToggleMangaReadingOrder:
 			mangaReadingOrderEnabled_ = !mangaReadingOrderEnabled_;
-			mangaReadingOrderDefault_ = mangaReadingOrderEnabled_;
+			runtimeSettings_.Values().mangaReadingOrderEnabled = mangaReadingOrderEnabled_;
 			ClearTransition();
 			if (!clipboardMode_ && !fileList_.Empty() &&
 				imageSession_.OwnsLoadedPath(fileList_.Current())) {
@@ -8479,10 +8380,10 @@ private:
 			SetTitle();
 			break;
 		case jpegview_linux::kCommandToggleSelectionMode:
-			SetSelectionModeEnabled(!selectionModeEnabled_);
+			SetSelectionModeEnabled(!runtimeSettings_.Values().selectionModeEnabled);
 			break;
 		case jpegview_linux::kToggleNavigationPanelAutoReveal:
-			navigationPanelAutoReveal_ = !navigationPanelAutoReveal_;
+			runtimeSettings_.Values().navigationPanelAutoReveal = !runtimeSettings_.Values().navigationPanelAutoReveal;
 			UpdateNavigationPanelVisibility(lastMouseX_, lastMouseY_);
 			SaveSettings();
 			break;
@@ -8692,17 +8593,17 @@ private:
 		state.animationPlaying = playback_.AnimationPlaying();
 		state.animationAvailable = playback_.HasAnimation();
 		state.movieFramesPerSecond = playback_.MovieFramesPerSecond();
-		state.infoVisible = infoVisible_;
-		state.filenameVisible = showFileName_;
-		state.navigationPanelEnabled = navigationPanelEnabled_;
-		state.navigationPanelAutoReveal = navigationPanelAutoReveal_;
-		state.thumbnailPanelVisible = thumbnailPanelVisible_;
-		state.showZoomNavigator = showZoomNavigator_;
+		state.infoVisible = runtimeSettings_.Values().infoVisible;
+		state.filenameVisible = runtimeSettings_.Values().showFilename;
+		state.navigationPanelEnabled = runtimeSettings_.Values().navigationPanelEnabled;
+		state.navigationPanelAutoReveal = runtimeSettings_.Values().navigationPanelAutoReveal;
+		state.thumbnailPanelVisible = runtimeSettings_.Values().thumbnailPanelVisible;
+		state.showZoomNavigator = runtimeSettings_.Values().showZoomNavigator;
 		state.magnifyingGlassEnabled = magnifyingGlass_.Enabled();
 		state.doublePageModeEnabled = doublePageModeEnabled_;
 		state.mangaReadingOrderEnabled = mangaReadingOrderEnabled_;
-		state.selectionModeEnabled = selectionModeEnabled_;
-		state.spacebarNavigatesImages = spacebarNavigatesImages_;
+		state.selectionModeEnabled = runtimeSettings_.Values().selectionModeEnabled;
+		state.spacebarNavigatesImages = runtimeSettings_.Values().spacebarNavigatesImages;
 		state.navigationMode = fileList_.GetNavigationMode();
 		state.sortMode = fileList_.GetSorting();
 		state.sortAscending = fileList_.IsSortedAscending();
@@ -8717,12 +8618,12 @@ private:
 		state.cropMode = cropSelection_.Mode();
 		state.cropAspectWidth = cropAspectWidth_;
 		state.cropAspectHeight = cropAspectHeight_;
-		state.userCropAspectWidth = cropUserAspectWidth_;
-		state.userCropAspectHeight = cropUserAspectHeight_;
+		state.userCropAspectWidth = runtimeSettings_.Values().userCropAspectWidth;
+		state.userCropAspectHeight = runtimeSettings_.Values().userCropAspectHeight;
 		state.autoCorrectionEnabled = autoContrastEnabled_;
 		state.pictureLevelsAvailable = !clipboardMode_ && !fileList_.Empty() && CurrentImage().width > 0;
 		state.localDensityEnabled = imageProcessing_.localDensityEnabled;
-		state.keepPictureLevels = keepPictureLevels_;
+		state.keepPictureLevels = runtimeSettings_.Values().keepPictureLevels;
 		state.pictureLevelsSaved = !fileList_.Empty() && imageProcessingStore_.find(
 			AbsoluteNormalized(fileList_.Current()).string()) != imageProcessingStore_.end();
 		state.parameterDatabaseAvailable =
@@ -9046,7 +8947,7 @@ private:
 			batchCopyDialog_.Preview();
 			return;
 		}
-		copyRenamePattern_ = batchCopyDialog_.Pattern();
+		runtimeSettings_.Values().copyRenamePattern = batchCopyDialog_.Pattern();
 		SaveSettings();
 		batchCopyDialog_.SetMessage("Saved batch pattern");
 	}
@@ -9081,7 +8982,7 @@ private:
 			return;
 		}
 		batchCopyDialog_.Open(CollectBatchCopyEntries(), fileList_.CurrentIndex(),
-			copyRenamePattern_, BatchCopyVisibleRows());
+			runtimeSettings_.Values().copyRenamePattern, BatchCopyVisibleRows());
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
 		SDL_StartTextInput();
@@ -9195,86 +9096,44 @@ private:
 		}
 	}
 
-	void RenderBatchButton(int button, const std::string& label) {
-		const SDL_Rect rect = BatchCopyButtonRect(button);
-		const bool hovered = PointInRect(lastMouseX_, lastMouseY_, rect);
-		SDL_SetRenderDrawColor(renderer_, hovered ? 52 : 28, hovered ? 78 : 28, hovered ? 108 : 28, 220);
-		SDL_RenderFillRect(renderer_, &rect);
-		DrawRect(rect, 125, 145, 165);
-		DrawText(ClipText(label, rect.w - 12), rect.x + 6, rect.y + 10, kUiTextScale,
-			255, 255, 255);
-	}
-
 	void RenderBatchCopy() {
-		if (!batchCopyDialog_.IsOpen()) return;
-		const SDL_Rect dialog = BatchCopyRect();
-		const SDL_Rect list = BatchCopyListRect();
-		const int rightX = BatchCopyRightX();
-		const int rightWidth = BatchCopyRightWidth();
-		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 224);
-		SDL_RenderFillRect(renderer_, &dialog);
-		DrawRect(dialog, 190, 190, 190);
-		DrawText("BATCH RENAME/COPY OF FILES", dialog.x + 18, dialog.y + 14, kUiTextScale);
-		const std::string directory = fileList_.Empty() ? std::string() : fileList_.Current().parent_path().string();
-		DrawText(ClipText("IMAGE FILES IN " + directory, dialog.w - 36), dialog.x + 18, dialog.y + 38,
-			kUiTextScale, 170, 170, 170);
-
-		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 215);
-		SDL_RenderFillRect(renderer_, &list);
-		DrawRect(list, 75, 75, 75);
-		DrawText("SEL", list.x + 8, list.y + 7, kUiTextScale, 170, 170, 170);
-		DrawText("OLD NAME", list.x + 42, list.y + 7, kUiTextScale, 170, 170, 170);
-		DrawText("DATE", list.x + 245, list.y + 7, kUiTextScale, 170, 170, 170);
-		DrawText("NEW NAME (>> COPY)", list.x + 380, list.y + 7, kUiTextScale, 170, 170, 170);
-
-		const int rows = BatchCopyVisibleRows();
-		for (int row = 0; row < rows; ++row) {
-			const int itemIndex = static_cast<int>(batchCopyDialog_.Scroll()) + row;
+		jpegview_linux::BatchCopyDialogPaint paint;
+		paint.visible = batchCopyDialog_.IsOpen();
+		if (!paint.visible) return;
+		paint.dialog = BatchCopyRect();
+		paint.list = BatchCopyListRect();
+		paint.rightX = BatchCopyRightX();
+		paint.rightWidth = BatchCopyRightWidth();
+		paint.pattern = BatchCopyPatternRect();
+		paint.patternFocused = batchCopyDialog_.PatternFocused();
+		const std::string directory = fileList_.Empty() ? std::string() :
+			fileList_.Current().parent_path().string();
+		paint.directory = ClipText("IMAGE FILES IN " + directory, paint.dialog.w - 36);
+		paint.patternText = ClipText(batchCopyDialog_.Pattern(), paint.pattern.w - 16);
+		paint.message = ClipText(batchCopyDialog_.Message(), paint.rightWidth);
+		const int visibleRows = BatchCopyVisibleRows();
+		for (int rowIndex = 0; rowIndex < visibleRows; ++rowIndex) {
+			const int itemIndex = static_cast<int>(batchCopyDialog_.Scroll()) + rowIndex;
 			if (itemIndex >= static_cast<int>(batchCopyDialog_.Items().size())) break;
-			const BatchCopyItem& item = batchCopyDialog_.Items()[static_cast<std::size_t>(itemIndex)];
-			const int rowTop = list.y + 22 + row * 24;
-			if (itemIndex == batchCopyDialog_.Cursor()) {
-				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
-				SDL_Rect selection{list.x + 2, rowTop, list.w - 4, 22};
-				SDL_RenderFillRect(renderer_, &selection);
-			}
-			DrawText(item.selected ? "[X]" : "[ ]", list.x + 8, rowTop + 6, kUiTextScale,
-				item.selected ? 255 : 150, item.selected ? 255 : 150, item.selected ? 255 : 150);
-			DrawText(ClipText(InfoText(item.source.filename().string()), 190), list.x + 42, rowTop + 6,
-				kUiTextScale, 235, 235, 235);
-		DrawText(ClipText(jpegview_linux::FormatBatchDate(item.modificationTime), 125), list.x + 245, rowTop + 6,
-				kUiTextScale, 210, 210, 210);
+			const BatchCopyItem& item = batchCopyDialog_.Items()[
+				static_cast<std::size_t>(itemIndex)];
 			const std::string destination = item.destinationText.empty() ? "-" :
 				std::string(item.copy ? ">> " : "") + InfoText(item.destinationText);
-			DrawText(ClipText(destination, list.w - 390), list.x + 380, rowTop + 6, kUiTextScale,
-				item.copy ? 255 : 220, item.copy ? 220 : 220, item.copy ? 150 : 220);
+			paint.rows.push_back({item.selected, itemIndex == batchCopyDialog_.Cursor(),
+				ClipText(InfoText(item.source.filename().string()), 190),
+				ClipText(jpegview_linux::FormatBatchDate(item.modificationTime), 125),
+				ClipText(destination, paint.list.w - 390), item.copy});
 		}
-
-		DrawText("PLACEHOLDERS", rightX, dialog.y + 68, kUiTextScale, 190, 210, 235);
-		DrawText("%x  consecutive number   %Nx  padded number", rightX, dialog.y + 92, kUiTextScale, 205, 205, 205);
-		DrawText("%n  number from filename  %f  original filename", rightX, dialog.y + 110, kUiTextScale, 205, 205, 205);
-		DrawText("%F  filename without ext  %e  extension", rightX, dialog.y + 128, kUiTextScale, 205, 205, 205);
-		DrawText("%d %m %y  day/month/year   %2y  short year", rightX, dialog.y + 146, kUiTextScale, 205, 205, 205);
-		DrawText("%h %min  hour/minute       %M %3M  month text", rightX, dialog.y + 164, kUiTextScale, 205, 205, 205);
-		DrawText("%pictures%  HOME/Pictures or XDG_PICTURES_DIR", rightX, dialog.y + 182, kUiTextScale, 205, 205, 205);
-		DrawText("TARGET PATTERN (use / for folders)", rightX, dialog.y + 216, kUiTextScale, 190, 210, 235);
-		const SDL_Rect patternRect = BatchCopyPatternRect();
-		SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
-		SDL_RenderFillRect(renderer_, &patternRect);
-		DrawRect(patternRect, batchCopyDialog_.PatternFocused() ? 100 : 75,
-			batchCopyDialog_.PatternFocused() ? 130 : 75, batchCopyDialog_.PatternFocused() ? 165 : 75);
-		DrawText(ClipText(batchCopyDialog_.Pattern(), patternRect.w - 16), patternRect.x + 8, patternRect.y + 10,
-			kUiTextScale);
-		if (!batchCopyDialog_.Message().empty()) {
-			DrawText(ClipText(batchCopyDialog_.Message(), rightWidth), rightX, dialog.y + dialog.h - 88, kUiTextScale,
-				235, 180, 130);
+		const int buttonIds[] = {kBatchSelectAll, kBatchSelectNone, kBatchPreview,
+			kBatchSavePattern, kBatchRename, kBatchClose};
+		const char* buttonLabels[] = {"SELECT ALL", "SELECT NONE", "PREVIEW",
+			"SAVE TEMPLATE", "RENAME/COPY", "CLOSE"};
+		for (std::size_t index = 0; index < paint.buttons.size(); ++index) {
+			const SDL_Rect rect = BatchCopyButtonRect(buttonIds[index]);
+			paint.buttons[index] = {rect, ClipText(buttonLabels[index], rect.w - 12),
+				PointInRect(lastMouseX_, lastMouseY_, rect)};
 		}
-		RenderBatchButton(kBatchSelectAll, "SELECT ALL");
-		RenderBatchButton(kBatchSelectNone, "SELECT NONE");
-		RenderBatchButton(kBatchPreview, "PREVIEW");
-		RenderBatchButton(kBatchSavePattern, "SAVE TEMPLATE");
-		RenderBatchButton(kBatchRename, "RENAME/COPY");
-		RenderBatchButton(kBatchClose, "CLOSE");
+		editingDialogRenderer_.Render(paint);
 	}
 
 	SDL_Rect ResizeDialogRect() const {
@@ -9400,50 +9259,37 @@ private:
 		}
 	}
 
-	void RenderResizeButton(int button, const char* label) {
-		const SDL_Rect rect = ResizeButtonRect(button);
-		const bool hovered = PointInRect(lastMouseX_, lastMouseY_, rect);
-		SDL_SetRenderDrawColor(renderer_, hovered ? 52 : 28, hovered ? 78 : 28, hovered ? 108 : 28, 220);
-		SDL_RenderFillRect(renderer_, &rect);
-		DrawRect(rect, 125, 145, 165);
-		DrawText(label, rect.x + 12, rect.y + 10, kUiTextScale, 255, 255, 255);
-	}
-
 	void RenderResizeDialog() {
-		if (!resizeDialog_.IsOpen()) return;
-		const SDL_Rect dialog = ResizeDialogRect();
-		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 232);
-		SDL_RenderFillRect(renderer_, &dialog);
-		DrawRect(dialog, 190, 190, 190);
-		DrawText("RESIZE IMAGE", dialog.x + 20, dialog.y + 16, kUiTextScale, 255, 255, 255);
-		DrawText("ORIGINAL SIZE", dialog.x + 20, dialog.y + 43, kUiTextScale, 180, 195, 215);
-		DrawText(std::to_string(resizeDialog_.Model().OriginalWidth()) + "X" +
-			std::to_string(resizeDialog_.Model().OriginalHeight()),
-			dialog.x + 190, dialog.y + 43, kUiTextScale, 220, 220, 220);
-
+		jpegview_linux::ResizeDialogPaint paint;
+		paint.visible = resizeDialog_.IsOpen();
+		if (!paint.visible) return;
+		paint.dialog = ResizeDialogRect();
+		paint.originalSize = std::to_string(resizeDialog_.Model().OriginalWidth()) + "X" +
+			std::to_string(resizeDialog_.Model().OriginalHeight());
+		paint.message = ClipText(resizeDialog_.Message(), paint.dialog.w - 40);
 		const char* labels[] = {"NEW SIZE", "NEW WIDTH", "NEW HEIGHT", "FILTER"};
-		for (int field = kResizePercent; field <= kResizeFilter; ++field) {
-			const SDL_Rect rect = ResizeFieldRect(field);
-			const bool focused = resizeDialog_.FocusedField() == field;
-			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 225);
-			SDL_RenderFillRect(renderer_, &rect);
-			DrawRect(rect, focused ? 100 : 75, focused ? 130 : 75, focused ? 165 : 75);
-			DrawText(labels[field], dialog.x + 20, rect.y + 9, kUiTextScale, 205, 215, 230);
-			const std::string value = field == kResizeFilter ? ResizeFilterName() : resizeDialog_.Model().FieldText(field);
-			DrawText(ClipText(value, rect.w - 16), rect.x + 8, rect.y + 9, kUiTextScale, 255, 255, 255);
-			if (field == kResizePercent) DrawText("%", rect.x + rect.w + 10, rect.y + 9, kUiTextScale, 185, 185, 185);
-			if (field == kResizeWidth || field == kResizeHeight) {
-				DrawText("PIXELS", rect.x + rect.w + 10, rect.y + 9, kUiTextScale, 185, 185, 185);
+		for (int fieldIndex = kResizePercent; fieldIndex <= kResizeFilter; ++fieldIndex) {
+			const std::size_t index = static_cast<std::size_t>(fieldIndex);
+			jpegview_linux::ResizeFieldPaint& field = paint.fields[index];
+			field.rect = ResizeFieldRect(fieldIndex);
+			field.label = labels[fieldIndex];
+			const std::string value = fieldIndex == kResizeFilter ? ResizeFilterName() :
+				resizeDialog_.Model().FieldText(fieldIndex);
+			field.value = ClipText(value, field.rect.w - 16);
+			field.focused = resizeDialog_.FocusedField() == fieldIndex;
+			if (fieldIndex == kResizePercent) field.suffix = "%";
+			if (fieldIndex == kResizeWidth || fieldIndex == kResizeHeight) {
+				field.suffix = "PIXELS";
 			}
 		}
-		if (!resizeDialog_.Message().empty()) {
-			DrawText(ClipText(resizeDialog_.Message(), dialog.w - 40), dialog.x + 20, dialog.y + dialog.h - 82,
-				kUiTextScale, 235, 180, 130);
+		const int buttonIds[] = {kResizeApply, kResizeCancel};
+		const char* buttonLabels[] = {"APPLY", "CANCEL"};
+		for (std::size_t index = 0; index < paint.buttons.size(); ++index) {
+			const SDL_Rect rect = ResizeButtonRect(buttonIds[index]);
+			paint.buttons[index] = {rect, buttonLabels[index],
+				PointInRect(lastMouseX_, lastMouseY_, rect)};
 		}
-		DrawText("TAB: NEXT FIELD   ARROWS: CHANGE FILTER/FIELD   ENTER: APPLY   ESC: CANCEL",
-			dialog.x + 20, dialog.y + dialog.h - 62, kUiTextScale, 160, 160, 160);
-		RenderResizeButton(kResizeApply, "APPLY");
-		RenderResizeButton(kResizeCancel, "CANCEL");
+		editingDialogRenderer_.Render(paint);
 	}
 
 	SDL_Rect CropSizeDialogRect() const {
@@ -9504,54 +9350,35 @@ private:
 		CloseFixedCropSizeDialog();
 	}
 
-	void RenderCropSizeButton(int button, const char* label) {
-		const SDL_Rect rect = CropSizeButtonRect(button);
-		const bool hovered = PointInRect(lastMouseX_, lastMouseY_, rect);
-		SDL_SetRenderDrawColor(renderer_, hovered ? 52 : 28, hovered ? 78 : 28,
-			hovered ? 108 : 28, 220);
-		SDL_RenderFillRect(renderer_, &rect);
-		DrawRect(rect, 125, 145, 165);
-		DrawText(label, rect.x + 12, rect.y + 10, kUiTextScale, 255, 255, 255);
-	}
-
 	void RenderFixedCropSizeDialog() {
-		if (!cropSizeDialog_.IsOpen()) return;
-		const SDL_Rect dialog = CropSizeDialogRect();
-		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 232);
-		SDL_RenderFillRect(renderer_, &dialog);
-		DrawRect(dialog, 190, 190, 190);
-		DrawText("SET FIXED CROP SIZE", dialog.x + 20, dialog.y + 16,
-			kUiTextScale, 255, 255, 255);
+		jpegview_linux::FixedCropSizeDialogPaint paint;
+		paint.visible = cropSizeDialog_.IsOpen();
+		if (!paint.visible) return;
+		paint.dialog = CropSizeDialogRect();
+		paint.message = ClipText(cropSizeDialog_.Message(), paint.dialog.w - 40);
 		const char* labels[] = {"WIDTH", "HEIGHT"};
-		const std::string values[] = {cropSizeDialog_.WidthText(), cropSizeDialog_.HeightText()};
-		for (int field = 0; field < 2; ++field) {
-			const SDL_Rect rect = CropSizeFieldRect(field);
-			const bool focused = cropSizeDialog_.FocusedField() == field;
-			SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 225);
-			SDL_RenderFillRect(renderer_, &rect);
-			DrawRect(rect, focused ? 100 : 75, focused ? 130 : 75, focused ? 165 : 75);
-			DrawText(labels[field], dialog.x + 20, rect.y + 10, kUiTextScale, 205, 215, 230);
-			DrawText(ClipText(values[field], rect.w - 16), rect.x + 8, rect.y + 10,
-				kUiTextScale, 255, 255, 255);
+		const std::string values[] = {cropSizeDialog_.WidthText(),
+			cropSizeDialog_.HeightText()};
+		for (int fieldIndex = 0; fieldIndex < 2; ++fieldIndex) {
+			jpegview_linux::CropSizeFieldPaint& field =
+				paint.fields[static_cast<std::size_t>(fieldIndex)];
+			field.rect = CropSizeFieldRect(fieldIndex);
+			field.label = labels[fieldIndex];
+			field.value = ClipText(values[fieldIndex], field.rect.w - 16);
+			field.focused = cropSizeDialog_.FocusedField() == fieldIndex;
 		}
-		for (const bool screenPixels : {true, false}) {
-			const SDL_Rect rect = CropSizeUnitRect(screenPixels);
-			const bool selected = cropSizeDialog_.UsesScreenPixels() == screenPixels;
-			SDL_SetRenderDrawColor(renderer_, selected ? 45 : 28, selected ? 68 : 28,
-				selected ? 92 : 28, 220);
-			SDL_RenderFillRect(renderer_, &rect);
-			DrawRect(rect, selected ? 120 : 75, selected ? 150 : 75, selected ? 190 : 75);
-			DrawText(screenPixels ? "Screen pixels" : "Image pixels", rect.x + 10,
-				rect.y + 9, kUiTextScale, 235, 235, 235);
+		paint.units[0] = {CropSizeUnitRect(true), "Screen pixels",
+			cropSizeDialog_.UsesScreenPixels()};
+		paint.units[1] = {CropSizeUnitRect(false), "Image pixels",
+			!cropSizeDialog_.UsesScreenPixels()};
+		const int buttonIds[] = {kCropSizeApply, kCropSizeCancel};
+		const char* buttonLabels[] = {"APPLY", "CANCEL"};
+		for (std::size_t index = 0; index < paint.buttons.size(); ++index) {
+			const SDL_Rect rect = CropSizeButtonRect(buttonIds[index]);
+			paint.buttons[index] = {rect, buttonLabels[index],
+				PointInRect(lastMouseX_, lastMouseY_, rect)};
 		}
-		if (!cropSizeDialog_.Message().empty()) {
-			DrawText(ClipText(cropSizeDialog_.Message(), dialog.w - 40), dialog.x + 20,
-				dialog.y + 222, kUiTextScale, 235, 180, 130);
-		}
-		DrawText("Screen-pixel sizes follow zoom; image-pixel sizes use source pixels.",
-			dialog.x + 20, dialog.y + 201, kUiTextScale, 160, 160, 160);
-		RenderCropSizeButton(kCropSizeApply, "APPLY");
-		RenderCropSizeButton(kCropSizeCancel, "CANCEL");
+		editingDialogRenderer_.Render(paint);
 	}
 
 	void HandleFixedCropSizeDialogEvents(const SDL_Event& event, bool& running) {
@@ -9613,8 +9440,8 @@ private:
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		const int maximumWidth = std::max(kFileDialogMinimumWidth, windowWidth - 40);
 		const int maximumHeight = std::max(kFileDialogMinimumHeight, windowHeight - 40);
-		const int width = std::clamp(fileDialogWidth_, kFileDialogMinimumWidth, maximumWidth);
-		const int height = std::clamp(fileDialogHeight_, kFileDialogMinimumHeight, maximumHeight);
+		const int width = std::clamp(runtimeSettings_.Values().fileDialogWidth, kFileDialogMinimumWidth, maximumWidth);
+		const int height = std::clamp(runtimeSettings_.Values().fileDialogHeight, kFileDialogMinimumHeight, maximumHeight);
 		const int x = std::clamp(fileDialogX_, 0, std::max(0, windowWidth - width));
 		const int y = std::clamp(fileDialogY_, 0, std::max(0, windowHeight - height));
 		return SDL_Rect{x, y, width, height};
@@ -9713,8 +9540,8 @@ private:
 		const SDL_Rect dialog = FileDialogRect();
 		const int availableWidth = dialog.w - 24 - kFileDialogDividerWidth;
 		const int defaultWidth = std::min(260, std::max(200, dialog.w / 3));
-		const int requestedWidth = fileDialogPreviewRatio_ > 0.0 ?
-			static_cast<int>(std::lround(fileDialogPreviewRatio_ * availableWidth)) : defaultWidth;
+		const int requestedWidth = runtimeSettings_.Values().fileDialogPreviewRatio > 0.0 ?
+			static_cast<int>(std::lround(runtimeSettings_.Values().fileDialogPreviewRatio * availableWidth)) : defaultWidth;
 		const int maximumWidth = std::max(kFileDialogMinimumPreviewWidth,
 			availableWidth - kFileDialogMinimumListWidth);
 		return std::clamp(requestedWidth, kFileDialogMinimumPreviewWidth, maximumWidth);
@@ -9761,9 +9588,9 @@ private:
 				windowWidth - fileDialogDragStartRect_.x - 20);
 			const int availableHeight = std::max(1,
 				windowHeight - fileDialogDragStartRect_.y - 20);
-			fileDialogWidth_ = std::clamp(fileDialogDragStartRect_.w + x - fileDialogDragStartX_,
+			runtimeSettings_.Values().fileDialogWidth = std::clamp(fileDialogDragStartRect_.w + x - fileDialogDragStartX_,
 				std::min(kFileDialogMinimumWidth, availableWidth), availableWidth);
-			fileDialogHeight_ = std::clamp(fileDialogDragStartRect_.h + y - fileDialogDragStartY_,
+			runtimeSettings_.Values().fileDialogHeight = std::clamp(fileDialogDragStartRect_.h + y - fileDialogDragStartY_,
 				std::min(kFileDialogMinimumHeight, availableHeight), availableHeight);
 			fileDialogX_ = fileDialogDragStartRect_.x;
 			fileDialogY_ = fileDialogDragStartRect_.y;
@@ -9775,7 +9602,7 @@ private:
 				availableWidth - kFileDialogMinimumListWidth);
 			const int previewWidth = std::clamp(fileDialogDragStartPreviewWidth_ +
 				fileDialogDragStartX_ - x, kFileDialogMinimumPreviewWidth, maximumWidth);
-			fileDialogPreviewRatio_ = static_cast<double>(previewWidth) / availableWidth;
+			runtimeSettings_.Values().fileDialogPreviewRatio = static_cast<double>(previewWidth) / availableWidth;
 		} else if (fileDialogDragMode_ == FileDialogDragMode::Scrollbar) {
 			const jpegview_linux::FileDialogScrollbarGeometry geometry = FileDialogScrollGeometry();
 			const int thumbY = y - fileDialogScrollbarGrabOffset_;
@@ -10008,60 +9835,6 @@ private:
 					fileDialogPreviewHeight_ = result.height;
 					fileDialogPreviewHasTransparency_ = result.hasTransparency;
 				}
-			}
-		}
-	}
-
-	void RenderFileDialogPreview(const SDL_Rect& previewRect) {
-		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 210);
-		SDL_RenderFillRect(renderer_, &previewRect);
-		DrawRect(previewRect, 75, 75, 75);
-		DrawText("Preview", previewRect.x + 8, previewRect.y + 6, kUiTextScale,
-			190, 205, 220);
-
-		const SDL_Rect imageRect = FileDialogPreviewImageRect(previewRect);
-		if (fileDialogPreviewTexture_ != nullptr && fileDialogPreviewWidth_ > 0 &&
-			fileDialogPreviewHeight_ > 0) {
-			const double scale = std::min({1.0,
-				static_cast<double>(imageRect.w) / fileDialogPreviewWidth_,
-				static_cast<double>(imageRect.h) / fileDialogPreviewHeight_});
-			const int width = std::max(1, static_cast<int>(fileDialogPreviewWidth_ * scale));
-			const int height = std::max(1, static_cast<int>(fileDialogPreviewHeight_ * scale));
-			const SDL_Rect destination{imageRect.x + (imageRect.w - width) / 2,
-				imageRect.y + (imageRect.h - height) / 2, width, height};
-			if (fileDialogPreviewHasTransparency_) {
-				RenderTransparencyBackground(destination, imageRect);
-			}
-			SDL_RenderCopy(renderer_, fileDialogPreviewTexture_, nullptr, &destination);
-		} else if (!fileDialogPreviewMessage_.empty()) {
-			const int textWidth = TextWidth(fileDialogPreviewMessage_, kUiTextScale);
-			DrawText(ClipText(fileDialogPreviewMessage_, imageRect.w - 12),
-				imageRect.x + std::max(6, (imageRect.w - textWidth) / 2),
-				imageRect.y + std::max(0, (imageRect.h - 12) / 2), kUiTextScale,
-				165, 165, 165);
-		}
-		if (!fileDialogPreviewSource_.empty()) {
-			const std::string filename = fileDialogPreviewSource_.filename().string();
-			std::string dimensions;
-			if (fileDialogPreviewSourceWidth_ > 0 && fileDialogPreviewSourceHeight_ > 0) {
-				const std::string formattedSize = fileDialogPreviewFileSizeKnown_ ?
-					jpegview_linux::FormatFileSize(fileDialogPreviewFileSize_) : std::string();
-				dimensions = jpegview_linux::FormatImageDimensionsAndSize(
-					fileDialogPreviewSourceWidth_, fileDialogPreviewSourceHeight_, formattedSize);
-			}
-			const int footerX = previewRect.x + 8;
-			const int footerWidth = std::max(0, previewRect.w - 16);
-			const jpegview_linux::FileDialogPreviewFooterLayout footerLayout =
-				jpegview_linux::CalculateFileDialogPreviewFooterLayout(footerWidth,
-					TextWidth(filename, kUiTextScale), TextWidth(dimensions, kUiTextScale));
-			const std::string visibleFilename = ClipText(filename, footerLayout.filenameWidth);
-			const int footerY = previewRect.y + previewRect.h - 19;
-			DrawText(visibleFilename, footerX, footerY, kUiTextScale, 165, 175, 185);
-			if (!dimensions.empty() && footerLayout.detailsWidth > 0) {
-				const std::string visibleDimensions = ClipText(dimensions, footerLayout.detailsWidth);
-				const int detailsX = footerX + footerLayout.detailsOffsetX +
-					footerLayout.detailsWidth - TextWidth(visibleDimensions, kUiTextScale);
-				DrawText(visibleDimensions, detailsX, footerY, kUiTextScale, 165, 175, 185);
 			}
 		}
 	}
@@ -10809,185 +10582,132 @@ private:
 		}
 	}
 
-	void RenderFileDialog() {
-		if (!fileDialogOpen_) return;
-		const SDL_Rect dialog = FileDialogRect();
-		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
-		SDL_RenderFillRect(renderer_, &dialog);
-		DrawRect(dialog, 190, 190, 190);
-		DrawText(fileDialogLosslessCrop_ ? "Save lossless JPEG crop" :
+	jpegview_linux::FileDialogRenderSnapshot BuildFileDialogRenderSnapshot() const {
+		jpegview_linux::FileDialogRenderSnapshot snapshot;
+		snapshot.visible = fileDialogOpen_;
+		if (!snapshot.visible) return snapshot;
+		snapshot.dialog = FileDialogRect();
+		snapshot.removeRecentButton = FileDialogRemoveRecentButtonRect();
+		snapshot.browseTab = FileDialogTabRect(FileDialogTab::Browse);
+		snapshot.recentsTab = FileDialogTabRect(FileDialogTab::Recents);
+		snapshot.sortButton = FileDialogSortRect();
+		snapshot.input = FileDialogInputRect();
+		snapshot.list = FileDialogListRect();
+		snapshot.listContent = FileDialogListContentRect();
+		snapshot.scrollbarTrack = FileDialogScrollbarRect();
+		snapshot.scrollbarThumb = FileDialogScrollbarThumbRect();
+		snapshot.divider = FileDialogDividerRect();
+		snapshot.resizeHandle = FileDialogResizeHandleRect();
+		snapshot.showTabs = FileDialogHasTabs();
+		snapshot.recentTab = fileDialogTab_ == FileDialogTab::Recents;
+		snapshot.showRemoveRecent = FileDialogCanRemoveRecent();
+		snapshot.recentSelectionAvailable = recentFileDialogModel_.SelectedEntry() != nullptr;
+		snapshot.removeRecentHovered = snapshot.recentSelectionAvailable &&
+			PointInRect(lastMouseX_, lastMouseY_, snapshot.removeRecentButton);
+		snapshot.showSort = FileDialogCanSort();
+		snapshot.sortByName = ActiveFileDialogModel().SortMode() ==
+			jpegview_linux::FileDialogSortMode::Name;
+		snapshot.showPreview = FileDialogHasPreviewColumn();
+		snapshot.message = fileDialogMessage_;
+		snapshot.location = snapshot.recentTab ? "One recent image per folder" :
+			jpegview_linux::ArchiveLocationDisplayName(fileDialogDirectory_);
+		snapshot.title = fileDialogLosslessCrop_ ? "Save lossless JPEG crop" :
 			(fileDialogParameterBackup_ ? "Back up picture-level database" :
 			(fileDialogParameterRestore_ ? "Restore picture-level database" :
-			(fileDialogSave_ ? "Save processed image" : "Open image"))),
-			dialog.x + 18, dialog.y + 14, kUiTextScale);
-		if (FileDialogHasTabs()) {
-			for (const FileDialogTab tab : {FileDialogTab::Browse, FileDialogTab::Recents}) {
-				const SDL_Rect tabRect = FileDialogTabRect(tab);
-				const bool active = fileDialogTab_ == tab;
-				SDL_SetRenderDrawColor(renderer_, active ? 45 : 30, active ? 72 : 30,
-					active ? 104 : 30, 230);
-				SDL_RenderFillRect(renderer_, &tabRect);
-				DrawRect(tabRect, active ? 100 : 75, active ? 130 : 75, active ? 165 : 75);
-				const std::string label = tab == FileDialogTab::Browse ? "Browse" : "Recents";
-				const int labelX = tabRect.x + std::max(4,
-					(tabRect.w - TextWidth(label, kUiTextScale)) / 2);
-				DrawText(label, labelX, tabRect.y + 7, kUiTextScale,
-					active ? 235 : 175, active ? 240 : 185, active ? 250 : 195);
-			}
-		}
-		DrawText(fileDialogTab_ == FileDialogTab::Recents ?
-			"One recent image per folder" :
-			jpegview_linux::ArchiveLocationDisplayName(fileDialogDirectory_),
-			dialog.x + 18, dialog.y + 42, kUiTextScale, 170, 170, 170);
-		if (FileDialogCanRemoveRecent()) {
-			const SDL_Rect button = FileDialogRemoveRecentButtonRect();
-			const bool enabled = recentFileDialogModel_.SelectedEntry() != nullptr;
-			const bool hovered = enabled && PointInRect(lastMouseX_, lastMouseY_, button);
-			SDL_SetRenderDrawColor(renderer_, enabled ? (hovered ? 52 : 32) : 24,
-				enabled ? (hovered ? 78 : 38) : 24, enabled ? (hovered ? 108 : 52) : 24, 230);
-			SDL_RenderFillRect(renderer_, &button);
-			DrawRect(button, enabled ? 115 : 65, enabled ? 135 : 65, enabled ? 155 : 65);
-			const int labelX = button.x + (button.w - TextWidth("Remove", kUiTextScale)) / 2;
-			DrawText("Remove", labelX, button.y + 7, kUiTextScale,
-				enabled ? 225 : 115, enabled ? 230 : 115, enabled ? 238 : 115);
-		}
-		DrawText(fileDialogSave_ ? "File name" :
-			(fileDialogParameterRestore_ ? "Backup filter" : "Filter"),
-			dialog.x + 18, dialog.y + 68,
-			kUiTextScale, 190, 190, 190);
-		if (FileDialogCanSort()) {
-			const SDL_Rect sortRect = FileDialogSortRect();
-			SDL_SetRenderDrawColor(renderer_, 36, 36, 36, 230);
-			SDL_RenderFillRect(renderer_, &sortRect);
-			DrawRect(sortRect, 100, 130, 165);
-			const std::string sortLabel = ActiveFileDialogModel().SortMode() == jpegview_linux::FileDialogSortMode::Name ?
-				"Sort: Name" : "Sort: Mod.date";
-			const int labelX = sortRect.x + std::max(6, (sortRect.w - TextWidth(sortLabel, kUiTextScale)) / 2);
-			DrawText(sortLabel, labelX, sortRect.y + 3, kUiTextScale, 210, 220, 230);
-		}
-		SDL_Rect inputRect = FileDialogInputRect();
-		SDL_SetRenderDrawColor(renderer_, 30, 30, 30, 220);
-		SDL_RenderFillRect(renderer_, &inputRect);
-		DrawRect(inputRect, 100, 130, 165);
-		const std::string& inputText = fileDialogSave_ ? fileDialogFilename_ : ActiveFileDialogModel().Filter();
-		DrawText(ClipInputText(inputText, inputRect.w - 20), inputRect.x + 10, inputRect.y + 6, kUiTextScale);
-
-		const int listTop = FileDialogListTop();
-		const int rows = FileDialogVisibleRows();
-		const SDL_Rect listRect = FileDialogListRect();
-		const SDL_Rect listContentRect = FileDialogListContentRect();
+			(fileDialogSave_ ? "Save processed image" : "Open image")));
+		snapshot.fieldTitle = fileDialogSave_ ? "File name" :
+			(fileDialogParameterRestore_ ? "Backup filter" : "Filter");
 		const jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
-		SDL_SetRenderDrawColor(renderer_, 25, 25, 25, 210);
-		SDL_RenderFillRect(renderer_, &listRect);
-		DrawRect(listRect, 75, 75, 75);
-		for (int row = 0; row < rows; ++row) {
-			const int item = model.Scroll() + row;
-			if (item >= static_cast<int>(model.Entries().size())) break;
-			const auto visibleEntries = model.Entries();
-			const FileDialogEntry& entry = visibleEntries[static_cast<std::size_t>(item)];
-			const int rowTop = listTop + row * 26;
-			if (item == model.SelectedIndex()) {
-				SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
-				SDL_Rect selection{listContentRect.x + 2, rowTop + 1,
-					listContentRect.w - 4, 24};
-				SDL_RenderFillRect(renderer_, &selection);
-			}
-			if (fileDialogTab_ == FileDialogTab::Recents) {
-				const int leftX = listContentRect.x + 10;
-				const int pathWidth = std::max(1, (listContentRect.w - 30) / 2);
-				const std::string sizeText = entry.fileSizeKnown ?
-					jpegview_linux::FormatFileSize(entry.fileSize) : std::string();
-				const int sizeWidth = TextWidth(sizeText, kUiTextScale);
-				const int rightEdge = listContentRect.x + listContentRect.w - 10;
-				const int sizeX = rightEdge - sizeWidth;
-				const int filenameRight = sizeText.empty() ? rightEdge : sizeX - 8;
-				const int filenameWidth = std::max(1,
-					filenameRight - (leftX + pathWidth + 8));
-				const std::string parent = ClipText(
-					jpegview_linux::ArchiveLocationDisplayName(entry.path.parent_path()), pathWidth);
-				const std::string filename = ClipText(entry.path.filename().string(), filenameWidth);
-				const int filenameX = filenameRight - TextWidth(filename, kUiTextScale);
-				const bool fromArchive = entry.archiveMember;
-				DrawText(parent, leftX, rowTop + 5, kUiTextScale,
-					fromArchive ? 210 : 165, fromArchive ? 170 : 175, fromArchive ? 105 : 190);
-				DrawText(filename, filenameX, rowTop + 5, kUiTextScale,
-					fromArchive ? 255 : 235, fromArchive ? 205 : 235, fromArchive ? 125 : 235);
-				if (!sizeText.empty()) {
-					DrawText(sizeText, sizeX, rowTop + 5, kUiTextScale, 165, 180, 200);
-				}
+		const std::string& inputText = fileDialogSave_ ? fileDialogFilename_ : model.Filter();
+		snapshot.inputText = ClipInputText(inputText, snapshot.input.w - 20);
+		snapshot.message = fileDialogMessage_;
+		if (fileDialogSave_) {
+			snapshot.shortcutHint = "Enter: Save   Backspace: Edit/parent   Esc: Cancel";
+		} else if (fileDialogParameterRestore_) {
+			snapshot.shortcutHint =
+				"Type: Filter   Enter: Restore backup   Backspace: Parent   Esc: Cancel";
+		} else if (snapshot.recentTab) {
+			snapshot.shortcutHint =
+				"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Del: Remove   Ctrl+Z: Undo   Enter: Open   Backspace: Filter   Esc: Cancel";
+		} else {
+			snapshot.shortcutHint =
+				"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Enter: Open   Ctrl+Return: Folder   Backspace: Filter/parent   Esc: Cancel";
+		}
+		const int visibleRows = FileDialogVisibleRows();
+		const auto entries = model.Entries();
+		for (int rowIndex = 0; rowIndex < visibleRows; ++rowIndex) {
+			const int item = model.Scroll() + rowIndex;
+			if (item >= static_cast<int>(entries.size())) break;
+			const FileDialogEntry& entry = entries[static_cast<std::size_t>(item)];
+			jpegview_linux::FileDialogRenderRow row;
+			row.selected = item == model.SelectedIndex();
+			row.recent = snapshot.recentTab;
+			row.archive = snapshot.recentTab ? entry.archiveMember :
+				(entry.archiveContainer || entry.archiveMember);
+			row.directory = entry.directory;
+			if (snapshot.recentTab) {
+				row.parent = jpegview_linux::ArchiveLocationDisplayName(entry.path.parent_path());
+				row.filename = entry.path.filename().string();
+				if (entry.fileSizeKnown) row.sizeText = jpegview_linux::FormatFileSize(entry.fileSize);
 			} else {
-				std::string rightText;
-				if (FileDialogCanSort() && entry.directory && !entry.parent && !entry.encrypted) {
+				if (snapshot.showSort && entry.directory && !entry.parent && !entry.encrypted) {
 					const auto summary = fileDialogDirectorySummaries_.find(entry.path.string());
-					rightText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
+					row.rightText = summary == fileDialogDirectorySummaries_.end() ? "Scanning..." :
 						jpegview_linux::FormatDirectorySummary(summary->second);
 				} else if (!entry.directory && entry.fileSizeKnown) {
-					rightText = jpegview_linux::FormatFileSize(entry.fileSize);
+					row.rightText = jpegview_linux::FormatFileSize(entry.fileSize);
 				}
-				rightText = ClipText(rightText, std::max(1, listContentRect.w / 2 - 20));
-				const int rightTextWidth = TextWidth(rightText, kUiTextScale);
-				const int rightTextX = listContentRect.x + listContentRect.w - 10 - rightTextWidth;
-				const int labelWidth = rightText.empty() ? listContentRect.w - 20 :
-					std::max(1, rightTextX - (listContentRect.x + 10) - 12);
-				const bool archiveEntry = entry.archiveContainer || entry.archiveMember;
-				const Uint8 red = archiveEntry ? 255 : entry.directory ? 185 : 235;
-				const Uint8 green = archiveEntry ? 205 : entry.directory ? 205 : 235;
-				const Uint8 blue = archiveEntry ? 125 : 235;
-				DrawText(ClipText(FileDialogEntryLabel(entry), labelWidth), listContentRect.x + 10,
-					rowTop + 5, kUiTextScale, red, green, blue);
-				if (!rightText.empty()) {
-					DrawText(rightText, rightTextX, rowTop + 5, kUiTextScale, 155, 175, 195);
-				}
+				row.rightText = ClipText(row.rightText,
+					std::max(1, snapshot.listContent.w / 2 - 20));
+				row.label = FileDialogEntryLabel(entry);
 			}
+			snapshot.rows.push_back(std::move(row));
 		}
-		if (model.Entries().empty() && fileDialogTab_ == FileDialogTab::Recents) {
-			const std::string emptyMessage = model.Filter().empty() ?
+		snapshot.recentListEmpty = entries.empty() && snapshot.recentTab;
+		if (snapshot.recentListEmpty) {
+			snapshot.emptyRecentMessage = model.Filter().empty() ?
 				"No recent files" : "No recent files match this filter";
-			DrawText(emptyMessage, listContentRect.x + 12, listRect.y + 10, kUiTextScale,
-				165, 175, 190);
 		}
-		const SDL_Rect scrollbarTrack = FileDialogScrollbarRect();
 		const jpegview_linux::FileDialogScrollbarGeometry scrollbar = FileDialogScrollGeometry();
-		SDL_SetRenderDrawColor(renderer_, 34, 34, 34, 230);
-		SDL_RenderFillRect(renderer_, &scrollbarTrack);
-		DrawRect(scrollbarTrack, 63, 63, 63);
-		const SDL_Rect scrollbarThumb = FileDialogScrollbarThumbRect();
-		const bool scrollbarHovered = PointInRect(lastMouseX_, lastMouseY_, scrollbarTrack);
-		const Uint8 thumbShade = !scrollbar.scrollable ? 82 :
-			(fileDialogDragMode_ == FileDialogDragMode::Scrollbar ? 185 :
-				(scrollbarHovered ? 158 : 128));
-		SDL_SetRenderDrawColor(renderer_, thumbShade, thumbShade, thumbShade, 255);
-		SDL_RenderFillRect(renderer_, &scrollbarThumb);
-		const Uint8 thumbBorder = static_cast<Uint8>(std::min(220,
-			static_cast<int>(thumbShade) + 35));
-		DrawRect(scrollbarThumb, thumbBorder, thumbBorder, thumbBorder);
-		if (FileDialogHasPreviewColumn()) {
-			RenderFileDialogPreview(FileDialogPreviewRect());
-			const SDL_Rect divider = FileDialogDividerRect();
-			const int centerX = divider.x + divider.w / 2;
-			const int centerY = divider.y + divider.h / 2;
-			DrawLine(centerX, divider.y + 8, centerX, divider.y + divider.h - 9, 74, 84, 96);
-			for (int offset = -6; offset <= 6; offset += 6) {
-				DrawLine(centerX - 2, centerY + offset, centerX + 2, centerY + offset,
-					145, 160, 178);
+		snapshot.scrollbarScrollable = scrollbar.scrollable;
+		snapshot.scrollbarDragging = fileDialogDragMode_ == FileDialogDragMode::Scrollbar;
+		snapshot.scrollbarHovered = PointInRect(lastMouseX_, lastMouseY_, snapshot.scrollbarTrack);
+		if (snapshot.showPreview) {
+			snapshot.preview.pane = FileDialogPreviewRect();
+			snapshot.preview.imageArea = FileDialogPreviewImageRect(snapshot.preview.pane);
+			snapshot.preview.texture = fileDialogPreviewTexture_;
+			snapshot.preview.width = fileDialogPreviewWidth_;
+			snapshot.preview.height = fileDialogPreviewHeight_;
+			snapshot.preview.hasTransparency = fileDialogPreviewHasTransparency_;
+			snapshot.preview.transparencyPattern = runtimeSettings_.Values().transparencyPattern;
+			snapshot.preview.message = fileDialogPreviewMessage_;
+			if (!fileDialogPreviewSource_.empty()) {
+				const std::string filename = fileDialogPreviewSource_.filename().string();
+				std::string dimensions;
+				if (fileDialogPreviewSourceWidth_ > 0 && fileDialogPreviewSourceHeight_ > 0) {
+					const std::string formattedSize = fileDialogPreviewFileSizeKnown_ ?
+						jpegview_linux::FormatFileSize(fileDialogPreviewFileSize_) : std::string();
+					dimensions = jpegview_linux::FormatImageDimensionsAndSize(
+						fileDialogPreviewSourceWidth_, fileDialogPreviewSourceHeight_, formattedSize);
+				}
+				const int footerX = snapshot.preview.pane.x + 8;
+				const int footerWidth = std::max(0, snapshot.preview.pane.w - 16);
+				const jpegview_linux::FileDialogPreviewFooterLayout footerLayout =
+					jpegview_linux::CalculateFileDialogPreviewFooterLayout(footerWidth,
+						TextWidth(filename, kUiTextScale), TextWidth(dimensions, kUiTextScale));
+				snapshot.preview.filename = ClipText(filename, footerLayout.filenameWidth);
+				snapshot.preview.dimensions = ClipText(dimensions, footerLayout.detailsWidth);
+				snapshot.preview.filenameX = footerX;
+				snapshot.preview.dimensionsX = footerX + footerLayout.detailsOffsetX +
+					footerLayout.detailsWidth - TextWidth(snapshot.preview.dimensions, kUiTextScale);
+				snapshot.preview.footerY = snapshot.preview.pane.y + snapshot.preview.pane.h - 19;
 			}
 		}
-		if (!fileDialogMessage_.empty()) {
-			DrawText(fileDialogMessage_, dialog.x + 18, dialog.y + dialog.h - 60, kUiTextScale, 235, 150, 120);
-		}
-		DrawText(fileDialogSave_ ? "Enter: Save   Backspace: Edit/parent   Esc: Cancel" :
-			(fileDialogParameterRestore_ ?
-				"Type: Filter   Enter: Restore backup   Backspace: Parent   Esc: Cancel" :
-				(fileDialogTab_ == FileDialogTab::Recents ?
-					"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Del: Remove   Ctrl+Z: Undo   Enter: Open   Backspace: Filter   Esc: Cancel" :
-					"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Enter: Open   Ctrl+Return: Folder   Backspace: Filter/parent   Esc: Cancel")),
-			dialog.x + 18, dialog.y + dialog.h - 34, kUiTextScale, 170, 170, 170);
-		const SDL_Rect resizeHandle = FileDialogResizeHandleRect();
-		for (int offset = 5; offset <= 13; offset += 4) {
-			DrawLine(resizeHandle.x + offset, resizeHandle.y + resizeHandle.h - 2,
-				resizeHandle.x + resizeHandle.w - 2, resizeHandle.y + offset,
-				135, 145, 155);
-		}
+		return snapshot;
+	}
+
+	void RenderFileDialog() {
+		fileDialogRenderer_.Render(BuildFileDialogRenderSnapshot());
 	}
 
 	void RenderArchivePasswordDialog() {
@@ -11029,88 +10749,21 @@ private:
 			panel.y + 145, kUiTextScale, 145, 150, 160);
 	}
 
-	void ClearTextTextureCache() {
-		for (auto& cached : textTextureCache_) {
-			if (cached.second.texture != nullptr) DestroyTextureMeasured(cached.second.texture);
-		}
-		textTextureCache_.clear();
-	}
-
-	TextTextureCacheEntry* TextTexture(const std::string& text, int scale) {
-		if (renderer_ == nullptr || text.empty() || scale <= 0) return nullptr;
-		const std::string key = std::to_string(scale) + '\n' + text;
-		auto found = textTextureCache_.find(key);
-		if (found != textTextureCache_.end()) {
-			found->second.lastUsed = ++textTextureUseCounter_;
-			return &found->second;
-		}
-
-		const jpegview_linux::RasterizedText raster = UiFont().Rasterize(text, scale);
-		if (raster.width <= 0 || raster.height <= 0 || raster.argb.empty()) return nullptr;
-		// The viewer keeps best-quality sampling for image textures. Bitmap text
-		// uses one-bit ink and transparent white padding, so linear sampling at a
-		// scaled renderer edge can leak a faint pixel beyond the final glyph.
-		const bool bitmapText = jpegview_linux::Terminus9CanRender(text);
-		if (bitmapText) SDL_SetHint(kRenderScaleQualityHint, kBitmapTextScaleQuality);
-		SDL_Texture* texture = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888,
-			SDL_TEXTUREACCESS_STATIC, raster.width, raster.height);
-		if (bitmapText) SDL_SetHint(kRenderScaleQualityHint, kImageTextureScaleQuality);
-		if (texture == nullptr) return nullptr;
-		if (SDL_UpdateTexture(texture, nullptr, raster.argb.data(), raster.width * 4) != 0) {
-			DestroyTextureMeasured(texture);
-			return nullptr;
-		}
-		SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-		TextTextureCacheEntry cached{texture, raster.width, raster.height,
-			raster.offsetX, raster.offsetY, ++textTextureUseCounter_};
-		auto inserted = textTextureCache_.emplace(key, cached).first;
-		if (textTextureCache_.size() > 512) {
-			auto oldest = textTextureCache_.begin();
-			for (auto candidate = textTextureCache_.begin(); candidate != textTextureCache_.end(); ++candidate) {
-				if (candidate->second.lastUsed < oldest->second.lastUsed) oldest = candidate;
-			}
-			if (oldest != inserted) {
-				DestroyTextureMeasured(oldest->second.texture);
-				textTextureCache_.erase(oldest);
-			}
-		}
-		return &inserted->second;
-	}
+	void ClearTextTextureCache() { textRenderer_.Clear(); }
 
 	void DrawText(const std::string& text, int x, int y, int scale,
 		Uint8 r = 235, Uint8 g = 235, Uint8 b = 235, Uint8 alpha = 255) {
-		TextTextureCacheEntry* cached = TextTexture(text, scale);
-		if (cached == nullptr) return;
-		SDL_SetTextureColorMod(cached->texture, r, g, b);
-		SDL_SetTextureAlphaMod(cached->texture, alpha);
-		const SDL_Rect destination{x + cached->offsetX, y + cached->offsetY,
-			cached->width, cached->height};
-		SDL_RenderCopy(renderer_, cached->texture, nullptr, &destination);
-		SDL_SetTextureAlphaMod(cached->texture, 255);
+		textRenderer_.Draw(text, x, y, scale, r, g, b, alpha);
 	}
 
 	void DrawLine(int x1, int y1, int x2, int y2, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235,
 		Uint8 alpha = 255) {
-		SDL_SetRenderDrawColor(renderer_, r, g, b, alpha);
-		SDL_RenderDrawLine(renderer_, x1, y1, x2, y2);
+		chromeRenderer_.DrawLine(x1, y1, x2, y2, r, g, b, alpha);
 	}
 
 	void DrawRect(const SDL_Rect& rect, Uint8 r = 235, Uint8 g = 235, Uint8 b = 235,
 		Uint8 alpha = 255) {
-		if (rect.w <= 0 || rect.h <= 0) return;
-		SDL_SetRenderDrawColor(renderer_, r, g, b, alpha);
-		const SDL_Rect top{rect.x, rect.y, rect.w, 1};
-		SDL_RenderFillRect(renderer_, &top);
-		if (rect.h > 1) {
-			const SDL_Rect bottom{rect.x, rect.y + rect.h - 1, rect.w, 1};
-			SDL_RenderFillRect(renderer_, &bottom);
-		}
-		if (rect.h > 2 && rect.w > 1) {
-			const SDL_Rect left{rect.x, rect.y + 1, 1, rect.h - 2};
-			const SDL_Rect right{rect.x + rect.w - 1, rect.y + 1, 1, rect.h - 2};
-			SDL_RenderFillRect(renderer_, &left);
-			SDL_RenderFillRect(renderer_, &right);
-		}
+		chromeRenderer_.DrawRect(rect, r, g, b, alpha);
 	}
 
 	static SDL_Rect SdlRect(const jpegview_linux::UiRect& rect) {
@@ -11118,48 +10771,15 @@ private:
 	}
 
 	void RenderOverlayPaint(const jpegview_linux::OverlayPaintPlan& plan) {
-		const SDL_Rect panel = SdlRect(plan.panel);
-		SDL_SetRenderDrawColor(renderer_, plan.background.red, plan.background.green,
-			plan.background.blue, plan.background.alpha);
-		SDL_RenderFillRect(renderer_, &panel);
-		DrawRect(panel, plan.border.red, plan.border.green, plan.border.blue);
-		for (const jpegview_linux::UiText& text : plan.text) {
-			DrawText(text.text, text.x, text.y, kUiTextScale,
-				text.color.red, text.color.green, text.color.blue);
-		}
+		chromeRenderer_.Render(plan);
 	}
 
 	void RenderNavigationButton(const jpegview_linux::NavigationButtonPaint& button) {
-		const SDL_Rect rect = SdlRect(button.rect);
-		auto drawLayer = [&](int offsetX, int offsetY, Uint8 red, Uint8 green, Uint8 blue,
-			Uint8 alpha) {
-			const SDL_Rect frame{rect.x + offsetX, rect.y + offsetY, rect.w, rect.h};
-			DrawRect(frame, red, green, blue, alpha);
-			for (const jpegview_linux::UiRect& outline : button.outlines) {
-				const SDL_Rect shape = SdlRect(outline);
-				DrawRect({shape.x + offsetX, shape.y + offsetY, shape.w, shape.h},
-					red, green, blue, alpha);
-			}
-			for (const jpegview_linux::UiLine& line : button.lines) {
-				DrawLine(line.x1 + offsetX, line.y1 + offsetY,
-					line.x2 + offsetX, line.y2 + offsetY, red, green, blue, alpha);
-			}
-			for (const jpegview_linux::UiText& text : button.text) {
-				DrawText(text.text, text.x + offsetX, text.y + offsetY, kUiTextScale,
-					red, green, blue, alpha);
-			}
-		};
-		const Uint8 alpha = button.foreground.alpha;
-		drawLayer(-1, 0, 0, 0, 0, alpha);
-		drawLayer(1, 0, 0, 0, 0, alpha);
-		drawLayer(0, -1, 0, 0, 0, alpha);
-		drawLayer(0, 1, 0, 0, 0, alpha);
-		drawLayer(0, 0, button.foreground.red, button.foreground.green,
-			button.foreground.blue, alpha);
+		chromeRenderer_.Render(button);
 	}
 
 	void RenderFileName() {
-		if (!showFileName_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+		if (!runtimeSettings_.Values().showFilename || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
 			advancedConfiguration_.IsOpen() || batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
 		int windowWidth = 0;
 		SDL_GetWindowSize(window_, &windowWidth, nullptr);
@@ -11195,7 +10815,7 @@ private:
 	}
 
 	void RenderImageInfo() {
-		if (!infoVisible_ || contextMenuOpen_ || fileDialogOpen_ || advancedConfiguration_.IsOpen() ||
+		if (!runtimeSettings_.Values().infoVisible || contextMenuOpen_ || fileDialogOpen_ || advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
 		const jpegview_linux::InformationOverlayPaintPlan& paint = BuildImageInfoPaintPlan();
 		if (paint.overlay.panel.width <= 0 || paint.overlay.panel.height <= 0) return;
@@ -11209,7 +10829,7 @@ private:
 		SDL_RenderSetClipRect(renderer_, nullptr);
 
 		if (jpegview_linux::Contains(paint.spectrumButton, lastMouseX_, lastMouseY_)) {
-			const std::string label = showHistogram_ ? "Hide histogram" : "Show histogram";
+			const std::string label = runtimeSettings_.Values().showHistogram ? "Hide histogram" : "Show histogram";
 			int windowWidth = 0;
 			int windowHeight = 0;
 			SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
@@ -11223,7 +10843,7 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		return jpegview_linux::CalculateThumbnailPanelLayout(windowWidth, windowHeight,
-			thumbnailPanelVisible_, thumbnailPanelWidth_);
+			runtimeSettings_.Values().thumbnailPanelVisible, runtimeSettings_.Values().thumbnailPanelWidth);
 	}
 
 	SDL_Rect ThumbnailPanelRect() const {
@@ -11282,9 +10902,9 @@ private:
 		const int visibleBottom = std::min(imageRect.y + imageRect.h, clipRect.y + clipRect.h);
 		if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return;
 
-		if (transparencyPattern_ != jpegview_linux::TransparencyPattern::Checkerboard) {
+		if (runtimeSettings_.Values().transparencyPattern != jpegview_linux::TransparencyPattern::Checkerboard) {
 			const jpegview_linux::TransparencyPatternColor color =
-				jpegview_linux::TransparencyPatternTileColor(transparencyPattern_, 0, 0);
+				jpegview_linux::TransparencyPatternTileColor(runtimeSettings_.Values().transparencyPattern, 0, 0);
 			SDL_SetRenderDrawColor(renderer_, color.red, color.green, color.blue, 255);
 			const SDL_Rect visible{visibleLeft, visibleTop,
 				visibleRight - visibleLeft, visibleBottom - visibleTop};
@@ -11304,7 +10924,7 @@ private:
 				const int left = std::max(visibleLeft, tileLeft);
 				const int right = std::min(visibleRight, tileLeft + cellSize);
 				const jpegview_linux::TransparencyPatternColor color =
-					jpegview_linux::TransparencyPatternTileColor(transparencyPattern_, tileX, tileY);
+					jpegview_linux::TransparencyPatternTileColor(runtimeSettings_.Values().transparencyPattern, tileX, tileY);
 				SDL_SetRenderDrawColor(renderer_, color.red, color.green, color.blue, 255);
 				const SDL_Rect tile{left, top, right - left, bottom - top};
 				SDL_RenderFillRect(renderer_, &tile);
@@ -11321,7 +10941,7 @@ private:
 
 	bool IsZoomNavigatorVisibleAt(int mouseX, int mouseY) const {
 		const auto dimensions = ViewportContentDimensions();
-		if (!showZoomNavigator_ || dimensions.first <= 0 || dimensions.second <= 0 ||
+		if (!runtimeSettings_.Values().showZoomNavigator || dimensions.first <= 0 || dimensions.second <= 0 ||
 			cropSelection_.HasSelection() || cropMouseDragging_ || pictureLevelsPanelOpen_ ||
 			unsharpDialogOpen_ || contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ ||
 			aboutOpen_ || helpOpen_ || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
@@ -11730,7 +11350,7 @@ private:
 
 		const bool requiresPanning = destination.width > imageArea.w ||
 			destination.height > imageArea.h;
-		if (!jpegview_linux::ShouldStartNewCropSelection(selectionModeEnabled_,
+		if (!jpegview_linux::ShouldStartNewCropSelection(runtimeSettings_.Values().selectionModeEnabled,
 			control || shift, requiresPanning)) return false;
 		if (!cropSelection_.StartNew(point.x, point.y)) return false;
 		cropMouseDragging_ = true;
@@ -11796,7 +11416,7 @@ private:
 		const bool imageNeedsPanning = destination.width > imageArea.w ||
 			destination.height > imageArea.h;
 		const bool canStartSelection = jpegview_linux::ShouldStartNewCropSelection(
-			selectionModeEnabled_, forcedByModifier, imageNeedsPanning);
+			runtimeSettings_.Values().selectionModeEnabled, forcedByModifier, imageNeedsPanning);
 		if (canStartSelection && PointInRect(screenX, screenY, imageArea) &&
 			screenX >= destination.x && screenY >= destination.y &&
 			screenX < destination.x + destination.width &&
@@ -11859,7 +11479,7 @@ private:
 	}
 
 	bool IsThumbnailPanelResizeHandle(int x, int y) const {
-		if (!thumbnailPanelVisible_) return false;
+		if (!runtimeSettings_.Values().thumbnailPanelVisible) return false;
 		const SDL_Rect panel = ThumbnailPanelRect();
 		return panel.w > 0 && y >= panel.y && y < panel.y + panel.h &&
 			x >= panel.x + panel.w - kThumbnailResizeHandleHalfWidth &&
@@ -11893,8 +11513,8 @@ private:
 			jpegview_linux::kMaximumThumbnailPanelWidth, windowWidth - 1));
 		const int minimumWidth = std::min(jpegview_linux::kMinimumThumbnailPanelWidth, maximumWidth);
 		const int width = std::clamp(mouseX + thumbnailResizeOffset_, minimumWidth, maximumWidth);
-		if (width == thumbnailPanelWidth_) return;
-		thumbnailPanelWidth_ = width;
+		if (width == runtimeSettings_.Values().thumbnailPanelWidth) return;
+		runtimeSettings_.Values().thumbnailPanelWidth = width;
 		thumbnailPanelResizeChanged_ = true;
 		if (viewport_.IsFitToWindow()) {
 			FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
@@ -11916,7 +11536,7 @@ private:
 	}
 
 	void TouchVisibleThumbnailRows() {
-		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
+		if (!runtimeSettings_.Values().thumbnailPanelVisible || fileList_.Empty()) return;
 		const SDL_Rect panel = ThumbnailPanelRect();
 		if (panel.w <= 0 || panel.h <= 0) return;
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w,
@@ -11940,7 +11560,7 @@ private:
 	}
 
 	void RenderThumbnailPanel() {
-		if (!thumbnailPanelVisible_ || fileList_.Empty()) return;
+		if (!runtimeSettings_.Values().thumbnailPanelVisible || fileList_.Empty()) return;
 		const SDL_Rect panel = ThumbnailPanelRect();
 		if (panel.w <= 0 || panel.h <= 0) return;
 		SDL_SetRenderDrawColor(renderer_, 7, 7, 7, 238);
@@ -12006,7 +11626,7 @@ private:
 	}
 
 	bool HandleThumbnailPanelClick(int x, int y) {
-		if (!thumbnailPanelVisible_ || fileList_.Empty()) return false;
+		if (!runtimeSettings_.Values().thumbnailPanelVisible || fileList_.Empty()) return false;
 		const SDL_Rect panel = ThumbnailPanelRect();
 		if (!PointInRect(x, y, panel)) return false;
 		const int rowHeight = jpegview_linux::ThumbnailRowHeight(panel.w, kThumbnailVerticalMargin);
@@ -12023,19 +11643,19 @@ private:
 	}
 
 	bool HandleImageInfoClick(int x, int y) {
-		if (!infoVisible_ || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+		if (!runtimeSettings_.Values().infoVisible || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
 			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return false;
 		const jpegview_linux::InformationOverlayPaintPlan& paint = BuildImageInfoPaintPlan();
 		if (!jpegview_linux::Contains(paint.spectrumButton, x, y)) return false;
-		showHistogram_ = !showHistogram_;
+		runtimeSettings_.Values().showHistogram = !runtimeSettings_.Values().showHistogram;
 		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
 		SaveSettings();
 		return true;
 	}
 
 	void RenderControls() {
-		if (!navigationPanelEnabled_ || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
+		if (!runtimeSettings_.Values().navigationPanelEnabled || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
 			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen()) return;
 		const jpegview_linux::NavigationPanelPaint paint = CurrentNavigationPanelPaint();
@@ -12053,8 +11673,8 @@ private:
 		SDL_RenderSetClipRect(renderer_, nullptr);
 		if (hoveredButton == nullptr) return;
 		const std::string text = jpegview_linux::NavigationTooltip(hoveredButton->command,
-			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting(), selectionModeEnabled_,
-			doublePageModeEnabled_, mangaReadingOrderEnabled_, spacebarNavigatesImages_,
+			viewport_.IsFitToWindow(), fullscreen_, fileList_.GetSorting(), runtimeSettings_.Values().selectionModeEnabled,
+			doublePageModeEnabled_, mangaReadingOrderEnabled_, runtimeSettings_.Values().spacebarNavigatesImages,
 			viewport_.FitRelativeZoomMode());
 		if (text.empty()) return;
 		int windowWidth = 0;
@@ -12180,7 +11800,7 @@ private:
 		DrawRect(panel, 160, 190, 225);
 		DrawText("QUICK HELP — JPEGVIEW LINUX", panel.x + 18, panel.y + 14,
 			kUiTextScale, 255, 255, 255);
-		const std::string spaceHelp = spacebarNavigatesImages_ ?
+		const std::string spaceHelp = runtimeSettings_.Values().spacebarNavigatesImages ?
 			"Navigate: Space next; Shift+Space previous; Return fit; Ctrl+Return fill with crop; +/- zoom" :
 			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom";
 		const std::array<std::string, 10> lines = {
@@ -12301,69 +11921,8 @@ private:
 		if (!contextMenuOpen_) return;
 		const SDL_Rect menu = ContextMenuRect();
 		const std::vector<ContextMenuColumn> columns = ContextMenuColumns();
-		SDL_SetRenderDrawColor(renderer_, 12, 12, 12, 220);
-		SDL_RenderFillRect(renderer_, &menu);
-		DrawRect(menu, 185, 185, 185);
-
-		for (const ContextMenuColumn& column : columns) {
-			const int columnX = menu.x + column.x;
-			int itemTop = menu.y + kContextMenuVerticalPadding;
-			for (std::size_t i = column.begin; i < column.end; ++i) {
-				const MenuItem& item = contextMenuItems_[i];
-				if (item.separator) {
-					DrawLine(columnX + 10, itemTop + 4, columnX + column.width - 10, itemTop + 4,
-						75, 75, 75);
-					itemTop += kContextMenuSeparatorHeight;
-					continue;
-				}
-				if (static_cast<int>(i) == menuSelected_) {
-					SDL_SetRenderDrawColor(renderer_, 45, 82, 120, 205);
-					SDL_Rect selection{columnX + 3, itemTop, column.width - 6, ContextMenuRowHeight()};
-					SDL_RenderFillRect(renderer_, &selection);
-				}
-				const Uint8 textColor = item.command == 0 ? 135 : (item.enabled ? 235 : 100);
-				const std::string label = MenuLabel(item);
-				const std::string shortcut = MenuShortcut(item);
-				const int textY = itemTop + (ContextMenuRowHeight() - TextLineHeight()) / 2;
-				DrawText(label, columnX + 12, textY, kUiTextScale,
-					textColor, textColor, textColor);
-				if (item.mnemonicOffset >= 0) {
-					const std::size_t visibleOffset = static_cast<std::size_t>(item.mnemonicOffset) +
-						(item.checked ? 4u : 0u);
-					if (visibleOffset < label.size()) {
-						int underlineX = columnX + 12 + TextWidth(
-							label.substr(0, visibleOffset), kUiTextScale);
-						int underlineWidth = std::max(1, TextWidth(
-							label.substr(visibleOffset, 1), kUiTextScale));
-						if (jpegview_linux::Terminus9CanRender(label)) {
-							const jpegview_linux::BitmapGlyphInkBounds ink =
-								jpegview_linux::Terminus9GlyphInkBounds(
-									static_cast<unsigned char>(label[visibleOffset]));
-							if (ink.width > 0) {
-								underlineX += ink.left * kUiTextScale;
-								underlineWidth = ink.width * kUiTextScale;
-							}
-						}
-						const int underlineY = textY + std::max(0, TextLineHeight() - 2);
-						SDL_SetRenderDrawColor(renderer_, textColor, textColor, textColor, 255);
-						const SDL_Rect underline{underlineX, underlineY, underlineWidth, 1};
-						SDL_RenderFillRect(renderer_, &underline);
-					}
-				}
-				if (!shortcut.empty()) {
-					const int shortcutWidth = TextWidth(shortcut, kUiTextScale);
-					const Uint8 shortcutColor = item.enabled ? 175 : 90;
-					DrawText(shortcut, columnX + column.width - 12 - shortcutWidth, textY, kUiTextScale,
-						shortcutColor, shortcutColor, shortcutColor);
-				}
-				itemTop += ContextMenuRowHeight();
-			}
-			if (&column != &columns.back()) {
-				DrawLine(columnX + column.width, menu.y + kContextMenuVerticalPadding,
-					columnX + column.width, menu.y + menu.h - kContextMenuVerticalPadding,
-					75, 75, 75);
-			}
-		}
+		contextMenuRenderer_.Render(contextMenuItems_, columns, menu, menuSelected_,
+			ContextMenuRowHeight(), kContextMenuSeparatorHeight, kContextMenuVerticalPadding);
 	}
 
 	void HandleEvents(bool& running, int waitTimeoutMs) {
@@ -12461,54 +12020,70 @@ private:
 					if (matchingTextInput) continue;
 				}
 			}
-			if (archivePasswordDialog_.IsOpen() || archivePasswordValidationPending_) {
+			jpegview_linux::ModalEventState modalState;
+			modalState.archivePassword = archivePasswordDialog_.IsOpen() ||
+				archivePasswordValidationPending_;
+			modalState.confirmation = confirmationOpen_;
+			modalState.help = helpOpen_;
+			modalState.about = aboutOpen_;
+			modalState.advancedConfiguration = advancedConfiguration_.IsOpen();
+			modalState.fileDialog = fileDialogOpen_;
+			modalState.batchCopy = batchCopyDialog_.IsOpen();
+			modalState.resize = resizeDialog_.IsOpen();
+			modalState.fixedCropSize = cropSizeDialog_.IsOpen();
+			modalState.unsharpMask = unsharpDialogOpen_;
+			modalState.pictureLevels = pictureLevelsPanelOpen_;
+			modalState.contextMenu = contextMenuOpen_;
+			const jpegview_linux::ModalEventRoute modalRoute =
+				jpegview_linux::ResolveModalEventRoute(modalState);
+			if (modalRoute == jpegview_linux::ModalEventRoute::ArchivePassword) {
 				HandleArchivePasswordEvents(event, running);
 				continue;
 			}
-			if (confirmationOpen_) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::Confirmation) {
 				if (event.type == SDL_QUIT) running = false;
 				else HandleConfirmationEvents(event);
 				continue;
 			}
-			if (helpOpen_) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::Help) {
 				if (event.type == SDL_QUIT) running = false;
 				else HandleHelpEvents(event);
 				continue;
 			}
-			if (aboutOpen_) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::About) {
 				if (event.type == SDL_QUIT) running = false;
 				else HandleAboutEvents(event);
 				continue;
 			}
-			if (advancedConfiguration_.IsOpen()) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::AdvancedConfiguration) {
 				HandleAdvancedConfigurationEvents(event, running);
 				continue;
 			}
-			if (fileDialogOpen_) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::FileDialog) {
 				HandleFileDialogEvents(event, running);
 				continue;
 			}
-			if (batchCopyDialog_.IsOpen()) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::BatchCopy) {
 				HandleBatchCopyEvents(event, running);
 				continue;
 			}
-			if (resizeDialog_.IsOpen()) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::Resize) {
 				HandleResizeDialogEvents(event, running);
 				continue;
 			}
-			if (cropSizeDialog_.IsOpen()) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::FixedCropSize) {
 				HandleFixedCropSizeDialogEvents(event, running);
 				continue;
 			}
-			if (unsharpDialogOpen_) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::UnsharpMask) {
 				HandleUnsharpMaskDialogEvents(event, running);
 				continue;
 			}
-			if (pictureLevelsPanelOpen_) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::PictureLevels) {
 				HandlePictureLevelsEvents(event, running);
 				continue;
 			}
-			if (contextMenuOpen_) {
+			if (modalRoute == jpegview_linux::ModalEventRoute::ContextMenu) {
 				switch (event.type) {
 				case SDL_QUIT:
 					running = false;
@@ -12594,9 +12169,9 @@ private:
 				break;
 			case SDL_WINDOWEVENT:
 				if (event.window.event == SDL_WINDOWEVENT_MAXIMIZED) {
-					maximized_ = true;
+					runtimeSettings_.Values().maximized = true;
 				} else if (event.window.event == SDL_WINDOWEVENT_RESTORED) {
-					maximized_ = false;
+					runtimeSettings_.Values().maximized = false;
 				} else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
 					EndThumbnailPanelResize(lastMouseX_, lastMouseY_);
 					EndZoomNavigatorDrag(lastMouseX_, lastMouseY_);
@@ -12619,7 +12194,7 @@ private:
 			{
 				const Uint16 modifiers = event.key.keysym.mod;
 				const int spaceNavigationDirection =
-					jpegview_linux::SpacebarNavigationDirection(event.key, spacebarNavigatesImages_);
+					jpegview_linux::SpacebarNavigationDirection(event.key, runtimeSettings_.Values().spacebarNavigatesImages);
 				const bool spaceNavigationKey = spaceNavigationDirection != 0;
 				const bool shiftSpaceNavigation = spaceNavigationKey &&
 					(modifiers & 0x0003u) != 0;
@@ -12647,14 +12222,14 @@ private:
 				if (plainNavigationKey && event.key.repeat != 0) {
 					const int physicalDirection = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
 					const int direction = jpegview_linux::LogicalDirectionForPhysicalKey(
-						physicalDirection, mangaReadingOrderEnabled_, mangaModeInvertsLeftRight_);
+						physicalDirection, mangaReadingOrderEnabled_, runtimeSettings_.Values().mangaModeInvertsLeftRight);
 					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, true);
 					break;
 				}
 				if (plainNavigationKey) {
 					const int physicalDirection = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
 					const int direction = jpegview_linux::LogicalDirectionForPhysicalKey(
-						physicalDirection, mangaReadingOrderEnabled_, mangaModeInvertsLeftRight_);
+						physicalDirection, mangaReadingOrderEnabled_, runtimeSettings_.Values().mangaModeInvertsLeftRight);
 					heldNavigation_.KeyDown(direction, event.key.keysym.scancode, false);
 				}
 				if (spaceNavigationKey) {
@@ -12683,7 +12258,7 @@ private:
 				if (spaceNavigationKey) {
 					command = spaceNavigationDirection > 0 ? IDM_NEXT : IDM_PREV;
 				}
-				if (plainNavigationKey && mangaReadingOrderEnabled_ && mangaModeInvertsLeftRight_) {
+				if (plainNavigationKey && mangaReadingOrderEnabled_ && runtimeSettings_.Values().mangaModeInvertsLeftRight) {
 					if (command == IDM_NEXT) command = IDM_PREV;
 					else if (command == IDM_PREV) command = IDM_NEXT;
 				}
@@ -13002,6 +12577,7 @@ private:
 		SDL_RenderPresent(renderer_);
 	}
 
+	jpegview_linux::RuntimeSettingsOwner runtimeSettings_;
 	jpegview_linux::FileList fileList_;
 	jpegview_linux::FileListScanWorker fileListScanWorker_;
 	jpegview_linux::FileListSortWorker fileListSortWorker_;
@@ -13074,7 +12650,6 @@ private:
 	std::optional<ActiveSpreadSourceRequest> activeSpreadSourceRequest_;
 	jpegview_linux::PresentationController presentationController_;
 	bool deferredCurrentDisplayPreparation_ = false;
-	std::size_t cacheSizeMiB_ = jpegview_linux::kDefaultCacheSizeMiB;
 	double initialSlideshowSeconds_ = 0.0;
 	jpegview_linux::PlaybackScheduler playback_;
 	jpegview_linux::FrameInvalidator frameInvalidator_;
@@ -13092,12 +12667,15 @@ private:
 	int currentImageRotationQuarterTurns_ = 0;
 	bool currentSpreadRotationValid_ = false;
 	jpegview_linux::ImageProcessingParams imageProcessing_;
-	jpegview_linux::ImageProcessingParams defaultImageProcessing_;
 	jpegview_linux::ImageProcessingStore imageProcessingStore_;
 	jpegview_linux::ImageProcessingStore pendingParameterDbRestore_;
 	std::string pendingParameterDbRestoreSource_;
-	SDL_Window* window_ = nullptr;
-	SDL_Renderer* renderer_ = nullptr;
+	jpegview_linux::TextRenderer textRenderer_;
+	jpegview_linux::ChromeRendererAdapter chromeRenderer_{textRenderer_};
+	jpegview_linux::ContextMenuRendererAdapter contextMenuRenderer_{chromeRenderer_, textRenderer_};
+	jpegview_linux::FileDialogRendererAdapter fileDialogRenderer_{textRenderer_, chromeRenderer_};
+	jpegview_linux::EditingDialogRendererAdapter editingDialogRenderer_{textRenderer_, chromeRenderer_};
+	jpegview_linux::RendererTextureOwner imageTextureOwner_;
 	Uint32 completionWakeEventType_ = std::numeric_limits<Uint32>::max();
 	SDL_Texture* texture_ = nullptr;
 	Image displayImage_;
@@ -13136,13 +12714,8 @@ private:
 	std::string magnifyingGlassRequestBaseKey_;
 	std::string magnifyingGlassBackgroundRequestedKey_;
 	std::optional<jpegview_linux::DisplayImageRequest> magnifyingGlassRequest_;
-	bool selectionModeEnabled_ = false;
 	bool doublePageModeEnabled_ = false;
 	bool mangaReadingOrderEnabled_ = false;
-	bool mangaModeInvertsLeftRight_ = true;
-	bool spacebarNavigatesImages_ = false;
-	bool doublePageModeDefault_ = false;
-	bool mangaReadingOrderDefault_ = false;
 	std::optional<ActiveDoublePageRender> activeDoublePageRender_;
 	std::string doublePagePartnerDisplayKey_;
 	std::optional<jpegview_linux::DisplayImageRequest> doublePagePartnerRequest_;
@@ -13159,10 +12732,7 @@ private:
 	int cropDragStartY_ = 0;
 	int cropAspectWidth_ = 1;
 	int cropAspectHeight_ = 1;
-	int cropUserAspectWidth_ = jpegview_linux::kDefaultUserCropAspectWidth;
-	int cropUserAspectHeight_ = jpegview_linux::kDefaultUserCropAspectHeight;
 	bool fullscreen_ = false;
-	bool maximized_ = false;
 	bool borderless_ = false;
 	bool alwaysOnTop_ = false;
 	bool dragging_ = false;
@@ -13172,20 +12742,9 @@ private:
 	bool unsharpDialogOpen_ = false;
 	int unsharpDraggingControl_ = -1;
 	jpegview_linux::ImageProcessingParams unsharpOriginalProcessing_;
-	double unsharpMaskRadius_ = 1.0;
-	double unsharpMaskAmount_ = 0.0;
-	double unsharpMaskThreshold_ = 4.0;
 	double unsharpOriginalRadius_ = 1.0;
 	double unsharpOriginalAmount_ = 0.0;
 	double unsharpOriginalThreshold_ = 4.0;
-	bool keepPictureLevels_ = false;
-	bool navigationPanelEnabled_ = true;
-	bool navigationPanelAutoReveal_ = true;
-	bool thumbnailPanelVisible_ = false;
-	bool showZoomNavigator_ = true;
-	jpegview_linux::TransparencyPattern transparencyPattern_ =
-		jpegview_linux::TransparencyPattern::Black;
-	int thumbnailPanelWidth_ = jpegview_linux::kDefaultThumbnailPanelWidth;
 	bool thumbnailPanelResizing_ = false;
 	bool thumbnailPanelResizeChanged_ = false;
 	int thumbnailResizeOffset_ = 0;
@@ -13201,8 +12760,6 @@ private:
 	bool magnifyingGlassCursorActive_ = false;
 	int magnifyingGlassPreviousCursorVisibility_ = kSdlCursorEnabled;
 	jpegview_linux::CropSelectionHandle cropDragHandle_ = jpegview_linux::CropSelectionHandle::None;
-	bool infoVisible_ = false;
-	bool showHistogram_ = false;
 	bool editedImageSpectrumValid_ = false;
 	jpegview_linux::GrayscaleSpectrum editedImageSpectrum_{};
 	std::optional<jpegview_linux::ImageSpectrumKey> editedImageSpectrumKey_;
@@ -13216,7 +12773,6 @@ private:
 	std::optional<jpegview_linux::ImageSpectrumKey> currentSourceSpectrumRequestKey_;
 	std::string currentSourceSpectrumDisplayCacheKey_;
 	std::uint64_t imageSpectrumPresentationRevision_ = 0;
-	bool showFileName_ = false;
 	jpegview_linux::HeldNavigationController heldNavigation_;
 	bool confirmationOpen_ = false;
 	int confirmationCommand_ = 0;
@@ -13252,13 +12808,10 @@ private:
 	std::optional<jpegview_linux::SourceKey> thumbnailUploadRetryKey_;
 	Uint32 thumbnailPixelStoreRetryTick_ = 0;
 	Uint32 thumbnailUploadRetryTick_ = 0;
-	std::unordered_map<std::string, TextTextureCacheEntry> textTextureCache_;
-	std::uint64_t textTextureUseCounter_ = 0;
 	std::vector<jpegview_linux::OpenWithApplication> openWithApplications_;
 	bool imageModified_ = false;
 	bool currentPixelsDetachedFromSource_ = false;
 	bool autoContrastEnabled_ = false;
-	bool defaultAutoContrastEnabled_ = false;
 	bool quitRequested_ = false;
 	bool fileDialogOpen_ = false;
 	bool fileDialogSave_ = false;
@@ -13266,9 +12819,6 @@ private:
 	bool fileDialogParameterRestore_ = false;
 	int fileDialogX_ = 0;
 	int fileDialogY_ = 0;
-	int fileDialogWidth_ = jpegview_linux::kDefaultFileDialogWidth;
-	int fileDialogHeight_ = jpegview_linux::kDefaultFileDialogHeight;
-	double fileDialogPreviewRatio_ = 0.0;
 	FileDialogDragMode fileDialogDragMode_ = FileDialogDragMode::None;
 	FileDialogTab fileDialogTab_ = FileDialogTab::Browse;
 	int fileDialogDragStartX_ = 0;
@@ -13318,8 +12868,6 @@ private:
 	std::string fileDialogPreviewContentKey_;
 	fs::path fileDialogPreviewSource_;
 	std::string fileDialogPreviewMessage_;
-	std::string copyRenamePattern_;
-	std::string windowTitlePattern_ = jpegview_linux::kDefaultWindowTitlePattern;
 	jpegview_linux::BatchCopyDialogController batchCopyDialog_;
 	jpegview_linux::ResizeDialogController resizeDialog_;
 	jpegview_linux::CropSizeDialogController cropSizeDialog_;

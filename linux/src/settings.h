@@ -83,4 +83,19 @@ bool LoadViewerSettings(const std::filesystem::path& filename, ViewerSettings& s
 // Writes settings through a temporary file and returns whether the final rename succeeded.
 bool SaveViewerSettings(const std::filesystem::path& filename, const ViewerSettings& settings);
 
+// Owns the live persisted defaults. New values become current only after a
+// successful settings-file write; per-image overrides remain in their own
+// session and Recents owners.
+class RuntimeSettingsOwner {
+public:
+	const ViewerSettings& Values() const noexcept { return values_; }
+	ViewerSettings& Values() noexcept { return values_; }
+	bool Load(const std::filesystem::path& filename);
+	bool SaveAndAdopt(const std::filesystem::path& filename,
+		const ViewerSettings& candidate);
+
+private:
+	ViewerSettings values_;
+};
+
 } // namespace jpegview_linux

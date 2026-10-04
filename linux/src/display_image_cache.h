@@ -239,6 +239,7 @@ public:
 	std::size_t EvictLeastRecentlyUsed(
 		CacheProtectionTier maximumTier = CacheProtectionTier::Neighbor);
 	void Clear();
+	void Shutdown();
 
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;

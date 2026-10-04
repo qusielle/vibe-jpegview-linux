@@ -287,6 +287,7 @@ public:
 		FileDialogListingPolicy policy);
 	void Clear(std::uint64_t generation);
 	std::vector<FileDialogDirectoryResult> TakeReady();
+	void Shutdown();
 
 private:
 	struct Impl;
@@ -319,6 +320,7 @@ public:
 		std::uint64_t generation);
 	void Clear(std::uint64_t generation);
 	std::vector<FileDialogFileSizeResult> TakeReady(std::size_t maximumResults = 128);
+	void Shutdown();
 
 private:
 	struct Impl;
@@ -349,6 +351,7 @@ public:
 		const std::string& password, std::uint64_t generation);
 	void Clear(std::uint64_t generation);
 	std::vector<ArchiveDirectoryResult> TakeReady();
+	void Shutdown();
 
 private:
 	struct Impl;
@@ -368,6 +371,7 @@ public:
 	void Request(const std::vector<std::filesystem::path>& directories, std::uint64_t generation);
 	bool IsYieldingForForeground() const;
 	std::vector<DirectorySummaryResult> TakeReady(std::size_t maximumResults = 64);
+	void Shutdown();
 
 private:
 	struct Impl;
@@ -413,6 +417,7 @@ public:
 		SourceDescriptor source = {});
 	void Clear();
 	std::vector<FileDialogPreviewResult> TakeReady();
+	void Shutdown();
 
 private:
 	struct Impl;

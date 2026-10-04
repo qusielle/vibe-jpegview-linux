@@ -136,6 +136,7 @@ public:
 	std::vector<Result> Cancel(const std::set<PerfWorkClass>& workClasses);
 	void Retire(const ImagePtr& image);
 	void Clear();
+	void Shutdown();
 	bool HasPendingWork() const;
 	ThumbnailPreparationDiagnostics GetDiagnostics() const;
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);

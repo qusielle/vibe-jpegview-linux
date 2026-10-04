@@ -218,9 +218,12 @@ struct DecodedImageCache::Impl {
 		retirementWorker = std::thread([state = retirementState] { Retire(state); });
 	}
 
-	~Impl() {
+	~Impl() { Shutdown(); }
+
+	void Shutdown() {
 		{
 			std::lock_guard<std::mutex> lock(mutex);
+			if (stopping) return;
 			stopping = true;
 			++generation;
 			for (const auto& active : inFlightCancellation) {
@@ -230,6 +233,7 @@ struct DecodedImageCache::Impl {
 			while (!entries.empty()) Erase(entries.begin());
 		}
 		workAvailable.notify_all();
+		idle.notify_all();
 		for (std::thread& worker : workers) {
 			if (worker.joinable()) worker.join();
 		}
@@ -743,6 +747,7 @@ DecodedImageCache::ImagePtr DecodedImageCache::FindOrWait(const fs::path& filena
 DecodedImageCache::ImagePtr DecodedImageCache::FindOrWait(const SourceDescriptor& source) {
 	const SourceKey key = source.Key();
 	std::unique_lock<std::mutex> lock(impl_->mutex);
+	if (impl_->stopping) return {};
 	impl_->EraseOtherSourceIdentities(key);
 	if (!key.Valid()) return {};
 	const DecodedImageWorkKey workKey = WorkKey(source);
@@ -788,6 +793,10 @@ DecodedImageCache::ImagePtr DecodedImageCache::FindOrWait(const SourceDescriptor
 
 void DecodedImageCache::Store(const fs::path& filename,
 	const std::shared_ptr<DecodedImage>& image) {
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
+	}
 	Store(DescribeImageSource(filename), image);
 }
 
@@ -796,6 +805,7 @@ void DecodedImageCache::Store(const SourceDescriptor& source,
 	const SourceKey key = source.Key();
 	{
 	std::lock_guard<std::mutex> lock(impl_->mutex);
+	if (impl_->stopping) return;
 	impl_->EraseOtherSourceIdentities(key);
 	if (!impl_->Insert(key, image, true, CacheProtectionTier::Active)) {
 		impl_->QueueRetirement(image);
@@ -806,6 +816,7 @@ void DecodedImageCache::Store(const SourceDescriptor& source,
 
 void DecodedImageCache::PromoteToActiveUse(const SourceKey& source) {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
+	if (impl_->stopping) return;
 	const auto entry = impl_->entries.find(source);
 	if (entry == impl_->entries.end()) return;
 	if (!impl_->SetProtection(entry, CacheProtectionTier::Active)) {
@@ -817,6 +828,7 @@ void DecodedImageCache::PromoteToActiveUse(const SourceKey& source) {
 void DecodedImageCache::SetProtectionSnapshot(
 	const std::vector<std::pair<SourceKey, CacheProtectionTier>>& protections) {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
+	if (impl_->stopping) return;
 	std::unordered_map<SourceKey, CacheProtectionTier, SourceKeyHash> strongest;
 	for (const auto& protection : protections) {
 		auto inserted = strongest.emplace(protection.first, protection.second);
@@ -856,6 +868,10 @@ void DecodedImageCache::SetProtectionSnapshot(
 
 void DecodedImageCache::RequestBackground(const fs::path& filename,
 	Completion completion, PerfWorkClass workClass) {
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
+	}
 	RequestBackground(DescribeImageSource(filename), std::move(completion), workClass);
 }
 
@@ -870,6 +886,7 @@ void DecodedImageCache::RequestBackground(const SourceDescriptor& source,
 	work.cancellation = std::make_shared<std::atomic<bool>>(false);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
 		impl_->EraseOtherSourceIdentities(work.key.source);
 	}
 	if (!work.key.source.Valid()) return;
@@ -928,6 +945,7 @@ void DecodedImageCache::RequestSelectedSource(const SourceDescriptor& source,
 	work.cancellation = std::make_shared<std::atomic<bool>>(false);
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
 		impl_->EraseOtherSourceIdentities(work.key.source);
 	}
 	if (!work.key.source.Valid()) {
@@ -985,6 +1003,10 @@ void DecodedImageCache::RequestSelectedSource(const SourceDescriptor& source,
 
 void DecodedImageCache::RequestJpegDimensions(const fs::path& filename,
 	DimensionsCompletion completion, PerfWorkClass workClass) {
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
+	}
 	RequestJpegDimensions(DescribeImageSource(filename), std::move(completion), workClass);
 }
 
@@ -1080,6 +1102,10 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 	std::size_t currentIndex, int preferredDirection, std::size_t maximumCount,
 	Completion completion, Filter filter, std::size_t nearestCount,
 	DescriptorProvider descriptorProvider) {
+	{
+		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
+	}
 	std::vector<Impl::Work> prepared;
 	std::vector<std::pair<fs::path, ImagePtr>> alreadyCached;
 	const std::vector<std::size_t> order = ImagePrefetchOrder(files.size(), currentIndex,
@@ -1102,6 +1128,7 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 	}
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
+		if (impl_->stopping) return;
 		++impl_->generation;
 		const std::uint64_t generation = impl_->generation;
 		for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
@@ -1208,6 +1235,10 @@ void DecodedImageCache::Clear() {
 	while (!impl_->entries.empty()) impl_->Erase(impl_->entries.begin());
 	impl_->idle.notify_all();
 	impl_->workAvailable.notify_one();
+}
+
+void DecodedImageCache::Shutdown() {
+	impl_->Shutdown();
 }
 
 std::size_t DecodedImageCache::CachedBytes() const {

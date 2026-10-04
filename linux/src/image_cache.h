@@ -138,6 +138,7 @@ public:
 		std::size_t maximumCount, Completion completion = {}, Filter filter = {},
 		std::size_t nearestCount = 2, DescriptorProvider descriptorProvider = {});
 	void Clear();
+	void Shutdown();
 
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;

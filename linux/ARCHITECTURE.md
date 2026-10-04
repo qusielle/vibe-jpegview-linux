@@ -407,6 +407,17 @@ should normally be added to one of these focused modules and covered by `tests/t
   display texture receives a temporary capture pin before an old transition is cleared, then the new
   transition takes its pin before that temporary pin is released. All SDL texture operations remain on
   the renderer thread.
+- `renderer_thread_resource`: move-only renderer-thread handles for the SDL window and renderer,
+  with explicit renderer-before-window reset ordering.
+- `renderer_texture_owner`: the renderer-thread owner for image, display, thumbnail, preview, and
+  partial-upload textures created by Viewer. It performs image texture creation, upload, and
+  destruction and provides a final live-handle drain before SDL renderer teardown. Cache maps keep
+  their keys, admission reservations, and non-owning texture references; cache policy remains in the
+  existing cache owners.
+- `text_renderer`, `chrome_renderer`, `context_menu_renderer`, `file_dialog_renderer`, and
+  `editing_dialog_renderer`: SDL drawing adapters that consume prepared paint snapshots and share
+  narrow renderer/font services. Viewer still decides when to draw and builds snapshots from its
+  models; the adapters own their renderer-facing helpers and do not become alternate state owners.
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
   validation and single-pass expansion for the configurable window-title pattern. It caches title
   and information-line formatting by the relevant source, catalog, metadata, and display state, and
@@ -503,8 +514,11 @@ should normally be added to one of these focused modules and covered by `tests/t
   SDL adapter, while decoder and image-preparation stages report their own timings. Cache snapshots
   are sampled once per second to keep their thumbnail accounting scan out of the ordinary frame path.
 
-`main.cpp` remains the SDL composition root. It owns windows, textures, event dispatch, rendering,
-and applying file-operation completions or invoking desktop integrations. The
+`main.cpp` remains the SDL composition root. It owns event dispatch and top-level rendering
+orchestration, applies file-operation completions, and invokes desktop integrations.
+`RendererWindowResources` owns the window/renderer pair, while `RendererTextureOwner` owns image
+textures created by Viewer and renderer adapters own their private text/font textures. Viewer keeps
+texture-cache keys, pins, reservations, and presentation policy. The
 `FileOperationService` owns slow filesystem operations and process waits; Viewer captures paths,
 image pixels, overwrite decisions, and owner generations before submission, then reconciles a ready
 result on the SDL thread. Image-session, display-preparation, and presentation controllers
@@ -769,8 +783,13 @@ mode snapshots have their own 256-path bound.
 
 ## Refactoring status
 
-The planned Viewer decomposition is complete. Future extractions should be driven by a concrete
-feature or maintenance problem rather than moving SDL calls for its own sake.
+UI decomposition remains incremental. The current boundary keeps pure state and policy in their
+existing model/controller modules, gives renderer-facing texture and drawing responsibilities
+explicit owners, and leaves composition, event precedence, and presentation scheduling in `main.cpp`.
+Viewer still contains substantial workflow orchestration and cache policy; future extractions should
+move a cohesive responsibility with its state and lifecycle, rather than only wrapping an existing
+method or moving SDL calls for their own sake. Each extraction should characterize observable
+behavior first and add model and UI coverage appropriate to the boundary.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
 The image, viewport, playback, file-dialog, dialog-controller, context-menu, thumbnail cache,
@@ -789,7 +808,8 @@ which reserves one shared footer row for the left-aligned filename and right-ali
 and resolve/scale only the newest requested selection using
 the thumbnail resampler's source-area antialiasing. A pane resize replaces the target-size request;
 the generation check prevents stale work from replacing the current preview. Preview pixels remain
-outside the persistent viewer caches, and their SDL texture is uploaded and destroyed by Viewer.
+outside the persistent viewer caches. Viewer asks `RendererTextureOwner` to upload and destroy their
+SDL texture; the file-dialog renderer only borrows it for drawing.
 The same worker returns full source dimensions (including for reduced-DCT JPEG previews) and file
 size; a separate replaceable file-size worker captures source descriptors for Browse and Recents rows
 using archive central-directory/header metadata for virtual members. Ordinary Browse sizes are reused

@@ -285,6 +285,17 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 	return true;
 }
 
+bool RuntimeSettingsOwner::Load(const fs::path& filename) {
+	return LoadViewerSettings(filename, values_);
+}
+
+bool RuntimeSettingsOwner::SaveAndAdopt(const fs::path& filename,
+	const ViewerSettings& candidate) {
+	if (!SaveViewerSettings(filename, candidate)) return false;
+	values_ = candidate;
+	return true;
+}
+
 bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings) {
 	if (filename.empty()) return false;
 	const std::string windowTitlePattern = NormalizeWindowTitlePattern(settings.windowTitlePattern);

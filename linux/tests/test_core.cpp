@@ -47,6 +47,9 @@
 #include "source_work_coordinator.h"
 #include "perf_diagnostics.h"
 #include "event_loop_model.h"
+#include "modal_event_router.h"
+#include "renderer_thread_resource.h"
+#include "renderer_texture_owner.h"
 #include "app_icon.h"
 #include "image_info_model.h"
 #include "spectrum_model.h"
@@ -128,6 +131,20 @@ class TestFailure : public std::runtime_error {
 public:
 	using std::runtime_error::runtime_error;
 };
+
+struct RendererResourceTestWindow {};
+struct RendererResourceTestRenderer {};
+std::vector<int> gRendererResourceDestructionOrder;
+
+void DestroyRendererResourceTestWindow(RendererResourceTestWindow* resource) {
+	gRendererResourceDestructionOrder.push_back(1);
+	delete resource;
+}
+
+void DestroyRendererResourceTestRenderer(RendererResourceTestRenderer* resource) {
+	gRendererResourceDestructionOrder.push_back(2);
+	delete resource;
+}
 
 void Expect(bool condition, const std::string& message) {
 	if (!condition) throw TestFailure(message);
@@ -5055,6 +5072,7 @@ void TestArchivePasswordValidationYieldsForForegroundWork() {
 	auto shutdownFinished = shutdownComplete.get_future();
 	std::thread shutdownThread([owned = std::move(shutdownLoader),
 		&shutdownComplete]() mutable {
+		owned->Shutdown();
 		owned.reset();
 		shutdownComplete.set_value();
 	});
@@ -8439,6 +8457,44 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	foreground.join();
 	Expect(joinedImage != nullptr && joinedDecodeCount == 1,
 		"foreground cache miss did not join its promoted speculative decode");
+}
+
+void TestDecodedImageCacheShutdownRejectsNewWork() {
+	TemporaryDirectory temporary;
+	std::vector<fs::path> files;
+	for (int index = 0; index < 3; ++index) {
+		const fs::path filename = temporary.path() / ("shutdown-" +
+			std::to_string(index) + ".jpg");
+		WriteText(filename, "decoded shutdown source");
+		files.push_back(filename);
+	}
+	std::atomic<int> decodeCalls{0};
+	std::atomic<int> dimensionCalls{0};
+	jpegview_linux::DecodedImageCache cache(128,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			++decodeCalls;
+			image = *CachedTestImage(4);
+			return true;
+		}, {}, 1,
+		[&](const fs::path&, int& width, int& height, std::string&) {
+			++dimensionCalls;
+			width = height = 1;
+			return true;
+		});
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(files.front());
+	cache.Shutdown();
+	cache.Shutdown();
+	cache.RequestBackground(source, {});
+	cache.RequestSelectedSource(source, {});
+	cache.RequestJpegDimensions(source,
+		[](const fs::path&, bool, int, int) {});
+	cache.Prefetch(files, 1, 1, 2);
+	cache.Store(source, CachedTestImage(4));
+	Expect(cache.WaitUntilIdle(std::chrono::milliseconds(100)) &&
+		cache.GetDiagnostics().backgroundQueued == 0 && cache.CachedImages() == 0 &&
+		decodeCalls.load() == 0 && dimensionCalls.load() == 0,
+		"decoded cache accepted work or retained pixels after terminal shutdown");
 }
 
 void TestDecodedActiveSpreadBudgetPressure() {
@@ -12147,6 +12203,11 @@ void TestDisplayBackpressuredShutdownRetiresWithoutPumping() {
 	Expect(cache->GetDiagnostics().speculativePreparedImages == 2 &&
 		cache->GetDiagnostics().backgroundQueued == 2,
 		"shutdown fixture did not fill the bounded completion queue");
+	cache->Shutdown();
+	cache->RequestBackgroundBatch(requests);
+	Expect(!cache->HasPendingWork() &&
+		cache->GetDiagnostics().backgroundQueued == 0,
+		"display cache accepted speculative work after terminal shutdown");
 	cache.reset();
 	std::unique_lock<std::mutex> lock(destructionMutex);
 	const bool allImagesRetired = destructionChanged.wait_for(lock,
@@ -15260,6 +15321,41 @@ void TestTransparencyPatternValuesAndTileColors() {
 		dark.red == 144 && dark.green == 144 && dark.blue == 144 &&
 		jpegview_linux::kTransparencyCheckerCellSize > 0,
 		"checkerboard pattern colors or tile geometry were invalid");
+}
+
+void TestRuntimeSettingsOwnerCommitSemantics() {
+	TemporaryDirectory temporary;
+	const fs::path settingsPath = temporary.path() / "config" / "settings.conf";
+	jpegview_linux::RuntimeSettingsOwner owner;
+	owner.Values().maximized = true;
+	owner.Values().thumbnailPanelVisible = true;
+	Expect(!owner.Load(temporary.path() / "missing.conf") &&
+		owner.Values().maximized && owner.Values().thumbnailPanelVisible,
+		"a missing settings file changed the live runtime defaults");
+
+	jpegview_linux::ViewerSettings candidate = owner.Values();
+	candidate.maximized = false;
+	candidate.doublePageModeEnabled = true;
+	candidate.cacheSizeMiB = 768;
+	Expect(owner.SaveAndAdopt(settingsPath, candidate) &&
+		!owner.Values().maximized && owner.Values().doublePageModeEnabled &&
+		owner.Values().cacheSizeMiB == 768,
+		"successful settings persistence did not commit the new runtime defaults");
+	jpegview_linux::ViewerSettings persisted;
+	Expect(jpegview_linux::LoadViewerSettings(settingsPath, persisted) &&
+		persisted.doublePageModeEnabled && persisted.cacheSizeMiB == 768,
+		"runtime settings owner committed values that were not persisted");
+
+	const fs::path blockedParent = temporary.path() / "not-a-directory";
+	{
+		std::ofstream blocker(blockedParent);
+		blocker << "file blocks settings directory creation";
+	}
+	candidate.maximized = true;
+	Expect(!owner.SaveAndAdopt(blockedParent / "settings.conf", candidate) &&
+		!owner.Values().maximized && owner.Values().doublePageModeEnabled &&
+		owner.Values().cacheSizeMiB == 768,
+		"failed settings persistence applied a draft to the live runtime owner");
 }
 
 void TestSettingsPathSelection() {
@@ -19783,6 +19879,14 @@ void TestThumbnailShutdownRetiresWithoutEventLoop() {
 		}
 		Expect(worker.GetDiagnostics().completedImages == 2,
 			"thumbnail shutdown fixture did not fill its bounded completion queue");
+		worker.Shutdown();
+		worker.Shutdown();
+		jpegview_linux::ThumbnailPreparationRequest afterShutdown;
+		afterShutdown.key = jpegview_linux::SourceKey("thumbnail-after-shutdown");
+		afterShutdown.maximumWidth = afterShutdown.maximumHeight = 16;
+		afterShutdown.logicalSource = "/virtual/thumbnail-after-shutdown";
+		Expect(!worker.Request(afterShutdown),
+			"thumbnail worker accepted new preparation after terminal shutdown");
 	}
 	std::lock_guard<std::mutex> lock(probe->mutex);
 	Expect(probe->count == 2 && probe->offCaller,
@@ -20843,6 +20947,67 @@ void TestEventLoopInvalidationDeadlinesWakeupsAndMotion() {
 		jpegview_linux::MouseMotionSample{24, 22, 10, 0, 1}) &&
 		motion.xrel == std::numeric_limits<std::int32_t>::max(),
 		"large motion accumulation overflowed the SDL relative-coordinate range");
+}
+
+void TestModalEventRouterPrecedence() {
+	using jpegview_linux::ModalEventRoute;
+	using jpegview_linux::ModalEventState;
+	using jpegview_linux::ResolveModalEventRoute;
+	ModalEventState state;
+	Expect(ResolveModalEventRoute(state) == ModalEventRoute::Viewer,
+		"no active modal should route events to the viewer");
+
+	const std::vector<std::pair<bool*, ModalEventRoute>> precedence{
+		{&state.archivePassword, ModalEventRoute::ArchivePassword},
+		{&state.confirmation, ModalEventRoute::Confirmation},
+		{&state.help, ModalEventRoute::Help},
+		{&state.about, ModalEventRoute::About},
+		{&state.advancedConfiguration, ModalEventRoute::AdvancedConfiguration},
+		{&state.fileDialog, ModalEventRoute::FileDialog},
+		{&state.batchCopy, ModalEventRoute::BatchCopy},
+		{&state.resize, ModalEventRoute::Resize},
+		{&state.fixedCropSize, ModalEventRoute::FixedCropSize},
+		{&state.unsharpMask, ModalEventRoute::UnsharpMask},
+		{&state.pictureLevels, ModalEventRoute::PictureLevels},
+		{&state.contextMenu, ModalEventRoute::ContextMenu},
+	};
+	for (const auto& entry : precedence) *entry.first = true;
+	for (const auto& entry : precedence) {
+		Expect(ResolveModalEventRoute(state) == entry.second,
+			"the active modal with the highest precedence should own the event");
+		*entry.first = false;
+	}
+
+	for (const auto& entry : precedence) {
+		*entry.first = true;
+		Expect(ResolveModalEventRoute(state) == entry.second,
+			"each modal should route to its own handler when it is the only active modal");
+		*entry.first = false;
+	}
+}
+
+void TestRendererWindowResourceOwnership() {
+	using Owner = jpegview_linux::RendererWindowResources<RendererResourceTestWindow,
+		RendererResourceTestRenderer, DestroyRendererResourceTestWindow,
+		DestroyRendererResourceTestRenderer>;
+	gRendererResourceDestructionOrder.clear();
+	{
+		Owner resources;
+		resources.WindowResource() = new RendererResourceTestWindow();
+		resources.RendererResource() = new RendererResourceTestRenderer();
+		Owner moved(std::move(resources));
+		Expect(resources.WindowResource().Get() == nullptr &&
+			resources.RendererResource().Get() == nullptr,
+			"moving the SDL resource owner should transfer both handles");
+		moved.Reset();
+		Expect(gRendererResourceDestructionOrder == std::vector<int>({2, 1}),
+			"renderer resources must destroy the renderer before its window");
+		moved.Reset();
+		Expect(gRendererResourceDestructionOrder == std::vector<int>({2, 1}),
+			"resetting an empty resource owner must not destroy handles twice");
+	}
+	Expect(gRendererResourceDestructionOrder == std::vector<int>({2, 1}),
+		"resource-owner destruction after explicit reset must be harmless");
 }
 
 void TestFileDialogFiltering() {
@@ -22160,6 +22325,7 @@ void TestFileDialogDirectorySummaries() {
 	std::condition_variable shutdownChanged;
 	bool shutdownReturned = false;
 	std::thread shutdownThread([&] {
+		stoppingLoader->Shutdown();
 		stoppingLoader.reset();
 		{
 			std::lock_guard<std::mutex> lock(shutdownMutex);
@@ -22453,7 +22619,12 @@ void TestFileDialogDirectoryLoader() {
 	std::promise<void> shutdownFinished;
 	std::future<void> shutdownResult = shutdownFinished.get_future();
 	std::thread shutdownThread([loader = std::move(idleLoader),
-		finished = std::move(shutdownFinished)]() mutable {
+		finished = std::move(shutdownFinished), policy]() mutable {
+		loader->Shutdown();
+		loader->Shutdown();
+		loader->Request("ignored-after-shutdown", 91, policy);
+		Expect(loader->TakeReady().empty(),
+			"shut down directory loader accepted new requests");
 		loader.reset();
 		finished.set_value();
 	});
@@ -22622,6 +22793,10 @@ void TestColdArchiveRowDescriptorsAreCapturedOffThread() {
 		std::all_of(boundedResults.begin(), boundedResults.end(), [](const auto& result) {
 			return result.generation == 83 && result.observedSource.Valid();
 		}), "file-size result draining exceeded its per-update bound or lost a row");
+	boundedLoader.Shutdown();
+	boundedLoader.Request({boundedPaths.front()}, 84);
+	Expect(boundedLoader.TakeReady().empty(),
+		"shut down file-size loader accepted a new request");
 }
 
 void TestFileDialogPreviewSelectionAndBackgroundLoading() {
@@ -22866,6 +23041,10 @@ void TestFileDialogPreviewSelectionAndBackgroundLoading() {
 
 	loader.Clear();
 	Expect(loader.TakeReady().empty(), "clearing the preview loader retained a completed image");
+	loader.Shutdown();
+	loader.Shutdown();
+	(void)loader.Request(ppm, false, jpegview_linux::FileDialogSortMode::Name, 2, 2);
+	Expect(loader.TakeReady().empty(), "shut down preview loader accepted a new request");
 }
 
 void TestFileDialogPreviewRecapturesRecreatedSource() {
@@ -22972,6 +23151,57 @@ void TestEmbeddedApplicationIcon() {
 	for (std::size_t offset = 3; offset < icon.bgra.size(); offset += 4) {
 		Expect(icon.bgra[offset] == 255, "opaque JPEGView.ico frame acquired unexpected transparency");
 	}
+}
+
+void TestRendererTextureOwnerLifecycle() {
+	Expect(SDL_Init(0) == 0, "SDL initialization failed: " + std::string(SDL_GetError()));
+	struct SdlTestResources {
+		SDL_Surface* surface = nullptr;
+		SDL_Renderer* renderer = nullptr;
+		~SdlTestResources() {
+			if (renderer != nullptr) SDL_DestroyRenderer(renderer);
+			if (surface != nullptr) SDL_FreeSurface(surface);
+			SDL_Quit();
+		}
+	} resources;
+	resources.surface = SDL_CreateRGBSurfaceWithFormat(0, 8, 8, 32,
+		SDL_PIXELFORMAT_ARGB8888);
+	Expect(resources.surface != nullptr,
+		"could not create software-renderer test surface: " + std::string(SDL_GetError()));
+	resources.renderer = SDL_CreateSoftwareRenderer(resources.surface);
+	Expect(resources.renderer != nullptr,
+		"could not create software test renderer: " + std::string(SDL_GetError()));
+
+	jpegview_linux::RendererTextureOwner owner;
+	owner.SetRenderer(resources.renderer);
+	Expect(owner.CreateEmpty(0, 2) == nullptr && owner.LiveTextureCount() == 0,
+		"empty image texture accepted invalid dimensions");
+	Expect(owner.CreateAndUpload({0, 1, 2}, 1, 1, false) == nullptr &&
+		owner.LiveTextureCount() == 0,
+		"image texture upload accepted a buffer with the wrong size");
+
+	const std::vector<std::uint8_t> pixels{
+		0, 0, 255, 255, 0, 255, 0, 255,
+		255, 0, 0, 255, 255, 255, 255, 128};
+	SDL_Texture* uploaded = owner.CreateAndUpload(pixels, 2, 2, true);
+	Expect(uploaded != nullptr && owner.LiveTextureCount() == 1,
+		"uploaded texture was not adopted by the image owner");
+	int blendMode = SDL_BLENDMODE_NONE;
+	Expect(SDL_GetTextureBlendMode(uploaded, &blendMode) == 0 &&
+		blendMode == SDL_BLENDMODE_BLEND,
+		"uploaded texture did not preserve the transparency blend mode");
+	Expect(owner.Destroy(uploaded, pixels.size()) && owner.LiveTextureCount() == 0,
+		"image owner did not release an explicitly destroyed texture");
+	Expect(!owner.Destroy(uploaded) && owner.LiveTextureCount() == 0,
+		"image owner accepted a duplicate texture destruction");
+
+	Expect(owner.CreateEmpty(3, 2) != nullptr && owner.LiveTextureCount() == 1,
+		"incomplete display texture was not adopted by the image owner");
+	Expect(owner.DestroyAll() == 1 && owner.LiveTextureCount() == 0,
+		"shutdown did not release all remaining image textures");
+	Expect(owner.DestroyAll() == 0,
+		"repeated image texture shutdown released unexpected resources");
+	owner.SetRenderer(nullptr);
 }
 
 void RunTest(const char* name, void (*test)(), int& failures) {
@@ -23117,6 +23347,8 @@ int main(int argc, char** argv) {
 		TestPerfContextAndPendingInputDiagnostics, failures);
 	RunTest("decoded-prefetch-work-class-attribution",
 		TestDecodedPrefetchWorkClassAttribution, failures);
+	RunTest("decoded-image-cache-shutdown-rejects-new-work",
+		TestDecodedImageCacheShutdownRejectsNewWork, failures);
 	RunTest("display-prefetch-planner-worker-snapshots-and-cancellation",
 		TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation, failures);
 	RunTest("display-resolution-request-canonicalization",
@@ -23272,6 +23504,8 @@ int main(int argc, char** argv) {
 		TestImageOperationWorkerSupersedesAndSurvivesFailures, failures);
 	RunTest("picture-levels-store-round-trip", TestPictureLevelsStoreRoundTrip, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
+	RunTest("runtime-settings-owner-commit-semantics",
+		TestRuntimeSettingsOwnerCommitSemantics, failures);
 	RunTest("advanced-configuration-model-categories-and-round-trips",
 		TestAdvancedConfigurationModelCategoriesAndRoundTrips, failures);
 	RunTest("advanced-configuration-model-validation-and-cancellation",
@@ -23382,6 +23616,8 @@ int main(int argc, char** argv) {
 	RunTest("playback-scheduler-timing-and-modes", TestPlaybackSchedulerTimingAndModes, failures);
 	RunTest("event-loop-invalidation-deadlines-wakeups-and-motion",
 		TestEventLoopInvalidationDeadlinesWakeupsAndMotion, failures);
+	RunTest("modal-event-router-precedence", TestModalEventRouterPrecedence, failures);
+	RunTest("renderer-window-resource-ownership", TestRendererWindowResourceOwnership, failures);
 	RunTest("recent-files-mru-uniqueness-persistence-and-viewports",
 		TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots, failures);
 	RunTest("image-session-controller-navigation-and-clipboard-state",
@@ -23418,6 +23654,7 @@ int main(int argc, char** argv) {
 	RunTest("file-dialog-preview-recaptures-recreated-source",
 		TestFileDialogPreviewRecapturesRecreatedSource, failures);
 	RunTest("embedded-application-icon", TestEmbeddedApplicationIcon, failures);
+	RunTest("renderer-texture-owner-lifecycle", TestRendererTextureOwnerLifecycle, failures);
 	if (failures != 0) {
 		std::cerr << failures << " test group(s) failed\n";
 		return 1;
