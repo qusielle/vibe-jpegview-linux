@@ -28,9 +28,12 @@ namespace jpegview_linux {
 #ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
 namespace detail {
 using LosslessCropPublicationTestHook = void (*)(void*);
+using ImageSavePublicationTestHook = void (*)(void*);
 } // namespace detail
 void SetLosslessCropPublicationTestHookForTesting(
 	detail::LosslessCropPublicationTestHook hook, void* context);
+void SetImageSavePublicationTestHookForTesting(
+	detail::ImageSavePublicationTestHook hook, void* context);
 #endif
 
 struct SaveImageOperation {

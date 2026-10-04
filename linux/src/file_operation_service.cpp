@@ -18,7 +18,9 @@
 #include <ctime>
 #include <fcntl.h>
 #include <fstream>
+#include <linux/fs.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <type_traits>
@@ -33,6 +35,9 @@ namespace {
 std::mutex losslessCropPublicationTestHookMutex;
 detail::LosslessCropPublicationTestHook losslessCropPublicationTestHook = nullptr;
 void* losslessCropPublicationTestHookContext = nullptr;
+std::mutex imageSavePublicationTestHookMutex;
+detail::ImageSavePublicationTestHook imageSavePublicationTestHook = nullptr;
+void* imageSavePublicationTestHookContext = nullptr;
 
 void InvokeLosslessCropPublicationTestHook() {
 	detail::LosslessCropPublicationTestHook hook = nullptr;
@@ -41,6 +46,17 @@ void InvokeLosslessCropPublicationTestHook() {
 		std::lock_guard<std::mutex> lock(losslessCropPublicationTestHookMutex);
 		hook = losslessCropPublicationTestHook;
 		context = losslessCropPublicationTestHookContext;
+	}
+	if (hook != nullptr) hook(context);
+}
+
+void InvokeImageSavePublicationTestHook() {
+	detail::ImageSavePublicationTestHook hook = nullptr;
+	void* context = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(imageSavePublicationTestHookMutex);
+		hook = imageSavePublicationTestHook;
+		context = imageSavePublicationTestHookContext;
 	}
 	if (hook != nullptr) hook(context);
 }
@@ -249,6 +265,31 @@ bool ApplyPermissions(const fs::path& output, mode_t permissions,
 	return true;
 }
 
+bool PublishWithoutReplacing(const fs::path& temporary, const fs::path& output,
+	std::string& errorMessage) {
+#if defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
+	if (::syscall(SYS_renameat2, AT_FDCWD, temporary.c_str(), AT_FDCWD,
+		output.c_str(), RENAME_NOREPLACE) == 0) return true;
+	const int renameError = errno;
+	if (renameError == EEXIST) {
+		errorMessage = "output appeared before publication";
+		return false;
+	}
+	if (renameError != ENOSYS && renameError != EINVAL &&
+		renameError != EOPNOTSUPP) {
+		errorMessage = "cannot publish image without replacing output: " +
+			std::string(std::strerror(renameError));
+		return false;
+	}
+#endif
+	if (::link(temporary.c_str(), output.c_str()) == 0) return true;
+	const int linkError = errno;
+	errorMessage = linkError == EEXIST ? "output appeared before publication" :
+		"cannot publish image without replacing output: " +
+		std::string(std::strerror(linkError));
+	return false;
+}
+
 bool ResolveOutputPath(const fs::path& output, fs::path& resolved,
 	std::string& errorMessage) {
 	fs::path candidate = output;
@@ -335,11 +376,18 @@ bool WriteImageWithSourceCpuAdmission(const fs::path& output, const Image& image
 		errorMessage)) {
 		return false;
 	}
-	if (::rename(stagedOutput.temporaryFile.c_str(), publicationPath.c_str()) != 0) {
-		errorMessage = "cannot publish image: " + std::string(std::strerror(errno));
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	InvokeImageSavePublicationTestHook();
+#endif
+	if (targetExists) {
+		if (::rename(stagedOutput.temporaryFile.c_str(), publicationPath.c_str()) != 0) {
+			errorMessage = "cannot publish image: " + std::string(std::strerror(errno));
+			return false;
+		}
+	} else if (!PublishWithoutReplacing(stagedOutput.temporaryFile,
+		publicationPath, errorMessage)) {
 		return false;
 	}
-	stagedOutput.temporaryFile.clear();
 	return true;
 }
 
@@ -689,13 +737,18 @@ FileOperationResult Execute(const LosslessCropOperation& operation,
 		Fail(result, errorMessage, shouldContinue);
 		return result;
 	}
-	if (::rename(result.temporaryFile.c_str(), operation.output.c_str()) != 0) {
-		Fail(result, "cannot finalize output: " + std::string(std::strerror(errno)),
-			shouldContinue);
+	if (outputExistsAtPublish) {
+		if (::rename(result.temporaryFile.c_str(), operation.output.c_str()) != 0) {
+			Fail(result, "cannot finalize output: " + std::string(std::strerror(errno)),
+				shouldContinue);
+			return result;
+		}
+	} else if (!PublishWithoutReplacing(result.temporaryFile,
+		operation.output, errorMessage)) {
+		Fail(result, errorMessage, shouldContinue);
 		return result;
 	}
 	result.path = operation.output;
-	result.temporaryFile.clear();
 	result.success = true;
 	return result;
 }
@@ -818,16 +871,16 @@ FileOperationResult Execute(const BatchCopyOperation& operation,
 				}
 				continue;
 			}
-			fs::rename(temporaryOutput.temporaryFile, item.destination, error);
-			if (error) {
+			if (!PublishWithoutReplacing(temporaryOutput.temporaryFile,
+				item.destination, errorMessage)) {
 				++result.batch.failed;
 				if (result.batch.firstFailure.empty()) {
-					result.batch.firstFailure = "cannot publish copy " +
-						item.destination.filename().string();
+					result.batch.firstFailure = errorMessage.empty() ?
+						"cannot publish copy " + item.destination.filename().string() :
+						errorMessage;
 				}
 				continue;
 			}
-			temporaryOutput.temporaryFile.clear();
 			++result.batch.copied;
 			++result.batch.completed;
 		} else {
@@ -1162,6 +1215,13 @@ void SetLosslessCropPublicationTestHookForTesting(
 	std::lock_guard<std::mutex> lock(losslessCropPublicationTestHookMutex);
 	losslessCropPublicationTestHook = hook;
 	losslessCropPublicationTestHookContext = context;
+}
+
+void SetImageSavePublicationTestHookForTesting(
+	detail::ImageSavePublicationTestHook hook, void* context) {
+	std::lock_guard<std::mutex> lock(imageSavePublicationTestHookMutex);
+	imageSavePublicationTestHook = hook;
+	imageSavePublicationTestHookContext = context;
 }
 #endif
 

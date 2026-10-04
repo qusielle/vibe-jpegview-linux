@@ -441,16 +441,18 @@ should normally be added to one of these focused modules and covered by `tests/t
   filesystem or child-process work on the SDL thread; each completion carries an operation ID and
   captured owner generation and is applied by Viewer only after the matching request is checked.
   Batch cancellation stops at file boundaries and reports completed changes without rollback. Each
-  copy is prepared in a mode-0600, non-image `.tmp` sibling and atomically renamed under destination
-  admission, so readers see only complete files; failed and canceled copies leave no partial image
-  behind. Source permissions and modification times are restored before publication. Lossless JPEG
-  results use the same private `.tmp` sibling policy, then atomically rename only after the codec
-  succeeds and source or destination permissions are restored. In-progress outputs stay hidden from
-  image scans. Encoded saves, print preparation, and wallpaper-cache images also use private non-image
-  siblings and atomically publish after format encoding succeeds; the writer receives the selected
-  output format separately from the staging filename. Existing output modes and normal umask-derived
-  modes for new outputs are restored before rename, and symlink destinations continue to address
-  their target. Once printing,
+  copy is prepared in a mode-0600, non-image `.tmp` sibling and published without replacing a
+  destination created after its existence check, so readers see only complete files; failed and
+  canceled copies leave no partial image behind. Source permissions and modification times are
+  restored before publication. Lossless JPEG results use the same private `.tmp` sibling policy;
+  newly absent destinations use atomic no-replace publication, while replacing an existing
+  destination requires confirmation and uses atomic rename after the codec succeeds and permissions
+  are restored. In-progress outputs stay hidden from image scans. Encoded saves, print preparation,
+  and wallpaper-cache images also use private non-image siblings and atomically publish after format
+  encoding succeeds; the writer receives the selected output format separately from the staging
+  filename. New save targets use atomic no-replace publication, while confirmed existing targets
+  retain their prior mode and use atomic rename. Symlink save destinations continue to address their
+  resolved target. Once printing,
   trash, or wallpaper commands have launched an irreversible side effect, ordinary request
   cancellation no longer terminates them; the worker waits for exit and publishes the actual success
   or failure without relabeling that completed command as canceled.
@@ -932,12 +934,14 @@ With keep-between-images enabled, current values take precedence; otherwise a sa
 restored. `image_processing` provides clamped ranges and identity defaults for the panel.
 Unsharp-mask parameters are included in display request keys so changing its preview cannot reuse
 stale prepared pixels.
-When Save processed overwrites the selected source, Viewer refreshes the file-list descriptor and
-thumbnail catalog while retaining the already materialized current image and correction base. The
-detached-pixel state prevents a refreshed source key from being paired with the old decoded image or
-from reapplying the active picture-level preset; ordinary `LoadCurrent` clears that state. While the
-image is detached, source-coordinate lossless JPEG crop is unavailable because it operates on the
-refreshed source; reloading restores that operation.
+When Save processed overwrites the selected source, the output-preparation worker also materializes
+the lazy document's source and processed presentation pixels before the file worker publishes them.
+Viewer refreshes the file-list descriptor and thumbnail catalog, rebinds the retained document to the
+new source identity, and keeps its correction base. This preserves the image on screen and lets later
+edits use the current document without pairing old pixels with a stale source key or applying the
+active picture-level preset twice. Ordinary `LoadCurrent` clears the detached state. While the image
+is detached, source-coordinate lossless JPEG crop is unavailable because it operates on the refreshed
+source; reloading restores that operation.
 
 Crop selection remains in source-image coordinates while the SDL adapter maps pointer gestures and
 the dotted/handled overlay through the current viewport destination. Crop and copy actions first

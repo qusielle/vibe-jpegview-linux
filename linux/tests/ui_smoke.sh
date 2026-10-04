@@ -1409,6 +1409,93 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	fi
 	stop_viewer
 
+	# Saving over the selected source must materialize its lazy document pixels,
+	# preserve the current presentation, and rebind later operations to the new
+	# filesystem identity. The title reports source dimensions, so verify the
+	# subsequent rotation through the rendered pixels below.
+	in_place_directory="$temporary/in-place-save"
+	in_place_config="$temporary/in-place-save-config"
+	mkdir -p "$in_place_directory" "$in_place_config/jpegview-linux"
+	convert -size 600x300 xc:red -fill blue -draw 'rectangle 300,0 599,299' \
+		"$in_place_directory/01-inplace.png"
+	printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$in_place_config/jpegview-linux/settings.conf"
+	VIEWER_TEST_HOME="$temporary/in-place-save-home" \
+		VIEWER_TEST_CONFIG_HOME="$in_place_config" \
+		launch_viewer "$in_place_directory/01-inplace.png"
+	assert_title_prefix "01-inplace.png (600x300," \
+		"in-place save fixture did not load its lazy source"
+	in_place_original_inode=$(stat -c '%i' "$in_place_directory/01-inplace.png")
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+s
+	# The default name is `01-inplace_proc.jpg` (19 code points). Backspace
+	# exactly that many times so the last key cannot navigate to the parent.
+	send_repeated_keypresses 19 BackSpace "$window_id"
+	DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 25 '01-inplace.png'
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+	sleep 0.1
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+	in_place_saved_inode=$in_place_original_inode
+	for _ in $(seq 1 80); do
+		in_place_saved_inode=$(stat -c '%i' "$in_place_directory/01-inplace.png")
+		if [ "$in_place_saved_inode" != "$in_place_original_inode" ]; then break; fi
+		sleep 0.05
+	done
+	if [ "$in_place_saved_inode" = "$in_place_original_inode" ]; then
+		echo "UI smoke test: in-place save did not publish a new image inode" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	if [ "$(identify -format '%wx%h' "$in_place_directory/01-inplace.png")" != "600x300" ]; then
+		echo "UI smoke test: in-place save changed the selected source dimensions" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+		viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+		in_place_x=$((viewer_width / 2))
+		in_place_y=$((viewer_height / 2))
+		in_place_visible=0
+		for _ in $(seq 1 60); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/in-place-after-save.png"
+			in_place_left=$(convert "$temporary/in-place-after-save.png" -format \
+				"%[fx:p{$((in_place_x - 50)),$in_place_y}.r>0.75&&p{$((in_place_x - 50)),$in_place_y}.b<0.25]" info:)
+			in_place_right=$(convert "$temporary/in-place-after-save.png" -format \
+				"%[fx:p{$((in_place_x + 50)),$in_place_y}.b>0.75&&p{$((in_place_x + 50)),$in_place_y}.r<0.25]" info:)
+			if [ "$in_place_left:$in_place_right" = "1:1" ]; then
+				in_place_visible=1
+				break
+			fi
+			sleep 0.05
+		done
+		if [ "$in_place_visible" -ne 1 ]; then
+			echo "UI smoke test: in-place save blanked or changed the current presentation ($in_place_left:$in_place_right)" >&2
+			exit 1
+		fi
+	fi
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Down
+	if [ "$visual_assertions" -eq 1 ]; then
+		in_place_rotated=0
+		for _ in $(seq 1 60); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/in-place-rotated.png"
+			in_place_top=$(convert "$temporary/in-place-rotated.png" -format \
+				"%[fx:p{$in_place_x,$((in_place_y - 60))}.r>0.75&&p{$in_place_x,$((in_place_y - 60))}.b<0.25]" info:)
+			in_place_bottom=$(convert "$temporary/in-place-rotated.png" -format \
+				"%[fx:p{$in_place_x,$((in_place_y + 60))}.b>0.75&&p{$in_place_x,$((in_place_y + 60))}.r<0.25]" info:)
+			if [ "$in_place_top:$in_place_bottom" = "1:1" ]; then
+				in_place_rotated=1
+				break
+			fi
+			sleep 0.05
+		done
+		if [ "$in_place_rotated" -ne 1 ]; then
+			echo "UI smoke test: transform after in-place save did not update the visible pixels ($in_place_top:$in_place_bottom)" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+
 	# A same-source resolution replacement must retain the last presented texture
 	# for every renderer tick while the replacement decode is blocked.
 	fallback_directory="$temporary/same-source-texture-fallback"

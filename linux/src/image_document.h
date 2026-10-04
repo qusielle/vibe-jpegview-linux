@@ -48,6 +48,7 @@ struct ImageDocumentSnapshot {
 
 struct ImageOperationSpec {
 	ImageOperationKind kind = ImageOperationKind::Materialize;
+	bool preserveDocumentPixels = false;
 	ImageTransformKind transform = ImageTransformKind::RotateClockwise;
 	int left = 0;
 	int top = 0;
@@ -120,7 +121,7 @@ public:
 	void UpdateProcessing(const ImageProcessingParams& processing, bool autoContrast);
 	RetiredImageBuffers ClearPixels();
 
-	void MarkDetached();
+	void MarkDetached(const SourceKey& newSource);
 	void MarkDocumentChanged();
 	void SetFrameIndex(std::size_t frameIndex);
 	void SetAnimation(bool animated);

@@ -14377,6 +14377,78 @@ void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
 		"identity transform built or charged two full-size outputs instead of sharing one");
 }
 
+void TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource() {
+	TemporaryDirectory temporary;
+	const fs::path sourcePath = temporary.path() / "in-place-save.png";
+	WriteBytes(sourcePath, {1});
+	const jpegview_linux::SourceDescriptor originalSource =
+		jpegview_linux::DescribeImageSource(sourcePath);
+	Expect(originalSource.Valid(), "in-place save fixture did not capture its original source");
+
+	const jpegview_linux::Image sourceImage = MakeIndexedImage(4, 3);
+	auto decoded = std::make_shared<jpegview_linux::DecodedImage>();
+	jpegview_linux::DecodedFrame decodedFrame;
+	decodedFrame.width = sourceImage.width;
+	decodedFrame.height = sourceImage.height;
+	decodedFrame.bgra = sourceImage.bgra;
+	decodedFrame.hasTransparency = sourceImage.hasTransparency;
+	decoded->frames.push_back(std::move(decodedFrame));
+
+	jpegview_linux::ImageProcessingParams processing;
+	processing.contrast = 0.12;
+	const auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(0);
+	jpegview_linux::ImageDocument document;
+	(void)document.BeginSelection(originalSource.Key(), 17, true);
+	document.SetDimensions(sourceImage.width, sourceImage.height,
+		sourceImage.hasTransparency);
+	document.UpdateProcessing(processing, false);
+	Expect(!document.HasMaterializedPixels(),
+		"in-place save fixture unexpectedly began with materialized document pixels");
+
+	jpegview_linux::ImageOperationRequest request;
+	request.document = document.Snapshot();
+	request.decoded = decoded;
+	request.operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
+	request.operation.preserveDocumentPixels = true;
+	const jpegview_linux::Image expectedPresentation = [&sourceImage, &processing] {
+		jpegview_linux::Image expected = sourceImage;
+		if (!expected.ApplyProcessing(processing, false)) {
+			throw TestFailure("could not prepare in-place save processing reference");
+		}
+		return expected;
+	}();
+	jpegview_linux::ImageOperationResult prepared =
+		jpegview_linux::ProcessImageOperation(request, [] { return true; }, *budget);
+	Expect(prepared.success && prepared.updatesDocument && prepared.sourcePixels &&
+		prepared.presentationPixels && prepared.outputPixels &&
+		prepared.presentationPixels->bgra == expectedPresentation.bgra &&
+		prepared.outputPixels->bgra == expectedPresentation.bgra,
+		"in-place save preparation did not retain its processed lazy document pixels");
+	jpegview_linux::RetiredImageBuffers retired;
+	Expect(document.Apply(prepared, retired) && document.HasMaterializedPixels(),
+		"in-place save preparation could not commit document pixels");
+
+	WriteBytes(sourcePath, {1, 2});
+	const jpegview_linux::SourceDescriptor savedSource =
+		jpegview_linux::DescribeImageSource(sourcePath);
+	Expect(savedSource.Valid() && savedSource.Key() != originalSource.Key(),
+		"in-place save fixture did not produce a new source identity");
+	document.MarkDetached(savedSource.Key());
+	Expect(document.Source() == savedSource.Key() && document.Detached(),
+		"in-place save did not rebind the materialized document to the saved source identity");
+
+	request = {};
+	request.document = document.Snapshot();
+	request.operation.kind = jpegview_linux::ImageOperationKind::Transform;
+	request.operation.transform = jpegview_linux::ImageTransformKind::RotateClockwise;
+	const jpegview_linux::ImageOperationResult nextOperation =
+		jpegview_linux::ProcessImageOperation(request, [] { return true; }, *budget);
+	Expect(nextOperation.success && nextOperation.sourcePixels &&
+		nextOperation.sourcePixels->width == sourceImage.height &&
+		nextOperation.sourcePixels->height == sourceImage.width,
+		"a transform after in-place save could not use the rebound source identity and retained pixels");
+}
+
 void TestImageOperationWorkerSupersedesAndSurvivesFailures() {
 	std::mutex mutex;
 	std::condition_variable condition;
@@ -15846,6 +15918,67 @@ void PauseLosslessCropBeforePublication(void* context) {
 	barrier->changed.notify_all();
 	barrier->changed.wait(lock, [barrier] { return barrier->released; });
 }
+
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+struct ImageSavePublicationBarrier {
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool reached = false;
+	bool released = false;
+};
+
+void PauseImageSaveBeforePublication(void* context) {
+	auto* barrier = static_cast<ImageSavePublicationBarrier*>(context);
+	std::unique_lock<std::mutex> lock(barrier->mutex);
+	barrier->reached = true;
+	barrier->changed.notify_all();
+	barrier->changed.wait(lock, [barrier] { return barrier->released; });
+}
+
+void TestImageSaveDoesNotReplaceUnconfirmedLateTarget() {
+	TemporaryDirectory temporary;
+	const fs::path output = temporary.path() / "late-target.png";
+	ImageSavePublicationBarrier barrier;
+	jpegview_linux::SetImageSavePublicationTestHookForTesting(
+		PauseImageSaveBeforePublication, &barrier);
+	jpegview_linux::SaveImageOperation save;
+	save.output = output;
+	save.image = MakeTinyTestImage();
+	auto operation = std::async(std::launch::async, [save = std::move(save)]() mutable {
+		return jpegview_linux::ExecuteFileOperation(
+			jpegview_linux::FileOperationPayload{std::move(save)}, 52,
+			[] { return true; });
+	});
+	bool reachedPublication = false;
+	{
+		std::unique_lock<std::mutex> lock(barrier.mutex);
+		reachedPublication = barrier.changed.wait_for(lock, std::chrono::seconds(2),
+			[&barrier] { return barrier.reached; });
+	}
+	const std::string lateText = "created during encoding";
+	const std::vector<std::uint8_t> lateContents(lateText.begin(), lateText.end());
+	if (reachedPublication) WriteBytes(output, lateContents);
+	{
+		std::lock_guard<std::mutex> lock(barrier.mutex);
+		barrier.released = true;
+		barrier.changed.notify_all();
+	}
+	const bool completed = operation.wait_for(std::chrono::seconds(2)) ==
+		std::future_status::ready;
+	jpegview_linux::SetImageSavePublicationTestHookForTesting(nullptr, nullptr);
+	Expect(completed, "image save did not leave its controlled publication boundary");
+	const jpegview_linux::FileOperationResult result = operation.get();
+	Expect(reachedPublication && !result.success && ReadBytes(output) == lateContents,
+		"unconfirmed image save replaced a destination created after its initial existence check");
+	std::error_code iteratorError;
+	for (const fs::directory_entry& entry : fs::directory_iterator(temporary.path(),
+		iteratorError)) {
+		Expect(entry.path() == output,
+			"late-target save left its staged image beside the destination");
+	}
+	Expect(!iteratorError, "cannot inspect late-target image-save cleanup");
+}
+#endif
 
 void TestLosslessCropPublicationWaitsForDestinationAdmission() {
 	TemporaryDirectory temporary;
@@ -23096,6 +23229,8 @@ int main(int argc, char** argv) {
 		TestImageOperationWorkerRunsCropAndFlattensCapturedFrame, failures);
 	RunTest("image-operation-worker-matches-transforms-and-pixel-pipelines",
 		TestImageOperationWorkerMatchesTransformsAndPixelPipelines, failures);
+	RunTest("in-place-save-materializes-lazy-document-and-rebinds-source",
+		TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource, failures);
 	RunTest("image-operation-worker-supersedes-and-survives-failures",
 		TestImageOperationWorkerSupersedesAndSurvivesFailures, failures);
 	RunTest("picture-levels-store-round-trip", TestPictureLevelsStoreRoundTrip, failures);
@@ -23118,6 +23253,10 @@ int main(int argc, char** argv) {
 		TestExternalProcessCancellationKillsDescendants, failures);
 	RunTest("file-operation-save-and-batch-policies",
 		TestFileOperationSaveAndBatchPolicies, failures);
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	RunTest("image-save-does-not-replace-unconfirmed-late-target",
+		TestImageSaveDoesNotReplaceUnconfirmedLateTarget, failures);
+#endif
 	RunTest("batch-cancellation-stops-between-files",
 		TestBatchCancellationStopsBetweenFiles, failures);
 	RunTest("file-operation-clipboard-temporary-cleanup-and-fallback",

@@ -131,8 +131,9 @@ RetiredImageBuffers ImageDocument::ClearPixels() {
 	return retired;
 }
 
-void ImageDocument::MarkDetached() {
-	if (detached_) return;
+void ImageDocument::MarkDetached(const SourceKey& newSource) {
+	if (detached_ && source_ == newSource) return;
+	source_ = newSource;
 	detached_ = true;
 	AdvanceRevision();
 }

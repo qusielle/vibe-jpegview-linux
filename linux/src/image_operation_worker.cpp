@@ -161,7 +161,9 @@ ImageOperationResult ProcessImageOperation(const ImageOperationRequest& request,
 		request.operation.kind == ImageOperationKind::Transform ||
 		request.operation.kind == ImageOperationKind::Crop ||
 		request.operation.kind == ImageOperationKind::Resize ||
-		request.operation.kind == ImageOperationKind::Reprocess;
+		request.operation.kind == ImageOperationKind::Reprocess ||
+		(request.operation.kind == ImageOperationKind::PrepareOutput &&
+			request.operation.preserveDocumentPixels);
 
 	CacheReservation newlyDecodedReservation;
 	const std::shared_ptr<const Image> source = GetSourcePixels(request, budget,
@@ -304,15 +306,35 @@ ImageOperationResult ProcessImageOperation(const ImageOperationRequest& request,
 			jpegview_linux::EqualImageProcessing(
 				request.document.materializedProcessing, request.document.processing) &&
 			request.document.materializedAutoContrast == request.document.autoContrast;
-		if (request.operation.width <= 0 && request.operation.height <= 0 &&
+		if (request.operation.preserveDocumentPixels) {
+			result.presentationPixels = currentPresentation ?
+				ShareImage(request.document.presentationPixels, budget,
+					result.presentationReservation) :
+				PreparePresentation(source, request.document, budget,
+					result.presentationReservation, shouldContinue);
+			if (!result.presentationPixels) break;
+			setSource(sourceCreated);
+		}
+		if (request.operation.preserveDocumentPixels &&
+			request.operation.width <= 0 && request.operation.height <= 0) {
+			result.outputPixels = result.presentationPixels;
+			result.outputReservation = result.presentationReservation.ShareAlias();
+		} else if (request.operation.width <= 0 && request.operation.height <= 0 &&
 			currentPresentation) {
 			result.outputPixels = request.document.presentationPixels;
 		} else if (request.operation.width <= 0 && request.operation.height <= 0 &&
-			!ProcessingChangesPixels(request.document)) {
+			!ProcessingChangesPixels(request.document) &&
+			!request.operation.preserveDocumentPixels) {
 			result.outputPixels = ShareImage(source, budget, result.outputReservation);
 		} else {
 			Image presentation;
-			if (currentPresentation) {
+			if (request.operation.preserveDocumentPixels) {
+				try {
+					presentation = *result.presentationPixels;
+				} catch (const std::exception&) {
+					break;
+				}
+			} else if (currentPresentation) {
 				try {
 					presentation = *request.document.presentationPixels;
 				} catch (const std::exception&) {

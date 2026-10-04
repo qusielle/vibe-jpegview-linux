@@ -3059,7 +3059,10 @@ private:
 			imageModified_ = imageDocument_.Modified();
 			currentPixelsDetachedFromSource_ = imageDocument_.Detached();
 			currentImageRotationQuarterTurns_ = imageDocument_.RotationQuarterTurns();
-			currentDisplayRequest_.reset();
+			const bool preserveLazySavePresentation =
+				pending.purpose == ImageOperationPurpose::Save &&
+				pending.operation.preserveDocumentPixels;
+			if (!preserveLazySavePresentation) currentDisplayRequest_.reset();
 			if (result->flattenAnimation) {
 				playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
 				retired.decoded = std::move(currentDecoded_);
@@ -3091,7 +3094,10 @@ private:
 				pending.purpose == ImageOperationPurpose::Crop ||
 				pending.purpose == ImageOperationPurpose::Resize) SetTitle();
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
-		} else {
+		}
+		if (!result->updatesDocument ||
+			(pending.purpose == ImageOperationPurpose::Save &&
+				pending.operation.preserveDocumentPixels)) {
 			if (!result->outputPixels) {
 				ReportImageOperationFailure(pending.purpose, "no output pixels were produced");
 			} else {
@@ -3868,9 +3874,16 @@ private:
 		}
 		const jpegview_linux::SourceRefreshOutcome refresh =
 			jpegview_linux::RefreshFileListSource(fileList_, previous, observed, true);
+		const bool ownedInPlaceSave = pendingFileOperation_.has_value() &&
+			pendingFileOperation_->kind == jpegview_linux::FileOperationKind::SaveImage &&
+			pendingFileOperation_->outputPath == changedPath &&
+			FileOperationOwnerStillCurrent(*pendingFileOperation_) &&
+			!fileList_.Empty() && AbsoluteNormalized(fileList_.Current()) == changedPath &&
+			observed.Valid();
 		if (!refresh.applied) return false;
 		const jpegview_linux::SourceRefreshDisplayAction displayAction =
-			jpegview_linux::ResolveSourceRefreshDisplayAction(refresh, preserveCurrentPixels);
+			jpegview_linux::ResolveSourceRefreshDisplayAction(refresh,
+				preserveCurrentPixels || ownedInPlaceSave);
 		const bool orderChanged = refresh.orderChanged;
 		bool spreadAffected = orderChanged || refresh.sortKeyChanged;
 		if (refresh.previousIndex.has_value()) {
@@ -3907,7 +3920,7 @@ private:
 		if (displayAction == jpegview_linux::SourceRefreshDisplayAction::PreserveCurrentPixels &&
 			!fileList_.Empty()) {
 			currentPixelsDetachedFromSource_ = true;
-			imageDocument_.MarkDetached();
+			imageDocument_.MarkDetached(observed.Key());
 			currentDisplayRequest_.reset();
 			deferredCurrentDisplayPreparation_ = false;
 			imageSession_.MarkDocumentChanged();
@@ -5139,6 +5152,8 @@ private:
 
 		jpegview_linux::ImageOperationSpec operation;
 		operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
+		operation.preserveDocumentPixels = !fileList_.Empty() &&
+			output == AbsoluteNormalized(fileList_.Current());
 		if (!fileDialogSaveFullSize_) {
 			operation.width = std::max(1, static_cast<int>(std::round(
 				CurrentImage().width * viewport_.Zoom())));
@@ -5400,7 +5415,13 @@ private:
 		if (replacedCurrentSource) {
 			const jpegview_linux::SourceDescriptor observed =
 				jpegview_linux::DescribeImageSource(output);
-			(void)ApplySourceChange(previousOutputKey, observed, true);
+			const bool alreadyReconciled = observed.Valid() && outputIndex.has_value() &&
+				fileList_.DescriptorAt(*outputIndex) != nullptr &&
+				fileList_.DescriptorAt(*outputIndex)->Key() == observed.Key() &&
+				imageDocument_.Source() == observed.Key() && imageDocument_.Detached();
+			if (!alreadyReconciled) {
+				(void)ApplySourceChange(previousOutputKey, observed, true);
+			}
 			SetTitle("Saved processed image: " + savedName);
 		} else if (outputIndex.has_value()) {
 			const jpegview_linux::SourceDescriptor observed =

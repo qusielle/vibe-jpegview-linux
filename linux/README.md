@@ -1241,8 +1241,9 @@ Linux equivalent.
 displayed screen-size result. The additional output formats listed above are selected by their
 filename extension, with the default filename following Windows JPEGView's `<name>_proc.jpg`
 convention. Existing files require a second Enter to confirm replacement. Saving over the selected
-source refreshes its cache identity while keeping the already processed image in the viewer, so its
-picture-level adjustments are not applied to the saved pixels a second time.
+source materializes and retains the current image in the viewer while refreshing its source identity,
+so later edits remain available and picture-level adjustments are not applied to the saved pixels a
+second time.
 
 The Linux command dispatcher uses the original numeric `IDM_*` values from
 `src/JPEGView/resource.h`, and the supported keyboard bindings follow the corresponding entries
