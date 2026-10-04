@@ -132,6 +132,9 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   image remains visible and a later edit still succeeds. Detect symlink aliases to the selected path,
   verify the resolved destination again in the file worker, and keep animated playback paused until
   publication either succeeds or fails.
+- Whenever work pauses playback readiness, every current-owner terminal path must restore readiness
+  or explicitly stop and reconfigure playback. Clearing animation frames alone must not leave a
+  retained still image unready; test that slideshow and movie playback can be started afterwards.
 - File existence checks and overwrite prompts do not reserve a path. Publish new targets with an
   atomic no-replace operation so a file created during encoding cannot be silently overwritten;
   reserve replacement publication for a target whose overwrite was explicitly confirmed.
