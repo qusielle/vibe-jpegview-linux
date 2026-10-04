@@ -11,7 +11,11 @@ should normally be added to one of these focused modules and covered by `tests/t
   entry. Each entry also owns an immutable `SourceDescriptor` captured with its filesystem metadata
   during enumeration. `MutationRevision()` changes when membership or ordering changes, while
   `DescriptorRevision()` changes when source identity or metadata is refreshed; ordinary current-image
-  navigation changes neither.
+  navigation changes neither. Filename sort data is folded once per entry and the natural comparator
+  consumes that cached key, retaining existing numeric, case, leading-zero, and path-tie behavior.
+  Ordinary-file identity, size, modification time, and optional birth time are requested together with
+  `statx`; when that request is unavailable or omits required fields, the stat fallback preserves
+  modification-time creation ordering.
 - `file_list_scan_worker`: one lazy, low-priority worker for viewer-list initialization, reloads,
   recursive/sibling transitions, dropped inputs, cross-folder marked-image toggles, and
   multiple-input scope changes. Requests carry
@@ -36,6 +40,14 @@ should normally be added to one of these focused modules and covered by `tests/t
   each path string. A direct image launch uses a provisional one-image list so decoding can start
   before its folder scan completes. Cancellation never blocks waiting for the worker; destruction
   joins it during normal owner teardown.
+- `file_list_sort_worker`: a separate foreground CPU-admitted worker for reordering an already loaded
+  catalog. `FileList` shares its immutable entry storage with the request; the worker copies and sorts
+  off-thread, then publishes a complete order and path index. The active order stays usable until the
+  matching result applies. Application checks catalog and descriptor revisions, then restores the
+  source selected at apply time and the marked source by logical path. A descriptor refresh that
+  changes the active metadata sort key uses this same asynchronous path. Superseded results and
+  replaced catalog vectors move to worker retirement so their large path and metadata buffers are not
+  freed during renderer-thread work.
 - `source_work_coordinator` and `work_context`: shared admission across otherwise independent
   worker pools. Foreground source work has a separate lane; speculative and metadata reads share one
   active lane and new background source admission waits while foreground work is pending. A partner

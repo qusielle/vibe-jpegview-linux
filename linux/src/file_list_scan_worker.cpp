@@ -29,8 +29,6 @@ struct FileListScanWorker::Impl {
 	void Stop() {
 		{
 			std::lock_guard<std::mutex> lock(mutex);
-			pending.reset();
-			ready.reset();
 			stopping.store(true);
 			generation.fetch_add(1);
 		}
@@ -58,15 +56,29 @@ struct FileListScanWorker::Impl {
 
 	void Run() {
 		(void)::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 19);
-		while (!stopping.load()) {
+		while (true) {
 			Task task;
+			std::vector<FileListScanResult> releaseResults;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
-				condition.wait(lock, [this] { return stopping.load() || pending.has_value(); });
-				if (stopping.load()) return;
-				task = std::move(*pending);
-				pending.reset();
+				condition.wait(lock, [this] {
+					return stopping.load() || pending.has_value() || !retiredResults.empty();
+				});
+				if (stopping.load()) {
+					pending.reset();
+					ready.reset();
+					releaseResults.swap(retiredResults);
+					lock.unlock();
+					return;
+				}
+				if (!retiredResults.empty()) {
+					releaseResults.swap(retiredResults);
+				} else if (pending) {
+					task = std::move(*pending);
+					pending.reset();
+				}
 			}
+			if (!releaseResults.empty()) continue;
 
 			FileListScanResult result;
 			result.generation = task.generation;
@@ -135,6 +147,7 @@ struct FileListScanWorker::Impl {
 	std::condition_variable condition;
 	std::optional<Task> pending;
 	std::optional<FileListScanResult> ready;
+	std::vector<FileListScanResult> retiredResults;
 	std::atomic<std::uint64_t> generation{0};
 	std::atomic<bool> stopping{false};
 	std::atomic<bool> foregroundPending{false};
@@ -155,6 +168,7 @@ std::uint64_t FileListScanWorker::Request(FileList::ScanRequest request) {
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		if (impl_->stopping.load()) return 0;
 		nextGeneration = impl_->generation.fetch_add(1) + 1;
+		if (impl_->ready) impl_->retiredResults.push_back(std::move(*impl_->ready));
 		impl_->ready.reset();
 		impl_->pending = Impl::Task{std::move(request), nextGeneration};
 		impl_->StartWorkerLocked();
@@ -169,8 +183,10 @@ void FileListScanWorker::Clear() {
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		impl_->generation.fetch_add(1);
 		impl_->pending.reset();
+		if (impl_->ready) impl_->retiredResults.push_back(std::move(*impl_->ready));
 		impl_->ready.reset();
 	}
+	impl_->condition.notify_one();
 	SourceWorkCoordinator::Global().NotifyWaiters();
 }
 

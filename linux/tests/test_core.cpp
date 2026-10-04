@@ -1,6 +1,7 @@
 #include "exif_reader.h"
 #include "file_list.h"
 #include "file_list_scan_worker.h"
+#include "file_list_sort_worker.h"
 #include "display_prefetch_planner.h"
 #include "display_preparation_controller.h"
 #include "exif_metadata_worker.h"
@@ -109,8 +110,11 @@ std::string gTestExecutablePath;
 using jpegview_linux::DecodedImage;
 using jpegview_linux::FileList;
 using jpegview_linux::FileListPreparedScan;
+using jpegview_linux::FileListPreparedSort;
 using jpegview_linux::FileListScanResult;
 using jpegview_linux::FileListScanWorker;
+using jpegview_linux::FileListSortResult;
+using jpegview_linux::FileListSortWorker;
 using jpegview_linux::ImageWriteOptions;
 
 namespace {
@@ -195,11 +199,30 @@ void ObserveArchiveSourceProbe(jpegview_linux::detail::ArchiveSourceProbePoint p
 	if (point == jpegview_linux::detail::ArchiveSourceProbePoint::LocationClassificationStat) {
 		observation->locationClassification.fetch_add(1);
 		if (!sourceAdmitted) observation->unadmittedLocationClassification.fetch_add(1);
-	} else {
+	} else if (point == jpegview_linux::detail::ArchiveSourceProbePoint::PasswordCacheIdentityStat) {
 		observation->passwordIdentity.fetch_add(1);
 		if (!sourceAdmitted || !cpuAdmitted) {
 			observation->unadmittedPasswordIdentity.fetch_add(1);
 		}
+	}
+}
+
+struct SourceIdentityStatObservation {
+	std::atomic<int> statxAttempts{0};
+	std::atomic<int> completedStatx{0};
+	std::atomic<int> fallbackStats{0};
+};
+
+void ObserveSourceIdentityStat(jpegview_linux::detail::ArchiveSourceProbePoint point,
+	const fs::path&, bool, bool, void* context) {
+	auto* observation = static_cast<SourceIdentityStatObservation*>(context);
+	if (observation == nullptr) return;
+	if (point == jpegview_linux::detail::ArchiveSourceProbePoint::SourceIdentityStatxAttempt) {
+		observation->statxAttempts.fetch_add(1);
+	} else if (point == jpegview_linux::detail::ArchiveSourceProbePoint::SourceIdentityStatxComplete) {
+		observation->completedStatx.fetch_add(1);
+	} else if (point == jpegview_linux::detail::ArchiveSourceProbePoint::SourceIdentityStatFallback) {
+		observation->fallbackStats.fetch_add(1);
 	}
 }
 
@@ -717,6 +740,51 @@ void SetModificationTimeNanoseconds(const fs::path& filename, std::int64_t secon
 	times[1].tv_nsec = nanoseconds;
 	Expect(::utimensat(AT_FDCWD, filename.c_str(), times, 0) == 0,
 		"cannot set precise test timestamp for " + filename.string());
+}
+
+void TestOrdinarySourceMetadataUsesOneStatxRequest() {
+	TemporaryDirectory temporary;
+	const fs::path sourcePath = temporary.path() / "metadata.jpg";
+	WriteTinyImage(sourcePath);
+	SetModificationTimeNanoseconds(sourcePath, 1700000000, 123456000);
+	SourceIdentityStatObservation observation;
+	ArchiveSourceProbeHookReset resetHook;
+	jpegview_linux::SetArchiveSourceProbeHookForTesting(
+		ObserveSourceIdentityStat, &observation);
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(sourcePath);
+	jpegview_linux::SetArchiveSourceProbeHookForTesting(nullptr, nullptr);
+	const bool completedWithStatx = observation.statxAttempts.load() == 1 &&
+		observation.completedStatx.load() == 1 && observation.fallbackStats.load() == 0;
+	const bool usedFallback = observation.statxAttempts.load() <= 1 &&
+		observation.completedStatx.load() == 0 && observation.fallbackStats.load() == 1;
+	Expect(source.Valid() && source.Metadata().hasFileSize &&
+		source.Metadata().hasModificationTime && source.Metadata().hasCreationTime &&
+		(completedWithStatx || usedFallback),
+		"ordinary source metadata required redundant identity and timestamp probes");
+	if (usedFallback) {
+		Expect(source.Metadata().creationTimeNanoseconds ==
+			source.Metadata().modificationTimeNanoseconds,
+			"stat fallback did not preserve modification-time creation fallback");
+	}
+
+	SourceIdentityStatObservation fallbackObservation;
+	jpegview_linux::SetArchiveSourceProbeHookForTesting(
+		ObserveSourceIdentityStat, &fallbackObservation);
+	jpegview_linux::SetStatxUnavailableForTesting(true);
+	const jpegview_linux::SourceDescriptor fallbackSource =
+		jpegview_linux::DescribeImageSource(sourcePath);
+	jpegview_linux::SetStatxUnavailableForTesting(false);
+	jpegview_linux::SetArchiveSourceProbeHookForTesting(nullptr, nullptr);
+	Expect(fallbackSource.Valid() && fallbackSource.BackingIdentity() == source.BackingIdentity() &&
+		fallbackSource.Metadata().hasFileSize &&
+		fallbackSource.Metadata().hasModificationTime &&
+		fallbackSource.Metadata().creationTimeNanoseconds ==
+			fallbackSource.Metadata().modificationTimeNanoseconds &&
+		fallbackObservation.statxAttempts.load() == 0 &&
+		fallbackObservation.completedStatx.load() == 0 &&
+		fallbackObservation.fallbackStats.load() == 1,
+		"forced stat fallback did not preserve source identity and creation-time semantics");
 }
 
 void TestSourceDescriptorIdentityAndUnusualPaths() {
@@ -3392,6 +3460,192 @@ void TestFileListDateSortingAndSelectionPreservation() {
 	files.SetSorting(FileList::SortMode::LastModificationTime, false);
 	Expect(FileNames(files) == std::vector<std::string>({"a-new.png", "m-middle.png", "z-old.png"}),
 		"descending modification-date ordering is incorrect");
+}
+
+void TestFileListNaturalNameSortingAndMarkedSelection() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "logical-names";
+	fs::create_directories(directory);
+	const std::vector<std::string> names = {
+		"page10.jpg", "page2.jpg", "page02.jpg", "Page2.jpg", "space name.jpg",
+		"line\nbreak.jpg", "z-last.jpg", "\xC3\xA9.jpg",
+	};
+	for (const std::string& name : names) WriteTinyImage(directory / fs::path(name));
+
+	FileList files({directory.string()}, FileList::SortMode::FileName, true, false);
+	const std::vector<std::string> ascending = {
+		"\xC3\xA9.jpg", "line\nbreak.jpg", "Page2.jpg", "page2.jpg", "page02.jpg",
+		"page10.jpg", "space name.jpg", "z-last.jpg",
+	};
+	const std::vector<std::string> actual = FileNames(files);
+	std::string actualOrder;
+	for (const std::string& name : actual) actualOrder += "{" + name + "} ";
+	Expect(actual == ascending,
+		"natural filename order changed numeric runs, case ties, unusual names, or path ties: " +
+		actualOrder);
+
+	const fs::path marked = directory / "page2.jpg";
+	const fs::path selected = directory / "z-last.jpg";
+	const std::optional<std::size_t> markedPosition = files.IndexOf(marked);
+	const std::optional<std::size_t> selectedPosition = files.IndexOf(selected);
+	Expect(markedPosition.has_value() && selectedPosition.has_value() &&
+		files.Select(*markedPosition) && files.MarkCurrentForToggle() &&
+		files.Select(*selectedPosition),
+		"could not prepare marked and selected owners before reordering");
+	files.SetSorting(FileList::SortMode::FileName, false);
+	const std::vector<std::string> descending(ascending.rbegin(), ascending.rend());
+	const std::optional<std::size_t> markedIndex = files.MarkedIndex();
+	Expect(FileNames(files) == descending && files.Current() == selected &&
+		markedIndex.has_value() && files.Files()[*markedIndex] == marked &&
+		files.MarkedToggleTarget() == marked,
+		"descending sort failed to preserve selected and marked source identities");
+}
+
+void TestFileListAsynchronousSortingKeepsLatestSelection() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "async-sort";
+	fs::create_directories(directory);
+	for (const char* name : {"page10.jpg", "page2.jpg", "page02.jpg", "Page2.jpg"}) {
+		WriteTinyImage(directory / name);
+	}
+
+	FileList files({directory.string()}, FileList::SortMode::FileName, true, false);
+	const std::vector<fs::path> oldOrder = files.Files();
+	const fs::path markedPath = directory / "page10.jpg";
+	const fs::path selectedPath = directory / "page2.jpg";
+	const auto markedIndex = files.IndexOf(markedPath);
+	Expect(markedIndex && files.Select(*markedIndex) && files.MarkCurrentForToggle(),
+		"could not mark a source before asynchronous sorting");
+	const jpegview_linux::FileListSortRequest request = files.MakeSortRequest(
+		FileList::SortMode::FileName, false);
+	const auto selectedIndex = files.IndexOf(selectedPath);
+	Expect(selectedIndex && files.Select(*selectedIndex) && files.Files() == oldOrder &&
+		files.Current() == selectedPath,
+		"pending sorting changed the active order or lost navigation before completion");
+
+	FileListSortWorker worker;
+	const std::uint64_t generation = worker.Request(request);
+	std::vector<FileListSortResult> results;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (results.empty() && std::chrono::steady_clock::now() < deadline) {
+		results = worker.TakeReady();
+		if (results.empty()) std::this_thread::yield();
+	}
+	Expect(results.size() == 1 && results.front().generation == generation &&
+		results.front().prepared.completed,
+		"sort worker did not publish one complete, generation-matched result");
+	FileListPreparedSort& prepared = results.front().prepared;
+	Expect(files.Files() == oldOrder && files.Current() == selectedPath,
+		"worker sorting mutated the active catalog before result application");
+	Expect(files.ApplyPreparedSort(prepared),
+		"current asynchronous sort result was unexpectedly rejected");
+	const std::vector<fs::path> expectedDescending(oldOrder.rbegin(), oldOrder.rend());
+	const auto newMarkedIndex = files.MarkedIndex();
+	Expect(files.Files() == expectedDescending && files.Current() == selectedPath &&
+		newMarkedIndex && files.Files()[*newMarkedIndex] == markedPath &&
+		files.MarkedToggleTarget() == markedPath,
+		"applying the worker result did not preserve the latest selection and marked identity");
+	worker.Retire(std::move(prepared.retiredEntries));
+	worker.Retire(std::move(prepared.retiredPaths));
+	worker.Retire(std::move(prepared.retiredPathIndices));
+	worker.Stop();
+
+	FileList staleFiles({directory.string()}, FileList::SortMode::FileName, true, false);
+	const fs::path staleSelection = staleFiles.Current();
+	jpegview_linux::FileListPreparedSort stale = FileList::PrepareSort(
+		staleFiles.MakeSortRequest(FileList::SortMode::FileName, false), [] { return true; });
+	staleFiles.SetProvisionalInputs({staleSelection.string()});
+	Expect(stale.completed && !staleFiles.ApplyPreparedSort(stale) &&
+		staleFiles.Size() == 1 && staleFiles.Current() == staleSelection,
+		"stale sort result replaced a newer list generation");
+}
+
+void TestFileListDefersMetadataResortToPreparedSort() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "deferred-metadata-sort";
+	fs::create_directories(directory);
+	const fs::path earlier = directory / "a.jpg";
+	const fs::path later = directory / "b.jpg";
+	WriteTinyImage(earlier);
+	WriteTinyImage(later);
+	SetModificationTimeNanoseconds(earlier, 1700000000, 100000000);
+	SetModificationTimeNanoseconds(later, 1700000000, 200000000);
+	FileList files({directory.string()}, FileList::SortMode::LastModificationTime, true, false);
+	Expect(files.Files() == std::vector<fs::path>({earlier, later}),
+		"metadata-sort fixture did not begin in modification-time order");
+	const jpegview_linux::SourceKey oldKey = files.DescriptorAt(0)->Key();
+	SetModificationTimeNanoseconds(earlier, 1700000000, 300000000);
+	const jpegview_linux::SourceDescriptor refreshed =
+		jpegview_linux::DescribeImageSource(earlier);
+	const jpegview_linux::SourceRefreshOutcome outcome =
+		jpegview_linux::RefreshFileListSource(files, oldKey, refreshed, true);
+	Expect(outcome.applied && outcome.sortKeyChanged && !outcome.orderChanged &&
+		files.Files() == std::vector<fs::path>({earlier, later}),
+		"deferred descriptor refresh changed active ordering synchronously");
+	FileListPreparedSort prepared = FileList::PrepareSort(
+		files.MakeSortRequest(files.GetSorting(), files.IsSortedAscending()),
+		[] { return true; });
+	Expect(prepared.completed && files.ApplyPreparedSort(prepared) &&
+		files.Files() == std::vector<fs::path>({later, earlier}) && files.Current() == earlier,
+		"prepared metadata resort did not publish the refreshed sort key");
+}
+
+void TestFileListAsynchronousSortRejectsStaleDescriptors() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "stale-sort-descriptor";
+	fs::create_directories(directory);
+	const fs::path first = directory / "a.jpg";
+	const fs::path second = directory / "b.jpg";
+	WriteTinyImage(first);
+	WriteTinyImage(second);
+	FileList files({directory.string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Files() == std::vector<fs::path>({first, second}),
+		"stale-sort fixture did not begin in filename order");
+	const jpegview_linux::SourceKey oldSecondKey = files.DescriptorAt(1)->Key();
+	FileListPreparedSort stale = FileList::PrepareSort(
+		files.MakeSortRequest(FileList::SortMode::FileName, false), [] { return true; });
+	SetModificationTimeNanoseconds(second, 1700000100, 456000000);
+	const jpegview_linux::SourceDescriptor refreshed =
+		jpegview_linux::DescribeImageSource(second);
+	const jpegview_linux::SourceRefreshOutcome refresh =
+		jpegview_linux::RefreshFileListSource(files, oldSecondKey, refreshed);
+	Expect(refresh.applied && !refresh.sortKeyChanged && !refresh.orderChanged &&
+		files.Files() == std::vector<fs::path>({first, second}),
+		"a non-sort-key metadata refresh unexpectedly reordered the active list");
+	Expect(stale.completed && !files.ApplyPreparedSort(stale),
+		"a sort snapshot with an obsolete source descriptor was accepted");
+	FileListPreparedSort current = FileList::PrepareSort(
+		files.MakeSortRequest(files.GetSorting(), files.IsSortedAscending()),
+		[] { return true; });
+	Expect(current.completed && files.ApplyPreparedSort(current) &&
+		files.Files() == std::vector<fs::path>({second, first}) &&
+		files.DescriptorAt(0)->Key() == refreshed.Key() &&
+		files.DescriptorAt(0)->Metadata().modificationTimeNanoseconds ==
+			refreshed.Metadata().modificationTimeNanoseconds,
+		"retrying sort from the current catalog lost refreshed metadata or ordering");
+}
+
+void TestFileListCreationTimeArchiveFallback() {
+	TemporaryDirectory temporary;
+	const fs::path sources = temporary.path() / "sources";
+	fs::create_directories(sources);
+	const fs::path oldSource = sources / "old.ppm";
+	const fs::path newSource = sources / "new.ppm";
+	WriteTinyImage(oldSource);
+	WriteTinyImage(newSource);
+	SetModificationTimeNanoseconds(oldSource, 1600000000, 0);
+	SetModificationTimeNanoseconds(newSource, 1600000300, 0);
+	const fs::path archive = temporary.path() / "fallback.zip";
+	WriteZipArchive(archive, {{"z-old.jpg", oldSource}, {"a-new.jpg", newSource}});
+
+	FileList files({archive.string()}, FileList::SortMode::CreationTime, true, false);
+	Expect(FileNames(files) == std::vector<std::string>({"z-old.jpg", "a-new.jpg"}),
+		"archive creation-time fallback did not use the member modification timestamps");
+	const jpegview_linux::SourceDescriptor* descriptor = files.DescriptorAt(0);
+	Expect(descriptor != nullptr && descriptor->Metadata().hasCreationTime &&
+		descriptor->Metadata().creationTimeNanoseconds ==
+			descriptor->Metadata().modificationTimeNanoseconds,
+		"archive member metadata did not preserve its modification-time creation fallback");
 }
 
 void TestFileListSizeAndRandomSorting() {
@@ -20895,6 +21149,8 @@ int main(int argc, char** argv) {
 	gTestExecutablePath = argv[0];
 	int failures = 0;
 	RunTest("file-list-filtering-and-logical-sorting", TestFileListFilteringAndLogicalSorting, failures);
+	RunTest("ordinary-source-metadata-uses-one-statx-request",
+		TestOrdinarySourceMetadataUsesOneStatxRequest, failures);
 	RunTest("source-descriptor-identity-and-unusual-paths",
 		TestSourceDescriptorIdentityAndUnusualPaths, failures);
 	RunTest("provisional-source-descriptor-survives-startup-replacement",
@@ -20972,6 +21228,16 @@ int main(int argc, char** argv) {
 	RunTest("work-batch-gate-serializes-deactivate-and-publish",
 		TestWorkBatchGateSerializesDeactivateAndPublish, failures);
 	RunTest("file-list-date-sorting-and-selection", TestFileListDateSortingAndSelectionPreservation, failures);
+	RunTest("file-list-natural-name-sorting-and-marked-selection",
+		TestFileListNaturalNameSortingAndMarkedSelection, failures);
+	RunTest("file-list-asynchronous-sorting-keeps-latest-selection",
+		TestFileListAsynchronousSortingKeepsLatestSelection, failures);
+	RunTest("file-list-defers-metadata-resort-to-prepared-sort",
+		TestFileListDefersMetadataResortToPreparedSort, failures);
+	RunTest("file-list-asynchronous-sort-rejects-stale-descriptors",
+		TestFileListAsynchronousSortRejectsStaleDescriptors, failures);
+	RunTest("file-list-creation-time-archive-fallback",
+		TestFileListCreationTimeArchiveFallback, failures);
 	RunTest("file-list-size-and-random-sorting", TestFileListSizeAndRandomSorting, failures);
 	RunTest("file-list-navigation-modes-and-reload", TestFileListNavigationModesAndReload, failures);
 	RunTest("file-list-multiple-inputs", TestFileListMultipleInputs, failures);

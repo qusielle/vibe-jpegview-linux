@@ -20,6 +20,8 @@ namespace jpegview_linux {
 
 namespace {
 
+struct SortCancelled {};
+
 bool ContinueScan(const std::function<bool()>& shouldContinue) {
 	return !shouldContinue || shouldContinue();
 }
@@ -164,10 +166,15 @@ std::string FileList::Lower(std::string value) {
 }
 
 int FileList::CompareLogicalNames(const std::string& left, const std::string& right) {
-	std::size_t leftPosition = 0;
-	std::size_t rightPosition = 0;
 	const std::string leftLower = Lower(left);
 	const std::string rightLower = Lower(right);
+	return CompareFoldedLogicalNames(leftLower, rightLower);
+}
+
+int FileList::CompareFoldedLogicalNames(const std::string& leftLower,
+	const std::string& rightLower) {
+	std::size_t leftPosition = 0;
+	std::size_t rightPosition = 0;
 	while (leftPosition < leftLower.size() && rightPosition < rightLower.size()) {
 		const unsigned char leftCharacter = static_cast<unsigned char>(leftLower[leftPosition]);
 		const unsigned char rightCharacter = static_cast<unsigned char>(rightLower[rightPosition]);
@@ -198,6 +205,10 @@ int FileList::CompareLogicalNames(const std::string& left, const std::string& ri
 	return 0;
 }
 
+void FileList::PrepareEntrySortKey(Entry& entry) {
+	entry.foldedFilename = Lower(entry.path.filename().string());
+}
+
 fs::path FileList::Normalize(const fs::path& path) {
 	std::error_code error;
 	const fs::path absolute = fs::absolute(path, error);
@@ -208,6 +219,7 @@ FileList::Entry FileList::DescribeFile(const fs::path& path,
 	const std::function<bool()>& shouldContinue) {
 	Entry result;
 	result.path = Normalize(path);
+	PrepareEntrySortKey(result);
 	result.randomOrder = std::hash<std::string>{}(result.path.string());
 	if (!ContinueScan(shouldContinue)) return result;
 	WorkContext suppliedContext;
@@ -254,6 +266,7 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 					archiveEntry.backingIdentity, archiveEntry.size,
 					archiveEntry.modificationTime, archiveEntry.encrypted);
 				entry.path = entry.source.LogicalPath();
+				PrepareEntrySortKey(entry);
 				entry.lastModificationTime = entry.source.Metadata().modificationTimeNanoseconds;
 				entry.creationTime = entry.lastModificationTime;
 				entry.fileSize = archiveEntry.size;
@@ -704,11 +717,16 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 			}
 		}
 		replacement.mutationRevision_ = mutationRevision_ + 1;
+		scan.retiredFileList = std::make_shared<FileList>(std::move(*this));
 		*this = std::move(replacement);
 		return true;
 	}
 
-	const auto moveActiveEntries = [this, &replacement, &selected] {
+	const auto moveActiveEntries = [this, &replacement, &selected, &scan] {
+		scan.retiredEntries = entries_.ShareMutable();
+		scan.retiredPaths = std::make_shared<std::vector<fs::path>>(std::move(paths_));
+		scan.retiredPathIndices =
+			std::make_shared<std::vector<std::size_t>>(std::move(pathIndices_));
 		entries_ = std::move(replacement.entries_);
 		paths_ = std::move(replacement.paths_);
 		pathIndices_ = std::move(replacement.pathIndices_);
@@ -728,6 +746,7 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 		replacement.markedFileCurrent_ = markedCurrent;
 		replacement.markedToggleIndex_ = markedToggle;
 		replacement.mutationRevision_ = mutationRevision_ + 1;
+		scan.retiredFileList = std::make_shared<FileList>(std::move(*this));
 		*this = std::move(replacement);
 		if (!selected.empty()) currentIndex_ = FindEntry(selected);
 		if (currentIndex_ >= entries_.size()) currentIndex_ = entries_.empty() ? 0 : entries_.size() - 1;
@@ -790,7 +809,8 @@ bool FileList::EntryLess(const Entry& left, const Entry& right,
 	case SortMode::FileName:
 		break;
 	}
-	if (comparison == 0) comparison = CompareLogicalNames(left.path.filename().string(), right.path.filename().string());
+	if (comparison == 0) comparison = CompareFoldedLogicalNames(
+		left.foldedFilename, right.foldedFilename);
 	if (comparison == 0 && left.path != right.path) comparison = left.path.string() < right.path.string() ? -1 : 1;
 	return sortAscending ? comparison < 0 : comparison > 0;
 }
@@ -839,6 +859,7 @@ void FileList::SetProvisionalInputs(const std::vector<std::string>& inputs) {
 		if (IsSupportedImagePath(input)) {
 			Entry provisional;
 			provisional.path = input;
+			PrepareEntrySortKey(provisional);
 			SourceIdentity identity;
 			(void)CaptureImageSourceIdentity(input, identity);
 			provisional.source = SourceDescriptor(input, identity, {});
@@ -863,7 +884,9 @@ void FileList::SetProvisionalInputs(const std::vector<std::string>& inputs) {
 void FileList::RebuildPaths() {
 	paths_.clear();
 	paths_.reserve(entries_.size());
-	for (const Entry& entry : entries_) paths_.push_back(entry.path);
+	for (const Entry& entry : static_cast<const EntryStorage&>(entries_)) {
+		paths_.push_back(entry.path);
+	}
 	if (currentIndex_ >= paths_.size()) currentIndex_ = paths_.empty() ? 0 : paths_.size() - 1;
 	UpdateMarkedIndex();
 }
@@ -874,7 +897,9 @@ bool FileList::RefreshSourceDescriptor(const fs::path& path) {
 	return RefreshSourceDescriptor(DescribeImageSource(normalized));
 }
 
-bool FileList::RefreshSourceDescriptor(const SourceDescriptor& refreshed) {
+bool FileList::RefreshSourceDescriptor(const SourceDescriptor& refreshed,
+	bool deferSort, bool* sortKeyChangedOutput) {
+	if (sortKeyChangedOutput != nullptr) *sortKeyChangedOutput = false;
 	if (entries_.empty() || refreshed.LogicalPath().empty()) return false;
 	const fs::path normalized = Normalize(refreshed.LogicalPath());
 	const std::size_t index = FindEntry(normalized);
@@ -900,7 +925,8 @@ bool FileList::RefreshSourceDescriptor(const SourceDescriptor& refreshed) {
 		metadata.creationTimeNanoseconds : entry.lastModificationTime;
 	entry.fileSize = metadata.hasFileSize ? metadata.fileSize : 0;
 	++descriptorRevision_;
-	if (sortKeyChanged) {
+	if (sortKeyChangedOutput != nullptr) *sortKeyChangedOutput = sortKeyChanged;
+	if (sortKeyChanged && !deferSort) {
 		const std::vector<fs::path> previousOrder = paths_;
 		SortEntries();
 		RebuildPaths();
@@ -910,24 +936,25 @@ bool FileList::RefreshSourceDescriptor(const SourceDescriptor& refreshed) {
 }
 
 bool FileList::RefreshSourceDescriptor(const SourceKey& expected,
-	const SourceDescriptor& observed) {
+	const SourceDescriptor& observed, bool deferSort, bool* sortKeyChanged) {
 	if (expected.logicalPath.empty() || expected.logicalPath != observed.Key().logicalPath) return false;
 	const fs::path normalized = Normalize(observed.LogicalPath());
 	if (entries_.empty()) return false;
 	const std::size_t index = FindEntry(normalized);
 	if (entries_[index].path != normalized || entries_[index].source.Key() != expected) return false;
-	return RefreshSourceDescriptor(observed);
+	return RefreshSourceDescriptor(observed, deferSort, sortKeyChanged);
 }
 
 SourceRefreshOutcome RefreshFileListSource(FileList& files,
-	const SourceKey& expected, const SourceDescriptor& observed) {
+	const SourceKey& expected, const SourceDescriptor& observed, bool deferSort) {
 	SourceRefreshOutcome outcome;
 	if (files.Empty()) return outcome;
 	const std::filesystem::path selectedPath = files.Current();
 	const std::size_t selectedIndexBefore = files.CurrentIndex();
 	outcome.previousIndex = files.IndexOf(observed.LogicalPath());
 	const std::uint64_t mutationRevision = files.MutationRevision();
-	if (!files.RefreshSourceDescriptor(expected, observed)) return outcome;
+	if (!files.RefreshSourceDescriptor(expected, observed, deferSort,
+		&outcome.sortKeyChanged)) return outcome;
 	outcome.applied = true;
 	outcome.orderChanged = files.MutationRevision() != mutationRevision;
 	outcome.currentIndex = files.IndexOf(observed.LogicalPath());
@@ -1297,6 +1324,97 @@ void FileList::SetSorting(SortMode sortMode, bool sortAscending) {
 	if (!selected.empty()) currentIndex_ = FindEntry(selected);
 	RebuildPaths();
 	++mutationRevision_;
+}
+
+FileListSortRequest FileList::MakeSortRequest(SortMode sortMode, bool sortAscending) {
+	sortMode_ = sortMode;
+	sortAscending_ = sortAscending;
+	++mutationRevision_;
+	FileListSortRequest request;
+	request.entries = entries_.Snapshot();
+	request.sortMode = sortMode_;
+	request.sortAscending = sortAscending_;
+	request.expectedRevision = mutationRevision_;
+	request.expectedDescriptorRevision = descriptorRevision_;
+	return request;
+}
+
+FileListPreparedSort FileList::PrepareSort(const FileListSortRequest& request,
+	const std::function<bool()>& shouldContinue) {
+	FileListPreparedSort result;
+	result.expectedRevision = request.expectedRevision;
+	result.expectedDescriptorRevision = request.expectedDescriptorRevision;
+	result.sortMode = request.sortMode;
+	result.sortAscending = request.sortAscending;
+	if (!request.entries || !ContinueScan(shouldContinue)) return result;
+
+	auto sortedEntries = std::make_shared<std::vector<Entry>>();
+	sortedEntries->reserve(request.entries->size());
+	for (std::size_t index = 0; index < request.entries->size(); ++index) {
+		if ((index & 127u) == 0 && !ContinueScan(shouldContinue)) return result;
+		sortedEntries->push_back((*request.entries)[index]);
+	}
+	std::size_t comparisons = 0;
+	try {
+		std::stable_sort(sortedEntries->begin(), sortedEntries->end(),
+			[&request, &shouldContinue, &comparisons](const Entry& left, const Entry& right) {
+				if (((++comparisons) & 1023u) == 0 && !ContinueScan(shouldContinue)) {
+					throw SortCancelled{};
+				}
+				return EntryLess(left, right, request.sortMode, request.sortAscending);
+			});
+	} catch (const SortCancelled&) {
+		return result;
+	}
+	if (!ContinueScan(shouldContinue)) return result;
+
+	result.paths.reserve(sortedEntries->size());
+	result.pathIndices.resize(sortedEntries->size());
+	for (std::size_t index = 0; index < sortedEntries->size(); ++index) {
+		if ((index & 127u) == 0 && !ContinueScan(shouldContinue)) return FileListPreparedSort{};
+		result.paths.push_back((*sortedEntries)[index].path);
+		result.pathIndices[index] = index;
+	}
+	std::sort(result.pathIndices.begin(), result.pathIndices.end(),
+		[&sortedEntries](std::size_t left, std::size_t right) {
+			return (*sortedEntries)[left].path.native() < (*sortedEntries)[right].path.native();
+		});
+	result.entries = std::move(sortedEntries);
+	result.completed = true;
+	return result;
+}
+
+bool FileList::ApplyPreparedSort(FileListPreparedSort& prepared) {
+	if (!prepared.completed || prepared.expectedRevision != mutationRevision_ ||
+		prepared.expectedDescriptorRevision != descriptorRevision_ ||
+		prepared.sortMode != sortMode_ || prepared.sortAscending != sortAscending_ ||
+		!prepared.entries || prepared.entries->size() != entries_.size()) return false;
+
+	const fs::path selectedPath = Current();
+	const SourceKey selectedSource = DescriptorAt(currentIndex_) != nullptr ?
+		DescriptorAt(currentIndex_)->Key() : SourceKey{};
+	prepared.retiredEntries = entries_.ShareMutable();
+	prepared.retiredPaths = std::make_shared<std::vector<fs::path>>(std::move(paths_));
+	prepared.retiredPathIndices =
+		std::make_shared<std::vector<std::size_t>>(std::move(pathIndices_));
+	entries_ = EntryStorage(std::move(prepared.entries));
+	paths_ = std::move(prepared.paths);
+	pathIndices_ = std::move(prepared.pathIndices);
+	if (!selectedSource.logicalPath.empty()) {
+		const std::optional<std::size_t> selectedIndex = IndexOf(selectedPath);
+		if (selectedIndex && DescriptorAt(*selectedIndex) != nullptr &&
+			DescriptorAt(*selectedIndex)->Key() == selectedSource) {
+			currentIndex_ = *selectedIndex;
+		} else if (selectedIndex) {
+			currentIndex_ = *selectedIndex;
+		}
+	} else if (!selectedPath.empty()) {
+		const std::optional<std::size_t> selectedIndex = IndexOf(selectedPath);
+		if (selectedIndex) currentIndex_ = *selectedIndex;
+	}
+	if (currentIndex_ >= entries_.size()) currentIndex_ = entries_.empty() ? 0 : entries_.size() - 1;
+	UpdateMarkedIndex();
+	return true;
 }
 
 bool FileList::SetNavigationMode(NavigationMode navigationMode) {

@@ -22,6 +22,9 @@ using ArchiveCatalogTestHook = void (*)(ArchiveCatalogTestHookPoint, void*);
 enum class ArchiveSourceProbePoint {
 	LocationClassificationStat,
 	PasswordCacheIdentityStat,
+	SourceIdentityStatxAttempt,
+	SourceIdentityStatxComplete,
+	SourceIdentityStatFallback,
 };
 using ArchiveSourceProbeHook = void (*)(ArchiveSourceProbePoint,
 	const std::filesystem::path&, bool, bool, void*);
@@ -244,6 +247,7 @@ void SetArchiveCatalogTestHookForTesting(
 	detail::ArchiveCatalogTestHook hook, void* context);
 void SetArchiveSourceProbeHookForTesting(
 	detail::ArchiveSourceProbeHook hook, void* context);
+void SetStatxUnavailableForTesting(bool unavailable);
 #endif
 
 } // namespace jpegview_linux

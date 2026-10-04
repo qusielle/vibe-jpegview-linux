@@ -185,7 +185,12 @@ they support.
    Metadata-based reordering also keeps the selected file in place. A full-list reload rebuilds visible
    spread geometry against the refreshed order while keeping the selected page and its current pixels.
    The Open-dialog Browse listing remains on its separate refresh path; this worker covers the viewer's
-   active file list.
+   active file list. Sorting an already loaded list uses a separate CPU-admitted worker: the current
+   order remains navigable until a complete sorted result is ready, and the source selected when that
+   result is applied stays selected. A metadata refresh that changes the active sort key follows the
+   same path. Filename comparison keys are computed once per entry, and ordinary-file identity, size,
+   modification time, and available creation time are requested together through `statx`, with a stat
+   fallback when the kernel cannot provide the required fields.
 
 5. **Responsive keyboard and mouse navigation.** Left/Right image navigation and menu/browser
    selection repeat while held. The open browser supports repeating Up/Down, PageUp/PageDown, and

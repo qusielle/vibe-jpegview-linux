@@ -1,6 +1,7 @@
 #include "sdl_abi.h"
 #include "file_list.h"
 #include "file_list_scan_worker.h"
+#include "file_list_sort_worker.h"
 #include "display_prefetch_planner.h"
 #include "display_preparation_controller.h"
 #include "display_upload_scheduler.h"
@@ -511,6 +512,7 @@ public:
 			TickPlayback();
 			UpdateInteractionWorkPolicy();
 			TickFileListScan();
+			TickFileListSort();
 			TickFileDialogArchiveDirectory();
 			TickFileDialogDirectorySummaries();
 			TickFileDialogFileSizes();
@@ -866,6 +868,9 @@ private:
 		freeCursor(cropVerticalCursor_);
 		freeCursor(cropDiagonalDownCursor_);
 		freeCursor(cropDiagonalUpCursor_);
+		fileListSortWorker_.Retire(
+			std::make_shared<jpegview_linux::FileList>(std::move(fileList_)));
+		fileListSortWorker_.Stop();
 		SDL_Quit();
 	}
 
@@ -3605,12 +3610,12 @@ private:
 			}
 		}
 		const jpegview_linux::SourceRefreshOutcome refresh =
-			jpegview_linux::RefreshFileListSource(fileList_, previous, observed);
+			jpegview_linux::RefreshFileListSource(fileList_, previous, observed, true);
 		if (!refresh.applied) return false;
 		const jpegview_linux::SourceRefreshDisplayAction displayAction =
 			jpegview_linux::ResolveSourceRefreshDisplayAction(refresh, preserveCurrentPixels);
 		const bool orderChanged = refresh.orderChanged;
-		bool spreadAffected = orderChanged;
+		bool spreadAffected = orderChanged || refresh.sortKeyChanged;
 		if (refresh.previousIndex.has_value()) {
 			const std::size_t changedIndex = *refresh.previousIndex;
 			if (activeDoublePageRender_.has_value() &&
@@ -3633,7 +3638,10 @@ private:
 			AbsoluteNormalized(activeDoublePageRender_->partnerSpec.filename) == changedPath) {
 			spreadAffected = true;
 		}
-		if (orderChanged) prefetchAffected = true;
+		if (orderChanged || refresh.sortKeyChanged) prefetchAffected = true;
+		if (refresh.sortKeyChanged) {
+			BeginFileListSort(fileList_.GetSorting(), fileList_.IsSortedAscending(), false);
+		}
 		if (prefetchAffected || spreadAffected) {
 			DeactivateDisplayPrefetchBatch();
 			displayPrefetchBatch_.reset();
@@ -3669,7 +3677,7 @@ private:
 				currentDisplayRequest_.reset();
 			}
 		}
-		if (prefetchAffected || spreadAffected) {
+		if ((prefetchAffected || spreadAffected) && !refresh.sortKeyChanged) {
 			PrepareImagePrefetch(pendingPrefetchDirection_);
 		}
 		if (spreadAffected) RefreshDoublePageRenderState();
@@ -5319,6 +5327,7 @@ private:
 			*pendingFileListScanOperation_ == request.operation &&
 			pendingFileListScanHandling_ == handling &&
 				pendingFileListScanDirection_ == direction) return;
+		fileListSortWorker_.Clear();
 		SettlePendingPlaybackBoundaryScan();
 		if (!preferredPath.empty()) request.selectedPath = preferredPath;
 		pendingDroppedScanRequest_.reset();
@@ -5335,6 +5344,16 @@ private:
 		pendingMarkedToggleReturnPath_ = markedToggleReturnPath;
 		pendingFileListScanCompletionTitle_ = std::move(completionTitle);
 		fileListScanGeneration_ = fileListScanWorker_.Request(std::move(request));
+	}
+
+	void BeginFileListSort(jpegview_linux::FileList::SortMode sortMode,
+		bool sortAscending, bool saveSettings = true) {
+		const std::uint64_t generation = fileListSortWorker_.Request(
+			fileList_.MakeSortRequest(sortMode, sortAscending));
+		if (generation == 0) return;
+		fileListSortGeneration_ = generation;
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+		if (saveSettings) SaveSettings();
 	}
 
 	void RequestFileListScan(jpegview_linux::FileList::ScanOperation operation,
@@ -5413,6 +5432,15 @@ private:
 
 	void TickFileListScan() {
 		for (jpegview_linux::FileListScanResult& result : fileListScanWorker_.TakeReady()) {
+			auto retirePreparedScan = [this](jpegview_linux::FileListPreparedScan* prepared) noexcept {
+				try {
+					fileListSortWorker_.Retire(
+						std::make_shared<jpegview_linux::FileListPreparedScan>(std::move(*prepared)));
+				} catch (...) {
+				}
+			};
+			std::unique_ptr<jpegview_linux::FileListPreparedScan,
+				decltype(retirePreparedScan)> retireOnExit(&result.prepared, retirePreparedScan);
 			if (result.generation != fileListScanGeneration_ ||
 				!pendingFileListScanOperation_.has_value()) continue;
 			const bool playbackBoundaryScan =
@@ -5571,6 +5599,37 @@ private:
 				RefreshFileListConsumers(direction);
 			}
 			if (refreshed && !completionTitle.empty()) SetTitle(completionTitle);
+		}
+	}
+
+	void TickFileListSort() {
+		for (jpegview_linux::FileListSortResult& result : fileListSortWorker_.TakeReady()) {
+			if (result.generation != fileListSortGeneration_) {
+				fileListSortWorker_.Retire(std::move(result.prepared));
+				continue;
+			}
+			if (!result.error.empty()) {
+				fileListSortWorker_.Retire(std::move(result.prepared));
+				SetTitle("File-list sorting failed: " + result.error);
+				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+				continue;
+			}
+			if (!fileList_.ApplyPreparedSort(result.prepared)) {
+				fileListSortWorker_.Retire(std::move(result.prepared));
+				if (!pendingFileListScanOperation_) {
+					BeginFileListSort(fileList_.GetSorting(), fileList_.IsSortedAscending(), false);
+				}
+				SetTitle();
+				continue;
+			}
+			fileListSortWorker_.Retire(std::move(result.prepared.retiredEntries));
+			fileListSortWorker_.Retire(std::move(result.prepared.retiredPaths));
+			fileListSortWorker_.Retire(std::move(result.prepared.retiredPathIndices));
+			SetTitle();
+			PrepareThumbnailPreload();
+			PrepareImagePrefetch();
+			RefreshDoublePageRenderState();
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 		}
 	}
 
@@ -8001,69 +8060,37 @@ private:
 			SetTitle();
 			break;
 		case IDM_SORT_MOD_DATE:
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::LastModificationTime,
+			BeginFileListSort(jpegview_linux::FileList::SortMode::LastModificationTime,
 				fileList_.IsSortedAscending());
-			SetTitle();
-			PrepareThumbnailPreload();
-			PrepareImagePrefetch();
-			SaveSettings();
 			break;
 		case jpegview_linux::kNavigationSortModeCommand:
-			fileList_.SetSorting(
+			BeginFileListSort(
 				fileList_.GetSorting() == jpegview_linux::FileList::SortMode::FileName ?
 					jpegview_linux::FileList::SortMode::LastModificationTime :
 					jpegview_linux::FileList::SortMode::FileName,
 				fileList_.IsSortedAscending());
-			SetTitle();
-			PrepareThumbnailPreload();
-			PrepareImagePrefetch();
-			SaveSettings();
 			break;
 		case IDM_SORT_CREATION_DATE:
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::CreationTime,
+			BeginFileListSort(jpegview_linux::FileList::SortMode::CreationTime,
 				fileList_.IsSortedAscending());
-			SetTitle();
-			PrepareThumbnailPreload();
-			PrepareImagePrefetch();
-			SaveSettings();
 			break;
 		case IDM_SORT_NAME:
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileName,
+			BeginFileListSort(jpegview_linux::FileList::SortMode::FileName,
 				fileList_.IsSortedAscending());
-			SetTitle();
-			PrepareThumbnailPreload();
-			PrepareImagePrefetch();
-			SaveSettings();
 			break;
 		case IDM_SORT_RANDOM:
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::Random,
+			BeginFileListSort(jpegview_linux::FileList::SortMode::Random,
 				fileList_.IsSortedAscending());
-			SetTitle();
-			PrepareThumbnailPreload();
-			PrepareImagePrefetch();
-			SaveSettings();
 			break;
 		case IDM_SORT_SIZE:
-			fileList_.SetSorting(jpegview_linux::FileList::SortMode::FileSize,
+			BeginFileListSort(jpegview_linux::FileList::SortMode::FileSize,
 				fileList_.IsSortedAscending());
-			SetTitle();
-			PrepareThumbnailPreload();
-			PrepareImagePrefetch();
-			SaveSettings();
 			break;
 		case IDM_SORT_ASCENDING:
-			fileList_.SetSorting(fileList_.GetSorting(), true);
-			SetTitle();
-			PrepareThumbnailPreload();
-			PrepareImagePrefetch();
-			SaveSettings();
+			BeginFileListSort(fileList_.GetSorting(), true);
 			break;
 		case IDM_SORT_DESCENDING:
-			fileList_.SetSorting(fileList_.GetSorting(), false);
-			SetTitle();
-			PrepareThumbnailPreload();
-			PrepareImagePrefetch();
-			SaveSettings();
+			BeginFileListSort(fileList_.GetSorting(), false);
 			break;
 		case IDM_STOP_MOVIE:
 			StopPlayback();
@@ -12481,6 +12508,7 @@ private:
 
 	jpegview_linux::FileList fileList_;
 	jpegview_linux::FileListScanWorker fileListScanWorker_;
+	jpegview_linux::FileListSortWorker fileListSortWorker_;
 	jpegview_linux::DisplayPreparationController displayPreparationController_;
 	jpegview_linux::ExifMetadataWorker exifMetadataWorker_;
 	jpegview_linux::InteractionWorkPolicy interactionWorkPolicy_;
@@ -12489,6 +12517,7 @@ private:
 	bool prefetchRefreshNeeded_ = false;
 	int pendingPrefetchDirection_ = 0;
 	std::uint64_t fileListScanGeneration_ = 0;
+	std::uint64_t fileListSortGeneration_ = 0;
 	std::uint64_t playbackBoundaryScanGeneration_ = 0;
 	fs::path pendingFileListScanSourcePath_;
 	std::optional<jpegview_linux::FileList::ScanOperation> pendingFileListScanOperation_;

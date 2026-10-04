@@ -505,6 +505,36 @@ if [ -n "$perf_trace_path" ]; then
 fi
 stop_viewer
 
+# Loaded-list sorting is asynchronous, but the selected source must remain the
+# same after the new order is applied.
+async_sort_directory="$temporary/async-sort-ui"
+async_sort_config="$temporary/async-sort-ui-config/jpegview-linux"
+mkdir -p "$async_sort_directory" "$async_sort_config"
+write_ppm "$async_sort_directory/a-first.ppm" 220 40 30
+write_ppm "$async_sort_directory/b-middle.ppm" 30 220 40
+write_ppm "$async_sort_directory/c-selected.ppm" 40 30 220
+touch -t 202001010000.00 "$async_sort_directory/c-selected.ppm"
+touch -t 202101010000.00 "$async_sort_directory/b-middle.ppm"
+touch -t 202201010000.00 "$async_sort_directory/a-first.ppm"
+printf 'scale_mode=fit\nsort_mode=modification_date\nsort_ascending=1\ndouble_page_mode_enabled=0\nthumbnail_panel_visible=0\n' \
+	> "$async_sort_config/settings.conf"
+async_sort_previous_state=$XDG_STATE_HOME
+XDG_STATE_HOME="$temporary/async-sort-ui-state"
+VIEWER_TEST_CONFIG_HOME="$temporary/async-sort-ui-config"
+export XDG_STATE_HOME VIEWER_TEST_CONFIG_HOME
+launch_viewer "$async_sort_directory"
+assert_title_prefix "c-selected.ppm" "metadata-sort fixture did not select the oldest image"
+DISPLAY=":$display_number" xdotool key n
+assert_title_prefix "c-selected.ppm" "asynchronous name sorting changed the selected source"
+assert_title_prefix "[3/3] " "asynchronous name sorting did not apply the selected source's new index"
+DISPLAY=":$display_number" xdotool key Left
+assert_title_prefix "b-middle.ppm" "navigation did not follow the applied filename order"
+assert_title_prefix "[2/3] " "navigation title did not follow the applied filename order"
+stop_viewer
+XDG_STATE_HOME=$async_sort_previous_state
+unset VIEWER_TEST_CONFIG_HOME
+export XDG_STATE_HOME
+
 # A slideshow that reaches the end of a non-wrapping folder must stop its
 # expired deadline instead of repeatedly invalidating and rebuilding frames.
 boundary_directory="$temporary/slideshow-boundary"
@@ -1797,6 +1827,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	fi
 	window_id=$manual_zoom_window_id
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	assert_title_prefix "[2/2] " \
+		"ordinary-navigation fixture did not finish loading both directory entries"
 	DISPLAY=":$display_number" xdotool key --window "$window_id" Right
 	assert_title_prefix "01-manual.jpg (400x240" \
 		"ordinary navigation did not load the saved Recents viewport fixture"

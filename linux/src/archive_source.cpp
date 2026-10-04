@@ -8,6 +8,9 @@
 
 #include <algorithm>
 #include <array>
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+#include <atomic>
+#endif
 #include <cerrno>
 #include <cctype>
 #include <chrono>
@@ -22,6 +25,7 @@
 #include <string_view>
 #include <linux/stat.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <archive.h>
 #include <archive_entry.h>
@@ -60,6 +64,12 @@ void NotifyArchiveSourceProbe(detail::ArchiveSourceProbePoint point,
 
 using BackingIdentity = SourceIdentity;
 
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+std::atomic<bool> gStatxUnavailableForTesting{false};
+#endif
+
+std::int64_t UnixNanoseconds(std::int64_t seconds, std::int64_t nanoseconds);
+
 struct SessionPassword {
 	BackingIdentity identity;
 	std::string value;
@@ -75,7 +85,49 @@ SessionPasswordCache& GlobalSessionPasswordCache() {
 	return cache;
 }
 
-bool StatIdentity(const fs::path& path, BackingIdentity& identity) {
+bool StatIdentity(const fs::path& path, BackingIdentity& identity,
+	std::int64_t* birthTimeNanoseconds = nullptr, bool* hasBirthTime = nullptr) {
+	if (birthTimeNanoseconds != nullptr) *birthTimeNanoseconds = 0;
+	if (hasBirthTime != nullptr) *hasBirthTime = false;
+#if defined(SYS_statx)
+	bool tryStatx = true;
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	tryStatx = !gStatxUnavailableForTesting.load();
+#endif
+	if (tryStatx) {
+		struct statx extendedStatus{};
+		const unsigned int requestedMask = STATX_BASIC_STATS | STATX_BTIME;
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+		NotifyArchiveSourceProbe(detail::ArchiveSourceProbePoint::SourceIdentityStatxAttempt, path);
+#endif
+		if (::syscall(SYS_statx, AT_FDCWD, path.c_str(), AT_STATX_SYNC_AS_STAT,
+			requestedMask, &extendedStatus) == 0) {
+			constexpr unsigned int requiredMask = STATX_INO | STATX_SIZE | STATX_MTIME;
+			if ((extendedStatus.stx_mask & requiredMask) == requiredMask) {
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+				NotifyArchiveSourceProbe(detail::ArchiveSourceProbePoint::SourceIdentityStatxComplete,
+					path);
+#endif
+				identity.device = static_cast<std::uint64_t>(::makedev(
+					extendedStatus.stx_dev_major, extendedStatus.stx_dev_minor));
+				identity.inode = extendedStatus.stx_ino;
+				identity.size = extendedStatus.stx_size;
+				identity.modifiedSeconds = extendedStatus.stx_mtime.tv_sec;
+				identity.modifiedNanoseconds = extendedStatus.stx_mtime.tv_nsec;
+				identity.valid = true;
+				if ((extendedStatus.stx_mask & STATX_BTIME) != 0 && birthTimeNanoseconds != nullptr) {
+					*birthTimeNanoseconds = UnixNanoseconds(extendedStatus.stx_btime.tv_sec,
+						extendedStatus.stx_btime.tv_nsec);
+					if (hasBirthTime != nullptr) *hasBirthTime = true;
+				}
+				return true;
+			}
+		}
+	}
+#endif
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	NotifyArchiveSourceProbe(detail::ArchiveSourceProbePoint::SourceIdentityStatFallback, path);
+#endif
 	struct stat status{};
 	if (::stat(path.c_str(), &status) != 0 || status.st_size < 0) return false;
 	identity.device = static_cast<std::uint64_t>(status.st_dev);
@@ -2378,10 +2430,10 @@ SourceDescriptor DescribeImageSource(const fs::path& path) {
 SourceDescriptor DescribeImageSource(const fs::path& path,
 	const WorkContext& workContext) {
 	SourceIdentity identity;
-	if (!CaptureImageSourceIdentity(path, identity)) {
-		return SourceDescriptor(path, identity, {});
-	}
 	if (IsArchiveMemberLocation(path)) {
+		if (!CaptureImageSourceIdentity(path, identity)) {
+			return SourceDescriptor(path, identity, {});
+		}
 		ArchiveMemberInfo member;
 		std::string errorMessage;
 		ArchiveErrorKind errorKind = ArchiveErrorKind::None;
@@ -2394,22 +2446,21 @@ SourceDescriptor DescribeImageSource(const fs::path& path,
 			member.modificationTime, member.encrypted);
 	}
 
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
+	std::int64_t birthTimeNanoseconds = 0;
+	bool hasBirthTime = false;
+	if (!StatIdentity(path, identity, &birthTimeNanoseconds, &hasBirthTime)) {
+		return SourceDescriptor(path, identity, {});
+	}
 	SourceMetadata metadata;
 	metadata.fileSize = identity.size;
 	metadata.modificationTimeNanoseconds = UnixNanoseconds(identity.modifiedSeconds,
 		identity.modifiedNanoseconds);
-	metadata.creationTimeNanoseconds = metadata.modificationTimeNanoseconds;
+	metadata.creationTimeNanoseconds = hasBirthTime ? birthTimeNanoseconds :
+		metadata.modificationTimeNanoseconds;
 	metadata.hasFileSize = true;
 	metadata.hasModificationTime = true;
 	metadata.hasCreationTime = true;
-#if defined(SYS_statx)
-	struct statx status{};
-	if (::syscall(SYS_statx, AT_FDCWD, path.c_str(), AT_STATX_SYNC_AS_STAT,
-		STATX_BTIME, &status) == 0 && (status.stx_mask & STATX_BTIME) != 0) {
-		metadata.creationTimeNanoseconds = UnixNanoseconds(status.stx_btime.tv_sec,
-			status.stx_btime.tv_nsec);
-	}
-#endif
 	return SourceDescriptor(path, identity, metadata);
 }
 
@@ -2443,6 +2494,10 @@ void SetArchiveSourceProbeHookForTesting(
 	std::lock_guard<std::mutex> lock(hooks.mutex);
 	hooks.hook = hook;
 	hooks.context = context;
+}
+
+void SetStatxUnavailableForTesting(bool unavailable) {
+	gStatxUnavailableForTesting.store(unavailable);
 }
 #endif
 
