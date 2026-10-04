@@ -41,6 +41,19 @@ struct PendingImageIntentBatch {
 	bool startTransition = false;
 };
 
+enum class PendingImageOperationAdmission {
+	Rejected,
+	WaitForSelectedCommit,
+	StartNow,
+};
+
+// A direct operation may follow previously accepted intents only when it is
+// itself the front intent being replayed. The selected image's display commit
+// is the point where an operation deferred for a cold load becomes startable.
+PendingImageOperationAdmission PlanPendingImageOperationAdmission(
+	bool operationAlreadyPending, std::size_t acceptedEarlierIntentCount,
+	bool selectedLoadPending, bool replayingFrontIntent);
+
 // Holds ordered user actions for a cold current-image header request. Actions
 // are released only to the matching filename, source, and load generation.
 class PendingImageIntents {

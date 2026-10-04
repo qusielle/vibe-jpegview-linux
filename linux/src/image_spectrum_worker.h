@@ -44,8 +44,8 @@ struct ImageSpectrumResult {
 bool IsCurrentImageSpectrumResult(const ImageSpectrumResult& result,
 	std::uint64_t expectedGeneration, const ImageSpectrumKey& expectedKey);
 
-// The request borrows a main-thread-owned Image. The owner must call
-// CancelAndWait before replacing or mutating that image and before teardown.
+// Requests retain immutable image storage. Replacing a document cancels the
+// generation; the worker drops its final image reference off the event thread.
 class ImageSpectrumWorker {
 public:
 	using Computer = std::function<std::optional<GrayscaleSpectrum>(const Image&,
@@ -56,7 +56,7 @@ public:
 	ImageSpectrumWorker(const ImageSpectrumWorker&) = delete;
 	ImageSpectrumWorker& operator=(const ImageSpectrumWorker&) = delete;
 
-	std::uint64_t Request(const Image& image, ImageSpectrumKey key);
+	std::uint64_t Request(std::shared_ptr<const Image> image, ImageSpectrumKey key);
 	void Cancel();
 	void CancelAndWait();
 	void Stop();
@@ -67,7 +67,7 @@ public:
 
 private:
 	struct Work {
-		const Image* image = nullptr;
+		std::shared_ptr<const Image> image;
 		ImageSpectrumKey key;
 		std::uint64_t generation = 0;
 		std::shared_ptr<std::atomic<bool>> canceled;

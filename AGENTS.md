@@ -102,6 +102,9 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   cancel and join that work before any mutation, replacement, or destruction. Avoid image-sized
   pixel scans on the render path. Cache font measurement and clipping by content and geometry, and
   publish generation-keyed worker results for the update phase to apply.
+- Prefer immutable shared pixel snapshots for asynchronous read-only work. Do not keep an unowned raw
+  pointer into a mutable image or make the SDL thread wait for a worker just to protect that pointer;
+  pair generation checks with worker-side retirement of large buffers.
 - For new or extracted asynchronous controllers, keep request batches free of raw pointers or
   references to the composition root and renderer/cache owners. Pass owned service handles and
   generation-tagged value completions through an explicit channel; the owner drains effects and

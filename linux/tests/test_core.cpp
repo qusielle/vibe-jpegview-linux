@@ -14,6 +14,8 @@
 #include "cache_policy.h"
 #include "display_upload_scheduler.h"
 #include "image_spectrum_worker.h"
+#include "image_document.h"
+#include "image_operation_worker.h"
 #include "image.h"
 #include "image_processing.h"
 #include "image_processing_store.h"
@@ -13556,6 +13558,16 @@ void TestImageStorageTransformsAndValidation() {
 	Expect(transformed.Mirror(false) &&
 		ImageBlueChannel(transformed) == std::vector<std::uint8_t>({5, 6, 3, 4, 1, 2}),
 		"vertical image mirror changed pixel orientation");
+	std::vector<std::uint8_t> cancellationPixels(32u * 32u * 4u, 63);
+	jpegview_linux::Image cancellableMirror;
+	Expect(cancellableMirror.StoreBGRA(cancellationPixels.data(), 32, 32),
+		"could not create cancellable mirror fixture");
+	const std::vector<std::uint8_t> unchangedMirror = cancellableMirror.bgra;
+	int mirrorChecks = 0;
+	Expect(!cancellableMirror.Mirror(true, [&mirrorChecks] {
+		return ++mirrorChecks < 3;
+	}) && mirrorChecks == 3 && cancellableMirror.bgra == unchangedMirror,
+		"canceled mirror changed source pixels or ignored its bounded row checks");
 
 	jpegview_linux::Image malformed;
 	malformed.width = 2;
@@ -13580,6 +13592,18 @@ void TestImageCropCopiesHalfOpenRectangle() {
 	Expect(!image.CopyCrop(1, 0, 4, 2, preserved) && preserved.width == 1 &&
 		preserved.height == 1 && preserved.bgra == preservedPixels,
 		"invalid copy-crop changed its output image");
+	std::vector<std::uint8_t> cancellablePixels(32u * 32u * 4u, 41);
+	jpegview_linux::Image cancellableSource;
+	Expect(cancellableSource.StoreBGRA(cancellablePixels.data(), 32, 32),
+		"could not create cancellable copy-crop fixture");
+	jpegview_linux::Image unchangedOutput = MakeIndexedImage(1, 1);
+	const std::vector<std::uint8_t> unchangedOutputPixels = unchangedOutput.bgra;
+	int cropChecks = 0;
+	Expect(!cancellableSource.CopyCrop(0, 0, 24, 24, unchangedOutput,
+		[&cropChecks] { return ++cropChecks < 3; }) && cropChecks == 3 &&
+		unchangedOutput.width == 1 && unchangedOutput.height == 1 &&
+		unchangedOutput.bgra == unchangedOutputPixels,
+		"canceled copy-crop changed its output or ignored bounded row checks");
 	Expect(image.CopyCrop(1, 0, 3, 2, image) && image.width == 2 && image.height == 2 &&
 		image.originalWidth == 3 && image.originalHeight == 2 &&
 		ImageBlueChannel(image) == std::vector<std::uint8_t>({2, 3, 5, 6}),
@@ -14039,6 +14063,402 @@ void TestPictureLevelsModelAndProcessing() {
 	jpegview_linux::Image inactive = original;
 	Expect(inactive.ApplyProcessing(color, false) && inactive.bgra == original.bgra,
 		"inactive correction controls needlessly changed image pixels");
+}
+
+void TestImageDocumentRejectsStaleOperationsAndOwnsCurrentPixels() {
+	TemporaryDirectory temporary;
+	const fs::path sourcePath = temporary.path() / "document.ppm";
+	WriteTinyImage(sourcePath);
+	const jpegview_linux::SourceKey source =
+		jpegview_linux::DescribeImageSource(sourcePath).Key();
+	jpegview_linux::ImageDocument document;
+	jpegview_linux::RetiredImageBuffers retired = document.BeginSelection(source, 41, true);
+	Expect(retired.sourcePixels == nullptr && document.OwnerGeneration() == 41 &&
+		document.Source() == source,
+		"new image document did not capture the selected source owner");
+	document.UpdateProcessing({}, false);
+	const jpegview_linux::ImageDocumentSnapshot materializeSnapshot = document.Snapshot();
+	auto sourcePixels = std::make_shared<jpegview_linux::Image>(MakeIndexedImage(3, 2));
+	auto presentationPixels = std::make_shared<jpegview_linux::Image>(*sourcePixels);
+	jpegview_linux::ImageOperationResult materialized;
+	materialized.expected = materializeSnapshot;
+	materialized.kind = jpegview_linux::ImageOperationKind::Materialize;
+	materialized.updatesDocument = true;
+	materialized.success = true;
+	materialized.sourcePixels = sourcePixels;
+	materialized.presentationPixels = presentationPixels;
+	Expect(document.Apply(materialized, retired) && document.HasMaterializedPixels() &&
+		document.Presentation().width == 3 && document.Revision() > materializeSnapshot.revision,
+		"current materialization did not atomically publish source and presentation pixels");
+
+	const auto currentSource = document.SourcePixels();
+	const auto currentPresentation = document.PresentationPixels();
+	jpegview_linux::ImageOperationResult failed;
+	failed.expected = document.Snapshot();
+	failed.kind = jpegview_linux::ImageOperationKind::Crop;
+	failed.updatesDocument = true;
+	failed.failure = {jpegview_linux::WorkerFailureKind::ProcessingFailed,
+		"synthetic crop failure"};
+	Expect(!document.Apply(failed, retired) && document.SourcePixels() == currentSource &&
+		document.PresentationPixels() == currentPresentation &&
+		document.Presentation().width == 3,
+		"failed pixel work replaced the last successful document or presentation");
+
+	jpegview_linux::ImageOperationResult stale;
+	stale.expected = document.Snapshot();
+	stale.kind = jpegview_linux::ImageOperationKind::Resize;
+	stale.updatesDocument = true;
+	stale.success = true;
+	stale.sourcePixels = currentSource;
+	stale.presentationPixels = currentPresentation;
+	jpegview_linux::ImageProcessingParams changed;
+	changed.contrast = 0.2;
+	document.UpdateProcessing(changed, false);
+	Expect(!document.CanApply(stale) && document.SourcePixels() == currentSource &&
+		document.PresentationPixels() == currentPresentation,
+		"processing revision change did not reject a stale operation result");
+	retired = document.ClearPixels();
+	Expect(!document.HasMaterializedPixels() && document.Presentation().bgra.empty(),
+		"clearing a source did not leave the document in lazy-pixel state");
+}
+
+void TestImageOperationWorkerRunsCropAndFlattensCapturedFrame() {
+	TemporaryDirectory temporary;
+	const fs::path sourcePath = temporary.path() / "animated-source.ppm";
+	WriteTinyImage(sourcePath);
+	const jpegview_linux::SourceKey source =
+		jpegview_linux::DescribeImageSource(sourcePath).Key();
+	const auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(1024);
+	jpegview_linux::ImageDocument document;
+	jpegview_linux::RetiredImageBuffers retired = document.BeginSelection(source, 57, true);
+	retired = document.SetFrame(3, true, 3, 2, false);
+	const jpegview_linux::ImageDocumentSnapshot initial = document.Snapshot();
+	auto sourcePixels = std::make_shared<jpegview_linux::Image>(MakeIndexedImage(3, 2));
+	auto presentationPixels = std::make_shared<jpegview_linux::Image>(*sourcePixels);
+	jpegview_linux::ImageOperationResult materialized;
+	materialized.expected = initial;
+	materialized.kind = jpegview_linux::ImageOperationKind::Materialize;
+	materialized.updatesDocument = true;
+	materialized.success = true;
+	materialized.sourcePixels = sourcePixels;
+	materialized.presentationPixels = presentationPixels;
+	Expect(document.Apply(materialized, retired),
+		"animation-frame document could not install its immutable pixel fixture");
+	const std::vector<std::uint8_t> originalPixels = sourcePixels->bgra;
+	jpegview_linux::ImageDocumentSnapshot cropSnapshot = document.Snapshot();
+	jpegview_linux::ImageOperationRequest cropRequest;
+	cropRequest.document = cropSnapshot;
+	cropRequest.operation.kind = jpegview_linux::ImageOperationKind::Crop;
+	cropRequest.operation.left = 1;
+	cropRequest.operation.top = 0;
+	cropRequest.operation.right = 3;
+	cropRequest.operation.bottom = 2;
+	jpegview_linux::ImageOperationWorker worker(budget);
+	const std::uint64_t cropGeneration = worker.Request(std::move(cropRequest));
+	Expect(cropGeneration != 0 && worker.WaitUntilIdle(std::chrono::seconds(3)),
+		"asynchronous crop did not complete within its bounded deadline");
+	auto cropResult = worker.TakeReady();
+	Expect(cropResult.has_value() && cropResult->success &&
+		cropResult->requestGeneration == cropGeneration && cropResult->flattenAnimation &&
+		cropResult->expected.frameIndex == 3 && cropResult->sourcePixels->width == 2 &&
+		cropResult->sourcePixels->originalWidth == 2 &&
+		ImageBlueChannel(*cropResult->presentationPixels) ==
+			std::vector<std::uint8_t>({2, 3, 5, 6}) && sourcePixels->bgra == originalPixels,
+		"worker crop changed half-open pixels, source ownership, or captured animation identity");
+	Expect(document.CanApply(*cropResult),
+		"matching animation-frame crop was rejected before document publication");
+	Expect(document.Apply(*cropResult, retired) && !document.Animated() &&
+		document.FrameIndex() == 3 && document.Modified() &&
+		document.Presentation().width == 2 && document.Presentation().height == 2,
+		"successful crop did not publish as a modified still from the captured animation frame");
+	worker.Retire(std::move(retired));
+	worker.Retire(std::move(*cropResult));
+
+	jpegview_linux::ImageDocumentSnapshot resizeSnapshot = document.Snapshot();
+	jpegview_linux::ImageOperationRequest resizeRequest;
+	resizeRequest.document = resizeSnapshot;
+	resizeRequest.operation.kind = jpegview_linux::ImageOperationKind::Resize;
+	resizeRequest.operation.width = 1;
+	resizeRequest.operation.height = 1;
+	resizeRequest.operation.resizeFilter = 0;
+	const std::uint64_t resizeGeneration = worker.Request(std::move(resizeRequest));
+	document.UpdateProcessing(document.Processing(), true);
+	Expect(worker.WaitUntilIdle(std::chrono::seconds(3)),
+		"superseded resize did not reach a bounded completion point");
+	auto resizeResult = worker.TakeReady();
+	Expect(resizeResult.has_value() && resizeResult->success &&
+		resizeResult->requestGeneration == resizeGeneration &&
+		!document.CanApply(*resizeResult) && document.Presentation().width == 2,
+		"worker result crossed a changed processing revision and replaced the visible document");
+	worker.Retire(std::move(*resizeResult));
+	retired = document.ClearPixels();
+	worker.Retire(std::move(retired));
+	worker.Stop();
+	Expect(budget->Snapshot().activeWorkingBytes != 0,
+		"retained operation snapshot did not keep its shared pixel charge alive");
+	resizeSnapshot = {};
+	cropSnapshot = {};
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (budget->Snapshot().activeWorkingBytes != 0 &&
+		std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+	Expect(budget->Snapshot().activeWorkingBytes == 0,
+		"retired operation buffers remained charged after their sole owners were released");
+}
+
+void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
+	TemporaryDirectory temporary;
+	const fs::path sourcePath = temporary.path() / "operation-parity.ppm";
+	WriteTinyImage(sourcePath);
+	const jpegview_linux::SourceKey sourceKey =
+		jpegview_linux::DescribeImageSource(sourcePath).Key();
+	auto source = std::make_shared<jpegview_linux::Image>(MakeIndexedImage(4, 3));
+	source->hasTransparency = true;
+	jpegview_linux::ImageProcessingParams processing;
+	processing.contrast = 0.12;
+	processing.saturation = 0.7;
+	processing.unsharpAmount = 0.0;
+	jpegview_linux::ImageDocumentSnapshot document;
+	document.source = sourceKey;
+	document.ownerGeneration = 91;
+	document.revision = 5;
+	document.frameIndex = 2;
+	document.animated = true;
+	document.sourcePixels = source;
+	document.processing = processing;
+	const auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(0);
+	const auto run = [&document, &budget](const jpegview_linux::ImageOperationSpec& operation) {
+		jpegview_linux::ImageOperationRequest request;
+		request.document = document;
+		request.operation = operation;
+		return jpegview_linux::ProcessImageOperation(request, [] { return true; }, *budget);
+	};
+	jpegview_linux::Image processedSource = *source;
+	Expect(processedSource.ApplyProcessing(processing, false),
+		"could not build the processing parity reference");
+	for (const auto& transform : std::vector<std::pair<jpegview_linux::ImageTransformKind,
+		int>>{
+		{jpegview_linux::ImageTransformKind::RotateClockwise, 1},
+		{jpegview_linux::ImageTransformKind::RotateCounterClockwise, 3},
+		{jpegview_linux::ImageTransformKind::MirrorHorizontal, 0},
+		{jpegview_linux::ImageTransformKind::MirrorVertical, 0}}) {
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::Transform;
+		operation.transform = transform.first;
+		auto result = run(operation);
+		jpegview_linux::Image expectedSource = *source;
+		jpegview_linux::Image expectedPresentation = processedSource;
+		if (transform.first == jpegview_linux::ImageTransformKind::RotateClockwise) {
+			Expect(expectedSource.Rotate(true) && expectedPresentation.Rotate(true),
+				"could not build the clockwise transform reference");
+		} else if (transform.first == jpegview_linux::ImageTransformKind::RotateCounterClockwise) {
+			Expect(expectedSource.Rotate(false) && expectedPresentation.Rotate(false),
+				"could not build the counter-clockwise transform reference");
+		} else if (transform.first == jpegview_linux::ImageTransformKind::MirrorHorizontal) {
+			Expect(expectedSource.Mirror(true) && expectedPresentation.Mirror(true),
+				"could not build the horizontal mirror reference");
+		} else {
+			Expect(expectedSource.Mirror(false) && expectedPresentation.Mirror(false),
+				"could not build the vertical mirror reference");
+		}
+		Expect(result.success && result.sourcePixels && result.presentationPixels &&
+			result.sourcePixels->bgra == expectedSource.bgra &&
+			result.presentationPixels->bgra == expectedPresentation.bgra &&
+			result.sourcePixels->width == expectedSource.width &&
+			result.sourcePixels->height == expectedSource.height &&
+			result.sourcePixels->hasTransparency && result.flattenAnimation &&
+			result.modified && result.rotationQuarterTurns == transform.second,
+			"worker transform diverged from mutable image transforms or changed alpha, dimensions, or animation state");
+	}
+
+	jpegview_linux::ImageOperationSpec crop;
+	crop.kind = jpegview_linux::ImageOperationKind::Crop;
+	crop.left = 1;
+	crop.top = 1;
+	crop.right = 4;
+	crop.bottom = 3;
+	auto cropped = run(crop);
+	jpegview_linux::Image expectedCropSource;
+	Expect(source->CopyCrop(1, 1, 4, 3, expectedCropSource),
+		"could not build crop parity reference");
+	expectedCropSource.originalWidth = expectedCropSource.width;
+	expectedCropSource.originalHeight = expectedCropSource.height;
+	jpegview_linux::Image expectedCropPresentation = expectedCropSource;
+	Expect(expectedCropPresentation.ApplyProcessing(processing, false) && cropped.success &&
+		cropped.sourcePixels->bgra == expectedCropSource.bgra &&
+		cropped.presentationPixels->bgra == expectedCropPresentation.bgra &&
+		cropped.sourcePixels->originalWidth == 3 && cropped.sourcePixels->originalHeight == 2 &&
+		cropped.presentationPixels->hasTransparency && cropped.flattenAnimation,
+		"worker crop changed half-open geometry, processing order, alpha, or animation flattening");
+
+	jpegview_linux::ImageOperationSpec resize;
+	resize.kind = jpegview_linux::ImageOperationKind::Resize;
+	resize.width = 2;
+	resize.height = 2;
+	resize.resizeFilter = 0;
+	auto resized = run(resize);
+	jpegview_linux::Image expectedResizeSource = *source;
+	Expect(expectedResizeSource.Resize(2, 2, 0), "could not build resize parity reference");
+	expectedResizeSource.originalWidth = 2;
+	expectedResizeSource.originalHeight = 2;
+	jpegview_linux::Image expectedResizePresentation = expectedResizeSource;
+	Expect(expectedResizePresentation.ApplyProcessing(processing, false) && resized.success &&
+		resized.sourcePixels->bgra == expectedResizeSource.bgra &&
+		resized.presentationPixels->bgra == expectedResizePresentation.bgra &&
+		resized.presentationPixels->width == 2 && resized.presentationPixels->height == 2 &&
+		resized.flattenAnimation,
+		"worker resize changed filter output, processing order, or animation flattening");
+
+	jpegview_linux::ImageDocumentSnapshot materialized = document;
+	materialized.animated = false;
+	materialized.presentationPixels = std::make_shared<jpegview_linux::Image>(processedSource);
+	materialized.materializedProcessing = processing;
+	jpegview_linux::ImageOperationRequest outputRequest;
+	outputRequest.document = materialized;
+	outputRequest.operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
+	outputRequest.operation.width = 2;
+	outputRequest.operation.height = 2;
+	outputRequest.operation.resizeFilter = 0;
+	auto output = jpegview_linux::ProcessImageOperation(outputRequest,
+		[] { return true; }, *budget);
+	jpegview_linux::Image expectedOutput = processedSource;
+	Expect(expectedOutput.Resize(2, 2, 0) && output.success && output.outputPixels &&
+		output.outputPixels->bgra == expectedOutput.bgra &&
+		output.outputPixels->width == 2 && output.outputPixels->height == 2,
+		"worker output preparation changed processing-before-resize pixels or dimensions");
+
+	outputRequest.operation.kind = jpegview_linux::ImageOperationKind::CopySelection;
+	outputRequest.operation.left = 1;
+	outputRequest.operation.top = 0;
+	outputRequest.operation.right = 4;
+	outputRequest.operation.bottom = 2;
+	auto selection = jpegview_linux::ProcessImageOperation(outputRequest,
+		[] { return true; }, *budget);
+	jpegview_linux::Image expectedSelection;
+	Expect(processedSource.CopyCrop(1, 0, 4, 2, expectedSelection) && selection.success &&
+		selection.outputPixels && selection.outputPixels->bgra == expectedSelection.bgra &&
+		selection.outputPixels->width == 3 && selection.outputPixels->height == 2 &&
+		selection.outputPixels->hasTransparency,
+		"worker selection copy changed processed pixels, half-open bounds, or alpha metadata");
+
+	jpegview_linux::Image identitySource = MakeIndexedImage(4, 3);
+	auto identityPixels = std::make_shared<const jpegview_linux::Image>(identitySource);
+	const auto identityBudget = std::make_shared<jpegview_linux::SharedCacheBudget>(0);
+	jpegview_linux::ImageDocumentSnapshot identityDocument = document;
+	identityDocument.animated = false;
+	identityDocument.processing = {};
+	identityDocument.sourcePixels = identityPixels;
+	identityDocument.presentationPixels.reset();
+	identityDocument.materializedProcessing = {};
+	identityDocument.autoContrast = false;
+	identityDocument.materializedAutoContrast = false;
+	identityDocument.modified = false;
+	jpegview_linux::ImageOperationRequest materializeRequest;
+	materializeRequest.document = identityDocument;
+	materializeRequest.operation.kind = jpegview_linux::ImageOperationKind::Materialize;
+	auto noOpMaterialization = jpegview_linux::ProcessImageOperation(materializeRequest,
+		[] { return true; }, *identityBudget);
+	Expect(noOpMaterialization.success &&
+		noOpMaterialization.sourcePixels == noOpMaterialization.presentationPixels &&
+		identityBudget->Snapshot().activeWorkingBytes == identityPixels->bgra.size(),
+		"identity materialization copied or double-charged the immutable source pixels");
+
+	identityDocument.revision++;
+	materializeRequest.document = identityDocument;
+	materializeRequest.operation.kind = jpegview_linux::ImageOperationKind::Transform;
+	materializeRequest.operation.transform = jpegview_linux::ImageTransformKind::RotateClockwise;
+	auto identityTransform = jpegview_linux::ProcessImageOperation(materializeRequest,
+		[] { return true; }, *identityBudget);
+	Expect(identityTransform.success &&
+		identityTransform.sourcePixels == identityTransform.presentationPixels &&
+		identityTransform.sourcePixels->width == 3 && identityTransform.sourcePixels->height == 4 &&
+		identityBudget->Snapshot().activeWorkingBytes == identityPixels->bgra.size() * 2,
+		"identity transform built or charged two full-size outputs instead of sharing one");
+}
+
+void TestImageOperationWorkerSupersedesAndSurvivesFailures() {
+	std::mutex mutex;
+	std::condition_variable condition;
+	bool firstEntered = false;
+	bool releaseFirst = false;
+	int calls = 0;
+	const auto processor = [&mutex, &condition, &firstEntered, &releaseFirst, &calls](
+		const jpegview_linux::ImageOperationRequest& request,
+		const std::function<bool()>& shouldContinue,
+		jpegview_linux::SharedCacheBudget&) {
+		jpegview_linux::ImageOperationResult result;
+		result.expected = request.document;
+		result.kind = request.operation.kind;
+		int call = 0;
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			call = ++calls;
+			if (call == 1) {
+				firstEntered = true;
+				condition.notify_all();
+				condition.wait(lock, [&releaseFirst] { return releaseFirst; });
+			}
+		}
+		if (call == 1 && !shouldContinue()) {
+			result.failure = {jpegview_linux::WorkerFailureKind::Cancelled,
+				"superseded test operation"};
+			return result;
+		}
+		if (request.operation.kind == jpegview_linux::ImageOperationKind::Transform) {
+			throw std::runtime_error("synthetic operation exception");
+		}
+		result.success = true;
+		return result;
+	};
+	const auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(0);
+	jpegview_linux::ImageOperationWorker worker(budget, processor);
+	jpegview_linux::ImageOperationRequest first;
+	first.operation.kind = jpegview_linux::ImageOperationKind::Crop;
+	const std::uint64_t firstGeneration = worker.Request(std::move(first));
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(condition.wait_for(lock, std::chrono::seconds(2),
+			[&firstEntered] { return firstEntered; }),
+			"test processor did not reach its deterministic cancellation barrier");
+	}
+	jpegview_linux::ImageOperationRequest second;
+	second.operation.kind = jpegview_linux::ImageOperationKind::Resize;
+	const std::uint64_t secondGeneration = worker.Request(std::move(second));
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseFirst = true;
+	}
+	condition.notify_all();
+	Expect(secondGeneration > firstGeneration && worker.WaitUntilIdle(std::chrono::seconds(3)),
+		"latest operation did not replace and complete after canceling its predecessor");
+	auto latest = worker.TakeReady();
+	Expect(latest.has_value() && latest->success &&
+		latest->requestGeneration == secondGeneration &&
+		latest->kind == jpegview_linux::ImageOperationKind::Resize,
+		"superseded operation published after its replacement");
+	worker.Retire(std::move(*latest));
+
+	jpegview_linux::ImageOperationRequest throwing;
+	throwing.operation.kind = jpegview_linux::ImageOperationKind::Transform;
+	worker.Request(std::move(throwing));
+	Expect(worker.WaitUntilIdle(std::chrono::seconds(3)),
+		"throwing operation escaped its bounded worker deadline");
+	auto failure = worker.TakeReady();
+	Expect(failure.has_value() && !failure->success && failure->failure.kind ==
+		jpegview_linux::WorkerFailureKind::Exception,
+		"worker exception did not publish a structured failure");
+	worker.Retire(std::move(*failure));
+
+	jpegview_linux::ImageOperationRequest validAfterFailure;
+	validAfterFailure.operation.kind = jpegview_linux::ImageOperationKind::Reprocess;
+	const std::uint64_t recoveredGeneration = worker.Request(std::move(validAfterFailure));
+	Expect(worker.WaitUntilIdle(std::chrono::seconds(3)),
+		"worker did not continue after a structured failure");
+	auto recovered = worker.TakeReady();
+	Expect(recovered.has_value() && recovered->success &&
+		recovered->requestGeneration == recoveredGeneration,
+		"valid later image operation was not serviced after a worker exception");
+	worker.Retire(std::move(*recovered));
+	worker.Stop();
 }
 
 void TestPictureLevelsStoreRoundTrip() {
@@ -18869,9 +19289,10 @@ void TestImageSpectrumWorkerGenerationDeduplicationAndShutdown() {
 		"histogram identity split on inactive controls or ignored frame and processing changes");
 	const jpegview_linux::GrayscaleSpectrum expected =
 		jpegview_linux::BuildGrayscaleSpectrum(image.bgra, image.width, image.height);
+	const auto immutableImage = std::make_shared<const jpegview_linux::Image>(image);
 	jpegview_linux::ImageSpectrumWorker worker;
-	const std::uint64_t generation = worker.Request(image, key);
-	Expect(generation != 0 && worker.Request(image, key) == generation,
+	const std::uint64_t generation = worker.Request(immutableImage, key);
+	Expect(generation != 0 && worker.Request(immutableImage, key) == generation,
 		"identical histogram requests were not deduplicated by source and document state");
 	Expect(worker.WaitUntilIdle(std::chrono::seconds(2)),
 		"full-source histogram worker did not finish within its bounded deadline");
@@ -18880,11 +19301,11 @@ void TestImageSpectrumWorkerGenerationDeduplicationAndShutdown() {
 		*result->spectrum == expected &&
 		jpegview_linux::IsCurrentImageSpectrumResult(*result, generation, key),
 		"histogram worker did not preserve the existing processed-pixel calculation");
-	Expect(worker.Request(image, key) == generation &&
+	Expect(worker.Request(immutableImage, key) == generation &&
 		!worker.TakeReady().has_value(),
 		"repeated viewport-independent requests restarted a completed histogram");
 	worker.Stop();
-	Expect(worker.Request(image, key) == 0,
+	Expect(worker.Request(immutableImage, key) == 0,
 		"stopped histogram worker accepted a request without scheduling it");
 	jpegview_linux::UiCompletionWakeup().Consume();
 
@@ -18908,18 +19329,18 @@ void TestImageSpectrumWorkerGenerationDeduplicationAndShutdown() {
 			return jpegview_linux::BuildGrayscaleSpectrum(
 				source.bgra, source.width, source.height);
 		});
-	const std::uint64_t obsoleteGeneration = replacingWorker.Request(image, key);
+	const std::uint64_t obsoleteGeneration = replacingWorker.Request(immutableImage, key);
 	{
 		std::unique_lock<std::mutex> lock(mutex);
 		Expect(startedCondition.wait_for(lock, std::chrono::seconds(2),
 			[&firstStarted] { return firstStarted; }),
 			"replacement test did not reach its controlled worker boundary");
 	}
-	const std::uint64_t duplicateGeneration = replacingWorker.Request(image, key);
+	const std::uint64_t duplicateGeneration = replacingWorker.Request(immutableImage, key);
 	jpegview_linux::ImageSpectrumKey replacementKey = key;
 	++replacementKey.documentRevision;
 	const std::uint64_t currentGeneration =
-		replacingWorker.Request(image, replacementKey);
+		replacingWorker.Request(immutableImage, replacementKey);
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		releaseFirst = true;
@@ -18959,14 +19380,14 @@ void TestImageSpectrumWorkerGenerationDeduplicationAndShutdown() {
 		return jpegview_linux::TryBuildGrayscaleSpectrum(source.bgra,
 			source.width, source.height, keepGoing);
 		});
-	const std::uint64_t failedGeneration = failureWorker.Request(image, key);
+	const std::uint64_t failedGeneration = failureWorker.Request(immutableImage, key);
 	Expect(failedGeneration != 0 &&
 		failureWorker.WaitUntilIdle(std::chrono::seconds(2)),
 		"throwing histogram processor did not finish within its bounded deadline");
 	const auto failedResult = failureWorker.TakeReady();
 	jpegview_linux::ImageSpectrumKey retryKey = key;
 	++retryKey.documentRevision;
-	const std::uint64_t retryGeneration = failureWorker.Request(image, retryKey);
+	const std::uint64_t retryGeneration = failureWorker.Request(immutableImage, retryKey);
 	Expect(failedResult.has_value() && failedResult->failure.kind ==
 		jpegview_linux::WorkerFailureKind::Exception && retryGeneration > failedGeneration &&
 		failureWorker.WaitUntilIdle(std::chrono::seconds(2)),
@@ -20297,6 +20718,29 @@ void TestPendingImageIntentsRespectSourceGeneration() {
 		!deferredDate.MarkImageCommitted(secondPath, second).runDeferredAction &&
 		!deferredDate.Complete(result, secondPath, second).matchedPendingRead,
 		"a replaced owner inherited the deferred EXIF-date action");
+}
+
+void TestPendingImageOperationAdmissionPreservesIntentOrder() {
+	using Admission = jpegview_linux::PendingImageOperationAdmission;
+	Expect(jpegview_linux::PlanPendingImageOperationAdmission(
+		false, 0, false, false) == Admission::StartNow,
+		"a direct operation was rejected with no earlier work pending");
+	Expect(jpegview_linux::PlanPendingImageOperationAdmission(
+		false, 0, true, false) == Admission::WaitForSelectedCommit,
+		"a direct operation did not wait for its selected image's display commit");
+	Expect(jpegview_linux::PlanPendingImageOperationAdmission(
+		false, 1, true, false) == Admission::Rejected &&
+		jpegview_linux::PlanPendingImageOperationAdmission(
+			false, 2, false, false) == Admission::Rejected,
+		"a later direct operation passed previously accepted deferred intents");
+	Expect(jpegview_linux::PlanPendingImageOperationAdmission(
+		false, 2, false, true) == Admission::StartNow,
+		"replay rejected its own front intent because it remained in the ordered queue");
+	Expect(jpegview_linux::PlanPendingImageOperationAdmission(
+		true, 0, true, false) == Admission::Rejected &&
+		jpegview_linux::PlanPendingImageOperationAdmission(
+			true, 1, false, true) == Admission::Rejected,
+		"a second image operation was admitted before the active one completed");
 }
 
 void TestFileDialogSorting() {
@@ -21827,6 +22271,14 @@ int main(int argc, char** argv) {
 	RunTest("image-resize-filters-and-limits", TestImageResizeFiltersAndLimits, failures);
 	RunTest("image-auto-contrast-invariants", TestImageAutoContrastInvariants, failures);
 	RunTest("picture-levels-model-and-processing", TestPictureLevelsModelAndProcessing, failures);
+	RunTest("image-document-rejects-stale-operations-and-owns-current-pixels",
+		TestImageDocumentRejectsStaleOperationsAndOwnsCurrentPixels, failures);
+	RunTest("image-operation-worker-runs-crop-and-flattens-captured-frame",
+		TestImageOperationWorkerRunsCropAndFlattensCapturedFrame, failures);
+	RunTest("image-operation-worker-matches-transforms-and-pixel-pipelines",
+		TestImageOperationWorkerMatchesTransformsAndPixelPipelines, failures);
+	RunTest("image-operation-worker-supersedes-and-survives-failures",
+		TestImageOperationWorkerSupersedesAndSurvivesFailures, failures);
 	RunTest("picture-levels-store-round-trip", TestPictureLevelsStoreRoundTrip, failures);
 	RunTest("settings-round-trip-and-malformed-values", TestSettingsRoundTripAndMalformedValues, failures);
 	RunTest("advanced-configuration-model-categories-and-round-trips",
@@ -21929,6 +22381,8 @@ int main(int argc, char** argv) {
 		TestPendingRecentViewportTracksUserModeChanges, failures);
 	RunTest("pending-image-intents-respect-source-generation",
 		TestPendingImageIntentsRespectSourceGeneration, failures);
+	RunTest("pending-image-operation-admission-preserves-intent-order",
+		TestPendingImageOperationAdmissionPreservesIntentOrder, failures);
 	RunTest("file-dialog-filtering", TestFileDialogFiltering, failures);
 	RunTest("file-dialog-sorting", TestFileDialogSorting, failures);
 	RunTest("file-dialog-model-state-and-navigation", TestFileDialogModelStateAndNavigation, failures);

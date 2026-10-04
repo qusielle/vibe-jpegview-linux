@@ -52,8 +52,9 @@ bool ImageSpectrumWorker::HasPixels(const Image& image) {
 		image.bgra.size() >= width * height * 4;
 }
 
-std::uint64_t ImageSpectrumWorker::Request(const Image& image, ImageSpectrumKey key) {
-	if (!key.Valid() || !HasPixels(image)) return 0;
+std::uint64_t ImageSpectrumWorker::Request(std::shared_ptr<const Image> image,
+	ImageSpectrumKey key) {
+	if (!key.Valid() || !image || !HasPixels(*image)) return 0;
 	std::shared_ptr<std::atomic<bool>> canceled;
 	ImageSpectrumKey stateKey;
 	ImageSpectrumKey workKey;
@@ -78,7 +79,7 @@ std::uint64_t ImageSpectrumWorker::Request(const Image& image, ImageSpectrumKey 
 		ready_.reset();
 		currentKey_ = std::move(stateKey);
 		requestedGeneration = generation_;
-		pending_ = Work{&image, std::move(workKey), requestedGeneration,
+		pending_ = Work{std::move(image), std::move(workKey), requestedGeneration,
 			std::move(canceled)};
 		available_.notify_one();
 	}

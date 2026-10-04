@@ -4,6 +4,18 @@
 
 namespace jpegview_linux {
 
+PendingImageOperationAdmission PlanPendingImageOperationAdmission(
+	bool operationAlreadyPending, std::size_t acceptedEarlierIntentCount,
+	bool selectedLoadPending, bool replayingFrontIntent) {
+	if (operationAlreadyPending ||
+		(acceptedEarlierIntentCount != 0 && !replayingFrontIntent)) {
+		return PendingImageOperationAdmission::Rejected;
+	}
+	return selectedLoadPending ?
+		PendingImageOperationAdmission::WaitForSelectedCommit :
+		PendingImageOperationAdmission::StartNow;
+}
+
 void PendingImageIntents::Begin(const std::filesystem::path& filename,
 	const SourceKey& source, std::uint64_t loadGeneration) {
 	Cancel();

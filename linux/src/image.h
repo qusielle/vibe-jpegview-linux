@@ -24,11 +24,12 @@ public:
 		bool containsTransparency = false);
 	// Copies a half-open source rectangle into a separate image without first
 	// duplicating the full source buffer. The output retains the original source size.
-	bool CopyCrop(int left, int top, int right, int bottom, Image& output) const;
+	bool CopyCrop(int left, int top, int right, int bottom, Image& output,
+		const std::function<bool()>& shouldContinue = {}) const;
 	// Retains the half-open pixel rectangle [left,right) x [top,bottom).
 	bool Crop(int left, int top, int right, int bottom);
 	bool Rotate(bool clockwise, const std::function<bool()>& shouldContinue = {});
-	bool Mirror(bool horizontal);
+	bool Mirror(bool horizontal, const std::function<bool()>& shouldContinue = {});
 
 	// Filters match the resize dialog: 0 point, 1 Lanczos, 2 sharpen-low,
 	// and 3 sharpen-medium.

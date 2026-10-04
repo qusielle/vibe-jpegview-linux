@@ -383,7 +383,10 @@ they support.
     Decode completions feed a
     separate display-preparation worker pool, and both decoded and display caches reject stale source
     identities. Selected JPEG header probes and display preparation, non-JPEG decoding, and optional
-    EXIF/comment reads run on background workers. Initial presentation keeps its loading title until
+    EXIF/comment reads run on background workers.
+    Crop, resize, and rotate edits to an animation hold the displayed frame while pixels are prepared;
+    a successful edit leaves that frame as a still image.
+    Initial presentation keeps its loading title until
     a matching frame is uploaded on the renderer thread; stale generations cannot commit Recents or
     loaded-image history. Archive password failures return to the password-capable Open dialog.
     Optional EXIF/comment data does not block presentation. EXIF-date updates wait for
@@ -392,10 +395,12 @@ they support.
     invalidated when their captured catalog, descriptor, viewport, or source state no longer matches;
     EXIF metadata results remain bound to their source identity and request generation and are
     discarded when either becomes stale. Archive-member EXIF reads resume after foreground source
-    work so navigation does not permanently lose optional metadata. Large evicted CPU buffers are
-    retired on workers rather than destroyed on the event thread. Previously viewed and prefetched images
-    therefore avoid repeated synchronous decoding, correction, high-quality scaling, and texture
-    creation during navigation.
+    work so navigation does not permanently lose optional metadata. Rotate/mirror, crop, resize,
+    full-resolution processing, and output-size preparation now use revision-checked worker results;
+    identity processing shares its immutable source allocation with the presentation. Large evicted CPU
+    buffers are retired on workers rather than destroyed on the event thread. Previously viewed and
+    prefetched images therefore avoid repeated synchronous decoding, correction, high-quality scaling,
+    and texture creation during navigation.
 
 12. **Information overlays and configurable window title.** F2 picture information and Shift+N/Ctrl+F2 filename
     overlays use compact translucent surfaces sized to their content with small comfortable margins.
@@ -1144,6 +1149,10 @@ configuration. The `%pictures%` placeholder maps to `$XDG_PICTURES_DIR` or `$HOM
 the aspect ratio, and the point, Lanczos/Bicubic, sharpen-low, and sharpen-medium filters are available.
 The resize is applied to the processed image in memory and can then be saved with `Ctrl+S`; `Ctrl+Shift+R`
 opens the same dialog directly.
+Rotate/mirror, in-memory crop, resize, and full-resolution processing run in the background while pan
+and zoom remain responsive. A failed operation keeps the last successfully displayed image. Navigating
+to another source cancels a pending edit. Applying rotate, mirror, crop, or resize to an animation
+flattens the frame currently displayed into a still image.
 
 Crop selection mode is off by default. Enable or disable it with Ctrl+E, the last button on the bottom
 navigation panel, or **Crop selection mode** in the regular or selection context menu; its state is

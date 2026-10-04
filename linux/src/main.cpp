@@ -57,6 +57,8 @@
 #include "perf_diagnostics.h"
 #include "event_loop_model.h"
 #include "image_spectrum_worker.h"
+#include "image_document.h"
+#include "image_operation_worker.h"
 
 // Keep Linux command dispatch aligned with the original Windows application.
 // resource.h is deliberately platform-neutral: it contains the command IDs
@@ -524,6 +526,7 @@ public:
 			TickExifMetadata();
 			TickCurrentJpegDimensions();
 			TickCurrentSelectedDecode();
+			TickImageOperation();
 			TickImageSpectrum();
 			TickActiveSpreadDimensions();
 			TickTimedPresentationEffects(SDL_GetTicks());
@@ -579,6 +582,31 @@ private:
 		WrappedToSameImage,
 		PendingDirectoryScan,
 		Blocked,
+	};
+
+	enum class ImageOperationPurpose {
+		Materialize,
+		Transform,
+		Crop,
+		Resize,
+		Reprocess,
+		Save,
+		CopyImage,
+		CopySelection,
+		Print,
+		Wallpaper,
+	};
+
+	struct PendingImageOperation {
+		ImageOperationPurpose purpose = ImageOperationPurpose::Materialize;
+		jpegview_linux::ImageOperationSpec operation;
+		jpegview_linux::ImageDocumentSnapshot document;
+		std::uint64_t workerGeneration = 0;
+		int transformCommand = 0;
+		bool fullSize = true;
+		bool keepSpreadRotation = false;
+		bool pausedAnimationPlayback = false;
+		fs::path output;
 	};
 
 	struct ContextMenuColumn {
@@ -785,6 +813,11 @@ private:
 	void Cleanup() {
 		jpegview_linux::UiCompletionWakeup().SetPostFunction({});
 		imageSpectrumWorker_.Stop();
+		CancelPendingImageOperation();
+		jpegview_linux::RetiredImageBuffers retiredDocument = imageDocument_.ClearPixels();
+		retiredDocument.decoded = std::move(currentDecoded_);
+		imageOperationWorker_.Retire(std::move(retiredDocument));
+		imageOperationWorker_.Stop();
 		DeactivateDisplayPrefetchBatch();
 		displayPreparationController_.Shutdown();
 		exifMetadataWorker_.Stop();
@@ -1027,7 +1060,6 @@ private:
 		currentJpegHeaderPending_ = false;
 		currentSelectedLoadPending_ = false;
 		currentSelectedStartupLoad_ = false;
-		currentMaterializationRequested_ = false;
 		pendingMaterializationIntents_.clear();
 		pendingSelectedDisplayKey_.clear();
 		pendingImageIntentLimitReached_ = false;
@@ -1101,13 +1133,13 @@ private:
 		pendingImageIntents_.Cancel();
 		ClearPendingTransitionFrame();
 		pendingMaterializationIntents_.clear();
-		currentMaterializationRequested_ = false;
 		currentDisplayRequest_.reset();
+		CancelPendingImageOperation();
 		CancelImageSpectrumBeforeImageMutation();
-		image_ = {};
-		currentDecoded_.reset();
+		jpegview_linux::RetiredImageBuffers retiredDocument = imageDocument_.ClearPixels();
+		retiredDocument.decoded = std::move(currentDecoded_);
+		imageOperationWorker_.Retire(std::move(retiredDocument));
 		currentSourcePageDimensions_.reset();
-		currentPixelsMaterialized_ = false;
 		playback_.SetImageReady(false, SDL_GetTicks());
 		if (passwordFailure) {
 			if (errorMessage.find("incorrect archive password") != std::string::npos) {
@@ -1169,7 +1201,12 @@ private:
 		}
 		RefreshDoublePageRenderState();
 		SetTitle();
-		ReplayPendingMaterializationIntents();
+		if (pendingImageOperation_.has_value()) {
+			(void)StartPendingImageOperation();
+		}
+		if (!pendingImageOperation_.has_value() && !pendingMaterializationIntents_.empty()) {
+			ReplayPendingMaterializationIntents();
+		}
 	}
 
 	void HandleCurrentDisplayFailure(std::uint64_t generation,
@@ -1201,10 +1238,10 @@ private:
 	}
 
 	void RequestCurrentDisplayFrame() {
-		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		if (fileList_.Empty() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		const SDL_Rect area = ImageAreaRect();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, area.w, area.h);
+			CurrentImage().width, CurrentImage().height, area.w, area.h);
 		const jpegview_linux::DisplayImageRequest* request =
 			CurrentDisplayRequest(destination.width, destination.height);
 		if (request == nullptr) return;
@@ -1258,8 +1295,15 @@ private:
 			if (currentSelectedLoadPending_) {
 				FailCurrentSelectedLoad(generation, result->source.Key(),
 					errorMessage, passwordFailure);
+			} else if (pendingImageOperation_.has_value() &&
+				pendingImageOperation_->workerGeneration == 0) {
+				const ImageOperationPurpose purpose = pendingImageOperation_->purpose;
+				pendingImageOperation_.reset();
+				ReportImageOperationFailure(purpose, errorMessage);
+				if (!pendingMaterializationIntents_.empty()) {
+					ReplayPendingMaterializationIntents();
+				}
 			} else {
-				currentMaterializationRequested_ = false;
 				pendingMaterializationIntents_.clear();
 				pendingImageIntents_.Cancel();
 				SetTitle(fileList_.Current().filename().string() +
@@ -1267,14 +1311,34 @@ private:
 			}
 			return;
 		}
+		if (currentDecoded_ && currentDecoded_ != result->image) {
+			jpegview_linux::RetiredImageBuffers retired;
+			retired.decoded = std::move(currentDecoded_);
+			imageOperationWorker_.Retire(std::move(retired));
+		}
 		currentDecoded_ = std::move(result->image);
 		imageCache_.PromoteToActiveUse(selectedSource.Key());
 		const jpegview_linux::DecodedFrame& firstFrame = currentDecoded_->frames.front();
 		currentSourcePageDimensions_ =
 			jpegview_linux::PageDimensions{firstFrame.width, firstFrame.height};
-		image_.width = image_.originalWidth = firstFrame.width;
-		image_.height = image_.originalHeight = firstFrame.height;
-		image_.hasTransparency = firstFrame.hasTransparency;
+		if (imageDocument_.FrameIndex() != 0 ||
+			imageDocument_.Animated() != currentDecoded_->animation) {
+			jpegview_linux::RetiredImageBuffers retired = imageDocument_.SetFrame(
+				0, currentDecoded_->animation, firstFrame.width, firstFrame.height,
+				firstFrame.hasTransparency);
+			imageOperationWorker_.Retire(std::move(retired));
+		}
+		imageDocument_.SetFrameIndex(0);
+		imageDocument_.SetAnimation(currentDecoded_->animation);
+		imageDocument_.SetDimensions(firstFrame.width, firstFrame.height,
+			firstFrame.hasTransparency);
+		if (pendingImageOperation_.has_value() &&
+			pendingImageOperation_->workerGeneration == 0 &&
+			pendingImageOperation_->document.source == imageDocument_.Source() &&
+			pendingImageOperation_->document.ownerGeneration ==
+				imageDocument_.OwnerGeneration()) {
+			pendingImageOperation_->document = imageDocument_.Snapshot();
+		}
 		currentAnimationFrame_ = 0;
 		std::vector<int> frameDelaysMs;
 		frameDelaysMs.reserve(currentDecoded_->frames.size());
@@ -1288,7 +1352,7 @@ private:
 			const std::optional<jpegview_linux::ImageSessionSelection> selection =
 				imageSession_.Selection();
 			if (selection.has_value()) RestoreScaleMode(selection->viewport);
-			cropSelection_.SetImageSize(image_.width, image_.height);
+			cropSelection_.SetImageSize(CurrentImage().width, CurrentImage().height);
 			const std::optional<jpegview_linux::PendingImageIntentBatch> intents =
 				pendingImageIntents_.Drain(selectedSource.Key(), generation);
 			if (intents.has_value()) {
@@ -1300,11 +1364,11 @@ private:
 			PrepareImagePrefetch(pendingPrefetchDirection_);
 			RefreshDoublePageRenderState();
 			if (currentSelectedLoadPending_) SetPendingImageTitle();
-		} else if (currentMaterializationRequested_) {
-			currentMaterializationRequested_ = false;
-			if (pendingMaterializationIntents_.empty()) (void)MaterializeCurrentPixels();
+		} else if (pendingImageOperation_.has_value() &&
+			pendingImageOperation_->workerGeneration == 0) {
+			(void)StartPendingImageOperation();
+		} else if (!pendingMaterializationIntents_.empty()) {
 			ReplayPendingMaterializationIntents();
-			playback_.SetImageReady(true, SDL_GetTicks());
 		}
 	}
 
@@ -1535,11 +1599,11 @@ private:
 			if (index == activeDoublePageRender_->layout.secondIndex)
 				return activeDoublePageRender_->nextPage;
 		}
-		if (index == fileList_.CurrentIndex() && image_.width > 0 && image_.height > 0) {
+		if (index == fileList_.CurrentIndex() && CurrentImage().width > 0 && CurrentImage().height > 0) {
 			if (currentSpreadRotationValid_ && currentSourcePageDimensions_.has_value()) {
 				return currentSourcePageDimensions_;
 			}
-			return jpegview_linux::PageDimensions{image_.width, image_.height};
+			return jpegview_linux::PageDimensions{CurrentImage().width, CurrentImage().height};
 		}
 		const fs::path& filename = fileList_.Files()[index];
 		const jpegview_linux::SourceDescriptor source = SourceDescriptorForPath(filename);
@@ -1580,7 +1644,7 @@ private:
 			return {activeDoublePageRender_->layout.canvasWidth,
 				activeDoublePageRender_->layout.canvasHeight};
 		}
-		return {image_.width, image_.height};
+		return {CurrentImage().width, CurrentImage().height};
 	}
 
 	std::pair<int, int> DoublePagePageDisplaySize(
@@ -1721,7 +1785,7 @@ private:
 			if (!activeDoublePageRender_.has_value()) return;
 			const jpegview_linux::ViewportSnapshot snapshot = viewport_.Snapshot();
 			activeDoublePageRender_.reset();
-			viewport_.Restore(snapshot, image_.width, image_.height, area.w, area.h);
+			viewport_.Restore(snapshot, CurrentImage().width, CurrentImage().height, area.w, area.h);
 			currentDisplayRequest_.reset();
 			SetTitle();
 		};
@@ -1750,7 +1814,7 @@ private:
 		spreadSnapshot.pageCount = fileList_.Size();
 		spreadSnapshot.selectedImageCommitted = selectionMatchesLoadedImage;
 		spreadSnapshot.cacheAvailable = cacheBudget_->Capacity() != 0;
-		spreadSnapshot.anchorPixelsAvailable = image_.width > 0 && image_.height > 0;
+		spreadSnapshot.anchorPixelsAvailable = CurrentImage().width > 0 && CurrentImage().height > 0;
 		spreadSnapshot.anchorRotationQuarterTurns = currentImageRotationQuarterTurns_;
 		spreadSnapshot.modes = {doublePageModeEnabled_, mangaReadingOrderEnabled_};
 		jpegview_linux::SpreadPreparationDecision spreadDecision =
@@ -1862,9 +1926,9 @@ private:
 				anchorTextureBytes)) {
 				anchorTextureBytes = std::numeric_limits<std::size_t>::max();
 			}
-		} else if (image_.width > 0 && image_.height > 0) {
-			const std::size_t width = static_cast<std::size_t>(image_.width);
-			const std::size_t height = static_cast<std::size_t>(image_.height);
+		} else if (CurrentImage().width > 0 && CurrentImage().height > 0) {
+			const std::size_t width = static_cast<std::size_t>(CurrentImage().width);
+			const std::size_t height = static_cast<std::size_t>(CurrentImage().height);
 			const std::size_t maximum = std::numeric_limits<std::size_t>::max();
 			if (width <= maximum / height && width * height <= maximum / 4) {
 				anchorTextureBytes = width * height * 4;
@@ -2004,62 +2068,6 @@ private:
 		}
 	}
 
-	bool MaterializeCurrentPixels() {
-		jpegview_linux::PerfContextScope workContext(
-			jpegview_linux::PerfWorkClass::ActiveImageSpread,
-			jpegview_linux::PerfExecution::EventThread);
-		if (currentPixelsMaterialized_ &&
-			jpegview_linux::EqualImageProcessing(materializedProcessing_, imageProcessing_) &&
-			materializedAutoContrast_ == autoContrastEnabled_) return true;
-		CancelImageSpectrumBeforeImageMutation();
-		if (currentPixelsMaterialized_ && correctionBaseValid_) {
-			image_ = correctionBase_;
-			jpegview_linux::PerfScopedTimer processingTimer(
-				jpegview_linux::PerfDiagnostics::Instance(), jpegview_linux::PerfMetric::Processing);
-			if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) return false;
-			materializedProcessing_ = imageProcessing_;
-			materializedAutoContrast_ = autoContrastEnabled_;
-			return true;
-		}
-		if (!currentDecoded_) {
-			if (fileList_.Empty()) return false;
-			const jpegview_linux::SourceDescriptor source =
-				SourceDescriptorForPath(fileList_.Current());
-			currentDecoded_ = imageCache_.Find(source);
-			if (!currentDecoded_) {
-				if (!currentMaterializationRequested_) {
-					currentMaterializationRequested_ = true;
-					RequestSelectedSourceDecode(source, imageSession_.Generation());
-					SetTitle(fileList_.Current().filename().string() +
-						" — loading source pixels; repeat the action when ready");
-				}
-				return false;
-			}
-			imageCache_.PromoteToActiveUse(source.Key());
-		}
-		if (currentDecoded_->frames.empty() ||
-			currentAnimationFrame_ >= currentDecoded_->frames.size()) return false;
-		const jpegview_linux::DecodedFrame& decodedFrame =
-			currentDecoded_->frames[currentAnimationFrame_];
-		if (!image_.StoreBGRA(decodedFrame.bgra.data(), decodedFrame.width,
-			decodedFrame.height, decodedFrame.hasTransparency)) {
-			SetTitle(fileList_.Current().filename().string() + " — image is too large");
-			return false;
-		}
-		correctionBase_ = image_;
-		correctionBaseValid_ = true;
-		jpegview_linux::PerfScopedTimer processingTimer(
-			jpegview_linux::PerfDiagnostics::Instance(), jpegview_linux::PerfMetric::Processing);
-		if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) {
-			SetTitle(fileList_.Current().filename().string() + " — picture-level processing failed");
-			return false;
-		}
-		materializedProcessing_ = imageProcessing_;
-		materializedAutoContrast_ = autoContrastEnabled_;
-		currentPixelsMaterialized_ = true;
-		return true;
-	}
-
 	void SelectPictureLevelsForCurrentFile(bool continuingPendingLoad = false) {
 		const std::string key = AbsoluteNormalized(fileList_.Current()).string();
 		const auto saved = imageProcessingStore_.find(key);
@@ -2089,6 +2097,7 @@ private:
 			CancelPendingCurrentJpegDimensions();
 			return false;
 		}
+		CancelPendingImageOperation();
 		CancelImageSpectrumBeforeImageMutation();
 		const fs::path targetPath = AbsoluteNormalized(fileList_.Current());
 		const bool pathChanged = imageSession_.LoadedPath().empty() ||
@@ -2136,6 +2145,14 @@ private:
 			source, targetPath, viewportSnapshot,
 			{imageProcessing_, autoContrastEnabled_}, !clipboardMode_);
 		const std::uint64_t loadGeneration = sessionStart.selection.generation;
+		const bool clearDocument = true;
+		const bool retainDecodedSource = currentDecoded_ &&
+			imageDocument_.Source() == source.Key();
+		jpegview_linux::RetiredImageBuffers retiredDocument = imageDocument_.BeginSelection(
+			source.Key(), loadGeneration, clearDocument);
+		if (!retainDecodedSource) retiredDocument.decoded = std::move(currentDecoded_);
+		imageOperationWorker_.Retire(std::move(retiredDocument));
+		imageDocument_.UpdateProcessing(imageProcessing_, autoContrastEnabled_);
 		selectedSourceDecodeChannel_->Activate(loadGeneration, source.Key());
 		currentSelectedLoadPending_ = true;
 		currentSelectedStartupLoad_ = startupLoad;
@@ -2169,20 +2186,13 @@ private:
 			ClearDisplayTextureProtections();
 			ClearPendingTextureUploads();
 			ClearActiveWorkingDisplayTextures();
-			currentDecoded_.reset();
 			currentAnimationFrame_ = 0;
 			currentDisplayRequest_.reset();
 			activeDoublePageRender_.reset();
 			doublePagePartnerDisplayKey_.clear();
 			doublePagePartnerRequest_.reset();
 			deferredCurrentDisplayPreparation_ = false;
-			currentPixelsMaterialized_ = false;
 			currentPixelsDetachedFromSource_ = false;
-			materializedProcessing_ = {};
-			materializedAutoContrast_ = false;
-			correctionBase_ = {};
-			correctionBaseValid_ = false;
-			image_ = {};
 			editedImageSpectrumValid_ = false;
 			imageModified_ = false;
 			currentImageRotationQuarterTurns_ = 0;
@@ -2200,12 +2210,7 @@ private:
 			activeDoublePageRender_.reset();
 			doublePagePartnerDisplayKey_.clear();
 			doublePagePartnerRequest_.reset();
-			currentPixelsMaterialized_ = false;
 			currentPixelsDetachedFromSource_ = false;
-			materializedProcessing_ = {};
-			materializedAutoContrast_ = false;
-			correctionBase_ = {};
-			correctionBaseValid_ = false;
 			imageModified_ = false;
 			currentImageRotationQuarterTurns_ = 0;
 			currentSpreadRotationValid_ = false;
@@ -2213,16 +2218,22 @@ private:
 			if (currentDecoded_ && !currentDecoded_->frames.empty()) {
 				const jpegview_linux::DecodedFrame& firstFrame =
 					currentDecoded_->frames.front();
-				image_ = {};
-				image_.width = image_.originalWidth = firstFrame.width;
-				image_.height = image_.originalHeight = firstFrame.height;
-				image_.hasTransparency = firstFrame.hasTransparency;
+				imageDocument_.SetDimensions(firstFrame.width, firstFrame.height,
+					firstFrame.hasTransparency);
 				currentSourcePageDimensions_ =
 					jpegview_linux::PageDimensions{firstFrame.width, firstFrame.height};
 			} else if (discardEditedPresentation) {
-				image_ = {};
+				imageDocument_.SetDimensions(0, 0, false);
 				currentSourcePageDimensions_.reset();
 			}
+		}
+		if (currentDecoded_ && !currentDecoded_->frames.empty()) {
+			const jpegview_linux::DecodedFrame& firstFrame =
+				currentDecoded_->frames.front();
+			imageDocument_.SetDimensions(firstFrame.width, firstFrame.height,
+				firstFrame.hasTransparency);
+			imageDocument_.SetFrameIndex(0);
+			imageDocument_.SetAnimation(currentDecoded_->animation);
 		}
 		bool waitingForJpegDimensions = false;
 		int sourceWidth = 0;
@@ -2242,8 +2253,7 @@ private:
 			jpegview_linux::SelectedSourcePreparationAction::UseCachedJpegDimensions) {
 			currentSourcePageDimensions_ =
 				jpegview_linux::PageDimensions{sourceWidth, sourceHeight};
-			image_.width = image_.originalWidth = sourceWidth;
-			image_.height = image_.originalHeight = sourceHeight;
+			imageDocument_.SetDimensions(sourceWidth, sourceHeight, false);
 			if (sessionStart.effects.restoreViewport) RestoreScaleMode(viewportSnapshot);
 			deferredCurrentDisplayPreparation_ = false;
 			RequestCurrentDisplayFrame();
@@ -2270,8 +2280,8 @@ private:
 				RequestSelectedSourceDecode(source, loadGeneration);
 			}
 		}
-		if (image_.width > 0 && image_.height > 0) {
-			cropSelection_.SetImageSize(image_.width, image_.height);
+		if (CurrentImage().width > 0 && CurrentImage().height > 0) {
+			cropSelection_.SetImageSize(CurrentImage().width, CurrentImage().height);
 		}
 		playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
 		if (waitingForJpegDimensions) {
@@ -2649,9 +2659,9 @@ private:
 		}
 		const std::size_t cacheCapacity = cacheBudget_->Capacity();
 		plannerRequest.maximumPreparedBytes = cacheCapacity;
-		if (image_.width > 0 && image_.height > 0) {
-			const std::size_t width = static_cast<std::size_t>(image_.width);
-			const std::size_t height = static_cast<std::size_t>(image_.height);
+		if (CurrentImage().width > 0 && CurrentImage().height > 0) {
+			const std::size_t width = static_cast<std::size_t>(CurrentImage().width);
+			const std::size_t height = static_cast<std::size_t>(CurrentImage().height);
 			const std::size_t maximum = std::numeric_limits<std::size_t>::max();
 			if (width <= maximum / height && width * height <= maximum / 4) {
 				std::size_t currentSourceBytes = width * height * 4;
@@ -2804,18 +2814,14 @@ private:
 			});
 	}
 
-	bool UpdateTexture() {
-		jpegview_linux::PerfContextScope workContext(
-			jpegview_linux::PerfWorkClass::ActiveImageSpread,
-			jpegview_linux::PerfExecution::EventThread);
-		SDL_Texture* newTexture = CreateTexture(image_);
-		if (newTexture == nullptr) {
-			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
-			return false;
-		}
+	const Image& CurrentImage() const {
+		return imageDocument_.Presentation();
+	}
+
+	void ReplaceCurrentTexture(SDL_Texture* replacement) {
 		ClearDisplayTexture();
 		if (texture_ != nullptr) DestroyTextureMeasured(texture_);
-		texture_ = newTexture;
+		texture_ = replacement;
 		if (!lastPresentedDisplayKey_.empty() &&
 			lastPresentedDisplayKey_ != transitionDisplayKey_ &&
 			lastPresentedDisplayKey_ != pendingTransitionFrame_.displayKey) {
@@ -2823,6 +2829,18 @@ private:
 				jpegview_linux::CacheProtectionTier::DistantSpeculation);
 			lastPresentedDisplayKey_.clear();
 		}
+	}
+
+	bool UpdateTexture() {
+		jpegview_linux::PerfContextScope workContext(
+			jpegview_linux::PerfWorkClass::ActiveImageSpread,
+			jpegview_linux::PerfExecution::EventThread);
+		SDL_Texture* newTexture = CreateTexture(CurrentImage());
+		if (newTexture == nullptr) {
+			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
+			return false;
+		}
+		ReplaceCurrentTexture(newTexture);
 		return true;
 	}
 
@@ -2868,6 +2886,288 @@ private:
 			jpegview_linux::PerfDiagnostics::Instance(),
 			jpegview_linux::PerfMetric::TextureDestroy, bytes);
 		SDL_DestroyTexture(texture);
+	}
+
+	void CancelPendingImageOperation() {
+		if (!pendingImageOperation_.has_value()) return;
+		ResumeImageOperationPlayback(*pendingImageOperation_);
+		pendingImageOperation_.reset();
+		imageOperationWorker_.Cancel();
+	}
+
+	void ResumeImageOperationPlayback(PendingImageOperation& pending) {
+		if (!pending.pausedAnimationPlayback) return;
+		pending.pausedAnimationPlayback = false;
+		playback_.SetImageReady(true, SDL_GetTicks());
+	}
+
+	void ShowImageOperationWaitingForSelectedCommit(ImageOperationPurpose purpose) {
+		if (purpose == ImageOperationPurpose::Save) {
+			fileDialogMessage_ = "Waiting for selected image";
+		} else if (purpose == ImageOperationPurpose::Resize) {
+			resizeDialog_.SetMessage("Waiting for selected image");
+		} else {
+			SetTitle("Waiting for selected image before image operation");
+		}
+	}
+
+	bool RequestImageOperation(const jpegview_linux::ImageOperationSpec& operation,
+		ImageOperationPurpose purpose, int transformCommand = 0, bool fullSize = true,
+		const fs::path& output = {},
+		bool replayingMaterializationIntent = false) {
+		if (fileList_.Empty()) return false;
+		const jpegview_linux::PendingImageOperationAdmission admission =
+			jpegview_linux::PlanPendingImageOperationAdmission(
+				pendingImageOperation_.has_value(), PendingImageIntentCount(),
+				currentSelectedLoadPending_, replayingMaterializationIntent);
+		if (admission == jpegview_linux::PendingImageOperationAdmission::Rejected) return false;
+		const jpegview_linux::SourceDescriptor source =
+			SourceDescriptorForPath(fileList_.Current());
+		if (!source.Valid() || source.Key() != imageDocument_.Source()) return false;
+		imageDocument_.UpdateProcessing(imageProcessing_, autoContrastEnabled_);
+		PendingImageOperation pending;
+		pending.purpose = purpose;
+		pending.operation = operation;
+		pending.document = imageDocument_.Snapshot();
+		pending.transformCommand = transformCommand;
+		pending.fullSize = fullSize;
+		pending.keepSpreadRotation = currentSpreadRotationValid_ || !imageModified_;
+		pending.output = output;
+		pendingImageOperation_ = std::move(pending);
+		if (admission ==
+			jpegview_linux::PendingImageOperationAdmission::WaitForSelectedCommit) {
+			ShowImageOperationWaitingForSelectedCommit(purpose);
+			return true;
+		}
+		return StartPendingImageOperation();
+	}
+
+	bool StartPendingImageOperation() {
+		if (!pendingImageOperation_.has_value()) return false;
+		PendingImageOperation& pending = *pendingImageOperation_;
+		if (pending.workerGeneration != 0) return true;
+		if (!imageDocument_.Matches(pending.document)) {
+			pendingImageOperation_.reset();
+			return false;
+		}
+		if (currentSelectedLoadPending_) {
+			ShowImageOperationWaitingForSelectedCommit(pending.purpose);
+			return true;
+		}
+
+		jpegview_linux::DecodedImageCache::ImagePtr decoded = currentDecoded_;
+		if (!decoded) {
+			const jpegview_linux::SourceDescriptor source =
+				SourceDescriptorForPath(fileList_.Current());
+			if (source.Key() == pending.document.source) {
+				decoded = imageCache_.Find(source);
+				if (decoded) currentDecoded_ = decoded;
+			}
+		}
+		if (!pending.document.sourcePixels && !decoded) {
+			const jpegview_linux::SourceDescriptor source =
+				SourceDescriptorForPath(fileList_.Current());
+			if (source.Key() != pending.document.source) {
+				pendingImageOperation_.reset();
+				return false;
+			}
+			RequestSelectedSourceDecode(source, pending.document.ownerGeneration);
+			if (pending.purpose == ImageOperationPurpose::Save) {
+				fileDialogMessage_ = "Preparing source pixels";
+			} else if (pending.purpose == ImageOperationPurpose::Resize) {
+				resizeDialog_.SetMessage("Preparing source pixels");
+			} else {
+				SetTitle("Preparing source pixels for image operation");
+			}
+			return true;
+		}
+		if (imageDocument_.Animated() && playback_.AnimationPlaying()) {
+			pending.pausedAnimationPlayback = true;
+			playback_.SetImageReady(false, SDL_GetTicks());
+		}
+		jpegview_linux::ImageOperationRequest request;
+		request.document = pending.document;
+		request.decoded = std::move(decoded);
+		request.operation = pending.operation;
+		pending.workerGeneration = imageOperationWorker_.Request(std::move(request));
+		if (pending.workerGeneration == 0) {
+			ResumeImageOperationPlayback(pending);
+			pendingImageOperation_.reset();
+			return false;
+		}
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+		if (pending.purpose == ImageOperationPurpose::Save) {
+			fileDialogMessage_ = "Preparing image pixels";
+		} else if (pending.purpose == ImageOperationPurpose::Resize) {
+			resizeDialog_.SetMessage("Preparing image pixels");
+		} else {
+			SetTitle("Preparing image operation");
+		}
+		return true;
+	}
+
+	void ReportImageOperationFailure(ImageOperationPurpose purpose,
+		const std::string& reason) {
+		const std::string detail = reason.empty() ? "operation failed" : reason;
+		switch (purpose) {
+		case ImageOperationPurpose::Save:
+			fileDialogMessage_ = "Cannot prepare image pixels: " + detail;
+			break;
+		case ImageOperationPurpose::Resize:
+			resizeDialog_.SetMessage("Resizing failed: " + detail);
+			break;
+		case ImageOperationPurpose::Transform:
+			SetTitle("Image transform failed: " + detail);
+			break;
+		case ImageOperationPurpose::Crop:
+			SetTitle("Crop failed: " + detail);
+			break;
+		case ImageOperationPurpose::Reprocess:
+			SetTitle("Picture-level processing failed: " + detail);
+			break;
+		case ImageOperationPurpose::CopyImage:
+		case ImageOperationPurpose::CopySelection:
+			SetTitle("Copy failed: " + detail);
+			break;
+		case ImageOperationPurpose::Print:
+			SetTitle("Print failed: " + detail);
+			break;
+		case ImageOperationPurpose::Wallpaper:
+			SetTitle("Set wallpaper failed: " + detail);
+			break;
+		case ImageOperationPurpose::Materialize:
+			SetTitle("Image pixels could not be prepared: " + detail);
+			break;
+		}
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+	}
+
+	bool OperationNeedsTexture(const PendingImageOperation& pending,
+		const jpegview_linux::ImageOperationResult& result) const {
+		if (pending.purpose == ImageOperationPurpose::Transform ||
+			pending.purpose == ImageOperationPurpose::Crop ||
+			pending.purpose == ImageOperationPurpose::Resize) return true;
+		return pending.purpose == ImageOperationPurpose::Reprocess &&
+			(result.modified || result.detached);
+	}
+
+	void TickImageOperation() {
+		std::optional<jpegview_linux::ImageOperationResult> result =
+			imageOperationWorker_.TakeReady();
+		if (!result.has_value()) return;
+		const auto replayLaterIntents = [this]() {
+			if (!pendingMaterializationIntents_.empty()) {
+				ReplayPendingMaterializationIntents();
+			}
+		};
+		if (!pendingImageOperation_.has_value() ||
+			pendingImageOperation_->workerGeneration != result->requestGeneration) {
+			imageOperationWorker_.Retire(std::move(*result));
+			replayLaterIntents();
+			return;
+		}
+		PendingImageOperation pending = std::move(*pendingImageOperation_);
+		pendingImageOperation_.reset();
+		if (!result->success || !imageDocument_.Matches(result->expected)) {
+			if (result->failure.kind != jpegview_linux::WorkerFailureKind::Cancelled) {
+				ReportImageOperationFailure(pending.purpose, result->failure.message);
+			}
+			ResumeImageOperationPlayback(pending);
+			imageOperationWorker_.Retire(std::move(*result));
+			replayLaterIntents();
+			return;
+		}
+
+		if (result->updatesDocument) {
+			SDL_Texture* replacementTexture = nullptr;
+			const bool needsTexture = OperationNeedsTexture(pending, *result);
+			if (needsTexture) {
+				jpegview_linux::PerfContextScope workContext(
+					jpegview_linux::PerfWorkClass::ActiveImageSpread,
+					jpegview_linux::PerfExecution::EventThread);
+				replacementTexture = CreateTexture(*result->presentationPixels);
+				if (replacementTexture == nullptr) {
+					ReportImageOperationFailure(pending.purpose,
+						"could not upload the completed image");
+					ResumeImageOperationPlayback(pending);
+					imageOperationWorker_.Retire(std::move(*result));
+					replayLaterIntents();
+					return;
+				}
+			}
+			jpegview_linux::RetiredImageBuffers retired;
+			if (!imageDocument_.Apply(*result, retired)) {
+				if (replacementTexture != nullptr) DestroyTextureMeasured(replacementTexture);
+				ResumeImageOperationPlayback(pending);
+				imageOperationWorker_.Retire(std::move(*result));
+				replayLaterIntents();
+				return;
+			}
+			if (replacementTexture != nullptr) ReplaceCurrentTexture(replacementTexture);
+			imageModified_ = imageDocument_.Modified();
+			currentPixelsDetachedFromSource_ = imageDocument_.Detached();
+			currentImageRotationQuarterTurns_ = imageDocument_.RotationQuarterTurns();
+			currentDisplayRequest_.reset();
+			if (result->flattenAnimation) {
+				playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
+				retired.decoded = std::move(currentDecoded_);
+			}
+			if (pending.purpose == ImageOperationPurpose::Transform) {
+				const bool rotated = pending.transformCommand == IDM_ROTATE_90 ||
+					pending.transformCommand == IDM_ROTATE_270;
+				currentSpreadRotationValid_ = rotated && pending.keepSpreadRotation;
+				ClearCropSelection();
+				CancelImageSpectrumBeforeImageMutation();
+				imageSession_.MarkDocumentChanged();
+				RestoreScaleMode(viewport_.Snapshot());
+			} else if (pending.purpose == ImageOperationPurpose::Crop ||
+				pending.purpose == ImageOperationPurpose::Resize) {
+				currentSpreadRotationValid_ = false;
+				CancelImageSpectrumBeforeImageMutation();
+				imageSession_.MarkDocumentChanged();
+				if (pending.purpose == ImageOperationPurpose::Crop) ClearCropSelection();
+				cropSelection_.SetImageSize(CurrentImage().width, CurrentImage().height);
+				RestoreScaleMode(viewport_.Snapshot());
+				if (pending.purpose == ImageOperationPurpose::Resize) CloseResizeDialog();
+			} else if (pending.purpose == ImageOperationPurpose::Reprocess &&
+				(result->modified || result->detached)) {
+				CancelImageSpectrumBeforeImageMutation();
+			}
+			imageOperationWorker_.Retire(std::move(retired));
+			RefreshDoublePageRenderState();
+			if (pending.purpose == ImageOperationPurpose::Transform ||
+				pending.purpose == ImageOperationPurpose::Crop ||
+				pending.purpose == ImageOperationPurpose::Resize) SetTitle();
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+		} else {
+			if (!result->outputPixels) {
+				ReportImageOperationFailure(pending.purpose, "no output pixels were produced");
+			} else {
+				const Image& output = *result->outputPixels;
+				switch (pending.purpose) {
+				case ImageOperationPurpose::Save:
+					CompleteImageSave(pending.output, output);
+					break;
+				case ImageOperationPurpose::CopyImage:
+					CopyPreparedImage(output, pending.fullSize, false);
+					break;
+				case ImageOperationPurpose::CopySelection:
+					CopyPreparedImage(output, true, true);
+					break;
+				case ImageOperationPurpose::Print:
+					PrintPreparedImage(output);
+					break;
+				case ImageOperationPurpose::Wallpaper:
+					SetWallpaperFromPreparedImage(output);
+					break;
+				default:
+					break;
+				}
+			}
+		}
+		ResumeImageOperationPlayback(pending);
+		imageOperationWorker_.Retire(std::move(*result));
+		replayLaterIntents();
 	}
 
 	SDL_Texture* CreateIncompleteDisplayTexture(
@@ -3651,6 +3951,7 @@ private:
 		if (displayAction == jpegview_linux::SourceRefreshDisplayAction::PreserveCurrentPixels &&
 			!fileList_.Empty()) {
 			currentPixelsDetachedFromSource_ = true;
+			imageDocument_.MarkDetached();
 			currentDisplayRequest_.reset();
 			deferredCurrentDisplayPreparation_ = false;
 			imageSession_.MarkDocumentChanged();
@@ -3674,7 +3975,7 @@ private:
 				const SDL_Rect area = ImageAreaRect();
 				const jpegview_linux::ViewportSnapshot snapshot = viewport_.Snapshot();
 				activeDoublePageRender_.reset();
-				viewport_.Restore(snapshot, image_.width, image_.height, area.w, area.h);
+				viewport_.Restore(snapshot, CurrentImage().width, CurrentImage().height, area.w, area.h);
 				currentDisplayRequest_.reset();
 			}
 		}
@@ -3705,10 +4006,10 @@ private:
 		}
 		const jpegview_linux::SourceDescriptor source =
 			SourceDescriptorForPath(fileList_.Current());
-		const int sourceWidth = image_.originalWidth > 0 ?
-			image_.originalWidth : image_.width;
-		const int sourceHeight = image_.originalHeight > 0 ?
-			image_.originalHeight : image_.height;
+		const int sourceWidth = CurrentImage().originalWidth > 0 ?
+			CurrentImage().originalWidth : CurrentImage().width;
+		const int sourceHeight = CurrentImage().originalHeight > 0 ?
+			CurrentImage().originalHeight : CurrentImage().height;
 		const jpegview_linux::DisplayImageTarget resolution =
 			jpegview_linux::ClampDisplayImageTarget(sourceWidth, sourceHeight,
 				width, height);
@@ -3774,7 +4075,7 @@ private:
 					includeSpectrum);
 			} else {
 				requested = jpegview_linux::MakeJpegDisplayImageRequest(
-					source, image_.originalWidth, image_.originalHeight,
+					source, CurrentImage().originalWidth, CurrentImage().originalHeight,
 					resolution.width, resolution.height,
 					autoContrastEnabled_, 0, imageProcessing_, 0,
 					includeSpectrum);
@@ -3801,7 +4102,7 @@ private:
 						includeSpectrum);
 				} else {
 					currentDisplayRequest_ = jpegview_linux::MakeJpegDisplayImageRequest(
-						source, image_.originalWidth, image_.originalHeight,
+						source, CurrentImage().originalWidth, CurrentImage().originalHeight,
 						bestRepresentation->cacheKey.targetWidth,
 						bestRepresentation->cacheKey.targetHeight,
 						autoContrastEnabled_, 0, imageProcessing_,
@@ -4005,12 +4306,12 @@ private:
 
 	TransitionFrame CaptureTransitionFrame() {
 		TransitionFrame frame;
-		if (transitionEffect_ == IDM_EFFECT_NONE || image_.width <= 0 || image_.height <= 0) {
+		if (transitionEffect_ == IDM_EFFECT_NONE || CurrentImage().width <= 0 || CurrentImage().height <= 0) {
 			return frame;
 		}
-		frame.width = image_.width;
-		frame.height = image_.height;
-		frame.hasTransparency = image_.hasTransparency;
+		frame.width = CurrentImage().width;
+		frame.height = CurrentImage().height;
+		frame.hasTransparency = CurrentImage().hasTransparency;
 		if (texture_ != nullptr) {
 			frame.texture = texture_;
 			frame.ownsTexture = true;
@@ -4418,23 +4719,13 @@ private:
 		SDL_SetTextureBlendMode(transitionTexture_, SDL_BLENDMODE_BLEND);
 		const SDL_Rect imageArea = ImageAreaRect();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
-			image_.width, image_.height, imageArea.w, imageArea.h);
+			CurrentImage().width, CurrentImage().height, imageArea.w, imageArea.h);
 		if (SDL_Texture* current = DisplayTextureFor(destination.width, destination.height)) {
 			SDL_SetTextureBlendMode(current, SDL_BLENDMODE_BLEND);
 		}
 		transitionStartTick_ = SDL_GetTicks();
 		transitionFrameTick_ = transitionStartTick_;
 		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Transition);
-	}
-
-	bool TransformImage(Image& image, int command) {
-		switch (command) {
-		case IDM_ROTATE_90: return image.Rotate(true);
-		case IDM_ROTATE_270: return image.Rotate(false);
-		case IDM_MIRROR_H: return image.Mirror(true);
-		case IDM_MIRROR_V: return image.Mirror(false);
-		default: return false;
-		}
 	}
 
 	void ApplyTransform(int command, bool replayPendingIntent = false) {
@@ -4446,39 +4737,33 @@ private:
 			(void)QueuePendingMaterializationIntent(intent);
 			return;
 		}
-		if (!MaterializeCurrentPixels()) {
-			if (currentMaterializationRequested_) {
-				jpegview_linux::PendingImageIntent intent;
-				intent.type = jpegview_linux::PendingImageIntentType::Transform;
-				intent.transform = command;
-				(void)QueuePendingMaterializationIntent(intent);
-			}
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::Transform;
+		switch (command) {
+		case IDM_ROTATE_90:
+			operation.transform = jpegview_linux::ImageTransformKind::RotateClockwise;
+			break;
+		case IDM_ROTATE_270:
+			operation.transform = jpegview_linux::ImageTransformKind::RotateCounterClockwise;
+			break;
+		case IDM_MIRROR_H:
+			operation.transform = jpegview_linux::ImageTransformKind::MirrorHorizontal;
+			break;
+		case IDM_MIRROR_V:
+			operation.transform = jpegview_linux::ImageTransformKind::MirrorVertical;
+			break;
+		default:
 			return;
 		}
-		ClearCropSelection();
-		CancelImageSpectrumBeforeImageMutation();
-		const bool canKeepSpreadRotation = currentSpreadRotationValid_ || !imageModified_;
-		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
-		if (!TransformImage(image_, command) ||
-			(correctionBaseValid_ && !TransformImage(correctionBase_, command)) || !UpdateTexture()) {
-			SetTitle("Image transform failed");
-			return;
+		if (!RequestImageOperation(operation, ImageOperationPurpose::Transform, command)) {
+			ReportImageOperationFailure(ImageOperationPurpose::Transform,
+				"another operation is pending or the selected source changed");
 		}
-		imageModified_ = true;
-		if (command == IDM_ROTATE_90 || command == IDM_ROTATE_270) {
-			const int turns = command == IDM_ROTATE_90 ? 1 : 3;
-			currentImageRotationQuarterTurns_ =
-				(currentImageRotationQuarterTurns_ + turns) % 4;
-			currentSpreadRotationValid_ = canKeepSpreadRotation;
-		} else {
-			currentSpreadRotationValid_ = false;
-		}
-		imageSession_.MarkDocumentChanged();
-		RestoreScaleMode(viewportSnapshot);
 	}
 
 	void ReplayPendingMaterializationIntents() {
-		if (currentSelectedLoadPending_ || fileList_.Empty()) return;
+		if (currentSelectedLoadPending_ || fileList_.Empty() ||
+			pendingImageOperation_.has_value()) return;
 		bool refreshTitleAtEnd = false;
 		while (!pendingMaterializationIntents_.empty()) {
 			const jpegview_linux::PendingImageIntent intent =
@@ -4489,27 +4774,66 @@ private:
 				refreshTitleAtEnd = true;
 				continue;
 			}
-			if (!MaterializeCurrentPixels()) {
-				if (currentMaterializationRequested_) return;
+			jpegview_linux::ImageOperationSpec operation;
+			ImageOperationPurpose purpose = ImageOperationPurpose::Materialize;
+			int transformCommand = 0;
+			if (intent.type == jpegview_linux::PendingImageIntentType::Transform) {
+				purpose = ImageOperationPurpose::Transform;
+				transformCommand = intent.transform;
+				operation.kind = jpegview_linux::ImageOperationKind::Transform;
+				switch (intent.transform) {
+				case IDM_ROTATE_90:
+					operation.transform = jpegview_linux::ImageTransformKind::RotateClockwise;
+					break;
+				case IDM_ROTATE_270:
+					operation.transform = jpegview_linux::ImageTransformKind::RotateCounterClockwise;
+					break;
+				case IDM_MIRROR_H:
+					operation.transform = jpegview_linux::ImageTransformKind::MirrorHorizontal;
+					break;
+				case IDM_MIRROR_V:
+					operation.transform = jpegview_linux::ImageTransformKind::MirrorVertical;
+					break;
+				default:
+					pendingMaterializationIntents_.erase(pendingMaterializationIntents_.begin());
+					continue;
+				}
+			} else if (intent.type == jpegview_linux::PendingImageIntentType::CopySelection) {
+				purpose = ImageOperationPurpose::CopySelection;
+				operation.kind = jpegview_linux::ImageOperationKind::CopySelection;
+				operation.left = intent.selectionLeft;
+				operation.top = intent.selectionTop;
+				operation.right = intent.selectionRight;
+				operation.bottom = intent.selectionBottom;
+			} else if (intent.type == jpegview_linux::PendingImageIntentType::CopyImage) {
+				purpose = ImageOperationPurpose::CopyImage;
+				operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
+				if (!intent.fullSize) {
+					operation.width = std::max(1, static_cast<int>(std::round(
+						CurrentImage().width * viewport_.Zoom())));
+					operation.height = std::max(1, static_cast<int>(std::round(
+						CurrentImage().height * viewport_.Zoom())));
+				}
+			} else if (intent.type == jpegview_linux::PendingImageIntentType::CropSelection) {
+				purpose = ImageOperationPurpose::Crop;
+				operation.kind = jpegview_linux::ImageOperationKind::Crop;
+				operation.left = intent.selectionLeft;
+				operation.top = intent.selectionTop;
+				operation.right = intent.selectionRight;
+				operation.bottom = intent.selectionBottom;
+			} else {
 				pendingMaterializationIntents_.erase(pendingMaterializationIntents_.begin());
 				continue;
 			}
-			pendingMaterializationIntents_.erase(pendingMaterializationIntents_.begin());
-			if (intent.type == jpegview_linux::PendingImageIntentType::Transform) {
-				ApplyTransform(intent.transform, true);
-				refreshTitleAtEnd = true;
-			} else if (intent.type == jpegview_linux::PendingImageIntentType::CopySelection) {
-				CopySelectionPixels({intent.selectionLeft, intent.selectionTop,
-					intent.selectionRight, intent.selectionBottom});
-				refreshTitleAtEnd = false;
-			} else if (intent.type == jpegview_linux::PendingImageIntentType::CopyImage) {
-				CopyImagePixels(intent.fullSize);
-				refreshTitleAtEnd = false;
+			if (!RequestImageOperation(operation, purpose, transformCommand,
+				intent.fullSize, {}, true)) {
+				pendingMaterializationIntents_.erase(pendingMaterializationIntents_.begin());
+				continue;
 			} else if (intent.type == jpegview_linux::PendingImageIntentType::CropSelection) {
-				(void)CropSelectionPixels({intent.selectionLeft, intent.selectionTop,
-					intent.selectionRight, intent.selectionBottom});
 				refreshTitleAtEnd = false;
 			}
+			pendingMaterializationIntents_.erase(pendingMaterializationIntents_.begin());
+			return;
 		}
 		if (refreshTitleAtEnd) SetTitle();
 	}
@@ -4522,12 +4846,16 @@ private:
 	}
 
 	void RefreshPictureLevels(bool refreshNeighbors = true) {
+		CancelPendingImageOperation();
 		imageSession_.UpdateProcessing({imageProcessing_, autoContrastEnabled_});
+		imageDocument_.UpdateProcessing(imageProcessing_, autoContrastEnabled_);
 		currentDisplayRequest_.reset();
-		if (imageModified_ || currentPixelsDetachedFromSource_ ||
-			cacheBudget_->Capacity() == 0) {
-			if (!MaterializeCurrentPixels() || !UpdateTexture()) {
-				SetTitle("Picture-level processing failed: could not update the image");
+		if (imageDocument_.SourcePixels() || imageModified_ ||
+			currentPixelsDetachedFromSource_) {
+			jpegview_linux::ImageOperationSpec operation;
+			operation.kind = jpegview_linux::ImageOperationKind::Reprocess;
+			if (!RequestImageOperation(operation, ImageOperationPurpose::Reprocess)) {
+				SetTitle("Picture-level processing could not be queued");
 				return;
 			}
 		}
@@ -4636,7 +4964,7 @@ private:
 			SetPendingImageTitle();
 			return;
 		}
-		if (fileList_.Empty() || image_.originalWidth <= 0 || image_.originalHeight <= 0) {
+		if (fileList_.Empty() || CurrentImage().originalWidth <= 0 || CurrentImage().originalHeight <= 0) {
 			SetTitle("JPEGView");
 			return;
 		}
@@ -4655,8 +4983,8 @@ private:
 		}
 		context.fullPath = currentPath.string();
 		context.directory = currentPath.parent_path().string();
-		context.width = image_.originalWidth;
-		context.height = image_.originalHeight;
+		context.width = CurrentImage().originalWidth;
+		context.height = CurrentImage().originalHeight;
 		if (source.Metadata().hasFileSize) context.fileSize = source.Metadata().fileSize;
 		context.applicationName = "JPEGView";
 		context.applicationVersion = JPEGVIEW_APP_VERSION;
@@ -4694,6 +5022,10 @@ private:
 	}
 
 	void CloseFileDialog(bool cancelPendingDrop = true) {
+		if (pendingImageOperation_.has_value() &&
+			pendingImageOperation_->purpose == ImageOperationPurpose::Save) {
+			CancelPendingImageOperation();
+		}
 		if (cancelPendingDrop &&
 			pendingFileListScanHandling_ == FileListScanHandling::DroppedInputs) {
 			fileListScanWorker_.Clear();
@@ -4759,7 +5091,7 @@ private:
 			return;
 		}
 		const jpegview_linux::SelectionRect aligned = jpegview_linux::CropSelectionModel::AlignToMcu(
-			cropSelection_.Rect(), image_.width, image_.height, mcuWidth, mcuHeight);
+			cropSelection_.Rect(), CurrentImage().width, CurrentImage().height, mcuWidth, mcuHeight);
 		if (!aligned.Valid()) {
 			SetTitle("Lossless crop is too small after JPEG block alignment");
 			return;
@@ -4885,10 +5217,6 @@ private:
 			SetTitle("Backed up picture-level parameters: " + savedName);
 			return;
 		}
-		if (!MaterializeCurrentPixels()) {
-			fileDialogMessage_ = "Cannot prepare image pixels";
-			return;
-		}
 		fs::path filename(fileDialogFilename_);
 		if (filename.extension().empty()) filename += ".jpg";
 		const fs::path output = AbsoluteNormalized(fileDialogDirectory_ / filename);
@@ -4899,16 +5227,21 @@ private:
 			return;
 		}
 
-		Image outputImage = image_;
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
 		if (!fileDialogSaveFullSize_) {
-			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * viewport_.Zoom())));
-			const int outputHeight = std::max(1, static_cast<int>(std::round(image_.height * viewport_.Zoom())));
-			if (!outputImage.Resize(outputWidth, outputHeight)) {
-				fileDialogMessage_ = "Cannot resize image for screen-size output";
-				return;
-			}
+			operation.width = std::max(1, static_cast<int>(std::round(
+				CurrentImage().width * viewport_.Zoom())));
+			operation.height = std::max(1, static_cast<int>(std::round(
+				CurrentImage().height * viewport_.Zoom())));
 		}
+		if (!RequestImageOperation(operation, ImageOperationPurpose::Save,
+			0, fileDialogSaveFullSize_, output)) {
+			fileDialogMessage_ = "Cannot prepare image pixels";
+		}
+	}
 
+	void CompleteImageSave(const fs::path& output, const Image& outputImage) {
 		jpegview_linux::ImageWriteOptions options;
 		std::string errorMessage;
 		if (!jpegview_linux::WriteImage(output, outputImage.bgra.data(), outputImage.width,
@@ -4986,40 +5319,41 @@ private:
 			(void)QueuePendingMaterializationIntent(intent);
 			return;
 		}
-		if (image_.width <= 0 || image_.height <= 0) return;
-		if (!MaterializeCurrentPixels()) {
-			if (currentMaterializationRequested_) {
-				jpegview_linux::PendingImageIntent intent;
-				intent.type = jpegview_linux::PendingImageIntentType::CopyImage;
-				intent.fullSize = fullSize;
-				(void)QueuePendingMaterializationIntent(intent);
-			}
-			return;
-		}
+		if (CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		CopyImagePixels(fullSize);
 	}
 
 	void CopyImagePixels(bool fullSize) {
-		if (image_.width <= 0 || image_.height <= 0) return;
-		Image copied = image_;
+		if (CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
 		if (!fullSize) {
-			const int outputWidth = std::max(1, static_cast<int>(std::round(image_.width * viewport_.Zoom())));
-			const int outputHeight = std::max(1, static_cast<int>(std::round(image_.height * viewport_.Zoom())));
-			if (!copied.Resize(outputWidth, outputHeight)) {
-				SetTitle("Copy failed: image is too large");
-				return;
-			}
+			operation.width = std::max(1, static_cast<int>(std::round(
+				CurrentImage().width * viewport_.Zoom())));
+			operation.height = std::max(1, static_cast<int>(std::round(
+				CurrentImage().height * viewport_.Zoom())));
 		}
+		if (!RequestImageOperation(operation, ImageOperationPurpose::CopyImage,
+			0, fullSize)) {
+			SetTitle("Copy failed: another operation is pending or the image is unavailable");
+		}
+	}
+
+	void CopyPreparedImage(const Image& copied, bool fullSize, bool selection) {
 		std::string errorMessage;
-		if (jpegview_linux::CopyImageToClipboard(copied.bgra.data(), copied.width, copied.height, errorMessage)) {
-			SetTitle(fullSize ? "Copied original-size image to clipboard" : "Copied displayed image to clipboard");
+		if (jpegview_linux::CopyImageToClipboard(copied.bgra.data(), copied.width,
+			copied.height, errorMessage)) {
+			SetTitle(selection ? "Copied selection to clipboard" : (fullSize ?
+				"Copied original-size image to clipboard" :
+				"Copied displayed image to clipboard"));
 		} else {
-			SetTitle("Copy image failed: " + errorMessage);
+			SetTitle(selection ? "Copy selection failed: " + errorMessage :
+				"Copy image failed: " + errorMessage);
 		}
 	}
 
 	bool CropCurrentSelection() {
-		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return false;
+		if (!cropSelection_.HasSelection() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return false;
 		const jpegview_linux::SelectionRect bounds = cropSelection_.Rect();
 		if (currentSelectedLoadPending_ || !pendingMaterializationIntents_.empty()) {
 			jpegview_linux::PendingImageIntent intent;
@@ -5030,69 +5364,22 @@ private:
 			intent.selectionBottom = bounds.bottom;
 			return QueuePendingMaterializationIntent(intent);
 		}
-		if (!MaterializeCurrentPixels()) {
-			if (currentMaterializationRequested_) {
-				jpegview_linux::PendingImageIntent intent;
-				intent.type = jpegview_linux::PendingImageIntentType::CropSelection;
-				intent.selectionLeft = bounds.left;
-				intent.selectionTop = bounds.top;
-				intent.selectionRight = bounds.right;
-				intent.selectionBottom = bounds.bottom;
-				return QueuePendingMaterializationIntent(intent);
-			}
-			return false;
-		}
 		return CropSelectionPixels(bounds);
 	}
 
 	bool CropSelectionPixels(const jpegview_linux::SelectionRect& bounds) {
-		if (!bounds.Valid() || image_.width <= 0 || image_.height <= 0) return false;
-		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
-		Image croppedBase;
-		const Image& sourceBase = correctionBaseValid_ ? correctionBase_ : image_;
-		if (!sourceBase.CopyCrop(bounds.left, bounds.top, bounds.right, bounds.bottom, croppedBase)) {
-			SetTitle("Crop failed: invalid selection or insufficient memory");
-			return false;
-		}
-		croppedBase.originalWidth = croppedBase.width;
-		croppedBase.originalHeight = croppedBase.height;
-		Image croppedImage;
-		if (!croppedBase.CopyCrop(0, 0, croppedBase.width, croppedBase.height, croppedImage)) {
-			SetTitle("Crop failed: insufficient memory for the processed image");
-			return false;
-		}
-		if (!croppedImage.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) {
-			SetTitle("Crop failed: picture-level processing could not be reapplied");
-			return false;
-		}
-		correctionBase_ = std::move(croppedBase);
-		correctionBaseValid_ = true;
-		CancelImageSpectrumBeforeImageMutation();
-		image_ = std::move(croppedImage);
-		currentPixelsMaterialized_ = true;
-		materializedProcessing_ = imageProcessing_;
-		materializedAutoContrast_ = autoContrastEnabled_;
-		if (currentDecoded_ && currentDecoded_->frames.size() > 1) {
-			playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
-		}
-		currentDecoded_.reset();
-		imageModified_ = true;
-		currentSpreadRotationValid_ = false;
-		imageSession_.MarkDocumentChanged();
-		currentDisplayRequest_.reset();
-		ClearCropSelection();
-		cropSelection_.SetImageSize(image_.width, image_.height);
-		if (!UpdateTexture()) {
-			SetTitle("Crop applied, but the display texture could not be refreshed");
-			return false;
-		}
-		RestoreScaleMode(viewportSnapshot);
-		SetTitle();
-		return true;
+		if (!bounds.Valid() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return false;
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::Crop;
+		operation.left = bounds.left;
+		operation.top = bounds.top;
+		operation.right = bounds.right;
+		operation.bottom = bounds.bottom;
+		return RequestImageOperation(operation, ImageOperationPurpose::Crop);
 	}
 
 	void CopyCurrentSelection() {
-		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return;
+		if (!cropSelection_.HasSelection() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		const jpegview_linux::SelectionRect bounds = cropSelection_.Rect();
 		if (currentSelectedLoadPending_ || !pendingMaterializationIntents_.empty()) {
 			jpegview_linux::PendingImageIntent intent;
@@ -5104,45 +5391,30 @@ private:
 			(void)QueuePendingMaterializationIntent(intent);
 			return;
 		}
-		if (!MaterializeCurrentPixels()) {
-			if (currentMaterializationRequested_) {
-				jpegview_linux::PendingImageIntent intent;
-				intent.type = jpegview_linux::PendingImageIntentType::CopySelection;
-				intent.selectionLeft = bounds.left;
-				intent.selectionTop = bounds.top;
-				intent.selectionRight = bounds.right;
-				intent.selectionBottom = bounds.bottom;
-				(void)QueuePendingMaterializationIntent(intent);
-			}
-			return;
-		}
 		CopySelectionPixels(bounds);
 	}
 
 	void CopySelectionPixels(const jpegview_linux::SelectionRect& bounds) {
-		if (!bounds.Valid() || image_.width <= 0 || image_.height <= 0) return;
-		Image copied;
-		if (!image_.CopyCrop(bounds.left, bounds.top, bounds.right, bounds.bottom, copied)) {
-			SetTitle("Copy selection failed: invalid selection or insufficient memory");
-			return;
-		}
-		std::string errorMessage;
-		if (jpegview_linux::CopyImageToClipboard(copied.bgra.data(), copied.width,
-			copied.height, errorMessage)) {
-			SetTitle("Copied selection to clipboard");
-		} else {
-			SetTitle("Copy selection failed: " + errorMessage);
+		if (!bounds.Valid() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::CopySelection;
+		operation.left = bounds.left;
+		operation.top = bounds.top;
+		operation.right = bounds.right;
+		operation.bottom = bounds.bottom;
+		if (!RequestImageOperation(operation, ImageOperationPurpose::CopySelection)) {
+			SetTitle("Copy selection failed: another operation is pending");
 		}
 	}
 
 	void ZoomToSelection() {
-		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return;
+		if (!cropSelection_.HasSelection() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		const jpegview_linux::SelectionRect bounds = cropSelection_.Rect();
 		const SDL_Rect imageArea = ImageAreaRect();
 		const SDL_Rect pageDestination = CurrentPageScreenRect(imageArea);
 		if (pageDestination.w <= 0 || pageDestination.h <= 0) return;
-		const double imageScaleX = static_cast<double>(pageDestination.w) / image_.width;
-		const double imageScaleY = static_cast<double>(pageDestination.h) / image_.height;
+		const double imageScaleX = static_cast<double>(pageDestination.w) / CurrentImage().width;
+		const double imageScaleY = static_cast<double>(pageDestination.h) / CurrentImage().height;
 		const double targetZoom = std::min(
 			static_cast<double>(std::max(1, imageArea.w)) /
 				(std::max(1.0, bounds.Width() * imageScaleX)),
@@ -5263,12 +5535,19 @@ private:
 	}
 
 	void PrintCurrentImage() {
-		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		if (fileList_.Empty() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
 			SetTitle("Printing images inside archives is unavailable");
 			return;
 		}
-		if (!MaterializeCurrentPixels()) return;
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
+		if (!RequestImageOperation(operation, ImageOperationPurpose::Print)) {
+			SetTitle("Print failed: image pixels could not be prepared");
+		}
+	}
+
+	void PrintPreparedImage(const Image& image) {
 		char temporaryDirectoryName[] = "/tmp/jpegview-print-XXXXXX";
 		if (mkdtemp(temporaryDirectoryName) == nullptr) {
 			SetTitle("Print failed: cannot create temporary file");
@@ -5278,8 +5557,8 @@ private:
 		const fs::path temporaryFile = temporaryDirectory / "image.png";
 		jpegview_linux::ImageWriteOptions options;
 		std::string errorMessage;
-		const bool written = jpegview_linux::WriteImage(temporaryFile, image_.bgra.data(), image_.width,
-			image_.height, options, errorMessage);
+		const bool written = jpegview_linux::WriteImage(temporaryFile, image.bgra.data(),
+			image.width, image.height, options, errorMessage);
 		if (!written) {
 			std::error_code removeError;
 			fs::remove_all(temporaryDirectory, removeError);
@@ -5423,7 +5702,7 @@ private:
 			const SDL_Rect area = ImageAreaRect();
 			const jpegview_linux::ViewportSnapshot snapshot = viewport_.Snapshot();
 			activeDoublePageRender_.reset();
-			viewport_.Restore(snapshot, image_.width, image_.height, area.w, area.h);
+			viewport_.Restore(snapshot, CurrentImage().width, CurrentImage().height, area.w, area.h);
 			currentDisplayRequest_.reset();
 		}
 	}
@@ -5707,37 +5986,49 @@ private:
 			SetTitle("Extract or save the image before setting it as wallpaper");
 			return;
 		}
-		fs::path wallpaperFile = fileList_.Current();
-		std::error_code error;
 		if (processed) {
-			if (!MaterializeCurrentPixels()) return;
-			const char* cacheHome = std::getenv("XDG_CACHE_HOME");
-			fs::path cacheDirectory;
-			if (cacheHome != nullptr && *cacheHome != '\0') {
-				cacheDirectory = fs::path(cacheHome) / "jpegview-linux";
-			} else {
-				const char* home = std::getenv("HOME");
-				if (home == nullptr || *home == '\0') {
-					SetTitle("Set wallpaper failed: home directory is unknown");
-					return;
-				}
-				cacheDirectory = fs::path(home) / ".cache" / "jpegview-linux";
+			jpegview_linux::ImageOperationSpec operation;
+			operation.kind = jpegview_linux::ImageOperationKind::PrepareOutput;
+			if (!RequestImageOperation(operation, ImageOperationPurpose::Wallpaper,
+				0, true)) {
+				SetTitle("Set wallpaper failed: image pixels could not be prepared");
 			}
-			fs::create_directories(cacheDirectory, error);
-			if (error) {
-				SetTitle("Set wallpaper failed: cannot create cache directory");
-				return;
-			}
-			wallpaperFile = cacheDirectory / "wallpaper.png";
-			jpegview_linux::ImageWriteOptions options;
-			std::string writeError;
-			if (!jpegview_linux::WriteImage(wallpaperFile, image_.bgra.data(), image_.width, image_.height,
-				options, writeError)) {
-				SetTitle("Set wallpaper failed: " + writeError);
-				return;
-			}
+			return;
 		}
+		ApplyWallpaperFile(fileList_.Current());
+	}
 
+	void SetWallpaperFromPreparedImage(const Image& image) {
+		const char* cacheHome = std::getenv("XDG_CACHE_HOME");
+		fs::path cacheDirectory;
+		if (cacheHome != nullptr && *cacheHome != '\0') {
+			cacheDirectory = fs::path(cacheHome) / "jpegview-linux";
+		} else {
+			const char* home = std::getenv("HOME");
+			if (home == nullptr || *home == '\0') {
+				SetTitle("Set wallpaper failed: home directory is unknown");
+				return;
+			}
+			cacheDirectory = fs::path(home) / ".cache" / "jpegview-linux";
+		}
+		std::error_code error;
+		fs::create_directories(cacheDirectory, error);
+		if (error) {
+			SetTitle("Set wallpaper failed: cannot create cache directory");
+			return;
+		}
+		const fs::path wallpaperFile = cacheDirectory / "wallpaper.png";
+		jpegview_linux::ImageWriteOptions options;
+		std::string writeError;
+		if (!jpegview_linux::WriteImage(wallpaperFile, image.bgra.data(), image.width,
+			image.height, options, writeError)) {
+			SetTitle("Set wallpaper failed: " + writeError);
+			return;
+		}
+		ApplyWallpaperFile(wallpaperFile);
+	}
+
+	void ApplyWallpaperFile(const fs::path& wallpaperFile) {
 		std::string errorMessage;
 		bool applied = false;
 		for (const jpegview_linux::ExternalCommandSequence& sequence :
@@ -6936,25 +7227,21 @@ private:
 
 	bool SetAnimationFrame(std::size_t index) {
 		if (!currentDecoded_ || index >= currentDecoded_->frames.size()) return false;
+		CancelPendingImageOperation();
 		CancelImageSpectrumBeforeImageMutation();
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		const jpegview_linux::DecodedFrame& frame = currentDecoded_->frames[index];
-		image_ = {};
+		jpegview_linux::RetiredImageBuffers retired = imageDocument_.SetFrame(
+			index, currentDecoded_->animation, frame.width, frame.height,
+			frame.hasTransparency);
+		imageOperationWorker_.Retire(std::move(retired));
 		imageModified_ = false;
 		currentPixelsDetachedFromSource_ = false;
-		currentPixelsMaterialized_ = false;
-		materializedProcessing_ = {};
-		materializedAutoContrast_ = false;
-		correctionBase_ = {};
-		correctionBaseValid_ = false;
 		currentImageRotationQuarterTurns_ = 0;
 		currentSpreadRotationValid_ = false;
 		editedImageSpectrumValid_ = false;
 		currentSourcePageDimensions_ =
 			jpegview_linux::PageDimensions{frame.width, frame.height};
-		image_.width = image_.originalWidth = frame.width;
-		image_.height = image_.originalHeight = frame.height;
-		image_.hasTransparency = frame.hasTransparency;
 		currentAnimationFrame_ = index;
 		currentDisplayRequest_.reset();
 		failedCurrentDisplayKey_.clear();
@@ -6993,7 +7280,7 @@ private:
 			SourceDescriptorForPath(fileList_.Current());
 		const jpegview_linux::SourceMetadata& sourceMetadata = source.Metadata();
 		lines.push_back(jpegview_linux::FormatImageDimensionsAndSize(
-			image_.originalWidth, image_.originalHeight,
+			CurrentImage().originalWidth, CurrentImage().originalHeight,
 			sourceMetadata.hasFileSize ? jpegview_linux::FormatFileSize(sourceMetadata.fileSize) :
 				std::string()));
 		if (currentDecoded_ && currentDecoded_->frames.size() > 1) {
@@ -7001,8 +7288,8 @@ private:
 				std::to_string(currentDecoded_->frames.size()));
 			lines.push_back(std::string("Playback: ") + (playback_.AnimationPlaying() ? "playing" : "paused"));
 		}
-		if (image_.width != image_.originalWidth || image_.height != image_.originalHeight) {
-			lines.push_back("Displayed size: " + std::to_string(image_.width) + " x " + std::to_string(image_.height));
+		if (CurrentImage().width != CurrentImage().originalWidth || CurrentImage().height != CurrentImage().originalHeight) {
+			lines.push_back("Displayed size: " + std::to_string(CurrentImage().width) + " x " + std::to_string(CurrentImage().height));
 		}
 		const std::string modificationDate = sourceMetadata.hasModificationTime ?
 			FormatUnixTime(sourceMetadata.modificationTimeNanoseconds / 1000000000ll) :
@@ -7059,8 +7346,8 @@ private:
 			<< source.Key().logicalPath.size() << ':' << source.Key().logicalPath << '|'
 			<< fileList_.CurrentIndex() << ':' << fileList_.Size() << '|'
 			<< CurrentImagePositionText().size() << ':' << CurrentImagePositionText() << '|'
-			<< image_.originalWidth << ':' << image_.originalHeight << '|'
-			<< image_.width << ':' << image_.height << '|'
+			<< CurrentImage().originalWidth << ':' << CurrentImage().originalHeight << '|'
+			<< CurrentImage().width << ':' << CurrentImage().height << '|'
 			<< playback_.FrameIndex() << ':' << playback_.AnimationPlaying() << '|'
 			<< (currentDecoded_ ? currentDecoded_->frames.size() : 0) << ':'
 			<< imageInfoMetadataRevision_;
@@ -7089,7 +7376,7 @@ private:
 			SourceDescriptorForPath(fileList_.Current());
 		if (!source.Key().Valid()) return std::nullopt;
 		return jpegview_linux::ImageSpectrumKey{source.Key(),
-			imageSession_.DocumentRevision(), currentAnimationFrame_,
+			imageDocument_.Revision(), currentAnimationFrame_,
 			jpegview_linux::EffectiveImageProcessingParams(imageProcessing_,
 				autoContrastEnabled_),
 			autoContrastEnabled_, currentImageRotationQuarterTurns_};
@@ -7139,7 +7426,7 @@ private:
 	}
 
 	void CancelImageSpectrumBeforeImageMutation() {
-		imageSpectrumWorker_.CancelAndWait();
+		imageSpectrumWorker_.Cancel();
 		editedImageSpectrumValid_ = false;
 		editedImageSpectrumKey_.reset();
 		editedImageSpectrumUnavailableKey_.reset();
@@ -7224,7 +7511,7 @@ private:
 				*currentSourceSpectrumUnavailableKey_ == *sourceKey) return;
 			if (currentSourceSpectrumRequestKey_.has_value() &&
 				*currentSourceSpectrumRequestKey_ == *sourceKey) return;
-			if (image_.width > 0) RequestCurrentDisplayFrame();
+			if (CurrentImage().width > 0) RequestCurrentDisplayFrame();
 			return;
 		}
 		if (!currentKey.has_value()) return;
@@ -7239,7 +7526,8 @@ private:
 			editedImageSpectrumRequestKey_.reset();
 			editedImageSpectrumRequestGeneration_ = 0;
 		}
-		const std::uint64_t generation = imageSpectrumWorker_.Request(image_, *currentKey);
+		const std::uint64_t generation = imageSpectrumWorker_.Request(
+			imageDocument_.PresentationPixels(), *currentKey);
 		if (generation == 0) {
 			editedImageSpectrumUnavailableKey_ = *currentKey;
 		} else {
@@ -7397,7 +7685,7 @@ private:
 	}
 
 	void OpenUnsharpMaskDialog() {
-		if (fileList_.Empty() || image_.width <= 0) return;
+		if (fileList_.Empty() || CurrentImage().width <= 0) return;
 		unsharpOriginalProcessing_ = imageProcessing_;
 		unsharpOriginalRadius_ = unsharpMaskRadius_;
 		unsharpOriginalAmount_ = unsharpMaskAmount_;
@@ -7592,7 +7880,7 @@ private:
 	}
 
 	void OpenPictureLevelsPanel() {
-		if (image_.width <= 0 || fileList_.Empty()) return;
+		if (CurrentImage().width <= 0 || fileList_.Empty()) return;
 		pictureLevelsPanelOpen_ = true;
 		levelsDraggingControl_ = -1;
 	}
@@ -7843,7 +8131,7 @@ private:
 			}
 			break;
 		case IDM_MARK_FOR_TOGGLE:
-			if (!clipboardMode_ && image_.width > 0 && image_.height > 0) {
+			if (!clipboardMode_ && CurrentImage().width > 0 && CurrentImage().height > 0) {
 				fileList_.MarkCurrentForToggle();
 			}
 			break;
@@ -8002,7 +8290,7 @@ private:
 			UpdateZoomNavigatorCursor(lastMouseX_, lastMouseY_);
 			break;
 		case jpegview_linux::kCommandToggleMagnifyingGlass:
-			if (image_.width > 0 && image_.height > 0 &&
+			if (CurrentImage().width > 0 && CurrentImage().height > 0 &&
 				(!fileList_.Empty() || clipboardMode_)) {
 				SetMagnifyingGlassEnabled(!magnifyingGlass_.Enabled());
 			}
@@ -8265,7 +8553,7 @@ private:
 		state.navigationMode = fileList_.GetNavigationMode();
 		state.sortMode = fileList_.GetSorting();
 		state.sortAscending = fileList_.IsSortedAscending();
-		state.imageAvailable = image_.width > 0;
+		state.imageAvailable = CurrentImage().width > 0;
 		state.archiveMember = archiveMember;
 		state.losslessJpegAvailable = !clipboardMode_ && !archiveMember && HasExecutable("jpegtran") &&
 			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
@@ -8279,7 +8567,7 @@ private:
 		state.userCropAspectWidth = cropUserAspectWidth_;
 		state.userCropAspectHeight = cropUserAspectHeight_;
 		state.autoCorrectionEnabled = autoContrastEnabled_;
-		state.pictureLevelsAvailable = !clipboardMode_ && !fileList_.Empty() && image_.width > 0;
+		state.pictureLevelsAvailable = !clipboardMode_ && !fileList_.Empty() && CurrentImage().width > 0;
 		state.localDensityEnabled = imageProcessing_.localDensityEnabled;
 		state.keepPictureLevels = keepPictureLevels_;
 		state.pictureLevelsSaved = !fileList_.Empty() && imageProcessingStore_.find(
@@ -8887,8 +9175,8 @@ private:
 	}
 
 	void OpenResizeDialog() {
-		if (image_.width <= 0 || image_.height <= 0) return;
-		resizeDialog_.Open(image_.width, image_.height);
+		if (CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
+		resizeDialog_.Open(CurrentImage().width, CurrentImage().height);
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
 		batchCopyDialog_.Close();
@@ -8907,42 +9195,18 @@ private:
 			resizeDialog_.SetMessage("Enter a valid size (maximum 65535 x 65535 / 100 MP)");
 			return;
 		}
-		if (width == image_.width && height == image_.height) {
+		if (width == CurrentImage().width && height == CurrentImage().height) {
 			CloseResizeDialog();
 			return;
 		}
-		if (!MaterializeCurrentPixels()) {
-			resizeDialog_.SetMessage("Cannot prepare image pixels");
-			return;
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::Resize;
+		operation.width = width;
+		operation.height = height;
+		operation.resizeFilter = resizeDialog_.Model().Filter();
+		if (!RequestImageOperation(operation, ImageOperationPurpose::Resize)) {
+			resizeDialog_.SetMessage("Resizing could not be queued");
 		}
-		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
-		Image resizedImage = correctionBaseValid_ ? correctionBase_ : image_;
-		if (!resizedImage.Resize(width, height, resizeDialog_.Model().Filter())) {
-			resizeDialog_.SetMessage("Resizing failed: not enough memory or the image is too large");
-			return;
-		}
-		resizedImage.originalWidth = width;
-		resizedImage.originalHeight = height;
-		correctionBase_ = std::move(resizedImage);
-		correctionBaseValid_ = true;
-		CancelImageSpectrumBeforeImageMutation();
-		image_ = correctionBase_;
-		if (!image_.ApplyProcessing(imageProcessing_, autoContrastEnabled_)) {
-			resizeDialog_.SetMessage("Image processing failed");
-			return;
-		}
-		materializedProcessing_ = imageProcessing_;
-		materializedAutoContrast_ = autoContrastEnabled_;
-		if (!UpdateTexture()) {
-			resizeDialog_.SetMessage("Resizing failed: could not update the display texture");
-			return;
-		}
-		imageModified_ = true;
-		currentSpreadRotationValid_ = false;
-		imageSession_.MarkDocumentChanged();
-		RestoreScaleMode(viewportSnapshot);
-		SetTitle();
-		CloseResizeDialog();
 	}
 
 	void HandleResizeDialogEvents(const SDL_Event& event, bool& running) {
@@ -10098,7 +10362,7 @@ private:
 	}
 
 	void OpenSaveFileDialog(bool fullSize) {
-		if (fileList_.Empty() || image_.width <= 0 || image_.height <= 0) return;
+		if (fileList_.Empty() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		const fs::path currentSource = fileList_.Current();
 		fs::path directory = jpegview_linux::IsArchiveMemberLocation(currentSource) ?
 			jpegview_linux::ArchiveBackingFile(currentSource).parent_path() : currentSource.parent_path();
@@ -10779,7 +11043,7 @@ private:
 	}
 
 	void RenderZoomReadout() {
-		if (!viewport_.FitRelativeZoomMode() || fileList_.Empty() || image_.width <= 0 ||
+		if (!viewport_.FitRelativeZoomMode() || fileList_.Empty() || CurrentImage().width <= 0 ||
 			static_cast<Sint32>(zoomReadoutVisibleUntil_ - SDL_GetTicks()) <= 0 ||
 			contextMenuOpen_ || fileDialogOpen_ || advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return;
@@ -11011,7 +11275,7 @@ private:
 	}
 
 	bool IsMagnifyingGlassVisibleAt(int screenX, int screenY) const {
-		if (!magnifyingGlass_.Enabled() || image_.width <= 0 || image_.height <= 0 ||
+		if (!magnifyingGlass_.Enabled() || CurrentImage().width <= 0 || CurrentImage().height <= 0 ||
 			dragging_ || cropMouseDragging_ ||
 			zoomNavigatorDragging_ || thumbnailPanelResizing_ || transitionTexture_ != nullptr ||
 			pictureLevelsPanelOpen_ || unsharpDialogOpen_ || contextMenuOpen_ || fileDialogOpen_ ||
@@ -11176,9 +11440,9 @@ private:
 		const SDL_Rect area = ImageAreaRect();
 		SDL_Rect displayed = CurrentPageScreenRect(area);
 		SDL_Texture* lensTexture = fallbackTexture;
-		int textureWidth = image_.width;
-		int textureHeight = image_.height;
-		bool hasTransparency = image_.hasTransparency;
+		int textureWidth = CurrentImage().width;
+		int textureHeight = CurrentImage().height;
+		bool hasTransparency = CurrentImage().hasTransparency;
 		if (fallbackTexture == displayTexture_) {
 			textureWidth = displayTextureWidth_;
 			textureHeight = displayTextureHeight_;
@@ -11293,7 +11557,7 @@ private:
 	}
 
 	bool BeginCropDrag(int screenX, int screenY) {
-		if (image_.width <= 0 || image_.height <= 0 || pictureLevelsPanelOpen_ ||
+		if (CurrentImage().width <= 0 || CurrentImage().height <= 0 || pictureLevelsPanelOpen_ ||
 			unsharpDialogOpen_ || resizeDialog_.IsOpen()) return false;
 		const SDL_Rect imageArea = ImageAreaRect();
 		const jpegview_linux::SelectionScreenRect destination = ImageDestinationScreenRect();
@@ -11306,11 +11570,11 @@ private:
 		const bool control = (modifiers & 0x00c0u) != 0;
 		const bool shift = (modifiers & 0x0003u) != 0;
 		const jpegview_linux::SelectionPoint point = jpegview_linux::CropSelectionModel::ScreenToImage(
-			screenX, screenY, destination, image_.width, image_.height);
+			screenX, screenY, destination, CurrentImage().width, CurrentImage().height);
 		if (cropSelection_.HasSelection()) {
 			const jpegview_linux::SelectionScreenRect selected =
 				jpegview_linux::CropSelectionModel::ToScreen(cropSelection_.Rect(), destination,
-					image_.width, image_.height);
+					CurrentImage().width, CurrentImage().height);
 			const auto handle = jpegview_linux::CropSelectionModel::HitTest(screenX, screenY,
 				selected, cropSelection_.Mode() == jpegview_linux::CropSelectionMode::FixedSize);
 			if (handle != jpegview_linux::CropSelectionHandle::None &&
@@ -11387,7 +11651,7 @@ private:
 			screenY < destination.y + destination.height) {
 			const jpegview_linux::SelectionScreenRect selected =
 				jpegview_linux::CropSelectionModel::ToScreen(cropSelection_.Rect(), destination,
-					image_.width, image_.height);
+					CurrentImage().width, CurrentImage().height);
 			const auto handle = jpegview_linux::CropSelectionModel::HitTest(screenX, screenY,
 				selected, cropSelection_.Mode() == jpegview_linux::CropSelectionMode::FixedSize);
 			SDL_Cursor* cursor = CropCursorForHandle(handle);
@@ -11415,7 +11679,7 @@ private:
 		interactionWorkPolicy_.NotifyActivity(
 			jpegview_linux::InteractionActivity::CropDrag);
 		const jpegview_linux::SelectionPoint point = jpegview_linux::CropSelectionModel::ScreenToImage(
-			screenX, screenY, ImageDestinationScreenRect(), image_.width, image_.height);
+			screenX, screenY, ImageDestinationScreenRect(), CurrentImage().width, CurrentImage().height);
 		const bool updated = cropSelection_.Update(point.x, point.y, viewport_.Zoom());
 		if (updated && (cropSelection_.Mode() == jpegview_linux::CropSelectionMode::FixedSize ||
 			std::abs(screenX - cropDragStartX_) >= 2 ||
@@ -11743,8 +12007,8 @@ private:
 			return {displayTexture_, displayTextureWidth_, displayTextureHeight_,
 				displayImage_.hasTransparency};
 		}
-		if (texture_ != nullptr && image_.width > 0 && image_.height > 0) {
-			return {texture_, image_.width, image_.height, image_.hasTransparency};
+		if (texture_ != nullptr && CurrentImage().width > 0 && CurrentImage().height > 0) {
+			return {texture_, CurrentImage().width, CurrentImage().height, CurrentImage().hasTransparency};
 		}
 		return {};
 	}
@@ -11853,11 +12117,11 @@ private:
 	}
 
 	void RenderCropSelection() {
-		if (!cropSelection_.HasSelection() || image_.width <= 0 || image_.height <= 0) return;
+		if (!cropSelection_.HasSelection() || CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		const jpegview_linux::SelectionScreenRect destination = ImageDestinationScreenRect();
 		const jpegview_linux::SelectionScreenRect selected =
 			jpegview_linux::CropSelectionModel::ToScreen(cropSelection_.Rect(), destination,
-				image_.width, image_.height);
+				CurrentImage().width, CurrentImage().height);
 		if (selected.width <= 0 || selected.height <= 0) return;
 		const int left = selected.x;
 		const int top = selected.y;
@@ -12213,7 +12477,7 @@ private:
 						jpegview_linux::InteractionActivity::Resize);
 					if (viewport_.IsFitToWindow()) {
 						FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
-					} else if (image_.width > 0) {
+					} else if (CurrentImage().width > 0) {
 						RefreshFitRelativeZoomBase();
 					}
 				}
@@ -12472,7 +12736,7 @@ private:
 		SDL_RenderFillRect(renderer_, &imageArea);
 		SDL_RenderSetClipRect(renderer_, &imageArea);
 		if (spreadTexturesReady) {
-			if (image_.hasTransparency) RenderTransparencyBackground(destination, imageArea);
+			if (CurrentImage().hasTransparency) RenderTransparencyBackground(destination, imageArea);
 			const auto partner = displayTextureCache_.find(doublePagePartnerDisplayKey_);
 			if (partner != displayTextureCache_.end() && partner->second.hasTransparency) {
 				RenderTransparencyBackground(nextPageDestination, imageArea);
@@ -12480,7 +12744,7 @@ private:
 			if (renderTexture != nullptr) SDL_RenderCopy(renderer_, renderTexture, nullptr, &destination);
 			SDL_RenderCopy(renderer_, nextPageTexture, nullptr, &nextPageDestination);
 		} else if (!suppressSingleImage) {
-			if (image_.hasTransparency ||
+			if (CurrentImage().hasTransparency ||
 				(transitionTexture_ != nullptr && transitionHasTransparency_)) {
 				RenderTransparencyBackground(destination, imageArea);
 			}
@@ -12646,6 +12910,8 @@ private:
 		std::numeric_limits<std::size_t>::max(), 0, {}, cacheBudget_};
 	jpegview_linux::DecodedImageCache imageCache_{
 		std::numeric_limits<std::size_t>::max(), {}, cacheBudget_, 2};
+	jpegview_linux::ImageDocument imageDocument_;
+	jpegview_linux::ImageOperationWorker imageOperationWorker_{cacheBudget_};
 	std::shared_ptr<DisplayPrefetchBatch> displayPrefetchBatch_;
 	std::shared_ptr<CurrentJpegDimensionsMailbox> currentJpegDimensionsMailbox_ =
 		std::make_shared<CurrentJpegDimensionsMailbox>();
@@ -12661,9 +12927,9 @@ private:
 	bool currentJpegHeaderPending_ = false;
 	bool currentSelectedLoadPending_ = false;
 	bool currentSelectedStartupLoad_ = false;
-	bool currentMaterializationRequested_ = false;
 	std::string pendingSelectedDisplayKey_;
 	std::vector<jpegview_linux::PendingImageIntent> pendingMaterializationIntents_;
+	std::optional<PendingImageOperation> pendingImageOperation_;
 	bool pendingImageIntentLimitReached_ = false;
 	std::uint64_t exifMetadataRequestGeneration_ = 0;
 	jpegview_linux::SourceKey exifMetadataSource_;
@@ -12685,19 +12951,15 @@ private:
 	Uint32 transitionStartTick_ = 0;
 	Uint32 transitionFrameTick_ = 0;
 	bool startFullscreen_ = false;
-	Image image_;
-	Image correctionBase_;
 	jpegview_linux::ImageSpectrumWorker imageSpectrumWorker_;
 	std::optional<jpegview_linux::PageDimensions> currentSourcePageDimensions_;
 	int currentImageRotationQuarterTurns_ = 0;
 	bool currentSpreadRotationValid_ = false;
 	jpegview_linux::ImageProcessingParams imageProcessing_;
 	jpegview_linux::ImageProcessingParams defaultImageProcessing_;
-	jpegview_linux::ImageProcessingParams materializedProcessing_;
 	jpegview_linux::ImageProcessingStore imageProcessingStore_;
 	jpegview_linux::ImageProcessingStore pendingParameterDbRestore_;
 	std::string pendingParameterDbRestoreSource_;
-	bool correctionBaseValid_ = false;
 	SDL_Window* window_ = nullptr;
 	SDL_Renderer* renderer_ = nullptr;
 	Uint32 completionWakeEventType_ = std::numeric_limits<Uint32>::max();
@@ -12725,8 +12987,6 @@ private:
 	jpegview_linux::DecodedImageCache::ImagePtr currentDecoded_;
 	std::size_t currentAnimationFrame_ = 0;
 	std::optional<jpegview_linux::DisplayImageRequest> currentDisplayRequest_;
-	bool currentPixelsMaterialized_ = false;
-	bool materializedAutoContrast_ = false;
 	SDL_Texture* transitionTexture_ = nullptr;
 	int transitionOriginalBlendMode_ = SDL_BLENDMODE_NONE;
 	int transitionWidth_ = 0;

@@ -897,17 +897,19 @@ if [ -n "$perf_trace_path" ]; then
 			$2 == "decode" && $4 == "worker_thread" &&
 				$6 == "active_image_spread" { worker_decode = 1 }
 			$2 == "processing" && $4 == "worker_thread" &&
-				$6 == "active_image_spread" { worker_processing = 1 }
+				$6 == "active_image_spread" {
+				worker_processing = 1
+				worker_pixel_operation_time = $1
+			}
 			$2 == "resampling" && $4 == "worker_thread" &&
 				$6 == "active_image_spread" { worker_resampling_time = $1 }
-			$2 == "processing" && $4 == "event_thread" &&
-				$6 == "active_image_spread" { transform_processing_time = $1 }
 			$2 == "texture_upload" && $4 == "event_thread" &&
 				$6 == "active_image_spread" {
 				if (worker_resampling_time != "" && $1 >= worker_resampling_time) {
 					prepared_upload = 1
 				}
-				if (transform_processing_time != "" && $1 >= transform_processing_time) {
+				if (worker_pixel_operation_time != "" && $1 >= worker_pixel_operation_time &&
+					$8 == 1200 && $9 == 1600) {
 					transform_upload = 1
 				}
 			}
@@ -917,7 +919,7 @@ if [ -n "$perf_trace_path" ]; then
 			END {
 				exit !(worker_source_read && worker_decode && worker_processing &&
 					worker_resampling_time != "" && prepared_upload &&
-					transform_processing_time != "" && transform_upload &&
+					worker_pixel_operation_time != "" && transform_upload &&
 					!event_source_read && !event_decode && !event_resampling)
 			}
 		' \
@@ -1365,6 +1367,48 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	fi
 	stop_viewer
 
+	# Resize must publish a replacement document and renderer texture from the
+	# asynchronous pixel worker without changing the original source file.
+	resize_directory="$temporary/resize-worker"
+	resize_config="$temporary/resize-worker-config"
+	mkdir -p "$resize_directory" "$resize_config/jpegview-linux"
+	convert -size 600x300 xc:red -fill blue -draw 'rectangle 300,0 599,299' \
+		"$resize_directory/01-resize.png"
+	printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$resize_config/jpegview-linux/settings.conf"
+	VIEWER_TEST_HOME="$temporary/resize-worker-home" \
+		VIEWER_TEST_CONFIG_HOME="$resize_config" \
+		launch_viewer "$resize_directory/01-resize.png"
+	assert_title_prefix "01-resize.png (600x300," "resize worker fixture did not load"
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+shift+r
+	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+a
+	DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 30 '50'
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+	assert_title_prefix "01-resize.png (300x150," \
+		"asynchronous resize did not commit the 50-percent document and texture"
+	if [ "$(identify -format '%wx%h' "$resize_directory/01-resize.png")" != "600x300" ]; then
+		echo "UI smoke test: in-memory resize unexpectedly changed the source file" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+		viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/resized-image.png"
+		resize_center_x=$((viewer_width / 2))
+		resize_center_y=$((viewer_height / 2))
+		resize_left=$(convert "$temporary/resized-image.png" -format \
+			"%[fx:p{$((resize_center_x - 50)),$resize_center_y}.r>0.75&&p{$((resize_center_x - 50)),$resize_center_y}.b<0.25]" info:)
+		resize_right=$(convert "$temporary/resized-image.png" -format \
+			"%[fx:p{$((resize_center_x + 50)),$resize_center_y}.b>0.75&&p{$((resize_center_x + 50)),$resize_center_y}.r<0.25]" info:)
+		if [ "$resize_left:$resize_right" != "1:1" ]; then
+			echo "UI smoke test: resized renderer texture did not preserve the two image halves ($resize_left:$resize_right)" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+
 	# A same-source resolution replacement must retain the last presented texture
 	# for every renderer tick while the replacement decode is blocked.
 	fallback_directory="$temporary/same-source-texture-fallback"
@@ -1545,6 +1589,82 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		done
 		if [ "$copied_animation_color" != "$second_animation_color" ]; then
 			echo "UI smoke test: second copied animation frame reused stale pixels ($second_animation_color/$copied_animation_color)" >&2
+			exit 1
+		fi
+		stop_viewer
+
+		# An edit must hold the visible animation frame until the worker publishes
+		# the flattened still. Fast animation used to cancel edits mid-operation.
+		animation_edit_directory="$temporary/animation-edit"
+		animation_edit_config="$temporary/animation-edit-config"
+		mkdir -p "$animation_edit_directory" "$animation_edit_config/jpegview-linux"
+		convert -size 3000x2000 xc:red -fill blue \
+			-draw 'rectangle 1500,0 2999,1999' "$temporary/animation-edit-first.png"
+		convert -size 3000x2000 xc:green -fill yellow \
+			-draw 'rectangle 1500,0 2999,1999' "$temporary/animation-edit-second.png"
+		convert -delay 1 "$temporary/animation-edit-first.png" \
+			-delay 1 "$temporary/animation-edit-second.png" -loop 0 \
+			"$animation_edit_directory/01-animated-edit.gif"
+		printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+			> "$animation_edit_config/jpegview-linux/settings.conf"
+		VIEWER_TEST_HOME="$temporary/animation-edit-home" \
+			VIEWER_TEST_CONFIG_HOME="$animation_edit_config" \
+			launch_viewer "$animation_edit_directory/01-animated-edit.gif"
+		assert_title_prefix "01-animated-edit.gif" "animated edit fixture did not load"
+		viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+		viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+		animation_edit_sample_x=$((viewer_width * 43 / 100))
+		animation_edit_top_y=$((viewer_height / 3))
+		animation_edit_bottom_y=$((viewer_height * 2 / 3))
+		animation_edit_ready=0
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/animation-edit-before.png"
+			animation_edit_top=$(convert "$temporary/animation-edit-before.png" \
+				-format "%[hex:p{$animation_edit_sample_x,$animation_edit_top_y}]" info:)
+			animation_edit_bottom=$(convert "$temporary/animation-edit-before.png" \
+				-format "%[hex:p{$animation_edit_sample_x,$animation_edit_bottom_y}]" info:)
+			case "$animation_edit_top:$animation_edit_bottom" in
+				FF0000:FF0000|008000:008000) animation_edit_ready=1; break ;;
+			esac
+			sleep 0.05
+		done
+		if [ "$animation_edit_ready" -ne 1 ]; then
+			echo "UI smoke test: animated edit source was not visible before rotation ($animation_edit_top:$animation_edit_bottom)" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool key --window "$window_id" Down
+		animation_edit_applied=0
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/animation-edit-after.png"
+			animation_edit_top=$(convert "$temporary/animation-edit-after.png" \
+				-format "%[hex:p{$animation_edit_sample_x,$animation_edit_top_y}]" info:)
+			animation_edit_bottom=$(convert "$temporary/animation-edit-after.png" \
+				-format "%[hex:p{$animation_edit_sample_x,$animation_edit_bottom_y}]" info:)
+			case "$animation_edit_top:$animation_edit_bottom" in
+				FF0000:0000FF|008000:FFFF00) animation_edit_applied=1; break ;;
+			esac
+			sleep 0.05
+		done
+		if [ "$animation_edit_applied" -ne 1 ]; then
+			echo "UI smoke test: rotation did not finish from a stable animation frame ($animation_edit_top:$animation_edit_bottom)" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		sleep 0.15
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/animation-edit-stable.png"
+		stable_edit_top=$(convert "$temporary/animation-edit-stable.png" \
+			-format "%[hex:p{$animation_edit_sample_x,$animation_edit_top_y}]" info:)
+		stable_edit_bottom=$(convert "$temporary/animation-edit-stable.png" \
+			-format "%[hex:p{$animation_edit_sample_x,$animation_edit_bottom_y}]" info:)
+		if [ "$stable_edit_top:$stable_edit_bottom" != \
+			"$animation_edit_top:$animation_edit_bottom" ]; then
+			echo "UI smoke test: successful animation edit did not remain flattened ($animation_edit_top:$animation_edit_bottom -> $stable_edit_top:$stable_edit_bottom)" >&2
+			cat "$temporary/viewer.log" >&2
 			exit 1
 		fi
 		stop_viewer

@@ -254,9 +254,10 @@ bool Image::StoreBGRA(const std::uint8_t* bgraPixels, int imageWidth, int imageH
 	return true;
 }
 
-bool Image::CopyCrop(int left, int top, int right, int bottom, Image& output) const {
+bool Image::CopyCrop(int left, int top, int right, int bottom, Image& output,
+	const std::function<bool()>& shouldContinue) const {
 	if (!HasValidPixels(*this) || left < 0 || top < 0 || right > width || bottom > height ||
-		right <= left || bottom <= top) return false;
+		right <= left || bottom <= top || !ContinueWork(shouldContinue)) return false;
 	const int croppedWidth = right - left;
 	const int croppedHeight = bottom - top;
 	std::vector<std::uint8_t> cropped;
@@ -267,6 +268,7 @@ bool Image::CopyCrop(int left, int top, int right, int bottom, Image& output) co
 	}
 	const std::size_t rowBytes = static_cast<std::size_t>(croppedWidth) * 4;
 	for (int y = 0; y < croppedHeight; ++y) {
+		if (!ContinueAtRow(y, shouldContinue)) return false;
 		const std::size_t sourceOffset = (static_cast<std::size_t>(top + y) * width + left) * 4;
 		const std::size_t targetOffset = static_cast<std::size_t>(y) * rowBytes;
 		std::copy_n(bgra.data() + sourceOffset, rowBytes, cropped.data() + targetOffset);
@@ -315,8 +317,8 @@ bool Image::Rotate(bool clockwise, const std::function<bool()>& shouldContinue) 
 	return true;
 }
 
-bool Image::Mirror(bool horizontal) {
-	if (!HasValidPixels(*this)) return false;
+bool Image::Mirror(bool horizontal, const std::function<bool()>& shouldContinue) {
+	if (!HasValidPixels(*this) || !ContinueWork(shouldContinue)) return false;
 	std::vector<std::uint8_t> transformed;
 	try {
 		transformed.resize(bgra.size());
@@ -324,6 +326,7 @@ bool Image::Mirror(bool horizontal) {
 		return false;
 	}
 	for (int sourceY = 0; sourceY < height; ++sourceY) {
+		if (!ContinueAtRow(sourceY, shouldContinue)) return false;
 		for (int sourceX = 0; sourceX < width; ++sourceX) {
 			const int targetX = horizontal ? width - sourceX - 1 : sourceX;
 			const int targetY = horizontal ? sourceY : height - sourceY - 1;
@@ -332,6 +335,7 @@ bool Image::Mirror(bool horizontal) {
 			std::copy_n(bgra.data() + sourceOffset, 4, transformed.data() + targetOffset);
 		}
 	}
+	if (!ContinueWork(shouldContinue)) return false;
 	bgra.swap(transformed);
 	return true;
 }

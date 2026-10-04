@@ -148,6 +148,15 @@ should normally be added to one of these focused modules and covered by `tests/t
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality downsampling, Catmull–Rom bicubic enlargement, and the automatic/manual picture-level
   processing pipeline.
+- `image_document`: lazy current-image metadata plus immutable, shared source and presentation pixels,
+  owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
+  and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer
+  instead of copying a second full-resolution image.
+- `image_operation_worker`: cancellable CPU-admitted transform, crop, resize, materialize, reprocess,
+  selection-copy, and output-size preparation requests. Each request captures an `ImageDocumentSnapshot`;
+  only a matching successful revision can be applied. Viewer creates any replacement SDL texture before
+  swapping document pixels, so failure or staleness preserves the last successful presentation. Large
+  result and decoded-buffer references retire off the event thread.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
   move/resize hit testing, image/view coordinate conversion, crop-mode drag eligibility, and JPEG
   MCU-boundary alignment; pixel-buffer cropping remains in `image`.
@@ -487,6 +496,17 @@ Timed playback produces no navigation while the current JPEG header is pending a
 slideshow or movie interval from the successful display commit. Rotate and mirror commands wait for
 the matching header continuation before materializing pixels; a pending slideshow transition retains
 the outgoing frame and starts when the incoming image is ready.
+Pixel-edit workers operate on immutable source snapshots and validate the selected owner, document
+revision, and animation frame before publication. The SDL thread creates a replacement texture first,
+then applies the new pixels and retires replaced buffers through the shared cache retirement service.
+For animated sources, frame-bound operations pause readiness while the captured frame is processed;
+failure or cancellation resumes playback, while a successful edit keeps that frame as a still image.
+Viewport pan/zoom can continue during work and final fit/manual mode restoration uses the live viewport
+snapshot. Failure leaves the current document and texture intact; replacing the selected source cancels
+the operation. A direct pixel operation cannot pass an earlier queued image intent; if it is accepted
+while the matching source is still loading, it starts after the successful display commit and later
+queued intents resume after that operation succeeds or fails. Editing an animated image flattens the
+captured displayed frame.
 Navigation reports a completed move, a hard boundary, or a pending directory scan separately. A timed
 advance suspends readiness while its forward-boundary scan runs; if the scan finds no target or fails,
 playback stops so its expired deadline cannot drive repeated redraws. Replacing or abandoning that scan
@@ -854,13 +874,13 @@ carries that compact result with the prepared frame and texture. File-backed JPE
 full-resolution decode in this optional mode to preserve histogram values; ordinary fitted-JPEG
 requests retain reduced-DCT decoding. Painting does not materialize source pixels or rescan the image.
 Edited images compute a replacement spectrum on a generation-keyed CPU worker only while the
-histogram is requested. The worker reads the current mutable image buffer under an explicit borrow;
-the owner cancels and joins it before any pixel mutation, replacement, or teardown. Stale source,
-document, frame, and processing results are discarded. The overlay displays a loading or unavailable
-line while no matching result exists. Formatted information lines and the complete clipped paint plan
-are cached by source/document state and window geometry; pointer motion only recolors the cached
-histogram button. Pango measurement and text clipping remain on the SDL thread and run only when that
-cache key changes.
+histogram is requested. Each request retains immutable shared pixel storage; cancellation invalidates
+the result generation without blocking the SDL thread, and final pixel ownership is released through
+the worker retirement path. Stale source, document, frame, and processing results are discarded. The
+overlay displays a loading or unavailable line while no matching result exists. Formatted information
+lines and the complete clipped paint plan are cached by source/document state and window geometry;
+pointer motion only recolors the cached histogram button. Pango measurement and text clipping remain
+on the SDL thread and run only when that cache key changes.
 For fitted JPEGs, header dimensions are cached by file size and modification time and workers decode
 the smallest native libjpeg scale that covers the stable viewport. This makes renderer-ready textures,
 rather than ~96 MiB source frames, the primary navigation cache for high-resolution photo folders.
