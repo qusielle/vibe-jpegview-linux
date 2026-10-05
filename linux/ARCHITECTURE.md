@@ -134,7 +134,10 @@ should normally be added to one of these focused modules and covered by the matc
   on the generic source operations. Catalog/listing and member-extraction tasks acquire the shared
   source lane using the backing container identity. Extraction carries its original archive member
   context into temporary-file decoding, so nested codec calls do not admit the temp path as a new
-  source or lose cancellation for the archive read.
+  source or lose cancellation for the archive read. The extension policy for navigable archive
+  containers is separate from the policy for containers accepted by internal member resolution;
+  embedded document formats can therefore expose one bounded preview without appearing as folders
+  in navigation or the open dialog.
 - `seven_zip_backend.h` and its selected implementation: the optional `seven_zip_backend_7zip.cpp`
   wraps the official 7-Zip 24.09 `Format7zF` shared library through `IInArchive`, `IInStream`, and
   per-operation callbacks. A private handler and archive stream are created for each catalog or

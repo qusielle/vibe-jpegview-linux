@@ -193,6 +193,14 @@ bool HasArchiveExtension(const fs::path& path) {
 		(name.size() >= 4 && name.compare(name.size() - 4, 4, ".tgz") == 0);
 }
 
+// Archive-member resolution and archive navigation have different format
+// policies. Keep the public container classification behind this predicate so
+// embedded documents can use bounded member extraction without becoming
+// browseable archives in the file list and open dialog.
+bool IsBrowsableArchiveExtension(const fs::path& path) {
+	return HasArchiveExtension(path);
+}
+
 bool SafeMemberPath(std::string_view name, bool directory, std::string& normalized) {
 	normalized.clear();
 	if (name.empty() || name.front() == '/' || name.find('\0') != std::string_view::npos) return false;
@@ -452,11 +460,11 @@ bool MakePrivateMemberFile(const std::filesystem::path& memberPath,
 using namespace archive_detail;
 
 bool IsArchiveContainerName(const fs::path& path) {
-	return HasArchiveExtension(path);
+	return IsBrowsableArchiveExtension(path);
 }
 
 bool IsArchiveContainerFile(const fs::path& path) {
-	if (!HasArchiveExtension(path)) return false;
+	if (!IsBrowsableArchiveExtension(path)) return false;
 	std::error_code error;
 	return fs::is_regular_file(path, error) && !error;
 }
@@ -489,7 +497,7 @@ std::string ArchiveFormatDisplayName(ArchiveFormat format, const fs::path& archi
 } // namespace
 
 std::string ArchiveContainerFormatName(const fs::path& path) {
-	if (!HasArchiveExtension(path)) return {};
+	if (!IsBrowsableArchiveExtension(path)) return {};
 	return ArchiveFormatDisplayName(FormatForContainerName(path), path);
 }
 
