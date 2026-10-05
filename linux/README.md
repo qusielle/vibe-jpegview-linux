@@ -1142,7 +1142,8 @@ preparation, EXIF timestamp changes, and desktop process waits run on a backgrou
 worker, keeping the viewer's event thread available while they run. Batch cancellation stops between
 files and reports completed changes without undoing them. Batch renames never replace a destination,
 including one created after the operation's initial check. Batch copies preserve source permissions
-and modification times, and each copy appears only after its contents are complete. Lossless JPEG
+and modification times. Their temporary siblings stay private while data is copied, and each copy
+appears only after its contents are complete. Lossless JPEG
 output is published from a temporary sibling only after the transform succeeds. Encoded image saves
 also use an atomic temporary sibling, preserving an existing output's permissions and symlink
 destination. Overwrite prompts are still confirmed before the operation starts. A pending save keeps

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -31,6 +32,10 @@ using LosslessCropPublicationTestHook = void (*)(void*);
 using ImageSavePublicationTestHook = void (*)(void*);
 using BatchRenameBeforeMoveTestHook = void (*)(
 	const std::filesystem::path&, const std::filesystem::path&, bool*, void*);
+using BatchCopyChunkTestHook = void (*)(
+	const std::filesystem::path&, std::size_t, void*);
+using BatchCopyBeforePublishTestHook = void (*)(
+	const std::filesystem::path&, void*);
 } // namespace detail
 void SetLosslessCropPublicationTestHookForTesting(
 	detail::LosslessCropPublicationTestHook hook, void* context);
@@ -38,6 +43,10 @@ void SetImageSavePublicationTestHookForTesting(
 	detail::ImageSavePublicationTestHook hook, void* context);
 void SetBatchRenameBeforeMoveTestHookForTesting(
 	detail::BatchRenameBeforeMoveTestHook hook, void* context);
+void SetBatchCopyChunkTestHookForTesting(
+	detail::BatchCopyChunkTestHook hook, void* context);
+void SetBatchCopyBeforePublishTestHookForTesting(
+	detail::BatchCopyBeforePublishTestHook hook, void* context);
 #endif
 
 struct SaveImageOperation {

@@ -2400,6 +2400,167 @@ void TestBatchCancellationStopsBetweenFiles() {
 		"batch cancellation did not stop between files while preserving completed work");
 }
 
+void TestBatchCopyTemporaryRemainsPrivateUntilPublication() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "copy-private";
+	fs::create_directories(directory);
+	const fs::path source = directory / "source.jpg";
+	const fs::path destination = directory / "copy.jpg";
+	std::vector<std::uint8_t> contents(2u * 1024u * 1024u, 0x5a);
+	WriteBytes(source, contents);
+	Expect(::chmod(source.c_str(), 0644) == 0,
+		"cannot set source permissions for private-copy test");
+
+	struct CopyPauseState {
+		std::mutex mutex;
+		std::condition_variable changed;
+		bool paused = false;
+		bool release = false;
+		std::size_t copiedBytes = 0;
+		fs::path temporary;
+	};
+	CopyPauseState pause;
+	auto pauseAfterChunk = [](const fs::path& temporaryPath,
+		std::size_t copiedBytes, void* opaque) {
+		auto& state = *static_cast<CopyPauseState*>(opaque);
+		std::unique_lock<std::mutex> lock(state.mutex);
+		if (state.paused) return;
+		state.temporary = temporaryPath;
+		state.copiedBytes = copiedBytes;
+		state.paused = true;
+		state.changed.notify_all();
+		state.changed.wait(lock, [&state] { return state.release; });
+	};
+	jpegview_linux::BatchCopyOperation batch;
+	jpegview_linux::BatchCopyItem copy;
+	copy.source = source;
+	copy.destination = destination;
+	copy.selected = true;
+	copy.copy = true;
+	batch.items.push_back(copy);
+	jpegview_linux::SetBatchCopyChunkTestHookForTesting(pauseAfterChunk, &pause);
+	auto operation = std::async(std::launch::async, [batch = std::move(batch)]() mutable {
+		return jpegview_linux::ExecuteFileOperation(
+			jpegview_linux::FileOperationPayload{std::move(batch)}, 1,
+			[] { return true; });
+	});
+	bool reachedCopyBarrier = false;
+	std::size_t bytesAtBarrier = 0;
+	fs::path temporaryAtBarrier;
+	{
+		std::unique_lock<std::mutex> lock(pause.mutex);
+		reachedCopyBarrier = pause.changed.wait_for(lock, std::chrono::seconds(2),
+			[&pause] { return pause.paused; });
+		if (reachedCopyBarrier) {
+			bytesAtBarrier = pause.copiedBytes;
+			temporaryAtBarrier = pause.temporary;
+		}
+	}
+	struct stat intermediateStatus{};
+	const bool privateDuringCopy = reachedCopyBarrier && bytesAtBarrier > 0 &&
+		bytesAtBarrier < contents.size() &&
+		::stat(temporaryAtBarrier.c_str(), &intermediateStatus) == 0 &&
+		static_cast<std::size_t>(intermediateStatus.st_size) == bytesAtBarrier &&
+		(intermediateStatus.st_mode & 0777) == 0600;
+	{
+		std::lock_guard<std::mutex> lock(pause.mutex);
+		pause.release = true;
+	}
+	pause.changed.notify_all();
+	const bool operationCompleted = operation.wait_for(std::chrono::seconds(3)) ==
+		std::future_status::ready;
+	jpegview_linux::SetBatchCopyChunkTestHookForTesting(nullptr, nullptr);
+	if (!operationCompleted) {
+		Expect(false, "batch copy did not finish after its test barrier was released");
+	}
+	const auto copied = operation.get();
+	struct stat destinationStatus{};
+	Expect(privateDuringCopy && copied.success && copied.batch.copied == 1 &&
+		ReadBytes(destination) == contents &&
+		::stat(destination.c_str(), &destinationStatus) == 0 &&
+		(destinationStatus.st_mode & 0777) == 0644,
+		"batch-copy contents became public before transfer completed or metadata was lost");
+	std::error_code iteratorError;
+	for (const fs::directory_entry& entry : fs::directory_iterator(directory,
+		iteratorError)) {
+		Expect(entry.path() == source || entry.path() == destination,
+			"completed batch copy left a temporary sibling behind");
+	}
+	Expect(!iteratorError, "cannot inspect completed batch-copy directory");
+
+	const fs::path lateDirectory = temporary.path() / "copy-late-target";
+	fs::create_directories(lateDirectory);
+	const fs::path lateSource = lateDirectory / "source.jpg";
+	const fs::path lateDestination = lateDirectory / "copy.jpg";
+	WriteBytes(lateSource, {1, 2, 3, 4});
+	std::string lateContents = "late target remains";
+	auto createLateCopyTarget = [](const fs::path& target, void* opaque) {
+		WriteText(target, *static_cast<const std::string*>(opaque));
+	};
+	jpegview_linux::BatchCopyItem lateCopy;
+	lateCopy.source = lateSource;
+	lateCopy.destination = lateDestination;
+	lateCopy.selected = true;
+	lateCopy.copy = true;
+	jpegview_linux::BatchCopyOperation lateBatch;
+	lateBatch.items.push_back(lateCopy);
+	jpegview_linux::SetBatchCopyBeforePublishTestHookForTesting(
+		createLateCopyTarget, &lateContents);
+	const auto lateCopyResult = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(lateBatch)}, 2,
+		[] { return true; });
+	jpegview_linux::SetBatchCopyBeforePublishTestHookForTesting(nullptr, nullptr);
+	Expect(lateCopyResult.batch.copied == 0 && lateCopyResult.batch.failed == 1 &&
+		lateCopyResult.batch.completed == 0 && ReadBytes(lateSource) ==
+		std::vector<std::uint8_t>({1, 2, 3, 4}) &&
+		ReadBytes(lateDestination) == std::vector<std::uint8_t>({
+			'l', 'a', 't', 'e', ' ', 't', 'a', 'r', 'g', 'e', 't', ' ', 'r', 'e', 'm', 'a', 'i', 'n', 's'}),
+		"batch-copy publication replaced a destination created after its check");
+	iteratorError.clear();
+	for (const fs::directory_entry& entry : fs::directory_iterator(lateDirectory,
+		iteratorError)) {
+		Expect(entry.path() == lateSource || entry.path() == lateDestination,
+			"late-target batch-copy failure left a temporary sibling behind");
+	}
+	Expect(!iteratorError, "cannot inspect late-target batch-copy directory");
+
+	const fs::path canceledDirectory = temporary.path() / "copy-canceled";
+	fs::create_directories(canceledDirectory);
+	const fs::path canceledSource = canceledDirectory / "source.jpg";
+	const fs::path canceledDestination = canceledDirectory / "copy.jpg";
+	WriteBytes(canceledSource, contents);
+	std::atomic<bool> keepCopying{true};
+	const auto cancelAfterChunk = [](const fs::path&, std::size_t, void* opaque) {
+		static_cast<std::atomic<bool>*>(opaque)->store(false, std::memory_order_release);
+	};
+	jpegview_linux::BatchCopyOperation canceledBatch;
+	jpegview_linux::BatchCopyItem canceledItem;
+	canceledItem.source = canceledSource;
+	canceledItem.destination = canceledDestination;
+	canceledItem.selected = true;
+	canceledItem.copy = true;
+	canceledBatch.items.push_back(canceledItem);
+	jpegview_linux::SetBatchCopyChunkTestHookForTesting(cancelAfterChunk,
+		&keepCopying);
+	const auto canceled = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(canceledBatch)}, 2,
+		[&keepCopying] {
+			return keepCopying.load(std::memory_order_acquire);
+		});
+	jpegview_linux::SetBatchCopyChunkTestHookForTesting(nullptr, nullptr);
+	Expect(canceled.cancelled && !canceled.success && canceled.batch.completed == 0 &&
+		fs::exists(canceledSource) && !fs::exists(canceledDestination) &&
+		ReadBytes(canceledSource) == contents,
+		"canceled batch copy published partial data or changed its source");
+	iteratorError.clear();
+	for (const fs::directory_entry& entry : fs::directory_iterator(canceledDirectory,
+		iteratorError)) {
+		Expect(entry.path() == canceledSource,
+			"canceled batch copy left its private temporary sibling behind");
+	}
+	Expect(!iteratorError, "cannot inspect canceled batch-copy directory");
+}
+
 void TestFileOperationClipboardTemporaryCleanupAndFallback() {
 	TemporaryDirectory temporary;
 	const fs::path bin = temporary.path() / "bin";
@@ -3471,6 +3632,7 @@ const TestCase kTests[] = {
 	{"file-operation-save-and-batch-policies", &TestFileOperationSaveAndBatchPolicies},
 	{"image-save-does-not-replace-unconfirmed-late-target", &TestImageSaveDoesNotReplaceUnconfirmedLateTarget},
 	{"batch-cancellation-stops-between-files", &TestBatchCancellationStopsBetweenFiles},
+	{"batch-copy-temporary-remains-private-until-publication", &TestBatchCopyTemporaryRemainsPrivateUntilPublication},
 	{"file-operation-clipboard-temporary-cleanup-and-fallback", &TestFileOperationClipboardTemporaryCleanupAndFallback},
 	{"lossless-operations-publish-only-successful-temporary-outputs", &TestLosslessOperationsPublishOnlySuccessfulTemporaryOutputs},
 	{"lossless-crop-publication-waits-for-destination-admission", &TestLosslessCropPublicationWaitsForDestinationAdmission},

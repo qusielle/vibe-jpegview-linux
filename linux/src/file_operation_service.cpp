@@ -10,6 +10,7 @@
 #include "source_work_coordinator.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cctype>
 #include <cstdio>
@@ -41,6 +42,12 @@ void* imageSavePublicationTestHookContext = nullptr;
 std::mutex batchRenameBeforeMoveTestHookMutex;
 detail::BatchRenameBeforeMoveTestHook batchRenameBeforeMoveTestHook = nullptr;
 void* batchRenameBeforeMoveTestHookContext = nullptr;
+std::mutex batchCopyChunkTestHookMutex;
+detail::BatchCopyChunkTestHook batchCopyChunkTestHook = nullptr;
+void* batchCopyChunkTestHookContext = nullptr;
+std::mutex batchCopyBeforePublishTestHookMutex;
+detail::BatchCopyBeforePublishTestHook batchCopyBeforePublishTestHook = nullptr;
+void* batchCopyBeforePublishTestHookContext = nullptr;
 
 void InvokeLosslessCropPublicationTestHook() {
 	detail::LosslessCropPublicationTestHook hook = nullptr;
@@ -74,6 +81,29 @@ void InvokeBatchRenameBeforeMoveTestHook(const fs::path& source,
 		context = batchRenameBeforeMoveTestHookContext;
 	}
 	if (hook != nullptr) hook(source, destination, &forceLinkFallback, context);
+}
+
+void InvokeBatchCopyChunkTestHook(const fs::path& temporary,
+	std::size_t bytesCopied) {
+	detail::BatchCopyChunkTestHook hook = nullptr;
+	void* context = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(batchCopyChunkTestHookMutex);
+		hook = batchCopyChunkTestHook;
+		context = batchCopyChunkTestHookContext;
+	}
+	if (hook != nullptr) hook(temporary, bytesCopied, context);
+}
+
+void InvokeBatchCopyBeforePublishTestHook(const fs::path& destination) {
+	detail::BatchCopyBeforePublishTestHook hook = nullptr;
+	void* context = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(batchCopyBeforePublishTestHookMutex);
+		hook = batchCopyBeforePublishTestHook;
+		context = batchCopyBeforePublishTestHookContext;
+	}
+	if (hook != nullptr) hook(destination, context);
 }
 #endif
 
@@ -482,6 +512,112 @@ bool CopyModificationTime(const fs::path& source, const fs::path& output,
 		return false;
 	}
 	return true;
+}
+
+class ScopedFileDescriptor {
+public:
+	explicit ScopedFileDescriptor(int descriptor) : descriptor_(descriptor) {}
+	~ScopedFileDescriptor() {
+		if (descriptor_ >= 0) (void)::close(descriptor_);
+	}
+	ScopedFileDescriptor(const ScopedFileDescriptor&) = delete;
+	ScopedFileDescriptor& operator=(const ScopedFileDescriptor&) = delete;
+
+	int Get() const { return descriptor_; }
+
+	bool Close(const char* operation, std::string& errorMessage) {
+		if (descriptor_ < 0) return true;
+		const int descriptor = descriptor_;
+		descriptor_ = -1;
+		if (::close(descriptor) == 0) return true;
+		const int closeError = errno;
+		errorMessage = std::string(operation) + ": " +
+			std::strerror(closeError);
+		return false;
+	}
+
+private:
+	int descriptor_ = -1;
+};
+
+bool CopyFileContentsPrivately(const fs::path& source,
+	const fs::path& temporary, const std::function<bool()>& shouldContinue,
+	std::string& errorMessage) {
+	const int sourceDescriptor = ::open(source.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+	if (sourceDescriptor < 0) {
+		errorMessage = "cannot open batch-copy source: " +
+			std::string(std::strerror(errno));
+		return false;
+	}
+	ScopedFileDescriptor sourceFile(sourceDescriptor);
+	struct stat sourceStatus{};
+	if (::fstat(sourceFile.Get(), &sourceStatus) != 0) {
+		errorMessage = "cannot inspect batch-copy source: " +
+			std::string(std::strerror(errno));
+		return false;
+	}
+	if (!S_ISREG(sourceStatus.st_mode)) {
+		errorMessage = "batch copy requires a regular source file";
+		return false;
+	}
+
+	const int temporaryDescriptor = ::open(temporary.c_str(),
+		O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
+	if (temporaryDescriptor < 0) {
+		errorMessage = "cannot open private batch-copy temporary: " +
+			std::string(std::strerror(errno));
+		return false;
+	}
+	ScopedFileDescriptor temporaryFile(temporaryDescriptor);
+	if (::fchmod(temporaryFile.Get(), S_IRUSR | S_IWUSR) != 0) {
+		errorMessage = "cannot keep batch-copy temporary private: " +
+			std::string(std::strerror(errno));
+		return false;
+	}
+
+	std::array<std::uint8_t, 128u * 1024u> buffer{};
+	std::size_t totalCopied = 0;
+	for (;;) {
+		if (!Continue(shouldContinue)) {
+			errorMessage = "batch copy was cancelled";
+			return false;
+		}
+		const ssize_t bytesRead = ::read(sourceFile.Get(), buffer.data(), buffer.size());
+		if (bytesRead < 0) {
+			if (errno == EINTR) continue;
+			errorMessage = "cannot read batch-copy source: " +
+				std::string(std::strerror(errno));
+			return false;
+		}
+		if (bytesRead == 0) break;
+
+		ssize_t offset = 0;
+		while (offset < bytesRead) {
+			if (!Continue(shouldContinue)) {
+				errorMessage = "batch copy was cancelled";
+				return false;
+			}
+			const ssize_t bytesWritten = ::write(temporaryFile.Get(),
+				buffer.data() + offset, static_cast<std::size_t>(bytesRead - offset));
+			if (bytesWritten < 0) {
+				if (errno == EINTR) continue;
+				errorMessage = "cannot write private batch-copy temporary: " +
+					std::string(std::strerror(errno));
+				return false;
+			}
+			if (bytesWritten == 0) {
+				errorMessage = "cannot write private batch-copy temporary: zero-length write";
+				return false;
+			}
+			offset += bytesWritten;
+			totalCopied += static_cast<std::size_t>(bytesWritten);
+		}
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+		InvokeBatchCopyChunkTestHook(temporary, totalCopied);
+#endif
+	}
+	return temporaryFile.Close("cannot close private batch-copy temporary",
+		errorMessage);
 }
 
 bool RunCommands(const std::vector<ExternalCommand>& commands,
@@ -909,8 +1045,8 @@ FileOperationResult Execute(const BatchCopyOperation& operation,
 				}
 				continue;
 			}
-			const bool copied = fs::copy_file(item.source, temporaryOutput.temporaryFile,
-				fs::copy_options::overwrite_existing, error) && !error &&
+			const bool copied = CopyFileContentsPrivately(item.source,
+				temporaryOutput.temporaryFile, shouldContinue, errorMessage) &&
 				CopyPermissions(item.source, temporaryOutput.temporaryFile, errorMessage) &&
 				CopyModificationTime(item.source, temporaryOutput.temporaryFile, errorMessage);
 			source.Reset();
@@ -942,6 +1078,9 @@ FileOperationResult Execute(const BatchCopyOperation& operation,
 				}
 				continue;
 			}
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+			InvokeBatchCopyBeforePublishTestHook(item.destination);
+#endif
 			if (!PublishWithoutReplacing(temporaryOutput.temporaryFile,
 				item.destination, errorMessage)) {
 				++result.batch.failed;
@@ -1307,6 +1446,20 @@ void SetBatchRenameBeforeMoveTestHookForTesting(
 	std::lock_guard<std::mutex> lock(batchRenameBeforeMoveTestHookMutex);
 	batchRenameBeforeMoveTestHook = hook;
 	batchRenameBeforeMoveTestHookContext = context;
+}
+
+void SetBatchCopyChunkTestHookForTesting(
+	detail::BatchCopyChunkTestHook hook, void* context) {
+	std::lock_guard<std::mutex> lock(batchCopyChunkTestHookMutex);
+	batchCopyChunkTestHook = hook;
+	batchCopyChunkTestHookContext = context;
+}
+
+void SetBatchCopyBeforePublishTestHookForTesting(
+	detail::BatchCopyBeforePublishTestHook hook, void* context) {
+	std::lock_guard<std::mutex> lock(batchCopyBeforePublishTestHookMutex);
+	batchCopyBeforePublishTestHook = hook;
+	batchCopyBeforePublishTestHookContext = context;
 }
 #endif
 

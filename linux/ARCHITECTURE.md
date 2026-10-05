@@ -480,11 +480,12 @@ should normally be added to one of these focused modules and covered by the matc
   captured owner generation and is applied by Viewer only after the matching request is checked.
   Batch cancellation stops at file boundaries and reports completed changes without rollback. Each
   copy is prepared in a mode-0600, non-image `.tmp` sibling and published without replacing a
-  destination created after its existence check, so readers see only complete files; failed and
-  canceled copies leave no partial image behind. Source permissions and modification times are
-  restored before publication. Batch rename uses `renameat2(RENAME_NOREPLACE)` and falls back to a
-  same-filesystem hard-link followed by source unlink when that primitive is unavailable. The
-  fallback moves symlinks themselves and fails on cross-filesystem moves; if source unlink fails,
+  destination created after its existence check, so readers see only complete files; content is
+  copied in cancellable bounded chunks while the temporary stays mode 0600, and failed or canceled
+  copies leave no partial image behind. Source permissions and modification times are restored
+  after transfer and before publication. Batch rename uses `renameat2(RENAME_NOREPLACE)` and falls
+  back to a same-filesystem hard-link followed by source unlink when that primitive is unavailable.
+  The fallback moves symlinks themselves and fails on cross-filesystem moves; if source unlink fails,
   both names may remain and the operation reports failure. Lossless JPEG results use the same
   private `.tmp` sibling policy;
   newly absent destinations use atomic no-replace publication, while replacing an existing
