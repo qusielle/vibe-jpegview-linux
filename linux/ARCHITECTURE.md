@@ -717,6 +717,11 @@ pattern was cross-checked against
 the large-folder reports in [upstream issues #194](https://github.com/sylikc/jpegview/issues/194) and
 [#263](https://github.com/sylikc/jpegview/issues/263), and the worker/result approach in
 [Masir01/jpegview_up's `dev-up` FileList](https://github.com/Masir01/jpegview_up/blob/dev-up/src/JPEGView/FileList.cpp).
+The directory worker also prepares archive-aware location text and verified archive-row format
+labels. Recents source-descriptor completions prepare archive parent text with the matching path and
+generation. Viewer snapshots borrow these strings; snapshot construction and row labeling do not
+classify paths or stat archive candidates. This keeps rendering filesystem-free and lets an ordinary
+directory named with an archive suffix retain its ordinary directory label.
 
 The magnifying-glass lens is a temporary viewer interaction; its enablement resets each run while
 its size and magnification are stored by `settings`. Its pure model owns those values, wheel

@@ -1266,6 +1266,25 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 		jpegview_linux::ArchiveBackingFile(nestedImage) == archive &&
 		jpegview_linux::ArchiveLocationDisplayName(nestedDirectory) == archive.string() + "!/nested",
 		"archive display or physical-container mapping is incorrect");
+	ArchiveSourceProbeObservation presentationProbe;
+	jpegview_linux::SetArchiveSourceProbeHookForTesting(
+		ObserveArchiveSourceProbe, &presentationProbe);
+	const jpegview_linux::ArchiveLocationPresentation presentation =
+		jpegview_linux::PrepareArchiveLocationPresentation(nestedDirectory);
+	const int classificationStatsAfterPresentation =
+		presentationProbe.locationClassification.load();
+	const std::string lexicalContainerFormat =
+		jpegview_linux::ArchiveContainerFormatName(archive);
+	const int classificationStatsAfterLexicalFormat =
+		presentationProbe.locationClassification.load();
+	jpegview_linux::SetArchiveSourceProbeHookForTesting(nullptr, nullptr);
+	Expect(presentation.archiveLocation &&
+		presentation.displayName == archive.string() + "!/nested" &&
+		presentation.formatName == "ZIP" &&
+		classificationStatsAfterPresentation == 1 &&
+		lexicalContainerFormat == "ZIP" &&
+		classificationStatsAfterLexicalFormat == classificationStatsAfterPresentation,
+		"prepared archive presentation repeated source classification or changed its label");
 	Expect(jpegview_linux::ArchiveTimestampNanoseconds(std::numeric_limits<std::int64_t>::max()) ==
 			std::numeric_limits<std::int64_t>::max() &&
 		jpegview_linux::ArchiveTimestampNanoseconds(std::numeric_limits<std::int64_t>::min()) ==
@@ -1369,11 +1388,16 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 		archiveSizes.front().requestedSource.Key() == archivePlaceholder.Key() &&
 		archiveSizes.front().observedSource.Valid() &&
 		archiveSizes.front().observedSource.Metadata().archiveMember &&
+		archiveSizes.front().parentDisplayName == archive.string() + " (ZIP)" &&
 		recentArchiveModel.RefreshSourceDescriptor(archivePlaceholder.Key(),
-			archiveSizes.front().observedSource) &&
+			archiveSizes.front().observedSource,
+			archiveSizes.front().parentDisplayName) &&
 		recentArchiveModel.AllEntries().front().fileSizeKnown &&
-		recentArchiveModel.AllEntries().front().fileSize == fs::file_size(image),
-		"background file-size lookup used the ZIP container size instead of the uncompressed member size");
+		recentArchiveModel.AllEntries().front().fileSize == fs::file_size(image) &&
+		recentArchiveModel.AllEntries().front().archiveMember &&
+		recentArchiveModel.AllEntries().front().parentDisplayName ==
+			archive.string() + " (ZIP)",
+		"background file-size lookup did not preserve archive-member size and prepared Recents parent label");
 
 	const fs::path comicArchive = temporary.path() / "comic.CBZ";
 	Expect(fs::copy_file(archive, comicArchive), "could not copy ZIP fixture as CBZ");
@@ -22530,12 +22554,14 @@ void TestFileDialogDirectoryLoader() {
 	TemporaryDirectory temporary;
 	const fs::path album = temporary.path() / "album";
 	const fs::path subdirectory = album / "subdirectory";
+	const fs::path ordinaryZipNamedDirectory = album / "ordinary.zip";
 	fs::create_directories(subdirectory);
+	fs::create_directories(ordinaryZipNamedDirectory);
 	const fs::path image = album / "photo.jpg";
 	WriteText(image, "directory listing size fixture");
 	WriteText(album / "notes.txt", "not an image");
 	const fs::path archive = album / "bundle.zip";
-	WriteZipArchive(archive, {{"inside.jpg", image}});
+	WriteZipArchive(archive, {{"inside.jpg", image}, {"nested/child.jpg", image}});
 	const fs::path empty = temporary.path() / "empty";
 	fs::create_directory(empty);
 	const fs::path missing = temporary.path() / "missing";
@@ -22566,6 +22592,8 @@ void TestFileDialogDirectoryLoader() {
 	std::vector<jpegview_linux::FileDialogDirectoryResult> results = waitForResult(loader);
 	Expect(results.size() == 1 && results.front().generation == 71 &&
 		results.front().directory == album && !results.front().archiveLocation &&
+		results.front().locationDisplayName == album.string() &&
+		results.front().archiveFormatName.empty() &&
 		results.front().error.empty(),
 		"filesystem Browse listing did not publish a completed generation");
 	if (!results.empty()) {
@@ -22580,11 +22608,15 @@ void TestFileDialogDirectoryLoader() {
 		};
 		const Entry* imageEntry = findEntry(image);
 		const Entry* archiveEntry = findEntry(archive);
-		Expect(model.AllEntries().size() == 4 && model.AllEntries().front().parent &&
+		const Entry* ordinaryZipDirectory = findEntry(ordinaryZipNamedDirectory);
+		Expect(model.AllEntries().size() == 5 && model.AllEntries().front().parent &&
 			imageEntry != nullptr && imageEntry->fileSizeKnown &&
 			imageEntry->fileSize == fs::file_size(image) &&
 			archiveEntry != nullptr && archiveEntry->directory &&
-			archiveEntry->archiveContainer,
+			archiveEntry->archiveContainer && archiveEntry->archiveFormatName == "ZIP" &&
+			ordinaryZipDirectory != nullptr && ordinaryZipDirectory->directory &&
+			!ordinaryZipDirectory->archiveContainer &&
+			ordinaryZipDirectory->archiveFormatName.empty(),
 			"filesystem listing lost its parent, immediate folders, archive rows, or file sizes");
 	}
 
@@ -22596,10 +22628,22 @@ void TestFileDialogDirectoryLoader() {
 			[](const Entry& entry) { return entry.path.filename() == "inside.jpg"; });
 	Expect(results.size() == 1 && results.front().generation == 72 &&
 		results.front().archiveLocation && results.front().error.empty() &&
+		results.front().locationDisplayName == archive.string() + " (ZIP)" &&
+		results.front().archiveFormatName == "ZIP" &&
 		member != results.front().entries.end() && member->archiveMember &&
 		member->fileSizeKnown && member->fileSize == fs::file_size(image) &&
 		member->sourceDescriptor.Valid(),
 		"generic Browse directory loader did not preserve archive member identity and size");
+	const fs::path nestedArchiveDirectory = archive / "nested";
+	loader.Request(nestedArchiveDirectory, 79, policy);
+	results = waitForResult(loader);
+	Expect(results.size() == 1 && results.front().generation == 79 &&
+		results.front().archiveLocation && results.front().error.empty() &&
+		results.front().locationDisplayName == archive.string() + "!/nested" &&
+		results.front().archiveFormatName == "ZIP" &&
+		std::any_of(results.front().entries.begin(), results.front().entries.end(),
+			[](const Entry& entry) { return entry.path.filename() == "child.jpg"; }),
+		"archive member directory did not carry its prepared location and format labels");
 
 	loader.Request(empty, 73, policy);
 	results = waitForResult(loader);

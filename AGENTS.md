@@ -75,6 +75,11 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   cleanup at `setjmp`/`longjmp` recovery points where stack unwinding cannot run safely.
 - Pure calculations, state transitions, ordering, filtering, and command planning belong outside
   `main.cpp` and should be covered by `linux/tests/test_core.cpp`.
+- Renderer snapshots and row labels must consume source-derived presentation prepared by their owning
+  model or worker completion. Do not run archive-location classification, format lookup, or other
+  filesystem discovery while building or painting a snapshot; these helpers may perform stats.
+  Preserve ordinary directories with archive-like suffixes by basing labels on worker-confirmed entry
+  metadata, and apply prepared text only to its matching path and generation.
 - SDL renderer resources are main-thread objects. Create, upload, render, and destroy SDL textures on
   the renderer thread.
 - When extracting renderer responsibilities, move texture creation, upload, destruction, and the

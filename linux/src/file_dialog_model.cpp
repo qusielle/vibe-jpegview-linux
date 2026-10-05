@@ -97,12 +97,14 @@ FileDialogDirectoryResult EnumerateFileDialogDirectory(
 	const std::function<bool()>& shouldContinue, bool& interruptedForForeground) {
 	FileDialogDirectoryResult result;
 	result.directory = directory;
+	result.locationDisplayName = directory.string();
 	const std::filesystem::path parent = directory.parent_path();
 	if (!parent.empty() && parent != directory) {
 		result.entries.emplace_back(parent, true, true);
 	}
 
-	bool archiveLocation = false;
+	ArchiveLocationPresentation locationPresentation;
+	locationPresentation.displayName = directory.string();
 	WorkContext classificationContext;
 	SourceWorkLease classificationLease;
 	if (!AcquireDirectoryEnumerationLease(directory, shouldContinue,
@@ -111,13 +113,17 @@ FileDialogDirectoryResult EnumerateFileDialogDirectory(
 	}
 	{
 		ScopedWorkContext activeContext(classificationContext);
-		if (classificationContext.Continue()) archiveLocation = IsArchiveLocation(directory);
+		if (classificationContext.Continue()) {
+			locationPresentation = PrepareArchiveLocationPresentation(directory);
+		}
 		ReleaseDirectoryEnumerationLease(classificationContext, classificationLease);
 	}
 	if (interruptedForForeground || !shouldContinue()) return result;
-	result.archiveLocation = archiveLocation;
+	result.archiveLocation = locationPresentation.archiveLocation;
+	result.locationDisplayName = std::move(locationPresentation.displayName);
+	result.archiveFormatName = std::move(locationPresentation.formatName);
 
-	if (archiveLocation) {
+	if (result.archiveLocation) {
 		std::vector<ArchiveEntryInfo> archiveEntries;
 		WorkContext archiveContext = MakePathWorkContext(directory,
 			SourceWorkPriority::Metadata, shouldContinue);
@@ -187,6 +193,9 @@ FileDialogDirectoryResult EnumerateFileDialogDirectory(
 						modificationError ? std::filesystem::file_time_type{} : modificationTime,
 						archive, false, archive &&
 							policy.encryptedArchivePaths.count(normalizedPath.string()) != 0};
+					if (archive) {
+						entry.archiveFormatName = ArchiveContainerFormatName(entryPath);
+					}
 					if (regularFile && !archive && !policy.includeNonImageFiles &&
 						IsSupportedImagePath(entryPath)) {
 						entry.sourceDescriptor = SourceDescriptor(normalizedPath, {}, {});
@@ -839,7 +848,8 @@ bool FileDialogModel::SetFileSize(const std::filesystem::path& path, std::uintma
 }
 
 bool FileDialogModel::RefreshSourceDescriptor(const SourceKey& expected,
-	const SourceDescriptor& observed) {
+	const SourceDescriptor& observed,
+	const std::string& preparedParentDisplayName) {
 	const std::filesystem::path normalizedPath = observed.LogicalPath().lexically_normal();
 	const auto found = entryIndexByPath_.find(PathIndexKey(normalizedPath));
 	if (found == entryIndexByPath_.end()) return false;
@@ -848,6 +858,13 @@ bool FileDialogModel::RefreshSourceDescriptor(const SourceKey& expected,
 	entry.sourceDescriptor = observed;
 	entry.archiveMember = observed.Metadata().archiveMember;
 	entry.encrypted = observed.Metadata().archiveMemberEncrypted;
+	if (entry.archiveMember) {
+		if (!preparedParentDisplayName.empty()) {
+			entry.parentDisplayName = preparedParentDisplayName;
+		}
+	} else {
+		entry.parentDisplayName = normalizedPath.parent_path().string();
+	}
 	entry.fileSizeKnown = observed.Metadata().hasFileSize;
 	entry.fileSize = observed.Metadata().hasFileSize ?
 		static_cast<std::uintmax_t>(observed.Metadata().fileSize) : 0;
@@ -1391,6 +1408,11 @@ struct FileDialogFileSizeLoader::Impl {
 							ScopedWorkContext activeContext(context);
 							result.observedSource = sourceCapture(requestedSource);
 							result.size = result.observedSource.Metadata().fileSize;
+							result.parentDisplayName =
+								result.observedSource.Metadata().archiveMember ?
+									PrepareArchiveLocationPresentation(
+										result.path.parent_path()).displayName :
+									result.path.parent_path().string();
 						} else if (IsCurrent(task.generation)) {
 							result.failure = {WorkerFailureKind::Cancelled,
 								"file-size source admission was cancelled"};

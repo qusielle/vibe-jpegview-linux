@@ -471,19 +471,32 @@ bool IsArchiveMemberLocation(const fs::path& path) {
 	return ParseArchiveLocation(path, location) && !location.memberDirectory.empty();
 }
 
-std::string ArchiveFormatName(const fs::path& path) {
-	ArchiveLocation location;
-	if (!ParseArchiveLocation(path, location)) return {};
-	switch (location.format) {
+namespace {
+
+std::string ArchiveFormatDisplayName(ArchiveFormat format, const fs::path& archive) {
+	switch (format) {
 	case ArchiveFormat::Zip:
-		return Lower(location.archive.extension().string()) == ".cbz" ? "CBZ" : "ZIP";
+		return Lower(archive.extension().string()) == ".cbz" ? "CBZ" : "ZIP";
 	case ArchiveFormat::Tar: return "TAR";
 	case ArchiveFormat::Tgz: return "TGZ";
 	case ArchiveFormat::SevenZip:
-		return Lower(location.archive.extension().string()) == ".cb7" ? "CB7" : ".7Z";
+		return Lower(archive.extension().string()) == ".cb7" ? "CB7" : ".7Z";
 	case ArchiveFormat::Rar: return "RAR";
 	}
 	return {};
+}
+
+} // namespace
+
+std::string ArchiveContainerFormatName(const fs::path& path) {
+	if (!HasArchiveExtension(path)) return {};
+	return ArchiveFormatDisplayName(FormatForContainerName(path), path);
+}
+
+std::string ArchiveFormatName(const fs::path& path) {
+	ArchiveLocation location;
+	if (!ParseArchiveLocation(path, location)) return {};
+	return ArchiveFormatDisplayName(location.format, location.archive);
 }
 
 namespace {
@@ -567,11 +580,24 @@ fs::path ArchiveBackingFileForAdmission(const fs::path& path) {
 }
 
 std::string ArchiveLocationDisplayName(const fs::path& path) {
+	return PrepareArchiveLocationPresentation(path).displayName;
+}
+
+ArchiveLocationPresentation PrepareArchiveLocationPresentation(const fs::path& path) {
+	ArchiveLocationPresentation presentation;
+	presentation.displayName = path.string();
 	ArchiveLocation location;
-	if (!ParseArchiveLocation(path, location)) return path.string();
-	const std::string format = ArchiveFormatName(path);
-	if (location.memberDirectory.empty()) return location.archive.string() + " (" + format + ")";
-	return location.archive.string() + "!/" + location.memberDirectory;
+	if (!ParseArchiveLocation(path, location)) return presentation;
+	presentation.archiveLocation = true;
+	presentation.formatName = ArchiveFormatDisplayName(location.format, location.archive);
+	if (location.memberDirectory.empty()) {
+		presentation.displayName = location.archive.string() + " (" +
+			presentation.formatName + ")";
+	} else {
+		presentation.displayName = location.archive.string() + "!/" +
+			location.memberDirectory;
+	}
+	return presentation;
 }
 
 std::uintmax_t ImageSourceFileSize(const fs::path& path, std::error_code& error) {

@@ -39,6 +39,8 @@ struct FileDialogEntry {
 	std::uintmax_t fileSize = 0;
 	bool fileSizeKnown = false;
 	SourceDescriptor sourceDescriptor;
+	std::string archiveFormatName;
+	std::string parentDisplayName;
 };
 
 enum class FileDialogSortMode {
@@ -213,7 +215,8 @@ public:
 	bool MarkEncrypted(const std::filesystem::path& path);
 	bool SetFileSize(const std::filesystem::path& path, std::uintmax_t size);
 	bool RefreshSourceDescriptor(const SourceKey& expected,
-		const SourceDescriptor& observed);
+		const SourceDescriptor& observed,
+		const std::string& preparedParentDisplayName = {});
 	void ClearSelection();
 
 	const std::vector<FileDialogEntry>& AllEntries() const { return allEntries_; }
@@ -268,6 +271,8 @@ struct FileDialogDirectoryResult {
 	ArchiveErrorKind errorKind = ArchiveErrorKind::None;
 	bool archiveLocation = false;
 	bool containsEncryptedEntries = false;
+	std::string locationDisplayName;
+	std::string archiveFormatName;
 };
 
 // Replaceable one-at-a-time directory listing for Browse. Filesystem metadata,
@@ -300,6 +305,7 @@ struct FileDialogFileSizeResult {
 	std::uintmax_t size = 0;
 	SourceDescriptor requestedSource;
 	SourceDescriptor observedSource;
+	std::string parentDisplayName;
 	WorkerFailure failure;
 };
 

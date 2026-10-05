@@ -162,6 +162,18 @@ bool IsArchiveContainerFile(const std::filesystem::path& path);
 bool IsArchiveLocation(const std::filesystem::path& path);
 bool IsArchiveMemberLocation(const std::filesystem::path& path);
 std::string ArchiveFormatName(const std::filesystem::path& path);
+// Resolve archive-aware text on a worker that owns source admission. For
+// ordinary filesystem paths the display name is simply path.string().
+struct ArchiveLocationPresentation {
+	bool archiveLocation = false;
+	std::string displayName;
+	std::string formatName;
+};
+ArchiveLocationPresentation PrepareArchiveLocationPresentation(
+	const std::filesystem::path& path);
+// Format a container name already verified as a regular archive file. This is
+// lexical and does not inspect the filesystem.
+std::string ArchiveContainerFormatName(const std::filesystem::path& path);
 // Convert archive Unix seconds to the filesystem clock's nanosecond domain for
 // std::filesystem::file_time_type adapters. SourceMetadata remains Unix-based.
 std::int64_t ArchiveTimestampNanoseconds(std::int64_t seconds);

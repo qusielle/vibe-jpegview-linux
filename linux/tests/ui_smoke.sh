@@ -97,6 +97,9 @@ write_ppm "$temporary/images/02-green.ppm" 0 255 0
 write_ppm "$temporary/images/03-blue.ppm" 0 0 255
 write_ppm "$temporary/images/04-yellow.ppm" 255 255 0
 write_ppm "$temporary/images/05-cyan.ppm" 0 255 255
+mkdir -p "$temporary/images/16-ordinary.zip"
+write_ppm "$temporary/images/16-ordinary.zip/inside-folder.ppm" 40 80 120
+touch -t 201601010000.00 "$temporary/images/16-ordinary.zip"
 mkdir -p "$temporary/double-page-fixtures"
 write_solid_ppm "$temporary/double-page-fixtures/00-cover.ppm" 35 75 220
 write_solid_ppm "$temporary/double-page-fixtures/01-first.ppm" 30 220 60
@@ -3295,6 +3298,35 @@ case "$filtered_title" in
 	*) echo "UI smoke test: Ctrl+O filename filter did not open the matching image" >&2; exit 1 ;;
 esac
 
+if [ "$visual_assertions" -eq 1 ]; then
+	# Archive-aware labels are prepared before painting: archive files stay gold,
+	# while an ordinary directory with an archive suffix stays a normal folder.
+	if [ -f "$temporary/images/06-archive.zip" ]; then
+		DISPLAY=":$display_number" xdotool key ctrl+o
+		DISPLAY=":$display_number" xdotool type --delay 20 '06-archive.zip'
+		sleep 0.3
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/archive-row.png"
+		archive_row_color=$(convert "$temporary/archive-row.png" +repage \
+			-format %c histogram:info:- | grep -c 'srgb(255,205,125)' || true)
+		if [ "$archive_row_color" -eq 0 ]; then
+			echo "UI smoke test: prepared Browse archive-format label was not rendered in archive color" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool key Escape
+	fi
+	DISPLAY=":$display_number" xdotool key ctrl+o
+	DISPLAY=":$display_number" xdotool type --delay 20 '16-ordinary.zip'
+	sleep 0.3
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/ordinary-zip-directory-row.png"
+	ordinary_directory_color=$(convert "$temporary/ordinary-zip-directory-row.png" +repage \
+		-format %c histogram:info:- | grep -c 'srgb(185,205,235)' || true)
+	if [ "$ordinary_directory_color" -eq 0 ]; then
+		echo "UI smoke test: an ordinary .zip-named directory was rendered as an archive" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key Escape
+fi
+
 if [ -f "$temporary/images/06-archive.zip" ]; then
 	# ZIP containers behave like directories in Browse and archive members remain
 	# openable from the Recents tab after they become the current image.
@@ -3306,6 +3338,21 @@ if [ -f "$temporary/images/06-archive.zip" ]; then
 	assert_title_prefix "inside-archive.ppm" "open dialog did not enter a ZIP and open its image member"
 	DISPLAY=":$display_number" xdotool key ctrl+o
 	DISPLAY=":$display_number" xdotool key ctrl+Tab
+	if [ "$visual_assertions" -eq 1 ]; then
+		recent_archive_parent_color=0
+		for _ in $(seq 1 30); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/recent-archive-parent.png"
+			recent_archive_parent_color=$(convert "$temporary/recent-archive-parent.png" +repage \
+				-format %c histogram:info:- | grep -c 'srgb(210,170,105)' || true)
+			if [ "$recent_archive_parent_color" -gt 0 ]; then break; fi
+			sleep 0.1
+		done
+		if [ "$recent_archive_parent_color" -eq 0 ]; then
+			echo "UI smoke test: Recents did not render the prepared archive parent label" >&2
+			exit 1
+		fi
+	fi
 	DISPLAY=":$display_number" xdotool key Return
 	assert_title_prefix "inside-archive.ppm" "Recents did not reopen an image stored inside a ZIP"
 	# Return the smoke suite to its normal filesystem directory before its

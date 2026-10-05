@@ -9902,9 +9902,10 @@ private:
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 			if (!result.observedSource.LogicalPath().empty()) {
 				const jpegview_linux::SourceKey previous = result.requestedSource.Key();
-				fileDialogModel_.RefreshSourceDescriptor(previous, result.observedSource);
+				fileDialogModel_.RefreshSourceDescriptor(previous, result.observedSource,
+					result.parentDisplayName);
 				recentFileDialogModel_.RefreshSourceDescriptor(previous,
-					result.observedSource);
+					result.observedSource, result.parentDisplayName);
 			}
 			if (result.observedSource.Metadata().hasFileSize) {
 				fileDialogModel_.SetFileSize(result.path, result.size);
@@ -9925,6 +9926,8 @@ private:
 				result.policy.includeNonImageFiles != includeNonImageFiles ||
 				result.policy.includeArchives != includeArchives) continue;
 			fileDialogListingPending_ = false;
+			fileDialogLocationDisplayName_ = result.locationDisplayName.empty() ?
+				result.directory.string() : std::move(result.locationDisplayName);
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 			if (result.containsEncryptedEntries) {
 				const fs::path backing = jpegview_linux::ArchiveBackingFile(result.directory);
@@ -9939,8 +9942,10 @@ private:
 					}
 					const fs::path backing = jpegview_linux::ArchiveBackingFile(result.directory);
 					encryptedArchivePaths_.insert(AbsoluteNormalized(backing).string());
-					result.entries.push_back(FileDialogEntry{result.directory, true, false, {},
-						true, false, true});
+					FileDialogEntry archiveEntry{result.directory, true, false, {},
+						true, false, true};
+					archiveEntry.archiveFormatName = result.archiveFormatName;
+					result.entries.push_back(std::move(archiveEntry));
 					listingMessage = result.errorKind ==
 						jpegview_linux::ArchiveErrorKind::PasswordRequired ?
 						"Archive contents are encrypted" : "Saved archive password is incorrect";
@@ -10148,6 +10153,7 @@ private:
 		InvalidateFileDialogPreview();
 		fileDialogDirectoryLoader_.Clear(++fileDialogDirectoryGeneration_);
 		fileDialogArchiveLoader_.Clear(++fileDialogArchiveGeneration_);
+		fileDialogLocationDisplayName_ = fileDialogDirectory_.string();
 		std::vector<FileDialogEntry> entries;
 		const fs::path parent = fileDialogDirectory_.parent_path();
 		if (!parent.empty() && parent != fileDialogDirectory_) {
@@ -10230,8 +10236,9 @@ private:
 		entries.reserve(recentFiles_.Files().size());
 		for (const fs::path& path : recentFiles_.Files()) {
 			FileDialogEntry entry{path, false, false, {}, false,
-				jpegview_linux::IsArchiveMemberLocation(path)};
+				false};
 			entry.sourceDescriptor = jpegview_linux::SourceDescriptor(path, {}, {});
+			entry.parentDisplayName = path.parent_path().string();
 			entries.push_back(std::move(entry));
 		}
 		recentFileDialogModel_.SetEntriesInOrder(std::move(entries), true);
@@ -10355,8 +10362,7 @@ private:
 
 	std::string FileDialogEntryLabel(const FileDialogEntry& entry) const {
 		if (entry.parent) return "[..]";
-		if (entry.archiveContainer) return "[" +
-			jpegview_linux::ArchiveFormatName(entry.path) + "] " +
+		if (entry.archiveContainer) return "[" + entry.archiveFormatName + "] " +
 			(entry.encrypted ? "[Encrypted] " : "") + entry.path.filename().string();
 		if (entry.encrypted) return "[Encrypted] " + entry.path.filename().string();
 		return entry.directory ? std::string("[Dir] ") + entry.path.filename().string() : entry.path.filename().string();
@@ -10610,7 +10616,7 @@ private:
 		snapshot.showPreview = FileDialogHasPreviewColumn();
 		snapshot.message = fileDialogMessage_;
 		snapshot.location = snapshot.recentTab ? "One recent image per folder" :
-			jpegview_linux::ArchiveLocationDisplayName(fileDialogDirectory_);
+			fileDialogLocationDisplayName_;
 		snapshot.title = fileDialogLosslessCrop_ ? "Save lossless JPEG crop" :
 			(fileDialogParameterBackup_ ? "Back up picture-level database" :
 			(fileDialogParameterRestore_ ? "Restore picture-level database" :
@@ -10646,7 +10652,8 @@ private:
 				(entry.archiveContainer || entry.archiveMember);
 			row.directory = entry.directory;
 			if (snapshot.recentTab) {
-				row.parent = jpegview_linux::ArchiveLocationDisplayName(entry.path.parent_path());
+				row.parent = entry.parentDisplayName.empty() ?
+					entry.path.parent_path().string() : entry.parentDisplayName;
 				row.filename = entry.path.filename().string();
 				if (entry.fileSizeKnown) row.sizeText = jpegview_linux::FormatFileSize(entry.fileSize);
 			} else {
@@ -12831,6 +12838,7 @@ private:
 	bool fileDialogLosslessCrop_ = false;
 	jpegview_linux::SelectionRect fileDialogLosslessCropRect_;
 	fs::path fileDialogDirectory_;
+	std::string fileDialogLocationDisplayName_;
 	std::string fileDialogFilename_;
 	std::string fileDialogMessage_;
 	jpegview_linux::FileDialogModel fileDialogModel_;
