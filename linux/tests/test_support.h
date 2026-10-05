@@ -42,6 +42,7 @@
 #include "overlay_layout.h"
 #include "viewer_chrome.h"
 #include "thumbnail_panel_model.h"
+#include "thumbnail_repository.h"
 #include "thumbnail_resampler.h"
 #include "interaction_work_policy.h"
 #include "work_batch_gate.h"

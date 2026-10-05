@@ -378,6 +378,8 @@ should normally be added to one of these focused modules and covered by the matc
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
   primitives, hit regions, fit-relative scale labels, dynamic labels, and tooltip placement.
+- `thumbnail_repository`: non-blocking pixel-storage interface. Viewer receives the current
+  `InMemoryThumbnailRepository` through its factory; persistent storage remains a future feature.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
   nearest-first cache scheduling from a catalog refreshed when membership, order, source identity,
   or descriptor metadata changes. The viewer pairs each `FileList::MutationRevision()` and
@@ -940,17 +942,20 @@ thumbnail requests use that same worker when no display frame is available, so i
 reads, JPEG dimension lookup, decode, and resampling do not run on the event thread. The worker keeps
 at most one request active and two queued requests; thumbnail results carry generation, file
 list, source-key, and target-geometry identities for validation before retention or renderer-thread
-upload. `ThumbnailPixelRepository` owns the prepared BGRA pixels for generated thumbnails in the
-active catalog, keyed by exact `SourceKey` and cleared when required panel geometry changes. Sorting
-and navigation preserve those CPU pixels. Removed or replaced source identities are evicted from the
-repository, and large buffers are handed to the thumbnail retirement worker before the SDL thread
-drops its final repository reference.
+upload. The `ThumbnailRepository` interface owns non-blocking lookup, storage, geometry invalidation,
+and diagnostics for prepared thumbnail pixels. Viewer currently receives an
+`InMemoryThumbnailRepository` from the repository factory; it retains generated BGRA pixels for the
+active catalog, keyed by exact `SourceKey`, and clears them when required panel geometry changes.
+Sorting and navigation preserve those CPU pixels. Removed or replaced source identities are evicted
+from the repository, and large buffers are handed to the thumbnail retirement worker before the SDL
+thread drops its final repository reference. Any future persistent implementation must keep disk
+reads and writes on workers and expose only non-blocking operations to Viewer.
 
 The separate SDL texture map is renderer-thread owned and contains only the visible thumbnail rows,
 one viewport of rows above and below, and any selected thumbnail preview pinned by an open delete
 confirmation. `ThumbnailTextureWindowIndices` computes this bounded set from panel geometry; moving
 the current row destroys textures outside the new set without evicting their CPU pixels. A revisit can
-therefore upload directly from `ThumbnailPixelRepository` without another source read, decode, or
+therefore upload directly from the in-memory repository without another source read, decode, or
 resample. Upload failures keep the pixels available for retry. Cache diagnostics report retained
 thumbnail pixel bytes/count separately from resident thumbnail texture bytes/count. This storage is
 independent of the configured large-image cache budget and can approach 1 GiB for 15,000 default-size

@@ -116,10 +116,10 @@ Its `master` branch had recent feature commits through 2026-09-01. The fork's
 [changelog](https://github.com/famomatic/jpegview/blob/master/CHANGELOG.txt) and feature commits
 describe the following ideas:
 
-- **Persistent thumbnail cache:** store generated thumbnails in a bounded on-disk cache, keyed by
-  source identity and freshness, so reopening a directory can show thumbnails immediately. Linux
-  currently retains thumbnails in memory for the active file list but regenerates them between
-  runs. Keep cache reads/writes off the event thread and invalidate stale entries. See the fork's
+- **Optional persistent thumbnail cache:** retain source-identity- and geometry-keyed thumbnails
+  across sessions in a configurable cache location, allowing an SSD cache for HDD photo libraries.
+  Define its quota, invalidation, clearing, and atomic publication before implementation. Keep disk
+  reads and writes off the event thread. See the fork's
   [thumbnail-cache changelog](https://github.com/famomatic/jpegview/blob/master/CHANGELOG.txt).
 - **Batch image conversion:** select multiple files and convert them to a chosen format, quality,
   and optional dimensions with progress and per-file errors. Linux currently has single-image

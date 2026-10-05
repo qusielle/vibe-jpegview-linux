@@ -279,7 +279,7 @@ void TestThumbnailPreparationRetryPreservesIdentityAcrossRepeatedFailuresAndReco
 	jpegview_linux::PreserveThumbnailPreparationRetry(retry, *retry);
 	Expect(retry->key == retainedKey && retry->image == retainedImage,
 		"a later thumbnail allocation retry corrupted the original request identity");
-	jpegview_linux::ThumbnailPixelRepository repository;
+	jpegview_linux::InMemoryThumbnailRepository repository;
 	repository.SetGeometry(164, 109);
 	Expect(repository.Store(retry->image) ==
 		jpegview_linux::ThumbnailPixelStoreOutcome::Stored &&

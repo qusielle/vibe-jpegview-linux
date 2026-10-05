@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -41,8 +40,6 @@ struct ThumbnailPanelLayout {
 	int imageWidth = 0;
 	int imageHeight = 0;
 };
-
-struct PreparedThumbnailImage;
 
 // Splits the client area into a left thumbnail strip and the image viewport.
 // At least one pixel remains available to the image in very narrow windows.
@@ -112,46 +109,6 @@ struct ThumbnailSchedulerOperationCounts {
 struct ThumbnailCacheEvictionCounts {
 	std::size_t keyLookups = 0;
 	std::size_t entriesErased = 0;
-};
-
-enum class ThumbnailPixelStoreOutcome {
-	Stored,
-	AlreadyPresent,
-	InvalidImage,
-	AllocationFailure,
-};
-
-struct ThumbnailPixelRepositoryDiagnostics {
-	std::size_t imageCount = 0;
-	std::size_t pixelBytes = 0;
-};
-
-// Retains validated prepared pixels independently from renderer-thread SDL
-// textures. Callers provide a retirement callback before clearing large pixel
-// allocations so their final destruction can stay off the event thread.
-class ThumbnailPixelRepository {
-public:
-	using ImagePtr = std::shared_ptr<const PreparedThumbnailImage>;
-	using ReleaseHandler = std::function<void(const ImagePtr&)>;
-
-	ThumbnailPixelStoreOutcome Store(const ImagePtr& image);
-	ImagePtr Find(const SourceKey& key) const;
-	ImagePtr Erase(const SourceKey& key);
-	void Clear(const ReleaseHandler& beforeRelease = {});
-	void SetGeometry(int maximumWidth, int maximumHeight,
-		const ReleaseHandler& beforeRelease = {});
-	ThumbnailPixelRepositoryDiagnostics Diagnostics() const;
-
-private:
-	struct Entry {
-		ImagePtr image;
-		std::size_t bytes = 0;
-	};
-
-	std::unordered_map<SourceKey, Entry, SourceKeyHash> entries_;
-	std::size_t pixelBytes_ = 0;
-	int maximumWidth_ = 0;
-	int maximumHeight_ = 0;
 };
 
 template <typename Cache, typename OnErase>

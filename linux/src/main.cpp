@@ -43,6 +43,7 @@
 #include "viewer_chrome.h"
 #include "playback_scheduler.h"
 #include "thumbnail_panel_model.h"
+#include "thumbnail_repository.h"
 #include "thumbnail_resampler.h"
 #include "interaction_work_policy.h"
 #include "source_work_coordinator.h"
@@ -4263,7 +4264,7 @@ private:
 		DestroyThumbnailTextures();
 		thumbnailTextureWindowKeys_.clear();
 		thumbnailTextureWindowIndices_.clear();
-		thumbnailPixelRepository_.Clear([this](const auto& image) {
+		thumbnailRepository_->Clear([this](const auto& image) {
 			thumbnailPreparation_.Retire(image);
 		});
 		thumbnailScheduler_.Clear();
@@ -4277,8 +4278,8 @@ private:
 				if (texture->second.texture != nullptr) DestroyTextureMeasured(texture->second.texture);
 				thumbnailTextureCache_.erase(texture);
 			}
-			const jpegview_linux::ThumbnailPixelRepository::ImagePtr pixels =
-				thumbnailPixelRepository_.Erase(key);
+			const jpegview_linux::ThumbnailRepository::ImagePtr pixels =
+				thumbnailRepository_->Erase(key);
 			thumbnailPreparation_.Retire(pixels);
 		}
 	}
@@ -4356,7 +4357,7 @@ private:
 			DiscardThumbnailPixelStoreRetry();
 			thumbnailUploadRetryKey_.reset();
 			(void)thumbnailScheduler_.SetGeometry(targetWidth, targetHeight);
-			thumbnailPixelRepository_.SetGeometry(targetWidth, targetHeight,
+			thumbnailRepository_->SetGeometry(targetWidth, targetHeight,
 				[this](const auto& image) { thumbnailPreparation_.Retire(image); });
 			DestroyThumbnailTextures();
 			thumbnailTargetWidth_ = targetWidth;
@@ -4372,7 +4373,7 @@ private:
 		if (!jpegview_linux::CanReuseDisplayPixelsForThumbnail(
 			prepared->width, prepared->height, kMaximumThumbnailSourcePixels)) return;
 		const jpegview_linux::SourceKey key = prepared->source.Key();
-		if (thumbnailPixelRepository_.Find(key) != nullptr) return;
+		if (thumbnailRepository_->Find(key) != nullptr) return;
 		const std::optional<std::size_t> found = fileList_.IndexOf(prepared->filename);
 		if (!found.has_value()) return;
 		const std::size_t index = *found;
@@ -4454,7 +4455,7 @@ private:
 				return true;
 			}
 			const jpegview_linux::ThumbnailPixelStoreOutcome outcome =
-				thumbnailPixelRepository_.Store(result.image);
+				thumbnailRepository_->Store(result.image);
 			if (outcome == jpegview_linux::ThumbnailPixelStoreOutcome::Stored ||
 				outcome == jpegview_linux::ThumbnailPixelStoreOutcome::AlreadyPresent) {
 				EvictThumbnails(thumbnailScheduler_.Store(result.key));
@@ -4518,7 +4519,7 @@ private:
 			if (source == nullptr) continue;
 			const jpegview_linux::SourceKey key = source->Key();
 			if (thumbnailTextureCache_.find(key) != thumbnailTextureCache_.end()) continue;
-			const auto prepared = thumbnailPixelRepository_.Find(key);
+			const auto prepared = thumbnailRepository_->Find(key);
 			if (!prepared) continue;
 			const bool visible = runtimeSettings_.Values().thumbnailPanelVisible &&
 				jpegview_linux::ThumbnailIndexVisible(fileList_.Size(), current,
@@ -4578,7 +4579,7 @@ private:
 			fileList_.DescriptorAt(request.fileIndex);
 		if (request.fileIndex >= fileList_.Files().size() || source == nullptr ||
 			source->Key() != request.key) return;
-		if (thumbnailPixelRepository_.Find(request.key) != nullptr) {
+		if (thumbnailRepository_->Find(request.key) != nullptr) {
 			EvictThumbnails(thumbnailScheduler_.Store(request.key));
 			return;
 		}
@@ -12512,8 +12513,8 @@ private:
 					static_cast<std::uint64_t>(cached.second.height) * 4;
 			}
 		}
-		const jpegview_linux::ThumbnailPixelRepositoryDiagnostics thumbnailPixels =
-			thumbnailPixelRepository_.Diagnostics();
+		const jpegview_linux::ThumbnailRepositoryDiagnostics thumbnailPixels =
+			thumbnailRepository_->Diagnostics();
 		const jpegview_linux::DecodedImageCacheDiagnostics decodedStats =
 			imageCache_.GetDiagnostics();
 		const jpegview_linux::DisplayImageCacheDiagnostics displayStats =
@@ -12805,7 +12806,8 @@ private:
 	std::unordered_set<jpegview_linux::SourceKey,
 		jpegview_linux::SourceKeyHash> thumbnailTextureWindowKeys_;
 	std::vector<std::size_t> thumbnailTextureWindowIndices_;
-	jpegview_linux::ThumbnailPixelRepository thumbnailPixelRepository_;
+	std::unique_ptr<jpegview_linux::ThumbnailRepository> thumbnailRepository_ =
+		jpegview_linux::MakeInMemoryThumbnailRepository();
 	jpegview_linux::ThumbnailCacheScheduler thumbnailScheduler_;
 	jpegview_linux::ThumbnailPreparationWorker thumbnailPreparation_;
 	std::optional<jpegview_linux::ThumbnailPreparationResult> thumbnailPixelStoreRetry_;

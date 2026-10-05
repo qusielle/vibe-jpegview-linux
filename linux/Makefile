@@ -124,7 +124,7 @@ CORE_CPP_SOURCES := \
 	src/desktop_applications.cpp src/desktop_association.cpp \
 	src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp \
 	src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp \
-	src/viewer_chrome.cpp src/thumbnail_panel_model.cpp \
+	src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_repository.cpp \
 	src/thumbnail_resampler.cpp src/image_info_model.cpp \
 	src/spectrum_model.cpp src/file_dialog_model.cpp \
 	src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp

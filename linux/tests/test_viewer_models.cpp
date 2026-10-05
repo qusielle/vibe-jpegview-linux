@@ -1629,9 +1629,37 @@ void TestThumbnailPanelLayoutPreloadAndSizing() {
 		"thumbnail row added horizontal margins or incorrect vertical margins");
 }
 
+void TestThumbnailRepositoryInterfaceUsesInMemoryImplementation() {
+	std::unique_ptr<jpegview_linux::ThumbnailRepository> repository =
+		jpegview_linux::MakeInMemoryThumbnailRepository();
+	Expect(repository != nullptr,
+		"thumbnail repository factory did not provide an implementation");
+	repository->SetGeometry(8, 4);
+	auto image = std::make_shared<jpegview_linux::PreparedThumbnailImage>();
+	image->key = jpegview_linux::SourceKey("repository-interface");
+	image->width = 4;
+	image->height = 2;
+	image->bgra.assign(4u * 2u * 4u, 127);
+	const std::shared_ptr<const jpegview_linux::PreparedThumbnailImage> retained = image;
+	Expect(repository->Store(retained) ==
+		jpegview_linux::ThumbnailPixelStoreOutcome::Stored &&
+		repository->Find(retained->key) == retained &&
+		repository->Diagnostics().imageCount == 1 &&
+		repository->Diagnostics().pixelBytes == retained->bgra.size(),
+		"the in-memory thumbnail repository did not satisfy the shared repository contract");
+	std::size_t retired = 0;
+	repository->SetGeometry(4, 2, [&](const auto& imageToRetire) {
+		if (imageToRetire == retained) ++retired;
+	});
+	Expect(retired == 1 && repository->Find(retained->key) == nullptr &&
+		repository->Diagnostics().imageCount == 0 &&
+		repository->Diagnostics().pixelBytes == 0,
+		"the repository interface did not preserve geometry invalidation and retirement");
+}
+
 void TestThumbnailPixelRetentionAndTextureWindow() {
 	using Image = jpegview_linux::PreparedThumbnailImage;
-	using Repository = jpegview_linux::ThumbnailPixelRepository;
+	using Repository = jpegview_linux::InMemoryThumbnailRepository;
 	const auto MakeImage = [](const jpegview_linux::SourceKey& key,
 		int width, int height, std::uint8_t value) {
 		auto image = std::make_shared<Image>();
@@ -4235,6 +4263,7 @@ const TestCase kTests[] = {
 	{"overlay-layout-content-width-and-margins", &TestOverlayLayoutUsesContentWidthAndComfortableMargins},
 	{"viewer-chrome-paint-plans", &TestViewerChromePaintPlans},
 	{"thumbnail-panel-layout-preload-and-sizing", &TestThumbnailPanelLayoutPreloadAndSizing},
+	{"thumbnail-repository-interface-in-memory-implementation", &TestThumbnailRepositoryInterfaceUsesInMemoryImplementation},
 	{"thumbnail-pixel-retention-and-texture-window", &TestThumbnailPixelRetentionAndTextureWindow},
 	{"thumbnail-cache-scheduling-and-eviction", &TestThumbnailCacheSchedulingAndEviction},
 	{"thumbnail-catalog-replacement-identity", &TestThumbnailCatalogReplacementIdentity},
