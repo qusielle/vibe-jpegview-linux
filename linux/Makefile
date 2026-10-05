@@ -68,7 +68,6 @@ BUILD_DIR ?= build
 SANITIZER_BUILD_DIR ?= build-sanitize
 SANITIZER_CXXFLAGS ?= -O1 -g -std=c++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -fsanitize=address,undefined
 VERSION ?= $(shell sh ./version.sh)
-BUILD_INFO_HEADER := $(BUILD_DIR)/build-info-$(VERSION).h
 TARGET := $(BUILD_DIR)/jpegview-linux
 TEST_TARGET := $(BUILD_DIR)/jpegview-tests
 ifneq ($(strip $(SEVENZIP_SOURCE_ROOT)),)
@@ -91,126 +90,157 @@ else
 RAR_BACKEND_SOURCE := src/rar_backend_unavailable.cpp
 RAR_BACKEND_PLUGIN_DEPENDENCY :=
 endif
-SOURCES := src/main.cpp src/perf_diagnostics.cpp src/perf_diagnostics.h src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/cache_budget.cpp src/cache_budget.h src/image_cache.cpp src/image_cache.h src/display_image_cache.cpp src/display_image_cache.h src/image.cpp src/image.h src/image_processing.cpp src/image_processing.h src/image_processing_store.cpp src/image_processing_store.h src/recent_files.cpp src/recent_files.h src/settings.cpp src/settings.h src/transparency_pattern.cpp src/transparency_pattern.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/external_commands.cpp src/external_commands.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h src/overlay_layout.cpp src/overlay_layout.h src/viewer_chrome.cpp src/viewer_chrome.h src/thumbnail_panel_model.cpp src/thumbnail_panel_model.h src/thumbnail_resampler.cpp src/thumbnail_resampler.h src/image_info_model.cpp src/image_info_model.h src/spectrum_model.cpp src/spectrum_model.h src/file_dialog_model.cpp src/file_dialog_model.h src/playback_scheduler.cpp src/playback_scheduler.h src/system_font.cpp src/system_font.h src/bitmap_font.cpp src/bitmap_font.h src/bitmap_font_data.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
-TEST_SOURCES := tests/test_core.cpp src/perf_diagnostics.cpp src/perf_diagnostics.h src/file_list.cpp src/file_list.h src/image_formats.cpp src/image_formats.h src/input_commands.cpp src/input_commands.h src/exif_reader.cpp src/exif_reader.h src/image_writer.cpp src/image_writer.h src/image_decoder.cpp src/image_decoder.h src/cache_budget.cpp src/cache_budget.h src/image_cache.cpp src/image_cache.h src/display_image_cache.cpp src/display_image_cache.h src/image.cpp src/image.h src/image_processing.cpp src/image_processing.h src/image_processing_store.cpp src/image_processing_store.h src/recent_files.cpp src/recent_files.h src/settings.cpp src/settings.h src/transparency_pattern.cpp src/transparency_pattern.h src/sort_mode.cpp src/sort_mode.h src/desktop_applications.cpp src/desktop_applications.h src/external_commands.cpp src/external_commands.h src/batch_copy.cpp src/batch_copy.h src/viewport.cpp src/viewport.h src/resize_model.cpp src/resize_model.h src/context_menu_model.cpp src/context_menu_model.h src/overlay_layout.cpp src/overlay_layout.h src/viewer_chrome.cpp src/viewer_chrome.h src/thumbnail_panel_model.cpp src/thumbnail_panel_model.h src/thumbnail_resampler.cpp src/thumbnail_resampler.h src/image_info_model.cpp src/image_info_model.h src/spectrum_model.cpp src/spectrum_model.h src/file_dialog_model.cpp src/file_dialog_model.h src/playback_scheduler.cpp src/playback_scheduler.h src/system_font.cpp src/system_font.h src/bitmap_font.cpp src/bitmap_font.h src/bitmap_font_data.h src/sdl_abi.h third_party/stb_image.h ../src/JPEGView/resource.h
-IMAGE_WRITER_SOURCES := src/image_writer_jpeg_png.cpp src/image_writer_basic.cpp src/image_writer_optional.cpp
-SOURCES += src/image_writer_internal.h $(IMAGE_WRITER_SOURCES)
-TEST_SOURCES += src/image_writer_internal.h $(IMAGE_WRITER_SOURCES)
-IMAGE_DECODER_SOURCES := src/image_decoder_stb.cpp src/image_decoder_jpeg.cpp src/image_decoder_apng.cpp src/image_decoder_builtin.cpp src/image_decoder_optional.cpp
-SOURCES += src/image_decoder_internal.h $(IMAGE_DECODER_SOURCES)
-TEST_SOURCES += src/image_decoder_internal.h $(IMAGE_DECODER_SOURCES)
+# Shared source ownership is explicit: platform-independent modules are listed once,
+# SDL adapters are isolated, and each executable supplies its own entry point.
+IMAGE_WRITER_SOURCES := src/image_writer_jpeg_png.cpp src/image_writer_basic.cpp \
+	src/image_writer_optional.cpp
+IMAGE_DECODER_SOURCES := src/image_decoder_stb.cpp src/image_decoder_jpeg.cpp \
+	src/image_decoder_apng.cpp src/image_decoder_builtin.cpp \
+	src/image_decoder_optional.cpp
 ARCHIVE_SOURCE_SOURCES := src/archive_source_catalog.cpp src/archive_source_readers.cpp
-SOURCES += src/archive_source_internal.h $(ARCHIVE_SOURCE_SOURCES)
-TEST_SOURCES += src/archive_source_internal.h $(ARCHIVE_SOURCE_SOURCES)
-SOURCES += src/display_prefetch_planner.cpp src/display_prefetch_planner.h \
-	src/exif_metadata_worker.cpp src/exif_metadata_worker.h \
-	src/pending_image_intents.cpp src/pending_image_intents.h
-TEST_SOURCES += src/display_prefetch_planner.cpp src/display_prefetch_planner.h \
-	src/exif_metadata_worker.cpp src/exif_metadata_worker.h \
-	src/pending_image_intents.cpp src/pending_image_intents.h
-SOURCES += src/image_session_controller.cpp src/image_session_controller.h \
-	src/display_preparation_controller.cpp src/display_preparation_controller.h \
-	src/presentation_controller.cpp src/presentation_controller.h
-TEST_SOURCES += src/image_session_controller.cpp src/image_session_controller.h \
-	src/display_preparation_controller.cpp src/display_preparation_controller.h \
-	src/presentation_controller.cpp src/presentation_controller.h
-SOURCES += src/source_work_coordinator.cpp src/source_work_coordinator.h src/work_context.h
-TEST_SOURCES += src/source_work_coordinator.cpp src/source_work_coordinator.h src/work_context.h
-SOURCES += src/file_list_scan_worker.cpp src/file_list_scan_worker.h
-TEST_SOURCES += src/file_list_scan_worker.cpp src/file_list_scan_worker.h
-SOURCES += src/file_list_sort_worker.cpp src/file_list_sort_worker.h
-TEST_SOURCES += src/file_list_sort_worker.cpp src/file_list_sort_worker.h
-SOURCES += src/advanced_configuration_model.cpp src/advanced_configuration_model.h
-TEST_SOURCES += src/advanced_configuration_model.cpp src/advanced_configuration_model.h
-SOURCES += src/double_page_model.cpp src/double_page_model.h
-TEST_SOURCES += src/double_page_model.cpp src/double_page_model.h
-SOURCES += src/archive_source.cpp src/archive_source.h
-TEST_SOURCES += src/archive_source.cpp src/archive_source.h
-SOURCES += src/cache_policy.cpp src/cache_policy.h
-TEST_SOURCES += src/cache_policy.cpp src/cache_policy.h
-SOURCES += src/display_upload_scheduler.cpp src/display_upload_scheduler.h
-TEST_SOURCES += src/display_upload_scheduler.cpp src/display_upload_scheduler.h
-SOURCES += src/display_texture_pins.h
-TEST_SOURCES += src/display_texture_pins.h
-SOURCES += src/event_loop_model.cpp src/event_loop_model.h
-TEST_SOURCES += src/event_loop_model.cpp src/event_loop_model.h
-SOURCES += src/modal_event_router.cpp src/modal_event_router.h
-TEST_SOURCES += src/modal_event_router.cpp src/modal_event_router.h
-SOURCES += src/renderer_thread_resource.h
-TEST_SOURCES += src/renderer_thread_resource.h
-SOURCES += src/text_renderer.cpp src/text_renderer.h src/chrome_renderer.cpp src/chrome_renderer.h
-TEST_SOURCES += src/text_renderer.cpp src/text_renderer.h src/chrome_renderer.cpp src/chrome_renderer.h
-SOURCES += src/context_menu_renderer.cpp src/context_menu_renderer.h
-TEST_SOURCES += src/context_menu_renderer.cpp src/context_menu_renderer.h
-SOURCES += src/file_dialog_renderer.cpp src/file_dialog_renderer.h
-TEST_SOURCES += src/file_dialog_renderer.cpp src/file_dialog_renderer.h
-SOURCES += src/editing_dialog_renderer.cpp src/editing_dialog_renderer.h
-TEST_SOURCES += src/editing_dialog_renderer.cpp src/editing_dialog_renderer.h
-SOURCES += src/renderer_texture_owner.cpp src/renderer_texture_owner.h
-TEST_SOURCES += src/renderer_texture_owner.cpp src/renderer_texture_owner.h
-SOURCES += src/image_spectrum_worker.cpp src/image_spectrum_worker.h
-TEST_SOURCES += src/image_spectrum_worker.cpp src/image_spectrum_worker.h
-SOURCES += src/image_document.cpp src/image_document.h
-TEST_SOURCES += src/image_document.cpp src/image_document.h
-SOURCES += src/image_operation_worker.cpp src/image_operation_worker.h
-TEST_SOURCES += src/image_operation_worker.cpp src/image_operation_worker.h
-SOURCES += src/external_process.cpp src/external_process.h \
-	src/file_operation_service.cpp src/file_operation_service.h src/clipboard.cpp src/clipboard.h
-TEST_SOURCES += src/external_process.cpp src/external_process.h \
-	src/file_operation_service.cpp src/file_operation_service.h src/clipboard.cpp src/clipboard.h
-SOURCES += src/desktop_association.cpp src/desktop_association.h
-TEST_SOURCES += src/desktop_association.cpp src/desktop_association.h
-TEST_SOURCES += tests/fixtures/data-encrypted.7z tests/fixtures/header-encrypted.7z
-TEST_SOURCES += tests/fixtures/encrypted_rar/private.png \
+CORE_CPP_SOURCES := \
+	src/perf_diagnostics.cpp src/source_work_coordinator.cpp \
+	src/interaction_work_policy.cpp src/file_list.cpp \
+	src/file_list_scan_worker.cpp src/file_list_sort_worker.cpp \
+	src/double_page_model.cpp src/presentation_controller.cpp \
+	src/display_prefetch_planner.cpp src/display_preparation_controller.cpp \
+	src/image_session_controller.cpp src/display_upload_scheduler.cpp \
+	src/event_loop_model.cpp src/modal_event_router.cpp \
+	src/image_spectrum_worker.cpp src/image_document.cpp \
+	src/image_operation_worker.cpp src/file_operation_service.cpp \
+	src/external_process.cpp src/exif_metadata_worker.cpp \
+	src/pending_image_intents.cpp src/archive_source.cpp \
+	$(ARCHIVE_SOURCE_SOURCES) src/cache_policy.cpp \
+	src/archive_password_dialog_model.cpp src/crop_selection_model.cpp \
+	src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp \
+	src/magnifying_glass_model.cpp src/advanced_configuration_model.cpp \
+	src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp \
+	src/image_writer.cpp $(IMAGE_WRITER_SOURCES) \
+	src/image_decoder.cpp $(IMAGE_DECODER_SOURCES) \
+	src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp \
+	src/image.cpp src/image_processing.cpp src/image_processing_store.cpp \
+	src/recent_files.cpp src/clipboard.cpp src/settings.cpp \
+	src/transparency_pattern.cpp src/sort_mode.cpp \
+	src/desktop_applications.cpp src/desktop_association.cpp \
+	src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp \
+	src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp \
+	src/viewer_chrome.cpp src/thumbnail_panel_model.cpp \
+	src/thumbnail_resampler.cpp src/image_info_model.cpp \
+	src/spectrum_model.cpp src/file_dialog_model.cpp \
+	src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp
+SDL_ADAPTER_CPP_SOURCES := \
+	src/text_renderer.cpp src/chrome_renderer.cpp \
+	src/context_menu_renderer.cpp src/file_dialog_renderer.cpp \
+	src/editing_dialog_renderer.cpp src/renderer_texture_owner.cpp \
+	src/app_icon.cpp
+BACKEND_CPP_SOURCES := $(SEVENZIP_BACKEND_SOURCE) $(RAR_BACKEND_SOURCE)
+APP_CPP_SOURCES := src/main.cpp $(CORE_CPP_SOURCES) \
+	$(SDL_ADAPTER_CPP_SOURCES) $(BACKEND_CPP_SOURCES)
+TEST_SUITE_CPP_SOURCES := tests/test_main.cpp \
+	tests/test_source_navigation.cpp tests/test_work_admission.cpp \
+	tests/test_codec_display.cpp tests/test_image_cache.cpp \
+	tests/test_image_operations.cpp tests/test_viewer_models.cpp \
+	tests/test_dialogs_sessions.cpp
+TEST_CPP_SOURCES := $(TEST_SUITE_CPP_SOURCES) $(CORE_CPP_SOURCES) \
+	$(SDL_ADAPTER_CPP_SOURCES) $(BACKEND_CPP_SOURCES)
+TEST_FIXTURE_FILES := \
+	tests/fixtures/data-encrypted.7z tests/fixtures/header-encrypted.7z \
+	tests/fixtures/encrypted_rar/private.png \
 	tests/fixtures/encrypted_rar/rar4-data-encrypted.rar \
 	tests/fixtures/encrypted_rar/rar4-header-encrypted.rar \
 	tests/fixtures/encrypted_rar/rar5-data-encrypted.rar \
-	tests/fixtures/encrypted_rar/rar5-header-encrypted.rar
-SOURCES += $(SEVENZIP_BACKEND_SOURCE) src/seven_zip_backend.h
-TEST_SOURCES += $(SEVENZIP_BACKEND_SOURCE) src/seven_zip_backend.h
-SOURCES += $(RAR_BACKEND_SOURCE) src/rar_backend.h
-TEST_SOURCES += $(RAR_BACKEND_SOURCE) src/rar_backend.h
-SOURCES += src/archive_password_dialog_model.cpp src/archive_password_dialog_model.h
-TEST_SOURCES += src/archive_password_dialog_model.cpp src/archive_password_dialog_model.h
-TEST_SOURCES += tests/rar_test_fixtures.h
-SOURCES += src/crop_selection_model.cpp src/crop_selection_model.h
-TEST_SOURCES += src/crop_selection_model.cpp src/crop_selection_model.h
-SOURCES += src/crop_size_dialog_model.cpp src/crop_size_dialog_model.h
-TEST_SOURCES += src/crop_size_dialog_model.cpp src/crop_size_dialog_model.h
-SOURCES += src/zoom_navigator_model.cpp src/zoom_navigator_model.h
-TEST_SOURCES += src/zoom_navigator_model.cpp src/zoom_navigator_model.h
-SOURCES += src/desktop_association.cpp src/desktop_association.h
-TEST_SOURCES += src/desktop_association.cpp src/desktop_association.h
-SOURCES += src/magnifying_glass_model.cpp src/magnifying_glass_model.h
-TEST_SOURCES += src/magnifying_glass_model.cpp src/magnifying_glass_model.h
-SOURCES += src/interaction_work_policy.cpp src/interaction_work_policy.h
-TEST_SOURCES += src/interaction_work_policy.cpp src/interaction_work_policy.h
-SOURCES += src/work_batch_gate.h
-TEST_SOURCES += src/work_batch_gate.h
+	tests/fixtures/encrypted_rar/rar5-header-encrypted.rar \
+	tests/rar_test_fixtures.h
 ICON_SOURCE := ../src/JPEGView/res/JPEGView.ico
 GENERATED_ICON_HEADER := $(BUILD_DIR)/jpegview_icon_data.h
+BUILD_INFO_HEADER := $(BUILD_DIR)/build-info.h
 ARCHIVE_FIXTURE_WRITER := $(BUILD_DIR)/write-7z-fixture
 RAR_FIXTURE_WRITER := $(BUILD_DIR)/write-rar-fixture
 ENCRYPTED_ZIP_FIXTURE_WRITER := $(BUILD_DIR)/write-encrypted-zip-fixture
-SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
-TEST_SOURCES += src/app_icon.cpp src/app_icon.h embed-icon.sh $(ICON_SOURCE) $(GENERATED_ICON_HEADER)
-SOURCES += $(BUILD_INFO_HEADER)
+APP_OBJECT_DIR := $(BUILD_DIR)/obj/app
+TEST_OBJECT_DIR := $(BUILD_DIR)/obj/tests
+PERF_OBJECT_DIR := $(BUILD_DIR)/obj/perf
+APP_MAIN_OBJECT := $(APP_OBJECT_DIR)/src/main.o
+APP_ICON_OBJECT := $(APP_OBJECT_DIR)/src/app_icon.o
+TEST_ICON_OBJECT := $(TEST_OBJECT_DIR)/src/app_icon.o
+PERF_OBJECT := $(PERF_OBJECT_DIR)/tests/perf_workload.o
+PERF_CPP_SOURCES := src/image.cpp src/image_processing.cpp
+PERF_SUPPORT_OBJECTS := $(patsubst %.cpp,$(PERF_OBJECT_DIR)/%.o,$(PERF_CPP_SOURCES))
+PERF_OBJECTS := $(PERF_SUPPORT_OBJECTS) $(PERF_OBJECT)
+PERF_TARGET := $(BUILD_DIR)/jpegview-perf-workload
+APP_OBJECTS := $(patsubst %.cpp,$(APP_OBJECT_DIR)/%.o,$(APP_CPP_SOURCES))
+TEST_OBJECTS := $(patsubst %.cpp,$(TEST_OBJECT_DIR)/%.o,$(TEST_CPP_SOURCES))
+APP_DEPFILES := $(APP_OBJECTS:.o=.d)
+TEST_DEPFILES := $(TEST_OBJECTS:.o=.d)
+PERF_DEPFILES := $(PERF_OBJECT:.o=.d)
+PERF_SUPPORT_DEPFILES := $(PERF_SUPPORT_OBJECTS:.o=.d)
+APP_CPPFLAGS := $(CODEC_DEFINES) $(SDL2_CFLAGS) $(PANGO_CFLAGS) \
+	$(CODEC_CFLAGS) $(SEVENZIP_CPPFLAGS) -I"$(BUILD_DIR)" -Isrc -Ithird_party
+TEST_CPPFLAGS := -DJPEGVIEW_CACHE_BUDGET_TEST_HOOKS $(CODEC_DEFINES) \
+	$(PANGO_CFLAGS) $(CODEC_CFLAGS) $(SEVENZIP_CPPFLAGS) \
+	-I"$(BUILD_DIR)" -Isrc -Ithird_party -Itests
+APP_LINK_LIBS := $(LDFLAGS) $(STATIC_RUNTIME) $(SDL2_LIBS) $(PANGO_LIBS) \
+	$(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+TEST_LINK_LIBS := $(SDL2_LIBS) $(PANGO_LIBS) $(IMAGE_LIBS) \
+	$(CODEC_LIBS) -ldl -lm -pthread
+PERF_CPPFLAGS := -Isrc
+PERF_LINK_LIBS := -lm
+APP_COMPILE_CONFIG_STAMP := $(BUILD_DIR)/config/app-compile.flags
+TEST_COMPILE_CONFIG_STAMP := $(BUILD_DIR)/config/tests-compile.flags
+APP_LINK_CONFIG_STAMP := $(BUILD_DIR)/config/app-link.flags
+TEST_LINK_CONFIG_STAMP := $(BUILD_DIR)/config/tests-link.flags
+PERF_COMPILE_CONFIG_STAMP := $(BUILD_DIR)/config/perf-compile.flags
+PERF_LINK_CONFIG_STAMP := $(BUILD_DIR)/config/perf-link.flags
+ARCHIVE_FIXTURE_CONFIG_STAMP := $(BUILD_DIR)/config/archive-fixture.flags
+RAR_FIXTURE_CONFIG_STAMP := $(BUILD_DIR)/config/rar-fixture.flags
+ZIP_FIXTURE_CONFIG_STAMP := $(BUILD_DIR)/config/zip-fixture.flags
+SEVENZIP_PLUGIN_CONFIG_STAMP := $(BUILD_DIR)/config/sevenzip-plugin.inputs
+RAR_PLUGIN_CONFIG_STAMP := $(BUILD_DIR)/config/rar-plugin.inputs
+ifneq ($(strip $(SEVENZIP_SOURCE_ROOT)),)
+SEVENZIP_PLUGIN_INPUTS := $(sort $(shell find "$(SEVENZIP_SOURCE_ROOT)/CPP" \
+	-type f -not -path '*/_o/*' -print 2>/dev/null))
+endif
+ifneq ($(strip $(RAR_BACKEND_ROOT)),)
+RAR_BACKEND_INPUTS := $(sort $(shell find "$(RAR_BACKEND_ROOT)" -type f -name '*.rs' -not -path '*/target/*' -print 2>/dev/null))
+endif
 
-.PHONY: all clean run test test-ui test-shell test-sanitize test-version check appimage \
+.PHONY: all clean run test test-focused test-list test-list-suites test-perf \
+	test-ui test-shell test-sanitize test-version check appimage FORCE \
 	regen-encrypted-zip-fixture
 
 all: $(TARGET) $(SEVENZIP_PLUGIN_DEPENDENCY) $(RAR_BACKEND_PLUGIN_DEPENDENCY)
 
+FORCE:
+
+shell_quote = '$(subst ','"'"',$(1))'
+
 ifneq ($(strip $(SEVENZIP_SOURCE_ROOT)),)
-$(SEVENZIP_PLUGIN): $(SEVENZIP_BUNDLE_DIR)/makefile.gcc
+$(SEVENZIP_PLUGIN_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,source-root=$(SEVENZIP_SOURCE_ROOT)) \
+		$(call shell_quote,inputs=$(SEVENZIP_PLUGIN_INPUTS)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(SEVENZIP_PLUGIN): $(SEVENZIP_BUNDLE_DIR)/makefile.gcc \
+	$(SEVENZIP_PLUGIN_CONFIG_STAMP) $(SEVENZIP_PLUGIN_INPUTS) \
+	$(APP_COMPILE_CONFIG_STAMP)
 	$(MAKE) -C "$(SEVENZIP_BUNDLE_DIR)" -f makefile.gcc DISABLE_RAR=1
 	@mkdir -p "$(dir $@)"
 	cp "$(SEVENZIP_BUNDLE_DIR)/_o/7z.so" "$@"
 endif
 
 ifneq ($(strip $(RAR_BACKEND_ROOT)),)
+$(RAR_PLUGIN_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,source-root=$(RAR_BACKEND_ROOT)) \
+		$(call shell_quote,inputs=$(RAR_BACKEND_INPUTS)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
 $(RAR_BACKEND_PLUGIN): $(RAR_BACKEND_ROOT)/Cargo.toml $(RAR_BACKEND_ROOT)/Cargo.lock \
-	$(RAR_BACKEND_ROOT)/rust-toolchain.toml $(wildcard $(RAR_BACKEND_ROOT)/src/*.rs)
+	$(RAR_BACKEND_ROOT)/rust-toolchain.toml $(RAR_BACKEND_INPUTS) \
+	$(RAR_PLUGIN_CONFIG_STAMP) $(APP_COMPILE_CONFIG_STAMP)
 	CARGO_HOME="$${CARGO_HOME:-$$HOME/.cargo}" RUSTUP_HOME="$${RUSTUP_HOME:-$$HOME/.rustup}" \
 	CARGO_TARGET_DIR="$(abspath $(RAR_CARGO_TARGET_DIR))" \
 	$(CARGO) build --manifest-path "$(RAR_BACKEND_ROOT)/Cargo.toml" --release --locked
@@ -218,43 +248,180 @@ $(RAR_BACKEND_PLUGIN): $(RAR_BACKEND_ROOT)/Cargo.toml $(RAR_BACKEND_ROOT)/Cargo.
 	cp "$(abspath $(RAR_CARGO_TARGET_DIR))/release/librar_backend.so" "$@"
 endif
 
+$(APP_COMPILE_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CPPFLAGS=$(CPPFLAGS)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,APP_CPPFLAGS=$(APP_CPPFLAGS)) \
+		$(call shell_quote,SEVENZIP_SOURCE_ROOT=$(SEVENZIP_SOURCE_ROOT)) \
+		$(call shell_quote,RAR_BACKEND_ROOT=$(RAR_BACKEND_ROOT)) \
+		$(call shell_quote,BACKEND_CPP_SOURCES=$(BACKEND_CPP_SOURCES)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(TEST_COMPILE_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CPPFLAGS=$(CPPFLAGS)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,TEST_CPPFLAGS=$(TEST_CPPFLAGS)) \
+		$(call shell_quote,SEVENZIP_SOURCE_ROOT=$(SEVENZIP_SOURCE_ROOT)) \
+		$(call shell_quote,RAR_BACKEND_ROOT=$(RAR_BACKEND_ROOT)) \
+		$(call shell_quote,BACKEND_CPP_SOURCES=$(BACKEND_CPP_SOURCES)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(APP_LINK_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,APP_LINK_LIBS=$(APP_LINK_LIBS)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(TEST_LINK_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,TEST_LINK_LIBS=$(TEST_LINK_LIBS)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(BUILD_INFO_HEADER): version.sh write-build-info.sh FORCE
+	@mkdir -p "$(BUILD_DIR)"
+	@tmp="$@.tmp"; \
+		sh ./write-build-info.sh "$$tmp" "$(VERSION)" && \
+		if cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv "$$tmp" "$@"; fi
+
 $(GENERATED_ICON_HEADER): $(ICON_SOURCE) embed-icon.sh
-	@mkdir -p $(BUILD_DIR)
-	./embed-icon.sh $(ICON_SOURCE) $@
+	@mkdir -p "$(BUILD_DIR)"
+	./embed-icon.sh "$(ICON_SOURCE)" "$@"
 
-$(BUILD_INFO_HEADER): version.sh write-build-info.sh
-	sh ./write-build-info.sh "$@" "$(VERSION)"
+$(APP_MAIN_OBJECT): APP_EXTRA_CPPFLAGS := -include "$(BUILD_INFO_HEADER)"
+$(APP_MAIN_OBJECT): $(BUILD_INFO_HEADER)
+$(APP_ICON_OBJECT) $(TEST_ICON_OBJECT): $(GENERATED_ICON_HEADER)
 
-$(TARGET): $(SOURCES) $(SEVENZIP_PLUGIN_DEPENDENCY) $(RAR_BACKEND_PLUGIN_DEPENDENCY)
-	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -include $(BUILD_INFO_HEADER) $(CODEC_DEFINES) $(SDL2_CFLAGS) $(PANGO_CFLAGS) $(CODEC_CFLAGS) $(SEVENZIP_CPPFLAGS) -I$(BUILD_DIR) -Isrc -Ithird_party src/main.cpp src/perf_diagnostics.cpp src/source_work_coordinator.cpp src/interaction_work_policy.cpp src/file_list.cpp src/file_list_scan_worker.cpp src/file_list_sort_worker.cpp src/double_page_model.cpp src/presentation_controller.cpp src/display_prefetch_planner.cpp src/display_preparation_controller.cpp src/image_session_controller.cpp src/display_upload_scheduler.cpp src/event_loop_model.cpp src/modal_event_router.cpp src/text_renderer.cpp src/chrome_renderer.cpp src/context_menu_renderer.cpp src/file_dialog_renderer.cpp src/editing_dialog_renderer.cpp src/renderer_texture_owner.cpp src/image_spectrum_worker.cpp src/image_document.cpp src/image_operation_worker.cpp src/file_operation_service.cpp src/external_process.cpp src/exif_metadata_worker.cpp src/pending_image_intents.cpp src/archive_source.cpp $(ARCHIVE_SOURCE_SOURCES) src/cache_policy.cpp $(SEVENZIP_BACKEND_SOURCE) $(RAR_BACKEND_SOURCE) src/archive_password_dialog_model.cpp src/crop_selection_model.cpp src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp src/magnifying_glass_model.cpp src/advanced_configuration_model.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp $(IMAGE_WRITER_SOURCES) src/image_decoder.cpp $(IMAGE_DECODER_SOURCES) src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp src/image.cpp src/image_processing.cpp src/image_processing_store.cpp src/recent_files.cpp src/clipboard.cpp src/settings.cpp src/transparency_pattern.cpp src/sort_mode.cpp src/desktop_applications.cpp src/desktop_association.cpp src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_resampler.cpp src/image_info_model.cpp src/spectrum_model.cpp src/file_dialog_model.cpp src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp src/app_icon.cpp -o $@ $(LDFLAGS) $(STATIC_RUNTIME) $(SDL2_LIBS) $(PANGO_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
-	@for stale_header in "$(BUILD_DIR)"/build-info-*.h; do \
-		[ -f "$$stale_header" ] || continue; \
-		[ "$$stale_header" = "$(BUILD_INFO_HEADER)" ] || rm -f "$$stale_header"; \
-	done
+$(APP_OBJECT_DIR)/%.o: %.cpp $(APP_COMPILE_CONFIG_STAMP) $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(APP_CPPFLAGS) $(APP_EXTRA_CPPFLAGS) \
+		-MMD -MP -MF "$(@:.o=.d)" -MT "$@" -c "$<" -o "$@"
+
+$(TEST_OBJECT_DIR)/%.o: %.cpp $(TEST_COMPILE_CONFIG_STAMP) $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(TEST_CPPFLAGS) \
+		-MMD -MP -MF "$(@:.o=.d)" -MT "$@" -c "$<" -o "$@"
+
+$(PERF_COMPILE_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CPPFLAGS=$(CPPFLAGS)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,PERF_CPPFLAGS=$(PERF_CPPFLAGS)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(PERF_LINK_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,PERF_LINK_LIBS=$(PERF_LINK_LIBS)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(ARCHIVE_FIXTURE_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,ARCHIVE_CFLAGS=$(ARCHIVE_CFLAGS)) \
+		$(call shell_quote,ARCHIVE_LIBS=$(ARCHIVE_LIBS)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(RAR_FIXTURE_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,INCLUDE_FLAGS=-Itests) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(ZIP_FIXTURE_CONFIG_STAMP): FORCE $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	@printf '%s\n' \
+		$(call shell_quote,CXX=$(CXX)) \
+		$(call shell_quote,CXXFLAGS=$(CXXFLAGS)) \
+		$(call shell_quote,ZIP_CFLAGS=$(ZIP_CFLAGS)) \
+		$(call shell_quote,ZIP_LIBS=$(ZIP_LIBS)) > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv "$@.tmp" "$@"; fi
+
+$(PERF_OBJECT_DIR)/%.o: %.cpp $(PERF_COMPILE_CONFIG_STAMP) $(MAKEFILE_LIST)
+	@mkdir -p "$(@D)"
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PERF_CPPFLAGS) \
+		-MMD -MP -MF "$(@:.o=.d)" -MT "$@" -c "$<" -o "$@"
+
+-include $(APP_DEPFILES) $(TEST_DEPFILES) $(PERF_DEPFILES) \
+	$(PERF_SUPPORT_DEPFILES)
+
+$(TARGET): $(APP_OBJECTS) $(APP_LINK_CONFIG_STAMP) \
+	$(SEVENZIP_PLUGIN_DEPENDENCY) $(RAR_BACKEND_PLUGIN_DEPENDENCY)
+	$(CXX) $(CXXFLAGS) $(APP_OBJECTS) -o "$@" $(APP_LINK_LIBS)
 
 run: $(TARGET)
 	$(TARGET) $(ARGS)
 
-$(TEST_TARGET): $(TEST_SOURCES) $(SEVENZIP_PLUGIN_DEPENDENCY) $(RAR_BACKEND_PLUGIN_DEPENDENCY)
-	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -DJPEGVIEW_CACHE_BUDGET_TEST_HOOKS $(CODEC_DEFINES) $(PANGO_CFLAGS) $(CODEC_CFLAGS) $(SEVENZIP_CPPFLAGS) -I$(BUILD_DIR) -Isrc -Ithird_party tests/test_core.cpp src/perf_diagnostics.cpp src/source_work_coordinator.cpp src/interaction_work_policy.cpp src/file_list.cpp src/file_list_scan_worker.cpp src/file_list_sort_worker.cpp src/double_page_model.cpp src/presentation_controller.cpp src/display_prefetch_planner.cpp src/display_preparation_controller.cpp src/image_session_controller.cpp src/display_upload_scheduler.cpp src/event_loop_model.cpp src/modal_event_router.cpp src/text_renderer.cpp src/chrome_renderer.cpp src/context_menu_renderer.cpp src/file_dialog_renderer.cpp src/editing_dialog_renderer.cpp src/renderer_texture_owner.cpp src/image_spectrum_worker.cpp src/image_document.cpp src/image_operation_worker.cpp src/file_operation_service.cpp src/external_process.cpp src/clipboard.cpp src/exif_metadata_worker.cpp src/pending_image_intents.cpp src/archive_source.cpp $(ARCHIVE_SOURCE_SOURCES) src/cache_policy.cpp $(SEVENZIP_BACKEND_SOURCE) $(RAR_BACKEND_SOURCE) src/archive_password_dialog_model.cpp src/crop_selection_model.cpp src/crop_size_dialog_model.cpp src/zoom_navigator_model.cpp src/magnifying_glass_model.cpp src/advanced_configuration_model.cpp src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp src/image_writer.cpp $(IMAGE_WRITER_SOURCES) src/image_decoder.cpp $(IMAGE_DECODER_SOURCES) src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp src/image.cpp src/image_processing.cpp src/image_processing_store.cpp src/recent_files.cpp src/settings.cpp src/transparency_pattern.cpp src/sort_mode.cpp src/desktop_applications.cpp src/desktop_association.cpp src/external_commands.cpp src/batch_copy.cpp src/viewport.cpp src/resize_model.cpp src/context_menu_model.cpp src/overlay_layout.cpp src/viewer_chrome.cpp src/thumbnail_panel_model.cpp src/thumbnail_resampler.cpp src/image_info_model.cpp src/spectrum_model.cpp src/file_dialog_model.cpp src/playback_scheduler.cpp src/system_font.cpp src/bitmap_font.cpp src/app_icon.cpp -o $@ $(SDL2_LIBS) $(PANGO_LIBS) $(IMAGE_LIBS) $(CODEC_LIBS) -ldl -lm -pthread
+$(TEST_TARGET): $(TEST_OBJECTS) $(TEST_LINK_CONFIG_STAMP) \
+	$(TEST_FIXTURE_FILES) $(SEVENZIP_PLUGIN_DEPENDENCY) \
+	$(RAR_BACKEND_PLUGIN_DEPENDENCY)
+	$(CXX) $(CXXFLAGS) $(TEST_OBJECTS) -o "$@" $(TEST_LINK_LIBS)
 
 test: $(TEST_TARGET)
 	@trace_file="$(abspath $(BUILD_DIR))/perf-trace-core.csv"; \
 	JPEGVIEW_PERF_TRACE="$$trace_file" $(TEST_TARGET) && \
 	JPEGVIEW_TEST_EXPECT_GIFLIB="$(if $(strip $(GIF_LIBS)),1,0)" \
-		sh tests/perf_trace_test.sh "$$trace_file"
+		sh tests/perf_trace_test.sh "$$trace_file" && \
+	sh tests/test_harness_test.sh "$(TEST_TARGET)"
 
-$(ARCHIVE_FIXTURE_WRITER): tests/write_7z_fixture.cpp
+test-focused: $(TEST_TARGET)
+	@if [ -n "$(TEST_SUITE)" ]; then \
+		if [ -n "$(TEST_FILTER)" ]; then \
+			$(TEST_TARGET) --suite "$(TEST_SUITE)" --filter "$(TEST_FILTER)"; \
+		else \
+			$(TEST_TARGET) --suite "$(TEST_SUITE)"; \
+		fi; \
+	elif [ -n "$(TEST_FILTER)" ]; then \
+		$(TEST_TARGET) --filter "$(TEST_FILTER)"; \
+	else \
+		echo "Set TEST_SUITE or TEST_FILTER to select focused tests." >&2; exit 2; \
+	fi
+
+test-list: $(TEST_TARGET)
+	$(TEST_TARGET) --list
+
+test-list-suites: $(TEST_TARGET)
+	$(TEST_TARGET) --list-suites
+
+$(PERF_TARGET): $(PERF_OBJECTS) $(PERF_LINK_CONFIG_STAMP)
+	$(CXX) $(CXXFLAGS) $(PERF_OBJECTS) -o "$@" $(PERF_LINK_LIBS)
+
+test-perf: $(PERF_TARGET)
+	$(PERF_TARGET) $(PERF_ARGS)
+
+
+$(ARCHIVE_FIXTURE_WRITER): tests/write_7z_fixture.cpp \
+	$(ARCHIVE_FIXTURE_CONFIG_STAMP) $(MAKEFILE_LIST)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(ARCHIVE_CFLAGS) $< -o $@ $(ARCHIVE_LIBS)
 
-$(RAR_FIXTURE_WRITER): tests/write_rar_fixture.cpp tests/rar_test_fixtures.h
+
+$(RAR_FIXTURE_WRITER): tests/write_rar_fixture.cpp tests/rar_test_fixtures.h \
+	$(RAR_FIXTURE_CONFIG_STAMP) $(MAKEFILE_LIST)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -Itests $< -o $@
 
-$(ENCRYPTED_ZIP_FIXTURE_WRITER): tests/write_encrypted_zip_fixture.cpp
+
+$(ENCRYPTED_ZIP_FIXTURE_WRITER): tests/write_encrypted_zip_fixture.cpp \
+	$(ZIP_FIXTURE_CONFIG_STAMP) $(MAKEFILE_LIST)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(ZIP_CFLAGS) $< -o $@ $(ZIP_LIBS)
 
@@ -277,7 +444,7 @@ test-version:
 	sh tests/version_test.sh
 
 test-shell:
-	sh -n AppRun retry-command.sh tests/ui_smoke.sh tests/thumbnail_panning_smoke.sh tests/perf_trace_test.sh tests/appimage_x11_smoke.sh tests/version_test.sh tests/docker_build_test.sh tests/appimage_runtime_test.sh tests/retry_command_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh ../set_env.sh
+	sh -n AppRun retry-command.sh tests/ui_smoke.sh tests/thumbnail_panning_smoke.sh tests/perf_trace_test.sh tests/test_harness_test.sh tests/appimage_x11_smoke.sh tests/version_test.sh tests/docker_build_test.sh tests/appimage_runtime_test.sh tests/retry_command_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh ../set_env.sh
 	$(MAKE) test-version
 	sh tests/docker_build_test.sh
 	sh tests/appimage_runtime_test.sh
@@ -285,7 +452,7 @@ test-shell:
 	bash -n release-assets.sh
 	bash tests/release_assets_test.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck AppRun retry-command.sh tests/ui_smoke.sh tests/thumbnail_panning_smoke.sh tests/perf_trace_test.sh tests/appimage_x11_smoke.sh tests/version_test.sh tests/docker_build_test.sh tests/appimage_runtime_test.sh tests/retry_command_test.sh tests/release_assets_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh release-assets.sh ../set_env.sh; \
+		shellcheck AppRun retry-command.sh tests/ui_smoke.sh tests/thumbnail_panning_smoke.sh tests/perf_trace_test.sh tests/test_harness_test.sh tests/appimage_x11_smoke.sh tests/version_test.sh tests/docker_build_test.sh tests/appimage_runtime_test.sh tests/retry_command_test.sh tests/release_assets_test.sh package-appimage.sh package-deb.sh fetch-7zip-source.sh install-rust-toolchain.sh fetch-rars-source.sh package-rar-backend-source.sh embed-icon.sh docker-build.sh version.sh write-build-info.sh release-assets.sh ../set_env.sh; \
 	else \
 		echo "ShellCheck: SKIP (shellcheck not installed)"; \
 	fi

@@ -74,7 +74,8 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
   internal header. Use scoped ownership for mappings and C-library handles, while keeping explicit
   cleanup at `setjmp`/`longjmp` recovery points where stack unwinding cannot run safely.
 - Pure calculations, state transitions, ordering, filtering, and command planning belong outside
-  `main.cpp` and should be covered by `linux/tests/test_core.cpp`.
+  `main.cpp` and should be covered by a matching `linux/tests/test_*.cpp` suite registered through
+  `linux/tests/test_harness.h`.
 - Renderer snapshots and row labels must consume source-derived presentation prepared by their owning
   model or worker completion. Do not run archive-location classification, format lookup, or other
   filesystem discovery while building or painting a snapshot; these helpers may perform stats.

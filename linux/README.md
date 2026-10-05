@@ -475,9 +475,12 @@ they support.
     open-dialog state,
     advanced-configuration state, overlays, thumbnails, fonts, image information, context menus,
     resize, batch operations, archive sources, and desktop applications.
-    Shell and sanitizer targets supplement the regular suites. Docker builds use distro codec
-    packages where available and build only codecs missing from that Ubuntu release; independent
-    codec stages and the viewer/tests compile in parallel.
+    The core suite is split into selectable subsystem suites, and Make tracks C++ header dependencies
+    so an incremental change recompiles affected objects instead of invoking one compiler over the
+    whole program. Application, test, and sanitizer objects use separate build trees. Shell and
+    sanitizer targets supplement the regular suites. Docker builds use distro codec packages where
+    available and build only codecs missing from that Ubuntu release; independent codec stages and
+    the viewer/tests compile in parallel.
 
 16. **Opt-in performance traces.** Set `JPEGVIEW_PERF_TRACE=/path/to/trace.csv` to record event,
     frame, presentation, input-to-presentation, decoder-stage, upload, cache, and renderer data for
@@ -885,6 +888,21 @@ make -C linux test
 The Unicode font-rendering test requires at least one installed system font. The Ubuntu Docker
 build installs `fonts-dejavu-core` for this purpose; this font is not bundled into the AppImage,
 which continues to use fonts installed on the user's system.
+
+The default `test` target always runs the complete suite. For focused development, list the suite
+names or individual stable test names, then select one suite or a substring filter:
+
+```sh
+make -C linux test-list-suites
+make -C linux test-list
+make -C linux test-focused TEST_SUITE=image_cache
+make -C linux test-focused TEST_FILTER=archive
+```
+
+`make -C linux test-perf` runs an optional synthetic 4000x2500 BGRA image through processing and
+resize workloads and reports median timings plus output checksums. Use
+`PERF_ARGS="--iterations 5"` to change its repeat count. It has no timing pass/fail threshold and
+does not replace measurements on a representative photo library and target GPU.
 
 It covers file-list ordering/navigation, mutable image transforms, source-coordinate crop selection,
 aspect/fixed-size geometry, manipulation/hit-testing, MCU alignment and image cropping, all resize

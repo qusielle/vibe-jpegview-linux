@@ -1,7 +1,8 @@
 # Linux frontend architecture
 
 The SDL frontend deliberately keeps platform-independent behavior outside `main.cpp`. New logic
-should normally be added to one of these focused modules and covered by `tests/test_core.cpp`:
+should normally be added to one of these focused modules and covered by the matching suite in
+`tests/test_*.cpp`, registered through `tests/test_harness.h`:
 
 - `file_list`: discovery, ordering, navigation modes, direct sibling-folder jumps, configurable
   folder-boundary wrap-around, current-file preservation, and the transient marked-image toggle pair
@@ -1026,13 +1027,40 @@ source-pixel percentages when they differ, and does not decode, resize, or retai
 ## Build version metadata
 
 `version.sh` resolves the nearest reachable semantic-version Git tag and adds commit-distance and
-working-tree metadata for development builds. Make generates a small forced-include header from the
-resolved or explicitly overridden `VERSION`; the executable uses that single value for `--version`
-and the About panel. AppImage and Debian packaging scripts receive the same version; the AppImage
-desktop entry's `X-AppImage-Version` and Debian control metadata use it as well. GitHub Actions
-fetches tag history before resolving the value. Docker build contexts omit `.git`, so workflows and
-documented Docker invocations resolve the version on the host and pass it into the container. Avoid
-independent version literals in build, package, and executable metadata.
+working-tree metadata for development builds. Make uses the existing build-info writer to update a
+generated header only when the resolved or explicitly overridden `VERSION` changes. That header is
+forced into the application entrypoint object alone, so a version change recompiles that object and
+relinks the executable without rebuilding unrelated modules. The executable uses that single value
+for `--version` and the About panel. AppImage and Debian packaging scripts receive the same version;
+the AppImage desktop entry's `X-AppImage-Version` and Debian control metadata use it as well.
+GitHub Actions fetches tag history before resolving the value. Docker build contexts omit `.git`, so
+workflows and documented Docker invocations resolve the version on the host and pass it into the
+container. Avoid independent version literals in build, package, and executable metadata.
+
+## Incremental build and test graph
+
+`linux/Makefile` owns one `CORE_CPP_SOURCES` list for platform-independent code and a separate
+`SDL_ADAPTER_CPP_SOURCES` list for renderer and icon adapters. The application adds `src/main.cpp`;
+the test executable adds its own entrypoint and seven subsystem test translation units. App and test
+objects live under `build/obj/app` and `build/obj/tests`. Each compile emits a compiler-generated
+`.d` file with transitive project-header dependencies; changing a header rebuilds only its users.
+Generated icon data is an explicit prerequisite of both icon objects.
+
+Compile and link configuration stamps record the effective compiler, flags, optional codec setup,
+backend selection, and link libraries. Their recipes compare new contents before replacing the stamp,
+so unchanged configuration leaves object timestamps intact while a changed configuration invalidates
+the appropriate objects or executable. Optional backend plugin stamps include the selected source
+root and discovered input file list, including nested Rust sources. This prevents changing backend
+roots or adding plugin inputs from silently reusing an older plugin. Sanitizer builds use a separate
+`BUILD_DIR` through `SANITIZER_BUILD_DIR`, so instrumented and ordinary objects cannot mix.
+
+`tests/test_main.cpp` runs every registered case by default and preserves the stable test-name strings
+when cases are grouped into `source_navigation`, `work_admission`, `codec_display`, `image_cache`,
+`image_operations`, `viewer_models`, and `dialogs_sessions`. `--suite` and `--filter` select focused
+cases for local iteration; `make test` always runs the complete suite and its performance-trace
+validation. `make test-perf` is opt-in and measures synthetic 4000x2500 BGRA image processing and
+resizing. It reports timings and deterministic pixel checksums without hardware-dependent thresholds;
+it is not a substitute for a real photo-directory and renderer benchmark.
 
 Published AppImages receive `APPIMAGE_UPDATE_INFORMATION` from `release-assets.sh`; local and
 branch-build AppImages omit it unless explicitly requested. Each Ubuntu release uses AppImage's
