@@ -247,8 +247,17 @@ if [ -n "$APPIMAGE_TOOL" ]; then
 	if [ -n "$APPIMAGE_UPDATE_INFORMATION" ]; then
 		set -- "$@" -u "$APPIMAGE_UPDATE_INFORMATION"
 	fi
-	set -- "$@" "$APPDIR" "$OUTPUT"
-	ARCH=x86_64 "$APPIMAGE_TOOL" "$@"
+	# zsyncmake writes its sidecar in the working directory, beside this output.
+	output_directory=$(dirname -- "$OUTPUT")
+	output_filename=$(basename -- "$OUTPUT")
+	mkdir -p -- "$output_directory"
+	output_directory=$(cd -- "$output_directory" && pwd)
+	appdir_absolute=$(cd -- "$APPDIR" && pwd)
+	set -- "$@" "$appdir_absolute" "$output_filename"
+	(
+		cd -- "$output_directory"
+		ARCH=x86_64 "$APPIMAGE_TOOL" "$@"
+	)
 	if [ -n "$APPIMAGE_UPDATE_INFORMATION" ] && [ ! -f "$OUTPUT.zsync" ]; then
 		echo "appimagetool did not create the requested update file: $OUTPUT.zsync" >&2
 		exit 1

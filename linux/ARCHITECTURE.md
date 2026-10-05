@@ -1078,10 +1078,12 @@ Published AppImages receive `APPIMAGE_UPDATE_INFORMATION` from `release-assets.s
 branch-build AppImages omit it unless explicitly requested. Each Ubuntu release uses AppImage's
 `gh-releases-zsync` transport with a `latest` release selector and a platform-specific `.zsync`
 filename wildcard. `appimagetool -u` embeds that value and generates a sidecar. Release packaging
-builds directly to the final versioned AppImage filename so the zsync target filename remains
-aligned, then uploads/checksums both assets together. The Ubuntu AppImage Docker images install the
-standard-repository `zsync` package to provide `zsyncmake`; package creation fails if requested
-update metadata does not produce the sidecar. The Ubuntu 20 release job also publishes a byte-for-byte
+builds directly to the final versioned AppImage filename and runs `appimagetool` from the output
+directory because `zsyncmake` writes its sidecar into its current working directory. This keeps the
+sidecar beside the image and the zsync target filename aligned, then both assets are uploaded and
+checksummed together. The Ubuntu AppImage Docker images install the standard-repository `zsync`
+package to provide `zsyncmake`; package creation fails if requested update metadata does not produce
+the sidecar. The Ubuntu 20 release job also publishes a byte-for-byte
 copy as `JPEGView-x86_64.AppImage`, the stable compatibility download alias. The release workflow
 requires that Ubuntu 20 job to complete before building or publishing the Ubuntu 22/24/26 variants;
 the latter are supplementary assets, not substitutes when the lowest-glibc artifact failed. The

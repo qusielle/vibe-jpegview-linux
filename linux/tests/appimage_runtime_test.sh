@@ -31,7 +31,9 @@ for argument in "$@"; do
 done
 : > "$output"
 if [ "$has_update_information" -eq 1 ] && [ "${APPIMAGE_TEST_OMIT_ZSYNC:-0}" -ne 1 ]; then
-	: > "$output.zsync"
+	# appimagetool runs zsyncmake with the AppImage filename, and zsyncmake
+	# writes its sidecar into the current working directory.
+	: > "$(basename -- "$output").zsync"
 fi
 exit 0
 EOF
@@ -117,10 +119,14 @@ test -f "$TEMP_DIR/test-update.AppImage.zsync" || {
 	echo 'AppImage update packaging did not retain the generated zsync file' >&2
 	exit 1
 }
+test -f "$TEMP_DIR/test-update.AppImage" || {
+	echo 'AppImage update packaging did not write the image to its requested output path' >&2
+	exit 1
+}
 grep -Fqx 'ARG<--appimage-extract-and-run>' "$TEMP_DIR/appimagetool-update-arguments"
 grep -Fqx 'ARG<-u>' "$TEMP_DIR/appimagetool-update-arguments"
 grep -Fqx "ARG<$update_information>" "$TEMP_DIR/appimagetool-update-arguments"
-grep -Fqx "ARG<$TEMP_DIR/test-update.AppImage>" "$TEMP_DIR/appimagetool-update-arguments"
+grep -Fqx 'ARG<test-update.AppImage>' "$TEMP_DIR/appimagetool-update-arguments"
 
 if APPIMAGE_TEST_LIB_DIR="$LIB_DIR" \
 	APPIMAGE_TEST_ICON="$REPO_DIR/linux/screenshots/main-window-panels.png" \
