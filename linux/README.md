@@ -382,7 +382,8 @@ they support.
     neighbors take the reduced-resolution display path directly, while full pixels remain lazy.
     Decode completions feed a
     separate display-preparation worker pool, and both decoded and display caches reject stale source
-    identities. Selected JPEG header probes and display preparation, non-JPEG decoding, and optional
+    identities. Texture tracking allocation failures follow the normal upload failure and retry path.
+    Selected JPEG header probes and display preparation, non-JPEG decoding, and optional
     EXIF/comment reads run on background workers.
     Crop, resize, and rotate edits to an animation hold the displayed frame while pixels are prepared;
     a successful edit leaves that frame as a still image.

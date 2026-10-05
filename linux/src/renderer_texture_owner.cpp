@@ -4,6 +4,7 @@
 
 #include <exception>
 #include <iostream>
+#include <new>
 
 namespace jpegview_linux {
 
@@ -28,10 +29,16 @@ void RendererTextureOwner::SetRenderer(SDL_Renderer* renderer) {
 bool RendererTextureOwner::Adopt(SDL_Texture* texture) {
 	if (texture == nullptr) return false;
 	try {
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+		if (failNextAdoption_) {
+			failNextAdoption_ = false;
+			throw std::bad_alloc();
+		}
+#endif
 		return textures_.insert(texture).second;
 	} catch (...) {
 		SDL_DestroyTexture(texture);
-		throw;
+		return false;
 	}
 }
 

@@ -28,6 +28,9 @@ public:
 	bool Destroy(SDL_Texture* texture, std::size_t bytes = 0);
 	std::size_t DestroyAll();
 	std::size_t LiveTextureCount() const;
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	void FailNextAdoptionForTesting() noexcept { failNextAdoption_ = true; }
+#endif
 
 private:
 	void CheckThread() const;
@@ -36,6 +39,9 @@ private:
 	SDL_Renderer* renderer_ = nullptr;
 	std::thread::id ownerThread_;
 	std::unordered_set<SDL_Texture*> textures_;
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	bool failNextAdoption_ = false;
+#endif
 };
 
 } // namespace jpegview_linux

@@ -23347,6 +23347,22 @@ void TestRendererTextureOwnerLifecycle() {
 		"shutdown did not release all remaining image textures");
 	Expect(owner.DestroyAll() == 0,
 		"repeated image texture shutdown released unexpected resources");
+	Expect(owner.CreateEmpty(2, 2) != nullptr && owner.LiveTextureCount() == 1,
+		"could not retain a texture before testing metadata allocation failure");
+	for (int attempt = 0; attempt < 2; ++attempt) {
+		owner.FailNextAdoptionForTesting();
+		Expect(owner.CreateEmpty(2, 2) == nullptr && owner.LiveTextureCount() == 1,
+			"texture metadata allocation failure did not return null and preserve existing textures");
+	}
+	owner.FailNextAdoptionForTesting();
+	Expect(owner.CreateAndUpload(pixels, 2, 2, true) == nullptr &&
+		owner.LiveTextureCount() == 1,
+		"uploaded texture metadata allocation failure did not preserve the retry contract");
+	Expect(owner.CreateAndUpload(pixels, 2, 2, true) != nullptr &&
+		owner.LiveTextureCount() == 2,
+		"texture creation did not recover after metadata allocation failures");
+	Expect(owner.DestroyAll() == 2 && owner.LiveTextureCount() == 0,
+		"texture shutdown did not release the existing and retried textures");
 	owner.SetRenderer(nullptr);
 }
 

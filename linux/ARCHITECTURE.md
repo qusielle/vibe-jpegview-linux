@@ -435,7 +435,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   partial-upload textures created by Viewer. It performs image texture creation, upload, and
   destruction and provides a final live-handle drain before SDL renderer teardown. Cache maps keep
   their keys, admission reservations, and non-owning texture references; cache policy remains in the
-  existing cache owners.
+  existing cache owners. If handle tracking cannot allocate, the owner destroys the newly created
+  texture and returns null, preserving the callers' existing defer-and-retry contract.
 - `text_renderer`, `chrome_renderer`, `context_menu_renderer`, `file_dialog_renderer`, and
   `editing_dialog_renderer`: SDL drawing adapters that consume prepared paint snapshots and share
   narrow renderer/font services. Viewer still decides when to draw and builds snapshots from its
