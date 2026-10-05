@@ -489,8 +489,10 @@ should normally be added to one of these focused modules and covered by the matc
   and wallpaper-cache images also use private non-image siblings and atomically publish after format
   encoding succeeds; the writer receives the selected output format separately from the staging
   filename. New save targets use atomic no-replace publication, while confirmed existing targets
-  retain their prior mode and use atomic rename. Symlink save destinations continue to address their
-  resolved target. Once printing,
+  retain their prior mode and use atomic rename. Viewer captures the overwrite decision with the
+  pending image-operation output path before asynchronous source/pixel preparation; file submission
+  consumes that captured decision instead of the dialog's later state. Symlink save destinations
+  continue to address their resolved target. Once printing,
   trash, or wallpaper commands have launched an irreversible side effect, ordinary request
   cancellation no longer terminates them; the worker waits for exit and publishes the actual success
   or failure without relabeling that completed command as canceled.

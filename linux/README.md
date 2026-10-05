@@ -1144,7 +1144,9 @@ files and reports completed changes without undoing them. Batch copies preserve 
 and modification times, and each copy appears only after its contents are complete. Lossless JPEG
 output is published from a temporary sibling only after the transform succeeds. Encoded image saves
 also use an atomic temporary sibling, preserving an existing output's permissions and symlink
-destination. Overwrite prompts are still confirmed before the operation starts.
+destination. Overwrite prompts are still confirmed before the operation starts. A pending save keeps
+its accepted filename and overwrite decision while source pixels are prepared, even if the dialog's
+filename field changes meanwhile.
 The `Auto correction` command uses the Windows histogram-derived RGB correction LUT and can be toggled
 with `F5`. `Edit picture levels...` opens the bottom adjustment panel; drag its sliders for live
 preview, turn on `Local density` to enable the shadow/highlight controls, and use `Reset` to restore

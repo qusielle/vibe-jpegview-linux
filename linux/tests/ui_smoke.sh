@@ -2000,6 +2000,80 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	fi
 	stop_viewer
 
+	# Source materialization may finish after the filename field changes. Keep
+	# the accepted output's overwrite decision with that pending save.
+	save_consent_directory="$temporary/save-consent"
+	save_consent_config="$temporary/save-consent-config"
+	mkdir -p "$save_consent_directory" "$save_consent_config/jpegview-linux"
+	convert -size 2400x1200 xc:red "$save_consent_directory/source.jpg"
+	printf 'original target' > "$save_consent_directory/A.png"
+	printf 'scale_mode=fit\ncache_size_mb=32\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$save_consent_config/jpegview-linux/settings.conf"
+	save_consent_started="$temporary/save-consent.started"
+	save_consent_active="$temporary/save-consent.active"
+	save_consent_release="$temporary/save-consent.release"
+	: > "$save_consent_release"
+	DISPLAY=":$display_number" HOME="$temporary/save-consent-home" \
+		XDG_CONFIG_HOME="$save_consent_config" XDG_STATE_HOME="$temporary/save-consent-state" \
+		LD_PRELOAD="$temporary/slow_map.so" \
+		JPEGVIEW_TEST_SLOW_MAP="$save_consent_directory/source.jpg" \
+		JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
+		JPEGVIEW_TEST_SLOW_MAP_STARTED="$save_consent_started" \
+		JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$save_consent_active" \
+		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$save_consent_release" \
+		JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=1200 \
+		"$BINARY" "$save_consent_directory/source.jpg" \
+		>"$temporary/save-consent.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 100); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.05
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: save-consent viewer window was unavailable" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	assert_title_prefix "source.jpg" "save-consent source did not load"
+	# Allow startup metadata to finish before holding the full-source read.
+	sleep 0.2
+	rm -f -- "$save_consent_started" "$save_consent_release"
+	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+s
+	send_repeated_keypresses 15 BackSpace "$window_id"
+	DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 25 'A.png'
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+	sleep 0.1
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+	save_consent_blocked=0
+	for _ in $(seq 1 100); do
+		if [ -f "$save_consent_active" ]; then save_consent_blocked=1; break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ "$save_consent_blocked" -ne 1 ]; then
+		echo "UI smoke test: accepted save did not reach the source-preparation barrier" >&2
+		cat "$temporary/save-consent.log" >&2
+		exit 1
+	fi
+	send_repeated_keypresses 5 BackSpace "$window_id"
+	DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 25 'B.png'
+	: > "$save_consent_release"
+	save_consent_published=0
+	for _ in $(seq 1 100); do
+		if [ "$(identify -format '%wx%h' "$save_consent_directory/A.png" 2>/dev/null || true)" = \
+			"2400x1200" ]; then save_consent_published=1; break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ "$save_consent_published" -ne 1 ] || [ -e "$save_consent_directory/B.png" ]; then
+		echo "UI smoke test: pending save did not publish its captured output only" >&2
+		exit 1
+	fi
+	stop_viewer
+
 	# Rotate a cold JPEG while its header is blocked. The command must survive
 	# the header continuation and be applied after the selected source is ready.
 	async_rotate_directory="$temporary/async-rotate"

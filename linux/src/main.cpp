@@ -549,6 +549,7 @@ private:
 		bool fullSize = true;
 		bool keepSpreadRotation = false;
 		bool pausedAnimationPlayback = false;
+		bool overwriteConfirmed = false;
 		fs::path output;
 	};
 
@@ -2822,6 +2823,8 @@ private:
 		pending.fullSize = fullSize;
 		pending.keepSpreadRotation = currentSpreadRotationValid_ || !imageModified_;
 		pending.output = output;
+		pending.overwriteConfirmed = purpose == ImageOperationPurpose::Save &&
+			fileDialogOverwriteConfirmed_;
 		pendingImageOperation_ = std::move(pending);
 		if (admission ==
 			jpegview_linux::PendingImageOperationAdmission::WaitForSelectedCommit) {
@@ -3046,6 +3049,7 @@ private:
 							pending.pausedAnimationPlayback;
 						const bool queued = CompleteImageSave(pending.output, result->outputPixels,
 							result->outputReservation.ShareAlias(),
+							pending.overwriteConfirmed,
 							pending.operation.preserveDocumentPixels,
 							pending.operation.preserveDocumentPixels && pending.document.animated,
 							deferPlaybackResume);
@@ -5340,6 +5344,7 @@ private:
 	bool CompleteImageSave(const fs::path& output,
 		std::shared_ptr<const Image> outputImage,
 		jpegview_linux::CacheReservation imageReservation,
+		bool overwriteConfirmed,
 		bool inPlaceSave, bool flattenAnimationOnSuccess,
 		bool resumeAnimationOnCompletion) {
 		jpegview_linux::ImageWriteOptions options;
@@ -5351,7 +5356,7 @@ private:
 		operation.image = std::move(outputImage);
 		operation.imageReservation = std::move(imageReservation);
 		operation.options = options;
-		operation.overwriteConfirmed = fileDialogOverwriteConfirmed_;
+		operation.overwriteConfirmed = overwriteConfirmed;
 		PendingFileOperationUi pending;
 		pending.outputPath = output;
 		pending.successTitle = "Saved processed image: " + output.filename().string();
