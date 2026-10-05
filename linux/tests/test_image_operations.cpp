@@ -2282,6 +2282,94 @@ void TestFileOperationSaveAndBatchPolicies() {
 			"batch copy left a temporary or partial image in the destination directory");
 	}
 	Expect(!iteratorError, "cannot inspect the batch-copy destination directory");
+
+	struct RenameHookState {
+		bool forceLinkFallback = false;
+		bool createLateDestination = false;
+		std::string lateDestinationContents;
+	};
+	auto renameHook = [](const fs::path&, const fs::path& destination,
+		bool* forceLinkFallback, void* opaque) {
+		auto& state = *static_cast<RenameHookState*>(opaque);
+		if (forceLinkFallback != nullptr) {
+			*forceLinkFallback = state.forceLinkFallback;
+		}
+		if (state.createLateDestination) {
+			WriteText(destination, state.lateDestinationContents);
+			state.createLateDestination = false;
+		}
+	};
+
+	const fs::path fallbackTarget = temporary.path() / "fallback symlink target.jpg";
+	const fs::path fallbackSource = temporary.path() / "fallback source.jpg";
+	const fs::path fallbackDestination = temporary.path() / "fallback destination.jpg";
+	WriteText(fallbackTarget, "symlink target bytes");
+	fs::create_symlink(fallbackTarget.filename(), fallbackSource);
+	RenameHookState fallbackState;
+	fallbackState.forceLinkFallback = true;
+	jpegview_linux::SetBatchRenameBeforeMoveTestHookForTesting(renameHook,
+		&fallbackState);
+	jpegview_linux::BatchCopyOperation fallbackBatch;
+	fallbackBatch.items.push_back(item(fallbackSource, fallbackDestination, false));
+	const auto fallbackRename = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(fallbackBatch)}, 6,
+		alwaysContinue);
+	jpegview_linux::SetBatchRenameBeforeMoveTestHookForTesting(nullptr, nullptr);
+	Expect(fallbackRename.batch.renamed == 1 && fallbackRename.batch.failed == 0 &&
+		!fs::exists(fallbackSource) && fs::is_symlink(fallbackDestination) &&
+		fs::read_symlink(fallbackDestination) == fallbackTarget.filename() &&
+		ReadBytes(fallbackTarget) == std::vector<std::uint8_t>({
+			's', 'y', 'm', 'l', 'i', 'n', 'k', ' ', 't', 'a', 'r', 'g', 'e', 't',
+			' ', 'b', 'y', 't', 'e', 's'}),
+		"no-replace fallback did not move a symlink itself while preserving its target");
+
+	const fs::path lateSource = temporary.path() / "late source.jpg";
+	const fs::path lateDestination = temporary.path() / "late destination.jpg";
+	WriteText(lateSource, "source remains");
+	RenameHookState lateTargetState;
+	lateTargetState.createLateDestination = true;
+	lateTargetState.lateDestinationContents = "late target remains";
+	jpegview_linux::SetBatchRenameBeforeMoveTestHookForTesting(renameHook,
+		&lateTargetState);
+	jpegview_linux::BatchCopyOperation lateTargetBatch;
+	lateTargetBatch.items.push_back(item(lateSource, lateDestination, false));
+	const auto lateTargetRename = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(lateTargetBatch)}, 6,
+		alwaysContinue);
+	jpegview_linux::SetBatchRenameBeforeMoveTestHookForTesting(nullptr, nullptr);
+	Expect(lateTargetRename.batch.renamed == 0 && lateTargetRename.batch.failed == 1 &&
+		lateTargetRename.batch.completed == 0 && fs::exists(lateSource) &&
+		ReadBytes(lateSource) == std::vector<std::uint8_t>({
+			's', 'o', 'u', 'r', 'c', 'e', ' ', 'r', 'e', 'm', 'a', 'i', 'n', 's'}) &&
+		ReadBytes(lateDestination) == std::vector<std::uint8_t>({
+			'l', 'a', 't', 'e', ' ', 't', 'a', 'r', 'g', 'e', 't', ' ', 'r', 'e', 'm', 'a', 'i', 'n', 's'}),
+		"batch rename replaced a target created after the initial existence check");
+
+	const fs::path fallbackLateSource = temporary.path() / "fallback late source.jpg";
+	const fs::path fallbackLateDestination = temporary.path() / "fallback late destination.jpg";
+	WriteText(fallbackLateSource, "fallback source remains");
+	RenameHookState fallbackLateState;
+	fallbackLateState.forceLinkFallback = true;
+	fallbackLateState.createLateDestination = true;
+	fallbackLateState.lateDestinationContents = "fallback late target remains";
+	jpegview_linux::SetBatchRenameBeforeMoveTestHookForTesting(renameHook,
+		&fallbackLateState);
+	jpegview_linux::BatchCopyOperation fallbackLateBatch;
+	fallbackLateBatch.items.push_back(item(fallbackLateSource,
+		fallbackLateDestination, false));
+	const auto fallbackLateRename = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::FileOperationPayload{std::move(fallbackLateBatch)}, 6,
+		alwaysContinue);
+	jpegview_linux::SetBatchRenameBeforeMoveTestHookForTesting(nullptr, nullptr);
+	Expect(fallbackLateRename.batch.renamed == 0 &&
+		fallbackLateRename.batch.failed == 1 && fs::exists(fallbackLateSource) &&
+		ReadBytes(fallbackLateSource) == std::vector<std::uint8_t>({
+			'f', 'a', 'l', 'l', 'b', 'a', 'c', 'k', ' ', 's', 'o', 'u', 'r', 'c', 'e',
+			' ', 'r', 'e', 'm', 'a', 'i', 'n', 's'}) &&
+		ReadBytes(fallbackLateDestination) == std::vector<std::uint8_t>({
+			'f', 'a', 'l', 'l', 'b', 'a', 'c', 'k', ' ', 'l', 'a', 't', 'e', ' ', 't',
+			'a', 'r', 'g', 'e', 't', ' ', 'r', 'e', 'm', 'a', 'i', 'n', 's'}),
+		"hard-link fallback replaced a destination created after the existence check");
 }
 
 void TestBatchCancellationStopsBetweenFiles() {

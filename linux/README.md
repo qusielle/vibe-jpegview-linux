@@ -1140,7 +1140,8 @@ overlays, slideshow transitions, window mode toggles, and `jpegtran`-backed loss
 Image saves, image clipboard conversion, batch copy/rename, lossless JPEG work, printing, wallpaper
 preparation, EXIF timestamp changes, and desktop process waits run on a background file-operation
 worker, keeping the viewer's event thread available while they run. Batch cancellation stops between
-files and reports completed changes without undoing them. Batch copies preserve source permissions
+files and reports completed changes without undoing them. Batch renames never replace a destination,
+including one created after the operation's initial check. Batch copies preserve source permissions
 and modification times, and each copy appears only after its contents are complete. Lossless JPEG
 output is published from a temporary sibling only after the transform succeeds. Encoded image saves
 also use an atomic temporary sibling, preserving an existing output's permissions and symlink

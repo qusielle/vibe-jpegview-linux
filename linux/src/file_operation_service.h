@@ -29,11 +29,15 @@ namespace jpegview_linux {
 namespace detail {
 using LosslessCropPublicationTestHook = void (*)(void*);
 using ImageSavePublicationTestHook = void (*)(void*);
+using BatchRenameBeforeMoveTestHook = void (*)(
+	const std::filesystem::path&, const std::filesystem::path&, bool*, void*);
 } // namespace detail
 void SetLosslessCropPublicationTestHookForTesting(
 	detail::LosslessCropPublicationTestHook hook, void* context);
 void SetImageSavePublicationTestHookForTesting(
 	detail::ImageSavePublicationTestHook hook, void* context);
+void SetBatchRenameBeforeMoveTestHookForTesting(
+	detail::BatchRenameBeforeMoveTestHook hook, void* context);
 #endif
 
 struct SaveImageOperation {

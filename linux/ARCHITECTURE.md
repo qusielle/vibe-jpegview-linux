@@ -482,7 +482,11 @@ should normally be added to one of these focused modules and covered by the matc
   copy is prepared in a mode-0600, non-image `.tmp` sibling and published without replacing a
   destination created after its existence check, so readers see only complete files; failed and
   canceled copies leave no partial image behind. Source permissions and modification times are
-  restored before publication. Lossless JPEG results use the same private `.tmp` sibling policy;
+  restored before publication. Batch rename uses `renameat2(RENAME_NOREPLACE)` and falls back to a
+  same-filesystem hard-link followed by source unlink when that primitive is unavailable. The
+  fallback moves symlinks themselves and fails on cross-filesystem moves; if source unlink fails,
+  both names may remain and the operation reports failure. Lossless JPEG results use the same
+  private `.tmp` sibling policy;
   newly absent destinations use atomic no-replace publication, while replacing an existing
   destination requires confirmation and uses atomic rename after the codec succeeds and permissions
   are restored. In-progress outputs stay hidden from image scans. Encoded saves, print preparation,

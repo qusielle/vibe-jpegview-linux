@@ -38,6 +38,9 @@ void* losslessCropPublicationTestHookContext = nullptr;
 std::mutex imageSavePublicationTestHookMutex;
 detail::ImageSavePublicationTestHook imageSavePublicationTestHook = nullptr;
 void* imageSavePublicationTestHookContext = nullptr;
+std::mutex batchRenameBeforeMoveTestHookMutex;
+detail::BatchRenameBeforeMoveTestHook batchRenameBeforeMoveTestHook = nullptr;
+void* batchRenameBeforeMoveTestHookContext = nullptr;
 
 void InvokeLosslessCropPublicationTestHook() {
 	detail::LosslessCropPublicationTestHook hook = nullptr;
@@ -59,6 +62,18 @@ void InvokeImageSavePublicationTestHook() {
 		context = imageSavePublicationTestHookContext;
 	}
 	if (hook != nullptr) hook(context);
+}
+
+void InvokeBatchRenameBeforeMoveTestHook(const fs::path& source,
+	const fs::path& destination, bool& forceLinkFallback) {
+	detail::BatchRenameBeforeMoveTestHook hook = nullptr;
+	void* context = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(batchRenameBeforeMoveTestHookMutex);
+		hook = batchRenameBeforeMoveTestHook;
+		context = batchRenameBeforeMoveTestHookContext;
+	}
+	if (hook != nullptr) hook(source, destination, &forceLinkFallback, context);
 }
 #endif
 
@@ -287,6 +302,47 @@ bool PublishWithoutReplacing(const fs::path& temporary, const fs::path& output,
 	errorMessage = linkError == EEXIST ? "output appeared before publication" :
 		"cannot publish image without replacing output: " +
 		std::string(std::strerror(linkError));
+	return false;
+}
+
+bool MoveWithoutReplacing(const fs::path& source, const fs::path& destination,
+	std::string& errorMessage, bool forceLinkFallback = false) {
+#if defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
+	if (!forceLinkFallback) {
+		if (::syscall(SYS_renameat2, AT_FDCWD, source.c_str(), AT_FDCWD,
+			destination.c_str(), RENAME_NOREPLACE) == 0) return true;
+		const int renameError = errno;
+		if (renameError == EEXIST) {
+			errorMessage = "destination appeared before rename";
+			return false;
+		}
+		if (renameError != ENOSYS && renameError != EINVAL &&
+			renameError != EOPNOTSUPP) {
+			errorMessage = "cannot rename without replacing destination: " +
+				std::string(std::strerror(renameError));
+			return false;
+		}
+	}
+#else
+	(void)forceLinkFallback;
+#endif
+
+	// Older kernels and filesystems may lack RENAME_NOREPLACE. A same-filesystem
+	// hard-link followed by unlink preserves no-replace behavior for regular
+	// files and symlinks. If source removal fails, both names may remain; never
+	// remove the destination during rollback because another process could have
+	// replaced it after link() succeeded.
+	if (::link(source.c_str(), destination.c_str()) != 0) {
+		const int linkError = errno;
+		errorMessage = linkError == EEXIST ? "destination appeared before rename" :
+			"cannot rename without replacing destination: " +
+			std::string(std::strerror(linkError));
+		return false;
+	}
+	if (::unlink(source.c_str()) == 0) return true;
+	const int unlinkError = errno;
+	errorMessage = "cannot remove rename source after creating destination link: " +
+		std::string(std::strerror(unlinkError)) + "; both paths may remain";
 	return false;
 }
 
@@ -899,11 +955,18 @@ FileOperationResult Execute(const BatchCopyOperation& operation,
 			++result.batch.copied;
 			++result.batch.completed;
 		} else {
-			fs::rename(item.source, item.destination, error);
-			if (error) {
+			std::string errorMessage;
+			bool forceLinkFallback = false;
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+			InvokeBatchRenameBeforeMoveTestHook(item.source,
+				item.destination, forceLinkFallback);
+#endif
+			if (!MoveWithoutReplacing(item.source, item.destination,
+				errorMessage, forceLinkFallback)) {
 				++result.batch.failed;
 				if (result.batch.firstFailure.empty()) {
-					result.batch.firstFailure = "cannot rename " + item.source.filename().string();
+					result.batch.firstFailure = errorMessage.empty() ?
+						"cannot rename " + item.source.filename().string() : errorMessage;
 				}
 				continue;
 			}
@@ -1237,6 +1300,13 @@ void SetImageSavePublicationTestHookForTesting(
 	std::lock_guard<std::mutex> lock(imageSavePublicationTestHookMutex);
 	imageSavePublicationTestHook = hook;
 	imageSavePublicationTestHookContext = context;
+}
+
+void SetBatchRenameBeforeMoveTestHookForTesting(
+	detail::BatchRenameBeforeMoveTestHook hook, void* context) {
+	std::lock_guard<std::mutex> lock(batchRenameBeforeMoveTestHookMutex);
+	batchRenameBeforeMoveTestHook = hook;
+	batchRenameBeforeMoveTestHookContext = context;
 }
 #endif
 
