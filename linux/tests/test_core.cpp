@@ -6230,6 +6230,38 @@ void TestImageWriterDecoderRoundTrips() {
 	Expect(!error.empty(), "invalid dimensions did not produce an error message");
 }
 
+void TestJpegWriterErrorRecovery() {
+	TemporaryDirectory temporary;
+	constexpr int dimension = 256;
+	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(dimension) * dimension * 4);
+	std::uint32_t randomState = 31;
+	for (std::uint8_t& value : pixels) {
+		randomState = randomState * 1664525u + 1013904223u;
+		value = static_cast<std::uint8_t>(randomState >> 24);
+	}
+	ImageWriteOptions options;
+	options.jpegQuality = 95;
+	std::string error;
+	// Noise makes the JPEG larger than stdio's buffer, forcing libjpeg's own
+	// write-error/longjmp path rather than a failure only at the final fclose.
+	for (int attempt = 0; attempt < 2; ++attempt) {
+		error.clear();
+		Expect(!jpegview_linux::WriteImageWithFormat("/dev/full", ".jpg", pixels.data(),
+			dimension, dimension, options, error) &&
+			error.find("Output file write error") != std::string::npos,
+			"JPEG output exhaustion did not return the libjpeg write failure");
+	}
+	const fs::path recovered = temporary.path() / "after-write-failure.jpg";
+	error.clear();
+	Expect(jpegview_linux::WriteImage(recovered, pixels.data(), dimension, dimension,
+		options, error), "JPEG writing did not recover after output exhaustion: " + error);
+	DecodedImage decoded;
+	Expect(jpegview_linux::DecodeImage(recovered, decoded, error) &&
+		decoded.frames.size() == 1 && decoded.frames.front().width == dimension &&
+		decoded.frames.front().height == dimension,
+		"JPEG written after output exhaustion was not a valid image: " + error);
+}
+
 void ExpectStaticFrame(const fs::path& filename, int width, int height,
 	const std::vector<std::uint8_t>& expectedPixels) {
 	DecodedImage decoded;
@@ -23499,6 +23531,7 @@ int main(int argc, char** argv) {
 	RunTest("prepared-scans-reject-descriptor-refresh-race",
 		TestPreparedScansRejectDescriptorRefreshRace, failures);
 	RunTest("image-writer-decoder-round-trips", TestImageWriterDecoderRoundTrips, failures);
+	RunTest("jpeg-writer-error-recovery", TestJpegWriterErrorRecovery, failures);
 	RunTest("pnm-variants", TestPnmVariants, failures);
 	RunTest("animated-image-decoders", TestAnimatedImageDecoders, failures);
 	RunTest("direct-codec-source-read-attribution",

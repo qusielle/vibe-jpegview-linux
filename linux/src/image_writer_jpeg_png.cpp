@@ -42,10 +42,10 @@ bool WriteJpeg(const std::filesystem::path& filename, const std::uint8_t* bgra,
 
 	ErrorManager error{};
 	jpeg_compress_struct compressor{};
-	bool created = false;
+	volatile bool created = false;
 	compressor.err = jpeg_std_error(&error.base);
 	error.base.error_exit = errorExit;
-	// libjpeg uses longjmp for errors, so its decoder and C buffers use explicit cleanup here.
+	// The post-setjmp creation flag must survive longjmp so compressor cleanup remains defined.
 	if (setjmp(error.jump) != 0) {
 		if (created) jpeg_destroy_compress(&compressor);
 		std::free(row);

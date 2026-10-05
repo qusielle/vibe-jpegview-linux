@@ -178,7 +178,8 @@ should normally be added to one of these focused modules and covered by `tests/t
   implementations. Decoder-owned pixel buffers move into `DecodedImage` when the decoder has finished
   using them. Mapped JPEG inputs and non-longjmp codec handles use scope ownership; libjpeg/libpng
   retain explicit cleanup at their `setjmp` recovery points because those C APIs report failures with
-  `longjmp`. Image decoders resolve archive-member paths through `archive_source` before invoking the existing codec
+  `longjmp`; creation flags read after recovery are volatile so an encoder failure still releases
+  its native handle. Image decoders resolve archive-member paths through `archive_source` before invoking the existing codec
   path, retaining ordinary-file and reduced-DCT JPEG behavior. JPEG cancellation is checked before
   opening, after header parsing, between 16-row scanline batches, before color conversion/resampling,
   and before publication; opaque codec calls are checked before and after their supported boundaries.

@@ -387,6 +387,8 @@ they support.
     EXIF/comment reads run on background workers.
     Crop, resize, and rotate edits to an animation hold the displayed frame while pixels are prepared;
     a successful edit leaves that frame as a still image.
+    JPEG save failures release encoder resources before reporting the error, including when output
+    storage fills during encoding.
     Initial presentation keeps its loading title until
     a matching frame is uploaded on the renderer thread; stale generations cannot commit Recents or
     loaded-image history. Archive password failures return to the password-capable Open dialog.
