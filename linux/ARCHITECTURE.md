@@ -168,8 +168,9 @@ should normally be added to one of these focused modules and covered by the matc
   swapping document pixels, so failure or staleness preserves the last successful presentation. Large
   result and decoded-buffer references retire off the event thread.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
-  move/resize hit testing, image/view coordinate conversion, crop-mode drag eligibility, and JPEG
-  MCU-boundary alignment; pixel-buffer cropping remains in `image`.
+  move/resize hit testing, image/view coordinate conversion, crop-mode drag eligibility, new
+  selection release-action planning, and JPEG MCU-boundary alignment; pixel-buffer cropping remains
+  in `image`.
 - `crop_size_dialog_model`: fixed-crop dimension text, focus/unit transitions, and validation.
 - `go_to_image_number_model`: one-based input validation for selecting an entry in the active
   ordered file list; it leaves list ownership and the subsequent image load to the Viewer.

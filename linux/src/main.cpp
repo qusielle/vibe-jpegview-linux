@@ -11740,13 +11740,18 @@ private:
 		cropMouseDragging_ = false;
 		SDL_CaptureMouse(SDL_FALSE);
 		if (cropDragWasNew_) {
-			if (!cropDragMoved_) {
+			switch (jpegview_linux::ResolveNewCropSelectionReleaseAction(
+				cropDragMoved_, cropZoomOnRelease_)) {
+			case jpegview_linux::NewCropSelectionReleaseAction::Clear:
 				cropSelection_.Clear();
-			} else if (cropZoomOnRelease_) {
+				break;
+			case jpegview_linux::NewCropSelectionReleaseAction::ZoomToSelection:
 				ZoomToSelection();
 				cropSelection_.Clear();
-			} else {
+				break;
+			case jpegview_linux::NewCropSelectionReleaseAction::OpenContextMenu:
 				OpenCropContextMenu();
+				break;
 			}
 		} else if (cropDragMoved_ && cropZoomOnRelease_) {
 			ZoomToSelection();

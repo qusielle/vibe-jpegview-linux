@@ -35,6 +35,15 @@ enum class CropSelectionMode {
 	FixedSize,
 };
 
+enum class NewCropSelectionReleaseAction {
+	Clear,
+	ZoomToSelection,
+	OpenContextMenu,
+};
+
+NewCropSelectionReleaseAction ResolveNewCropSelectionReleaseAction(
+	bool selectionMoved, bool zoomOnRelease);
+
 bool ShouldStartNewCropSelection(bool selectionModeEnabled,
 	bool forcedByModifier, bool imageNeedsPanning);
 bool CanOfferLosslessJpegCrop(bool losslessJpegAvailable, bool imageModified,

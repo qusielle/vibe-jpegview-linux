@@ -42,6 +42,13 @@ bool ShouldStartNewCropSelection(bool selectionModeEnabled,
 	return forcedByModifier || (selectionModeEnabled && !imageNeedsPanning);
 }
 
+NewCropSelectionReleaseAction ResolveNewCropSelectionReleaseAction(
+	bool selectionMoved, bool zoomOnRelease) {
+	if (!selectionMoved) return NewCropSelectionReleaseAction::Clear;
+	return zoomOnRelease ? NewCropSelectionReleaseAction::ZoomToSelection :
+		NewCropSelectionReleaseAction::OpenContextMenu;
+}
+
 bool CanOfferLosslessJpegCrop(bool losslessJpegAvailable, bool imageModified,
 	bool pixelsDetachedFromSource) {
 	return losslessJpegAvailable && !imageModified && !pixelsDetachedFromSource;

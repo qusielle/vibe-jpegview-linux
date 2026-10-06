@@ -117,6 +117,16 @@ void TestCropSelectionModelGeometryAndManipulation() {
 		!jpegview_linux::ShouldStartNewCropSelection(true, false, true) &&
 		jpegview_linux::ShouldStartNewCropSelection(false, true, true),
 		"crop-selection drag gating did not keep selection off by default or preserve modifier override");
+	using ReleaseAction = jpegview_linux::NewCropSelectionReleaseAction;
+	Expect(jpegview_linux::ResolveNewCropSelectionReleaseAction(false, false) ==
+		ReleaseAction::Clear &&
+		jpegview_linux::ResolveNewCropSelectionReleaseAction(false, true) ==
+		ReleaseAction::Clear &&
+		jpegview_linux::ResolveNewCropSelectionReleaseAction(true, true) ==
+		ReleaseAction::ZoomToSelection &&
+		jpegview_linux::ResolveNewCropSelectionReleaseAction(true, false) ==
+		ReleaseAction::OpenContextMenu,
+		"new selection release policy changed empty, shift-zoom, or crop-menu behavior");
 	CropSelectionModel selection;
 	selection.SetImageSize(100, 80);
 	Expect(selection.StartNew(2, 1), "selection could not start on a valid image");
