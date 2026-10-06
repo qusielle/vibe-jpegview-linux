@@ -15,6 +15,7 @@ enum class ModalEventRoute {
 	BatchCopy,
 	Resize,
 	FixedCropSize,
+	GoToImageNumber,
 	UnsharpMask,
 	PictureLevels,
 	ContextMenu,
@@ -31,6 +32,7 @@ struct ModalEventState {
 	bool batchCopy = false;
 	bool resize = false;
 	bool fixedCropSize = false;
+	bool goToImageNumber = false;
 	bool unsharpMask = false;
 	bool pictureLevels = false;
 	bool contextMenu = false;

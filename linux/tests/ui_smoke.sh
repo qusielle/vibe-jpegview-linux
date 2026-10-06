@@ -508,6 +508,23 @@ if [ -n "$perf_trace_path" ]; then
 fi
 stop_viewer
 
+# Go-to input is one-based, replaces its prefilled current value when typed,
+# and keeps the selected image unchanged when the requested index is invalid.
+launch_viewer "$temporary/images"
+assert_title_prefix "01-red.ppm" "go-to fixture did not start on the first image"
+DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+g
+DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+a
+DISPLAY=":$display_number" xdotool type --window "$window_id" --clearmodifiers 3
+DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+assert_title_prefix "03-blue.ppm" "Ctrl+G did not select the requested one-based image number"
+DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+g
+DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+a
+DISPLAY=":$display_number" xdotool type --window "$window_id" --clearmodifiers 0
+DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+DISPLAY=":$display_number" xdotool key --window "$window_id" Escape
+assert_title_prefix "03-blue.ppm" "invalid go-to input changed the selected image"
+stop_viewer
+
 # Loaded-list sorting is asynchronous, but the selected source must remain the
 # same after the new order is applied.
 async_sort_directory="$temporary/async-sort-ui"

@@ -279,10 +279,6 @@ repeated as new candidates below.
   profiles, but does not identify the profile in its information overlay. Add a concise profile
   description when available; pixel dimensions are already shown, so a megapixel count from
   [issue #363](https://github.com/sylikc/jpegview/issues/363) is optional rather than essential.
-- **Go to image number:** provide a small command to jump directly to an index in the current
-  ordered file list, complementing the existing `[current/total]` indicator in the F2 information
-  overlay. See
-  [issue #26](https://github.com/sylikc/jpegview/issues/26).
 - **Skip hidden images:** add an optional setting to omit hidden image files from navigation. On
   Linux, define this in terms of dotfiles (and decide explicitly whether `.hidden` directory
   metadata should also count), rather than copying Windows hidden-attribute behavior. See

@@ -36,6 +36,7 @@
 #include "resize_model.h"
 #include "crop_selection_model.h"
 #include "crop_size_dialog_model.h"
+#include "go_to_image_number_model.h"
 #include "zoom_navigator_model.h"
 #include "magnifying_glass_model.h"
 #include "context_menu_model.h"
@@ -8111,6 +8112,9 @@ private:
 			return;
 		}
 		switch (command) {
+		case jpegview_linux::kCommandGoToImageNumber:
+			OpenGoToImageNumberDialog();
+			break;
 		case IDM_CROP_SEL:
 			CropCurrentSelection();
 			break;
@@ -8614,6 +8618,7 @@ private:
 		state.sortMode = fileList_.GetSorting();
 		state.sortAscending = fileList_.IsSortedAscending();
 		state.imageAvailable = CurrentImage().width > 0;
+		state.fileListAvailable = !fileList_.Empty() && !clipboardMode_;
 		state.archiveMember = archiveMember;
 		state.losslessJpegAvailable = !clipboardMode_ && !archiveMember && HasExecutable("jpegtran") &&
 			(extension == ".jpg" || extension == ".jpeg" || extension == ".jpe");
@@ -9438,6 +9443,137 @@ private:
 		default:
 			break;
 		}
+	}
+
+	SDL_Rect GoToImageNumberDialogRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(460, std::max(320, windowWidth - 32));
+		const int height = 190;
+		return {(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
+	}
+
+	SDL_Rect GoToImageNumberButtonRect(bool go) const {
+		const SDL_Rect dialog = GoToImageNumberDialogRect();
+		return {dialog.x + dialog.w - (go ? 196 : 104), dialog.y + dialog.h - 48,
+			84, 30};
+	}
+
+	void OpenGoToImageNumberDialog() {
+		if (fileList_.Empty() || clipboardMode_) {
+			SetTitle("Go to image number is unavailable without an active file list");
+			return;
+		}
+		goToImageNumberDialog_.Open(fileList_.Size(), fileList_.CurrentIndex());
+		if (!goToImageNumberDialog_.IsOpen()) return;
+		contextMenuOpen_ = false;
+		contextMenuCropOnly_ = false;
+		SDL_StartTextInput();
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+		SetTitle("Go to image number");
+	}
+
+	void CloseGoToImageNumberDialog() {
+		if (!goToImageNumberDialog_.IsOpen()) return;
+		SDL_StopTextInput();
+		goToImageNumberDialog_.Close();
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+		SetTitle();
+	}
+
+	void ApplyGoToImageNumberDialog() {
+		const std::optional<std::size_t> target = goToImageNumberDialog_.Submit();
+		if (!target.has_value()) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			return;
+		}
+		const std::size_t previous = fileList_.CurrentIndex();
+		CloseGoToImageNumberDialog();
+		if (*target == previous) return;
+		if (fileList_.Select(*target)) LoadCurrent(*target > previous ? 1 : -1);
+	}
+
+	void HandleGoToImageNumberDialogEvents(const SDL_Event& event, bool& running) {
+		switch (event.type) {
+		case SDL_QUIT:
+			running = false;
+			break;
+		case SDL_KEYDOWN:
+			if (event.key.repeat != 0) break;
+			if (event.key.keysym.sym == SDLK_ESCAPE) {
+				CloseGoToImageNumberDialog();
+			} else if (event.key.keysym.sym == SDLK_RETURN) {
+				ApplyGoToImageNumberDialog();
+			} else if ((event.key.keysym.mod & 0x00c0u) != 0 &&
+				event.key.keysym.sym == 'a') {
+				goToImageNumberDialog_.SelectAll();
+			} else if (event.key.keysym.sym == SDLK_BACKSPACE) {
+				goToImageNumberDialog_.Backspace();
+			}
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			break;
+		case SDL_TEXTINPUT:
+			(void)goToImageNumberDialog_.AppendText(event.text.text);
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			break;
+		case SDL_MOUSEMOTION:
+			lastMouseX_ = event.motion.x;
+			lastMouseY_ = event.motion.y;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			break;
+		case SDL_MOUSEBUTTONDOWN:
+			if (event.button.button != SDL_BUTTON_LEFT) break;
+			if (PointInRect(event.button.x, event.button.y, GoToImageNumberButtonRect(true))) {
+				ApplyGoToImageNumberDialog();
+			} else if (PointInRect(event.button.x, event.button.y,
+				GoToImageNumberButtonRect(false))) {
+				CloseGoToImageNumberDialog();
+			} else {
+				goToImageNumberDialog_.SelectAll();
+			}
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			break;
+		default:
+			break;
+		}
+	}
+
+	void RenderGoToImageNumberDialog() {
+		if (!goToImageNumberDialog_.IsOpen()) return;
+		const SDL_Rect dialog = GoToImageNumberDialogRect();
+		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 238);
+		SDL_RenderFillRect(renderer_, &dialog);
+		DrawRect(dialog, 160, 190, 225);
+		DrawText("GO TO IMAGE NUMBER", dialog.x + 18, dialog.y + 14,
+			kUiTextScale, 255, 255, 255);
+		DrawText("Enter a position from 1 to " +
+			std::to_string(goToImageNumberDialog_.ImageCount()), dialog.x + 18,
+			dialog.y + 48, kUiTextScale, 210, 220, 240);
+		const SDL_Rect input{dialog.x + 18, dialog.y + 78, dialog.w - 36, 34};
+		SDL_SetRenderDrawColor(renderer_, 24, 27, 32, 255);
+		SDL_RenderFillRect(renderer_, &input);
+		DrawRect(input, 115, 155, 205);
+		DrawText(ClipText(goToImageNumberDialog_.Text(), input.w - 16),
+			input.x + 8, input.y + (input.h - TextLineHeight()) / 2,
+			kUiTextScale, 245, 245, 245);
+		if (!goToImageNumberDialog_.Message().empty()) {
+			DrawText(ClipText(goToImageNumberDialog_.Message(), dialog.w - 36),
+				dialog.x + 18, dialog.y + 120, kUiTextScale, 255, 145, 135);
+		}
+		const SDL_Rect go = GoToImageNumberButtonRect(true);
+		SDL_SetRenderDrawColor(renderer_, 38, 75, 105, 255);
+		SDL_RenderFillRect(renderer_, &go);
+		DrawRect(go, 135, 175, 205);
+		DrawText("Go", go.x + (go.w - TextWidth("Go", kUiTextScale)) / 2,
+			go.y + (go.h - TextLineHeight()) / 2, kUiTextScale, 245, 245, 250);
+		const SDL_Rect cancel = GoToImageNumberButtonRect(false);
+		SDL_SetRenderDrawColor(renderer_, 40, 40, 42, 255);
+		SDL_RenderFillRect(renderer_, &cancel);
+		DrawRect(cancel, 115, 115, 120);
+		DrawText("Cancel", cancel.x + (cancel.w - TextWidth("Cancel", kUiTextScale)) / 2,
+			cancel.y + (cancel.h - TextLineHeight()) / 2, kUiTextScale, 225, 225, 230);
 	}
 
 	SDL_Rect FileDialogRect() const {
@@ -11817,7 +11953,7 @@ private:
 			"Navigate: Space next; Shift+Space previous; Return fit; Ctrl+Return fill with crop; +/- zoom" :
 			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom";
 		const std::array<std::string, 10> lines = {
-			"Navigate: arrows/wheel; Home/End; D double page; J manga order; Ctrl+M mark; Alt+arrows siblings",
+			"Navigate: Ctrl+G number; arrows/wheel; Home/End; Alt+arrows sibling folders",
 			"Zoom/pan: Ctrl+wheel or Ctrl+Up/Down; drag; Shift+Arrow; Z lens; wheel resizes it",
 			"Navigator: hover upper-right when magnified; click or drag its map to reposition",
 			spaceHelp,
@@ -11825,7 +11961,7 @@ private:
 			"Files: Ctrl+O open; Ctrl+S save processed; Ctrl+Shift+S save displayed size",
 			"Clipboard: Ctrl+C copy image; Ctrl+Shift+C copy path; Ctrl+V paste PNG",
 			"Adjustments: Up/Down rotate; F5 auto correction; F6 local density; Ctrl+Shift+R resize",
-			"Window: F11 fullscreen; Shift+F11 title bar; Shift+F12 always on top",
+			"View/window: D double page; J manga; Ctrl+M mark; F11 full; Shift+F11 title; Shift+F12 top",
 			"Dialogs: Ctrl+Tab switches Browse/Recents; type to filter; arrows/pages select; wheel scrolls; drag to resize"};
 		for (std::size_t index = 0; index < lines.size(); ++index) {
 			DrawText(ClipText(lines[index], width - 36), panel.x + 18,
@@ -12044,6 +12180,7 @@ private:
 			modalState.batchCopy = batchCopyDialog_.IsOpen();
 			modalState.resize = resizeDialog_.IsOpen();
 			modalState.fixedCropSize = cropSizeDialog_.IsOpen();
+			modalState.goToImageNumber = goToImageNumberDialog_.IsOpen();
 			modalState.unsharpMask = unsharpDialogOpen_;
 			modalState.pictureLevels = pictureLevelsPanelOpen_;
 			modalState.contextMenu = contextMenuOpen_;
@@ -12086,6 +12223,10 @@ private:
 			}
 			if (modalRoute == jpegview_linux::ModalEventRoute::FixedCropSize) {
 				HandleFixedCropSizeDialogEvents(event, running);
+				continue;
+			}
+			if (modalRoute == jpegview_linux::ModalEventRoute::GoToImageNumber) {
+				HandleGoToImageNumberDialogEvents(event, running);
 				continue;
 			}
 			if (modalRoute == jpegview_linux::ModalEventRoute::UnsharpMask) {
@@ -12489,6 +12630,7 @@ private:
 		RenderBatchCopy();
 		RenderResizeDialog();
 		RenderFixedCropSizeDialog();
+		RenderGoToImageNumberDialog();
 		RenderAdvancedConfigurationDialog();
 		RenderConfirmation();
 		RenderAbout();
@@ -12886,6 +13028,7 @@ private:
 	jpegview_linux::BatchCopyDialogController batchCopyDialog_;
 	jpegview_linux::ResizeDialogController resizeDialog_;
 	jpegview_linux::CropSizeDialogController cropSizeDialog_;
+	jpegview_linux::GoToImageNumberModel goToImageNumberDialog_;
 	jpegview_linux::AdvancedConfigurationModel advancedConfiguration_;
 	std::string advancedConfigurationLocation_;
 	std::vector<std::string> pendingDroppedFiles_;
@@ -12915,7 +13058,7 @@ void PrintUsage(const char* program) {
 		<< "          Ctrl+M marks an image; Ctrl+Left/Right toggles between it and the paired image,\n"
 		<< "          N/M/C select display order, Z toggles the magnifying glass,\n"
 		<< "          D toggles double-page mode, J reverses manga reading order,\n"
-		<< "          F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails, Ctrl+E toggles crop selection mode,\n"
+		<< "          Ctrl+G jumps to an image number, F2 toggles picture information, Shift+N toggles the filename overlay, Ctrl+O opens, Ctrl+S saves full size, Ctrl+Shift+S saves screen size, Ctrl+R reloads, Ctrl+N toggles navigation, Ctrl+T toggles thumbnails, Ctrl+E toggles crop selection mode,\n"
 		<< "          right-click or the Context Menu key opens the context menu, Esc or Q quits.\n";
 }
 

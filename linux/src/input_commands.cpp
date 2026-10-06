@@ -20,6 +20,7 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	if (key == SDLK_ESCAPE) return playbackActive ? IDM_DEFAULT_ESC : IDM_EXIT;
 	if (!ctrl && !shift && key == SDLK_q) return IDM_EXIT;
 	if (ctrl && !shift && key == SDLK_o) return IDM_OPEN;
+	if (ctrl && !shift && key == 'g') return kCommandGoToImageNumber;
 	if (ctrl && !shift && key == SDLK_F2) return IDM_SHOW_FILENAME;
 	if (ctrl && !shift && key == 'c') return IDM_COPY_FULL;
 	if (ctrl && shift && key == 'c') return IDM_COPY_PATH;

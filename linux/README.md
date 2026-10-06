@@ -160,6 +160,9 @@ they support.
    the first image in the previous/next populated sibling folder, independent of the active mode.
    Ordering supports logical filename,
    filesystem modification date, creation date, file size, and random modes in either direction.
+   Ctrl+G opens a one-based **Go to image number** prompt for the current ordered file list; the
+   same action is available in the context menu. Invalid or out-of-range numbers leave the current
+   image selected.
    The active filename/date ordering is visible and switchable from both the navigation panel and
    context menu, and the selected mode is preserved between runs. By default, manga mode reverses
    physical Left/Right navigation; `manga_mode_inverts_left_right=0` disables that inversion while
@@ -947,7 +950,8 @@ core suite.
 
 ## Controls
 
-Right/Left or PageUp/PageDown navigate; Home/End select the first/last image; mouse wheel up/down
+Right/Left or PageUp/PageDown navigate; Home/End select the first/last image; Ctrl+G opens the
+one-based image-number prompt for the current ordered list; mouse wheel up/down
 navigates previous/next, while Ctrl+mouse wheel and Ctrl+Up/Down zoom around the pointer or center.
 When the image extends beyond the viewport, hover the upper-right corner to show the zoom navigator;
 click or drag the miniature image to reposition the view. **Show zoom navigator** in the context menu

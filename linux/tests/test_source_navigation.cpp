@@ -1883,6 +1883,7 @@ void TestKeyboardCommandMappings() {
 		{SDLK_F1, 0, IDM_HELP},
 		{SDLK_q, 0, IDM_EXIT},
 		{SDLK_o, 0x00C0u, IDM_OPEN},
+		{'g', 0x00C0u, jpegview_linux::kCommandGoToImageNumber},
 		{SDLK_F2, 0x00C0u, IDM_SHOW_FILENAME},
 		{'c', 0x00C0u, IDM_COPY_FULL},
 		{'c', 0x00C3u, IDM_COPY_PATH},

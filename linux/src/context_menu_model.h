@@ -3,6 +3,7 @@
 #include "file_list.h"
 #include "playback_scheduler.h"
 #include "crop_selection_model.h"
+#include "input_commands.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -64,6 +65,7 @@ struct ContextMenuState {
 	FileList::SortMode sortMode = FileList::SortMode::FileName;
 	bool sortAscending = true;
 	bool imageAvailable = false;
+	bool fileListAvailable = false;
 	bool archiveMember = false;
 	bool losslessJpegAvailable = false;
 	bool cropContextMenu = false;

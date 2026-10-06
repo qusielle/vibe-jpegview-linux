@@ -32,6 +32,7 @@
 #include "batch_copy.h"
 #include "crop_selection_model.h"
 #include "crop_size_dialog_model.h"
+#include "go_to_image_number_model.h"
 #include "zoom_navigator_model.h"
 #include "magnifying_glass_model.h"
 #include "image_formats.h"

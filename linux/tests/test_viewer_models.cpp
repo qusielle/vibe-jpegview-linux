@@ -846,6 +846,18 @@ void TestContextMenuCatalogAndState() {
 
 	ContextMenuState state;
 	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
+	const MenuItem* goToUnavailable = findCommand(compact,
+		jpegview_linux::kCommandGoToImageNumber);
+	Expect(goToUnavailable != nullptr && !goToUnavailable->enabled &&
+		goToUnavailable->shortcut == "Ctrl+G",
+		"go-to-image command was not disabled without an active file list");
+	state.fileListAvailable = true;
+	const std::vector<MenuItem> withFileList = jpegview_linux::BuildContextMenu(state, false);
+	const MenuItem* goToAvailable = findCommand(withFileList,
+		jpegview_linux::kCommandGoToImageNumber);
+	Expect(goToAvailable != nullptr && goToAvailable->enabled,
+		"go-to-image command was not enabled for an active file list");
+	state.fileListAvailable = false;
 	const MenuItem* compactAdvancedConfiguration = findCommand(compact,
 		jpegview_linux::kCommandAdvancedConfiguration);
 	Expect(findCommand(compact, jpegview_linux::kContextMenuShowAdvanced) != nullptr,
@@ -4200,6 +4212,7 @@ void TestModalEventRouterPrecedence() {
 		{&state.batchCopy, ModalEventRoute::BatchCopy},
 		{&state.resize, ModalEventRoute::Resize},
 		{&state.fixedCropSize, ModalEventRoute::FixedCropSize},
+		{&state.goToImageNumber, ModalEventRoute::GoToImageNumber},
 		{&state.unsharpMask, ModalEventRoute::UnsharpMask},
 		{&state.pictureLevels, ModalEventRoute::PictureLevels},
 		{&state.contextMenu, ModalEventRoute::ContextMenu},
@@ -4217,6 +4230,48 @@ void TestModalEventRouterPrecedence() {
 			"each modal should route to its own handler when it is the only active modal");
 		*entry.first = false;
 	}
+}
+
+void TestGoToImageNumberModel() {
+	jpegview_linux::GoToImageNumberModel model;
+	model.Open(15000, 249);
+	Expect(model.IsOpen() && model.Text() == "250" && model.ImageCount() == 15000,
+		"go-to dialog did not prime the current one-based image number");
+	Expect(model.AppendText("7") && model.Text() == "7" &&
+		model.Submit() == std::optional<std::size_t>(6),
+		"first typed digit did not replace the primed value or convert to a zero-based index");
+
+	model.Open(15000, 0);
+	model.SelectAll();
+	Expect(model.AppendText("15000") && model.Submit() == std::optional<std::size_t>(14999),
+		"the final image number was rejected or mapped to the wrong list index");
+
+	model.Open(15000, 0);
+	model.SelectAll();
+	Expect(model.AppendText("0") && !model.Submit().has_value() &&
+		model.Message().find("1 to 15000") != std::string::npos,
+		"zero was accepted as a one-based image number");
+	model.SelectAll();
+	Expect(model.AppendText("15001") && !model.Submit().has_value(),
+		"an image number beyond the active list was accepted");
+	model.SelectAll();
+	Expect(!model.Submit().has_value() && model.Message() == "Enter an image number.",
+		"empty go-to input did not report a validation error");
+	model.SelectAll();
+	Expect(!model.AppendText("2x") && model.Text().empty(),
+		"go-to input accepted non-digit characters or partially appended malformed text");
+	model.SelectAll();
+	Expect(model.AppendText("99999999999999999999") && !model.Submit().has_value(),
+		"an overflowing image number was accepted");
+
+	model.Open(0, 0);
+	Expect(!model.IsOpen() && !model.Submit().has_value(),
+		"go-to dialog opened for an empty file list");
+	model.Open(4, 2);
+	model.Backspace();
+	Expect(model.Text().empty(), "backspace did not clear the primed current image number");
+	model.Close();
+	Expect(!model.IsOpen(), "go-to dialog remained open after cancellation");
 }
 
 void TestRendererWindowResourceOwnership() {
@@ -4290,6 +4345,7 @@ const TestCase kTests[] = {
 	{"playback-scheduler-timing-and-modes", &TestPlaybackSchedulerTimingAndModes},
 	{"event-loop-invalidation-deadlines-wakeups-and-motion", &TestEventLoopInvalidationDeadlinesWakeupsAndMotion},
 	{"modal-event-router-precedence", &TestModalEventRouterPrecedence},
+	{"go-to-image-number-model", &TestGoToImageNumberModel},
 	{"renderer-window-resource-ownership", &TestRendererWindowResourceOwnership},
 };
 
