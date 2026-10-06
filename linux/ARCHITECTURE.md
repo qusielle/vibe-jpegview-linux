@@ -390,7 +390,8 @@ should normally be added to one of these focused modules and covered by the matc
   Image-dimension and archive-member size lookups stay off the SDL event thread.
 - `overlay_layout`: content-sized filename/EXIF panel geometry and window clamping.
 - `viewer_chrome`: renderer-independent overlay and navigation-panel paint plans, including icon
-  primitives, hit regions, fit-relative scale labels, dynamic labels, and tooltip placement.
+  primitives, hit regions for the EXIF GPS map link, fit-relative scale labels, dynamic labels, and
+  tooltip placement.
 - `thumbnail_repository`: non-blocking pixel-storage interface. Viewer receives the current
   `InMemoryThumbnailRepository` through its factory; persistent storage remains a future feature.
 - `thumbnail_panel_model` and `thumbnail_resampler`: strip geometry and current/marked row state,
@@ -522,7 +523,12 @@ should normally be added to one of these focused modules and covered by the matc
   the printer reads the prepared file. Temporary-image cleanup uses source admission for the same
   file path, so it waits for an active reader before removing the file and its private directory;
   unpublished operation outputs use scoped cleanup on every exit.
-- `exif_reader`: JPEG metadata parsing.
+- `exif_reader`: JPEG metadata parsing, including signed decimal GPS coordinates retained alongside
+  their compact information-overlay text.
+- `gps_map_action`: validation of the configurable HTTP(S) map URL template and locale-independent
+  substitution of signed latitude/longitude values. Viewer exposes the action only for metadata
+  matching the selected source, through the EXIF location row and a conditional context-menu entry;
+  launching the desktop URL handler always requires an explicit user action.
 - `event_loop_model`: renderer-thread frame invalidation reasons, wrapping SDL tick-deadline
   selection, adjacent pointer-motion accumulation, and a process-wide coalesced completion wake.
   Workers publish their owned payloads to their normal generation-checked queues before notifying;

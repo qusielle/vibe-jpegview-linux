@@ -52,6 +52,8 @@ struct OverlayPaintPlan {
 struct InformationOverlayPaintPlan {
 	OverlayPaintPlan overlay;
 	UiRect spectrumButton;
+	UiRect gpsLocationLink;
+	int gpsLocationLineIndex = -1;
 	std::vector<UiLine> spectrumLines;
 };
 
@@ -60,7 +62,7 @@ OverlayPaintPlan FilenameOverlayPaint(const OverlayLayout& layout,
 InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 	const std::vector<std::string>& lines, int lineHeight, int textPadding = 6,
 	bool spectrumVisible = false, const GrayscaleSpectrum* spectrum = nullptr,
-	bool buttonHovered = false);
+	bool buttonHovered = false, int gpsLocationLineIndex = -1);
 
 class InformationOverlayPaintPlanCache {
 public:
@@ -74,6 +76,7 @@ private:
 	InformationOverlayPaintPlan plan_;
 	bool valid_ = false;
 	bool buttonHovered_ = false;
+	bool gpsLocationHovered_ = false;
 };
 
 UiRect InformationOverlaySpectrumButton(const OverlayLayout& layout, int textPadding = 6);

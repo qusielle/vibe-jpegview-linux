@@ -846,6 +846,26 @@ void TestContextMenuCatalogAndState() {
 
 	ContextMenuState state;
 	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
+	Expect(findCommand(compact, jpegview_linux::kCommandOpenGpsLocation) == nullptr,
+		"GPS map action was shown without image coordinates");
+	state.gpsLocationAvailable = true;
+	const std::vector<MenuItem> gpsProviderUnavailable =
+		jpegview_linux::BuildContextMenu(state, false);
+	const MenuItem* disabledGpsAction = findCommand(gpsProviderUnavailable,
+		jpegview_linux::kCommandOpenGpsLocation);
+	Expect(disabledGpsAction != nullptr && !disabledGpsAction->enabled,
+		"GPS map action was not disabled for an invalid provider template");
+	state.gpsMapProviderValid = true;
+	const std::vector<MenuItem> gpsAvailable = jpegview_linux::BuildContextMenu(state, false);
+	const MenuItem* enabledGpsAction = findCommand(gpsAvailable,
+		jpegview_linux::kCommandOpenGpsLocation);
+	const MenuItem* gpsInfoItem = findCommand(gpsAvailable, IDM_SHOW_FILEINFO);
+	Expect(enabledGpsAction != nullptr && enabledGpsAction->enabled &&
+		enabledGpsAction->label == "Open GPS location in map",
+		"GPS map action was not offered when coordinates and provider were valid");
+	Expect(gpsInfoItem != nullptr && enabledGpsAction == gpsInfoItem + 1,
+		"GPS map command was not placed beside the EXIF information action");
+	state.gpsLocationAvailable = false;
 	const MenuItem* goToUnavailable = findCommand(compact,
 		jpegview_linux::kCommandGoToImageNumber);
 	Expect(goToUnavailable != nullptr && !goToUnavailable->enabled &&
@@ -1372,6 +1392,31 @@ void TestViewerChromePaintPlans() {
 			infoPaint.spectrumButton.x + infoPaint.spectrumButton.width,
 			infoPaint.spectrumButton.y),
 		"information overlay paint plan ignored visible lines or emphasis colors");
+	infoPaint = jpegview_linux::InformationOverlayPaint(infoLayout,
+		{"heading", "Location: 51.50000, -0.12000"}, 18, 6,
+		false, nullptr, false, 1);
+	Expect(infoPaint.gpsLocationLineIndex == 1 &&
+		infoPaint.gpsLocationLink.x == 10 && infoPaint.gpsLocationLink.y == 52 &&
+		infoPaint.gpsLocationLink.width == 100 && infoPaint.gpsLocationLink.height == 18 &&
+		infoPaint.overlay.text[1].color.red == 120 &&
+		infoPaint.overlay.text[1].color.green == 205 &&
+		jpegview_linux::Contains(infoPaint.gpsLocationLink, 10, 52) &&
+		!jpegview_linux::Contains(infoPaint.gpsLocationLink, 110, 52),
+		"GPS location link paint plan did not identify and bound the clickable row");
+	jpegview_linux::InformationOverlayPaintPlanCache gpsLinkCache;
+	const auto gpsLinkBuilder = [&infoLayout] {
+		return jpegview_linux::InformationOverlayPaint(infoLayout,
+			{"heading", "Location: 51.50000, -0.12000"}, 18, 6,
+			false, nullptr, false, 1);
+	};
+	const auto& gpsHovered = gpsLinkCache.GetOrBuild("gps-link", 10, 52, gpsLinkBuilder);
+	Expect(gpsHovered.overlay.text[1].color.red == 255 &&
+		gpsHovered.overlay.text[1].color.green == 205,
+		"hovering the GPS link did not highlight its cached location row");
+	const auto& gpsIdle = gpsLinkCache.GetOrBuild("gps-link", 0, 0, gpsLinkBuilder);
+	Expect(gpsIdle.overlay.text[1].color.red == 120 &&
+		gpsIdle.overlay.text[1].color.green == 205,
+		"leaving the GPS link did not restore its link color");
 	jpegview_linux::GrayscaleSpectrum spectrum{};
 	spectrum[64] = 16;
 	spectrum[192] = 4;

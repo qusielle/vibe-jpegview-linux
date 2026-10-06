@@ -299,10 +299,6 @@ repeated as new candidates below.
   optional action while retaining the JPEG still as the normal image and navigation item. This may
   require a new video demux dependency and is lower priority. See
   [issue #275](https://github.com/sylikc/jpegview/issues/275).
-- **GPS map action:** when GPS coordinates exist in EXIF, offer an explicit action to open them in a
-  user-configurable map URL. Keep it opt-in per click so coordinates are not sent anywhere
-  automatically. See [issue #59](https://github.com/sylikc/jpegview/issues/59).
-
 ## Existing Windows-parity gaps
 
 These user-facing gaps are also listed in the [Linux README](README.md#known-windows-parity-gaps)

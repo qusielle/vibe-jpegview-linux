@@ -106,6 +106,8 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 			loaded.sortAscending = ParseBool(value);
 		} else if (key == "copy_rename_pattern") {
 			loaded.copyRenamePattern = value;
+		} else if (key == "gps_map_provider_url") {
+			loaded.gpsMapProviderUrl = value;
 		} else if (key == "manual_zoom") {
 			try {
 				std::size_t parsedCharacters = 0;
@@ -370,6 +372,8 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "# %a application name, %v build version, %% literal percent. Empty uses the default.\n"
 		       << "# Unknown or incomplete codes are invalid; surrounding whitespace is trimmed.\n"
 		       << "window_title_pattern=" << windowTitlePattern << '\n'
+		       << "# Map URL placeholders: {lat} and {lng}; only HTTP(S) URLs are opened.\n"
+		       << "gps_map_provider_url=" << settings.gpsMapProviderUrl << '\n'
 		       << "auto_contrast=" << (settings.autoContrast ? 1 : 0) << '\n'
 		       << "keep_picture_levels=" << (settings.keepPictureLevels ? 1 : 0) << '\n'
 		       << "unsharp_mask_radius=" << std::clamp(settings.unsharpMaskRadius, 0.0, 5.0) << '\n'

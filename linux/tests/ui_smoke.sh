@@ -7,6 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 BINARY=${1:-./build/jpegview-linux}
 ARCHIVE_FIXTURE_WRITER=${2:-}
 RAR_FIXTURE_WRITER=${3:-}
+GPS_EXIF_FIXTURE_WRITER=${4:-}
 perf_trace_path=${JPEGVIEW_TEST_PERF_TRACE:-}
 if [ ! -x "$BINARY" ]; then
 	echo "UI smoke test: binary not found: $BINARY" >&2
@@ -91,6 +92,16 @@ write_solid_ppm() {
 		yes "$red $green $blue" 2>/dev/null | head -n 76800
 	} > "$filename"
 }
+
+gps_map_image=''
+if [ -x "$GPS_EXIF_FIXTURE_WRITER" ] && command -v convert >/dev/null 2>&1; then
+	write_solid_ppm "$temporary/gps-source.ppm" 35 80 120
+	convert "$temporary/gps-source.ppm" "$temporary/gps-source.jpg"
+	"$GPS_EXIF_FIXTURE_WRITER" "$temporary/gps-source.jpg" "$temporary/gps-map.jpg"
+	gps_map_image="$temporary/gps-map.jpg"
+else
+	echo "UI smoke test: SKIP GPS map link interaction (missing fixture writer or ImageMagick convert)"
+fi
 
 write_ppm "$temporary/images/01-red.ppm" 255 0 0
 write_ppm "$temporary/images/02-green.ppm" 0 255 0
@@ -519,6 +530,49 @@ if [ -n "$perf_trace_path" ]; then
 	sleep 0.1
 fi
 stop_viewer
+
+if [ -n "$gps_map_image" ]; then
+	gps_config="$temporary/gps-map-config"
+	gps_previous_state_home=$XDG_STATE_HOME
+	XDG_STATE_HOME="$temporary/gps-map-state"
+	export XDG_STATE_HOME
+	mkdir -p "$gps_config/jpegview-linux"
+	cat >"$gps_config/jpegview-linux/settings.conf" <<'EOF'
+scale_mode=fit
+sort_mode=file_name
+double_page_mode_enabled=0
+thumbnail_panel_visible=0
+show_filename=0
+info_visible=1
+gps_map_provider_url=https://maps.example.test/?lat={lat}&lon={lng}
+EOF
+	: > "$temporary/opened-url"
+	VIEWER_TEST_HOME="$temporary/gps-home" \
+		VIEWER_TEST_CONFIG_HOME="$gps_config" launch_viewer "$gps_map_image"
+	gps_map_opened=0
+	expected_gps_map_url='https://maps.example.test/?lat=-12.58222&lon=-98.11833'
+	for _ in $(seq 1 60); do
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 20 70 click 1
+		if [ -f "$temporary/opened-url" ] &&
+			[ "$(cat "$temporary/opened-url")" = "$expected_gps_map_url" ]; then
+			gps_map_opened=1
+			break
+		fi
+		sleep 0.1
+	done
+	if [ "$gps_map_opened" -ne 1 ]; then
+		echo "UI smoke test: clicking the EXIF GPS location did not open the configured map URL" >&2
+		cat "$temporary/viewer.log" >&2
+		cat "$temporary/opened-url" >&2
+		exit 1
+	fi
+	stop_viewer
+	grep -Fq 'gps_map_provider_url=https://maps.example.test/?lat={lat}&lon={lng}' \
+		"$gps_config/jpegview-linux/settings.conf"
+	unset VIEWER_TEST_HOME VIEWER_TEST_CONFIG_HOME
+	XDG_STATE_HOME=$gps_previous_state_home
+	export XDG_STATE_HOME
+fi
 
 # Go-to input is one-based, replaces its prefilled current value when typed,
 # and keeps the selected image unchanged when the requested index is invalid.

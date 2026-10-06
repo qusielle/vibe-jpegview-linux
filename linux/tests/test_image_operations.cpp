@@ -1,5 +1,6 @@
 #include "test_harness.h"
 #include "test_support.h"
+#include "gps_map_action.h"
 
 namespace {
 
@@ -1195,6 +1196,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"copy-selection-on-release was enabled by default");
 	Expect(!jpegview_linux::ViewerSettings{}.fitRelativeZoomMode,
 		"fit-relative zoom was enabled in the built-in settings defaults");
+	Expect(jpegview_linux::ViewerSettings{}.gpsMapProviderUrl ==
+		jpegview_linux::kDefaultGpsMapProviderUrl,
+		"GPS map provider did not retain the built-in URL template");
 	jpegview_linux::ViewerSettings expected;
 	expected.scaleMode = "manual";
 	expected.sortMode = "file_name";
@@ -1249,6 +1253,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.unsharpMaskThreshold = 7.0;
 	expected.cacheSizeMiB = 1536;
 	expected.copyRenamePattern = "%F=%n";
+	expected.gpsMapProviderUrl = "https://maps.example.test/?lat={lat}&lon={lng}";
 	expected.windowTitlePattern = "%f | [%p] | %m | %%";
 	Expect(jpegview_linux::SaveViewerSettings(settingsPath, expected), "settings could not be saved");
 	Expect(fs::exists(settingsPath), "settings file was not created");
@@ -1340,6 +1345,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	ExpectNear(loaded.unsharpMaskThreshold, expected.unsharpMaskThreshold, 0.0000001,
 		"unsharp threshold setting did not round-trip");
 	Expect(loaded.copyRenamePattern == expected.copyRenamePattern, "batch pattern did not round-trip");
+	Expect(loaded.gpsMapProviderUrl == expected.gpsMapProviderUrl,
+		"GPS map provider URL did not round-trip");
 	Expect(loaded.windowTitlePattern == expected.windowTitlePattern,
 		"window-title pattern did not round-trip");
 	Expect(loaded.cacheSizeMiB == expected.cacheSizeMiB, "cache size did not round-trip");
@@ -1453,6 +1460,44 @@ void TestSettingsRoundTripAndMalformedValues() {
 	Expect(jpegview_linux::LoadViewerSettings(settingsPath, loaded) &&
 		loaded.windowTitlePattern == expected.windowTitlePattern,
 		"invalid settings save replaced the last valid title pattern");
+}
+
+void TestGpsMapProviderUrlValidationAndCoordinateFormatting() {
+	const std::string defaultUrl = jpegview_linux::BuildGpsMapUrl(
+		jpegview_linux::kDefaultGpsMapProviderUrl, -12.582222, -98.118333);
+	Expect(defaultUrl == "https://opentopomap.org/#marker=15/-12.58222/-98.11833",
+		"default GPS map URL did not substitute signed decimal coordinates");
+	const std::string repeated = jpegview_linux::BuildGpsMapUrl(
+		"HTTPS://maps.example.test/{lat}/{lng}?center={lat},{lng}", 51.5, -0.12);
+	Expect(repeated == "HTTPS://maps.example.test/51.50000/-0.12000?center=51.50000,-0.12000",
+		"custom GPS map URL did not replace every placeholder with locale-stable values");
+	Expect(jpegview_linux::BuildGpsMapUrl("https://map.example/?lat={lat}", 0.0, 0.0).empty() &&
+		jpegview_linux::BuildGpsMapUrl("javascript:open({lat},{lng})", 0.0, 0.0).empty() &&
+		jpegview_linux::BuildGpsMapUrl("https:///map?lat={lat}&lon={lng}", 0.0, 0.0).empty() &&
+		jpegview_linux::BuildGpsMapUrl("https://:443/?lat={lat}&lon={lng}", 0.0, 0.0).empty() &&
+		jpegview_linux::BuildGpsMapUrl("https://maps.example:bad/?lat={lat}&lon={lng}", 0.0, 0.0).empty() &&
+		jpegview_linux::BuildGpsMapUrl("https://user@maps.example/?lat={lat}&lon={lng}", 0.0, 0.0).empty() &&
+		jpegview_linux::BuildGpsMapUrl("https://map.example/?lat={lat}&lon={lng} extra", 0.0, 0.0).empty(),
+		"GPS map URL accepted an unsafe scheme, malformed authority, missing coordinate, or whitespace");
+	Expect(jpegview_linux::BuildGpsMapUrl(
+		"https://maps.example:8443/?lat={lat}&lon={lng}", 1.0, 2.0) ==
+		"https://maps.example:8443/?lat=1.00000&lon=2.00000" &&
+		jpegview_linux::BuildGpsMapUrl(
+			"https://[2001:db8::1]:8443/?lat={lat}&lon={lng}", 1.0, 2.0) ==
+			"https://[2001:db8::1]:8443/?lat=1.00000&lon=2.00000",
+		"GPS map URL rejected a valid hostname port or bracketed IPv6 authority");
+	Expect(jpegview_linux::BuildGpsMapUrl(
+		"https://map.example/?lat={lat}&lon={lng}", 90.00001, 0.0).empty() &&
+		jpegview_linux::BuildGpsMapUrl(
+			"https://map.example/?lat={lat}&lon={lng}", 0.0, -180.00001).empty() &&
+		jpegview_linux::BuildGpsMapUrl(
+			"https://map.example/?lat={lat}&lon={lng}",
+			std::numeric_limits<double>::quiet_NaN(), 0.0).empty(),
+		"GPS map URL accepted non-finite or out-of-range coordinates");
+	Expect(!jpegview_linux::AreGpsCoordinatesValid(90.00001, 0.0) &&
+		!jpegview_linux::AreGpsCoordinatesValid(0.0, -180.00001) &&
+		jpegview_linux::AreGpsCoordinatesValid(-90.0, 180.0),
+		"GPS coordinate range validation accepted an invalid pair or rejected its inclusive limits");
 }
 
 void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
@@ -3550,7 +3595,10 @@ void TestExifAndJpegCommentParsing() {
 	ExpectNear(info.fNumber, 2.8, 0.0001, "f-number was parsed incorrectly");
 	Expect(info.isoSpeed == 200, "ISO metadata was parsed incorrectly");
 	Expect(info.userComment == "hello", "user comment was parsed incorrectly");
-	Expect(info.hasGps && info.gpsLocation == "-12.58222, -98.11833", "GPS metadata was parsed incorrectly");
+	Expect(info.hasGps && info.gpsLocation == "-12.58222, -98.11833" &&
+		std::abs(info.gpsLatitude + 12.5822222222) < 0.0000001 &&
+		std::abs(info.gpsLongitude + 98.1183333333) < 0.0000001,
+		"GPS metadata was parsed incorrectly");
 	Expect(info.hasAltitude, "GPS altitude was not detected");
 	ExpectNear(info.altitude, -30.0, 0.0001, "GPS altitude was parsed incorrectly");
 	Expect(comment == "test comment", "JPEG comment was parsed incorrectly");
@@ -3671,6 +3719,7 @@ const TestCase kTests[] = {
 	{"desktop-application-parsing-and-expansion", &TestDesktopApplicationParsingAndExecExpansion},
 	{"default-viewer-registration", &TestDefaultViewerRegistration},
 	{"external-command-planning", &TestExternalCommandPlanning},
+	{"gps-map-provider-url-validation-and-coordinate-formatting", &TestGpsMapProviderUrlValidationAndCoordinateFormatting},
 	{"exif-and-jpeg-comment-parsing", &TestExifAndJpegCommentParsing},
 	{"file-operation-folder-exif-dates-update-only-regular-images", &TestFileOperationFolderExifDatesUpdatesOnlyRegularImages},
 };

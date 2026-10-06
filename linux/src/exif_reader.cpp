@@ -300,6 +300,8 @@ private:
 		std::ostringstream location;
 		location << std::fixed << std::setprecision(5) << latitudeDecimal << ", " << longitudeDecimal;
 		info.hasGps = true;
+		info.gpsLatitude = latitudeDecimal;
+		info.gpsLongitude = longitudeDecimal;
 		info.gpsLocation = location.str();
 
 		std::uint32_t altitudeReference = 0;

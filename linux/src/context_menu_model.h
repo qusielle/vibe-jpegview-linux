@@ -17,6 +17,7 @@ constexpr int kToggleNavigationPanelAutoReveal = -3;
 constexpr int kCommandEditPictureLevels = -7;
 constexpr int kCommandToggleZoomNavigator = -9;
 constexpr int kCommandAdvancedConfiguration = -14;
+constexpr int kCommandOpenGpsLocation = -16;
 
 struct MenuItem {
 	std::string label;
@@ -51,6 +52,8 @@ struct ContextMenuState {
 	bool animationAvailable = false;
 	double movieFramesPerSecond = 25.0;
 	bool infoVisible = false;
+	bool gpsLocationAvailable = false;
+	bool gpsMapProviderValid = false;
 	bool filenameVisible = false;
 	bool navigationPanelEnabled = true;
 	bool navigationPanelAutoReveal = true;

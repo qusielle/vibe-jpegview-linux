@@ -27,6 +27,7 @@
 #include "sort_mode.h"
 #include "desktop_applications.h"
 #include "external_commands.h"
+#include "gps_map_action.h"
 #include "external_process.h"
 #include "file_operation_service.h"
 #include "batch_copy.h"
@@ -5629,6 +5630,44 @@ private:
 		}
 	}
 
+	bool CurrentGpsCoordinatesAvailable() const {
+		if (fileList_.Empty() || clipboardMode_ || !metadata_.hasGps) return false;
+		const jpegview_linux::SourceDescriptor* source =
+			fileList_.DescriptorAt(fileList_.CurrentIndex());
+		return source != nullptr && source->Valid() && source->Key() == exifMetadataSource_;
+	}
+
+	bool CurrentGpsMapActionAvailable() const {
+		return CurrentGpsCoordinatesAvailable() &&
+			jpegview_linux::IsValidGpsMapProviderUrlTemplate(
+				runtimeSettings_.Values().gpsMapProviderUrl) &&
+			jpegview_linux::AreGpsCoordinatesValid(
+				metadata_.gpsLatitude, metadata_.gpsLongitude);
+	}
+
+	std::string CurrentGpsMapUrl() const {
+		if (!CurrentGpsCoordinatesAvailable()) return {};
+		return jpegview_linux::BuildGpsMapUrl(
+			runtimeSettings_.Values().gpsMapProviderUrl,
+			metadata_.gpsLatitude, metadata_.gpsLongitude);
+	}
+
+	void OpenGpsMap() {
+		const std::string url = CurrentGpsMapUrl();
+		if (url.empty()) {
+			SetTitle("Cannot open map: check gps_map_provider_url in settings.conf");
+			return;
+		}
+		jpegview_linux::LaunchDesktopOperation operation;
+		operation.fallbacks = jpegview_linux::OpenUrlCommands(url);
+		PendingFileOperationUi pending;
+		pending.successTitle = "Opened GPS location in map";
+		pending.failurePrefix = "Cannot open GPS location in map: ";
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			SetTitle("Cannot open GPS location in map: another file operation is still in progress");
+		}
+	}
+
 	void OpenCurrentWith(std::size_t applicationIndex) {
 		if (fileList_.Empty() || clipboardMode_ || applicationIndex >= openWithApplications_.size()) return;
 		if (jpegview_linux::IsArchiveMemberLocation(fileList_.Current())) {
@@ -7608,6 +7647,7 @@ private:
 
 	const jpegview_linux::InformationOverlayPaintPlan& BuildImageInfoPaintPlan() {
 		const std::vector<std::string>& sourceLines = CachedImageInfoLines();
+		const bool gpsLinkAvailable = CurrentGpsMapActionAvailable();
 		const bool editedPixels = UsesEditedImageSpectrum();
 		const std::optional<jpegview_linux::ImageSpectrumKey> spectrumKey =
 			runtimeSettings_.Values().showHistogram ? CurrentImageSpectrumKey() : std::nullopt;
@@ -7647,6 +7687,7 @@ private:
 		std::ostringstream cacheKey;
 		const std::string& linesKey = imageInfoLineCache_.Key();
 		cacheKey << linesKey.size() << ':' << linesKey << '|'
+			<< gpsLinkAvailable << '|'
 			<< windowWidth << ':' << windowHeight << '|'
 			<< runtimeSettings_.Values().showFilename << ':' << runtimeSettings_.Values().showHistogram << '|'
 			<< OverlayLineHeight() << ':' << FilenameOverlayHeight() << '|'
@@ -7656,10 +7697,21 @@ private:
 		const std::string key = cacheKey.str();
 		return imageInfoPaintPlanCache_.GetOrBuild(key, lastMouseX_, lastMouseY_,
 			[this, &sourceLines, windowWidth, windowHeight, spectrumPointer,
-				spectrumStatus] {
+				spectrumStatus, gpsLinkAvailable] {
 				if (sourceLines.empty()) return jpegview_linux::InformationOverlayPaintPlan{};
 				std::vector<std::string> lines = sourceLines;
 				if (!spectrumStatus.empty()) lines.insert(lines.begin(), spectrumStatus);
+				int gpsLocationLineIndex = -1;
+				if (gpsLinkAvailable) {
+					const auto locationLine = std::find_if(lines.begin(), lines.end(),
+						[](const std::string& line) {
+							return line.compare(0, 10, "Location: ") == 0;
+						});
+					if (locationLine != lines.end()) {
+						gpsLocationLineIndex = static_cast<int>(
+							std::distance(lines.begin(), locationLine));
+					}
+				}
 				int contentWidth = 0;
 				for (std::string& line : lines) {
 					line = InfoText(line);
@@ -7676,7 +7728,7 @@ private:
 				}
 				return jpegview_linux::InformationOverlayPaint(layout, lines,
 					OverlayLineHeight(), kOverlayTextPadding, runtimeSettings_.Values().showHistogram,
-					spectrumPointer, false);
+					spectrumPointer, false, gpsLocationLineIndex);
 			});
 	}
 
@@ -8113,6 +8165,9 @@ private:
 			return;
 		}
 		switch (command) {
+		case jpegview_linux::kCommandOpenGpsLocation:
+			OpenGpsMap();
+			break;
 		case jpegview_linux::kCommandGoToImageNumber:
 			OpenGoToImageNumberDialog();
 			break;
@@ -8605,6 +8660,8 @@ private:
 		state.animationAvailable = playback_.HasAnimation();
 		state.movieFramesPerSecond = playback_.MovieFramesPerSecond();
 		state.infoVisible = runtimeSettings_.Values().infoVisible;
+		state.gpsLocationAvailable = CurrentGpsCoordinatesAvailable();
+		state.gpsMapProviderValid = CurrentGpsMapActionAvailable();
 		state.filenameVisible = runtimeSettings_.Values().showFilename;
 		state.navigationPanelEnabled = runtimeSettings_.Values().navigationPanelEnabled;
 		state.navigationPanelAutoReveal = runtimeSettings_.Values().navigationPanelAutoReveal;
@@ -11127,6 +11184,13 @@ private:
 			SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 			RenderOverlayPaint(jpegview_linux::NavigationTooltipPaint(paint.spectrumButton,
 				label, TextWidth(label, kUiTextScale), TextLineHeight(), windowWidth, windowHeight));
+		} else if (jpegview_linux::Contains(paint.gpsLocationLink, lastMouseX_, lastMouseY_)) {
+			int windowWidth = 0;
+			int windowHeight = 0;
+			SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+			const std::string label = "Open GPS location in map";
+			RenderOverlayPaint(jpegview_linux::NavigationTooltipPaint(paint.gpsLocationLink,
+				label, TextWidth(label, kUiTextScale), TextLineHeight(), windowWidth, windowHeight));
 		}
 	}
 
@@ -11949,11 +12013,17 @@ private:
 			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen()) return false;
 		const jpegview_linux::InformationOverlayPaintPlan& paint = BuildImageInfoPaintPlan();
-		if (!jpegview_linux::Contains(paint.spectrumButton, x, y)) return false;
-		runtimeSettings_.Values().showHistogram = !runtimeSettings_.Values().showHistogram;
-		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
-		SaveSettings();
-		return true;
+		if (jpegview_linux::Contains(paint.spectrumButton, x, y)) {
+			runtimeSettings_.Values().showHistogram = !runtimeSettings_.Values().showHistogram;
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+			SaveSettings();
+			return true;
+		}
+		if (jpegview_linux::Contains(paint.gpsLocationLink, x, y)) {
+			OpenGpsMap();
+			return true;
+		}
+		return false;
 	}
 
 	void RenderControls() {

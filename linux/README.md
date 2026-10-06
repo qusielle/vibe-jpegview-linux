@@ -420,7 +420,12 @@ they support.
     the information overlay when available. The information popup uses a readable `W X H, Size` line
     and an unlabeled modification date. The EXIF popup includes a
     toggleable grayscale histogram, hidden by default. Overlay visibility persists
-    immediately. The window title uses a configurable pattern whose default keeps the current
+    immediately. A valid GPS location appears as a blue clickable row and as a context-menu action;
+    either opens the configured map only after an explicit click. Set
+    `gps_map_provider_url` in `settings.conf` to an HTTP(S) URL template containing both `{lat}` and
+    `{lng}`; the default opens OpenTopoMap, and the signed coordinates are formatted to five decimal
+    places. An invalid template leaves the coordinates visible but disables the map action. The
+    window title uses a configurable pattern whose default keeps the current
     position and total before the filename, followed by dimensions and size; double-page mode shows
     both visible positions. Menus, dialogs, tooltips,
     and panels use the hinted 9-point Terminus bitmap when the complete string is printable ASCII,

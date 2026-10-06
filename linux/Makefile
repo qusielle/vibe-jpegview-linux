@@ -114,6 +114,7 @@ CORE_CPP_SOURCES := \
 	src/archive_password_dialog_model.cpp src/crop_selection_model.cpp \
 	src/crop_size_dialog_model.cpp src/go_to_image_number_model.cpp \
 	src/pixel_color_sampler.cpp \
+	src/gps_map_action.cpp \
 	src/zoom_navigator_model.cpp \
 	src/magnifying_glass_model.cpp src/advanced_configuration_model.cpp \
 	src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp \
@@ -158,6 +159,7 @@ GENERATED_ICON_HEADER := $(BUILD_DIR)/jpegview_icon_data.h
 BUILD_INFO_HEADER := $(BUILD_DIR)/build-info.h
 ARCHIVE_FIXTURE_WRITER := $(BUILD_DIR)/write-7z-fixture
 RAR_FIXTURE_WRITER := $(BUILD_DIR)/write-rar-fixture
+GPS_EXIF_FIXTURE_WRITER := $(BUILD_DIR)/write-gps-exif-fixture
 ENCRYPTED_ZIP_FIXTURE_WRITER := $(BUILD_DIR)/write-encrypted-zip-fixture
 APP_OBJECT_DIR := $(BUILD_DIR)/obj/app
 TEST_OBJECT_DIR := $(BUILD_DIR)/obj/tests
@@ -422,6 +424,11 @@ $(RAR_FIXTURE_WRITER): tests/write_rar_fixture.cpp tests/rar_test_fixtures.h \
 	$(CXX) $(CXXFLAGS) -Itests $< -o $@
 
 
+$(GPS_EXIF_FIXTURE_WRITER): tests/write_gps_exif_fixture.cpp $(MAKEFILE_LIST)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+
 $(ENCRYPTED_ZIP_FIXTURE_WRITER): tests/write_encrypted_zip_fixture.cpp \
 	$(ZIP_FIXTURE_CONFIG_STAMP) $(MAKEFILE_LIST)
 	@mkdir -p $(BUILD_DIR)
@@ -430,7 +437,7 @@ $(ENCRYPTED_ZIP_FIXTURE_WRITER): tests/write_encrypted_zip_fixture.cpp \
 regen-encrypted-zip-fixture: $(ENCRYPTED_ZIP_FIXTURE_WRITER)
 	$(ENCRYPTED_ZIP_FIXTURE_WRITER) tests/fixtures/encrypted-zip.zip
 
-test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER)
+test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(GPS_EXIF_FIXTURE_WRITER)
 	@version_output=$$($(TARGET) --version); \
 	expected_version="JPEGView Linux $(VERSION)"; \
 	if [ "$$version_output" != "$$expected_version" ]; then \
@@ -440,7 +447,8 @@ test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER)
 	JPEGVIEW_TEST_PERF_TRACE="$(abspath $(BUILD_DIR))/perf-trace-ui.csv" \
 	JPEGVIEW_TEST_HAS_7Z_PLUGIN=$(if $(strip $(SEVENZIP_SOURCE_ROOT)),1,0) \
 		JPEGVIEW_TEST_HAS_RAR_PLUGIN=$(if $(strip $(RAR_BACKEND_ROOT)),1,0) \
-		./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER)
+		./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) \
+			$(GPS_EXIF_FIXTURE_WRITER)
 
 test-version:
 	sh tests/version_test.sh

@@ -14,6 +14,7 @@ namespace {
 
 constexpr UiColor kGuiColor{243, 242, 231, 255};
 constexpr UiColor kHighlightColor{255, 205, 0, 255};
+constexpr UiColor kGpsLinkColor{120, 205, 255, 255};
 
 UiRect AsRect(const OverlayLayout& layout) {
 	return {layout.x, layout.y, layout.width, layout.height};
@@ -214,7 +215,8 @@ UiRect InformationOverlaySpectrumButton(const OverlayLayout& layout, int textPad
 
 InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 	const std::vector<std::string>& lines, int lineHeight, int textPadding,
-	bool spectrumVisible, const GrayscaleSpectrum* spectrum, bool buttonHovered) {
+	bool spectrumVisible, const GrayscaleSpectrum* spectrum, bool buttonHovered,
+	int gpsLocationLineIndex) {
 	InformationOverlayPaintPlan result;
 	OverlayPaintPlan& plan = result.overlay;
 	plan.panel = AsRect(layout);
@@ -223,6 +225,13 @@ InformationOverlayPaintPlan InformationOverlayPaint(const OverlayLayout& layout,
 		plan.text.push_back({lines[static_cast<std::size_t>(index)], layout.x + textPadding,
 			layout.y + textPadding + index * lineHeight,
 			index == 0 ? UiColor{255, 255, 255, 255} : UiColor{243, 242, 231, 255}});
+	}
+	if (gpsLocationLineIndex >= 0 && gpsLocationLineIndex < count) {
+		result.gpsLocationLineIndex = gpsLocationLineIndex;
+		result.gpsLocationLink = {layout.x + textPadding,
+			layout.y + textPadding + gpsLocationLineIndex * lineHeight,
+			layout.textWidth, lineHeight};
+		plan.text[static_cast<std::size_t>(gpsLocationLineIndex)].color = kGpsLinkColor;
 	}
 
 	const int contentHeight = layout.contentHeight;
@@ -266,6 +275,7 @@ const InformationOverlayPaintPlan& InformationOverlayPaintPlanCache::GetOrBuild(
 		plan_ = std::move(plan);
 		valid_ = true;
 		buttonHovered_ = false;
+		gpsLocationHovered_ = false;
 	}
 	const bool hovered = Contains(plan_.spectrumButton, mouseX, mouseY);
 	if (hovered != buttonHovered_) {
@@ -277,6 +287,13 @@ const InformationOverlayPaintPlan& InformationOverlayPaintPlanCache::GetOrBuild(
 		}
 		buttonHovered_ = hovered;
 	}
+	const bool gpsHovered = Contains(plan_.gpsLocationLink, mouseX, mouseY);
+	if (gpsHovered != gpsLocationHovered_ && plan_.gpsLocationLineIndex >= 0 &&
+		static_cast<std::size_t>(plan_.gpsLocationLineIndex) < plan_.overlay.text.size()) {
+		plan_.overlay.text[static_cast<std::size_t>(plan_.gpsLocationLineIndex)].color =
+			gpsHovered ? kHighlightColor : kGpsLinkColor;
+	}
+	gpsLocationHovered_ = gpsHovered;
 	return plan_;
 }
 
@@ -285,6 +302,7 @@ void InformationOverlayPaintPlanCache::Clear() {
 	plan_ = {};
 	valid_ = false;
 	buttonHovered_ = false;
+	gpsLocationHovered_ = false;
 }
 
 NavigationPanelPaint BuildNavigationPanelPaint(int windowWidth, int windowHeight,

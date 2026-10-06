@@ -30,6 +30,8 @@ struct ExifInfo {
 	double fNumber = 0.0;
 	int isoSpeed = 0;
 	bool hasGps = false;
+	double gpsLatitude = 0.0;
+	double gpsLongitude = 0.0;
 	std::string gpsLocation;
 	bool hasAltitude = false;
 	double altitude = 0.0;

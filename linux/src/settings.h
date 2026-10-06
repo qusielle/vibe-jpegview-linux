@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cache_budget.h"
+#include "gps_map_action.h"
 #include "image_info_model.h"
 #include "image_processing.h"
 #include "magnifying_glass_model.h"
@@ -75,6 +76,7 @@ struct ViewerSettings {
 	double unsharpMaskThreshold = 4.0;
 	std::size_t cacheSizeMiB = kDefaultCacheSizeMiB;
 	std::string copyRenamePattern;
+	std::string gpsMapProviderUrl = kDefaultGpsMapProviderUrl;
 	std::string windowTitlePattern = kDefaultWindowTitlePattern;
 };
 

@@ -358,6 +358,15 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		{nullptr, 0, true},
 		{"Exit", IDM_EXIT, false, false, true, "Q/Esc"},
 	};
+	if (state.gpsLocationAvailable) {
+		const auto infoItem = std::find_if(items.begin(), items.end(), [](const MenuItem& item) {
+			return item.command == IDM_SHOW_FILEINFO;
+		});
+		if (infoItem != items.end()) {
+			items.insert(infoItem + 1, {"Open GPS location in map", kCommandOpenGpsLocation,
+				false, false, state.gpsMapProviderValid});
+		}
+	}
 
 	const auto openWithHeader = std::find_if(items.begin(), items.end(), [](const MenuItem& item) {
 		return item.label == "Open image with";
