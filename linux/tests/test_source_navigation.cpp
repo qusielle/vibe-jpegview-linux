@@ -666,6 +666,42 @@ void TestArchiveBrowsingDecodingAndRecentPreview() {
 		"malformed ZIP input did not fail with a useful error");
 }
 
+void TestKritaFlattenedImageDecodingWithoutArchiveBrowsing() {
+	TemporaryDirectory temporary;
+	const fs::path imageDirectory = temporary.path() / "source";
+	fs::create_directories(imageDirectory);
+	const fs::path image = imageDirectory / "merged.png";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	ImageWriteOptions options;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(image, pixels.data(), 2, 2, options, error),
+		"cannot create Krita flattened-image fixture: " + error);
+
+	const fs::path project = temporary.path() / "flattened.KRA";
+	WriteZipArchive(project, {{"mergedimage.png", image}});
+	Expect(jpegview_linux::IsSupportedImagePath(project) &&
+		!jpegview_linux::IsArchiveContainerName(project) &&
+		!jpegview_linux::IsArchiveContainerFile(project) &&
+		!jpegview_linux::IsArchiveMemberLocation(project),
+		"Krita project was not classified as a single image outside archive navigation");
+	FileList files({project.string()}, FileList::SortMode::FileName, true, false);
+	Expect(files.Size() == 1 && files.Current() == project && !files.IsArchiveMember(0),
+		"direct Krita input did not remain a regular image-list entry");
+
+	DecodedImage decoded;
+	Expect(jpegview_linux::DecodeImage(project, decoded, error),
+		"image decoder could not read a Krita root flattened image: " + error);
+	Expect(decoded.frames.size() == 1 && decoded.frames.front().width == 2 &&
+		decoded.frames.front().height == 2 && decoded.frames.front().bgra == pixels,
+		"Krita flattened-image decoding changed dimensions or pixels");
+
+	const fs::path nestedProject = temporary.path() / "nested-only.kra";
+	WriteZipArchive(nestedProject, {{"preview/mergedimage.png", image}});
+	decoded = {};
+	Expect(!jpegview_linux::DecodeImage(nestedProject, decoded, error) && !error.empty(),
+		"Krita project without the required root mergedimage.png unexpectedly decoded");
+}
+
 void TestArchiveCatalogFailureReleasesLoadingState() {
 	TemporaryDirectory temporary;
 	const fs::path payload = temporary.path() / "catalog-payload.bin";
@@ -1862,7 +1898,7 @@ void TestFileListMarkedImageToggle() {
 
 void TestSupportedImageExtensionPolicy() {
 	const std::vector<std::string> supported = {
-		"photo.JPG", "photo.apng", "photo.PAM", "camera.CR3", "camera.rwl"};
+		"photo.JPG", "photo.apng", "photo.PAM", "camera.CR3", "camera.rwl", "project.KRA"};
 	for (const std::string& filename : supported) {
 		Expect(jpegview_linux::IsSupportedImagePath(filename),
 			"supported image extension was rejected: " + filename);
@@ -2432,6 +2468,7 @@ const TestCase kTests[] = {
 	{"file-dialog-source-refresh-requires-exact-descriptor", &TestFileDialogSourceRefreshRequiresExactDescriptor},
 	{"file-dialog-preview-refresh-policy", &TestFileDialogPreviewRefreshPolicy},
 	{"archive-browsing-decoding-and-recent-preview", &TestArchiveBrowsingDecodingAndRecentPreview},
+	{"krita-flattened-image-decoding-without-archive-browsing", &TestKritaFlattenedImageDecodingWithoutArchiveBrowsing},
 	{"archive-descriptor-identity-and-replacement", &TestArchiveDescriptorIdentityAndReplacement},
 	{"encrypted-zip-browsing-and-session-passwords", &TestEncryptedZipBrowsingAndSessionPasswords},
 	{"encrypted-7z-browsing-and-session-passwords", &TestEncryptedSevenZipBrowsingAndSessionPasswords},

@@ -290,9 +290,6 @@ repeated as new candidates below.
   grayscale/desaturate command; both should be reversible display operations, not destructive edits.
   See [issue #273](https://github.com/sylikc/jpegview/issues/273) and
   [#238](https://github.com/sylikc/jpegview/issues/238).
-- **Krita documents (`.kra`):** optionally display the flattened `mergedimage.png` embedded in a
-  Krita archive, without implying support for its editable layers. Bound archive extraction and
-  validate paths and sizes. See [issue #385](https://github.com/sylikc/jpegview/issues/385).
 - **HDR still-image viewing:** investigate a controlled tone-mapping path for HDR AVIF/JXR content
   on ordinary SDR displays, preserving the source and avoiding clipped or unexpectedly dark output.
   Treat this as exploratory until representative HDR fixtures and a defined output policy exist.

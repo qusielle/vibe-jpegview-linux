@@ -137,7 +137,9 @@ should normally be added to one of these focused modules and covered by the matc
   source or lose cancellation for the archive read. The extension policy for navigable archive
   containers is separate from the policy for containers accepted by internal member resolution;
   embedded document formats can therefore expose one bounded preview without appearing as folders
-  in navigation or the open dialog.
+  in navigation or the open dialog. Krita `.kra` uses this path to extract only the root
+  `mergedimage.png` as one flattened image; it is not exposed as a browsable archive, and the normal
+  128 MiB member bound and canonical path validation still apply.
 - `seven_zip_backend.h` and its selected implementation: the optional `seven_zip_backend_7zip.cpp`
   wraps the official 7-Zip 24.09 `Format7zF` shared library through `IInArchive`, `IInStream`, and
   per-operation callbacks. A private handler and archive stream are created for each catalog or
@@ -189,9 +191,11 @@ should normally be added to one of these focused modules and covered by the matc
   using them. Mapped JPEG inputs and non-longjmp codec handles use scope ownership; libjpeg/libpng
   retain explicit cleanup at their `setjmp` recovery points because those C APIs report failures with
   `longjmp`; creation flags read after recovery are volatile so an encoder failure still releases
-  its native handle. Image decoders resolve archive-member paths through `archive_source` before invoking the existing codec
-  path, retaining ordinary-file and reduced-DCT JPEG behavior. JPEG cancellation is checked before
-  opening, after header parsing, between 16-row scanline batches, before color conversion/resampling,
+  its native handle. Image decoders resolve archive-member paths through `archive_source` before
+  invoking the existing codec path, retaining ordinary-file and reduced-DCT JPEG behavior. Krita
+  `.kra` decoding resolves the root `mergedimage.png` through the same bounded archive-member API.
+  JPEG cancellation is checked before opening, after header parsing, between 16-row scanline batches,
+  before color conversion/resampling,
   and before publication; opaque codec calls are checked before and after their supported boundaries.
   callback exception boundaries remain in place, and callbacks are never thrown across C codec frames.
   Decoded frames carry alpha-presence metadata so opaque-image textures can keep blending

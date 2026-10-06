@@ -398,6 +398,13 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 			}, errorMessage, nullptr, [context] { return context.Continue(); });
 	}
 	const std::string extension = decoder_detail::Lower(filename.extension().string());
+	if (extension == ".kra") {
+		return WithArchiveMemberFile(filename / "mergedimage.png",
+			[&image, context](const std::filesystem::path& temporary,
+				std::string& decodeError) {
+				return DecodeImage(temporary, image, decodeError, context);
+			}, errorMessage, nullptr, [context] { return context.Continue(); });
+	}
 	if (IsJpegPath(filename)) {
 		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0, nullptr, nullptr, context);
 	}

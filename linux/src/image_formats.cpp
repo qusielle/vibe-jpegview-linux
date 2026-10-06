@@ -21,6 +21,7 @@ bool IsSupportedImagePath(const std::filesystem::path& path) {
 	static const std::vector<std::string_view> extensions = {
 		".jpg", ".jpeg", ".jpe", ".png", ".gif", ".bmp", ".tga",
 		".psd", ".pnm", ".pbm", ".pgm", ".ppm", ".pam", ".pic", ".qoi", ".apng", ".webp",
+		".kra",
 		".tif", ".tiff", ".heic", ".heif", ".hif", ".avif", ".avifs", ".jxl",
 		".jxr", ".wdp", ".hdp", ".mdp", ".pef", ".dng", ".crw", ".nef", ".cr2",
 		".mrw", ".rw2", ".orf", ".x3f", ".arw", ".kdc", ".nrw", ".dcr", ".sr2",

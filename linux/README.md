@@ -17,8 +17,10 @@ they support.
    whose build and runtime dependencies come from the corresponding standard Ubuntu repositories.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
-   PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, and LibRaw camera formats. Embedded
-   color profiles are transformed through LCMS2. Supported images inside ZIP/CBZ, TAR,
+   PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, LibRaw camera formats, and flattened
+   Krita `.kra` projects. A Krita project opens as one image from its root `mergedimage.png`; editable
+   layers are not exposed. Embedded color profiles are transformed through LCMS2. Supported images
+   inside ZIP/CBZ, TAR,
    gzip-compressed TAR, 7z/CB7, and RAR containers can also be browsed and viewed. CBZ comic ZIP
    archives reuse ZIP browsing, and CB7 comic 7z archives reuse 7z browsing. The save dialog writes
    JPEG, PNG, BMP, TGA,
@@ -728,8 +730,11 @@ Supported input formats are JPEG, PNG/APNG (including animation), GIF (including
 QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
 formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, CBZ, TAR, `.tar.gz`, `.tgz`, `.7z`,
 `.cb7`, and `.rar` archives can contain any supported image format above; they are browsed read-only
-as virtual folders. CBZ uses the ZIP reader and CB7 uses the 7z reader. Neither adds comic-specific
-page bookmarks or archive-level reading-position memory.
+as virtual folders. Krita `.kra` projects open as single flattened images from their root
+`mergedimage.png`; they are not browsable folders and their editable layers are not exposed. The
+embedded image uses the same 128 MiB extraction limit as other archive members. CBZ uses the ZIP
+reader and CB7 uses the 7z reader. Neither adds comic-specific page bookmarks or archive-level
+reading-position memory.
 Unencrypted RAR input stays on libarchive. When the optional private reader is present, encrypted
 RAR4/RAR5 data and header encryption use the Rust `rars` backend. Data-encrypted member names remain
 visible; header-encrypted names stay hidden until unlock. Wrong and correct passwords share the

@@ -118,6 +118,18 @@ if command -v zip >/dev/null 2>&1; then
 	cp "$temporary/images/06-archive.zip" "$temporary/images/14-comic.cbz"
 	touch -t 201801010000.00 "$temporary/images/14-comic.cbz"
 fi
+krita_project=''
+if command -v zip >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+	mkdir -p "$temporary/krita-source"
+	write_solid_ppm "$temporary/krita-source/mergedimage.ppm" 20 80 140
+	convert "$temporary/krita-source/mergedimage.ppm" \
+		"$temporary/krita-source/mergedimage.png"
+	krita_project="$temporary/images/17-flattened.kra"
+	(
+		cd "$temporary/krita-source"
+		zip -q "$krita_project" mergedimage.png
+	)
+fi
 if command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
 	mkdir -p "$temporary/tar-source"
 	write_ppm "$temporary/tar-source/inside-tar.ppm" 48 96 144
@@ -524,6 +536,26 @@ DISPLAY=":$display_number" xdotool key --window "$window_id" Return
 DISPLAY=":$display_number" xdotool key --window "$window_id" Escape
 assert_title_prefix "03-blue.ppm" "invalid go-to input changed the selected image"
 stop_viewer
+
+# A Krita project is a regular image input and presents its embedded flattened
+# image through the normal decoder path.
+if [ -n "$krita_project" ]; then
+	launch_viewer "$krita_project"
+	assert_title_prefix "17-flattened.kra" "Krita input did not open as a single image"
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/krita-capture.png"
+		krita_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+		krita_width=$(printf '%s\n' "$krita_geometry" | sed -n 's/^WIDTH=//p')
+		krita_height=$(printf '%s\n' "$krita_geometry" | sed -n 's/^HEIGHT=//p')
+		krita_center=$(convert "$temporary/krita-capture.png" \
+			-format "%[hex:p{$((krita_width / 2)),$((krita_height / 2))}]" info:)
+		case "$krita_center" in
+			*14508C*) ;;
+			*) echo "UI smoke test: Krita project did not render its flattened image ($krita_center)" >&2; exit 1 ;;
+		esac
+	fi
+	stop_viewer
+fi
 
 # The DOC readout samples a decoded pixel in RGBA order and copies its value
 # when clicked.

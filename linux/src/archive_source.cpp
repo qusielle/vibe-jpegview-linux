@@ -188,7 +188,7 @@ bool HasArchiveExtension(const fs::path& path) {
 	const std::string extension = Lower(path.extension().string());
 	return extension == ".zip" || extension == ".cbz" || extension == ".tar" ||
 		extension == ".7z" || extension == ".cb7" ||
-		extension == ".rar" ||
+		extension == ".rar" || extension == ".kra" ||
 		(name.size() >= 7 && name.compare(name.size() - 7, 7, ".tar.gz") == 0) ||
 		(name.size() >= 4 && name.compare(name.size() - 4, 4, ".tgz") == 0);
 }
@@ -198,7 +198,7 @@ bool HasArchiveExtension(const fs::path& path) {
 // embedded documents can use bounded member extraction without becoming
 // browseable archives in the file list and open dialog.
 bool IsBrowsableArchiveExtension(const fs::path& path) {
-	return HasArchiveExtension(path);
+	return Lower(path.extension().string()) != ".kra" && HasArchiveExtension(path);
 }
 
 bool SafeMemberPath(std::string_view name, bool directory, std::string& normalized) {
