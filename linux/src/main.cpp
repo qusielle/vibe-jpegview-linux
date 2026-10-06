@@ -478,6 +478,7 @@ public:
 			TickTimedPresentationEffects(SDL_GetTicks());
 			if (frameInvalidator_.NeedsRender()) {
 				UpdatePresentationState();
+				UpdatePixelColorSampler();
 				TouchVisibleThumbnailRows();
 				const PresentedFrame presented = Render();
 				frameInvalidator_.Consume();
@@ -11021,145 +11022,88 @@ private:
 			kUiTextScale, 245, 245, 245);
 	}
 
-	std::optional<jpegview_linux::PixelColorRgba> PixelColorAtScreen(int screenX,
-		int screenY, const SDL_Rect& area, const SDL_Rect& destination) const {
-		if (fileList_.Empty() || clipboardMode_ || currentSelectedLoadPending_ ||
+	void UpdatePixelColorSampler() {
+		jpegview_linux::PixelColorSamplerInput input;
+		if (fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+			advancedConfiguration_.IsOpen() || batchCopyDialog_.IsOpen() ||
+			resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
+			goToImageNumberDialog_.IsOpen() || unsharpDialogOpen_ ||
+			pictureLevelsPanelOpen_ || aboutOpen_ || helpOpen_ || confirmationOpen_ ||
+			archivePasswordDialog_.IsOpen() || clipboardMode_ || currentSelectedLoadPending_ ||
 			imageSession_.LoadedPath() != AbsoluteNormalized(fileList_.Current()) ||
-			CurrentImage().width <= 0 || CurrentImage().height <= 0) return std::nullopt;
-		if (!PointInRect(screenX, screenY, area) || !PointInRect(screenX, screenY, destination)) {
-			return std::nullopt;
+			CurrentImage().width <= 0 || CurrentImage().height <= 0) {
+			pixelColorSampler_.Clear();
+			return;
 		}
+
+		input.enabled = true;
+		input.ownerGeneration = imageSession_.Generation();
+		input.documentRevision = imageDocument_.Revision();
+		input.frameIndex = currentAnimationFrame_;
+		input.imageWidth = CurrentImage().width;
+		input.imageHeight = CurrentImage().height;
+		input.pointerX = lastMouseX_;
+		input.pointerY = lastMouseY_;
+		input.labelWidth = TextWidth("DOC #FFFFFFFF", kUiTextScale);
+		input.lineHeight = TextLineHeight();
+		SDL_GetWindowSize(window_, &input.windowWidth, &input.windowHeight);
+		const SDL_Rect area = ImageAreaRect();
+		const SDL_Rect destination = CurrentPageScreenRect(area);
+		input.imageArea = {area.x, area.y, area.w, area.h};
+		input.destination = {destination.x, destination.y,
+			destination.w, destination.h};
 
 		const std::vector<std::uint8_t>* pixels = nullptr;
 		int pixelWidth = 0;
 		int pixelHeight = 0;
 		if (const std::shared_ptr<const Image>& presentation =
 			imageDocument_.PresentationPixels()) {
+			input.pixelOwner = presentation.get();
 			pixels = &presentation->bgra;
 			pixelWidth = presentation->width;
 			pixelHeight = presentation->height;
 		} else if (currentDecoded_ && currentAnimationFrame_ < currentDecoded_->frames.size()) {
 			const jpegview_linux::DecodedFrame& frame =
 				currentDecoded_->frames[currentAnimationFrame_];
+			input.pixelOwner = currentDecoded_.get();
 			pixels = &frame.bgra;
 			pixelWidth = frame.width;
 			pixelHeight = frame.height;
 		}
-		if (pixels == nullptr || pixelWidth != CurrentImage().width ||
-			pixelHeight != CurrentImage().height) return std::nullopt;
-
-		const jpegview_linux::SelectionPoint point =
-			jpegview_linux::CropSelectionModel::ScreenToImage(screenX, screenY,
-				{destination.x, destination.y, destination.w, destination.h},
+		if (pixels != nullptr && pixelWidth == input.imageWidth &&
+			pixelHeight == input.imageHeight &&
+			PointInRect(input.pointerX, input.pointerY, area) &&
+			PointInRect(input.pointerX, input.pointerY, destination)) {
+			const jpegview_linux::SelectionPoint point =
+				jpegview_linux::CropSelectionModel::ScreenToImage(input.pointerX,
+				input.pointerY, {input.destination.x, input.destination.y,
+					input.destination.width, input.destination.height},
 				pixelWidth, pixelHeight);
-		return jpegview_linux::SampleBgraPixel(*pixels, pixelWidth, pixelHeight,
-			point.x, point.y);
+			input.bgra = pixels;
+			input.pixelX = point.x;
+			input.pixelY = point.y;
+		}
+		pixelColorSampler_.Update(input);
 	}
 
 	void RenderPixelColorSampler() {
-		if (fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
-			advancedConfiguration_.IsOpen() || batchCopyDialog_.IsOpen() ||
-			resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
-			goToImageNumberDialog_.IsOpen() || unsharpDialogOpen_ ||
-			pictureLevelsPanelOpen_ || aboutOpen_ || helpOpen_ || confirmationOpen_ ||
-			archivePasswordDialog_.IsOpen() || clipboardMode_ || currentSelectedLoadPending_) {
-			pixelSamplerReadoutRect_ = {};
-			pixelSamplerReadoutHex_.clear();
-			pixelSamplerReadoutLabel_.clear();
-			pixelSamplerReadoutColor_.reset();
-			pixelSamplerReadoutPinned_ = false;
-			pixelSamplerCacheValid_ = false;
-			return;
-		}
-		const SDL_Rect area = ImageAreaRect();
-		const SDL_Rect destination = CurrentPageScreenRect(area);
-		const std::shared_ptr<const Image>& presentation = imageDocument_.PresentationPixels();
-		const bool presentationOwnerChanged = pixelSamplerCachedPresentation_.owner_before(presentation) ||
-			presentation.owner_before(pixelSamplerCachedPresentation_);
-		const bool decodedOwnerChanged = pixelSamplerCachedDecoded_.owner_before(currentDecoded_) ||
-			currentDecoded_.owner_before(pixelSamplerCachedDecoded_);
-		const std::size_t currentIndex = fileList_.CurrentIndex();
-		const int imageWidth = CurrentImage().width;
-		const int imageHeight = CurrentImage().height;
-		const bool sourceChanged = !pixelSamplerCacheValid_ ||
-			pixelSamplerCachedIndex_ != currentIndex ||
-			presentationOwnerChanged || decodedOwnerChanged ||
-			pixelSamplerCachedFrame_ != currentAnimationFrame_ ||
-			pixelSamplerCachedImageWidth_ != imageWidth ||
-			pixelSamplerCachedImageHeight_ != imageHeight;
-		const auto sameRect = [](const SDL_Rect& left, const SDL_Rect& right) {
-			return left.x == right.x && left.y == right.y &&
-				left.w == right.w && left.h == right.h;
-		};
-		const bool geometryChanged = !pixelSamplerCacheValid_ ||
-			!sameRect(pixelSamplerCachedArea_, area) ||
-			!sameRect(pixelSamplerCachedDestination_, destination);
-		if (pixelSamplerReadoutPinned_ && (sourceChanged || geometryChanged)) {
-			pixelSamplerReadoutPinned_ = false;
-		}
-		const bool samplePositionChanged = pixelSamplerCachedScreenX_ != lastMouseX_ ||
-			pixelSamplerCachedScreenY_ != lastMouseY_;
-		if (!pixelSamplerReadoutPinned_ &&
-			(sourceChanged || geometryChanged || samplePositionChanged)) {
-			pixelSamplerReadoutColor_ = PixelColorAtScreen(lastMouseX_, lastMouseY_,
-				area, destination);
-			pixelSamplerReadoutHex_.clear();
-			pixelSamplerReadoutLabel_.clear();
-			pixelSamplerReadoutRect_ = {};
-			if (pixelSamplerReadoutColor_.has_value()) {
-				pixelSamplerReadoutHex_ =
-					jpegview_linux::FormatPixelColorRgba(*pixelSamplerReadoutColor_);
-				pixelSamplerReadoutLabel_ = "DOC " + pixelSamplerReadoutHex_;
-				const int lineHeight = TextLineHeight();
-				const int swatchSize = 14;
-				const int padding = 6;
-				const int swatchGap = 8;
-				const int width = padding * 2 + swatchSize + swatchGap +
-					TextWidth(pixelSamplerReadoutLabel_, kUiTextScale);
-				const int height = std::max(26, lineHeight + padding * 2);
-				int windowWidth = 0;
-				int windowHeight = 0;
-				SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-				int x = lastMouseX_ + 16;
-				int y = lastMouseY_ + 16;
-				if (x + width > windowWidth - 4) x = lastMouseX_ - width - 12;
-				if (y + height > windowHeight - 4) y = lastMouseY_ - height - 12;
-				x = std::clamp(x, 4, std::max(4, windowWidth - width - 4));
-				y = std::clamp(y, 4, std::max(4, windowHeight - height - 4));
-				pixelSamplerReadoutRect_ = {x, y, width, height};
-			}
-			pixelSamplerCachedIndex_ = currentIndex;
-			pixelSamplerCachedPresentation_ = presentation;
-			pixelSamplerCachedDecoded_ = currentDecoded_;
-			pixelSamplerCachedFrame_ = currentAnimationFrame_;
-			pixelSamplerCachedImageWidth_ = imageWidth;
-			pixelSamplerCachedImageHeight_ = imageHeight;
-			pixelSamplerCachedArea_ = area;
-			pixelSamplerCachedDestination_ = destination;
-			pixelSamplerCachedScreenX_ = lastMouseX_;
-			pixelSamplerCachedScreenY_ = lastMouseY_;
-			pixelSamplerCacheValid_ = true;
-		}
-		if (!pixelSamplerReadoutColor_.has_value() ||
-			pixelSamplerReadoutRect_.w <= 0 || pixelSamplerReadoutRect_.h <= 0) return;
-		const jpegview_linux::PixelColorRgba& color = *pixelSamplerReadoutColor_;
-		const int lineHeight = TextLineHeight();
-		const int swatchSize = 14;
-		const int padding = 6;
-		const int swatchGap = 8;
-		const int x = pixelSamplerReadoutRect_.x;
-		const int y = pixelSamplerReadoutRect_.y;
+		const jpegview_linux::PixelColorSamplerPaintPlan& plan =
+			pixelColorSampler_.PaintPlan();
+		if (!plan.color.has_value() || plan.panel.width <= 0 || plan.panel.height <= 0) return;
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 228);
-		SDL_RenderFillRect(renderer_, &pixelSamplerReadoutRect_);
-		DrawRect(pixelSamplerReadoutRect_, 150, 165, 185);
-		const SDL_Rect swatch{x + padding, y + (pixelSamplerReadoutRect_.h - swatchSize) / 2,
-			swatchSize, swatchSize};
-		SDL_SetRenderDrawColor(renderer_, color.red, color.green, color.blue, color.alpha);
+		const SDL_Rect panel{plan.panel.x, plan.panel.y,
+			plan.panel.width, plan.panel.height};
+		SDL_RenderFillRect(renderer_, &panel);
+		DrawRect(panel, 150, 165, 185);
+		const SDL_Rect swatch{plan.swatch.x, plan.swatch.y,
+			plan.swatch.width, plan.swatch.height};
+		SDL_SetRenderDrawColor(renderer_, plan.color->red, plan.color->green,
+			plan.color->blue, plan.color->alpha);
 		SDL_RenderFillRect(renderer_, &swatch);
 		DrawRect(swatch, 235, 235, 235);
-		DrawText(pixelSamplerReadoutLabel_, x + padding + swatchSize + swatchGap,
-			y + (pixelSamplerReadoutRect_.h - lineHeight) / 2,
+		DrawText(plan.label, panel.x + 6 + 14 + 8,
+			panel.y + (panel.h - TextLineHeight()) / 2,
 			kUiTextScale, 245, 245, 245);
 	}
 
@@ -12648,10 +12592,9 @@ private:
 			}
 			case SDL_MOUSEBUTTONDOWN:
 				if (event.button.button == SDL_BUTTON_LEFT) {
-					if (!pixelSamplerReadoutHex_.empty() &&
-						PointInRect(event.button.x, event.button.y,
-							pixelSamplerReadoutRect_)) {
-						if (SDL_SetClipboardText(pixelSamplerReadoutHex_.c_str()) != 0) {
+					if (const std::optional<std::string> colorText =
+						pixelColorSampler_.CopyTextAt(event.button.x, event.button.y)) {
+						if (SDL_SetClipboardText(colorText->c_str()) != 0) {
 							SetTitle("Could not copy pixel color");
 						}
 						dragging_ = false;
@@ -12707,9 +12650,7 @@ private:
 				}
 				break;
 			case SDL_MOUSEMOTION:
-				pixelSamplerReadoutPinned_ = !pixelSamplerReadoutHex_.empty() &&
-					PointInRect(event.motion.x, event.motion.y,
-						pixelSamplerReadoutRect_);
+				pixelColorSampler_.PointerMoved(event.motion.x, event.motion.y);
 				UpdateThumbnailPanelCursor(event.motion.x, event.motion.y);
 				UpdateCropCursor(event.motion.x, event.motion.y);
 				UpdateZoomNavigatorCursor(event.motion.x, event.motion.y);
@@ -13276,22 +13217,7 @@ private:
 	int lastMouseY_ = kDefaultHeight / 2;
 	int imageCenterX_ = kDefaultWidth / 2;
 	int imageCenterY_ = kDefaultHeight / 2;
-	SDL_Rect pixelSamplerReadoutRect_{};
-	std::string pixelSamplerReadoutHex_;
-	std::string pixelSamplerReadoutLabel_;
-	std::optional<jpegview_linux::PixelColorRgba> pixelSamplerReadoutColor_;
-	bool pixelSamplerReadoutPinned_ = false;
-	bool pixelSamplerCacheValid_ = false;
-	std::size_t pixelSamplerCachedIndex_ = 0;
-	std::weak_ptr<const Image> pixelSamplerCachedPresentation_;
-	std::weak_ptr<const jpegview_linux::DecodedImage> pixelSamplerCachedDecoded_;
-	std::size_t pixelSamplerCachedFrame_ = 0;
-	int pixelSamplerCachedImageWidth_ = 0;
-	int pixelSamplerCachedImageHeight_ = 0;
-	SDL_Rect pixelSamplerCachedArea_{};
-	SDL_Rect pixelSamplerCachedDestination_{};
-	int pixelSamplerCachedScreenX_ = -1;
-	int pixelSamplerCachedScreenY_ = -1;
+	jpegview_linux::PixelColorSamplerModel pixelColorSampler_;
 };
 
 void PrintUsage(const char* program) {

@@ -4345,6 +4345,76 @@ void TestPixelColorSamplerReadsBgraAsRgba() {
 		"pixel sampler accepted dimensions whose byte count overflows size_t");
 }
 
+void TestPixelColorSamplerModelUpdatePinAndCopy() {
+	const std::vector<std::uint8_t> pixels = {
+		0x56, 0x34, 0x12, 0xff,
+		0xff, 0x00, 0xab, 0xcd,
+	};
+	jpegview_linux::PixelColorSamplerInput input;
+	input.enabled = true;
+	input.ownerGeneration = 4;
+	input.documentRevision = 2;
+	input.pixelOwner = &pixels;
+	input.bgra = &pixels;
+	input.imageWidth = 2;
+	input.imageHeight = 1;
+	input.pixelX = 0;
+	input.pixelY = 0;
+	input.pointerX = 20;
+	input.pointerY = 30;
+	input.windowWidth = 200;
+	input.windowHeight = 150;
+	input.labelWidth = 100;
+	input.lineHeight = 16;
+	input.imageArea = {0, 0, 100, 100};
+	input.destination = {10, 20, 80, 40};
+
+	jpegview_linux::PixelColorSamplerModel model;
+	model.Update(input);
+	const auto& initial = model.PaintPlan();
+	Expect(initial.hex == "#123456FF" && initial.label == "DOC #123456FF" &&
+		initial.panel.x == 36 && initial.panel.y == 46 &&
+		initial.panel.width == 134 && initial.panel.height == 28 &&
+		initial.swatch.x == 42 && initial.swatch.y == 53 &&
+		initial.swatch.width == 14 && initial.swatch.height == 14,
+		"sampler update did not prepare a correctly placed readout and swatch");
+
+	model.PointerMoved(initial.panel.x + 1, initial.panel.y + 1);
+	Expect(model.PaintPlan().pinned &&
+		model.CopyTextAt(initial.panel.x + 1, initial.panel.y + 1) == "#123456FF" &&
+		!model.CopyTextAt(initial.panel.x + initial.panel.width,
+			initial.panel.y + 1).has_value(),
+		"sampler did not pin and copy only when clicked inside the readout");
+	input.pointerX = 85;
+	input.pointerY = 75;
+	input.pixelX = 1;
+	model.Update(input);
+	Expect(model.PaintPlan().pinned && model.PaintPlan().hex == "#123456FF",
+		"sampler changed a pinned readout while the pointer remained over it");
+
+	model.PointerMoved(190, 140);
+	input.pointerX = 190;
+	input.pointerY = 140;
+	model.Update(input);
+	Expect(!model.PaintPlan().pinned && model.PaintPlan().hex == "#AB00FFCD" &&
+		model.PaintPlan().panel.x == 44 && model.PaintPlan().panel.y == 100,
+		"sampler did not resume pointer-following after leaving the pinned readout");
+
+	input.documentRevision++;
+	model.PointerMoved(model.PaintPlan().panel.x + 1, model.PaintPlan().panel.y + 1);
+	input.pointerX = 40;
+	input.pointerY = 45;
+	input.pixelX = 0;
+	model.Update(input);
+	Expect(!model.PaintPlan().pinned && model.PaintPlan().hex == "#123456FF",
+		"sampler retained pinning or color across a document revision");
+	input.enabled = false;
+	model.Update(input);
+	Expect(model.PaintPlan().hex.empty() && model.PaintPlan().panel.width == 0 &&
+		!model.CopyTextAt(40, 45).has_value(),
+		"disabled sampler retained visible or copyable state");
+}
+
 void TestRendererWindowResourceOwnership() {
 	using Owner = jpegview_linux::RendererWindowResources<RendererResourceTestWindow,
 		RendererResourceTestRenderer, DestroyRendererResourceTestWindow,
@@ -4418,6 +4488,7 @@ const TestCase kTests[] = {
 	{"modal-event-router-precedence", &TestModalEventRouterPrecedence},
 	{"go-to-image-number-model", &TestGoToImageNumberModel},
 	{"pixel-color-sampler-bgra-rgba-and-bounds", &TestPixelColorSamplerReadsBgraAsRgba},
+	{"pixel-color-sampler-model-update-pin-and-copy", &TestPixelColorSamplerModelUpdatePinAndCopy},
 	{"renderer-window-resource-ownership", &TestRendererWindowResourceOwnership},
 };
 
