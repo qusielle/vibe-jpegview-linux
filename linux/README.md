@@ -18,8 +18,11 @@ they support.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
    PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, LibRaw camera formats, and flattened
-   Krita `.kra` projects. JPEG-named files with RIFF/WEBP content are recognized by their byte
-   signature when JPEG decoding fails. A Krita project opens as one image from its root
+   Krita `.kra` projects. Decoding uses recognizable content signatures when the filename suffix is
+   wrong; a regular file explicitly opened with an otherwise unsupported suffix is checked too.
+   Folder and archive listings remain suffix-filtered, so they do not probe every unknown file. Some
+   container-based formats do not have a unique signature and still rely on their suffix. A Krita
+   project opens as one image from its root
    `mergedimage.png`; editable
    layers are not exposed. Embedded color profiles are transformed through LCMS2. Supported images
    inside ZIP/CBZ, TAR,
@@ -739,15 +742,18 @@ make -C linux SDL2_LIBS='-L/path/to/lib -lSDL2'
 
 Supported input formats are JPEG, PNG/APNG (including animation), GIF (including animation), BMP, TGA, PSD, PNM-family files,
 QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
-formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. ZIP, CBZ, TAR, `.tar.gz`, `.tgz`, `.7z`,
+formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. When decoding, JPEGView recognizes common image
+signatures independently of the filename suffix and routes them to the matching reader. An
+explicitly opened regular file with an unsupported suffix is also checked by content. Directory,
+Browse, and archive-member listings remain extension-filtered and do not inspect arbitrary files.
+Formats without an unambiguous signature, including some RAW and project containers, continue to use
+their known suffix. ZIP, CBZ, TAR, `.tar.gz`, `.tgz`, `.7z`,
 `.cb7`, and `.rar` archives can contain any supported image format above; they are browsed read-only
 as virtual folders. Krita `.kra` projects open as single flattened images from their root
 `mergedimage.png`; they are not browsable folders and their editable layers are not exposed. The
 embedded image uses the same 128 MiB extraction limit as other archive members. CBZ uses the ZIP
 reader and CB7 uses the 7z reader. Neither adds comic-specific page bookmarks or archive-level
-reading-position memory. If JPEG decoding fails for a `.jpg`, `.jpeg`, or `.jpe` file, JPEGView
-checks its RIFF/WEBP content signature and can open it as WebP even when its filename uses a JPEG
-extension.
+reading-position memory.
 Unencrypted RAR input stays on libarchive. When the optional private reader is present, encrypted
 RAR4/RAR5 data and header encryption use the Rust `rars` backend. Data-encrypted member names remain
 visible; header-encrypted names stay hidden until unlock. Wrong and correct passwords share the

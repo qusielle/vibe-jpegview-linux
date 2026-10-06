@@ -1,6 +1,7 @@
 #include "image_decoder.h"
 #include "image_decoder_internal.h"
 #include "archive_source.h"
+#include "image_formats.h"
 #include "perf_diagnostics.h"
 #include "source_work_coordinator.h"
 
@@ -300,21 +301,106 @@ bool RunWithSourceAndCpuAdmission(const std::filesystem::path& filename,
 	}
 }
 
-bool HasRiffWebPSignature(const std::filesystem::path& filename) {
-	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::SourceRead);
-	std::ifstream input(filename, std::ios::binary);
-	std::array<char, 12> signature{};
-	if (!input.read(signature.data(), static_cast<std::streamsize>(signature.size()))) {
+bool DecodeDetectedImageContent(const std::filesystem::path& filename,
+	ImageContentFormat format, DecodedImage& image, std::string& errorMessage,
+	const WorkContext& context) {
+	switch (format) {
+	case ImageContentFormat::Jpeg:
+		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,
+			nullptr, nullptr, context);
+	case ImageContentFormat::Png:
+		return decoder_detail::DecodeStb(filename, image, errorMessage);
+	case ImageContentFormat::Apng:
+		return decoder_detail::DecodeApng(filename, image, errorMessage);
+	case ImageContentFormat::Gif:
+#if JPEGVIEW_HAVE_GIF
+		return decoder_detail::DecodeGif(filename, image, errorMessage);
+#else
+		return decoder_detail::DecodeStb(filename, image, errorMessage);
+#endif
+	case ImageContentFormat::Bmp:
+	case ImageContentFormat::Tga:
+		return decoder_detail::DecodeStb(filename, image, errorMessage);
+	case ImageContentFormat::WebP:
+#if JPEGVIEW_HAVE_WEBP
+		return decoder_detail::DecodeWebP(filename, image, errorMessage);
+#else
+		errorMessage = "WebP content detected, but WebP support is not available in this build";
 		return false;
+#endif
+	case ImageContentFormat::Tiff: {
+#if JPEGVIEW_HAVE_TIFF
+		if (decoder_detail::DecodeTiff(filename, image, errorMessage)) return true;
+		const std::string tiffError = errorMessage;
+#if JPEGVIEW_HAVE_RAW
+		image = {};
+		if (decoder_detail::DecodeRaw(filename, image, errorMessage)) return true;
+#endif
+		errorMessage = tiffError;
+		return false;
+#elif JPEGVIEW_HAVE_RAW
+		if (decoder_detail::DecodeRaw(filename, image, errorMessage)) return true;
+		errorMessage = "TIFF support is not available in this build";
+		return false;
+#else
+		errorMessage = "TIFF support is not available in this build";
+		return false;
+#endif
 	}
-	return std::equal(signature.begin(), signature.begin() + 4, "RIFF") &&
-		std::equal(signature.begin() + 8, signature.end(), "WEBP");
+	case ImageContentFormat::Heif:
+#if JPEGVIEW_HAVE_HEIF
+		return decoder_detail::DecodeHeif(filename, image, errorMessage);
+#else
+		errorMessage = "HEIF content detected, but HEIF support is not available in this build";
+		return false;
+#endif
+	case ImageContentFormat::Avif:
+#if JPEGVIEW_HAVE_AVIF
+		return decoder_detail::DecodeAvif(filename, image, errorMessage);
+#elif JPEGVIEW_HAVE_HEIF
+		return decoder_detail::DecodeHeif(filename, image, errorMessage);
+#else
+		errorMessage = "AVIF content detected, but AVIF support is not available in this build";
+		return false;
+#endif
+	case ImageContentFormat::JpegXl:
+#if JPEGVIEW_HAVE_JXL
+		return decoder_detail::DecodeJxl(filename, image, errorMessage);
+#else
+		errorMessage = "JPEG XL content detected, but JPEG XL support is not available in this build";
+		return false;
+#endif
+	case ImageContentFormat::JpegXr:
+#if JPEGVIEW_HAVE_JXR
+		return decoder_detail::DecodeJxr(filename, image, errorMessage);
+#else
+		errorMessage = "JPEG XR content detected, but JPEG XR support is not available in this build";
+		return false;
+#endif
+	case ImageContentFormat::Psd:
+		return decoder_detail::DecodePsd(filename, image, errorMessage);
+	case ImageContentFormat::Pnm:
+		return decoder_detail::DecodePnm(filename, image, errorMessage);
+	case ImageContentFormat::Qoi:
+		return decoder_detail::DecodeQoi(filename, image, errorMessage);
+	case ImageContentFormat::Raw:
+#if JPEGVIEW_HAVE_RAW
+		return decoder_detail::DecodeRaw(filename, image, errorMessage);
+#else
+		errorMessage = "RAW content detected, but RAW support is not available in this build";
+		return false;
+#endif
+	case ImageContentFormat::Unknown:
+		break;
+	}
+	errorMessage = "unsupported image content";
+	return false;
 }
 
-bool DecodeWebPAfterJpegFailure(const std::filesystem::path& filename,
+bool DecodeDetectedContentAfterFailure(const std::filesystem::path& filename,
 	DecodedImage& image, std::string& errorMessage, const WorkContext& context,
 	int* sourceWidth = nullptr, int* sourceHeight = nullptr) {
-	const std::string jpegError = errorMessage;
+	const std::string originalError = errorMessage;
 	image = {};
 	if (sourceWidth != nullptr) *sourceWidth = 0;
 	if (sourceHeight != nullptr) *sourceHeight = 0;
@@ -322,30 +408,26 @@ bool DecodeWebPAfterJpegFailure(const std::filesystem::path& filename,
 		errorMessage = "source work was cancelled";
 		return false;
 	}
-	const bool isWebP = HasRiffWebPSignature(filename);
+	const ImageContentFormat format = ReadImageContentFormat(filename,
+		[&context] { return context.Continue(); });
 	if (!context.Continue()) {
 		errorMessage = "source work was cancelled";
 		return false;
 	}
-	if (!isWebP) {
-		errorMessage = jpegError;
+	if (format == ImageContentFormat::Unknown) {
+		errorMessage = originalError;
 		return false;
 	}
-#if JPEGVIEW_HAVE_WEBP
 	errorMessage.clear();
-	if (!decoder_detail::DecodeWebP(filename, image, errorMessage) || image.frames.empty()) {
+	if (!DecodeDetectedImageContent(filename, format, image, errorMessage, context) ||
+		image.frames.empty()) {
 		image = {};
-		if (errorMessage.empty()) errorMessage = "invalid WebP image";
+		if (errorMessage.empty()) errorMessage = "invalid image content";
 		return false;
 	}
 	if (sourceWidth != nullptr) *sourceWidth = image.frames.front().width;
 	if (sourceHeight != nullptr) *sourceHeight = image.frames.front().height;
 	return true;
-#else
-	image = {};
-	errorMessage = "WebP content detected, but WebP support is not available in this build";
-	return false;
-#endif
 }
 
 
@@ -426,7 +508,7 @@ bool DecodeJpegForDisplay(const std::filesystem::path& filename,
 			}
 			if (decoder_detail::DecodeJpeg(filename, image, errorMessage, minimumWidth,
 				minimumHeight, &sourceWidth, &sourceHeight, context)) return true;
-			return DecodeWebPAfterJpegFailure(filename, image, errorMessage, context,
+			return DecodeDetectedContentAfterFailure(filename, image, errorMessage, context,
 				&sourceWidth, &sourceHeight);
 		});
 }
@@ -454,10 +536,22 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 				return DecodeImage(temporary, image, decodeError, context);
 			}, errorMessage, nullptr, [context] { return context.Continue(); });
 	}
+	const ImageContentFormat contentFormat = ReadImageContentFormat(filename,
+		[&context] { return context.Continue(); });
+	if (contentFormat != ImageContentFormat::Unknown) {
+		if (!context.Continue()) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
+		return DecodeDetectedImageContent(filename, contentFormat, image, errorMessage, context);
+	}
+	if (!context.Continue()) {
+		errorMessage = "source work was cancelled";
+		return false;
+	}
 	if (IsJpegPath(filename)) {
-		if (decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,
-			nullptr, nullptr, context)) return true;
-		return DecodeWebPAfterJpegFailure(filename, image, errorMessage, context);
+		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,
+			nullptr, nullptr, context);
 	}
 	if (extension == ".gif") {
 #if JPEGVIEW_HAVE_GIF

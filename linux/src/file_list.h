@@ -224,6 +224,9 @@ private:
 		const std::function<bool()>& shouldContinue = {});
 	static std::vector<Entry> ScanDirectory(const std::filesystem::path& directory,
 		const std::function<bool()>& shouldContinue = {});
+	static bool IncludeExplicitContentFile(std::vector<Entry>& entries,
+		const std::filesystem::path& path,
+		const std::function<bool()>& shouldContinue = {});
 	static std::vector<std::filesystem::path> ChildDirectories(
 		const std::filesystem::path& directory, const std::function<bool()>& shouldContinue = {});
 	static void CollectDescendantDirectories(const std::filesystem::path& directory,

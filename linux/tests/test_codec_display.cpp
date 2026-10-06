@@ -3,6 +3,50 @@
 
 namespace {
 
+void TestImageContentFormatDetection() {
+	using jpegview_linux::DetectImageContent;
+	using jpegview_linux::ImageContentFormat;
+	const auto expect = [](const std::vector<std::uint8_t>& bytes,
+		ImageContentFormat expected, const char* label) {
+		Expect(DetectImageContent(bytes.data(), bytes.size()) == expected,
+			std::string("content signature was not identified as ") + label);
+	};
+	expect({0xff, 0xd8, 0xff}, ImageContentFormat::Jpeg, "JPEG");
+	expect({0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a},
+		ImageContentFormat::Png, "PNG");
+	expect({0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a,
+		0, 0, 0, 8, 'a', 'c', 'T', 'L'}, ImageContentFormat::Apng, "APNG");
+	expect({'G', 'I', 'F', '8', '9', 'a'}, ImageContentFormat::Gif, "GIF");
+	expect({'B', 'M'}, ImageContentFormat::Bmp, "BMP");
+	expect({'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'},
+		ImageContentFormat::WebP, "WebP");
+	expect({'I', 'I', '*', 0}, ImageContentFormat::Tiff, "TIFF");
+	expect({'I', 'I', '*', 0, 0, 0, 0, 0, 'C', 'R', 2, 0},
+		ImageContentFormat::Raw, "CR2 RAW");
+	expect({'I', 'I', 0x1a, 0, 0, 0, 'H', 'E', 'A', 'P', 'C', 'C', 'D', 'R'},
+		ImageContentFormat::Raw, "CRW RAW");
+	expect({'F', 'O', 'V', 'b'}, ImageContentFormat::Raw, "X3F RAW");
+	expect({0, 0, 0, 24, 'f', 't', 'y', 'p', 'a', 'v', 'i', 'f', 0, 0, 0, 0,
+		'a', 'v', 'i', 'f', 'm', 'i', 'f', '1'}, ImageContentFormat::Avif, "AVIF");
+	expect({0, 0, 0, 24, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'c', 0, 0, 0, 0,
+		'h', 'e', 'i', 'c', 'm', 'i', 'f', '1'}, ImageContentFormat::Heif, "HEIF");
+	expect({0xff, 0x0a}, ImageContentFormat::JpegXl, "JPEG XL");
+	expect({'I', 'I', 0xbc, 1}, ImageContentFormat::JpegXr, "JPEG XR");
+	expect({'8', 'B', 'P', 'S'}, ImageContentFormat::Psd, "PSD");
+	expect({'P', '6', '\n'}, ImageContentFormat::Pnm, "PNM");
+	expect({'q', 'o', 'i', 'f'}, ImageContentFormat::Qoi, "QOI");
+	expect({0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 24, 0},
+		ImageContentFormat::Tga, "TGA");
+	expect({'n', 'o', 't', ' ', 'a', 'n', ' ', 'i', 'm', 'a', 'g', 'e'},
+		ImageContentFormat::Unknown, "unknown content");
+	TemporaryDirectory temporary;
+	const fs::path canceledProbe = temporary.path() / "probe.png";
+	WriteBytes(canceledProbe, {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a});
+	Expect(jpegview_linux::ReadImageContentFormat(canceledProbe, [] { return false; }) ==
+		ImageContentFormat::Unknown,
+		"content probing ignored cancellation before reading a source");
+}
+
 void TestImageWriterDecoderRoundTrips() {
 	TemporaryDirectory temporary;
 	const std::vector<std::uint8_t> pixels = TestPixels();
@@ -183,6 +227,12 @@ void TestPhotoSizedLossyVp8WebPDecode() {
 		"WebP RIFF content was incorrectly accepted as a JPEG header");
 	Expect(jpegview_linux::IsJpegPath(mislabeledFilename),
 		"mislabeled fixture no longer exercises the JPEG-selected decode path");
+	const fs::path unknownSuffixFilename = temporary.path() / "photo-sized-vp8.image-data";
+	fs::copy_file(mislabeledFilename, unknownSuffixFilename);
+	Expect(!jpegview_linux::IsSupportedImagePath(unknownSuffixFilename) &&
+		jpegview_linux::ReadImageContentFormat(unknownSuffixFilename) ==
+			jpegview_linux::ImageContentFormat::WebP,
+		"content probing did not identify WebP independently of the file suffix");
 
 	DecodedImage decoded;
 	error.clear();
@@ -193,6 +243,14 @@ void TestPhotoSizedLossyVp8WebPDecode() {
 		decoded.frames.front().bgra.size() == pixels.size() &&
 		!decoded.frames.front().hasTransparency && !decoded.animation,
 		"photo-sized lossy VP8 WebP decoded with the wrong frame geometry or alpha state");
+	DecodedImage unknownSuffixDecoded;
+	error.clear();
+	Expect(jpegview_linux::DecodeImage(unknownSuffixFilename, unknownSuffixDecoded, error),
+		"cannot decode WebP explicitly opened with an unknown suffix: " + error);
+	Expect(unknownSuffixDecoded.frames.size() == 1 &&
+		unknownSuffixDecoded.frames.front().width == width &&
+		unknownSuffixDecoded.frames.front().height == height,
+		"unknown-suffix WebP was decoded with the wrong dimensions");
 	const jpegview_linux::DecodedFrame& frame = decoded.frames.front();
 	const std::size_t sample = (static_cast<std::size_t>(height / 2) * width + width / 2) * 4;
 	for (std::size_t channel = 0; channel < 3; ++channel) {
@@ -359,7 +417,9 @@ void TestAnimatedImageDecoders() {
 	Expect(jpegview_linux::WriteImage(firstPng, red.data(), 2, 2, options, error), "cannot write APNG first frame");
 	Expect(jpegview_linux::WriteImage(secondPng, blue.data(), 2, 2, options, error), "cannot write APNG second frame");
 	const fs::path apng = temporary.path() / "animated.apng";
-	WriteBytes(apng, MakeApng(ReadBytes(firstPng), ReadBytes(secondPng)));
+	const std::vector<std::uint8_t> apngBytes = MakeApng(
+		ReadBytes(firstPng), ReadBytes(secondPng));
+	WriteBytes(apng, apngBytes);
 	DecodedImage decoded;
 	Expect(jpegview_linux::DecodeImage(apng, decoded, error), "cannot decode APNG: " + error);
 	Expect(decoded.animation && decoded.frames.size() == 2 && decoded.loopCount == 1,
@@ -367,6 +427,23 @@ void TestAnimatedImageDecoders() {
 	Expect(decoded.frames[0].delayMs == 70 && decoded.frames[1].delayMs == 70,
 		"APNG frame delay is incorrect");
 	Expect(decoded.frames[0].bgra != decoded.frames[1].bgra, "APNG frames were not composited independently");
+
+	std::vector<std::uint8_t> delayedApng = apngBytes;
+	const std::size_t afterIhdr = 8 + 12 + 13;
+	delayedApng.resize(afterIhdr);
+	AppendPngChunk(delayedApng, "teSt", std::vector<std::uint8_t>(256 * 1024, 'x'));
+	delayedApng.insert(delayedApng.end(), apngBytes.begin() +
+		static_cast<std::ptrdiff_t>(afterIhdr), apngBytes.end());
+	const fs::path delayedAnimation = temporary.path() / "large-metadata.apng";
+	WriteBytes(delayedAnimation, delayedApng);
+	Expect(jpegview_linux::ReadImageContentFormat(delayedAnimation) ==
+		jpegview_linux::ImageContentFormat::Unknown,
+		"bounded PNG probing guessed static PNG before reaching its animation marker");
+	DecodedImage delayedDecoded;
+	Expect(jpegview_linux::DecodeImage(delayedAnimation, delayedDecoded, error),
+		"suffix fallback did not decode APNG beyond the signature-probe bound: " + error);
+	Expect(delayedDecoded.animation && delayedDecoded.frames.size() == 2,
+		"bounded content probing replaced APNG extension fallback with static PNG decoding");
 
 	const std::vector<std::uint8_t> gif = {
 		0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x02, 0x00, 0x02, 0x00, 0xf0, 0x00,
@@ -2062,6 +2139,7 @@ void TestExifMetadataWorkerPublishesCurrentExceptions() {
 		failure.str());
 }
 const TestCase kTests[] = {
+	{"image-content-format-detection", &TestImageContentFormatDetection},
 	{"image-writer-decoder-round-trips", &TestImageWriterDecoderRoundTrips},
 #if JPEGVIEW_HAVE_WEBP
 	{"photo-sized-lossy-vp8-webp-decode", &TestPhotoSizedLossyVp8WebPDecode},

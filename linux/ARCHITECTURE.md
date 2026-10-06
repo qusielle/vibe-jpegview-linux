@@ -14,6 +14,9 @@ should normally be added to one of these focused modules and covered by the matc
   `DescriptorRevision()` changes when source identity or metadata is refreshed; ordinary current-image
   navigation changes neither. Filename sort data is folded once per entry and the natural comparator
   consumes that cached key, retaining existing numeric, case, leading-zero, and path-tie behavior.
+  Directory discovery remains extension-filtered. During explicit input classification only, a regular
+  file with an unsupported suffix may be admitted when a bounded content probe recognizes it as an
+  image; that selected file is added alongside the ordinary supported siblings.
   Ordinary-file identity, size, modification time, and optional birth time are requested together with
   `statx`; when that request is unavailable or omits required fields, the stat fallback preserves
   modification-time creation ordering.
@@ -195,6 +198,12 @@ should normally be added to one of these focused modules and covered by the matc
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
   pixel processing, the atomic native per-image levels database, and its portable backup/restore.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
+  `image_formats` owns both the extension policy used by listings and bounded content-signature
+  detection used by decoding. The decoder selects a recognized content format before falling back to
+  suffix dispatch; ambiguous or unknown signatures retain the existing suffix path. Unknown-suffix
+  probing occurs only for explicitly opened paths, never for every entry in a folder scan. PNG probing
+  follows bounded chunk headers to distinguish APNG from static PNG, and accepts a cancellation
+  predicate.
   `image_decoder.cpp` owns validation, append/conversion helpers, source admission, and codec dispatch;
   `image_decoder_stb.cpp`, `image_decoder_jpeg.cpp`, `image_decoder_apng.cpp`,
   `image_decoder_builtin.cpp`, and `image_decoder_optional.cpp` isolate the corresponding reader
@@ -207,11 +216,10 @@ should normally be added to one of these focused modules and covered by the matc
   its native handle. Image decoders resolve archive-member paths through `archive_source` before
   invoking the existing codec path, retaining ordinary-file and reduced-DCT JPEG behavior. Krita
   `.kra` decoding resolves the root `mergedimage.png` through the same bounded archive-member API.
-  When JPEG decoding fails for a JPEG-named source, the decode path checks the RIFF/WEBP byte
-  signature and routes matching content to the WebP decoder. In Viewer loading this runs inside
-  existing asynchronous source preparation. The probe follows the failed JPEG attempt, so
-  successfully decoded ordinary JPEGs avoid another source read; file-backed thumbnails use
-  generic decoding when the JPEG header probe fails.
+  Content dispatch runs inside existing admitted asynchronous source preparation. The reduced-DCT
+  display path retains its direct JPEG attempt and only invokes content detection when that attempt
+  fails; generic decodes use content signatures first. Unknown and ambiguous formats fall back to
+  the existing extension-based dispatch.
   JPEG cancellation is checked before opening, after header parsing, between 16-row scanline batches,
   before color conversion/resampling,
   and before publication; opaque codec calls are checked before and after their supported boundaries.

@@ -471,6 +471,39 @@ void TestFileListFilteringAndLogicalSorting() {
 		"file-list exact path lookup did not follow the active sort order");
 }
 
+void TestExplicitWrongSuffixImageIsIncludedWithoutFolderSniffing() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "images";
+	fs::create_directories(directory);
+	const fs::path mislabeled = directory / "photo.zip";
+	const fs::path imageFixture = directory / "photo.png";
+	const fs::path listedImage = directory / "listed.png";
+	WriteTinyImage(imageFixture);
+	WriteTinyImage(listedImage);
+	std::error_code renameError;
+	fs::rename(imageFixture, mislabeled, renameError);
+	Expect(!renameError, "could not rename the image to an unsupported suffix");
+	Expect(!jpegview_linux::IsSupportedImagePath(mislabeled),
+		"unknown image suffix unexpectedly entered the extension policy");
+
+	FileList directoryList({directory.string()}, FileList::SortMode::FileName, true, false);
+	Expect(directoryList.Size() == 1 && directoryList.Current() == listedImage,
+		"directory scanning sniffed a wrong-suffix file that was not explicitly opened");
+
+	FileList explicitOpen({mislabeled.string()}, FileList::SortMode::FileName, true, false);
+	Expect(explicitOpen.Size() == 2 && explicitOpen.Current() == mislabeled &&
+		explicitOpen.ContainsPath(mislabeled),
+		"explicitly opened image with a wrong suffix was not added to the selected file list");
+	FileList::ScanRequest reloadRequest = explicitOpen.MakeScanRequest(
+		FileList::ScanOperation::Reload);
+	FileListPreparedScan preparedReload = FileList::PrepareScan(reloadRequest,
+		[] { return true; });
+	Expect(preparedReload.completed && preparedReload.replacement.ContainsPath(mislabeled),
+		"background reload dropped the explicitly opened wrong-suffix image");
+	Expect(explicitOpen.Reload() && explicitOpen.ContainsPath(mislabeled),
+		"reloading the selected directory dropped its explicitly opened wrong-suffix image");
+}
+
 void TestArchiveBrowsingDecodingAndRecentPreview() {
 	TemporaryDirectory temporary;
 	const fs::path imageDirectory = temporary.path() / "source";
@@ -2459,6 +2492,7 @@ void TestHeldNavigationWaitsForCurrentImageContinuation() {
 }
 const TestCase kTests[] = {
 	{"file-list-filtering-and-logical-sorting", &TestFileListFilteringAndLogicalSorting},
+	{"explicit-wrong-suffix-image-is-included-without-folder-sniffing", &TestExplicitWrongSuffixImageIsIncludedWithoutFolderSniffing},
 	{"ordinary-source-metadata-uses-one-statx-request", &TestOrdinarySourceMetadataUsesOneStatxRequest},
 	{"source-descriptor-identity-and-unusual-paths", &TestSourceDescriptorIdentityAndUnusualPaths},
 	{"provisional-source-descriptor-survives-startup-replacement", &TestProvisionalSourceDescriptorSurvivesStartupReplacement},
