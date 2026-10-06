@@ -176,11 +176,12 @@ should normally be added to one of these focused modules and covered by the matc
 - `crop_size_dialog_model`: fixed-crop dimension text, focus/unit transitions, and validation.
 - `go_to_image_number_model`: one-based input validation for selecting an entry in the active
   ordered file list; it leaves list ownership and the subsequent image load to the Viewer.
-- `pixel_color_sampler`: bounds-checked BGRA document-pixel sampling, RGBA hex formatting, and the
-  renderer-independent readout cache/pin/copy state. The Viewer maps pointer coordinates and updates
-  the sampler during the event-thread update phase; the renderer consumes its prepared paint plan
-  without changing sampler state. It does not read back the renderer or retain another display-sized
-  buffer.
+- `pixel_color_sampler`: bounds-checked BGRA document-source sampling, RGBA hex formatting, and the
+  renderer-independent readout cache/pin/copy state. Materialized source pixels include geometry
+  edits such as rotate and crop, but exclude non-destructive levels processing; a lazy document uses
+  its active decoded frame. The Viewer maps pointer coordinates and updates the sampler during the
+  event-thread update phase; the renderer consumes its prepared paint plan without changing sampler
+  state. It does not read back the renderer or retain another display-sized buffer.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
   pixel processing, the atomic native per-image levels database, and its portable backup/restore.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.

@@ -11056,12 +11056,11 @@ private:
 		const std::vector<std::uint8_t>* pixels = nullptr;
 		int pixelWidth = 0;
 		int pixelHeight = 0;
-		if (const std::shared_ptr<const Image>& presentation =
-			imageDocument_.PresentationPixels()) {
-			input.pixelOwner = presentation.get();
-			pixels = &presentation->bgra;
-			pixelWidth = presentation->width;
-			pixelHeight = presentation->height;
+		if (const std::shared_ptr<const Image>& source = imageDocument_.SourcePixels()) {
+			input.pixelOwner = source.get();
+			pixels = &source->bgra;
+			pixelWidth = source->width;
+			pixelHeight = source->height;
 		} else if (currentDecoded_ && currentAnimationFrame_ < currentDecoded_->frames.size()) {
 			const jpegview_linux::DecodedFrame& frame =
 				currentDecoded_->frames[currentAnimationFrame_];

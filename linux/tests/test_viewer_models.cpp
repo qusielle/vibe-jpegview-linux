@@ -4415,6 +4415,84 @@ void TestPixelColorSamplerModelUpdatePinAndCopy() {
 		"disabled sampler retained visible or copyable state");
 }
 
+void TestPixelColorSamplerUsesSourceColorsAfterProcessingAndGeometryEdits() {
+	const std::uint8_t sourcePixels[] = {
+		0x56, 0x34, 0x12, 0xff,
+		0xcc, 0xbb, 0xaa, 0xff,
+	};
+	jpegview_linux::Image source;
+	Expect(source.StoreBGRA(sourcePixels, 2, 1),
+		"sampler source fixture could not be initialized");
+	jpegview_linux::ImageProcessingParams levels;
+	levels.gamma = 2.0;
+	jpegview_linux::Image processed = source;
+	Expect(processed.ApplyProcessing(levels, false),
+		"sampler processed fixture could not apply gamma");
+	const auto processedColor = jpegview_linux::SampleBgraPixel(
+		processed.bgra, processed.width, processed.height, 0, 0);
+	Expect(processedColor.has_value() &&
+		jpegview_linux::FormatPixelColorRgba(*processedColor) != "#123456FF",
+		"gamma fixture did not change the visible presentation color");
+
+	jpegview_linux::PixelColorSamplerModel model;
+	jpegview_linux::PixelColorSamplerInput input;
+	input.enabled = true;
+	input.ownerGeneration = 8;
+	input.documentRevision = 1;
+	input.pixelOwner = &source;
+	input.bgra = &source.bgra;
+	input.imageWidth = source.width;
+	input.imageHeight = source.height;
+	input.pixelX = 0;
+	input.pixelY = 0;
+	input.pointerX = 20;
+	input.pointerY = 30;
+	input.windowWidth = 200;
+	input.windowHeight = 150;
+	input.labelWidth = 100;
+	input.lineHeight = 16;
+	input.imageArea = {0, 0, 100, 100};
+	input.destination = {10, 20, 80, 40};
+	model.Update(input);
+	Expect(model.PaintPlan().hex == "#123456FF",
+		"sampler reported levels-processed pixels instead of source color");
+
+	jpegview_linux::Image rotated = source;
+	Expect(rotated.Rotate(true), "sampler rotated source fixture failed");
+	jpegview_linux::Image rotatedPresentation = rotated;
+	Expect(rotatedPresentation.ApplyProcessing(levels, false),
+		"sampler rotated presentation could not apply gamma");
+	input.documentRevision++;
+	input.pixelOwner = &rotated;
+	input.bgra = &rotated.bgra;
+	input.imageWidth = rotated.width;
+	input.imageHeight = rotated.height;
+	input.pixelX = 0;
+	input.pixelY = 1;
+	input.destination = {10, 20, 40, 80};
+	model.Update(input);
+	Expect(model.PaintPlan().hex == "#AABBCCFF",
+		"sampler lost source colors or document coordinates after rotation");
+
+	jpegview_linux::Image cropped;
+	Expect(rotated.CopyCrop(0, 1, 1, 2, cropped),
+		"sampler crop fixture failed");
+	jpegview_linux::Image croppedPresentation = cropped;
+	Expect(croppedPresentation.ApplyProcessing(levels, false),
+		"sampler cropped presentation could not apply gamma");
+	input.documentRevision++;
+	input.pixelOwner = &cropped;
+	input.bgra = &cropped.bgra;
+	input.imageWidth = cropped.width;
+	input.imageHeight = cropped.height;
+	input.pixelX = 0;
+	input.pixelY = 0;
+	input.destination = {10, 20, 40, 40};
+	model.Update(input);
+	Expect(model.PaintPlan().hex == "#AABBCCFF",
+		"sampler lost source colors or document coordinates after crop");
+}
+
 void TestRendererWindowResourceOwnership() {
 	using Owner = jpegview_linux::RendererWindowResources<RendererResourceTestWindow,
 		RendererResourceTestRenderer, DestroyRendererResourceTestWindow,
@@ -4489,6 +4567,7 @@ const TestCase kTests[] = {
 	{"go-to-image-number-model", &TestGoToImageNumberModel},
 	{"pixel-color-sampler-bgra-rgba-and-bounds", &TestPixelColorSamplerReadsBgraAsRgba},
 	{"pixel-color-sampler-model-update-pin-and-copy", &TestPixelColorSamplerModelUpdatePinAndCopy},
+	{"pixel-color-sampler-source-colors-after-processing-and-edits", &TestPixelColorSamplerUsesSourceColorsAfterProcessingAndGeometryEdits},
 	{"renderer-window-resource-ownership", &TestRendererWindowResourceOwnership},
 };
 

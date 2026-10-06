@@ -122,8 +122,9 @@ they support.
    after a quarter-turn, then return to a horizontal spread when rotated back. The spread remains
    paired if double-page mode is switched off and on while the rotation is applied.
    PageUp/PageDown remain logical previous/next. A pointer-following pixel sampler shows a swatch and
-   `#RRGGBBAA` value; clicking the readout copies it. It samples decoded or materialized document
-   pixels before live non-destructive levels adjustments and display scaling. The two checkable
+   `#RRGGBBAA` value; clicking the readout copies it. It samples decoded source pixels before live
+   non-destructive levels adjustments and display scaling. Rotate, mirror, and crop update the
+   sampled document coordinates while preserving the source colors. The two checkable
    controls appear in the navigation panel and context menu. Page pairs follow
    [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
    Spread navigation prepares both pages at their final slot sizes through background workers and
