@@ -747,7 +747,9 @@ signatures independently of the filename suffix and routes them to the matching 
 explicitly opened regular file with an unsupported suffix is also checked by content. Directory,
 Browse, and archive-member listings remain extension-filtered and do not inspect arbitrary files.
 Formats without an unambiguous signature, including some RAW and project containers, continue to use
-their known suffix. ZIP, CBZ, TAR, `.tar.gz`, `.tgz`, `.7z`,
+their known suffix. TIFF-based camera files with a known RAW suffix retain RAW development rather
+than showing a TIFF preview. Recognizable image content also takes precedence over a `.kra` suffix;
+actual Krita projects still open their flattened preview. ZIP, CBZ, TAR, `.tar.gz`, `.tgz`, `.7z`,
 `.cb7`, and `.rar` archives can contain any supported image format above; they are browsed read-only
 as virtual folders. Krita `.kra` projects open as single flattened images from their root
 `mergedimage.png`; they are not browsable folders and their editable layers are not exposed. The

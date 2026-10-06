@@ -3424,8 +3424,11 @@ void TestThumbnailFileBackedPreparationAndShutdown() {
 	const fs::path mislabeledWebP = temporary.path() / "file-backed-webp.jpg";
 	options.webpQuality = 82;
 	error.clear();
-	Expect(jpegview_linux::WriteImage(mislabeledWebP, pixels.data(), 4, 4,
+	Expect(jpegview_linux::WriteImageWithFormat(mislabeledWebP, ".webp", pixels.data(), 4, 4,
 		options, error), "cannot create JPEG-named WebP thumbnail fixture: " + error);
+	Expect(jpegview_linux::ReadImageContentFormat(mislabeledWebP) ==
+		jpegview_linux::ImageContentFormat::WebP,
+		"JPEG-named thumbnail fixture did not contain WebP bytes");
 	Expect(worker.Request(fileRequest(mislabeledWebP, 2, 2, 14, 7, 6)) &&
 		worker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not decode WebP content with a JPEG extension");

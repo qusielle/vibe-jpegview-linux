@@ -172,6 +172,39 @@ void TestImageWriterDecoderRoundTrips() {
 	Expect(!error.empty(), "invalid dimensions did not produce an error message");
 }
 
+void TestContentDispatchPreservesContainerPolicy() {
+	TemporaryDirectory temporary;
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	ImageWriteOptions options;
+	std::string error;
+	const fs::path pngWithProjectSuffix = temporary.path() / "png-content.kra";
+	Expect(jpegview_linux::WriteImageWithFormat(pngWithProjectSuffix, ".png",
+		pixels.data(), 2, 2, options, error), "cannot write PNG container-policy fixture: " + error);
+	ExpectDecoded(pngWithProjectSuffix, pixels, true, true, true);
+	const fs::path pngWithRawSuffix = temporary.path() / "png-content.nef";
+	fs::copy_file(pngWithProjectSuffix, pngWithRawSuffix);
+	ExpectDecoded(pngWithRawSuffix, pixels, true, true, true);
+	for (const char* suffix : {".jpg", ".image-data"}) {
+		const fs::path colorKeyPng = temporary.path() / ("color-key" + std::string(suffix));
+		WriteBytes(colorKeyPng, MakeTransparentColorKeyPng());
+		ExpectDecoded(colorKeyPng,
+			{0, 0, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 0, 255, 0},
+			true, true, true);
+	}
+#if JPEGVIEW_HAVE_TIFF
+	const fs::path tiffWithRawSuffix = temporary.path() / "tiff-content.nef";
+	Expect(jpegview_linux::WriteImageWithFormat(tiffWithRawSuffix, ".tiff",
+		pixels.data(), 2, 2, options, error), "cannot write TIFF container-policy fixture: " + error);
+	Expect(jpegview_linux::ReadImageContentFormat(tiffWithRawSuffix) ==
+		jpegview_linux::ImageContentFormat::Tiff,
+		"TIFF container-policy fixture did not have ambiguous TIFF magic");
+	DecodedImage decoded;
+	Expect(!jpegview_linux::DecodeImage(tiffWithRawSuffix, decoded, error) &&
+		error.find("RAW") != std::string::npos,
+		"ambiguous TIFF magic bypassed the RAW reader selected by a camera suffix");
+#endif
+}
+
 #if JPEGVIEW_HAVE_WEBP
 void TestPhotoSizedLossyVp8WebPDecode() {
 	TemporaryDirectory temporary;
@@ -2141,6 +2174,7 @@ void TestExifMetadataWorkerPublishesCurrentExceptions() {
 const TestCase kTests[] = {
 	{"image-content-format-detection", &TestImageContentFormatDetection},
 	{"image-writer-decoder-round-trips", &TestImageWriterDecoderRoundTrips},
+	{"content-dispatch-preserves-container-policy", &TestContentDispatchPreservesContainerPolicy},
 #if JPEGVIEW_HAVE_WEBP
 	{"photo-sized-lossy-vp8-webp-decode", &TestPhotoSizedLossyVp8WebPDecode},
 #else

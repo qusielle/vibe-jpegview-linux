@@ -203,7 +203,9 @@ should normally be added to one of these focused modules and covered by the matc
   suffix dispatch; ambiguous or unknown signatures retain the existing suffix path. Unknown-suffix
   probing occurs only for explicitly opened paths, never for every entry in a folder scan. PNG probing
   follows bounded chunk headers to distinguish APNG from static PNG, and accepts a cancellation
-  predicate.
+  predicate. Ambiguous TIFF signatures preserve the RAW reader for known camera suffixes so a
+  preview IFD cannot replace sensor development. Recognized content takes precedence over the `.kra`
+  flattened-preview fallback, which remains selected for actual project containers.
   `image_decoder.cpp` owns validation, append/conversion helpers, source admission, and codec dispatch;
   `image_decoder_stb.cpp`, `image_decoder_jpeg.cpp`, `image_decoder_apng.cpp`,
   `image_decoder_builtin.cpp`, and `image_decoder_optional.cpp` isolate the corresponding reader

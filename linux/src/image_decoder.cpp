@@ -301,9 +301,23 @@ bool RunWithSourceAndCpuAdmission(const std::filesystem::path& filename,
 	}
 }
 
+bool IsRawPath(const std::filesystem::path& filename) {
+	static const std::array<const char*, 25> extensions = {{
+		".pef", ".dng", ".crw", ".nef", ".cr2", ".mrw", ".rw2", ".orf", ".x3f", ".arw",
+		".kdc", ".nrw", ".dcr", ".sr2", ".raf", ".kc2", ".erf", ".3fr", ".raw", ".mef",
+		".mos", ".mdc", ".cr3", ".iiq", ".rwl"
+	}};
+	const std::string extension = decoder_detail::Lower(filename.extension().string());
+	return std::find(extensions.begin(), extensions.end(), extension) != extensions.end();
+}
+
 bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 	ImageContentFormat format, DecodedImage& image, std::string& errorMessage,
 	const WorkContext& context) {
+	// TIFF magic also belongs to camera containers whose first IFD can be only a preview.
+	if (format == ImageContentFormat::Tiff && IsRawPath(filename)) {
+		format = ImageContentFormat::Raw;
+	}
 	switch (format) {
 	case ImageContentFormat::Jpeg:
 		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,
@@ -529,13 +543,6 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 			}, errorMessage, nullptr, [context] { return context.Continue(); });
 	}
 	const std::string extension = decoder_detail::Lower(filename.extension().string());
-	if (extension == ".kra") {
-		return WithArchiveMemberFile(filename / "mergedimage.png",
-			[&image, context](const std::filesystem::path& temporary,
-				std::string& decodeError) {
-				return DecodeImage(temporary, image, decodeError, context);
-			}, errorMessage, nullptr, [context] { return context.Continue(); });
-	}
 	const ImageContentFormat contentFormat = ReadImageContentFormat(filename,
 		[&context] { return context.Continue(); });
 	if (contentFormat != ImageContentFormat::Unknown) {
@@ -548,6 +555,13 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	if (!context.Continue()) {
 		errorMessage = "source work was cancelled";
 		return false;
+	}
+	if (extension == ".kra") {
+		return WithArchiveMemberFile(filename / "mergedimage.png",
+			[&image, context](const std::filesystem::path& temporary,
+				std::string& decodeError) {
+				return DecodeImage(temporary, image, decodeError, context);
+			}, errorMessage, nullptr, [context] { return context.Continue(); });
 	}
 	if (IsJpegPath(filename)) {
 		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,
@@ -611,12 +625,7 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 #endif
 	}
 	if (extension == ".psd") return decoder_detail::DecodePsd(filename, image, errorMessage);
-	static const std::array<const char*, 25> rawExtensions = {{
-		".pef", ".dng", ".crw", ".nef", ".cr2", ".mrw", ".rw2", ".orf", ".x3f", ".arw",
-		".kdc", ".nrw", ".dcr", ".sr2", ".raf", ".kc2", ".erf", ".3fr", ".raw", ".mef",
-		".mos", ".mdc", ".cr3", ".iiq", ".rwl"
-	}};
-	if (std::find(rawExtensions.begin(), rawExtensions.end(), extension) != rawExtensions.end()) {
+	if (IsRawPath(filename)) {
 #if JPEGVIEW_HAVE_RAW
 		return decoder_detail::DecodeRaw(filename, image, errorMessage);
 #else
