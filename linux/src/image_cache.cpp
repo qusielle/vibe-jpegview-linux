@@ -13,6 +13,7 @@
 #include <iterator>
 #include <list>
 #include <mutex>
+#include <optional>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
@@ -60,6 +61,24 @@ struct DecodedImageWorkKeyHash {
 
 DecodedImageWorkKey WorkKey(const SourceDescriptor& source, bool dimensionsOnly = false) {
 	return DecodedImageWorkKey{source.Key(), dimensionsOnly};
+}
+
+int DecodedWorkClassPriority(PerfWorkClass workClass) {
+	switch (workClass) {
+	case PerfWorkClass::ActiveImageSpread: return 0;
+	case PerfWorkClass::FocusedPreview: return 1;
+	case PerfWorkClass::NearestNavigationNeighbor: return 2;
+	case PerfWorkClass::VisibleThumbnail: return 3;
+	case PerfWorkClass::DistantSpeculation: return 4;
+	case PerfWorkClass::Unspecified: return 5;
+	}
+	return 5;
+}
+
+PerfWorkClass StrongerDecodedWorkClass(PerfWorkClass existing,
+	PerfWorkClass incoming) {
+	return DecodedWorkClassPriority(incoming) < DecodedWorkClassPriority(existing) ?
+		incoming : existing;
 }
 
 void RecordQueuedCancellation(PerfWorkClass workClass,
@@ -162,6 +181,21 @@ struct DecodedImageCache::Impl {
 		std::shared_ptr<std::atomic<bool>> cancellation;
 		bool foregroundAtStart = false;
 	};
+
+	void QueueObserverWork(Work work) {
+		// Observing optional detail must not move it ahead of selected work.
+		auto position = queue.begin();
+		for (auto queued = queue.begin(); queued != queue.end(); ++queued) {
+			if (foregroundKeys.find(queued->key) != foregroundKeys.end() ||
+				DecodedWorkClassPriority(queued->workClass) <=
+					DecodedWorkClassPriority(work.workClass)) {
+				position = std::next(queued);
+			}
+		}
+		const auto inserted = queue.insert(position, std::move(work));
+		queuedKeys.insert(inserted->key);
+		desiredWork[inserted->key] = *inserted;
+	}
 
 	static std::size_t TierIndex(CacheProtectionTier tier) {
 		return static_cast<std::size_t>(tier);
@@ -586,7 +620,8 @@ struct DecodedImageCache::Impl {
 						}
 						for (auto queued = queue.begin(); queued != queue.end();) {
 							if (queued->workClass == PerfWorkClass::ActiveImageSpread ||
-								foregroundKeys.find(queued->key) != foregroundKeys.end()) {
+								foregroundKeys.find(queued->key) != foregroundKeys.end() ||
+								!queued->observerCompletions.empty()) {
 								++queued;
 								continue;
 							}
@@ -1059,8 +1094,6 @@ void DecodedImageCache::ObserveSelectedSource(const SourceDescriptor& source,
 		const auto cached = impl_->entries.find(work.key.source);
 		if (cached != impl_->entries.end()) {
 			impl_->Touch(cached);
-			impl_->SetProtection(cached,
-				CacheProtectionForWorkClass(work.workClass));
 			alreadyCached = cached->second.image;
 		} else {
 			auto queued = std::find_if(impl_->queue.begin(), impl_->queue.end(),
@@ -1068,17 +1101,19 @@ void DecodedImageCache::ObserveSelectedSource(const SourceDescriptor& source,
 			if (queued != impl_->queue.end()) {
 				if (queued->cancellation) queued->cancellation->store(false);
 				queued->generation = work.generation;
-				queued->workClass = work.workClass;
+				const PerfWorkClass previousWorkClass = queued->workClass;
+				queued->workClass = StrongerDecodedWorkClass(queued->workClass,
+					work.workClass);
 				queued->observerCompletions.push_back(
 					std::move(work.observerCompletions.front()));
-				const bool needsPromotion = queued != impl_->queue.begin();
+				const bool needsPromotion = queued->workClass != previousWorkClass;
 				if (needsPromotion) {
 					Impl::Work promoted = std::move(*queued);
 					impl_->queue.erase(queued);
-					impl_->queue.push_front(std::move(promoted));
+					impl_->QueueObserverWork(std::move(promoted));
+				} else {
+					impl_->desiredWork[work.key] = *queued;
 				}
-				impl_->desiredWork[work.key] = needsPromotion ?
-					impl_->queue.front() : *queued;
 				wakeWorker = true;
 			} else if (impl_->inFlightKeys.find(work.key) != impl_->inFlightKeys.end()) {
 				auto desired = impl_->desiredWork.find(work.key);
@@ -1091,8 +1126,12 @@ void DecodedImageCache::ObserveSelectedSource(const SourceDescriptor& source,
 				}
 				desired->second.generation = std::max(
 					desired->second.generation, impl_->generation);
-				desired->second.workClass = workClass;
-				impl_->inFlightWorkClasses[requestKey] = desired->second.workClass;
+				const PerfWorkClass effectiveWorkClass = StrongerDecodedWorkClass(
+					impl_->inFlightWorkClasses[requestKey], workClass);
+				desired->second.workClass = StrongerDecodedWorkClass(
+					desired->second.workClass, effectiveWorkClass);
+				impl_->inFlightWorkClasses[requestKey] =
+					desired->second.workClass;
 				const auto cancellation = impl_->inFlightCancellation.find(requestKey);
 				if (cancellation != impl_->inFlightCancellation.end()) {
 					if (const auto token = cancellation->second.lock()) {
@@ -1101,9 +1140,7 @@ void DecodedImageCache::ObserveSelectedSource(const SourceDescriptor& source,
 					}
 				}
 			} else {
-				impl_->queue.push_front(work);
-				impl_->queuedKeys.insert(work.key);
-				impl_->desiredWork[work.key] = work;
+				impl_->QueueObserverWork(std::move(work));
 				wakeWorker = true;
 			}
 		}
@@ -1239,14 +1276,27 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 		work.cancellation = std::make_shared<std::atomic<bool>>(false);
 		if (work.key.source.Valid()) prepared.push_back(std::move(work));
 	}
+	const SourceDescriptor* currentSource = currentIndex < files.size() &&
+		descriptorProvider ? descriptorProvider(currentIndex) : nullptr;
+	const std::optional<SourceKey> currentSourceKey = currentSource != nullptr ?
+		std::optional<SourceKey>(currentSource->Key()) : std::nullopt;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		if (impl_->stopping) return;
 		++impl_->generation;
 		const std::uint64_t generation = impl_->generation;
+		const auto retainFocusedObservers = [&](const Impl::Work& work) {
+			if (work.workClass != PerfWorkClass::FocusedPreview ||
+				work.observerCompletions.empty() || currentIndex >= files.size()) return false;
+			return currentSourceKey.has_value() ?
+				work.source.Key() == *currentSourceKey :
+				work.source.LogicalPath().lexically_normal() ==
+					files[currentIndex].lexically_normal();
+		};
 		for (auto queued = impl_->queue.begin(); queued != impl_->queue.end();) {
 			if (queued->workClass == PerfWorkClass::ActiveImageSpread ||
-				impl_->foregroundKeys.find(queued->key) != impl_->foregroundKeys.end()) {
+				impl_->foregroundKeys.find(queued->key) != impl_->foregroundKeys.end() ||
+				retainFocusedObservers(*queued)) {
 				queued->generation = generation;
 				if (queued->cancellation) queued->cancellation->store(false);
 				++queued;
@@ -1258,9 +1308,13 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 		}
 		for (const auto& active : impl_->inFlightCancellation) {
 			const auto workClass = impl_->inFlightWorkClasses.find(active.first);
+			const auto desired = impl_->desiredWork.find(active.first);
+			const bool retainObserver = desired != impl_->desiredWork.end() &&
+				retainFocusedObservers(desired->second);
 			if (impl_->foregroundKeys.find(active.first) != impl_->foregroundKeys.end() ||
 				(workClass != impl_->inFlightWorkClasses.end() &&
-					workClass->second == PerfWorkClass::ActiveImageSpread)) {
+					workClass->second == PerfWorkClass::ActiveImageSpread) ||
+				retainObserver) {
 				continue;
 			}
 			const bool remainsDesired = std::any_of(prepared.begin(), prepared.end(),
@@ -1271,31 +1325,34 @@ void DecodedImageCache::Prefetch(const std::vector<fs::path>& files,
 		}
 		impl_->queuedKeys.clear();
 		std::unordered_map<DecodedImageWorkKey, Impl::Work,
-			DecodedImageWorkKeyHash> preservedSpreadWork;
+			DecodedImageWorkKeyHash> preservedUserWork;
 		for (const auto& active : impl_->inFlightWorkClasses) {
-			if (active.second != PerfWorkClass::ActiveImageSpread) continue;
 			const auto desired = impl_->desiredWork.find(active.first);
-			if (desired != impl_->desiredWork.end()) {
+			if (desired != impl_->desiredWork.end() &&
+				(active.second == PerfWorkClass::ActiveImageSpread ||
+					retainFocusedObservers(desired->second))) {
 				Impl::Work work = desired->second;
 				work.generation = generation;
-				preservedSpreadWork.emplace(active.first, std::move(work));
+				preservedUserWork.emplace(active.first, std::move(work));
 			}
 		}
 		for (Impl::Work& work : impl_->queue) {
 			impl_->queuedKeys.insert(work.key);
-			if (work.workClass == PerfWorkClass::ActiveImageSpread) {
-				preservedSpreadWork[work.key] = work;
+			if (work.workClass == PerfWorkClass::ActiveImageSpread ||
+				retainFocusedObservers(work)) {
+				preservedUserWork[work.key] = work;
 			}
 		}
 		impl_->queue.erase(std::remove_if(impl_->queue.begin(), impl_->queue.end(),
 			[&](const Impl::Work& work) {
 				return work.workClass != PerfWorkClass::ActiveImageSpread &&
-					impl_->foregroundKeys.find(work.key) == impl_->foregroundKeys.end();
+					impl_->foregroundKeys.find(work.key) == impl_->foregroundKeys.end() &&
+					!retainFocusedObservers(work);
 			}), impl_->queue.end());
 		impl_->queuedKeys.clear();
 		for (const Impl::Work& work : impl_->queue) impl_->queuedKeys.insert(work.key);
 		impl_->desiredWork.clear();
-		for (auto& retained : preservedSpreadWork) {
+		for (auto& retained : preservedUserWork) {
 			impl_->desiredWork.emplace(retained.first, std::move(retained.second));
 		}
 		for (Impl::Work& work : prepared) {

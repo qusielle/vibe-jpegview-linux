@@ -119,7 +119,9 @@ public:
 		DetailedCompletion completion,
 		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
 	// Adds an independent completion to an existing or newly started selected
-	// decode. It does not replace the request owner's callback.
+	// decode. It does not replace or lower the priority of existing work; the
+	// supplied class applies to new work and may promote queued work behind any
+	// stronger requests. Retention denial must not discard observer completions.
 	void ObserveSelectedSource(const SourceDescriptor& source,
 		DetailedCompletion completion,
 		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);

@@ -519,7 +519,9 @@ void TestDecodedImageCacheObserverPreservesSelectedCompletion() {
 				observerCompleted = true;
 			}
 			changed.notify_all();
-		});
+		}, jpegview_linux::PerfWorkClass::FocusedPreview);
+	Expect(cache.GetDiagnostics().activeSpreadActive == 1,
+		"focused sampler observer downgraded an in-flight selected decode");
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		releaseDecoder = true;
@@ -536,6 +538,25 @@ void TestDecodedImageCacheObserverPreservesSelectedCompletion() {
 	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) && decodeCalls == 1 &&
 		selectedImage && selectedImage == observedImage,
 		"observing a selected decode replaced its owner or started a duplicate decode");
+
+	const auto activeBudget = std::make_shared<jpegview_linux::SharedCacheBudget>(1024);
+	jpegview_linux::DecodedImageCache cachedObserverCache(1024, {}, activeBudget, 1);
+	cachedObserverCache.Store(source, CachedTestImage(4));
+	cachedObserverCache.PromoteToActiveUse(source.Key());
+	const jpegview_linux::CacheBudgetSnapshot beforeCachedObserver =
+		activeBudget->Snapshot();
+	bool cachedObserverCompleted = false;
+	cachedObserverCache.ObserveSelectedSource(source,
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image,
+			const jpegview_linux::WorkerFailure&) {
+			cachedObserverCompleted = image != nullptr;
+		}, jpegview_linux::PerfWorkClass::FocusedPreview);
+	const jpegview_linux::CacheBudgetSnapshot afterCachedObserver =
+		activeBudget->Snapshot();
+	Expect(cachedObserverCompleted && beforeCachedObserver.activeWorkingBytes > 0 &&
+		afterCachedObserver.activeWorkingBytes == beforeCachedObserver.activeWorkingBytes,
+		"cache-hit observer downgraded the active source's memory protection");
 
 	const fs::path blockerPath = temporary.path() / "observer-queue-blocker.jpg";
 	const fs::path queuedPath = temporary.path() / "observer-queued-source.jpg";
@@ -594,7 +615,7 @@ void TestDecodedImageCacheObserverPreservesSelectedCompletion() {
 				queuedObserverCompleted = image != nullptr;
 			}
 			queuedChanged.notify_all();
-		});
+		}, jpegview_linux::PerfWorkClass::FocusedPreview);
 	{
 		std::lock_guard<std::mutex> lock(queuedMutex);
 		releaseBlocker = true;
@@ -610,6 +631,199 @@ void TestDecodedImageCacheObserverPreservesSelectedCompletion() {
 	}
 	Expect(queuedCache.WaitUntilIdle(std::chrono::seconds(2)) && queuedDecodeCalls == 1,
 		"queued selected-source observer caused duplicate target decoding");
+
+	const fs::path focusedPath = temporary.path() / "focused-observer.jpg";
+	WriteText(focusedPath, "focused observer source");
+	const jpegview_linux::SourceDescriptor focusedSource =
+		jpegview_linux::DescribeImageSource(focusedPath);
+	std::mutex focusedMutex;
+	std::condition_variable focusedChanged;
+	bool focusedDecodeStarted = false;
+	bool releaseFocusedDecode = false;
+	bool focusedObserverCompleted = false;
+	jpegview_linux::DecodedImageCache focusedCache(64,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			std::unique_lock<std::mutex> lock(focusedMutex);
+			focusedDecodeStarted = true;
+			focusedChanged.notify_all();
+			focusedChanged.wait(lock, [&] { return releaseFocusedDecode; });
+			image = *CachedTestImage(4);
+			return true;
+		}, {}, 1);
+	focusedCache.ObserveSelectedSource(focusedSource,
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image,
+			const jpegview_linux::WorkerFailure&) {
+			{
+				std::lock_guard<std::mutex> lock(focusedMutex);
+				focusedObserverCompleted = image != nullptr;
+			}
+			focusedChanged.notify_all();
+		}, jpegview_linux::PerfWorkClass::FocusedPreview);
+	bool focusedDecodeReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(focusedMutex);
+		focusedDecodeReachedBarrier = focusedChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return focusedDecodeStarted; });
+	}
+	focusedCache.Prefetch({focusedPath}, 0, 1, 0, {}, {}, 2,
+		[&focusedSource](std::size_t index) {
+			return index == 0 ? &focusedSource : nullptr;
+		});
+	{
+		std::lock_guard<std::mutex> lock(focusedMutex);
+		releaseFocusedDecode = true;
+	}
+	focusedChanged.notify_all();
+	Expect(focusedDecodeReachedBarrier,
+		"focused-source observer did not reach its decoder barrier");
+	{
+		std::unique_lock<std::mutex> lock(focusedMutex);
+		Expect(focusedChanged.wait_for(lock, std::chrono::seconds(2),
+			[&] { return focusedObserverCompleted; }),
+			"neighbor prefetch refresh discarded a live focused-source observer");
+	}
+	Expect(focusedCache.WaitUntilIdle(std::chrono::seconds(2)),
+		"focused-source observer cache did not become idle after prefetch refresh");
+}
+
+void TestDecodedImageCacheFocusedObserverWaitsForQueuedActiveWork() {
+	for (const bool joinQueuedWork : {false, true}) {
+		TemporaryDirectory temporary;
+		const fs::path blocker = temporary.path() / "observer-blocker.png";
+		const fs::path active = temporary.path() / "observer-active.png";
+		const fs::path focused = temporary.path() / "observer-focused.png";
+		for (const fs::path& path : {blocker, active, focused}) WriteText(path, "source");
+		std::mutex mutex;
+		std::condition_variable changed;
+		bool blockerStarted = false;
+		bool releaseBlocker = false;
+		bool activeCompleted = false;
+		bool observerCompleted = false;
+		std::vector<fs::path> decodedPaths;
+		jpegview_linux::DecodedImageCache cache(4096,
+			[&](const fs::path& path, DecodedImage& image, std::string&) {
+				std::unique_lock<std::mutex> lock(mutex);
+				decodedPaths.push_back(path);
+				if (path == blocker) {
+					blockerStarted = true;
+					changed.notify_all();
+					changed.wait(lock, [&] { return releaseBlocker; });
+				}
+				image = *CachedTestImage(4);
+				return true;
+			}, {}, 1);
+		cache.RequestSelectedSource(jpegview_linux::DescribeImageSource(blocker),
+			[](const jpegview_linux::SourceDescriptor&,
+				const jpegview_linux::DecodedImageCache::ImagePtr&,
+				const jpegview_linux::WorkerFailure&) {});
+		bool blockerReachedBarrier = false;
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			blockerReachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+				[&] { return blockerStarted; });
+		}
+		if (joinQueuedWork) cache.Prefetch({blocker, focused}, 0, 1, 1);
+		cache.RequestSelectedSource(jpegview_linux::DescribeImageSource(active),
+			[&](const jpegview_linux::SourceDescriptor&,
+				const jpegview_linux::DecodedImageCache::ImagePtr& image,
+				const jpegview_linux::WorkerFailure&) {
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+					activeCompleted = image != nullptr;
+				}
+				changed.notify_all();
+			});
+		cache.ObserveSelectedSource(jpegview_linux::DescribeImageSource(focused),
+			[&](const jpegview_linux::SourceDescriptor&,
+				const jpegview_linux::DecodedImageCache::ImagePtr& image,
+				const jpegview_linux::WorkerFailure&) {
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+					observerCompleted = image != nullptr;
+				}
+				changed.notify_all();
+			}, jpegview_linux::PerfWorkClass::FocusedPreview);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			releaseBlocker = true;
+		}
+		changed.notify_all();
+		Expect(blockerReachedBarrier, "observer priority fixture did not reach its barrier");
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] {
+				return activeCompleted && observerCompleted;
+			}), "active work or its lower-priority observer did not complete");
+		}
+		Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) &&
+			decodedPaths == std::vector<fs::path>{blocker, active, focused},
+			"new or promoted focused observer overtook queued active source decoding");
+	}
+}
+
+void TestDecodedImageCacheRetentionDenialKeepsQueuedObserver() {
+	TemporaryDirectory temporary;
+	const fs::path blocker = temporary.path() / "observer-budget-blocker.png";
+	const fs::path focused = temporary.path() / "observer-budget-focused.png";
+	WriteText(blocker, "blocker");
+	WriteText(focused, "focused");
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool blockerStarted = false;
+	bool releaseBlocker = false;
+	bool observerCompleted = false;
+	bool observerSucceeded = false;
+	int focusedDecodeCalls = 0;
+	jpegview_linux::DecodedImageCache cache(1,
+		[&](const fs::path& path, DecodedImage& image, std::string&) {
+			std::unique_lock<std::mutex> lock(mutex);
+			if (path == blocker) {
+				blockerStarted = true;
+				changed.notify_all();
+				changed.wait(lock, [&] { return releaseBlocker; });
+			} else if (path == focused) {
+				++focusedDecodeCalls;
+			}
+			image = *CachedTestImage(4);
+			return true;
+		}, {}, 1);
+	cache.RequestSelectedSource(jpegview_linux::DescribeImageSource(blocker),
+		[](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr&,
+			const jpegview_linux::WorkerFailure&) {});
+	bool blockerReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		blockerReachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return blockerStarted; });
+	}
+	cache.ObserveSelectedSource(jpegview_linux::DescribeImageSource(focused),
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image,
+			const jpegview_linux::WorkerFailure& failure) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				observerCompleted = true;
+				observerSucceeded = image != nullptr && !failure.Failed();
+			}
+			changed.notify_all();
+		}, jpegview_linux::PerfWorkClass::FocusedPreview);
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseBlocker = true;
+	}
+	changed.notify_all();
+	Expect(blockerReachedBarrier, "observer retention fixture did not reach its barrier");
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return observerCompleted; }),
+			"retention denial silently discarded a queued observer completion");
+	}
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) && observerSucceeded &&
+		focusedDecodeCalls == 1 && cache.CachedImages() == 0,
+		"queued observer did not receive its uncached source after retention denial");
 }
 
 void TestDecodedImageCacheObserverReceivesStructuredFailure() {
@@ -5726,6 +5940,8 @@ const TestCase kTests[] = {
 	{"work-batch-gate-serializes-deactivate-and-publish", &TestWorkBatchGateSerializesDeactivateAndPublish},
 	{"decoded-image-cache-shutdown-rejects-new-work", &TestDecodedImageCacheShutdownRejectsNewWork},
 	{"decoded-image-cache-observer-preserves-selected-completion", &TestDecodedImageCacheObserverPreservesSelectedCompletion},
+	{"decoded-image-cache-focused-observer-waits-for-queued-active-work", &TestDecodedImageCacheFocusedObserverWaitsForQueuedActiveWork},
+	{"decoded-image-cache-retention-denial-keeps-queued-observer", &TestDecodedImageCacheRetentionDenialKeepsQueuedObserver},
 	{"decoded-image-cache-observer-receives-structured-failure", &TestDecodedImageCacheObserverReceivesStructuredFailure},
 	{"decoded-image-cache-and-background-prefetch-cold-spread-retention", &TestDecodedImageCacheAndBackgroundPrefetch},
 	{"decoded-active-spread-budget-pressure-preserves-foreground", &TestDecodedActiveSpreadBudgetPressure},
