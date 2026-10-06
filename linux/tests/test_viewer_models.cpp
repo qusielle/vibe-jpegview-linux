@@ -4274,6 +4274,32 @@ void TestGoToImageNumberModel() {
 	Expect(!model.IsOpen(), "go-to dialog remained open after cancellation");
 }
 
+void TestPixelColorSamplerReadsBgraAsRgba() {
+	const std::vector<std::uint8_t> pixels = {
+		0x56, 0x34, 0x12, 0x78,
+		0xff, 0x00, 0xab, 0xcd,
+	};
+	const std::optional<jpegview_linux::PixelColorRgba> first =
+		jpegview_linux::SampleBgraPixel(pixels, 2, 1, 0, 0);
+	Expect(first.has_value() && first->red == 0x12 && first->green == 0x34 &&
+		first->blue == 0x56 && first->alpha == 0x78 &&
+		jpegview_linux::FormatPixelColorRgba(*first) == "#12345678",
+		"pixel sampler did not map BGRA storage to uppercase RGBA hex");
+	const std::optional<jpegview_linux::PixelColorRgba> second =
+		jpegview_linux::SampleBgraPixel(pixels, 2, 1, 1, 0);
+	Expect(second.has_value() &&
+		jpegview_linux::FormatPixelColorRgba(*second) == "#AB00FFCD",
+		"pixel sampler returned the wrong edge pixel or alpha channel");
+	Expect(!jpegview_linux::SampleBgraPixel(pixels, 2, 1, -1, 0).has_value() &&
+		!jpegview_linux::SampleBgraPixel(pixels, 2, 1, 2, 0).has_value() &&
+		!jpegview_linux::SampleBgraPixel(pixels, 0, 1, 0, 0).has_value(),
+		"pixel sampler accepted invalid dimensions or out-of-bounds coordinates");
+	Expect(!jpegview_linux::SampleBgraPixel({0, 1, 2}, 1, 1, 0, 0).has_value(),
+		"pixel sampler read a truncated pixel buffer");
+	Expect(!jpegview_linux::SampleBgraPixel({}, 2147483647, 2147483647, 0, 0).has_value(),
+		"pixel sampler accepted dimensions whose byte count overflows size_t");
+}
+
 void TestRendererWindowResourceOwnership() {
 	using Owner = jpegview_linux::RendererWindowResources<RendererResourceTestWindow,
 		RendererResourceTestRenderer, DestroyRendererResourceTestWindow,
@@ -4346,6 +4372,7 @@ const TestCase kTests[] = {
 	{"event-loop-invalidation-deadlines-wakeups-and-motion", &TestEventLoopInvalidationDeadlinesWakeupsAndMotion},
 	{"modal-event-router-precedence", &TestModalEventRouterPrecedence},
 	{"go-to-image-number-model", &TestGoToImageNumberModel},
+	{"pixel-color-sampler-bgra-rgba-and-bounds", &TestPixelColorSamplerReadsBgraAsRgba},
 	{"renderer-window-resource-ownership", &TestRendererWindowResourceOwnership},
 };
 

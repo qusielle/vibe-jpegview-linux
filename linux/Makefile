@@ -113,6 +113,7 @@ CORE_CPP_SOURCES := \
 	$(ARCHIVE_SOURCE_SOURCES) src/cache_policy.cpp \
 	src/archive_password_dialog_model.cpp src/crop_selection_model.cpp \
 	src/crop_size_dialog_model.cpp src/go_to_image_number_model.cpp \
+	src/pixel_color_sampler.cpp \
 	src/zoom_navigator_model.cpp \
 	src/magnifying_glass_model.cpp src/advanced_configuration_model.cpp \
 	src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp \

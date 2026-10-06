@@ -525,6 +525,43 @@ DISPLAY=":$display_number" xdotool key --window "$window_id" Escape
 assert_title_prefix "03-blue.ppm" "invalid go-to input changed the selected image"
 stop_viewer
 
+# The DOC readout samples a decoded pixel in RGBA order and copies its value
+# when clicked.
+pixel_sampler_directory="$temporary/pixel-sampler"
+mkdir -p "$pixel_sampler_directory"
+pixel_sampler_previous_state=$XDG_STATE_HOME
+XDG_STATE_HOME="$temporary/pixel-sampler-state"
+export XDG_STATE_HOME
+printf 'P3\n2 2\n255\n18 52 86 18 52 86 18 52 86 18 52 86\n' \
+	> "$pixel_sampler_directory/01-sampler.ppm"
+launch_viewer "$pixel_sampler_directory"
+assert_title_prefix "01-sampler.ppm" "pixel-sampler fixture did not load"
+sampler_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+sampler_window_width=$(printf '%s\n' "$sampler_geometry" | sed -n 's/^WIDTH=//p')
+sampler_window_height=$(printf '%s\n' "$sampler_geometry" | sed -n 's/^HEIGHT=//p')
+sampler_x=$((sampler_window_width / 2))
+sampler_y=$((sampler_window_height / 2))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$sampler_x" "$sampler_y"
+sleep 0.15
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	$((sampler_x + 62)) $((sampler_y + 20))
+DISPLAY=":$display_number" xdotool click --window "$window_id" 1
+sampled_color=''
+for _ in $(seq 1 20); do
+	sampled_color=$(DISPLAY=":$display_number" xclip -selection clipboard -o 2>/dev/null || true)
+	if [ "$sampled_color" = '#123456FF' ]; then break; fi
+	sleep 0.05
+done
+if [ "$sampled_color" != '#123456FF' ]; then
+	echo "UI smoke test: pixel readout did not copy the decoded RGBA document color ($sampled_color)" >&2
+	exit 1
+fi
+clear_clipboard_text
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 8 8
+stop_viewer
+XDG_STATE_HOME=$pixel_sampler_previous_state
+export XDG_STATE_HOME
+
 # Loaded-list sorting is asynchronous, but the selected source must remain the
 # same after the new order is applied.
 async_sort_directory="$temporary/async-sort-ui"

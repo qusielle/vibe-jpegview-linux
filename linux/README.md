@@ -119,8 +119,10 @@ they support.
    Up/Down rotation turns the open spread as one unit: both pages stay visible and stack vertically
    after a quarter-turn, then return to a horizontal spread when rotated back. The spread remains
    paired if double-page mode is switched off and on while the rotation is applied.
-   PageUp/PageDown remain logical previous/next. The two checkable controls appear in the navigation
-   panel and context menu. Page pairs follow
+   PageUp/PageDown remain logical previous/next. A pointer-following pixel sampler shows a swatch and
+   `#RRGGBBAA` value; clicking the readout copies it. It samples decoded or materialized document
+   pixels before live non-destructive levels adjustments and display scaling. The two checkable
+   controls appear in the navigation panel and context menu. Page pairs follow
    [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
    Spread navigation prepares both pages at their final slot sizes through background workers and
    reveals them together in one frame; while a cold spread is being prepared, the viewer does not
@@ -933,7 +935,8 @@ Apply/Cancel behavior; thumbnail
 display/resizing/clicking/persistence; sibling-folder hotkeys; context-menu mnemonics, expansion,
 and repainting; startup controls;
 mouse-wheel navigation versus Ctrl+wheel zoom; held image navigation; crop-mode dialog, selection
-overlay, crop, and lossless JPEG output; zoom-navigator visibility, click-to-pan, and drag-to-pan;
+overlay, crop, and lossless JPEG output; pixel-sampler color and clipboard interaction;
+zoom-navigator visibility, click-to-pan, and drag-to-pan;
 maximize restoration; and persisted settings:
 
 ```sh
@@ -972,6 +975,9 @@ center of the lens unobstructed. Use wheel down/up to enlarge/shrink the lens;
 Ctrl+wheel changes lens height, Alt+wheel width, and Shift+wheel magnification. The lens is
 disabled when the app starts, but its size and magnification persist between runs. Ctrl+O opens the
 native in-app file browser with **Browse** and **Recents** tabs.
+When the pointer is over the selected image, the `DOC` readout shows its decoded or materialized
+document pixel as `#RRGGBBAA`; click the readout to copy the value. This samples before live,
+non-destructive levels adjustments and display scaling, so it may differ from the displayed color.
 Clicking blank space inside the dialog leaves it open; press Escape to cancel.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
 The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while

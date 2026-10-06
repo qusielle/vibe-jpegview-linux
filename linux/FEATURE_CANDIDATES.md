@@ -286,9 +286,6 @@ repeated as new candidates below.
 - **Quick rename of the current image:** add a one-file rename command and shortcut, initially
   selecting the basename but not the extension, with collision-safe behavior. This complements the
   existing batch rename/copy dialog; see [issue #280](https://github.com/sylikc/jpegview/issues/280).
-- **Pixel color sampler:** show the color under the pointer in a small readout and optionally copy
-  it in a common notation such as hexadecimal RGBA. Define whether sampling reflects the source or
-  the currently processed display. See [issue #278](https://github.com/sylikc/jpegview/issues/278).
 - **Selection convenience actions:** optionally copy selected pixels to the clipboard immediately
   after a selection is made, then clear the selection, without changing the existing explicit crop
   and copy actions. The interaction should be configurable to avoid surprising current users. See
