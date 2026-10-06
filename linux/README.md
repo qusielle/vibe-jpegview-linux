@@ -18,7 +18,9 @@ they support.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
    PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, LibRaw camera formats, and flattened
-   Krita `.kra` projects. A Krita project opens as one image from its root `mergedimage.png`; editable
+   Krita `.kra` projects. JPEG-named files with RIFF/WEBP content are recognized by their byte
+   signature when JPEG decoding fails. A Krita project opens as one image from its root
+   `mergedimage.png`; editable
    layers are not exposed. Embedded color profiles are transformed through LCMS2. Supported images
    inside ZIP/CBZ, TAR,
    gzip-compressed TAR, 7z/CB7, and RAR containers can also be browsed and viewed. CBZ comic ZIP
@@ -743,7 +745,9 @@ as virtual folders. Krita `.kra` projects open as single flattened images from t
 `mergedimage.png`; they are not browsable folders and their editable layers are not exposed. The
 embedded image uses the same 128 MiB extraction limit as other archive members. CBZ uses the ZIP
 reader and CB7 uses the 7z reader. Neither adds comic-specific page bookmarks or archive-level
-reading-position memory.
+reading-position memory. If JPEG decoding fails for a `.jpg`, `.jpeg`, or `.jpe` file, JPEGView
+checks its RIFF/WEBP content signature and can open it as WebP even when its filename uses a JPEG
+extension.
 Unencrypted RAR input stays on libarchive. When the optional private reader is present, encrypted
 RAR4/RAR5 data and header encryption use the Rust `rars` backend. Data-encrypted member names remain
 visible; header-encrypted names stay hidden until unlock. Wrong and correct passwords share the

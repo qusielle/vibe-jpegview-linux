@@ -207,6 +207,11 @@ should normally be added to one of these focused modules and covered by the matc
   its native handle. Image decoders resolve archive-member paths through `archive_source` before
   invoking the existing codec path, retaining ordinary-file and reduced-DCT JPEG behavior. Krita
   `.kra` decoding resolves the root `mergedimage.png` through the same bounded archive-member API.
+  When JPEG decoding fails for a JPEG-named source, the decode path checks the RIFF/WEBP byte
+  signature and routes matching content to the WebP decoder. In Viewer loading this runs inside
+  existing asynchronous source preparation. The probe follows the failed JPEG attempt, so
+  successfully decoded ordinary JPEGs avoid another source read; file-backed thumbnails use
+  generic decoding when the JPEG header probe fails.
   JPEG cancellation is checked before opening, after header parsing, between 16-row scanline batches,
   before color conversion/resampling,
   and before publication; opaque codec calls are checked before and after their supported boundaries.

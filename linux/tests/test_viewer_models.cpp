@@ -3420,6 +3420,21 @@ void TestThumbnailFileBackedPreparationAndShutdown() {
 		jpegview_linux::ThumbnailPreparationResultMatches(
 			result.front(), 7, 11, 3, jpeg.string(), 2, 2),
 		"file-backed JPEG thumbnail lost its reduced decode or request identity");
+#if JPEGVIEW_HAVE_WEBP
+	const fs::path mislabeledWebP = temporary.path() / "file-backed-webp.jpg";
+	options.webpQuality = 82;
+	error.clear();
+	Expect(jpegview_linux::WriteImage(mislabeledWebP, pixels.data(), 4, 4,
+		options, error), "cannot create JPEG-named WebP thumbnail fixture: " + error);
+	Expect(worker.Request(fileRequest(mislabeledWebP, 2, 2, 14, 7, 6)) &&
+		worker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not decode WebP content with a JPEG extension");
+	result = worker.TakeCompleted(1);
+	Expect(result.size() == 1 && result.front().image &&
+		result.front().image->width == 2 && result.front().image->height == 2 &&
+		result.front().image->bgra.size() == 16,
+		"JPEG-named WebP did not use generic decode before thumbnail resampling");
+#endif
 	Expect(worker.Request(fileRequest(ppm, 2, 1, 12, 7, 4)) &&
 		worker.WaitUntilIdle(std::chrono::seconds(2)),
 		"thumbnail worker did not decode a file-backed non-JPEG request");

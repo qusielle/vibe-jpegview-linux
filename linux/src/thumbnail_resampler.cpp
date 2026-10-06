@@ -276,17 +276,22 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 		if (IsJpegPath(request.logicalSource)) {
 			int jpegWidth = 0;
 			int jpegHeight = 0;
-			if (!ReadJpegDimensions(request.logicalSource, jpegWidth, jpegHeight,
-				errorMessage, workContext) || !shouldContinue()) return {};
-			size = FitThumbnailSize(jpegWidth, jpegHeight,
-				request.maximumWidth, request.maximumHeight);
-			int decodedSourceWidth = 0;
-			int decodedSourceHeight = 0;
-			if (size.width <= 0 || size.height <= 0 ||
-				!DecodeJpegForDisplay(request.logicalSource, size.width, size.height,
-					decoded, decodedSourceWidth, decodedSourceHeight, errorMessage,
-					workContext) ||
-				decoded.frames.empty() || !shouldContinue()) return {};
+			if (ReadJpegDimensions(request.logicalSource, jpegWidth, jpegHeight,
+				errorMessage, workContext)) {
+				size = FitThumbnailSize(jpegWidth, jpegHeight,
+					request.maximumWidth, request.maximumHeight);
+				int decodedSourceWidth = 0;
+				int decodedSourceHeight = 0;
+				if (size.width <= 0 || size.height <= 0 ||
+					!DecodeJpegForDisplay(request.logicalSource, size.width, size.height,
+						decoded, decodedSourceWidth, decodedSourceHeight, errorMessage,
+						workContext) ||
+					decoded.frames.empty() || !shouldContinue()) return {};
+			} else if (!shouldContinue() ||
+				!DecodeImage(request.logicalSource, decoded, errorMessage, workContext) ||
+				decoded.frames.empty() || !shouldContinue()) {
+				return {};
+			}
 		} else if (!DecodeImage(request.logicalSource, decoded, errorMessage, workContext) ||
 			decoded.frames.empty() || !shouldContinue()) {
 			return {};

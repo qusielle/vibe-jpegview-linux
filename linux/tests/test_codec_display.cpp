@@ -128,6 +128,107 @@ void TestImageWriterDecoderRoundTrips() {
 	Expect(!error.empty(), "invalid dimensions did not produce an error message");
 }
 
+#if JPEGVIEW_HAVE_WEBP
+void TestPhotoSizedLossyVp8WebPDecode() {
+	TemporaryDirectory temporary;
+	constexpr int width = 1920;
+	constexpr int height = 1280;
+	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+	for (int y = 0; y < height; ++y) {
+		for (int x = 0; x < width; ++x) {
+			const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * 4;
+			pixels[offset] = static_cast<std::uint8_t>(x * 255 / (width - 1));
+			pixels[offset + 1] = static_cast<std::uint8_t>(y * 255 / (height - 1));
+			pixels[offset + 2] = static_cast<std::uint8_t>((x + y) * 255 /
+				(width + height - 2));
+			pixels[offset + 3] = 255;
+		}
+	}
+	ImageWriteOptions options;
+	options.webpQuality = 82;
+	const fs::path webpFilename = temporary.path() / "photo-sized-vp8.webp";
+	std::string error;
+	Expect(jpegview_linux::WriteImage(webpFilename, pixels.data(), width, height, options, error),
+		"cannot write lossy VP8 WebP fixture: " + error);
+
+	const std::vector<std::uint8_t> encoded = ReadBytes(webpFilename);
+	Expect(encoded.size() >= 20 &&
+		std::equal(encoded.begin(), encoded.begin() + 4, "RIFF") &&
+		std::equal(encoded.begin() + 8, encoded.begin() + 12, "WEBP"),
+		"lossy VP8 fixture did not contain a WebP RIFF container");
+	bool hasVp8Chunk = false;
+	for (std::size_t offset = 12; offset + 8 <= encoded.size();) {
+		const std::uint32_t chunkSize = static_cast<std::uint32_t>(encoded[offset + 4]) |
+			(static_cast<std::uint32_t>(encoded[offset + 5]) << 8) |
+			(static_cast<std::uint32_t>(encoded[offset + 6]) << 16) |
+			(static_cast<std::uint32_t>(encoded[offset + 7]) << 24);
+		if (std::equal(encoded.begin() + static_cast<std::ptrdiff_t>(offset),
+			encoded.begin() + static_cast<std::ptrdiff_t>(offset + 4), "VP8 ")) {
+			hasVp8Chunk = true;
+			break;
+		}
+		const std::size_t chunkBytes = static_cast<std::size_t>(chunkSize) + (chunkSize & 1u);
+		if (chunkBytes > encoded.size() - offset - 8) break;
+		offset += 8 + chunkBytes;
+	}
+	Expect(hasVp8Chunk, "photo-sized WebP fixture was not lossy VP8 encoding");
+
+	const fs::path mislabeledFilename = temporary.path() / "photo-sized-vp8.jpg";
+	fs::rename(webpFilename, mislabeledFilename);
+	int jpegWidth = 0;
+	int jpegHeight = 0;
+	error.clear();
+	Expect(!jpegview_linux::ReadJpegDimensions(mislabeledFilename, jpegWidth,
+		jpegHeight, error) && jpegWidth == 0 && jpegHeight == 0,
+		"WebP RIFF content was incorrectly accepted as a JPEG header");
+	Expect(jpegview_linux::IsJpegPath(mislabeledFilename),
+		"mislabeled fixture no longer exercises the JPEG-selected decode path");
+
+	DecodedImage decoded;
+	error.clear();
+	Expect(jpegview_linux::DecodeImage(mislabeledFilename, decoded, error),
+		"cannot decode lossy VP8 WebP stored in a JPEG-named file: " + error);
+	Expect(decoded.frames.size() == 1 && decoded.frames.front().width == width &&
+		decoded.frames.front().height == height &&
+		decoded.frames.front().bgra.size() == pixels.size() &&
+		!decoded.frames.front().hasTransparency && !decoded.animation,
+		"photo-sized lossy VP8 WebP decoded with the wrong frame geometry or alpha state");
+	const jpegview_linux::DecodedFrame& frame = decoded.frames.front();
+	const std::size_t sample = (static_cast<std::size_t>(height / 2) * width + width / 2) * 4;
+	for (std::size_t channel = 0; channel < 3; ++channel) {
+		Expect(std::abs(static_cast<int>(frame.bgra[sample + channel]) - 127) <= 20,
+			"photo-sized lossy VP8 WebP decoded an incorrect center color sample");
+	}
+	Expect(frame.bgra[sample + 3] == 255,
+		"opaque lossy VP8 WebP unexpectedly decoded a transparent center pixel");
+
+	DecodedImage displayDecoded;
+	int sourceWidth = 0;
+	int sourceHeight = 0;
+	error.clear();
+	Expect(jpegview_linux::DecodeJpegForDisplay(mislabeledFilename, 640, 480,
+		displayDecoded, sourceWidth, sourceHeight, error),
+		"JPEG display decode did not fall back to the RIFF/WEBP signature: " + error);
+	Expect(sourceWidth == width && sourceHeight == height &&
+		displayDecoded.frames.size() == 1 &&
+		displayDecoded.frames.front().width == width &&
+		displayDecoded.frames.front().height == height,
+		"WebP display fallback lost the source dimensions or frame");
+}
+#else
+void TestJpegNamedWebPReportsUnavailableCodec() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "webp-content.jpg";
+	WriteBytes(filename, {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'});
+	DecodedImage decoded;
+	std::string error;
+	Expect(!jpegview_linux::DecodeImage(filename, decoded, error) &&
+		error.find("WebP content detected") != std::string::npos &&
+		error.find("not available") != std::string::npos,
+		"JPEG-named WebP content did not report the missing optional WebP decoder");
+}
+#endif
+
 void TestJpegWriterErrorRecovery() {
 	TemporaryDirectory temporary;
 	constexpr int dimension = 256;
@@ -1962,6 +2063,11 @@ void TestExifMetadataWorkerPublishesCurrentExceptions() {
 }
 const TestCase kTests[] = {
 	{"image-writer-decoder-round-trips", &TestImageWriterDecoderRoundTrips},
+#if JPEGVIEW_HAVE_WEBP
+	{"photo-sized-lossy-vp8-webp-decode", &TestPhotoSizedLossyVp8WebPDecode},
+#else
+	{"jpeg-named-webp-reports-unavailable-codec", &TestJpegNamedWebPReportsUnavailableCodec},
+#endif
 	{"jpeg-writer-error-recovery", &TestJpegWriterErrorRecovery},
 	{"pnm-variants", &TestPnmVariants},
 	{"animated-image-decoders", &TestAnimatedImageDecoders},

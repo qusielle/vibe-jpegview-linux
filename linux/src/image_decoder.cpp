@@ -300,6 +300,53 @@ bool RunWithSourceAndCpuAdmission(const std::filesystem::path& filename,
 	}
 }
 
+bool HasRiffWebPSignature(const std::filesystem::path& filename) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::SourceRead);
+	std::ifstream input(filename, std::ios::binary);
+	std::array<char, 12> signature{};
+	if (!input.read(signature.data(), static_cast<std::streamsize>(signature.size()))) {
+		return false;
+	}
+	return std::equal(signature.begin(), signature.begin() + 4, "RIFF") &&
+		std::equal(signature.begin() + 8, signature.end(), "WEBP");
+}
+
+bool DecodeWebPAfterJpegFailure(const std::filesystem::path& filename,
+	DecodedImage& image, std::string& errorMessage, const WorkContext& context,
+	int* sourceWidth = nullptr, int* sourceHeight = nullptr) {
+	const std::string jpegError = errorMessage;
+	image = {};
+	if (sourceWidth != nullptr) *sourceWidth = 0;
+	if (sourceHeight != nullptr) *sourceHeight = 0;
+	if (!context.Continue()) {
+		errorMessage = "source work was cancelled";
+		return false;
+	}
+	const bool isWebP = HasRiffWebPSignature(filename);
+	if (!context.Continue()) {
+		errorMessage = "source work was cancelled";
+		return false;
+	}
+	if (!isWebP) {
+		errorMessage = jpegError;
+		return false;
+	}
+#if JPEGVIEW_HAVE_WEBP
+	errorMessage.clear();
+	if (!decoder_detail::DecodeWebP(filename, image, errorMessage) || image.frames.empty()) {
+		image = {};
+		if (errorMessage.empty()) errorMessage = "invalid WebP image";
+		return false;
+	}
+	if (sourceWidth != nullptr) *sourceWidth = image.frames.front().width;
+	if (sourceHeight != nullptr) *sourceHeight = image.frames.front().height;
+	return true;
+#else
+	image = {};
+	errorMessage = "WebP content detected, but WebP support is not available in this build";
+	return false;
+#endif
+}
 
 
 } // namespace
@@ -377,8 +424,10 @@ bool DecodeJpegForDisplay(const std::filesystem::path& filename,
 					}, errorMessage, nullptr,
 					[context] { return context.Continue(); });
 			}
-			return decoder_detail::DecodeJpeg(filename, image, errorMessage, minimumWidth, minimumHeight,
-				&sourceWidth, &sourceHeight, context);
+			if (decoder_detail::DecodeJpeg(filename, image, errorMessage, minimumWidth,
+				minimumHeight, &sourceWidth, &sourceHeight, context)) return true;
+			return DecodeWebPAfterJpegFailure(filename, image, errorMessage, context,
+				&sourceWidth, &sourceHeight);
 		});
 }
 
@@ -406,7 +455,9 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 			}, errorMessage, nullptr, [context] { return context.Continue(); });
 	}
 	if (IsJpegPath(filename)) {
-		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0, nullptr, nullptr, context);
+		if (decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,
+			nullptr, nullptr, context)) return true;
+		return DecodeWebPAfterJpegFailure(filename, image, errorMessage, context);
 	}
 	if (extension == ".gif") {
 #if JPEGVIEW_HAVE_GIF

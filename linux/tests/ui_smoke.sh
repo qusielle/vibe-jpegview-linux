@@ -5207,4 +5207,23 @@ fi
 
 "$SCRIPT_DIR/thumbnail_panning_smoke.sh" "$BINARY"
 
+# Keep this content-detection case last so its Viewer/Recents state cannot
+# influence any other smoke case.
+if command -v convert >/dev/null 2>&1 &&
+	convert -list format | grep -Eq '^[[:space:]]*WEBP\*?[[:space:]]'; then
+	mislabeled_webp="$temporary/misnamed-webp.jpg"
+	convert -size 640x480 xc:'#d04070' -quality 82 "webp:$mislabeled_webp"
+	mislabeled_webp_previous_state=$XDG_STATE_HOME
+	XDG_STATE_HOME="$temporary/misnamed-webp-state"
+	export XDG_STATE_HOME
+	launch_viewer "$mislabeled_webp"
+	assert_title_prefix "misnamed-webp.jpg (640x480" \
+		"JPEG-named RIFF/WEBP content did not reach a ready image presentation"
+	stop_viewer
+	XDG_STATE_HOME=$mislabeled_webp_previous_state
+	export XDG_STATE_HOME
+else
+	echo "UI smoke test: SKIP JPEG-named WebP case (ImageMagick WebP encoder is unavailable)"
+fi
+
 echo "UI smoke tests passed"
