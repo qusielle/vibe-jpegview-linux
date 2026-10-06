@@ -215,7 +215,10 @@ should normally be added to one of these focused modules and covered by the matc
   `display_preparation_controller`, and
   `display_upload_scheduler`: aggregate cache accounting,
   source-aware decoded-image retention, nearest-first decode completion, and threaded picture-level
-  processing/scaling of renderer-ready frames. Decoded, display, and thumbnail caches use the same
+  processing/scaling of renderer-ready frames. A selected-source decode can carry independent
+  completion observers alongside its request owner's callback; observers can join queued or in-flight
+  work without replacing the callback that owns the selected load, and receive the same shared result
+  or structured failure. Decoded, display, and thumbnail caches use the same
   structured `SourceKey` equality and hashing. Display keys add frame, effective processing controls,
   target geometry, and quarter-turn orientation, so disabled controls normalize away while an active
   adjustment, animation frame, or spread rotation cannot reuse different pixels. Renderer lookups use

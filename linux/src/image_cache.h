@@ -118,6 +118,11 @@ public:
 	void RequestSelectedSource(const SourceDescriptor& source,
 		DetailedCompletion completion,
 		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
+	// Adds an independent completion to an existing or newly started selected
+	// decode. It does not replace the request owner's callback.
+	void ObserveSelectedSource(const SourceDescriptor& source,
+		DetailedCompletion completion,
+		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
 	// Reads only JPEG header dimensions on the existing worker, without retaining
 	// or materializing full-resolution decoded pixels.
 	void RequestJpegDimensions(const std::filesystem::path& filename,

@@ -466,6 +466,223 @@ void TestDecodedImageCacheShutdownRejectsNewWork() {
 		"decoded cache accepted work or retained pixels after terminal shutdown");
 }
 
+void TestDecodedImageCacheObserverPreservesSelectedCompletion() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "observed-selected-source.jpg";
+	WriteText(filename, "selected source");
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(filename);
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool decoderStarted = false;
+	bool releaseDecoder = false;
+	int decodeCalls = 0;
+	jpegview_linux::DecodedImageCache::ImagePtr selectedImage;
+	jpegview_linux::DecodedImageCache::ImagePtr observedImage;
+	bool selectedCompleted = false;
+	bool observerCompleted = false;
+	jpegview_linux::DecodedImageCache cache(64,
+		[&](const fs::path&, DecodedImage& image, std::string&) {
+			std::unique_lock<std::mutex> lock(mutex);
+			++decodeCalls;
+			decoderStarted = true;
+			changed.notify_all();
+			changed.wait(lock, [&] { return releaseDecoder; });
+			image = *CachedTestImage(4);
+			return true;
+		}, {}, 1);
+	cache.RequestSelectedSource(source,
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image,
+			const jpegview_linux::WorkerFailure&) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				selectedImage = image;
+				selectedCompleted = true;
+			}
+			changed.notify_all();
+		});
+	bool decoderReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		decoderReachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decoderStarted; });
+	}
+	cache.ObserveSelectedSource(source,
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image,
+			const jpegview_linux::WorkerFailure&) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				observedImage = image;
+				observerCompleted = true;
+			}
+			changed.notify_all();
+		});
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseDecoder = true;
+	}
+	changed.notify_all();
+	Expect(decoderReachedBarrier,
+		"selected source decode did not reach its deterministic barrier");
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return selectedCompleted && observerCompleted; }),
+			"selected owner and attached observer did not both receive the decode result");
+	}
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)) && decodeCalls == 1 &&
+		selectedImage && selectedImage == observedImage,
+		"observing a selected decode replaced its owner or started a duplicate decode");
+
+	const fs::path blockerPath = temporary.path() / "observer-queue-blocker.jpg";
+	const fs::path queuedPath = temporary.path() / "observer-queued-source.jpg";
+	WriteText(blockerPath, "blocker source");
+	WriteText(queuedPath, "queued source");
+	const jpegview_linux::SourceDescriptor blockerSource =
+		jpegview_linux::DescribeImageSource(blockerPath);
+	const jpegview_linux::SourceDescriptor queuedSource =
+		jpegview_linux::DescribeImageSource(queuedPath);
+	std::mutex queuedMutex;
+	std::condition_variable queuedChanged;
+	bool blockerStarted = false;
+	bool releaseBlocker = false;
+	bool prefetchCompleted = false;
+	bool queuedObserverCompleted = false;
+	int queuedDecodeCalls = 0;
+	jpegview_linux::DecodedImageCache queuedCache(64,
+		[&](const fs::path& path, DecodedImage& image, std::string&) {
+			std::unique_lock<std::mutex> lock(queuedMutex);
+			if (path == blockerPath) {
+				blockerStarted = true;
+				queuedChanged.notify_all();
+				queuedChanged.wait(lock, [&] { return releaseBlocker; });
+			} else if (path == queuedPath) {
+				++queuedDecodeCalls;
+			}
+			image = *CachedTestImage(4);
+			return true;
+		}, {}, 1);
+	queuedCache.RequestSelectedSource(blockerSource,
+		[](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr&,
+			const jpegview_linux::WorkerFailure&) {});
+	bool queuedBlockerReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(queuedMutex);
+		queuedBlockerReachedBarrier = queuedChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return blockerStarted; });
+	}
+	queuedCache.Prefetch({blockerPath, queuedPath}, 0, 1, 1,
+		[&](const fs::path& path,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image) {
+			if (path != queuedPath || !image) return;
+			{
+				std::lock_guard<std::mutex> lock(queuedMutex);
+				prefetchCompleted = true;
+			}
+			queuedChanged.notify_all();
+		}, {}, 1);
+	queuedCache.ObserveSelectedSource(queuedSource,
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image,
+			const jpegview_linux::WorkerFailure&) {
+			{
+				std::lock_guard<std::mutex> lock(queuedMutex);
+				queuedObserverCompleted = image != nullptr;
+			}
+			queuedChanged.notify_all();
+		});
+	{
+		std::lock_guard<std::mutex> lock(queuedMutex);
+		releaseBlocker = true;
+	}
+	queuedChanged.notify_all();
+	Expect(queuedBlockerReachedBarrier,
+		"queued-source blocker did not reach its deterministic barrier");
+	{
+		std::unique_lock<std::mutex> lock(queuedMutex);
+		Expect(queuedChanged.wait_for(lock, std::chrono::seconds(2), [&] {
+			return prefetchCompleted && queuedObserverCompleted;
+		}), "queued selected-source observer replaced the prefetch completion");
+	}
+	Expect(queuedCache.WaitUntilIdle(std::chrono::seconds(2)) && queuedDecodeCalls == 1,
+		"queued selected-source observer caused duplicate target decoding");
+}
+
+void TestDecodedImageCacheObserverReceivesStructuredFailure() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "observed-failed-source.jpg";
+	WriteText(filename, "failed source");
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(filename);
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool decoderStarted = false;
+	bool releaseDecoder = false;
+	bool ownerCompleted = false;
+	bool observerCompleted = false;
+	jpegview_linux::WorkerFailureKind ownerFailure =
+		jpegview_linux::WorkerFailureKind::None;
+	jpegview_linux::WorkerFailureKind observerFailure =
+		jpegview_linux::WorkerFailureKind::None;
+	jpegview_linux::DecodedImageCache cache(64,
+		[&](const fs::path&, DecodedImage&, std::string& error) {
+			std::unique_lock<std::mutex> lock(mutex);
+			decoderStarted = true;
+			changed.notify_all();
+			changed.wait(lock, [&] { return releaseDecoder; });
+			error = "intentional decoder failure";
+			return false;
+		}, {}, 1);
+	cache.RequestSelectedSource(source,
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr&,
+			const jpegview_linux::WorkerFailure& failure) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				ownerFailure = failure.kind;
+				ownerCompleted = true;
+			}
+			changed.notify_all();
+		});
+	bool decoderReachedBarrier = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		decoderReachedBarrier = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return decoderStarted; });
+	}
+	cache.ObserveSelectedSource(source,
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr&,
+			const jpegview_linux::WorkerFailure& failure) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				observerFailure = failure.kind;
+				observerCompleted = true;
+			}
+			changed.notify_all();
+		});
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseDecoder = true;
+	}
+	changed.notify_all();
+	Expect(decoderReachedBarrier,
+		"failing selected decode did not reach its deterministic barrier");
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(changed.wait_for(lock, std::chrono::seconds(2), [&] {
+			return ownerCompleted && observerCompleted;
+		}), "owner and observer did not both receive the selected decode failure");
+	}
+	Expect(ownerFailure == jpegview_linux::WorkerFailureKind::ProcessingFailed &&
+		observerFailure == ownerFailure,
+		"observer did not receive the selected decode's structured failure");
+}
+
 void TestDecodedActiveSpreadBudgetPressure() {
 	TemporaryDirectory temporary;
 	const fs::path foregroundFile = temporary.path() / "recent-foreground.ppm";
@@ -5508,6 +5725,8 @@ const TestCase kTests[] = {
 	{"display-prefetch-retains-only-active-spread-decoded-fallback", &TestDisplayPrefetchDecodedOwnershipPolicy},
 	{"work-batch-gate-serializes-deactivate-and-publish", &TestWorkBatchGateSerializesDeactivateAndPublish},
 	{"decoded-image-cache-shutdown-rejects-new-work", &TestDecodedImageCacheShutdownRejectsNewWork},
+	{"decoded-image-cache-observer-preserves-selected-completion", &TestDecodedImageCacheObserverPreservesSelectedCompletion},
+	{"decoded-image-cache-observer-receives-structured-failure", &TestDecodedImageCacheObserverReceivesStructuredFailure},
 	{"decoded-image-cache-and-background-prefetch-cold-spread-retention", &TestDecodedImageCacheAndBackgroundPrefetch},
 	{"decoded-active-spread-budget-pressure-preserves-foreground", &TestDecodedActiveSpreadBudgetPressure},
 	{"decoded-active-work-retention-refusal-keeps-fitted-spread-frame", &TestDecodedActiveWorkSurvivesRetentionRefusalForSpreadFrames},
