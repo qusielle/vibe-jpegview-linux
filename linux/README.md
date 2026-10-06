@@ -1203,7 +1203,9 @@ navigation panel, or **Crop selection mode** in the regular or selection context
 saved between runs. When enabled, an ordinary drag on an image that fits the view creates a
 selection. Ctrl-drag remains a one-off way to create a selection at any zoom, even while the mode is
 off; dragging an image larger than the viewport pans unless Ctrl is held. Shift-drag zooms into the
-selected region; otherwise releasing a new selection opens its crop menu. Choosing Free, an aspect
+selected region. Otherwise releasing a new selection opens its crop menu, unless **Copy selection on
+release** is enabled under Advanced configuration → Crop; that option copies the selection at source
+resolution and clears it. Choosing Free, an aspect
 ratio, or applying a fixed-size crop also enables crop selection mode. Drag the selection interior
 to move it and its border handles to resize it; right-click reopens the menu and Escape clears the
 selection. The menu can crop the processed image in memory, copy the selection at source resolution,
@@ -1220,10 +1222,11 @@ sizes track the current zoom, while image-pixel sizes remain in source pixels; w
 pointer positions the fixed rectangle's top-left corner. The fixed size and unit choice are persisted
 when applied. To customize the final crop-menu ratio, use the Crop section of Advanced configuration
 or set `user_crop_aspect_width=14` and `user_crop_aspect_height=11` (or another positive pair) in
-`${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. The explicit crop-selection mode
-is persisted as `selection_mode_enabled=0` or `selection_mode_enabled=1` and defaults to `0`. The
-older `default_selection_mode` setting is ignored so an existing Windows-parity default cannot
-silently reactivate crop mode.
+`${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. **Copy selection on release** is
+off by default and is persisted as `copy_selection_on_release=0` or `copy_selection_on_release=1`.
+The explicit crop-selection mode is persisted as `selection_mode_enabled=0` or
+`selection_mode_enabled=1` and defaults to `0`. The older `default_selection_mode` setting is
+ignored so an existing Windows-parity default cannot silently reactivate crop mode.
 The AppImage bundles `xclip`, `wl-copy`/`wl-paste`, and `jpegtran` when the build environment provides
 them. `lp`, `gsettings`, `feh`, and `nitrogen` remain host desktop integrations. The clipboard tools
 are also needed for image copy/paste in a local non-AppImage build.

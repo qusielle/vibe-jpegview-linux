@@ -4878,6 +4878,72 @@ if command -v convert >/dev/null 2>&1; then
 	fi
 	stop_viewer
 
+	if command -v xclip >/dev/null 2>&1; then
+		selection_copy_config="$temporary/selection-copy-config"
+		mkdir -p "$selection_copy_config/jpegview-linux"
+		printf 'scale_mode=fit_no_enlarge\nselection_mode_enabled=1\ncopy_selection_on_release=1\nthumbnail_panel_visible=0\n' \
+			> "$selection_copy_config/jpegview-linux/settings.conf"
+		VIEWER_TEST_HOME="$temporary/home" VIEWER_TEST_CONFIG_HOME="$selection_copy_config" \
+			launch_viewer "$temporary/crop-images/01-crop.jpg"
+		assert_title_prefix "01-crop.jpg" \
+			"copy-on-release crop viewer did not load its initial image"
+		selection_copy_width=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" |
+			sed -n 's/^WIDTH=//p')
+		selection_copy_height=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" |
+			sed -n 's/^HEIGHT=//p')
+		selection_copy_left=$((selection_copy_width / 2 - 80))
+		selection_copy_top=$((selection_copy_height / 2 - 64))
+		clear_clipboard_text
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((selection_copy_left + 32)) $((selection_copy_top + 32)) mousedown 1
+		sleep 0.1
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((selection_copy_left + 127)) $((selection_copy_top + 95)) mouseup 1
+		selection_copy_dimensions=''
+		for _ in $(seq 1 40); do
+			if DISPLAY=":$display_number" xclip -selection clipboard -t image/png -o \
+				>"$temporary/automatic-selection-copy.png" 2>/dev/null; then
+				selection_copy_dimensions=$(identify -format '%wx%h' \
+					"$temporary/automatic-selection-copy.png" 2>/dev/null || true)
+				if [ "$selection_copy_dimensions" = "96x64" ]; then break; fi
+			fi
+			sleep 0.1
+		done
+		selection_copy_title=$(DISPLAY=":$display_number" window_title_without_position)
+		if [ "$selection_copy_dimensions" != "96x64" ] || \
+			[ "$selection_copy_title" != "Copied selection to clipboard" ]; then
+			echo "UI smoke test: copy-on-release did not copy and complete the source-size selection ($selection_copy_dimensions; $selection_copy_title)" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		if [ "$visual_assertions" -eq 1 ]; then
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/automatic-selection-copy-cleared.png"
+			selection_copy_border=$(convert "$temporary/automatic-selection-copy-cleared.png" \
+				-format "%[pixel:p{$((selection_copy_left + 32)),$((selection_copy_top + 32))}]" info:)
+			if [ "$selection_copy_border" = "srgb(255,205,0)" ]; then
+				echo "UI smoke test: automatic selection copy left the selection overlay visible" >&2
+				exit 1
+			fi
+		fi
+		set_clipboard_text 'selection-copy-shift-sentinel'
+		DISPLAY=":$display_number" xdotool keydown Shift_L
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((selection_copy_left + 32)) $((selection_copy_top + 32)) mousedown 1
+		sleep 0.1
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((selection_copy_left + 127)) $((selection_copy_top + 95))
+		DISPLAY=":$display_number" xdotool mouseup 1 keyup Shift_L
+		shift_clipboard_text=$(DISPLAY=":$display_number" xclip -selection clipboard -o 2>/dev/null || true)
+		if [ "$shift_clipboard_text" != 'selection-copy-shift-sentinel' ]; then
+			echo "UI smoke test: Shift-zoom triggered copy-on-release ($shift_clipboard_text)" >&2
+			exit 1
+		fi
+		clear_clipboard_text
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 8 8
+		stop_viewer
+	fi
+
 	if command -v jpegtran >/dev/null 2>&1; then
 		mkdir -p "$temporary/lossless-crop-config"
 		env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$display_number" \

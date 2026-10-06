@@ -228,6 +228,9 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		} else if (key == "selection_mode_enabled") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.selectionModeEnabled = parsed;
+		} else if (key == "copy_selection_on_release") {
+			bool parsed = false;
+			if (ParseBoolStrict(value, parsed)) loaded.copySelectionOnRelease = parsed;
 		} else if (key == "info_visible") {
 			loaded.infoVisible = ParseBool(value);
 		} else if (key == "show_histogram") {
@@ -356,6 +359,7 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "user_crop_aspect_height=" << std::clamp(settings.userCropAspectHeight,
 			kMinimumFixedCropDimension, kMaximumFixedCropDimension) << '\n'
 		       << "selection_mode_enabled=" << (settings.selectionModeEnabled ? 1 : 0) << '\n'
+		       << "copy_selection_on_release=" << (settings.copySelectionOnRelease ? 1 : 0) << '\n'
 		       << "info_visible=" << (settings.infoVisible ? 1 : 0) << '\n'
 		       << "show_histogram=" << (settings.showHistogram ? 1 : 0) << '\n'
 		       << "show_filename=" << (settings.showFilename ? 1 : 0) << '\n'

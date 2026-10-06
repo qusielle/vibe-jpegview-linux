@@ -63,6 +63,7 @@ struct ViewerSettings {
 	int userCropAspectWidth = kDefaultUserCropAspectWidth;
 	int userCropAspectHeight = kDefaultUserCropAspectHeight;
 	bool selectionModeEnabled = false;
+	bool copySelectionOnRelease = false;
 	bool infoVisible = false;
 	bool showHistogram = false;
 	bool showFilename = false;

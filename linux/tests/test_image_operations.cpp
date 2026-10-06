@@ -118,15 +118,17 @@ void TestCropSelectionModelGeometryAndManipulation() {
 		jpegview_linux::ShouldStartNewCropSelection(false, true, true),
 		"crop-selection drag gating did not keep selection off by default or preserve modifier override");
 	using ReleaseAction = jpegview_linux::NewCropSelectionReleaseAction;
-	Expect(jpegview_linux::ResolveNewCropSelectionReleaseAction(false, false) ==
+	Expect(jpegview_linux::ResolveNewCropSelectionReleaseAction(false, false, false) ==
 		ReleaseAction::Clear &&
-		jpegview_linux::ResolveNewCropSelectionReleaseAction(false, true) ==
+		jpegview_linux::ResolveNewCropSelectionReleaseAction(false, true, true) ==
 		ReleaseAction::Clear &&
-		jpegview_linux::ResolveNewCropSelectionReleaseAction(true, true) ==
+		jpegview_linux::ResolveNewCropSelectionReleaseAction(true, true, true) ==
 		ReleaseAction::ZoomToSelection &&
-		jpegview_linux::ResolveNewCropSelectionReleaseAction(true, false) ==
+		jpegview_linux::ResolveNewCropSelectionReleaseAction(true, false, true) ==
+		ReleaseAction::CopySelection &&
+		jpegview_linux::ResolveNewCropSelectionReleaseAction(true, false, false) ==
 		ReleaseAction::OpenContextMenu,
-		"new selection release policy changed empty, shift-zoom, or crop-menu behavior");
+		"new selection release policy changed empty, Shift-zoom, automatic-copy, or menu behavior");
 	CropSelectionModel selection;
 	selection.SetImageSize(100, 80);
 	Expect(selection.StartNew(2, 1), "selection could not start on a valid image");
@@ -1189,6 +1191,8 @@ void TestPictureLevelsStoreRoundTrip() {
 void TestSettingsRoundTripAndMalformedValues() {
 	TemporaryDirectory temporary;
 	const fs::path settingsPath = temporary.path() / "config" / "settings.conf";
+	Expect(!jpegview_linux::ViewerSettings{}.copySelectionOnRelease,
+		"copy-selection-on-release was enabled by default");
 	Expect(!jpegview_linux::ViewerSettings{}.fitRelativeZoomMode,
 		"fit-relative zoom was enabled in the built-in settings defaults");
 	jpegview_linux::ViewerSettings expected;
@@ -1221,6 +1225,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.userCropAspectWidth = 13;
 	expected.userCropAspectHeight = 7;
 	expected.selectionModeEnabled = true;
+	expected.copySelectionOnRelease = true;
 	expected.infoVisible = true;
 	expected.showHistogram = true;
 	expected.showFilename = true;
@@ -1261,6 +1266,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		settingsContents.find("window_title_pattern=%f | [%p] | %m | %%\n") !=
 			std::string::npos,
 		"saved config did not explain title codes beside the custom pattern");
+	Expect(settingsContents.find("copy_selection_on_release=1\n") != std::string::npos,
+		"saved config omitted the enabled copy-selection-on-release setting");
 	const std::size_t titleSettingPosition = settingsContents.find("window_title_pattern=");
 	const std::size_t titleCommentPosition = settingsContents.rfind("# Window title codes:", titleSettingPosition);
 	const std::string titleCommentText = titleSettingPosition == std::string::npos ||
@@ -1315,8 +1322,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"fixed crop size and pixel units did not round-trip");
 	Expect(loaded.userCropAspectWidth == expected.userCropAspectWidth &&
 		loaded.userCropAspectHeight == expected.userCropAspectHeight &&
-		loaded.selectionModeEnabled == expected.selectionModeEnabled,
-		"user crop ratio or selection mode did not round-trip");
+		loaded.selectionModeEnabled == expected.selectionModeEnabled &&
+		loaded.copySelectionOnRelease == expected.copySelectionOnRelease,
+		"user crop ratio, selection mode, or automatic-copy setting did not round-trip");
 	Expect(loaded.infoVisible == expected.infoVisible && loaded.showHistogram == expected.showHistogram &&
 		loaded.showFilename == expected.showFilename &&
 		loaded.autoContrast == expected.autoContrast,
@@ -1350,6 +1358,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"user_crop_aspect_width=0\nuser_crop_aspect_height=nan\n"
 		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=1\n"
 		"selection_mode_enabled=maybe\n"
+		"copy_selection_on_release=maybe\n"
 		"show_zoom_navigator=maybe\nmanga_mode_inverts_left_right=maybe\n"
 		"spacebar_navigates_images=maybe\nfolder_wrap_around=maybe\n"
 		"fit_relative_zoom_mode=maybe\n"
@@ -1367,6 +1376,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"settings without thumbnail visibility did not retain the hidden default");
 	Expect(!loaded.showHistogram,
 		"settings without a histogram choice did not retain the hidden default");
+	Expect(!loaded.copySelectionOnRelease,
+		"malformed copy-selection-on-release setting did not retain its default");
 	Expect(loaded.showZoomNavigator,
 		"malformed zoom navigator visibility did not retain its enabled default");
 	Expect(!loaded.doublePageModeEnabled && !loaded.mangaReadingOrderEnabled,
@@ -1451,6 +1462,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	source.scaleMode = "manual";
 	source.maximized = true;
 	source.selectionModeEnabled = true;
+	source.copySelectionOnRelease = true;
 	source.autoContrast = true;
 	source.mangaModeInvertsLeftRight = false;
 	source.spacebarNavigatesImages = true;
@@ -1494,7 +1506,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 		{"thumbnail_panel_width", "file_dialog_width", "file_dialog_height",
 			"file_dialog_preview_ratio"},
 		{"magnifying_glass_width", "magnifying_glass_height", "magnifying_glass_zoom_level"},
-		{"user_crop_aspect_width", "user_crop_aspect_height"},
+		{"user_crop_aspect_width", "user_crop_aspect_height", "copy_selection_on_release"},
 		{"default_local_density", "default_contrast", "default_gamma", "default_saturation",
 			"default_cyan_red", "default_magenta_green", "default_yellow_blue",
 			"default_lighten_shadows", "default_darken_highlights", "default_deep_shadows",
@@ -1534,7 +1546,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 			++fieldTotal;
 		}
 	}
-	Expect(fieldTotal == 34, "advanced configuration did not expose every requested setting");
+	Expect(fieldTotal == 35, "advanced configuration did not expose every requested setting");
 	Expect(model.SelectCategory(static_cast<int>(Category::Behavior)) &&
 		model.FieldValue(2) == "Off" && model.FieldValue(3) == "On",
 		"behavior settings did not display their draft values");
@@ -1548,6 +1560,9 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	Expect(model.SelectCategory(static_cast<int>(Category::MagnifyingGlass)) &&
 		model.FieldValue(2) == "0.725",
 		"magnifying-glass zoom level did not retain its source-scale meaning");
+	Expect(model.SelectCategory(static_cast<int>(Category::Crop)) &&
+		model.FieldValue(2) == "On",
+		"copy-selection-on-release setting did not display its draft value");
 	Expect(jpegview_linux::EqualImageProcessing(model.Draft().defaultImageProcessing,
 		source.defaultImageProcessing) && model.Draft().copyRenamePattern == source.copyRenamePattern &&
 		model.Draft().magnifyingGlassWidth == source.magnifyingGlassWidth &&
@@ -1557,6 +1572,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 		"opening and visiting categories changed the persisted settings draft");
 	Expect(model.Draft().scaleMode == source.scaleMode && model.Draft().maximized == source.maximized &&
 		model.Draft().selectionModeEnabled == source.selectionModeEnabled &&
+		model.Draft().copySelectionOnRelease == source.copySelectionOnRelease &&
 		model.Draft().autoContrast == source.autoContrast,
 		"advanced configuration altered excluded automatic or session settings");
 
@@ -1628,8 +1644,11 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	model.SelectCategory(static_cast<int>(Category::Crop));
 	edit(0, "21");
 	edit(1, "9");
-	Expect(model.Draft().userCropAspectWidth == 21 && model.Draft().userCropAspectHeight == 9,
-		"crop aspect fields did not round-trip typed values");
+	model.SelectRow(2);
+	Expect(model.ActivateSelected() && !model.Draft().copySelectionOnRelease &&
+		model.AdjustSelected(1) && model.Draft().copySelectionOnRelease &&
+		model.Draft().userCropAspectWidth == 21 && model.Draft().userCropAspectHeight == 9,
+		"crop aspect fields or automatic selection-copy toggle did not update the settings draft");
 
 	model.SelectCategory(static_cast<int>(Category::ImageDefaults));
 	model.SelectRow(0);

@@ -83,6 +83,7 @@ const std::vector<AdvancedConfigurationField>& FieldsFor(int category) {
 			kMinimumFixedCropDimension, kMaximumFixedCropDimension, 1.0),
 		IntegerField("user_crop_aspect_height", "User crop aspect height",
 			kMinimumFixedCropDimension, kMaximumFixedCropDimension, 1.0),
+		BooleanField("copy_selection_on_release", "Copy selection on release"),
 	};
 	static const std::vector<AdvancedConfigurationField> imageDefaults = [] {
 		std::vector<AdvancedConfigurationField> fields;
@@ -161,6 +162,7 @@ bool GetBooleanValue(const ViewerSettings& settings, const char* key) {
 	if (std::string(key) == "folder_wrap_around") return settings.folderWrapAround;
 	if (std::string(key) == "fit_relative_zoom_mode") return settings.fitRelativeZoomMode;
 	if (std::string(key) == "show_histogram") return settings.showHistogram;
+	if (std::string(key) == "copy_selection_on_release") return settings.copySelectionOnRelease;
 	if (std::string(key) == "default_local_density") {
 		return settings.defaultImageProcessing.localDensityEnabled;
 	}
@@ -173,6 +175,7 @@ void SetBooleanValue(ViewerSettings& settings, const char* key, bool value) {
 	else if (std::string(key) == "folder_wrap_around") settings.folderWrapAround = value;
 	else if (std::string(key) == "fit_relative_zoom_mode") settings.fitRelativeZoomMode = value;
 	else if (std::string(key) == "show_histogram") settings.showHistogram = value;
+	else if (std::string(key) == "copy_selection_on_release") settings.copySelectionOnRelease = value;
 	else if (std::string(key) == "default_local_density") {
 		settings.defaultImageProcessing.localDensityEnabled = value;
 	}

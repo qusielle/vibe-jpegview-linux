@@ -11741,13 +11741,18 @@ private:
 		SDL_CaptureMouse(SDL_FALSE);
 		if (cropDragWasNew_) {
 			switch (jpegview_linux::ResolveNewCropSelectionReleaseAction(
-				cropDragMoved_, cropZoomOnRelease_)) {
+				cropDragMoved_, cropZoomOnRelease_,
+				runtimeSettings_.Values().copySelectionOnRelease)) {
 			case jpegview_linux::NewCropSelectionReleaseAction::Clear:
 				cropSelection_.Clear();
 				break;
 			case jpegview_linux::NewCropSelectionReleaseAction::ZoomToSelection:
 				ZoomToSelection();
 				cropSelection_.Clear();
+				break;
+			case jpegview_linux::NewCropSelectionReleaseAction::CopySelection:
+				CopyCurrentSelection();
+				ClearCropSelection();
 				break;
 			case jpegview_linux::NewCropSelectionReleaseAction::OpenContextMenu:
 				OpenCropContextMenu();

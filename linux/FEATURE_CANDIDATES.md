@@ -286,10 +286,6 @@ repeated as new candidates below.
 - **Quick rename of the current image:** add a one-file rename command and shortcut, initially
   selecting the basename but not the extension, with collision-safe behavior. This complements the
   existing batch rename/copy dialog; see [issue #280](https://github.com/sylikc/jpegview/issues/280).
-- **Selection convenience actions:** optionally copy selected pixels to the clipboard immediately
-  after a selection is made, then clear the selection, without changing the existing explicit crop
-  and copy actions. The interaction should be configurable to avoid surprising current users. See
-  [issue #193](https://github.com/sylikc/jpegview/issues/193).
 - **Fast view-only color commands:** provide a direct invert-colors toggle and a separate quick
   grayscale/desaturate command; both should be reversible display operations, not destructive edits.
   See [issue #273](https://github.com/sylikc/jpegview/issues/273) and

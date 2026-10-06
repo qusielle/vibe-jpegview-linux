@@ -43,9 +43,10 @@ bool ShouldStartNewCropSelection(bool selectionModeEnabled,
 }
 
 NewCropSelectionReleaseAction ResolveNewCropSelectionReleaseAction(
-	bool selectionMoved, bool zoomOnRelease) {
+	bool selectionMoved, bool zoomOnRelease, bool copyOnRelease) {
 	if (!selectionMoved) return NewCropSelectionReleaseAction::Clear;
-	return zoomOnRelease ? NewCropSelectionReleaseAction::ZoomToSelection :
+	if (zoomOnRelease) return NewCropSelectionReleaseAction::ZoomToSelection;
+	return copyOnRelease ? NewCropSelectionReleaseAction::CopySelection :
 		NewCropSelectionReleaseAction::OpenContextMenu;
 }
 

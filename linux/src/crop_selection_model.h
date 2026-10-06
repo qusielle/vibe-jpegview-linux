@@ -38,11 +38,12 @@ enum class CropSelectionMode {
 enum class NewCropSelectionReleaseAction {
 	Clear,
 	ZoomToSelection,
+	CopySelection,
 	OpenContextMenu,
 };
 
 NewCropSelectionReleaseAction ResolveNewCropSelectionReleaseAction(
-	bool selectionMoved, bool zoomOnRelease);
+	bool selectionMoved, bool zoomOnRelease, bool copyOnRelease);
 
 bool ShouldStartNewCropSelection(bool selectionModeEnabled,
 	bool forcedByModifier, bool imageNeedsPanning);

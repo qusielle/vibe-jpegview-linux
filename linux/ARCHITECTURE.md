@@ -1024,6 +1024,9 @@ the dotted/handled overlay through the current viewport destination. Crop and co
 materialize the full-resolution processed image, then extract only the selected region instead of
 copying a second full-size source buffer; destructive crop updates both the cropped correction
 base and its reprocessed display image as one operation, and flattening an animation is explicit.
+The release-action model gives Shift-zoom precedence over the optional copy-on-release setting;
+the Viewer captures the selected bounds through the existing copy workflow before clearing a new
+selection.
 Lossless JPEG crop reads sampling factors from the JPEG header, aligns the source selection to the
 corresponding MCU grid, and delegates the crop to `jpegtran` through a direct argv plan. Fixed crop
 size and custom aspect choices are user settings; fixed-size editor layout and rendering are owned by
