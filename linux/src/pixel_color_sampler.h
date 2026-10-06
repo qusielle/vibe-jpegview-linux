@@ -45,6 +45,20 @@ struct PixelColorSamplerInput {
 	PixelColorSamplerRect destination;
 };
 
+struct PixelColorSamplerDecodeDemand {
+	bool ownerCommitted = false;
+	bool postCommitPointerMotion = false;
+	bool pointerOverImage = false;
+	bool pointerButtonsDown = false;
+	bool hasSampleablePixels = false;
+	bool requestPending = false;
+	bool requestFailed = false;
+};
+
+// Full-resolution source decoding is optional work. Admit it only for an
+// explicit idle hover over the committed image when no usable pixels exist.
+bool ShouldDecodePixelColorSamplerSource(const PixelColorSamplerDecodeDemand& demand);
+
 struct PixelColorSamplerPaintPlan {
 	PixelColorSamplerRect panel;
 	PixelColorSamplerRect swatch;

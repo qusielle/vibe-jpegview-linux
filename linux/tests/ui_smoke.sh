@@ -640,6 +640,7 @@ for _ in $(seq 1 20); do
 done
 if [ "$sampled_color" != '#123456FF' ]; then
 	echo "UI smoke test: pixel readout did not copy the decoded RGBA document color ($sampled_color)" >&2
+	cat "$temporary/viewer.log" >&2
 	exit 1
 fi
 clear_clipboard_text
@@ -647,6 +648,62 @@ DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 8 8
 stop_viewer
 XDG_STATE_HOME=$pixel_sampler_previous_state
 export XDG_STATE_HOME
+
+# A fitted JPEG stays on its reduced display path until pointer motion asks the
+# sampler for source pixels. This exercises the sampler-only decode channel,
+# rather than the already-materialized PPM path above.
+if command -v convert >/dev/null 2>&1; then
+	lazy_sampler_jpeg="$temporary/pixel-sampler-lazy.jpg"
+	lazy_sampler_config="$temporary/pixel-sampler-lazy-config/jpegview-linux"
+	mkdir -p "$lazy_sampler_config"
+	convert -size 1800x1200 xc:black -quality 90 "$lazy_sampler_jpeg"
+	printf 'scale_mode=fit\ncache_size_mb=128\n' > "$lazy_sampler_config/settings.conf"
+	pixel_sampler_previous_state=$XDG_STATE_HOME
+	pixel_sampler_previous_config_set=${VIEWER_TEST_CONFIG_HOME+x}
+	pixel_sampler_previous_config=${VIEWER_TEST_CONFIG_HOME-}
+	XDG_STATE_HOME="$temporary/pixel-sampler-lazy-state"
+	VIEWER_TEST_CONFIG_HOME="$temporary/pixel-sampler-lazy-config"
+	export XDG_STATE_HOME VIEWER_TEST_CONFIG_HOME
+	launch_viewer "$lazy_sampler_jpeg"
+	assert_title_prefix "pixel-sampler-lazy.jpg" "lazy-JPEG sampler fixture did not load"
+	sampler_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+	sampler_window_width=$(printf '%s\n' "$sampler_geometry" | sed -n 's/^WIDTH=//p')
+	sampler_window_height=$(printf '%s\n' "$sampler_geometry" | sed -n 's/^HEIGHT=//p')
+	sampler_x=$((sampler_window_width / 2))
+	sampler_y=$((sampler_window_height / 2))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$sampler_x" "$sampler_y"
+	sampled_color=''
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			"$sampler_x" "$sampler_y"
+		sleep 0.04
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+			$((sampler_x + 62)) $((sampler_y + 20))
+		DISPLAY=":$display_number" xdotool click --window "$window_id" 1
+		sampled_color=$(DISPLAY=":$display_number" xclip -selection clipboard -o 2>/dev/null || true)
+		if [ "$sampled_color" = '#000000FF' ]; then break; fi
+	done
+	if [ "$sampled_color" != '#000000FF' ]; then
+		echo "UI smoke test: lazy-JPEG hover did not decode and copy its source color ($sampled_color)" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	clear_clipboard_text
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 8 8
+	stop_viewer
+	XDG_STATE_HOME=$pixel_sampler_previous_state
+	export XDG_STATE_HOME
+	if [ -n "$pixel_sampler_previous_config_set" ]; then
+		VIEWER_TEST_CONFIG_HOME=$pixel_sampler_previous_config
+		export VIEWER_TEST_CONFIG_HOME
+	else
+		unset VIEWER_TEST_CONFIG_HOME
+	fi
+else
+	echo "UI smoke test: SKIP lazy-JPEG sampler case (convert is unavailable)" >&2
+fi
 
 # Loaded-list sorting is asynchronous, but the selected source must remain the
 # same after the new order is applied.

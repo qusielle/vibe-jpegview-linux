@@ -471,6 +471,7 @@ public:
 			TickExifMetadata();
 			TickCurrentJpegDimensions();
 			TickCurrentSelectedDecode();
+			TickPixelColorSamplerDecode();
 			TickImageOperation();
 			TickFileOperation();
 			TickImageSpectrum();
@@ -780,6 +781,7 @@ private:
 		jpegview_linux::RetiredImageBuffers retiredDocument = imageDocument_.ClearPixels();
 		retiredDocument.decoded = std::move(currentDecoded_);
 		imageOperationWorker_.Retire(std::move(retiredDocument));
+		RetirePixelColorSamplerOwnership();
 		imageOperationWorker_.Stop();
 		DeactivateDisplayPrefetchBatch();
 		displayPreparationController_.Shutdown();
@@ -2076,6 +2078,7 @@ private:
 		imageOperationWorker_.Retire(std::move(retiredDocument));
 		imageDocument_.UpdateProcessing(imageProcessing_, autoContrastEnabled_);
 		selectedSourceDecodeChannel_->Activate(loadGeneration, source.Key());
+		BeginPixelColorSamplerOwner(loadGeneration, source.Key());
 		currentSelectedLoadPending_ = true;
 		currentSelectedStartupLoad_ = startupLoad;
 		currentJpegHeaderPending_ = false;
@@ -11022,20 +11025,172 @@ private:
 			kUiTextScale, 245, 245, 245);
 	}
 
-	void UpdatePixelColorSampler() {
-		jpegview_linux::PixelColorSamplerInput input;
-		if (fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
+	bool PixelColorSamplerUiBlocked() const {
+		return contextMenuOpen_ || fileDialogOpen_ ||
 			advancedConfiguration_.IsOpen() || batchCopyDialog_.IsOpen() ||
 			resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
 			goToImageNumberDialog_.IsOpen() || unsharpDialogOpen_ ||
 			pictureLevelsPanelOpen_ || aboutOpen_ || helpOpen_ || confirmationOpen_ ||
-			archivePasswordDialog_.IsOpen() || clipboardMode_ || currentSelectedLoadPending_ ||
-			imageSession_.LoadedPath() != AbsoluteNormalized(fileList_.Current()) ||
+			archivePasswordDialog_.IsOpen() || clipboardMode_;
+	}
+
+	bool PixelColorSamplerOwnerCommitted() const {
+		if (fileList_.Empty() || currentSelectedLoadPending_ ||
+			imageSession_.Stage() != jpegview_linux::ImageSessionStage::Committed ||
+			imageSession_.LoadedPath() != AbsoluteNormalized(fileList_.Current())) return false;
+		const std::optional<jpegview_linux::ImageSessionSelection>& selection =
+			imageSession_.Selection();
+		return selection.has_value() &&
+			selection->generation == imageSession_.Generation() &&
+			selection->source.Key() == pixelSamplerDecodeSource_;
+	}
+
+	bool PixelColorSamplerPointerOverImage(int x, int y) const {
+		if (fileList_.Empty() || CurrentImage().width <= 0 || CurrentImage().height <= 0) {
+			return false;
+		}
+		const SDL_Rect area = ImageAreaRect();
+		const SDL_Rect destination = CurrentPageScreenRect(area);
+		return PointInRect(x, y, area) && PointInRect(x, y, destination);
+	}
+
+	void AdvancePixelSamplerDecodeGeneration() {
+		if (pixelSamplerDecodeGeneration_ == std::numeric_limits<std::uint64_t>::max()) {
+			pixelSamplerDecodeGeneration_ = 1;
+		} else {
+			++pixelSamplerDecodeGeneration_;
+		}
+	}
+
+	void RetirePixelSamplerDecoded(
+		jpegview_linux::DecodedImageCache::ImagePtr image) {
+		if (!image) return;
+		jpegview_linux::RetiredImageBuffers retired;
+		retired.decoded = std::move(image);
+		imageOperationWorker_.Retire(std::move(retired));
+	}
+
+	bool RetireReadyPixelSamplerDecode() {
+		if (!pixelSamplerDecodeChannel_) return false;
+		auto ready = pixelSamplerDecodeChannel_->Take(pixelSamplerDecodeGeneration_,
+			pixelSamplerDecodeSource_);
+		if (!ready.has_value()) return false;
+		RetirePixelSamplerDecoded(std::move(ready->image));
+		return true;
+	}
+
+	void BeginPixelColorSamplerOwner(std::uint64_t ownerGeneration,
+		const jpegview_linux::SourceKey& source) {
+		RetireReadyPixelSamplerDecode();
+		RetirePixelSamplerDecoded(std::move(pixelSamplerDecoded_));
+		pixelSamplerDecodePending_ = false;
+		pixelSamplerDecodeFailed_ = false;
+		pixelSamplerHoverGeneration_ = 0;
+		pixelSamplerOwnerGeneration_ = ownerGeneration;
+		pixelSamplerDecodedOwnerGeneration_ = 0;
+		pixelSamplerPointerButtonsDown_ = false;
+		pixelSamplerDecodeSource_ = source;
+		AdvancePixelSamplerDecodeGeneration();
+		pixelSamplerDecodeChannel_->Activate(pixelSamplerDecodeGeneration_, source);
+		pixelColorSampler_.Clear();
+	}
+
+	void InvalidatePixelColorSampler() {
+		const bool hadReady = RetireReadyPixelSamplerDecode();
+		const bool hadSamplerPixels = static_cast<bool>(pixelSamplerDecoded_);
+		const bool hadReadout = pixelColorSampler_.PaintPlan().color.has_value();
+		const bool invalidateRequest = pixelSamplerDecodePending_ || hadReady ||
+			pixelSamplerHoverGeneration_ != 0 || hadSamplerPixels || hadReadout;
+		RetirePixelSamplerDecoded(std::move(pixelSamplerDecoded_));
+		pixelSamplerDecodePending_ = false;
+		pixelSamplerDecodeFailed_ = false;
+		pixelSamplerHoverGeneration_ = 0;
+		pixelSamplerDecodedOwnerGeneration_ = 0;
+		pixelSamplerPointerButtonsDown_ = false;
+		pixelColorSampler_.Clear();
+		if (invalidateRequest) {
+			AdvancePixelSamplerDecodeGeneration();
+			pixelSamplerDecodeChannel_->Activate(pixelSamplerDecodeGeneration_,
+				pixelSamplerDecodeSource_);
+		}
+	}
+
+	void RetirePixelColorSamplerOwnership() {
+		RetireReadyPixelSamplerDecode();
+		RetirePixelSamplerDecoded(std::move(pixelSamplerDecoded_));
+		pixelSamplerDecodePending_ = false;
+		pixelSamplerDecodeFailed_ = false;
+		pixelSamplerHoverGeneration_ = 0;
+		pixelSamplerDecodedOwnerGeneration_ = 0;
+		pixelColorSampler_.Clear();
+		if (pixelSamplerDecodeChannel_) pixelSamplerDecodeChannel_->Shutdown();
+	}
+
+	void TickPixelColorSamplerDecode() {
+		if (!pixelSamplerDecodeChannel_) return;
+		auto result = pixelSamplerDecodeChannel_->Take(pixelSamplerDecodeGeneration_,
+			pixelSamplerDecodeSource_);
+		if (!result.has_value()) return;
+		pixelSamplerDecodePending_ = false;
+		if (result->generation != pixelSamplerDecodeGeneration_ ||
+			result->source.Key() != pixelSamplerDecodeSource_ ||
+			!imageSession_.MatchesSelection(pixelSamplerOwnerGeneration_,
+				pixelSamplerDecodeSource_)) {
+			RetirePixelSamplerDecoded(std::move(result->image));
+			return;
+		}
+		if (result->failure.Failed() || !result->image ||
+			result->image->frames.empty()) {
+			pixelSamplerDecodeFailed_ = true;
+			return;
+		}
+		if (!PixelColorSamplerOwnerCommitted() || PixelColorSamplerUiBlocked() ||
+			pixelSamplerHoverGeneration_ != pixelSamplerOwnerGeneration_ ||
+			pixelSamplerPointerButtonsDown_ ||
+			!PixelColorSamplerPointerOverImage(lastMouseX_, lastMouseY_) ||
+			imageDocument_.SourcePixels() || currentDecoded_) {
+			RetirePixelSamplerDecoded(std::move(result->image));
+			return;
+		}
+		const std::size_t frameIndex = currentAnimationFrame_ < result->image->frames.size() ?
+			currentAnimationFrame_ : 0;
+		const jpegview_linux::DecodedFrame& frame = result->image->frames[frameIndex];
+		if (frame.width != CurrentImage().width || frame.height != CurrentImage().height) {
+			pixelSamplerDecodeFailed_ = true;
+			RetirePixelSamplerDecoded(std::move(result->image));
+			return;
+		}
+		pixelSamplerDecodedOwnerGeneration_ = pixelSamplerOwnerGeneration_;
+		pixelSamplerDecoded_ = std::move(result->image);
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+	}
+
+	void NotePixelColorSamplerPointerMotion(int x, int y, std::uint32_t buttons) {
+		pixelSamplerPointerButtonsDown_ = buttons != 0;
+		const bool ownerCanSample = !pixelSamplerPointerButtonsDown_ &&
+			!PixelColorSamplerUiBlocked() && PixelColorSamplerOwnerCommitted();
+		if (ownerCanSample && PixelColorSamplerPointerOverImage(x, y)) {
+			pixelSamplerHoverGeneration_ = imageSession_.Generation();
+		} else if (ownerCanSample && pixelColorSampler_.PaintPlan().pinned) {
+			// Keep the readout alive while the pointer is over its own copy panel.
+			return;
+		} else {
+			pixelSamplerHoverGeneration_ = 0;
+		}
+	}
+
+	void UpdatePixelColorSampler() {
+		if (!PixelColorSamplerOwnerCommitted() || PixelColorSamplerUiBlocked() ||
 			CurrentImage().width <= 0 || CurrentImage().height <= 0) {
+			InvalidatePixelColorSampler();
+			return;
+		}
+		if (pixelSamplerPointerButtonsDown_) {
 			pixelColorSampler_.Clear();
 			return;
 		}
 
+		jpegview_linux::PixelColorSamplerInput input;
 		input.enabled = true;
 		input.ownerGeneration = imageSession_.Generation();
 		input.documentRevision = imageDocument_.Revision();
@@ -11068,19 +11223,62 @@ private:
 			pixels = &frame.bgra;
 			pixelWidth = frame.width;
 			pixelHeight = frame.height;
+		} else if (pixelSamplerDecoded_ &&
+			pixelSamplerDecodedOwnerGeneration_ == imageSession_.Generation() &&
+			currentAnimationFrame_ < pixelSamplerDecoded_->frames.size()) {
+			const jpegview_linux::DecodedFrame& frame =
+				pixelSamplerDecoded_->frames[currentAnimationFrame_];
+			input.pixelOwner = pixelSamplerDecoded_.get();
+			pixels = &frame.bgra;
+			pixelWidth = frame.width;
+			pixelHeight = frame.height;
 		}
-		if (pixels != nullptr && pixelWidth == input.imageWidth &&
-			pixelHeight == input.imageHeight &&
-			PointInRect(input.pointerX, input.pointerY, area) &&
-			PointInRect(input.pointerX, input.pointerY, destination)) {
+		const bool sampleablePixels = pixels != nullptr &&
+			pixelWidth == input.imageWidth && pixelHeight == input.imageHeight;
+		const bool pointerOverImage = PointInRect(input.pointerX, input.pointerY, area) &&
+			PointInRect(input.pointerX, input.pointerY, destination);
+		if (sampleablePixels && pointerOverImage) {
 			const jpegview_linux::SelectionPoint point =
 				jpegview_linux::CropSelectionModel::ScreenToImage(input.pointerX,
-				input.pointerY, {input.destination.x, input.destination.y,
+					input.pointerY, {input.destination.x, input.destination.y,
 					input.destination.width, input.destination.height},
-				pixelWidth, pixelHeight);
+					pixelWidth, pixelHeight);
 			input.bgra = pixels;
 			input.pixelX = point.x;
 			input.pixelY = point.y;
+		}
+		if (sampleablePixels && pixelSamplerDecoded_ &&
+			input.pixelOwner != pixelSamplerDecoded_.get()) {
+			RetirePixelSamplerDecoded(std::move(pixelSamplerDecoded_));
+			pixelSamplerDecodedOwnerGeneration_ = 0;
+		}
+		const bool sourceDecodeDemand =
+			jpegview_linux::ShouldDecodePixelColorSamplerSource({
+					PixelColorSamplerOwnerCommitted(),
+					pixelSamplerHoverGeneration_ == imageSession_.Generation(),
+					pointerOverImage,
+					pixelSamplerPointerButtonsDown_,
+					sampleablePixels,
+					pixelSamplerDecodePending_,
+					pixelSamplerDecodeFailed_});
+		if (sourceDecodeDemand && !pendingCurrentDecodedSource_.has_value() &&
+			!pendingImageOperation_.has_value() &&
+			pendingImageIntents_.ActionCount() == 0 &&
+			pendingMaterializationIntents_.empty()) {
+			const std::optional<jpegview_linux::ImageSessionSelection>& selection =
+				imageSession_.Selection();
+			if (selection.has_value() && selection->source.Valid()) {
+				pixelSamplerDecodePending_ = true;
+				const std::shared_ptr<jpegview_linux::SelectedSourceDecodeChannel> channel =
+					pixelSamplerDecodeChannel_;
+				const std::uint64_t generation = pixelSamplerDecodeGeneration_;
+				imageCache_.ObserveSelectedSource(selection->source,
+					[channel, generation](const jpegview_linux::SourceDescriptor& source,
+						const jpegview_linux::DecodedImageCache::ImagePtr& image,
+						const jpegview_linux::WorkerFailure& failure) {
+						(void)channel->Publish({generation, source, image, failure});
+					}, jpegview_linux::PerfWorkClass::FocusedPreview);
+			}
 		}
 		pixelColorSampler_.Update(input);
 	}
@@ -12639,6 +12837,8 @@ private:
 				}
 				break;
 			case SDL_MOUSEBUTTONUP:
+				pixelSamplerPointerButtonsDown_ =
+					SDL_GetMouseState(nullptr, nullptr) != 0;
 				if (event.button.button == SDL_BUTTON_LEFT) {
 					if (zoomNavigatorDragging_) EndZoomNavigatorDrag(event.button.x, event.button.y);
 					else if (cropMouseDragging_) EndCropDrag(event.button.x, event.button.y);
@@ -12650,6 +12850,8 @@ private:
 				break;
 			case SDL_MOUSEMOTION:
 				pixelColorSampler_.PointerMoved(event.motion.x, event.motion.y);
+				NotePixelColorSamplerPointerMotion(event.motion.x, event.motion.y,
+					event.motion.state);
 				UpdateThumbnailPanelCursor(event.motion.x, event.motion.y);
 				UpdateCropCursor(event.motion.x, event.motion.y);
 				UpdateZoomNavigatorCursor(event.motion.x, event.motion.y);
@@ -12961,6 +13163,18 @@ private:
 	std::shared_ptr<jpegview_linux::SelectedSourceDecodeChannel>
 		selectedSourceDecodeChannel_ =
 			std::make_shared<jpegview_linux::SelectedSourceDecodeChannel>();
+	std::shared_ptr<jpegview_linux::SelectedSourceDecodeChannel>
+		pixelSamplerDecodeChannel_ =
+			std::make_shared<jpegview_linux::SelectedSourceDecodeChannel>();
+	jpegview_linux::SourceKey pixelSamplerDecodeSource_;
+	jpegview_linux::DecodedImageCache::ImagePtr pixelSamplerDecoded_;
+	std::uint64_t pixelSamplerDecodeGeneration_ = 0;
+	std::uint64_t pixelSamplerOwnerGeneration_ = 0;
+	std::uint64_t pixelSamplerHoverGeneration_ = 0;
+	std::uint64_t pixelSamplerDecodedOwnerGeneration_ = 0;
+	bool pixelSamplerDecodePending_ = false;
+	bool pixelSamplerDecodeFailed_ = false;
+	bool pixelSamplerPointerButtonsDown_ = false;
 	std::optional<PendingCurrentJpegDimensions> pendingCurrentJpegDimensions_;
 	std::optional<jpegview_linux::SourceDescriptor> pendingCurrentDecodedSource_;
 	jpegview_linux::PendingImageIntents pendingImageIntents_;

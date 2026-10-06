@@ -4415,6 +4415,44 @@ void TestPixelColorSamplerModelUpdatePinAndCopy() {
 		"disabled sampler retained visible or copyable state");
 }
 
+void TestPixelColorSamplerDecodeDemandRequiresCommittedIdleHover() {
+	jpegview_linux::PixelColorSamplerDecodeDemand demand;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"sampler requested source pixels before a committed hover");
+	demand.ownerCommitted = true;
+	demand.postCommitPointerMotion = true;
+	demand.pointerOverImage = true;
+	Expect(jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"eligible hover did not request missing source pixels");
+	demand.ownerCommitted = false;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"sampler admitted source decoding for an uncommitted image");
+	demand.ownerCommitted = true;
+	demand.postCommitPointerMotion = false;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"stationary startup cursor caused optional source decoding");
+	demand.postCommitPointerMotion = true;
+	demand.pointerOverImage = false;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"sampler admitted source decoding while the pointer was outside the image");
+	demand.pointerOverImage = true;
+	demand.pointerButtonsDown = true;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"sampler admitted full decoding while the pointer was dragging");
+	demand.pointerButtonsDown = false;
+	demand.hasSampleablePixels = true;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"sampler requested a second source when sampleable pixels were already available");
+	demand.hasSampleablePixels = false;
+	demand.requestPending = true;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"sampler duplicated an in-flight source decode");
+	demand.requestPending = false;
+	demand.requestFailed = true;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"sampler retried a failed source decode without a new owner");
+}
+
 void TestPixelColorSamplerUsesSourceColorsAfterProcessingAndGeometryEdits() {
 	const std::uint8_t sourcePixels[] = {
 		0x56, 0x34, 0x12, 0xff,
@@ -4567,6 +4605,7 @@ const TestCase kTests[] = {
 	{"go-to-image-number-model", &TestGoToImageNumberModel},
 	{"pixel-color-sampler-bgra-rgba-and-bounds", &TestPixelColorSamplerReadsBgraAsRgba},
 	{"pixel-color-sampler-model-update-pin-and-copy", &TestPixelColorSamplerModelUpdatePinAndCopy},
+	{"pixel-color-sampler-decode-demand-requires-committed-idle-hover", &TestPixelColorSamplerDecodeDemandRequiresCommittedIdleHover},
 	{"pixel-color-sampler-source-colors-after-processing-and-edits", &TestPixelColorSamplerUsesSourceColorsAfterProcessingAndGeometryEdits},
 	{"renderer-window-resource-ownership", &TestRendererWindowResourceOwnership},
 };

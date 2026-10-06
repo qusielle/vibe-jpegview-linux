@@ -123,8 +123,11 @@ they support.
    paired if double-page mode is switched off and on while the rotation is applied.
    PageUp/PageDown remain logical previous/next. A pointer-following pixel sampler shows a swatch and
    `#RRGGBBAA` value; clicking the readout copies it. It samples decoded source pixels before live
-   non-destructive levels adjustments and display scaling. Rotate, mirror, and crop update the
-   sampled document coordinates while preserving the source colors. The two checkable
+   non-destructive levels adjustments and display scaling. For a fitted JPEG that is displayed from
+   reduced pixels, full-resolution sampling starts asynchronously after the pointer moves over the
+   committed image; opening an image with a stationary pointer does not trigger that extra decode.
+   Rotate, mirror, and crop update the sampled document coordinates while preserving the source
+   colors. The two checkable
    controls appear in the navigation panel and context menu. Page pairs follow
    [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
    Spread navigation prepares both pages at their final slot sizes through background workers and
@@ -989,6 +992,9 @@ native in-app file browser with **Browse** and **Recents** tabs.
 When the pointer is over the selected image, the `DOC` readout shows its decoded or materialized
 document pixel as `#RRGGBBAA`; click the readout to copy the value. This samples before live,
 non-destructive levels adjustments and display scaling, so it may differ from the displayed color.
+Fitted JPEGs can initially use reduced display pixels; the sampler requests full source pixels
+asynchronously after pointer motion over the committed image, leaving normal opening and viewing
+on the reduced path.
 Clicking blank space inside the dialog leaves it open; press Escape to cancel.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
 The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while

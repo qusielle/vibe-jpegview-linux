@@ -179,7 +179,15 @@ should normally be added to one of these focused modules and covered by the matc
 - `pixel_color_sampler`: bounds-checked BGRA document-source sampling, RGBA hex formatting, and the
   renderer-independent readout cache/pin/copy state. Materialized source pixels include geometry
   edits such as rotate and crop, but exclude non-destructive levels processing; a lazy document uses
-  its active decoded frame. The Viewer maps pointer coordinates and updates the sampler during the
+  its active decoded frame. If a fitted JPEG has only reduced display pixels, the Viewer starts an
+  optional full-source decode only after pointer motion over the committed image. This decode uses
+  focused-preview priority, so selected presentation and spread work remain ahead of this optional
+  detail. It observes the shared decoded-image cache through a separate generation-checked channel,
+  so the sampler neither replaces selected-load completion nor lowers existing decode priority or
+  changes image readiness or playback state. Neighbor-prefetch refreshes retain a focused observer
+  only while its source key remains selected. Leaving the image, opening a modal, or changing owners
+  rejects stale sampler results and retires unneeded pixel aliases off the event thread. The Viewer
+  maps pointer coordinates and updates the sampler during the
   event-thread update phase; the renderer consumes its prepared paint plan without changing sampler
   state. It does not read back the renderer or retain another display-sized buffer.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,

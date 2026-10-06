@@ -20,6 +20,12 @@ bool Contains(const PixelColorSamplerRect& rect, int x, int y) {
 		x < rect.x + rect.width && y < rect.y + rect.height;
 }
 
+bool ShouldDecodePixelColorSamplerSource(const PixelColorSamplerDecodeDemand& demand) {
+	return demand.ownerCommitted && demand.postCommitPointerMotion &&
+		demand.pointerOverImage && !demand.pointerButtonsDown &&
+		!demand.hasSampleablePixels && !demand.requestPending && !demand.requestFailed;
+}
+
 void PixelColorSamplerModel::Update(const PixelColorSamplerInput& input) {
 	if (!input.enabled) {
 		Clear();

@@ -362,6 +362,29 @@ void TestSelectedSourceDecodeChannelRejectsStaleOwnerCompletions() {
 		"selected decode mailbox accepted work after shutdown");
 }
 
+void TestPixelSamplerDecodeChannelIsIndependentOfSelectedLoad() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "sampler-channel.png";
+	WriteTinyImage(filename);
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(filename);
+	jpegview_linux::SelectedSourceDecodeChannel selectedLoadChannel;
+	jpegview_linux::SelectedSourceDecodeChannel samplerChannel;
+	selectedLoadChannel.Activate(7, source.Key());
+	samplerChannel.Activate(7, source.Key());
+	Expect(samplerChannel.Publish({7, source, {}, {}}),
+		"sampler-only channel rejected its current source result");
+	Expect(samplerChannel.Take(7, source.Key()).has_value() &&
+		!selectedLoadChannel.Take(7, source.Key()).has_value(),
+		"sampler-only completion leaked into selected-load state");
+	samplerChannel.Activate(8, source.Key());
+	Expect(!samplerChannel.Publish({7, source, {}, {}}) &&
+		!samplerChannel.Take(8, source.Key()).has_value(),
+		"sampler channel accepted a completion from the previous owner generation");
+	selectedLoadChannel.Shutdown();
+	samplerChannel.Shutdown();
+}
+
 void TestImageSessionControllerPlansSelectedSourcePreparation() {
 	using jpegview_linux::ImageSessionController;
 	using jpegview_linux::SelectedSourcePreparationAction;
@@ -2237,6 +2260,7 @@ const TestCase kTests[] = {
 	{"image-session-controller-navigation-and-clipboard-state", &TestImageSessionControllerSnapshotsNavigationAndClipboardState},
 	{"image-session-selected-load-commits-only-ready-current-owner", &TestImageSessionSelectedLoadCommitsOnlyReadyCurrentOwner},
 	{"selected-source-decode-channel-rejects-stale-owner-completions", &TestSelectedSourceDecodeChannelRejectsStaleOwnerCompletions},
+	{"pixel-sampler-decode-channel-is-independent-of-selected-load", &TestPixelSamplerDecodeChannelIsIndependentOfSelectedLoad},
 	{"image-session-controller-selected-source-preparation", &TestImageSessionControllerPlansSelectedSourcePreparation},
 	{"recent-image-load-history-commits-only-after-success", &TestRecentImageLoadHistoryCommitsOnlyAfterSuccess},
 	{"viewport-snapshot-follows-selected-identity-during-cancellation", &TestViewportSnapshotFollowsSelectedIdentityDuringCancellation},
