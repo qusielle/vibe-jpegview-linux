@@ -23,6 +23,7 @@ bool Contains(const PixelColorSamplerRect& rect, int x, int y) {
 bool ShouldDecodePixelColorSamplerSource(const PixelColorSamplerDecodeDemand& demand) {
 	return demand.ownerCommitted && demand.postCommitPointerMotion &&
 		demand.pointerOverImage && !demand.pointerButtonsDown &&
+		demand.currentPointerButtons == 0 &&
 		!demand.hasSampleablePixels && !demand.requestPending && !demand.requestFailed;
 }
 

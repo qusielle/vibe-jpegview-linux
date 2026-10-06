@@ -53,10 +53,12 @@ struct PixelColorSamplerDecodeDemand {
 	bool hasSampleablePixels = false;
 	bool requestPending = false;
 	bool requestFailed = false;
+	std::uint32_t currentPointerButtons = 0;
 };
 
 // Full-resolution source decoding is optional work. Admit it only for an
 // explicit idle hover over the committed image when no usable pixels exist.
+// The current button mask guards against stationary presses after motion.
 bool ShouldDecodePixelColorSamplerSource(const PixelColorSamplerDecodeDemand& demand);
 
 struct PixelColorSamplerPaintPlan {

@@ -180,9 +180,11 @@ should normally be added to one of these focused modules and covered by the matc
   renderer-independent readout cache/pin/copy state. Materialized source pixels include geometry
   edits such as rotate and crop, but exclude non-destructive levels processing; a lazy document uses
   its active decoded frame. If a fitted JPEG has only reduced display pixels, the Viewer starts an
-  optional full-source decode only after pointer motion over the committed image. This decode uses
-  focused-preview priority, so selected presentation and spread work remain ahead of this optional
-  detail. It observes the shared decoded-image cache through a separate generation-checked channel,
+  optional full-source decode only after pointer motion over the committed image. Button presses
+  update the sampler gate immediately; admission and completion also check SDL's current button
+  mask so stationary held buttons cannot admit optional decoding through stale motion state.
+  This decode uses focused-preview priority, keeping selected presentation and spread work ahead of
+  this optional detail. It observes the shared decoded-image cache through a separate generation-checked channel,
   so the sampler neither replaces selected-load completion nor lowers existing decode priority or
   changes image readiness or playback state. Neighbor-prefetch refreshes retain a focused observer
   only while its source key remains selected. Leaving the image, opening a modal, or changing owners

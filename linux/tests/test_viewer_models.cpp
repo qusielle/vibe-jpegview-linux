@@ -4453,6 +4453,31 @@ void TestPixelColorSamplerDecodeDemandRequiresCommittedIdleHover() {
 		"sampler retried a failed source decode without a new owner");
 }
 
+void TestPixelColorSamplerDecodeDemandRejectsStationaryHeldButtons() {
+	jpegview_linux::PixelColorSamplerDecodeDemand demand;
+	demand.ownerCommitted = true;
+	demand.postCommitPointerMotion = true;
+	demand.pointerOverImage = true;
+	Expect(jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"idle hover did not admit source decoding before a stationary press");
+	// A press after the last motion leaves its button state false. The current
+	// mask must reject decoding even without another motion event.
+	for (unsigned int button = 0; button < 32; ++button) {
+		demand.currentPointerButtons = std::uint32_t{1} << button;
+		Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+			"stationary held button admitted optional source decoding");
+	}
+	demand.currentPointerButtons = 3;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"two stationary held buttons admitted optional source decoding");
+	demand.currentPointerButtons = 2;
+	Expect(!jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"releasing one button admitted decoding while another remained held");
+	demand.currentPointerButtons = 0;
+	Expect(jpegview_linux::ShouldDecodePixelColorSamplerSource(demand),
+		"releasing all buttons did not restore idle-hover decode eligibility");
+}
+
 void TestPixelColorSamplerUsesSourceColorsAfterProcessingAndGeometryEdits() {
 	const std::uint8_t sourcePixels[] = {
 		0x56, 0x34, 0x12, 0xff,
@@ -4606,6 +4631,7 @@ const TestCase kTests[] = {
 	{"pixel-color-sampler-bgra-rgba-and-bounds", &TestPixelColorSamplerReadsBgraAsRgba},
 	{"pixel-color-sampler-model-update-pin-and-copy", &TestPixelColorSamplerModelUpdatePinAndCopy},
 	{"pixel-color-sampler-decode-demand-requires-committed-idle-hover", &TestPixelColorSamplerDecodeDemandRequiresCommittedIdleHover},
+	{"pixel-color-sampler-decode-demand-rejects-stationary-held-buttons", &TestPixelColorSamplerDecodeDemandRejectsStationaryHeldButtons},
 	{"pixel-color-sampler-source-colors-after-processing-and-edits", &TestPixelColorSamplerUsesSourceColorsAfterProcessingAndGeometryEdits},
 	{"renderer-window-resource-ownership", &TestRendererWindowResourceOwnership},
 };

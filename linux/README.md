@@ -994,7 +994,8 @@ document pixel as `#RRGGBBAA`; click the readout to copy the value. This samples
 non-destructive levels adjustments and display scaling, so it may differ from the displayed color.
 Fitted JPEGs can initially use reduced display pixels; the sampler requests full source pixels
 asynchronously after pointer motion over the committed image, leaving normal opening and viewing
-on the reduced path.
+on the reduced path. Holding any mouse button suppresses the readout and new optional source
+decodes, including a stationary press without further pointer motion.
 Clicking blank space inside the dialog leaves it open; press Escape to cancel.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
 The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while

@@ -11147,6 +11147,7 @@ private:
 		if (!PixelColorSamplerOwnerCommitted() || PixelColorSamplerUiBlocked() ||
 			pixelSamplerHoverGeneration_ != pixelSamplerOwnerGeneration_ ||
 			pixelSamplerPointerButtonsDown_ ||
+			SDL_GetMouseState(nullptr, nullptr) != 0 ||
 			!PixelColorSamplerPointerOverImage(lastMouseX_, lastMouseY_) ||
 			imageDocument_.SourcePixels() || currentDecoded_) {
 			RetirePixelSamplerDecoded(std::move(result->image));
@@ -11185,7 +11186,8 @@ private:
 			InvalidatePixelColorSampler();
 			return;
 		}
-		if (pixelSamplerPointerButtonsDown_) {
+		const std::uint32_t pointerButtons = SDL_GetMouseState(nullptr, nullptr);
+		if (pixelSamplerPointerButtonsDown_ || pointerButtons != 0) {
 			pixelColorSampler_.Clear();
 			return;
 		}
@@ -11260,7 +11262,8 @@ private:
 					pixelSamplerPointerButtonsDown_,
 					sampleablePixels,
 					pixelSamplerDecodePending_,
-					pixelSamplerDecodeFailed_});
+					pixelSamplerDecodeFailed_,
+					pointerButtons});
 		if (sourceDecodeDemand && !pendingCurrentDecodedSource_.has_value() &&
 			!pendingImageOperation_.has_value() &&
 			pendingImageIntents_.ActionCount() == 0 &&
@@ -12788,6 +12791,7 @@ private:
 				break;
 			}
 			case SDL_MOUSEBUTTONDOWN:
+				pixelSamplerPointerButtonsDown_ = true;
 				if (event.button.button == SDL_BUTTON_LEFT) {
 					if (const std::optional<std::string> colorText =
 						pixelColorSampler_.CopyTextAt(event.button.x, event.button.y)) {
