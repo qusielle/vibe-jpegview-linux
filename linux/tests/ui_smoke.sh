@@ -1895,7 +1895,9 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		convert -delay 1 "$temporary/animation-save-first.png" \
 			-delay 1 "$temporary/animation-save-second.png" -loop 0 \
 			"$animation_save_directory/01-animated-save.gif"
-		printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		# Saving changes the timestamp; an asynchronous timestamp sort can overwrite
+		# the save-completion title before its assertion. Keep this fixture in filename order.
+		printf 'scale_mode=fit\nsort_mode=file_name\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
 			> "$animation_save_config/jpegview-linux/settings.conf"
 		VIEWER_TEST_HOME="$temporary/animation-save-home" \
 			VIEWER_TEST_CONFIG_HOME="$animation_save_config" \
