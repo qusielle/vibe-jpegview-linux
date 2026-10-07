@@ -3,6 +3,8 @@
 #include "chrome_renderer.h"
 #include "text_renderer.h"
 
+#include <algorithm>
+
 namespace jpegview_linux {
 namespace {
 
@@ -139,18 +141,21 @@ void EditingDialogRendererAdapter::Render(const PerspectiveCorrectionDialogPaint
 	textRenderer_.Draw("PERSPECTIVE CORRECTION", paint.dialog.x + 18,
 		paint.dialog.y + 14, kTextScale, 245, 245, 250);
 	for (const PerspectiveSliderPaint& slider : paint.sliders) {
-		textRenderer_.Draw(slider.label, slider.rect.x, slider.rect.y - 18,
+		const int labelY = slider.rect.y - (paint.veryCompact ? 12 : 18);
+		textRenderer_.Draw(slider.label, slider.rect.x, labelY,
 			kTextScale, slider.focused ? 235 : 205, slider.focused ? 240 : 215,
 			slider.focused ? 248 : 230);
 		textRenderer_.Draw(slider.value, paint.dialog.x + paint.dialog.w -
 			textRenderer_.TextWidth(slider.value, kTextScale) - 18,
-			slider.rect.y - 18, kTextScale, 235, 240, 245);
+			labelY, kTextScale, 235, 240, 245);
 		chromeRenderer_.DrawLine(slider.rect.x, slider.rect.y + slider.rect.h / 2,
 			slider.rect.x + slider.rect.w, slider.rect.y + slider.rect.h / 2,
 			slider.focused ? 135 : 100, slider.focused ? 160 : 116,
 			slider.focused ? 195 : 132);
-		Fill(SDL_Rect{slider.knobX - 5, slider.rect.y + slider.rect.h / 2 - 7,
-			11, 15}, 130, 205, 240, 255);
+		const int knobHeight = std::min(15, slider.rect.h - 3);
+		Fill(SDL_Rect{slider.knobX - 5,
+			slider.rect.y + slider.rect.h / 2 - knobHeight / 2,
+			11, knobHeight}, 130, 205, 240, 255);
 	}
 	for (const DialogTogglePaint& toggle : paint.toggles) {
 		const Uint8 shade = toggle.enabled ? 220 : 115;

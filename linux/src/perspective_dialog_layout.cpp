@@ -25,7 +25,7 @@ PerspectiveCorrectionDialogLayout BuildPerspectiveCorrectionDialogLayout(
 	layout.dialog = MakeRect((windowWidth - width) / 2,
 		(windowHeight - height) / 2, width, height);
 	layout.compact = height < 354;
-	layout.veryCompact = width < 220 || height < 154;
+	layout.veryCompact = width < 220 || height < 158;
 
 	const SDL_Rect& dialog = layout.dialog;
 	const int sliderWidth = std::max(0,

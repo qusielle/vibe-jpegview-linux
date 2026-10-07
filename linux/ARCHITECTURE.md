@@ -194,7 +194,8 @@ should normally be added to one of these focused modules and covered by the matc
   the document only after the new texture uploads successfully.
 - `perspective_dialog_layout`: pure window-relative placement for the perspective editor. It switches
   to a compact control arrangement in short windows, keeping mouse targets inside the client area;
-  Viewer recomputes the layout after window resizing.
+  Viewer recomputes the layout after window resizing. Dense layouts reserve separate option and action
+  rows, while the renderer fits slider labels and knobs between adjacent tracks.
 - `image_document`: lazy current-image metadata plus immutable, shared source and presentation pixels,
   owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer

@@ -223,6 +223,9 @@ void TestPerspectiveCorrectionDialogLayoutAdaptsToSmallWindows() {
 		bool showHelp;
 	};
 	const WindowCase cases[] = {
+		{640, 154, true, false},
+		{640, 157, true, false},
+		{640, 158, false, false},
 		{640, 160, false, false},
 		{640, 200, false, false},
 		{320, 240, false, false},
