@@ -1218,7 +1218,7 @@ private:
 		pending.priority = {request->workClass, request->priority};
 		pending.lastAttemptRetainedCapacityRevision =
 			cacheBudget_->RetainedCapacityRevision();
-		pending.selectionGeneration = currentSelectedLoadPending_ ? generation : 0;
+		pending.selectionGeneration = generation;
 		QueuePendingTextureUpload(std::move(pending));
 	}
 

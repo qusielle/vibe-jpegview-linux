@@ -1323,7 +1323,8 @@ timing for the current image and uses animation frame timing; a custom delay rem
 reset or image replacement. Movie's selected FPS remains its separate timing control. Manual frame
 holds also stop Movie from advancing to another file. These controls are disabled during slideshow
 mode and while the selected frame or an image/file operation is pending. The full context menu lists
-the available controls and current delay.
+the available controls and current delay. Failed frame steps return to the last successfully displayed
+frame and keep it frozen.
 When automatic slideshow or movie advancement reaches a non-wrapping folder boundary, playback stops
 instead of repeatedly rebuilding the final image. `Esc` stops animation, movie, or slideshow playback
 before it closes the viewer.

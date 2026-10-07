@@ -317,9 +317,17 @@ void TestImageSessionSelectedLoadCommitsOnlyReadyCurrentOwner() {
 		session.Stage() == jpegview_linux::ImageSessionStage::Committed &&
 		session.LoadedPath() == fs::absolute(first).lexically_normal(),
 		"selected-load stage did not require a matching renderer-ready owner before Recents commit");
+	Expect(session.Generation() == start.selection.generation &&
+		session.MatchesSelection(start.selection.generation, firstSource.Key()) &&
+		!session.MatchesSelection(0, firstSource.Key()) &&
+		!session.MatchesSelection(start.selection.generation + 1, firstSource.Key()) &&
+		!session.MatchesSelection(start.selection.generation, failedSource.Key()),
+		"committing a selection lost its display owner or accepted a zero, stale, or different-source owner");
 	const auto sameSourceStart = session.BeginSelection(firstSource, first, {}, {}, true);
 	Expect(!sameSourceStart.effects.clearPreviousPresentation &&
-		sameSourceStart.selection.generation > start.selection.generation,
+		sameSourceStart.selection.generation > start.selection.generation &&
+		!session.MatchesSelection(start.selection.generation, firstSource.Key()) &&
+		session.MatchesSelection(sameSourceStart.selection.generation, firstSource.Key()),
 		"same-source replacement did not preserve the current presentation while advancing its owner");
 	const auto failedStart = session.BeginSelection(failedSource, failed, {}, {}, true);
 	Expect(failedStart.effects.clearPreviousPresentation &&
