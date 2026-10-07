@@ -4,6 +4,7 @@
 #include "cache_budget.h"
 #include "image.h"
 #include "image_decoder.h"
+#include "image_transform_geometry.h"
 #include "work_context.h"
 
 #include <cstddef>
@@ -17,6 +18,8 @@ enum class ImageOperationKind {
 	Transform,
 	FreeRotate,
 	FreeRotatePreview,
+	PerspectiveCorrect,
+	PerspectivePreview,
 	Crop,
 	Resize,
 	Reprocess,
@@ -53,6 +56,7 @@ struct ImageOperationSpec {
 	bool preserveDocumentPixels = false;
 	ImageTransformKind transform = ImageTransformKind::RotateClockwise;
 	double clockwiseDegrees = 0.0;
+	PerspectiveCorrectionParameters perspective;
 	bool autoCrop = false;
 	bool preserveAspectRatio = false;
 	int left = 0;

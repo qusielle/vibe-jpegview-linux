@@ -957,6 +957,90 @@ void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
 		preview.outputPixels->bgra == expectedPreview.bgra,
 		"free-rotation preview did not produce an isolated provisional result");
 
+	for (const auto& cropPolicy : std::vector<std::pair<bool, bool>>{
+		{false, false}, {true, false}, {true, true}}) {
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::PerspectiveCorrect;
+		operation.perspective.leftDeltaFraction = 0.2;
+		operation.perspective.rightDeltaFraction = -0.1;
+		operation.perspective.autoCrop = cropPolicy.first;
+		operation.perspective.preserveAspectRatio = cropPolicy.second;
+		const jpegview_linux::ImageOperationResult result = run(operation);
+		jpegview_linux::ImageTransformGeometry geometry;
+		Expect(jpegview_linux::BuildPerspectiveGeometry(source->width, source->height,
+			operation.perspective, geometry),
+			"could not build perspective worker reference geometry");
+		jpegview_linux::Image expectedSource;
+		jpegview_linux::Image expectedPresentation;
+		Expect(jpegview_linux::ResampleImageTransform(*source, geometry,
+			jpegview_linux::ImageTransformSampling::FinalBicubic, expectedSource) &&
+			jpegview_linux::ResampleImageTransform(processedSource, geometry,
+				jpegview_linux::ImageTransformSampling::FinalBicubic,
+				expectedPresentation),
+			"could not build perspective worker parity references");
+		Expect(result.success && result.updatesDocument && result.sourcePixels &&
+			result.presentationPixels && result.flattenAnimation && result.modified &&
+			result.rotationQuarterTurns == 0 &&
+			result.sourcePixels->bgra == expectedSource.bgra &&
+			result.presentationPixels->bgra == expectedPresentation.bgra &&
+			result.presentationPixels->width == geometry.outputWidth &&
+			result.presentationPixels->height == geometry.outputHeight,
+			"perspective correction changed processing order, crop policy, or animation metadata");
+	}
+
+	jpegview_linux::ImageOperationSpec previewPerspective;
+	previewPerspective.kind = jpegview_linux::ImageOperationKind::PerspectivePreview;
+	previewPerspective.perspective.leftDeltaFraction = 0.2;
+	previewPerspective.perspective.rightDeltaFraction = -0.1;
+	const jpegview_linux::ImageOperationResult perspectivePreview = run(previewPerspective);
+	jpegview_linux::ImageTransformGeometry perspectivePreviewGeometry;
+	Expect(jpegview_linux::BuildPerspectiveGeometry(source->width, source->height,
+		previewPerspective.perspective, perspectivePreviewGeometry),
+		"could not build perspective preview reference geometry");
+	jpegview_linux::Image expectedPerspectivePreview;
+	Expect(jpegview_linux::ResampleImageTransform(processedSource,
+		perspectivePreviewGeometry,
+		jpegview_linux::ImageTransformSampling::PreviewBilinear,
+		expectedPerspectivePreview) && perspectivePreview.success &&
+		!perspectivePreview.updatesDocument && !perspectivePreview.sourcePixels &&
+		!perspectivePreview.presentationPixels && perspectivePreview.outputPixels &&
+		perspectivePreview.outputPixels->bgra == expectedPerspectivePreview.bgra,
+		"perspective preview did not produce the matching isolated provisional result");
+
+	jpegview_linux::ImageOperationSpec invalidPerspective;
+	invalidPerspective.kind = jpegview_linux::ImageOperationKind::PerspectiveCorrect;
+	invalidPerspective.perspective.leftDeltaFraction = 0.3;
+	const auto invalidPerspectiveResult = run(invalidPerspective);
+	Expect(!invalidPerspectiveResult.success && invalidPerspectiveResult.failure.Failed() &&
+		!invalidPerspectiveResult.sourcePixels && !invalidPerspectiveResult.presentationPixels,
+		"perspective worker accepted invalid geometry or published partial pixels");
+
+	jpegview_linux::ImageOperationSpec cancelledPerspective;
+	cancelledPerspective.kind = jpegview_linux::ImageOperationKind::PerspectiveCorrect;
+	cancelledPerspective.perspective.leftDeltaFraction = 0.2;
+	const std::size_t workingBytesBeforeCancellation = budget->Snapshot().activeWorkingBytes;
+	int checksAfterOutputAdmission = 0;
+	bool cancellationObserved = false;
+	const auto cancelledPerspectiveResult = jpegview_linux::ProcessImageOperation(
+		jpegview_linux::ImageOperationRequest{document, nullptr, cancelledPerspective},
+		[&budget, &checksAfterOutputAdmission, &cancellationObserved,
+			workingBytesBeforeCancellation] {
+			if (cancellationObserved) return false;
+			if (budget->Snapshot().activeWorkingBytes > workingBytesBeforeCancellation &&
+				++checksAfterOutputAdmission >= 4) {
+				cancellationObserved = true;
+				return false;
+			}
+			return true;
+		}, *budget);
+	Expect(!cancelledPerspectiveResult.success &&
+		cancelledPerspectiveResult.failure.kind == jpegview_linux::WorkerFailureKind::Cancelled &&
+		!cancelledPerspectiveResult.sourcePixels &&
+		!cancelledPerspectiveResult.presentationPixels && cancellationObserved &&
+		checksAfterOutputAdmission >= 4 &&
+		budget->Snapshot().activeWorkingBytes == workingBytesBeforeCancellation,
+		"cancellation during resampling published partial pixels or leaked its output reservation");
+
 	jpegview_linux::ImageOperationSpec crop;
 	crop.kind = jpegview_linux::ImageOperationKind::Crop;
 	crop.left = 1;
@@ -1060,9 +1144,24 @@ void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
 		identityTransform.sourcePixels->width == 3 && identityTransform.sourcePixels->height == 4 &&
 		identityBudget->Snapshot().activeWorkingBytes == identityPixels->bgra.size() * 2,
 		"identity transform built or charged two full-size outputs instead of sharing one");
+
+	identityDocument.revision++;
+	materializeRequest.document = identityDocument;
+	materializeRequest.operation.kind = jpegview_linux::ImageOperationKind::PerspectiveCorrect;
+	materializeRequest.operation.perspective.leftDeltaFraction = 0.0;
+	materializeRequest.operation.perspective.rightDeltaFraction = 0.0;
+	auto identityPerspective = jpegview_linux::ProcessImageOperation(materializeRequest,
+		[] { return true; }, *identityBudget);
+	Expect(identityPerspective.success && identityPerspective.updatesDocument &&
+		identityPerspective.sourcePixels == identityPerspective.presentationPixels &&
+		identityPerspective.sourcePixels->width == identitySource.width &&
+		identityPerspective.sourcePixels->height == identitySource.height &&
+		identityPerspective.rotationQuarterTurns == 0 &&
+		identityBudget->Snapshot().activeWorkingBytes == identityPixels->bgra.size() * 3,
+		"identity perspective correction changed pixels, kept stale rotation state, or lost its shared working-data charge");
 }
 
-void TestFreeRotationPreviewBoundsLargeSourcePixels() {
+void TestTransformPreviewsBoundLargeSourcePixels() {
 	constexpr int width = 3000;
 	constexpr int height = 2000;
 	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4, 91);
@@ -1087,6 +1186,19 @@ void TestFreeRotationPreviewBoundsLargeSourcePixels() {
 			result.outputPixels->height <= 4ull * 1024ull * 1024ull &&
 		std::max(result.outputPixels->width, result.outputPixels->height) <= 2048,
 		"large free-rotation preview exceeded its output-pixel or dimension bound");
+
+	request.operation.kind = jpegview_linux::ImageOperationKind::PerspectivePreview;
+	request.operation.perspective.leftDeltaFraction = 0.2;
+	request.operation.perspective.rightDeltaFraction = -0.1;
+	request.operation.perspective.autoCrop = false;
+	const jpegview_linux::ImageOperationResult perspectiveResult =
+		jpegview_linux::ProcessImageOperation(request, [] { return true; }, *budget);
+	Expect(perspectiveResult.success && perspectiveResult.outputPixels &&
+		static_cast<std::uint64_t>(perspectiveResult.outputPixels->width) *
+			perspectiveResult.outputPixels->height <= 4ull * 1024ull * 1024ull &&
+		std::max(perspectiveResult.outputPixels->width,
+			perspectiveResult.outputPixels->height) <= 2048,
+		"large perspective preview exceeded its output-pixel or dimension bound");
 }
 
 void TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource() {
@@ -4225,7 +4337,7 @@ const TestCase kTests[] = {
 	{"image-document-rejects-stale-operations-and-owns-current-pixels", &TestImageDocumentRejectsStaleOperationsAndOwnsCurrentPixels},
 	{"image-operation-worker-runs-crop-and-flattens-captured-frame", &TestImageOperationWorkerRunsCropAndFlattensCapturedFrame},
 	{"image-operation-worker-matches-transforms-and-pixel-pipelines", &TestImageOperationWorkerMatchesTransformsAndPixelPipelines},
-	{"free-rotation-preview-bounds-large-source-pixels", &TestFreeRotationPreviewBoundsLargeSourcePixels},
+	{"transform-previews-bound-large-source-pixels", &TestTransformPreviewsBoundLargeSourcePixels},
 	{"in-place-save-materializes-lazy-document-and-rebinds-source", &TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource},
 	{"image-operation-worker-supersedes-and-survives-failures", &TestImageOperationWorkerSupersedesAndSurvivesFailures},
 	{"picture-levels-store-round-trip", &TestPictureLevelsStoreRoundTrip},

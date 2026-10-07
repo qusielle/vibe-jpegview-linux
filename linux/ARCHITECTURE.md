@@ -187,15 +187,16 @@ should normally be added to one of these focused modules and covered by the matc
   owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer
   instead of copying a second full-resolution image.
-- `image_operation_worker`: cancellable CPU-admitted discrete/free rotation, crop, resize, materialize,
-  reprocess, selection-copy, and output-size preparation requests. Free-rotation previews return an
-  image bounded to 2048 pixels per side and 4 MP without changing the document. A shared transform
-  preview helper copies and resizes the processing base under cache reservations, then rebuilds its
-  geometry until the output bounds are satisfied. Final rotation
-  captures the same `ImageDocumentSnapshot` and produces replacement source and presentation pixels;
-  only a matching successful revision can be applied. Viewer creates any replacement SDL texture before
-  swapping document pixels, so failure or staleness preserves the last successful presentation. Large
-  result and decoded-buffer references retire off the event thread.
+- `image_operation_worker`: cancellable CPU-admitted discrete/free rotation, perspective correction,
+  crop, resize, materialize, reprocess, selection-copy, and output-size preparation requests. Free-
+  rotation and perspective previews return images bounded to 2048 pixels per side and 4 MP without
+  changing the document. Shared transform-preview and final-transform helpers apply one geometry to
+  source and presentation pixels, retain the effective processing snapshot, and account for output
+  allocations before resampling begins. Perspective operations use projective geometry and the same
+  alpha-aware resampler as final rotations. Only a matching successful revision can be applied.
+  Viewer creates any replacement SDL texture before swapping document pixels, so failure or staleness
+  preserves the last successful presentation. Large result and decoded-buffer references retire off
+  the event thread.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
   move/resize hit testing, image/view coordinate conversion, crop-mode drag eligibility, new
   selection release-action planning, and JPEG MCU-boundary alignment; pixel-buffer cropping remains

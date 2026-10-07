@@ -153,6 +153,79 @@ std::shared_ptr<const Image> PreparePresentation(
 	return OwnImage(std::move(processed), budget, reservation);
 }
 
+std::shared_ptr<const Image> ResampleTrackedImage(const Image& source,
+	const ImageTransformGeometry& geometry, ImageTransformSampling sampling,
+	SharedCacheBudget& budget, CacheReservation& reservation,
+	const std::function<bool()>& shouldContinue) {
+	if (geometry.outputWidth <= 0 || geometry.outputHeight <= 0) return {};
+	const std::uint64_t pixelCount = static_cast<std::uint64_t>(geometry.outputWidth) *
+		static_cast<std::uint64_t>(geometry.outputHeight);
+	if (pixelCount > std::numeric_limits<std::size_t>::max() / 4) return {};
+	const std::size_t bytes = static_cast<std::size_t>(pixelCount) * 4;
+	std::shared_ptr<Image> output;
+	try {
+		output = std::make_shared<Image>();
+	} catch (const std::exception&) {
+		return {};
+	}
+	reservation = budget.TrackTemporary(bytes, CacheMemoryCategory::ActiveWorkingData,
+		std::static_pointer_cast<const void>(output));
+	if (!reservation || (shouldContinue && !shouldContinue()) ||
+		!ResampleImageTransform(source, geometry, sampling, *output, shouldContinue)) {
+		reservation.Reset();
+		return {};
+	}
+	return output;
+}
+
+bool PrepareTransformedDocumentPixels(const Image& source,
+	const ImageDocumentSnapshot& document,
+	const ImageTransformGeometry& geometry,
+	SharedCacheBudget& budget, const std::function<bool()>& shouldContinue,
+	std::shared_ptr<const Image>& transformedSource,
+	CacheReservation& sourceReservation,
+	std::shared_ptr<const Image>& transformedPresentation,
+	CacheReservation& presentationReservation) {
+	CacheReservation nextSourceReservation;
+	CacheReservation nextPresentationReservation;
+	auto nextSource = ResampleTrackedImage(source, geometry,
+		ImageTransformSampling::FinalBicubic, budget, nextSourceReservation,
+		shouldContinue);
+	if (!nextSource) return false;
+	auto nextPresentation = nextSource;
+	if (ProcessingChangesPixels(document)) {
+		const bool presentationMatches = document.presentationPixels &&
+			HasPixels(*document.presentationPixels) &&
+			document.presentationPixels->width == source.width &&
+			document.presentationPixels->height == source.height &&
+			jpegview_linux::EqualImageProcessing(document.materializedProcessing,
+				document.processing) &&
+			document.materializedAutoContrast == document.autoContrast;
+		Image processedPresentation;
+		CacheReservation processingStaging;
+		const Image* presentationInput = document.presentationPixels.get();
+		if (!presentationMatches) {
+			processingStaging = budget.TrackTemporary(source.bgra.size(),
+				CacheMemoryCategory::ActiveWorkingData);
+			if (!processingStaging || !BuildProcessed(source, document,
+				processedPresentation, shouldContinue)) return false;
+			presentationInput = &processedPresentation;
+		}
+		if (presentationInput == nullptr) return false;
+		nextPresentation = ResampleTrackedImage(*presentationInput, geometry,
+			ImageTransformSampling::FinalBicubic, budget,
+			nextPresentationReservation, shouldContinue);
+		if (!nextPresentation) return false;
+	} else {
+		nextPresentationReservation = nextSourceReservation.ShareAlias();
+	}
+	transformedSource = std::move(nextSource);
+	sourceReservation = std::move(nextSourceReservation);
+	transformedPresentation = std::move(nextPresentation);
+	presentationReservation = std::move(nextPresentationReservation);
+	return true;
+}
+
 bool ResizeTransformPreviewBase(std::shared_ptr<Image>& previewBase,
 	int width, int height, SharedCacheBudget& budget,
 	CacheReservation& previewReservation,
@@ -195,14 +268,20 @@ bool PrepareBoundedTransformPreviewBase(const Image& source, const Image& input,
 	int previewWidth = std::max(1, static_cast<int>(std::llround(source.width * scale)));
 	int previewHeight = std::max(1, static_cast<int>(std::llround(source.height * scale)));
 	try {
-		previewBase = std::make_shared<Image>(input);
+		previewBase = std::make_shared<Image>();
 	} catch (const std::exception&) {
 		return false;
 	}
-	previewReservation = budget.TrackTemporary(previewBase->bgra.size(),
+	previewReservation = budget.TrackTemporary(input.bgra.size(),
 		CacheMemoryCategory::ActiveWorkingData,
 		std::static_pointer_cast<const void>(previewBase));
-	if (!previewReservation || (shouldContinue && !shouldContinue()) ||
+	if (!previewReservation || (shouldContinue && !shouldContinue())) return false;
+	try {
+		*previewBase = input;
+	} catch (const std::exception&) {
+		return false;
+	}
+	if ((shouldContinue && !shouldContinue()) ||
 		!ResizeTransformPreviewBase(previewBase, previewWidth, previewHeight,
 			budget, previewReservation, shouldContinue) ||
 		!buildGeometry(previewBase->width, previewBase->height, previewGeometry)) return false;
@@ -235,11 +314,13 @@ bool PrepareBoundedTransformPreviewBase(const Image& source, const Image& input,
 	return true;
 }
 
-bool PrepareFreeRotationPreview(const Image& source,
-	const ImageDocumentSnapshot& document, const ImageOperationSpec& operation,
+template <typename GeometryBuilder>
+bool PrepareTransformPreview(const Image& source,
+	const ImageDocumentSnapshot& document, GeometryBuilder buildGeometry,
 	SharedCacheBudget& budget, const std::function<bool()>& shouldContinue,
-	Image& output, CacheReservation& outputStaging) {
+	std::shared_ptr<const Image>& output, CacheReservation& outputReservation) {
 	const bool processingMatches = document.presentationPixels &&
+		HasPixels(*document.presentationPixels) &&
 		jpegview_linux::EqualImageProcessing(document.materializedProcessing,
 			document.processing) &&
 		document.materializedAutoContrast == document.autoContrast &&
@@ -249,24 +330,41 @@ bool PrepareFreeRotationPreview(const Image& source,
 	std::shared_ptr<Image> previewBase;
 	CacheReservation previewReservation;
 	ImageTransformGeometry previewGeometry;
+	if (!PrepareBoundedTransformPreviewBase(source, input, buildGeometry,
+		budget, shouldContinue, previewBase, previewReservation, previewGeometry)) return false;
+	if (!processingMatches && ProcessingChangesPixels(document) &&
+		!previewBase->ApplyProcessing(document.processing, document.autoContrast,
+			shouldContinue)) return false;
+	output = ResampleTrackedImage(*previewBase, previewGeometry,
+		ImageTransformSampling::PreviewBilinear, budget, outputReservation,
+		shouldContinue);
+	return output != nullptr;
+}
+
+bool PrepareFreeRotationPreview(const Image& source,
+	const ImageDocumentSnapshot& document, const ImageOperationSpec& operation,
+	SharedCacheBudget& budget, const std::function<bool()>& shouldContinue,
+	std::shared_ptr<const Image>& output, CacheReservation& outputReservation) {
 	const auto buildGeometry = [&operation](int width, int height,
 		ImageTransformGeometry& geometry) {
 		return BuildFreeRotationGeometry(width, height,
 			operation.clockwiseDegrees, operation.autoCrop,
 			operation.preserveAspectRatio, geometry);
 	};
-	if (!PrepareBoundedTransformPreviewBase(source, input, buildGeometry,
-		budget, shouldContinue, previewBase, previewReservation, previewGeometry)) return false;
-	if (!processingMatches && ProcessingChangesPixels(document) &&
-		!previewBase->ApplyProcessing(document.processing, document.autoContrast,
-			shouldContinue)) return false;
-	const std::size_t outputBytes = static_cast<std::size_t>(previewGeometry.outputWidth) *
-		previewGeometry.outputHeight * 4;
-	outputStaging = budget.TrackTemporary(outputBytes,
-		CacheMemoryCategory::ActiveWorkingData);
-	if (!outputStaging || (shouldContinue && !shouldContinue())) return false;
-	return ResampleImageTransform(*previewBase, previewGeometry,
-		ImageTransformSampling::PreviewBilinear, output, shouldContinue);
+	return PrepareTransformPreview(source, document, buildGeometry, budget,
+		shouldContinue, output, outputReservation);
+}
+
+bool PreparePerspectivePreview(const Image& source,
+	const ImageDocumentSnapshot& document, const ImageOperationSpec& operation,
+	SharedCacheBudget& budget, const std::function<bool()>& shouldContinue,
+	std::shared_ptr<const Image>& output, CacheReservation& outputReservation) {
+	const auto buildGeometry = [&operation](int width, int height,
+		ImageTransformGeometry& geometry) {
+		return BuildPerspectiveGeometry(width, height, operation.perspective, geometry);
+	};
+	return PrepareTransformPreview(source, document, buildGeometry, budget,
+		shouldContinue, output, outputReservation);
 }
 
 } // namespace
@@ -282,6 +380,7 @@ ImageOperationResult ProcessImageOperation(const ImageOperationRequest& request,
 	result.updatesDocument = request.operation.kind == ImageOperationKind::Materialize ||
 		request.operation.kind == ImageOperationKind::Transform ||
 		request.operation.kind == ImageOperationKind::FreeRotate ||
+		request.operation.kind == ImageOperationKind::PerspectiveCorrect ||
 		request.operation.kind == ImageOperationKind::Crop ||
 		request.operation.kind == ImageOperationKind::Resize ||
 		request.operation.kind == ImageOperationKind::Reprocess ||
@@ -368,50 +467,47 @@ ImageOperationResult ProcessImageOperation(const ImageOperationRequest& request,
 		result.success = true;
 		break;
 	}
-	case ImageOperationKind::FreeRotate: {
+	case ImageOperationKind::FreeRotate:
+	case ImageOperationKind::PerspectiveCorrect: {
 		ImageTransformGeometry geometry;
-		if (!BuildFreeRotationGeometry(source->width, source->height,
-			request.operation.clockwiseDegrees, request.operation.autoCrop,
-			request.operation.preserveAspectRatio, geometry)) break;
-		Image rotatedSource;
-		if (!ResampleImageTransform(*source, geometry,
-			ImageTransformSampling::FinalBicubic, rotatedSource, shouldContinue)) break;
-		result.sourcePixels = OwnImage(std::move(rotatedSource), budget,
-			result.sourceReservation);
-		if (!result.sourcePixels) break;
-		if (!ProcessingChangesPixels(request.document)) {
-			if (!sharePresentation(result.sourcePixels)) break;
-		} else {
-			Image currentPresentation;
-			Image rotatedPresentation;
-			const bool currentProcessingMatches = request.document.presentationPixels &&
-				jpegview_linux::EqualImageProcessing(
-					request.document.materializedProcessing, request.document.processing) &&
-				request.document.materializedAutoContrast == request.document.autoContrast;
-			const Image* presentationToRotate = request.document.presentationPixels.get();
-			if (!currentProcessingMatches) {
-				if (!BuildProcessed(*source, request.document, currentPresentation,
-					shouldContinue)) break;
-				presentationToRotate = &currentPresentation;
-			}
-			if (presentationToRotate == nullptr ||
-				!ResampleImageTransform(*presentationToRotate, geometry,
-					ImageTransformSampling::FinalBicubic, rotatedPresentation,
-					shouldContinue) ||
-				!makePresentation(std::move(rotatedPresentation))) break;
-		}
+		const bool geometryReady = request.operation.kind == ImageOperationKind::FreeRotate ?
+			BuildFreeRotationGeometry(source->width, source->height,
+				request.operation.clockwiseDegrees, request.operation.autoCrop,
+				request.operation.preserveAspectRatio, geometry) :
+			BuildPerspectiveGeometry(source->width, source->height,
+				request.operation.perspective, geometry);
+		if (!geometryReady) break;
+		std::shared_ptr<const Image> transformedSource;
+		std::shared_ptr<const Image> transformedPresentation;
+		CacheReservation transformedSourceReservation;
+		CacheReservation transformedPresentationReservation;
+		if (!PrepareTransformedDocumentPixels(*source, request.document, geometry,
+			budget, shouldContinue, transformedSource,
+			transformedSourceReservation, transformedPresentation,
+			transformedPresentationReservation)) break;
+		result.sourcePixels = std::move(transformedSource);
+		result.sourceReservation = std::move(transformedSourceReservation);
+		result.presentationPixels = std::move(transformedPresentation);
+		result.presentationReservation = std::move(transformedPresentationReservation);
 		result.rotationQuarterTurns = 0;
 		result.modified = true;
 		result.flattenAnimation = request.document.animated;
 		result.success = true;
 		break;
 	}
-	case ImageOperationKind::FreeRotatePreview: {
-		Image preview;
-		CacheReservation previewOutputStaging;
-		if (!PrepareFreeRotationPreview(*source, request.document,
-			request.operation, budget, shouldContinue, preview, previewOutputStaging) ||
-			!makeOutput(std::move(preview))) break;
+	case ImageOperationKind::FreeRotatePreview:
+	case ImageOperationKind::PerspectivePreview: {
+		std::shared_ptr<const Image> preview;
+		CacheReservation previewReservation;
+		const bool prepared = request.operation.kind ==
+			ImageOperationKind::FreeRotatePreview ?
+			PrepareFreeRotationPreview(*source, request.document,
+				request.operation, budget, shouldContinue, preview, previewReservation) :
+			PreparePerspectivePreview(*source, request.document,
+				request.operation, budget, shouldContinue, preview, previewReservation);
+		if (!prepared) break;
+		result.outputPixels = std::move(preview);
+		result.outputReservation = std::move(previewReservation);
 		result.success = true;
 		break;
 	}
