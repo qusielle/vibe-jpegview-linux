@@ -16,6 +16,7 @@ enum class ImageOperationKind {
 	Materialize,
 	Transform,
 	FreeRotate,
+	FreeRotatePreview,
 	Crop,
 	Resize,
 	Reprocess,

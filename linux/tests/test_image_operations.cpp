@@ -941,6 +941,21 @@ void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
 	Expect(!invalidRotationResult.success && invalidRotationResult.failure.Failed() &&
 		!invalidRotationResult.sourcePixels && !invalidRotationResult.presentationPixels,
 		"free-rotation worker accepted invalid geometry or published partial pixels");
+	jpegview_linux::ImageOperationSpec previewRotation;
+	previewRotation.kind = jpegview_linux::ImageOperationKind::FreeRotatePreview;
+	previewRotation.clockwiseDegrees = 27.0;
+	const jpegview_linux::ImageOperationResult preview = run(previewRotation);
+	jpegview_linux::ImageTransformGeometry previewGeometry;
+	Expect(jpegview_linux::BuildFreeRotationGeometry(source->width, source->height,
+		previewRotation.clockwiseDegrees, false, false, previewGeometry),
+		"could not build free-rotation preview reference geometry");
+	jpegview_linux::Image expectedPreview;
+	Expect(jpegview_linux::ResampleFreeRotation(processedSource, previewGeometry,
+		jpegview_linux::ImageTransformSampling::PreviewBilinear, expectedPreview) &&
+		preview.success && !preview.updatesDocument && !preview.sourcePixels &&
+		!preview.presentationPixels && preview.outputPixels &&
+		preview.outputPixels->bgra == expectedPreview.bgra,
+		"free-rotation preview did not produce an isolated provisional result");
 
 	jpegview_linux::ImageOperationSpec crop;
 	crop.kind = jpegview_linux::ImageOperationKind::Crop;
@@ -1045,6 +1060,33 @@ void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
 		identityTransform.sourcePixels->width == 3 && identityTransform.sourcePixels->height == 4 &&
 		identityBudget->Snapshot().activeWorkingBytes == identityPixels->bgra.size() * 2,
 		"identity transform built or charged two full-size outputs instead of sharing one");
+}
+
+void TestFreeRotationPreviewBoundsLargeSourcePixels() {
+	constexpr int width = 3000;
+	constexpr int height = 2000;
+	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4, 91);
+	for (std::size_t offset = 3; offset < pixels.size(); offset += 4) pixels[offset] = 255;
+	auto source = std::make_shared<jpegview_linux::Image>();
+	Expect(source->StoreBGRA(pixels.data(), width, height),
+		"could not create a large free-rotation preview source");
+	pixels.clear();
+	jpegview_linux::ImageDocumentSnapshot document;
+	document.ownerGeneration = 3;
+	document.revision = 8;
+	document.sourcePixels = source;
+	jpegview_linux::ImageOperationRequest request;
+	request.document = document;
+	request.operation.kind = jpegview_linux::ImageOperationKind::FreeRotatePreview;
+	request.operation.clockwiseDegrees = 45.0;
+	const auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(0);
+	const jpegview_linux::ImageOperationResult result =
+		jpegview_linux::ProcessImageOperation(request, [] { return true; }, *budget);
+	Expect(result.success && result.outputPixels &&
+		static_cast<std::uint64_t>(result.outputPixels->width) *
+			result.outputPixels->height <= 4ull * 1024ull * 1024ull &&
+		std::max(result.outputPixels->width, result.outputPixels->height) <= 2048,
+		"large free-rotation preview exceeded its output-pixel or dimension bound");
 }
 
 void TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource() {
@@ -4183,6 +4225,7 @@ const TestCase kTests[] = {
 	{"image-document-rejects-stale-operations-and-owns-current-pixels", &TestImageDocumentRejectsStaleOperationsAndOwnsCurrentPixels},
 	{"image-operation-worker-runs-crop-and-flattens-captured-frame", &TestImageOperationWorkerRunsCropAndFlattensCapturedFrame},
 	{"image-operation-worker-matches-transforms-and-pixel-pipelines", &TestImageOperationWorkerMatchesTransformsAndPixelPipelines},
+	{"free-rotation-preview-bounds-large-source-pixels", &TestFreeRotationPreviewBoundsLargeSourcePixels},
 	{"in-place-save-materializes-lazy-document-and-rebinds-source", &TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource},
 	{"image-operation-worker-supersedes-and-survives-failures", &TestImageOperationWorkerSupersedesAndSurvivesFailures},
 	{"picture-levels-store-round-trip", &TestPictureLevelsStoreRoundTrip},

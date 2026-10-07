@@ -175,8 +175,9 @@ should normally be added to one of these focused modules and covered by the matc
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer
   instead of copying a second full-resolution image.
 - `image_operation_worker`: cancellable CPU-admitted discrete/free rotation, crop, resize, materialize,
-  reprocess, selection-copy, and output-size preparation requests. Each request captures an
-  `ImageDocumentSnapshot`;
+  reprocess, selection-copy, and output-size preparation requests. Free-rotation previews return an
+  image bounded to 2048 pixels per side and 4 MP without changing the document; final rotation
+  captures the same `ImageDocumentSnapshot` and produces replacement source and presentation pixels;
   only a matching successful revision can be applied. Viewer creates any replacement SDL texture before
   swapping document pixels, so failure or staleness preserves the last successful presentation. Large
   result and decoded-buffer references retire off the event thread.
