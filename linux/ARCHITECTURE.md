@@ -167,9 +167,9 @@ should normally be added to one of these focused modules and covered by the matc
   including expanded canvas geometry, centered contained cropping, optional source-aspect
   preservation, and exact orthogonal-turn identification. It performs no pixel allocation or
   rendering.
-- `image_transform_pixels`: cancellable BGRA resampling for free rotation, with exact pixel copies
-  for orthogonal turns, bilinear previews, bicubic final output, transparent uncovered areas, and
-  premultiplied-alpha interpolation.
+- `image_transform_pixels`: cancellable BGRA resampling through validated image-transform geometry,
+  currently preserving affine mappings and exact pixel copies for orthogonal turns, with bilinear
+  previews, bicubic final output, transparent uncovered areas, and premultiplied-alpha interpolation.
 - `free_rotation_model`: dialog session state and parameter revisions for free-rotation editing.
   Preview results match both the open session and its current parameter revision; applying freezes
   edits and rejects preview completions until failure resumes editing or the document commit closes
@@ -184,7 +184,9 @@ should normally be added to one of these focused modules and covered by the matc
   instead of copying a second full-resolution image.
 - `image_operation_worker`: cancellable CPU-admitted discrete/free rotation, crop, resize, materialize,
   reprocess, selection-copy, and output-size preparation requests. Free-rotation previews return an
-  image bounded to 2048 pixels per side and 4 MP without changing the document; final rotation
+  image bounded to 2048 pixels per side and 4 MP without changing the document. A shared transform
+  preview helper copies and resizes the processing base under cache reservations, then rebuilds its
+  geometry until the output bounds are satisfied. Final rotation
   captures the same `ImageDocumentSnapshot` and produces replacement source and presentation pixels;
   only a matching successful revision can be applied. Viewer creates any replacement SDL texture before
   swapping document pixels, so failure or staleness preserves the last successful presentation. Large

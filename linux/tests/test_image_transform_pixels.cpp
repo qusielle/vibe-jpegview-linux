@@ -15,7 +15,7 @@ using jpegview_linux::BuildFreeRotationGeometry;
 using jpegview_linux::Image;
 using jpegview_linux::ImageTransformGeometry;
 using jpegview_linux::ImageTransformSampling;
-using jpegview_linux::ResampleFreeRotation;
+using jpegview_linux::ResampleImageTransform;
 
 void Expect(bool condition, const char* message) {
 	if (!condition) throw std::runtime_error(message);
@@ -36,7 +36,7 @@ void TestFreeRotationExactTurnsPreservePixels() {
 	ImageTransformGeometry geometry;
 	Image output;
 	Expect(BuildFreeRotationGeometry(source.width, source.height, 90.0,
-		false, false, geometry) && ResampleFreeRotation(source, geometry,
+		false, false, geometry) && ResampleImageTransform(source, geometry,
 		ImageTransformSampling::FinalBicubic, output),
 		"exact clockwise rotation could not be resampled");
 	Expect(output.width == 3 && output.height == 2 &&
@@ -50,7 +50,7 @@ void TestFreeRotationExactTurnsPreservePixels() {
 		"exact quarter-turn resampling changed source pixel values");
 
 	Expect(BuildFreeRotationGeometry(source.width, source.height, 360.0,
-		false, false, geometry) && ResampleFreeRotation(source, geometry,
+		false, false, geometry) && ResampleImageTransform(source, geometry,
 		ImageTransformSampling::PreviewBilinear, output) &&
 		output.width == source.width && output.height == source.height &&
 		output.bgra == source.bgra,
@@ -64,7 +64,7 @@ void TestFreeRotationBilinearAlphaAndTransparentCanvas() {
 	ImageTransformGeometry geometry;
 	Image output;
 	Expect(BuildFreeRotationGeometry(2, 2, 45.0, false, false, geometry) &&
-		ResampleFreeRotation(source, geometry,
+		ResampleImageTransform(source, geometry,
 			ImageTransformSampling::PreviewBilinear, output),
 		"bilinear free-rotation resampling failed");
 	Expect(output.width == 3 && output.height == 3,
@@ -92,7 +92,7 @@ void TestFreeRotationBicubicSamplingAndCancellation() {
 	ImageTransformGeometry geometry;
 	Image output;
 	Expect(BuildFreeRotationGeometry(7, 7, 45.0, false, false, geometry) &&
-		ResampleFreeRotation(source, geometry,
+		ResampleImageTransform(source, geometry,
 			ImageTransformSampling::FinalBicubic, output),
 		"bicubic free-rotation resampling failed");
 	const std::size_t sampleOffset = (static_cast<std::size_t>(4) * output.width + 5) * 4;
@@ -103,7 +103,7 @@ void TestFreeRotationBicubicSamplingAndCancellation() {
 	Image unchanged = MakeImage(1, 1, {9, 8, 7, 6});
 	const std::vector<std::uint8_t> original = unchanged.bgra;
 	int checks = 0;
-	const bool completed = ResampleFreeRotation(source, geometry,
+	const bool completed = ResampleImageTransform(source, geometry,
 		ImageTransformSampling::FinalBicubic, unchanged, [&checks] {
 			return ++checks < 3;
 		});
@@ -120,7 +120,7 @@ void TestFreeRotationRejectsMismatchedGeometry() {
 	Image output = MakeImage(1, 1, {90, 80, 70, 60});
 	const std::vector<std::uint8_t> original = output.bgra;
 	Expect(BuildFreeRotationGeometry(3, 2, 30.0, false, false, geometry) &&
-		!ResampleFreeRotation(source, geometry,
+		!ResampleImageTransform(source, geometry,
 			ImageTransformSampling::FinalBicubic, output) &&
 		output.width == 1 && output.height == 1 && output.bgra == original,
 		"resampling accepted geometry for another source or modified output on failure");
@@ -128,7 +128,7 @@ void TestFreeRotationRejectsMismatchedGeometry() {
 	geometry.sourceWidth = source.width;
 	geometry.sourceHeight = source.height;
 	geometry.outputWidth = 0;
-	Expect(!ResampleFreeRotation(source, geometry,
+	Expect(!ResampleImageTransform(source, geometry,
 		ImageTransformSampling::PreviewBilinear, output) && output.bgra == original,
 		"resampling accepted an invalid output extent");
 }

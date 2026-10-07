@@ -174,7 +174,7 @@ bool CopyExactTurn(const Image& source, const ImageTransformGeometry& geometry,
 
 } // namespace
 
-bool ResampleFreeRotation(const Image& source,
+bool ResampleImageTransform(const Image& source,
 	const ImageTransformGeometry& geometry, ImageTransformSampling sampling,
 	Image& output, const std::function<bool()>& shouldContinue) {
 	if (!HasValidPixels(source) || !ValidGeometry(geometry) ||

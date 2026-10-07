@@ -553,8 +553,8 @@ private:
 		jpegview_linux::ImageOperationSpec operation;
 		jpegview_linux::ImageDocumentSnapshot document;
 		std::uint64_t workerGeneration = 0;
-		std::uint64_t rotationSessionId = 0;
-		std::uint64_t rotationPreviewRevision = 0;
+		std::uint64_t transformEditorSessionId = 0;
+		std::uint64_t transformPreviewRevision = 0;
 		int transformCommand = 0;
 		bool fullSize = true;
 		bool keepSpreadRotation = false;
@@ -3003,7 +3003,7 @@ private:
 		pendingImageOperation_.reset();
 		if (pending.purpose == ImageOperationPurpose::FreeRotationPreview) {
 			const bool currentPreview = freeRotationDialog_.MatchesPreview(
-				pending.rotationSessionId, pending.rotationPreviewRevision) &&
+				pending.transformEditorSessionId, pending.transformPreviewRevision) &&
 				imageDocument_.Matches(result->expected);
 			if (currentPreview && result->success && result->outputPixels) {
 				SDL_Texture* previewTexture = CreateTexture(*result->outputPixels);
@@ -3023,8 +3023,8 @@ private:
 						freeRotationPreviewHeight_ = result->outputPixels->height;
 						freeRotationPreviewHasTransparency_ =
 							result->outputPixels->hasTransparency;
-						freeRotationPreviewSessionId_ = pending.rotationSessionId;
-						freeRotationPreviewRevision_ = pending.rotationPreviewRevision;
+						freeRotationPreviewSessionId_ = pending.transformEditorSessionId;
+						freeRotationPreviewRevision_ = pending.transformPreviewRevision;
 						const SDL_Rect area = ImageAreaRect();
 						freeRotationPreviewViewport_.Fit(freeRotationPreviewWidth_,
 							freeRotationPreviewHeight_, area.w, area.h);
@@ -9375,8 +9375,8 @@ private:
 		}
 		if (pendingImageOperation_.has_value() &&
 			pendingImageOperation_->purpose == ImageOperationPurpose::FreeRotationPreview) {
-			pendingImageOperation_->rotationSessionId = freeRotationDialog_.SessionId();
-			pendingImageOperation_->rotationPreviewRevision = freeRotationDialog_.PreviewRevision();
+			pendingImageOperation_->transformEditorSessionId = freeRotationDialog_.SessionId();
+			pendingImageOperation_->transformPreviewRevision = freeRotationDialog_.PreviewRevision();
 		}
 		return true;
 	}

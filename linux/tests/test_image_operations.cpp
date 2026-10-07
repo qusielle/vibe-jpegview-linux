@@ -920,9 +920,9 @@ void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
 			geometry), "could not build free-rotation worker reference geometry");
 		jpegview_linux::Image expectedSource;
 		jpegview_linux::Image expectedPresentation;
-		Expect(jpegview_linux::ResampleFreeRotation(*source, geometry,
+		Expect(jpegview_linux::ResampleImageTransform(*source, geometry,
 			jpegview_linux::ImageTransformSampling::FinalBicubic, expectedSource) &&
-			jpegview_linux::ResampleFreeRotation(processedSource, geometry,
+			jpegview_linux::ResampleImageTransform(processedSource, geometry,
 				jpegview_linux::ImageTransformSampling::FinalBicubic, expectedPresentation),
 			"could not build free-rotation worker parity references");
 		Expect(result.success && result.updatesDocument && result.sourcePixels &&
@@ -950,7 +950,7 @@ void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
 		previewRotation.clockwiseDegrees, false, false, previewGeometry),
 		"could not build free-rotation preview reference geometry");
 	jpegview_linux::Image expectedPreview;
-	Expect(jpegview_linux::ResampleFreeRotation(processedSource, previewGeometry,
+	Expect(jpegview_linux::ResampleImageTransform(processedSource, previewGeometry,
 		jpegview_linux::ImageTransformSampling::PreviewBilinear, expectedPreview) &&
 		preview.success && !preview.updatesDocument && !preview.sourcePixels &&
 		!preview.presentationPixels && preview.outputPixels &&
