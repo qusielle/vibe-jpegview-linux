@@ -437,8 +437,15 @@ should normally be added to one of these focused modules and covered by the matc
   catalog before compact filtering so commands shared by both views keep the same letter and
   underline position; the compact-only “Show Advanced Options” row is assigned afterward.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
-  Temporary modal suppression hides deadlines without changing frame readiness or play intent, then
-  starts a fresh interval when the modal closes.
+  It tracks explicit user freeze separately from image readiness and temporary modal suppression.
+  Manual frame stepping wraps only within the current animation and freezes every playback deadline,
+  including Movie's folder-advance deadline; resuming a manually held last frame continues from that
+  frame, while a naturally exhausted finite animation restarts from frame zero. A per-image uniform
+  delay override is clamped to 10–60,000 ms, replaces each source frame's native delay for scheduling,
+  and can be reset to restore the original per-frame timings. Changing or resetting that override
+  returns timing to native animation mode rather than Movie or slideshow timing. Temporary modal
+  suppression still preserves the separate user play/freeze intent and starts a fresh interval when
+  the modal closes.
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus

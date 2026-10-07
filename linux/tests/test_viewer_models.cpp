@@ -4466,6 +4466,104 @@ void TestPlaybackSchedulerTimingAndModes() {
 		"slideshow elapsed time failed across tick wraparound");
 }
 
+void TestPlaybackSchedulerAnimationFrameControls() {
+	using jpegview_linux::PlaybackActionType;
+	using jpegview_linux::PlaybackMode;
+	jpegview_linux::PlaybackScheduler stepped;
+	stepped.ConfigureImage({25, 90, 130}, 0, true, 100);
+	Expect(stepped.StepAnimationFrame(1, 101).type == PlaybackActionType::ShowFrame &&
+		stepped.FrameIndex() == 1 && stepped.AnimationManuallyPaused() &&
+		!stepped.AnimationPlaying() && !stepped.NextDeadline().has_value(),
+		"manual next-frame did not select one frame and freeze all animation deadlines");
+	Expect(stepped.Tick(10000).type == PlaybackActionType::None &&
+		stepped.StepAnimationFrame(1, 10001).frameIndex == 2 &&
+		stepped.StepAnimationFrame(1, 10002).frameIndex == 0 &&
+		stepped.StepAnimationFrame(-1, 10003).frameIndex == 2,
+		"manual frame stepping did not wrap in both directions or remain frozen");
+	Expect(stepped.ToggleAnimationPlayback(10004).type == PlaybackActionType::None &&
+		!stepped.AnimationManuallyPaused() && stepped.AnimationPlaying() &&
+		stepped.FrameIndex() == 2 && stepped.NextDeadline() == 10134,
+		"resuming a manually selected last frame rewound it or used the wrong frame delay");
+	Expect(stepped.ToggleAnimationPlayback(10005).type == PlaybackActionType::None &&
+		stepped.AnimationManuallyPaused() && !stepped.NextDeadline().has_value() &&
+		stepped.Tick(20000).type == PlaybackActionType::None,
+		"manual freeze did not suppress later animation ticks");
+	stepped.SetImageReady(false, 20001);
+	stepped.SetImageReady(true, 21000);
+	Expect(stepped.AnimationManuallyPaused() && !stepped.AnimationPlaying() &&
+		!stepped.NextDeadline().has_value(),
+		"renderer readiness restored playback against an explicit user freeze");
+	stepped.ToggleAnimationPlayback(21001);
+	Expect(stepped.AnimationPlaying() && stepped.NextDeadline() == 21131,
+		"resuming after a renderer-ready transition did not start a fresh frame interval");
+
+	jpegview_linux::PlaybackScheduler movie;
+	movie.ConfigureImage({20, 20}, 1, true, 0);
+	movie.StartMovie(25.0, 0);
+	Expect(movie.StepAnimationFrame(1, 1).frameIndex == 1 &&
+		movie.Mode() == PlaybackMode::Movie && movie.AnimationManuallyPaused() &&
+		!movie.NextDeadline().has_value() &&
+		movie.Tick(1000).type == PlaybackActionType::None,
+		"manual frame stepping allowed Movie mode to advance the folder");
+	movie.ToggleAnimationPlayback(1000);
+	Expect(movie.AnimationPlaying() && movie.NextDeadline() == 1040 &&
+		movie.Tick(1039).type == PlaybackActionType::None &&
+		movie.Tick(1040).type == PlaybackActionType::NextImage,
+		"resuming a manually stepped Movie frame did not preserve Movie FPS and loop behavior");
+	Expect(movie.ToggleAnimationPlayback(1041).type == PlaybackActionType::None &&
+		movie.AnimationManuallyPaused() && !movie.NextDeadline().has_value() &&
+		movie.Tick(10000).type == PlaybackActionType::None,
+		"manual freeze did not suppress Movie folder advancement after finite playback ended");
+	movie.ToggleAnimationPlayback(10001);
+	Expect(!movie.AnimationPlaying() && movie.NextDeadline() == 10041 &&
+		movie.Tick(10040).type == PlaybackActionType::None &&
+		movie.Tick(10041).type == PlaybackActionType::NextImage,
+		"resuming a manually held finite Movie did not restart its folder interval");
+
+	jpegview_linux::PlaybackScheduler finite;
+	finite.ConfigureImage({20, 30}, 1, true, 0);
+	finite.StepAnimationFrame(1, 1);
+	finite.ToggleAnimationPlayback(2);
+	Expect(finite.FrameIndex() == 1 && finite.NextDeadline() == 32 &&
+		finite.Tick(32).type == PlaybackActionType::None &&
+		!finite.AnimationPlaying() && finite.CompletedLoops() == 1,
+		"manually stepping reset the finite sequence's remaining loop run incorrectly");
+	const auto restarted = finite.Resume(40);
+	Expect(restarted.type == PlaybackActionType::ShowFrame && restarted.frameIndex == 0 &&
+		finite.FrameIndex() == 0 && finite.AnimationPlaying() &&
+		finite.CompletedLoops() == 0 && finite.NextDeadline() == 60,
+		"a naturally exhausted finite animation did not restart as a new loop run");
+
+	jpegview_linux::PlaybackScheduler delays;
+	delays.ConfigureImage({100, 250}, 0, true, 0);
+	delays.StartMovie(25.0, 0);
+	delays.StepAnimationFrame(1, 1);
+	Expect(delays.FrameDelayMs() == 250 && delays.OriginalFrameDelayMs() == 250 &&
+		delays.AdjustAnimationDelay(50, 20) && delays.Mode() == PlaybackMode::None &&
+		delays.AnimationPlaying() && delays.FrameDelayMs() == 300 &&
+		delays.AnimationDelayOverrideMs() == 300 && delays.NextDeadline() == 320,
+		"slowing an animation did not create a per-image uniform delay or leave Movie mode");
+	Expect(delays.Tick(319).type == PlaybackActionType::None &&
+		delays.Tick(320).frameIndex == 0 && delays.NextDeadline() == 620,
+		"the adjusted delay did not apply uniformly to each frame");
+	Expect(delays.AdjustAnimationDelay(std::numeric_limits<int>::min(), 400) &&
+		delays.FrameDelayMs() == 10 && delays.NextDeadline() == 410 &&
+		delays.AdjustAnimationDelay(std::numeric_limits<int>::max(), 500) &&
+		delays.FrameDelayMs() == 60000 && delays.NextDeadline() == 60500,
+		"animation delay adjustment did not saturate safely at its supported limits");
+	Expect(delays.ResetAnimationDelay(600) && !delays.AnimationDelayOverrideMs().has_value() &&
+		delays.FrameDelayMs() == 100 && delays.NextDeadline() == 700 &&
+		!delays.ResetAnimationDelay(700),
+		"restoring native delays did not clear the override or retain original frame timing");
+
+	jpegview_linux::PlaybackScheduler unavailable;
+	unavailable.ConfigureImage({100}, 0, false, 0);
+	Expect(unavailable.StepAnimationFrame(1, 1).type == PlaybackActionType::None &&
+		!unavailable.AdjustAnimationDelay(50, 2) &&
+		!unavailable.ResetAnimationDelay(3),
+		"still images accepted animation-only frame or delay controls");
+}
+
 void TestEventLoopInvalidationDeadlinesWakeupsAndMotion() {
 	using jpegview_linux::FrameInvalidationReason;
 	using jpegview_linux::FrameInvalidator;
@@ -4930,6 +5028,7 @@ const TestCase kTests[] = {
 	{"image-info-formatting", &TestImageInfoFormatting},
 	{"system-font-resolution-and-unicode-rendering", &TestSystemFontResolutionAndUnicodeRendering},
 	{"playback-scheduler-timing-and-modes", &TestPlaybackSchedulerTimingAndModes},
+	{"playback-scheduler-animation-frame-controls", &TestPlaybackSchedulerAnimationFrameControls},
 	{"event-loop-invalidation-deadlines-wakeups-and-motion", &TestEventLoopInvalidationDeadlinesWakeupsAndMotion},
 	{"modal-event-router-precedence", &TestModalEventRouterPrecedence},
 	{"go-to-image-number-model", &TestGoToImageNumberModel},

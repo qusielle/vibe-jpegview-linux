@@ -39,14 +39,23 @@ public:
 	void StartMovie(double framesPerSecond, std::uint32_t now);
 	void Stop(std::uint32_t now);
 	PlaybackAction Resume(std::uint32_t now);
+	PlaybackAction StepAnimationFrame(int direction, std::uint32_t now);
+	PlaybackAction ToggleAnimationPlayback(std::uint32_t now);
+	bool AdjustAnimationDelay(int deltaMs, std::uint32_t now);
+	bool ResetAnimationDelay(std::uint32_t now);
 	PlaybackAction Tick(std::uint32_t now);
 	std::optional<std::uint32_t> NextDeadline() const;
 	void FrameDisplayFailed();
 
 	PlaybackMode Mode() const { return mode_; }
 	bool AnimationPlaying() const { return animationPlaying_; }
+	bool AnimationManuallyPaused() const { return manuallyPaused_; }
 	bool HasAnimation() const { return hasAnimation_; }
+	bool ImageReady() const { return imageReady_; }
 	std::size_t FrameIndex() const { return frameIndex_; }
+	int FrameDelayMs() const;
+	int OriginalFrameDelayMs() const;
+	std::optional<int> AnimationDelayOverrideMs() const { return frameDelayOverrideMs_; }
 	double SlideshowSeconds() const { return slideshowSeconds_; }
 	double LastSlideshowSeconds() const { return lastSlideshowSeconds_; }
 	double MovieFramesPerSecond() const { return movieFramesPerSecond_; }
@@ -56,6 +65,7 @@ public:
 private:
 	std::uint32_t MovieFrameInterval() const;
 	void ScheduleFrame(std::uint32_t now);
+	PlaybackAction StartAnimation(std::uint32_t now);
 	static bool Reached(std::uint32_t now, std::uint32_t deadline);
 
 	PlaybackMode mode_ = PlaybackMode::None;
@@ -66,9 +76,13 @@ private:
 	std::uint32_t lastInteractionTick_ = 0;
 	bool hasAnimation_ = false;
 	bool animationPlaying_ = false;
+	bool manuallyPaused_ = false;
+	bool manualResumeAnimation_ = false;
+	bool sequenceExhausted_ = false;
 	bool imageReady_ = true;
 	bool temporarilyPaused_ = false;
 	std::vector<int> frameDelaysMs_;
+	std::optional<int> frameDelayOverrideMs_;
 	std::size_t frameIndex_ = 0;
 	int loopCount_ = 0;
 	int completedLoops_ = 0;
