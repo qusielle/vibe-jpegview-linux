@@ -134,6 +134,11 @@ they support.
    nonzero rotation to an animation keeps the displayed frame as a still image. Opening the editor
    pauses animation, movie, and slideshow timing. Cancel resumes animation from the retained frame;
    Apply keeps a still frame and resumes an active movie or slideshow interval.
+   **Transform image → Perspective correction...** opens a separate editor with left- and right-edge
+   convergence sliders, automatic cropping, source-aspect preservation, and an alignment grid.
+   Its bounded preview runs asynchronously, and Apply corrects the full-resolution image in memory.
+   Cancel and zero-adjustment Apply leave the document unchanged. Opening the editor pauses playback;
+   Cancel resumes it, while applying a correction retains an animation's displayed frame as a still.
    PageUp/PageDown remain logical previous/next. The pixel color sampler is disabled by default;
    enable **Pixel color sampler** in the context menu to show a pointer-following swatch and
    `#RRGGBBAA` value, and click the readout to copy it. The opt-in preference persists between runs.
