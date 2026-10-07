@@ -18,6 +18,7 @@ codec_display
 image_cache
 image_operations
 image_transform_geometry
+image_transform_pixels
 viewer_models
 dialogs_sessions
 EOF
