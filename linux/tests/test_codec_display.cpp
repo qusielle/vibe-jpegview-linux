@@ -1823,7 +1823,7 @@ void TestExifArchiveForegroundYieldRetriesCurrentGeneration() {
 	Expect(completed && ready.size() == 1 &&
 		ready.front().generation == generation && ready.front().source == source.Key() &&
 		ready.front().metadataAvailable &&
-		ready.front().jpegComment == archiveComment &&
+		ready.front().imageComment == archiveComment &&
 		!ready.front().failure.Failed() && reads.load() == 2,
 		"current archive EXIF request did not retry and publish after its foreground yield");
 }
@@ -2055,7 +2055,7 @@ void TestExifMetadataWorkerPublishesCurrentExceptions() {
 		!readerFailure.front().metadataAvailable &&
 		!readerFailure.front().metadata.hasExif &&
 		readerFailure.front().metadata.cameraModel.empty() &&
-		readerFailure.front().jpegComment.empty();
+		readerFailure.front().imageComment.empty();
 	const std::uint64_t readerRetryGeneration = readerWorker.Request(admissionSource);
 	const bool readerRetryBecameIdle = readerWorker.WaitUntilIdle(std::chrono::seconds(2));
 	auto readerRetry = readerWorker.TakeReady();
@@ -2088,7 +2088,7 @@ void TestExifMetadataWorkerPublishesCurrentExceptions() {
 		!validatorFailure.front().metadataAvailable &&
 		!validatorFailure.front().metadata.hasExif &&
 		validatorFailure.front().metadata.cameraModel.empty() &&
-		validatorFailure.front().jpegComment.empty();
+		validatorFailure.front().imageComment.empty();
 	const std::uint64_t validatorRetryGeneration = validatorWorker.Request(admissionSource);
 	const bool validatorRetryBecameIdle = validatorWorker.WaitUntilIdle(
 		std::chrono::seconds(2));
@@ -2129,7 +2129,7 @@ void TestExifMetadataWorkerPublishesCurrentExceptions() {
 		!admissionFailure.front().metadataAvailable &&
 		!admissionFailure.front().metadata.hasExif &&
 		admissionFailure.front().metadata.cameraModel.empty() &&
-		admissionFailure.front().jpegComment.empty() && admissionReaderCalls.load() == 0;
+		admissionFailure.front().imageComment.empty() && admissionReaderCalls.load() == 0;
 	coordinator.SetTestHookForTesting(nullptr, nullptr);
 	const std::uint64_t admissionRetryGeneration = admissionWorker.Request(admissionSource);
 	const bool admissionRetryBecameIdle = admissionWorker.WaitUntilIdle(

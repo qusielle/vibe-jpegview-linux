@@ -1,6 +1,7 @@
 #include "exif_metadata_worker.h"
 
 #include "event_loop_model.h"
+#include "image_metadata_reader.h"
 #include "perf_diagnostics.h"
 #include "source_work_coordinator.h"
 
@@ -33,7 +34,7 @@ struct ExifMetadataWorker::Impl {
 		if (!reader) {
 			reader = [](const std::filesystem::path& filename, ExifInfo& metadata,
 				std::string& comment) {
-				return ReadJpegMetadata(filename, metadata, comment);
+				return ReadImageMetadata(filename, metadata, comment);
 			};
 		}
 		if (!sourceValidator) sourceValidator = IsImageSourceCurrent;
@@ -111,7 +112,7 @@ struct ExifMetadataWorker::Impl {
 								}
 							} else if (context.Continue()) {
 								result.metadataAvailable = reader(work.source.LogicalPath(),
-									result.metadata, result.jpegComment);
+									result.metadata, result.imageComment);
 								if (foregroundYielded->load(std::memory_order_relaxed) ||
 									!context.Continue()) {
 									retryAfterForeground = foregroundYielded->load(
@@ -153,13 +154,13 @@ struct ExifMetadataWorker::Impl {
 					}
 				} catch (const std::exception& error) {
 					result.metadata = {};
-					result.jpegComment.clear();
+					result.imageComment.clear();
 					result.metadataAvailable = false;
 					result.failure = {WorkerFailureKind::Exception, error.what()};
 					exceptionFailure = true;
 				} catch (...) {
 					result.metadata = {};
-					result.jpegComment.clear();
+					result.imageComment.clear();
 					result.metadataAvailable = false;
 					result.failure = {WorkerFailureKind::Exception,
 						"unknown EXIF metadata worker failure"};
@@ -174,7 +175,7 @@ struct ExifMetadataWorker::Impl {
 				if (!retryAfterForeground) break;
 
 				result.metadata = {};
-				result.jpegComment.clear();
+				result.imageComment.clear();
 				result.metadataAvailable = false;
 				result.failure = {};
 				sourceCurrentForPublication = false;
@@ -189,11 +190,11 @@ struct ExifMetadataWorker::Impl {
 				result.failure = {WorkerFailureKind::Cancelled, "metadata request was cancelled"};
 			} else if (!result.metadataAvailable && !result.failure.Failed()) {
 				result.failure = {WorkerFailureKind::ProcessingFailed,
-					"JPEG metadata was unavailable"};
+					"image metadata was unavailable"};
 			}
 			if (!result.metadataAvailable) {
 				result.metadata = {};
-				result.jpegComment.clear();
+				result.imageComment.clear();
 			}
 
 			bool published = false;

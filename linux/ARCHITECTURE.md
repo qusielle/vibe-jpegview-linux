@@ -559,6 +559,9 @@ should normally be added to one of these focused modules and covered by the matc
   unpublished operation outputs use scoped cleanup on every exit.
 - `exif_reader`: bounded JPEG APP1/COM segment traversal and comment parsing; embedded TIFF data is
   handed to `tiff_metadata_reader`.
+- `image_metadata_reader`: selected-image metadata dispatch from the detected content signature.
+  JPEG, standalone TIFF, and DNG content share the existing worker and source-generation checks;
+  directory scans do not probe metadata for every listed image.
 - `tiff_metadata_reader`: bounds-checked TIFF parsing over a memory span or read-at source; large
   TIFF files need only read the header, directory tables, and referenced metadata values. Reads check
   the work context for cancellation. Common shooting fields use IFD0 as a per-field fallback; valid

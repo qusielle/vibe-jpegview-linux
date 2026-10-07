@@ -417,7 +417,10 @@ they support.
     discarded when either becomes stale. Archive-member EXIF reads resume after foreground source
     work so navigation does not permanently lose optional metadata. Common shooting fields use
     IFD0 as a safe fallback when the ExifIFD is missing or malformed, while valid ExifIFD values
-    take precedence. Rotate/mirror, crop, resize,
+    take precedence. The selected-image metadata reader identifies JPEG, TIFF, and DNG content from
+    its signature, so a mismatched filename suffix does not select the wrong metadata parser. TIFF
+    and DNG metadata uses bounded reads of directory tables and referenced values instead of
+    loading the whole image. Rotate/mirror, crop, resize,
     full-resolution processing, and output-size preparation now use revision-checked worker results;
     identity processing shares its immutable source allocation with the presentation. Large evicted CPU
     buffers are retired on workers rather than destroyed on the event thread. Previously viewed and
@@ -429,7 +432,8 @@ they support.
     Filename, EXIF, and counter text remain responsive during navigation. Formatted title and
     information text are cached for the current source and document state, so panning does not
     repeat metadata formatting or send the same title to SDL. Optional EXIF/comment reads refresh
-    the information overlay when available. The information popup uses a readable `W X H, Size` line
+    the information overlay when available. JPEG and TIFF/DNG metadata is read asynchronously and
+    applied only to the matching selected source. The information popup uses a readable `W X H, Size` line
     and an unlabeled modification date. The EXIF popup includes a
     toggleable grayscale histogram, hidden by default. Overlay visibility persists
     immediately. A valid GPS location appears as a blue clickable row and as a context-menu action;

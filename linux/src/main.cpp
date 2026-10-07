@@ -1368,7 +1368,7 @@ private:
 				SourceDescriptorForPath(fileList_.Current());
 			if (current.Key() != result.source) continue;
 			metadata_ = std::move(result.metadata);
-			jpegComment_ = std::move(result.jpegComment);
+			imageComment_ = std::move(result.imageComment);
 			++imageInfoMetadataRevision_;
 			if (runtimeSettings_.Values().infoVisible) {
 				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
@@ -2087,9 +2087,9 @@ private:
 		playback_.SetImageReady(false, SDL_GetTicks());
 		if (!preserveExifMetadataRequest) {
 			metadata_ = {};
-			jpegComment_.clear();
+			imageComment_.clear();
 			++imageInfoMetadataRevision_;
-			if (jpegview_linux::IsJpegPath(source.LogicalPath()) && source.Valid()) {
+			if (source.Valid()) {
 				exifMetadataRequestGeneration_ = exifMetadataWorker_.Request(source);
 				exifMetadataSource_ = source.Key();
 				deferredExifDateAction_.Begin(targetPath, source.Key(),
@@ -7433,7 +7433,7 @@ private:
 		if (!metadata_.software.empty()) lines.push_back("Software: " + InfoText(metadata_.software));
 		if (!metadata_.imageDescription.empty()) lines.push_back("Description: " + InfoText(metadata_.imageDescription));
 		if (!metadata_.userComment.empty()) lines.push_back("Comment: " + InfoText(metadata_.userComment));
-		if (!jpegComment_.empty() && metadata_.userComment.empty()) lines.push_back("Comment: " + InfoText(jpegComment_));
+		if (!imageComment_.empty() && metadata_.userComment.empty()) lines.push_back("Comment: " + InfoText(imageComment_));
 		if (metadata_.hasGps) lines.push_back("Location: " + metadata_.gpsLocation);
 		if (metadata_.hasAltitude) {
 			std::ostringstream value;
@@ -13338,7 +13338,7 @@ private:
 	bool aboutOpen_ = false;
 	bool helpOpen_ = false;
 	jpegview_linux::ExifInfo metadata_;
-	std::string jpegComment_;
+	std::string imageComment_;
 	bool contextMenuOpen_ = false;
 	bool contextMenuAdvancedOptions_ = false;
 	bool contextMenuCropOnly_ = false;

@@ -8,9 +8,9 @@
 
 namespace jpegview_linux {
 
-// The fields mirror the information selected by JPEGView's CEXIFDisplayCtl.
-// The Linux reader intentionally owns its strings so the metadata remains
-// valid after the encoded JPEG buffer is released.
+// The fields mirror information selected by JPEGView's CEXIFDisplayCtl. The
+// Linux readers own their strings so metadata remains valid after the encoded
+// image buffer is released.
 struct ExifInfo {
 	bool hasExif = false;
 	std::string cameraModel;

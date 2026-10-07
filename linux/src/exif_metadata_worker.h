@@ -16,12 +16,12 @@ struct ExifMetadataResult {
 	std::uint64_t generation = 0;
 	SourceKey source;
 	ExifInfo metadata;
-	std::string jpegComment;
+	std::string imageComment;
 	bool metadataAvailable = false;
 	WorkerFailure failure;
 };
 
-// Loads optional JPEG metadata away from the event thread. Requests replace
+// Loads optional image metadata away from the event thread. Requests replace
 // older work, and only the latest source generation is published.
 class ExifMetadataWorker {
 public:

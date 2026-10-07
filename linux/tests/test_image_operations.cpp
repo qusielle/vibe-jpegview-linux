@@ -1,6 +1,7 @@
 #include "test_harness.h"
 #include "test_support.h"
 #include "gps_map_action.h"
+#include "image_metadata_reader.h"
 #include "tiff_metadata_reader.h"
 
 #include <cstring>
@@ -3741,6 +3742,71 @@ void TestTiffMetadataReaderBoundedRandomAccess() {
 		info, canceled), "TIFF metadata parser ignored source cancellation");
 }
 
+void TestImageMetadataReaderDispatchesByContent() {
+	TemporaryDirectory temporary;
+	const std::vector<std::uint8_t> exifPayload =
+		ExifFixture().Build(true, false, true);
+	const std::vector<std::uint8_t> tiffBytes(exifPayload.begin() + 6,
+		exifPayload.end());
+
+	const fs::path dng = temporary.path() / "capture.dng";
+	WriteBytes(dng, tiffBytes);
+	jpegview_linux::ExifInfo info;
+	std::string comment;
+	Expect(jpegview_linux::ReadImageMetadata(dng, info, comment) &&
+		info.hasExif && info.cameraModel == "Acme Model" &&
+		info.exposureTime == "1/125" && info.isoSpeed == 200,
+		"selected DNG metadata was not read from its TIFF content");
+	const jpegview_linux::SourceDescriptor dngSource =
+		jpegview_linux::DescribeImageSource(dng);
+	jpegview_linux::ExifMetadataWorker metadataWorker;
+	const std::uint64_t metadataGeneration = metadataWorker.Request(dngSource);
+	const bool metadataWorkerIdle =
+		metadataWorker.WaitUntilIdle(std::chrono::seconds(3));
+	const std::vector<jpegview_linux::ExifMetadataResult> workerResults =
+		metadataWorker.TakeReady();
+	Expect(metadataGeneration != 0 && metadataWorkerIdle && workerResults.size() == 1 &&
+		workerResults.front().generation == metadataGeneration &&
+		workerResults.front().source == dngSource.Key() &&
+		workerResults.front().metadataAvailable &&
+		workerResults.front().metadata.cameraModel == "Acme Model",
+		"default metadata worker did not route the selected DNG through TIFF parsing");
+
+	const fs::path tiffNamedJpeg = temporary.path() / "capture.jpg";
+	WriteBytes(tiffNamedJpeg, tiffBytes);
+	info = {};
+	comment.clear();
+	Expect(jpegview_linux::ReadImageMetadata(tiffNamedJpeg, info, comment) &&
+		info.hasExif && info.cameraModel == "Acme Model" &&
+		info.exposureTime == "1/125",
+		"metadata dispatch trusted a JPEG suffix over TIFF content");
+
+	const fs::path jpegNamedDng = temporary.path() / "capture.dng";
+	const fs::path jpegBase = temporary.path() / "base.jpg";
+	ImageWriteOptions options;
+	options.jpegQuality = 100;
+	std::string error;
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	Expect(jpegview_linux::WriteImage(jpegBase, pixels.data(), 2, 2, options, error),
+		"cannot create mismatched-extension JPEG fixture: " + error);
+	WriteBytes(jpegNamedDng, InsertJpegSegment(ReadBytes(jpegBase), 0xe1,
+		ExifFixture().Build()));
+	info = {};
+	comment.clear();
+	Expect(jpegview_linux::ReadImageMetadata(jpegNamedDng, info, comment) &&
+		info.hasExif && info.cameraModel == "Acme Model",
+		"metadata dispatch trusted a DNG suffix over JPEG content");
+
+	const fs::path unknown = temporary.path() / "unknown.jpg";
+	WriteBytes(unknown, {1, 2, 3, 4});
+	info.hasExif = true;
+	info.cameraModel = "stale metadata";
+	comment = "stale comment";
+	Expect(!jpegview_linux::ReadImageMetadata(unknown, info, comment) &&
+		!info.hasExif && info.cameraModel.empty() && comment.empty(),
+		"unsupported content retained metadata from the previous source");
+}
+
 void TestFileOperationFolderExifDatesUpdatesOnlyRegularImages() {
 	TemporaryDirectory temporary;
 	const fs::path folder = temporary.path() / "images";
@@ -3823,6 +3889,7 @@ const TestCase kTests[] = {
 	{"exif-and-jpeg-comment-parsing", &TestExifAndJpegCommentParsing},
 	{"exif-ifd0-shooting-field-fallback", &TestExifIfd0ShootingFieldFallback},
 	{"tiff-metadata-bounded-random-access", &TestTiffMetadataReaderBoundedRandomAccess},
+	{"image-metadata-reader-dispatches-by-content", &TestImageMetadataReaderDispatchesByContent},
 	{"file-operation-folder-exif-dates-update-only-regular-images", &TestFileOperationFolderExifDatesUpdatesOnlyRegularImages},
 };
 
