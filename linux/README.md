@@ -1253,7 +1253,8 @@ mouse wheel, or Left/Right keys (0.1° per step, or 1° with Shift); Home resets
 G toggles control automatic corner cropping, preservation of the source aspect ratio, and an alignment
 grid over the preview. The preview is prepared off-thread and capped at 2048 pixels per side and four
 megapixels; Apply uses a cancellable full-resolution operation, and Cancel discards the preview. A
-zero-degree Apply is a no-op. Free rotation of an animated image retains the current frame as a still.
+zero-degree Apply is a no-op. A crop reduced to one row still samples the rotated image across the
+whole row. Free rotation of an animated image retains the current frame as a still.
 Reloading a changed source closes its editor and discards any pending rotation.
 
 Crop selection mode is off by default. Enable or disable it with Ctrl+E, the last button on the bottom

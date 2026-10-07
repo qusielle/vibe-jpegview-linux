@@ -273,7 +273,7 @@ bool ResampleImageTransform(const Image& source,
 	const auto& matrix = geometry.destinationToSource;
 	if (matrix[6] == 0.0 && matrix[7] == 0.0) {
 		const double stepX = result.width > 1 ? matrix[0] / matrix[8] : 0.0;
-		const double stepY = result.height > 1 ? matrix[3] / matrix[8] : 0.0;
+		const double stepY = result.width > 1 ? matrix[3] / matrix[8] : 0.0;
 		for (int y = 0; y < result.height; ++y) {
 			if (!Continue(shouldContinue)) return false;
 			double sourceX = (matrix[1] * y + matrix[2]) / matrix[8];

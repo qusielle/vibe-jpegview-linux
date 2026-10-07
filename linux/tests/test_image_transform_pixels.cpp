@@ -135,6 +135,31 @@ void TestFreeRotationRejectsMismatchedGeometry() {
 		"resampling accepted an invalid output extent");
 }
 
+void TestFreeRotationSingleRowCropKeepsColumnMapping() {
+	std::vector<std::uint8_t> pixels(4 * 2 * 4, 0);
+	for (int y = 0; y < 2; ++y) {
+		for (int x = 0; x < 4; ++x) {
+			const std::size_t offset = (static_cast<std::size_t>(y) * 4 + x) * 4;
+			pixels[offset] = static_cast<std::uint8_t>(y * 200);
+			pixels[offset + 3] = 255;
+		}
+	}
+	const Image source = MakeImage(4, 2, pixels);
+	ImageTransformGeometry geometry;
+	Expect(BuildFreeRotationGeometry(source.width, source.height, 90.0,
+		true, true, geometry) && geometry.outputWidth == 2 &&
+		geometry.outputHeight == 1 && geometry.exactClockwiseQuarterTurns == -1,
+		"aspect-preserving rotation did not produce the expected single-row crop");
+	for (ImageTransformSampling sampling : {ImageTransformSampling::PreviewBilinear,
+		ImageTransformSampling::FinalBicubic}) {
+		Image output;
+		Expect(ResampleImageTransform(source, geometry, sampling, output) &&
+			output.bgra[0] == 200 && output.bgra[4] == 0 &&
+			output.bgra[3] == 255 && output.bgra[7] == 255,
+			"single-row rotation repeated its first source row across output columns");
+	}
+}
+
 Image MakePerspectiveRampImage() {
 	std::vector<std::uint8_t> pixels(5 * 5 * 4);
 	for (int y = 0; y < 5; ++y) {
@@ -346,6 +371,8 @@ const TestCase kTests[] = {
 		&TestFreeRotationBicubicSamplingAndCancellation},
 	{"free-rotation-rejects-mismatched-geometry",
 		&TestFreeRotationRejectsMismatchedGeometry},
+	{"free-rotation-single-row-crop-keeps-column-mapping",
+		&TestFreeRotationSingleRowCropKeepsColumnMapping},
 	{"perspective-resampling-uses-projective-coordinates",
 		&TestPerspectiveResamplingUsesProjectiveCoordinates},
 	{"projective-resampling-supports-column-denominator-variation",

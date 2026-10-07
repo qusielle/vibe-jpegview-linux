@@ -174,7 +174,8 @@ should normally be added to one of these focused modules and covered by the matc
   projective mapping that rejects singular two-dimensional mappings and denominator poles across
   the output canvas.
   Previews use bilinear sampling; final output uses bicubic sampling, transparent uncovered areas,
-  and premultiplied-alpha interpolation. Collapsed one-pixel output axes sample their center line.
+  and premultiplied-alpha interpolation. Collapsed one-pixel output axes sample their center line;
+  both affine source coordinates advance across columns even when the output has only one row.
 - `free_rotation_model`: dialog session state and parameter revisions for free-rotation editing.
   Preview results match both the open session and its current parameter revision; applying freezes
   edits and rejects preview completions until failure resumes editing or the document commit closes
