@@ -170,8 +170,11 @@ should normally be added to one of these focused modules and covered by the matc
   and constrain both edges independently, including unequal adjustments; a cropped axis reduced to
   one pixel samples its center. It performs no pixel allocation or rendering.
 - `image_transform_pixels`: cancellable BGRA resampling through validated image-transform geometry,
-  currently preserving affine mappings and exact pixel copies for orthogonal turns, with bilinear
-  previews, bicubic final output, transparent uncovered areas, and premultiplied-alpha interpolation.
+  with exact pixel copies for orthogonal turns, an unchanged incremental affine path, and incremental
+  projective mapping that rejects singular two-dimensional mappings and denominator poles across
+  the output canvas.
+  Previews use bilinear sampling; final output uses bicubic sampling, transparent uncovered areas,
+  and premultiplied-alpha interpolation. Collapsed one-pixel output axes sample their center line.
 - `free_rotation_model`: dialog session state and parameter revisions for free-rotation editing.
   Preview results match both the open session and its current parameter revision; applying freezes
   edits and rejects preview completions until failure resumes editing or the document commit closes

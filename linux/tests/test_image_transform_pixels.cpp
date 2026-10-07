@@ -12,9 +12,11 @@
 namespace {
 
 using jpegview_linux::BuildFreeRotationGeometry;
+using jpegview_linux::BuildPerspectiveGeometry;
 using jpegview_linux::Image;
 using jpegview_linux::ImageTransformGeometry;
 using jpegview_linux::ImageTransformSampling;
+using jpegview_linux::PerspectiveCorrectionParameters;
 using jpegview_linux::ResampleImageTransform;
 
 void Expect(bool condition, const char* message) {
@@ -133,6 +135,208 @@ void TestFreeRotationRejectsMismatchedGeometry() {
 		"resampling accepted an invalid output extent");
 }
 
+Image MakePerspectiveRampImage() {
+	std::vector<std::uint8_t> pixels(5 * 5 * 4);
+	for (int y = 0; y < 5; ++y) {
+		for (int x = 0; x < 5; ++x) {
+			const std::size_t offset = (static_cast<std::size_t>(y) * 5 + x) * 4;
+			pixels[offset] = static_cast<std::uint8_t>(y * 20);
+			pixels[offset + 1] = static_cast<std::uint8_t>(x * 20);
+			pixels[offset + 2] = 37;
+			pixels[offset + 3] = 255;
+		}
+	}
+	return MakeImage(5, 5, pixels);
+}
+
+void TestPerspectiveResamplingUsesProjectiveCoordinates() {
+	const Image source = MakePerspectiveRampImage();
+	PerspectiveCorrectionParameters parameters;
+	parameters.leftDeltaFraction = 0.2;
+	parameters.rightDeltaFraction = -0.1;
+	parameters.autoCrop = false;
+	ImageTransformGeometry geometry;
+	Expect(BuildPerspectiveGeometry(source.width, source.height, parameters, geometry) &&
+		geometry.outputWidth == 7 && geometry.outputHeight == source.height,
+		"perspective test geometry could not create its expanded canvas");
+
+	const double topWidth = 4.0 - 0.4 - 0.8;
+	const double bottomWidth = 4.0 + 0.4 + 0.8;
+	const double targetY = 2.0;
+	const double expectedSourceY = 4.0 * bottomWidth * (targetY / 4.0) /
+		(topWidth - (topWidth - bottomWidth) * (targetY / 4.0));
+	const std::uint8_t expectedRamp = static_cast<std::uint8_t>(
+		std::lround(expectedSourceY * 20.0));
+	Expect(expectedRamp == 52,
+		"test's independent projective coordinate oracle changed unexpectedly");
+
+	for (ImageTransformSampling sampling : {ImageTransformSampling::PreviewBilinear,
+		ImageTransformSampling::FinalBicubic}) {
+		Image output;
+		Expect(ResampleImageTransform(source, geometry, sampling, output),
+			"projective image transform could not be resampled");
+		const std::size_t sample = (static_cast<std::size_t>(2) * output.width + 3) * 4;
+		Expect(output.bgra[sample] == expectedRamp && output.bgra[sample + 2] == 37 &&
+			output.bgra[sample + 3] == 255,
+			"projective resampling did not use the nonlinear homography coordinates");
+		Expect(output.bgra[sample] != 40,
+			"projective resampling regressed to affine vertical interpolation");
+	}
+}
+
+void TestProjectiveResamplingSupportsColumnDenominatorVariation() {
+	std::vector<std::uint8_t> pixels(3 * 3 * 4);
+	for (int y = 0; y < 3; ++y) {
+		for (int x = 0; x < 3; ++x) {
+			const std::size_t offset = (static_cast<std::size_t>(y) * 3 + x) * 4;
+			pixels[offset] = static_cast<std::uint8_t>(x * 100);
+			pixels[offset + 1] = static_cast<std::uint8_t>(y * 100);
+			pixels[offset + 2] = 33;
+			pixels[offset + 3] = 255;
+		}
+	}
+	const Image source = MakeImage(3, 3, pixels);
+	ImageTransformGeometry geometry;
+	geometry.sourceWidth = source.width;
+	geometry.sourceHeight = source.height;
+	geometry.outputWidth = 3;
+	geometry.outputHeight = 3;
+	geometry.destinationToSource = {1.0, 0.0, 0.0,
+		0.0, 1.0, 0.0, 0.1, 0.0, 1.0};
+	Image output;
+	Expect(ResampleImageTransform(source, geometry,
+		ImageTransformSampling::PreviewBilinear, output),
+		"valid column-varying projective geometry could not be sampled");
+	const std::size_t first = (static_cast<std::size_t>(1) * output.width + 1) * 4;
+	const std::size_t second = (static_cast<std::size_t>(1) * output.width + 2) * 4;
+	Expect(output.bgra[first] == 91 && output.bgra[first + 1] == 91 &&
+		output.bgra[second] == 167 && output.bgra[second + 1] == 83,
+		"projective sampling ignored denominator variation across columns");
+}
+
+void TestProjectiveResamplingPreservesAlphaAndExactIdentity() {
+	const Image source = MakeImage(2, 2, {
+		0, 0, 200, 255, 255, 0, 0, 0,
+		0, 0, 200, 255, 0, 0, 200, 255});
+	ImageTransformGeometry projective;
+	projective.sourceWidth = source.width;
+	projective.sourceHeight = source.height;
+	projective.outputWidth = 1;
+	projective.outputHeight = 1;
+	projective.destinationToSource = {1.0, 0.0, 0.5,
+		0.0, 1.0, 0.5, 0.0, 0.25, 1.0};
+	projective.exactClockwiseQuarterTurns = -1;
+	Image sampled;
+	Expect(ResampleImageTransform(source, projective,
+		ImageTransformSampling::PreviewBilinear, sampled) &&
+		sampled.bgra[0] == 0 && sampled.bgra[1] == 0 &&
+		sampled.bgra[2] == 200 && sampled.bgra[3] == 191 &&
+		sampled.hasTransparency,
+		"projective interpolation mixed hidden RGB into a partially transparent sample");
+
+	ImageTransformGeometry scaledProjective = projective;
+	for (double& value : scaledProjective.destinationToSource) value *= 1e-200;
+	Image scaledSampled;
+	Expect(ResampleImageTransform(source, scaledProjective,
+		ImageTransformSampling::PreviewBilinear, scaledSampled) &&
+		scaledSampled.bgra == sampled.bgra,
+		"projective sampling changed under an equivalent small matrix scale");
+
+	const Image affineSource = MakeImage(2, 2, {
+		1, 2, 3, 255, 4, 5, 6, 255,
+		7, 8, 9, 255, 10, 11, 12, 255});
+	ImageTransformGeometry scaledAffine;
+	Expect(BuildFreeRotationGeometry(affineSource.width, affineSource.height, 0.0,
+		false, false, scaledAffine), "affine identity geometry could not be built");
+	scaledAffine.exactClockwiseQuarterTurns = -1;
+	for (double& value : scaledAffine.destinationToSource) value *= 1e-200;
+	Image scaledAffineOutput;
+	Expect(ResampleImageTransform(affineSource, scaledAffine,
+		ImageTransformSampling::PreviewBilinear, scaledAffineOutput) &&
+		scaledAffineOutput.bgra == affineSource.bgra,
+		"affine sampling changed under an equivalent small matrix scale");
+
+	PerspectiveCorrectionParameters identityParameters;
+	ImageTransformGeometry identityGeometry;
+	const Image identitySource = MakeImage(3, 2, {
+		1, 2, 3, 255, 4, 5, 6, 0, 7, 8, 9, 255,
+		10, 11, 12, 255, 13, 14, 15, 255, 16, 17, 18, 255});
+	Image identityOutput;
+	Expect(BuildPerspectiveGeometry(identitySource.width, identitySource.height,
+		identityParameters, identityGeometry) &&
+		ResampleImageTransform(identitySource, identityGeometry,
+			ImageTransformSampling::FinalBicubic, identityOutput) &&
+		identityOutput.bgra == identitySource.bgra,
+		"identity perspective resampling did not preserve source pixels exactly");
+}
+
+void TestProjectiveResamplingCentersSinglePixelOutputAxis() {
+	const Image source = MakeImage(2, 2, {
+		0, 0, 0, 255, 100, 0, 0, 255,
+		0, 0, 0, 255, 100, 0, 0, 255});
+	PerspectiveCorrectionParameters parameters;
+	parameters.leftDeltaFraction = 0.25;
+	parameters.rightDeltaFraction = 0.25;
+	ImageTransformGeometry geometry;
+	Image output;
+	Expect(BuildPerspectiveGeometry(source.width, source.height, parameters, geometry) &&
+		geometry.outputWidth == 1 && geometry.outputHeight == 2 &&
+		ResampleImageTransform(source, geometry,
+			ImageTransformSampling::PreviewBilinear, output) &&
+		output.bgra[0] == 25 && output.bgra[4] == 75,
+		"single-pixel crop axis did not sample through the centered crop region");
+}
+
+void TestProjectiveResamplingRejectsPolesAndPreservesOutputOnCancellation() {
+	const Image source = MakeImage(3, 3, std::vector<std::uint8_t>(3 * 3 * 4, 255));
+	Image output = MakeImage(1, 1, {9, 8, 7, 6});
+	const std::vector<std::uint8_t> original = output.bgra;
+	ImageTransformGeometry geometry;
+	geometry.sourceWidth = source.width;
+	geometry.sourceHeight = source.height;
+	geometry.outputWidth = 3;
+	geometry.outputHeight = 3;
+	geometry.destinationToSource = {1.0, 0.0, 0.0,
+		0.0, 1.0, 0.0, 1.0, 0.0, -0.5};
+	Expect(!ResampleImageTransform(source, geometry,
+		ImageTransformSampling::PreviewBilinear, output) &&
+		output.width == 1 && output.height == 1 && output.bgra == original,
+		"projective resampling accepted a denominator pole across its output canvas");
+
+	geometry.destinationToSource = {1.0, 0.0, 0.0,
+		0.0, 1.0, 0.0, 0.0, 0.0, 1e-15};
+	Expect(!ResampleImageTransform(source, geometry,
+		ImageTransformSampling::PreviewBilinear, output) && output.bgra == original,
+		"projective resampling accepted a nearly singular source mapping");
+
+	geometry.destinationToSource = {1.0, 0.0, 0.0,
+		0.0, 0.0, 0.0, 0.0, 0.0, 1.0};
+	Expect(!ResampleImageTransform(source, geometry,
+		ImageTransformSampling::PreviewBilinear, output) && output.bgra == original,
+		"projective resampling accepted a singular two-dimensional mapping");
+
+	geometry.destinationToSource = {1.0, 0.0, 0.0,
+		0.0, 1.0, 0.0, 1.0, 0.0, 1e-13};
+	Expect(!ResampleImageTransform(source, geometry,
+		ImageTransformSampling::PreviewBilinear, output) && output.bgra == original,
+		"projective resampling accepted a denominator too close to a pole");
+
+	PerspectiveCorrectionParameters parameters;
+	parameters.leftDeltaFraction = 0.2;
+	parameters.rightDeltaFraction = -0.1;
+	parameters.autoCrop = false;
+	Expect(BuildPerspectiveGeometry(source.width, source.height, parameters, geometry),
+		"valid projective geometry could not be rebuilt after rejection");
+	int checks = 0;
+	const bool completed = ResampleImageTransform(source, geometry,
+		ImageTransformSampling::FinalBicubic, output, [&checks] {
+			return ++checks < 3;
+		});
+	Expect(!completed && output.width == 1 && output.height == 1 &&
+		output.bgra == original,
+		"cancelled projective resampling published a partial output image");
+}
+
 const TestCase kTests[] = {
 	{"free-rotation-exact-turns-preserve-pixels",
 		&TestFreeRotationExactTurnsPreservePixels},
@@ -142,6 +346,16 @@ const TestCase kTests[] = {
 		&TestFreeRotationBicubicSamplingAndCancellation},
 	{"free-rotation-rejects-mismatched-geometry",
 		&TestFreeRotationRejectsMismatchedGeometry},
+	{"perspective-resampling-uses-projective-coordinates",
+		&TestPerspectiveResamplingUsesProjectiveCoordinates},
+	{"projective-resampling-supports-column-denominator-variation",
+		&TestProjectiveResamplingSupportsColumnDenominatorVariation},
+	{"projective-resampling-preserves-alpha-and-exact-identity",
+		&TestProjectiveResamplingPreservesAlphaAndExactIdentity},
+	{"projective-resampling-centers-single-pixel-output-axis",
+		&TestProjectiveResamplingCentersSinglePixelOutputAxis},
+	{"projective-resampling-rejects-poles-and-preserves-output-on-cancellation",
+		&TestProjectiveResamplingRejectsPolesAndPreservesOutputOnCancellation},
 };
 
 } // namespace

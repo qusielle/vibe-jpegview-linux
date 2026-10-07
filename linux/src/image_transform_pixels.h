@@ -12,9 +12,11 @@ enum class ImageTransformSampling {
 	FinalBicubic,
 };
 
-// Resamples a validated BGRA image into the geometry's output canvas. Pixels
-// outside the source are transparent; color interpolation is alpha-aware.
-// The caller's output is left untouched on failure or cancellation.
+// Resamples a validated BGRA image into the geometry's output canvas, using
+// exact copies, affine mapping, or projective mapping as its geometry permits.
+// Projective mappings may not cross a denominator pole. Pixels outside the
+// source are transparent; color interpolation is alpha-aware. The caller's
+// output is left untouched on failure or cancellation.
 bool ResampleImageTransform(const Image& source,
 	const ImageTransformGeometry& geometry, ImageTransformSampling sampling,
 	Image& output, const std::function<bool()>& shouldContinue = {});

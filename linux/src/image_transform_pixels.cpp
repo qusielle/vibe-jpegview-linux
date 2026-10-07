@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <new>
+#include <utility>
 
 namespace jpegview_linux {
 namespace {
@@ -13,7 +14,8 @@ namespace {
 constexpr int kMaximumImageDimension = 65535;
 constexpr std::uint64_t kMaximumImagePixels = 100ull * 1024ull * 1024ull;
 constexpr double kAlphaEpsilon = 1e-8;
-constexpr double kGeometryEpsilon = 1e-12;
+constexpr double kProjectiveDenominatorRelativeTolerance = 1e-12;
+constexpr double kMinimumNormalizedDeterminant = 1e-16;
 
 bool Continue(const std::function<bool()>& shouldContinue) {
 	return !shouldContinue || shouldContinue();
@@ -38,14 +40,69 @@ bool ValidGeometry(const ImageTransformGeometry& geometry) {
 		geometry.outputWidth > kMaximumImageDimension ||
 		geometry.outputHeight > kMaximumImageDimension ||
 		static_cast<std::uint64_t>(geometry.outputWidth) * geometry.outputHeight >
-			kMaximumImagePixels) return false;
+			kMaximumImagePixels ||
+		static_cast<std::uint64_t>(geometry.outputWidth) * geometry.outputHeight >
+			std::numeric_limits<std::size_t>::max() / 4) return false;
 	for (double value : geometry.destinationToSource) {
 		if (!std::isfinite(value)) return false;
 	}
-	return geometry.exactClockwiseQuarterTurns >= -1 &&
-		std::abs(geometry.destinationToSource[6]) <= kGeometryEpsilon &&
-		std::abs(geometry.destinationToSource[7]) <= kGeometryEpsilon &&
-		std::abs(geometry.destinationToSource[8] - 1.0) <= kGeometryEpsilon;
+	return geometry.exactClockwiseQuarterTurns >= -1;
+}
+
+bool NormalizeMappingMatrix(const ImageTransformGeometry& geometry,
+	std::array<double, 9>& normalized) {
+	double scale = 0.0;
+	for (double value : geometry.destinationToSource) {
+		scale = std::max(scale, std::abs(value));
+	}
+	if (!std::isfinite(scale) || scale == 0.0) return false;
+	for (std::size_t index = 0; index < normalized.size(); ++index) {
+		normalized[index] = geometry.destinationToSource[index] / scale;
+	}
+	return true;
+}
+
+bool HasNonsingularMapping(const std::array<double, 9>& normalized) {
+	const double determinant =
+		normalized[0] * (normalized[4] * normalized[8] - normalized[5] * normalized[7]) -
+		normalized[1] * (normalized[3] * normalized[8] - normalized[5] * normalized[6]) +
+		normalized[2] * (normalized[3] * normalized[7] - normalized[4] * normalized[6]);
+	return std::isfinite(determinant) &&
+		std::abs(determinant) > kMinimumNormalizedDeterminant;
+}
+
+bool ValidProjectiveMapping(const ImageTransformGeometry& geometry) {
+	std::array<double, 9> matrix{};
+	if (!NormalizeMappingMatrix(geometry, matrix)) return false;
+	const double maximumX = geometry.outputWidth - 1.0;
+	const double maximumY = geometry.outputHeight - 1.0;
+	const double denominatorScale = std::abs(matrix[6]) * maximumX +
+		std::abs(matrix[7]) * maximumY + std::abs(matrix[8]);
+	if (!std::isfinite(denominatorScale) || denominatorScale <= 0.0) return false;
+	const double minimumSafeDenominator =
+		std::max(1.0, denominatorScale) * kProjectiveDenominatorRelativeTolerance;
+	const std::array<std::pair<double, double>, 4> corners = {{{0.0, 0.0},
+		{maximumX, 0.0}, {maximumX, maximumY}, {0.0, maximumY}}};
+	int denominatorSign = 0;
+	for (const auto& corner : corners) {
+		const double x = corner.first;
+		const double y = corner.second;
+		const double denominator = matrix[6] * x + matrix[7] * y + matrix[8];
+		if (!std::isfinite(denominator) ||
+			std::abs(denominator) <= minimumSafeDenominator) return false;
+		const int sign = denominator > 0.0 ? 1 : -1;
+		if (denominatorSign != 0 && sign != denominatorSign) return false;
+		denominatorSign = sign;
+		const double mappedX = (matrix[0] * x + matrix[1] * y + matrix[2]) /
+			denominator;
+		const double mappedY = (matrix[3] * x + matrix[4] * y + matrix[5]) /
+			denominator;
+		if (!std::isfinite(mappedX) || !std::isfinite(mappedY)) return false;
+	}
+	// A one-pixel output axis intentionally samples a line or point through the
+	// source and therefore has a rank-deficient composed mapping.
+	return geometry.outputWidth == 1 || geometry.outputHeight == 1 ||
+		HasNonsingularMapping(matrix);
 }
 
 double CubicWeight(double distance) {
@@ -179,7 +236,19 @@ bool ResampleImageTransform(const Image& source,
 	Image& output, const std::function<bool()>& shouldContinue) {
 	if (!HasValidPixels(source) || !ValidGeometry(geometry) ||
 		geometry.sourceWidth != source.width || geometry.sourceHeight != source.height ||
-		!Continue(shouldContinue)) return false;
+		!Continue(shouldContinue) ||
+		(sampling != ImageTransformSampling::PreviewBilinear &&
+		 sampling != ImageTransformSampling::FinalBicubic)) return false;
+
+	const bool exactTurn = geometry.exactClockwiseQuarterTurns >= 0;
+	if (exactTurn) {
+		const bool swapsDimensions = geometry.exactClockwiseQuarterTurns % 2 != 0;
+		if (geometry.exactClockwiseQuarterTurns > 3 ||
+			geometry.outputWidth != (swapsDimensions ? source.height : source.width) ||
+			geometry.outputHeight != (swapsDimensions ? source.width : source.height)) return false;
+	} else if (!ValidProjectiveMapping(geometry)) {
+		return false;
+	}
 
 	Image result;
 	result.width = geometry.outputWidth;
@@ -195,38 +264,57 @@ bool ResampleImageTransform(const Image& source,
 		return false;
 	}
 
-	if (geometry.exactClockwiseQuarterTurns >= 0) {
-		const bool swapsDimensions = geometry.exactClockwiseQuarterTurns % 2 != 0;
-		if (geometry.exactClockwiseQuarterTurns > 3 ||
-			result.width != (swapsDimensions ? source.height : source.width) ||
-			result.height != (swapsDimensions ? source.width : source.height) ||
-			!CopyExactTurn(source, geometry, result, shouldContinue)) return false;
+	if (exactTurn) {
+		if (!CopyExactTurn(source, geometry, result, shouldContinue)) return false;
 		output = std::move(result);
 		return true;
 	}
-	if (sampling != ImageTransformSampling::PreviewBilinear &&
-		sampling != ImageTransformSampling::FinalBicubic) return false;
 
 	const auto& matrix = geometry.destinationToSource;
-	const double inverseDenominator = 1.0 / matrix[8];
-	const double stepX = matrix[0] * inverseDenominator;
-	const double stepY = matrix[3] * inverseDenominator;
-	const double startXOffset = matrix[2] * inverseDenominator;
-	const double startYOffset = matrix[5] * inverseDenominator;
-	for (int y = 0; y < result.height; ++y) {
-		if (!Continue(shouldContinue)) return false;
-		double sourceX = matrix[1] * y * inverseDenominator + startXOffset;
-		double sourceY = matrix[4] * y * inverseDenominator + startYOffset;
-		for (int x = 0; x < result.width; ++x) {
-			if (x > 0 && (x & 255) == 0 && !Continue(shouldContinue)) return false;
-			const std::size_t offset = (static_cast<std::size_t>(y) * result.width + x) * 4;
-			const bool sampled = sampling == ImageTransformSampling::PreviewBilinear ?
-				SampleBilinear(source, sourceX, sourceY, result.bgra.data() + offset) :
-				SampleBicubic(source, sourceX, sourceY, result.bgra.data() + offset);
-			if (!sampled) return false;
-			if (result.bgra[offset + 3] < 255) result.hasTransparency = true;
-			sourceX += stepX;
-			sourceY += stepY;
+	if (matrix[6] == 0.0 && matrix[7] == 0.0) {
+		const double stepX = result.width > 1 ? matrix[0] / matrix[8] : 0.0;
+		const double stepY = result.height > 1 ? matrix[3] / matrix[8] : 0.0;
+		for (int y = 0; y < result.height; ++y) {
+			if (!Continue(shouldContinue)) return false;
+			double sourceX = (matrix[1] * y + matrix[2]) / matrix[8];
+			double sourceY = (matrix[4] * y + matrix[5]) / matrix[8];
+			for (int x = 0; x < result.width; ++x) {
+				if (x > 0 && (x & 255) == 0 && !Continue(shouldContinue)) return false;
+				const std::size_t offset = (static_cast<std::size_t>(y) * result.width + x) * 4;
+				const bool sampled = sampling == ImageTransformSampling::PreviewBilinear ?
+					SampleBilinear(source, sourceX, sourceY, result.bgra.data() + offset) :
+					SampleBicubic(source, sourceX, sourceY, result.bgra.data() + offset);
+				if (!sampled) return false;
+				if (result.bgra[offset + 3] < 255) result.hasTransparency = true;
+				sourceX += stepX;
+				sourceY += stepY;
+			}
+		}
+	} else {
+		std::array<double, 9> normalizedMatrix{};
+		if (!NormalizeMappingMatrix(geometry, normalizedMatrix)) return false;
+		for (int y = 0; y < result.height; ++y) {
+			if (!Continue(shouldContinue)) return false;
+			double numeratorX = normalizedMatrix[1] * y + normalizedMatrix[2];
+			double numeratorY = normalizedMatrix[4] * y + normalizedMatrix[5];
+			double denominator = normalizedMatrix[7] * y + normalizedMatrix[8];
+			for (int x = 0; x < result.width; ++x) {
+				if (x > 0 && (x & 255) == 0 && !Continue(shouldContinue)) return false;
+				if (!std::isfinite(numeratorX) || !std::isfinite(numeratorY) ||
+					!std::isfinite(denominator) || denominator == 0.0) return false;
+				const double sourceX = numeratorX / denominator;
+				const double sourceY = numeratorY / denominator;
+				if (!std::isfinite(sourceX) || !std::isfinite(sourceY)) return false;
+				const std::size_t offset = (static_cast<std::size_t>(y) * result.width + x) * 4;
+				const bool sampled = sampling == ImageTransformSampling::PreviewBilinear ?
+					SampleBilinear(source, sourceX, sourceY, result.bgra.data() + offset) :
+					SampleBicubic(source, sourceX, sourceY, result.bgra.data() + offset);
+				if (!sampled) return false;
+				if (result.bgra[offset + 3] < 255) result.hasTransparency = true;
+				numeratorX += normalizedMatrix[0];
+				numeratorY += normalizedMatrix[3];
+				denominator += normalizedMatrix[6];
+			}
 		}
 	}
 	if (!Continue(shouldContinue)) return false;
