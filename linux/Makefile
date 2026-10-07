@@ -109,6 +109,7 @@ CORE_CPP_SOURCES := \
 	src/image_spectrum_worker.cpp src/image_document.cpp \
 	src/image_operation_worker.cpp src/file_operation_service.cpp \
 	src/free_rotation_model.cpp src/perspective_correction_model.cpp \
+	src/perspective_dialog_layout.cpp \
 	src/image_transform_geometry.cpp src/image_transform_pixels.cpp \
 	src/external_process.cpp src/exif_metadata_worker.cpp \
 	src/pending_image_intents.cpp src/archive_source.cpp \

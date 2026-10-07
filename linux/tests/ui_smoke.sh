@@ -302,6 +302,27 @@ launch_viewer() {
 	sleep 0.3
 }
 
+resize_viewer_window() {
+	resize_target_width=$1
+	resize_target_height=$2
+	DISPLAY=":$display_number" xdotool windowsize "$window_id" \
+		"$resize_target_width" "$resize_target_height"
+	for _ in $(seq 1 20); do
+		resize_actual_geometry=$(DISPLAY=":$display_number" \
+			xdotool getwindowgeometry --shell "$window_id")
+		resize_actual_width=$(printf '%s\n' "$resize_actual_geometry" |
+			sed -n 's/^WIDTH=//p')
+		resize_actual_height=$(printf '%s\n' "$resize_actual_geometry" |
+			sed -n 's/^HEIGHT=//p')
+		if [ "$resize_actual_width" -eq "$resize_target_width" ] &&
+			[ "$resize_actual_height" -eq "$resize_target_height" ]; then
+			return 0
+		fi
+		sleep 0.05
+	done
+	return 1
+}
+
 stop_viewer() {
 	DISPLAY=":$display_number" xdotool key q || true
 	wait "$viewer_pid" || true
@@ -762,6 +783,13 @@ stop_viewer
 perspective_image="$temporary/perspective-gradient.ppm"
 write_gradient_ppm "$perspective_image" 64 48
 launch_viewer "$perspective_image"
+if ! resize_viewer_window 640 240; then
+	cat "$temporary/viewer.log" >&2
+	echo "UI smoke test: viewer did not resize to the compact perspective-editor test size" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" \
+	> "$temporary/perspective-geometry"
 perspective_title_before=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$visual_assertions" -eq 1 ]; then
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
@@ -775,15 +803,13 @@ perspective_window_width=$(awk -F= '$1 == "WIDTH" { print $2 }' \
 perspective_window_height=$(awk -F= '$1 == "HEIGHT" { print $2 }' \
 	"$temporary/perspective-geometry")
 perspective_dialog_width=$((perspective_window_width - 32))
-perspective_dialog_height=$((perspective_window_height - 32))
+perspective_dialog_height=$((perspective_window_height - 16))
 if [ "$perspective_dialog_width" -gt 620 ]; then perspective_dialog_width=620; fi
-if [ "$perspective_dialog_width" -lt 440 ]; then perspective_dialog_width=440; fi
 if [ "$perspective_dialog_height" -gt 390 ]; then perspective_dialog_height=390; fi
-if [ "$perspective_dialog_height" -lt 350 ]; then perspective_dialog_height=350; fi
 perspective_dialog_border_x=$(((perspective_window_width - perspective_dialog_width) / 2))
 perspective_dialog_border_y=$(((perspective_window_height - perspective_dialog_height) / 2))
 open_perspective_menu() {
-	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 40 40
 	DISPLAY=":$display_number" xdotool keydown Shift_L
 	DISPLAY=":$display_number" xdotool click 3
 	DISPLAY=":$display_number" xdotool keyup Shift_L
@@ -853,8 +879,54 @@ if [ "$visual_assertions" -eq 1 ]; then
 		exit 1
 	fi
 fi
+if ! resize_viewer_window 160 120; then
+	cat "$temporary/viewer.log" >&2
+	echo "UI smoke test: perspective editor did not remain open through a 160x120 resize" >&2
+	exit 1
+fi
+perspective_dialog_border_x=0
+perspective_dialog_border_y=0
+perspective_dialog_width=160
+perspective_dialog_height=120
+perspective_cancel_x=119
+perspective_button_y=106
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$perspective_cancel_x" "$perspective_button_y" click 1
+if [ "$visual_assertions" -eq 1 ]; then
+	perspective_mouse_cancel_closed=0
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-mouse-canceled.png"
+		perspective_border=$(convert "$temporary/perspective-mouse-canceled.png" \
+			-format "%[pixel:p{$perspective_dialog_border_x,$perspective_dialog_border_y}]" info:-)
+		if [ "$perspective_border" != 'srgb(200,210,225)' ]; then
+			perspective_mouse_cancel_closed=1
+			break
+		fi
+	done
+	if [ "$perspective_mouse_cancel_closed" -ne 1 ]; then
+		echo "UI smoke test: compact perspective Cancel button was not mouse-accessible" >&2
+		exit 1
+	fi
+fi
+assert_title_prefix "$perspective_title_before" \
+	"clicking compact perspective Cancel changed the current image title"
+if ! resize_viewer_window 640 240; then
+	cat "$temporary/viewer.log" >&2
+	echo "UI smoke test: viewer did not restore the perspective test window size" >&2
+	exit 1
+fi
+perspective_dialog_border_x=16
+perspective_dialog_border_y=8
+perspective_dialog_width=608
+perspective_dialog_height=224
+perspective_button_y=$((perspective_dialog_border_y + perspective_dialog_height - 43 + 15))
+open_perspective_menu
 DISPLAY=":$display_number" xdotool key --repeat 12 --delay 20 Right
-DISPLAY=":$display_number" xdotool key Return
+perspective_apply_x=$((perspective_dialog_border_x + perspective_dialog_width - 198 + 43))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$perspective_apply_x" "$perspective_button_y" click 1
 if [ "$visual_assertions" -eq 1 ]; then
 	perspective_editor_applied=0
 	for _ in $(seq 1 80); do

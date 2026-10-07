@@ -79,7 +79,11 @@ struct PerspectiveSliderPaint {
 struct PerspectiveCorrectionDialogPaint {
 	bool visible = false;
 	bool applying = false;
+	bool compact = false;
+	bool veryCompact = false;
 	SDL_Rect dialog{};
+	SDL_Rect messageRect{};
+	int helpY = -1;
 	std::array<PerspectiveSliderPaint, 2> sliders;
 	std::array<DialogTogglePaint, 3> toggles;
 	std::string message;

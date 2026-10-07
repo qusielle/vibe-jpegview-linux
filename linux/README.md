@@ -1272,7 +1272,8 @@ ratio, and G shows an alignment grid. The preview is generated off-thread and bo
 per side and four megapixels. Apply runs a cancellable full-resolution correction; Cancel leaves the
 document unchanged, and applying zero edge adjustments is a no-op. An animated image retains its
 currently displayed frame as a still. Reloading a changed source closes the editor and discards pending
-correction work.
+correction work. The editor switches to a compact layout in short windows so its sliders, options, and
+Apply/Cancel controls remain available; it recalculates the layout when the window is resized.
 
 Crop selection mode is off by default. Enable or disable it with Ctrl+E, the last button on the bottom
 navigation panel, or **Crop selection mode** in the regular or selection context menu; its state is

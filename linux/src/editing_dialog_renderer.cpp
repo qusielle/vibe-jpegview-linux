@@ -160,20 +160,29 @@ void EditingDialogRendererAdapter::Render(const PerspectiveCorrectionDialogPaint
 			toggle.enabled ? (toggle.checked ? 125 : 75) : 58,
 			toggle.enabled ? (toggle.checked ? 155 : 75) : 62,
 			toggle.enabled ? (toggle.checked ? 195 : 75) : 66);
-		textRenderer_.Draw(toggle.label, toggle.rect.x + 10,
-			toggle.rect.y + 7, kTextScale, shade, shade, shade);
+		textRenderer_.Draw(toggle.label,
+			toggle.rect.x + (paint.veryCompact ? 2 : paint.compact ? 6 : 10),
+			toggle.rect.y + (paint.veryCompact ? 3 : paint.compact ? 5 : 7), kTextScale,
+			shade, shade, shade);
 	}
 	if (!paint.message.empty()) {
-		textRenderer_.Draw(paint.message, paint.dialog.x + 18,
-			paint.dialog.y + paint.dialog.h - 87, kTextScale, 235, 185, 135);
+		textRenderer_.Draw(paint.message, paint.messageRect.x,
+			paint.messageRect.y, kTextScale, 235, 185, 135);
 	}
-	textRenderer_.Draw("TAB: SELECT EDGE   LEFT/RIGHT: ADJUST   SHIFT: FINE   HOME: RESET",
-		paint.dialog.x + 18, paint.dialog.y + paint.dialog.h - 69,
-		kTextScale, 155, 165, 178);
-	textRenderer_.Draw("A: AUTO-CROP   P: ASPECT   G: GRID   ENTER: APPLY   ESC: CANCEL",
-		paint.dialog.x + 18, paint.dialog.y + paint.dialog.h - 54,
-		kTextScale, 155, 165, 178);
-	for (const DialogButtonPaint& button : paint.buttons) DrawButton(button, true);
+	if (paint.helpY >= 0) {
+		if (paint.compact) {
+			textRenderer_.Draw("ARROWS: ADJUST   ENTER: APPLY   ESC: CANCEL",
+				paint.dialog.x + 18, paint.helpY, kTextScale, 155, 165, 178);
+		} else {
+			textRenderer_.Draw("TAB: SELECT EDGE   LEFT/RIGHT: ADJUST   SHIFT: FINE   HOME: RESET",
+				paint.dialog.x + 18, paint.helpY, kTextScale, 155, 165, 178);
+			textRenderer_.Draw("A: AUTO-CROP   P: ASPECT   G: GRID   ENTER: APPLY   ESC: CANCEL",
+				paint.dialog.x + 18, paint.helpY + 15, kTextScale, 155, 165, 178);
+		}
+	}
+	for (const DialogButtonPaint& button : paint.buttons) {
+		DrawButton(button, !paint.veryCompact);
+	}
 }
 
 void EditingDialogRendererAdapter::Render(const FixedCropSizeDialogPaint& paint) {

@@ -2,6 +2,7 @@
 #include "test_support.h"
 #include "free_rotation_model.h"
 #include "perspective_correction_model.h"
+#include "perspective_dialog_layout.h"
 
 #include <limits>
 
@@ -157,6 +158,108 @@ void TestPerspectiveCorrectionDialogControllerTracksPreviewAndApplyOwnership() {
 		!controller.MatchesPreview(firstSession, initialRevision),
 		"reopened perspective session accepted a completion from its former owner");
 	controller.Close();
+}
+
+void TestPerspectiveCorrectionDialogLayoutAdaptsToSmallWindows() {
+	using namespace jpegview_linux;
+	const auto fitsWindow = [](const SDL_Rect& rect, int width, int height) {
+		return rect.x >= 0 && rect.y >= 0 && rect.w > 0 && rect.h > 0 &&
+			rect.x + rect.w <= width && rect.y + rect.h <= height;
+	};
+
+	const PerspectiveCorrectionDialogLayout compact =
+		BuildPerspectiveCorrectionDialogLayout(640, 240);
+	Expect(compact.compact && compact.dialog.x == 16 && compact.dialog.y == 8 &&
+		compact.dialog.w == 608 && compact.dialog.h == 224 &&
+		!compact.veryCompact,
+		"perspective editor did not use the available area in a compact window");
+	Expect(fitsWindow(compact.dialog, 640, 240),
+		"compact perspective dialog escaped the resized window");
+	for (const SDL_Rect& rect : compact.sliders) {
+		Expect(fitsWindow(rect, 640, 240),
+			"compact perspective slider escaped the resized window");
+	}
+	for (const SDL_Rect& rect : compact.toggles) {
+		Expect(fitsWindow(rect, 640, 240),
+			"compact perspective toggle escaped the resized window");
+	}
+	for (const SDL_Rect& rect : compact.buttons) {
+		Expect(fitsWindow(rect, 640, 240),
+			"compact perspective action button escaped the resized window");
+	}
+	Expect(compact.sliders[0].y + compact.sliders[0].h < compact.sliders[1].y &&
+		compact.toggles[0].y == compact.toggles[1].y &&
+		compact.toggles[1].y == compact.toggles[2].y &&
+		compact.toggles[0].x + compact.toggles[0].w < compact.toggles[1].x &&
+		compact.toggles[1].x + compact.toggles[1].w < compact.toggles[2].x,
+		"compact perspective controls overlap instead of fitting on separate rows");
+	Expect(compact.message.y >= compact.toggles[0].y + compact.toggles[0].h &&
+		compact.message.y + compact.message.h < compact.buttons[0].y &&
+		compact.buttons[0].x + compact.buttons[0].w < compact.buttons[1].x &&
+		compact.helpY >= compact.dialog.y &&
+		compact.helpY + 8 <= compact.dialog.y + compact.dialog.h,
+		"compact perspective status, help, or actions do not fit in the dialog");
+
+	const PerspectiveCorrectionDialogLayout resized =
+		BuildPerspectiveCorrectionDialogLayout(1024, 768);
+	Expect(!resized.compact && fitsWindow(resized.dialog, 1024, 768) &&
+		resized.dialog.w == 620 && resized.dialog.h == 390,
+		"perspective dialog did not restore its normal layout after window growth");
+	Expect(resized.helpY >= resized.toggles[2].y + resized.toggles[2].h &&
+		resized.message.y >= resized.toggles[2].y + resized.toggles[2].h,
+		"normal perspective status and help overlap the option controls");
+
+	const PerspectiveCorrectionDialogLayout dense =
+		BuildPerspectiveCorrectionDialogLayout(640, 200);
+	Expect(dense.compact && dense.message.h == 0 && dense.helpY == -1 &&
+		fitsWindow(dense.buttons[0], 640, 200) &&
+		fitsWindow(dense.buttons[1], 640, 200),
+		"dense perspective layout hid required buttons or drew status outside its space");
+
+	struct WindowCase {
+		int width;
+		int height;
+		bool veryCompact;
+		bool showHelp;
+	};
+	const WindowCase cases[] = {
+		{640, 160, false, false},
+		{640, 200, false, false},
+		{320, 240, false, false},
+		{160, 120, true, false},
+	};
+	for (const WindowCase& window : cases) {
+		const PerspectiveCorrectionDialogLayout layout =
+			BuildPerspectiveCorrectionDialogLayout(window.width, window.height);
+		Expect(layout.veryCompact == window.veryCompact &&
+			fitsWindow(layout.dialog, window.width, window.height),
+			"perspective layout escaped or selected the wrong mode for a boundary window");
+		for (const SDL_Rect& rect : layout.sliders) {
+			Expect(fitsWindow(rect, window.width, window.height),
+				"perspective slider escaped a supported small window");
+		}
+		for (const SDL_Rect& rect : layout.toggles) {
+			Expect(fitsWindow(rect, window.width, window.height),
+				"perspective option escaped a supported small window");
+		}
+		for (const SDL_Rect& rect : layout.buttons) {
+			Expect(fitsWindow(rect, window.width, window.height),
+				"perspective action escaped a supported small window");
+		}
+		Expect(layout.sliders[0].y + layout.sliders[0].h <= layout.sliders[1].y &&
+			layout.sliders[1].y + layout.sliders[1].h <= layout.toggles[0].y &&
+			layout.toggles[0].y == layout.toggles[1].y &&
+			layout.toggles[1].y == layout.toggles[2].y &&
+			layout.toggles[0].x + layout.toggles[0].w < layout.toggles[1].x &&
+			layout.toggles[1].x + layout.toggles[1].w < layout.toggles[2].x &&
+			layout.toggles[0].y + layout.toggles[0].h <= layout.buttons[0].y &&
+			layout.buttons[0].x + layout.buttons[0].w < layout.buttons[1].x,
+			"perspective controls overlap in a supported small window");
+		Expect((layout.helpY >= 0) == window.showHelp &&
+			(layout.helpY < 0 || layout.helpY + 8 <=
+				layout.dialog.y + layout.dialog.h),
+			"perspective help text does not fit the selected compact layout");
+	}
 }
 
 void TestViewportManualZoomPanAndRestore() {
@@ -4779,6 +4882,7 @@ const TestCase kTests[] = {
 	{"viewport-modes-and-geometry", &TestViewportModesAndGeometry},
 	{"free-rotation-dialog-controller-tracks-preview-and-apply-ownership", &TestFreeRotationDialogControllerTracksPreviewAndApplyOwnership},
 	{"perspective-correction-dialog-controller-tracks-preview-and-apply-ownership", &TestPerspectiveCorrectionDialogControllerTracksPreviewAndApplyOwnership},
+	{"perspective-correction-dialog-layout-adapts-to-small-windows", &TestPerspectiveCorrectionDialogLayoutAdaptsToSmallWindows},
 	{"viewport-manual-zoom-pan-and-restore", &TestViewportManualZoomPanAndRestore},
 	{"pending-viewport-intents-replay-after-dimensions", &TestPendingViewportIntentsReplayAfterDimensions},
 	{"zoom-navigator-geometry-and-panning", &TestZoomNavigatorGeometryAndPanning},

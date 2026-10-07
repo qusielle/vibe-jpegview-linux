@@ -192,6 +192,9 @@ should normally be added to one of these focused modules and covered by the matc
   frame-readiness state; every close, source replacement, and successful Apply releases that pause.
   Pixel work remains in the image operation worker, and a matching full-resolution result replaces
   the document only after the new texture uploads successfully.
+- `perspective_dialog_layout`: pure window-relative placement for the perspective editor. It switches
+  to a compact control arrangement in short windows, keeping mouse targets inside the client area;
+  Viewer recomputes the layout after window resizing.
 - `image_document`: lazy current-image metadata plus immutable, shared source and presentation pixels,
   owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer

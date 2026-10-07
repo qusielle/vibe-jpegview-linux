@@ -39,6 +39,7 @@
 #include "crop_size_dialog_model.h"
 #include "free_rotation_model.h"
 #include "perspective_correction_model.h"
+#include "perspective_dialog_layout.h"
 #include "go_to_image_number_model.h"
 #include "pixel_color_sampler.h"
 #include "zoom_navigator_model.h"
@@ -9683,34 +9684,31 @@ private:
 		editingDialogRenderer_.Render(paint);
 	}
 
-	SDL_Rect PerspectiveCorrectionDialogRect() const {
+	jpegview_linux::PerspectiveCorrectionDialogLayout PerspectiveCorrectionLayout() const {
 		int windowWidth = 0;
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
-		const int width = std::min(620, std::max(440, windowWidth - 32));
-		const int height = std::min(390, std::max(350, windowHeight - 32));
-		return {std::max(0, (windowWidth - width) / 2),
-			std::max(0, (windowHeight - height) / 2), width, height};
+		return jpegview_linux::BuildPerspectiveCorrectionDialogLayout(
+			windowWidth, windowHeight);
+	}
+
+	SDL_Rect PerspectiveCorrectionDialogRect() const {
+		return PerspectiveCorrectionLayout().dialog;
 	}
 
 	SDL_Rect PerspectiveCorrectionSliderRect(int edge) const {
-		const SDL_Rect dialog = PerspectiveCorrectionDialogRect();
-		return {dialog.x + 24, dialog.y + 86 + edge * 60,
-			dialog.w - 48, 22};
+		if (edge < 0 || edge >= 2) return {};
+		return PerspectiveCorrectionLayout().sliders[static_cast<std::size_t>(edge)];
 	}
 
 	SDL_Rect PerspectiveCorrectionToggleRect(int index) const {
-		const SDL_Rect dialog = PerspectiveCorrectionDialogRect();
-		return {dialog.x + 18, dialog.y + 184 + index * 28,
-			dialog.w - 36, 26};
+		if (index < 0 || index >= 3) return {};
+		return PerspectiveCorrectionLayout().toggles[static_cast<std::size_t>(index)];
 	}
 
 	SDL_Rect PerspectiveCorrectionButtonRect(int button) const {
-		const SDL_Rect dialog = PerspectiveCorrectionDialogRect();
-		const int y = dialog.y + dialog.h - 43;
-		if (button == 0) return {dialog.x + dialog.w - 198, y, 86, 30};
-		if (button == 1) return {dialog.x + dialog.w - 102, y, 86, 30};
-		return {};
+		if (button < 0 || button >= 2) return {};
+		return PerspectiveCorrectionLayout().buttons[static_cast<std::size_t>(button)];
 	}
 
 	void DestroyPerspectiveCorrectionPreview() {
@@ -9985,36 +9983,53 @@ private:
 		jpegview_linux::PerspectiveCorrectionDialogPaint paint;
 		paint.visible = true;
 		paint.applying = perspectiveCorrectionDialog_.IsApplying();
-		paint.dialog = PerspectiveCorrectionDialogRect();
+		const jpegview_linux::PerspectiveCorrectionDialogLayout layout =
+			PerspectiveCorrectionLayout();
+		paint.compact = layout.compact;
+		paint.veryCompact = layout.veryCompact;
+		paint.dialog = layout.dialog;
+		paint.messageRect = layout.message;
+		paint.helpY = layout.helpY;
 		const auto& parameters = perspectiveCorrectionDialog_.Parameters();
 		const char* labels[] = {"LEFT EDGE CONVERGENCE", "RIGHT EDGE CONVERGENCE"};
+		const char* compactLabels[] = {"LEFT EDGE", "RIGHT EDGE"};
+		const char* veryCompactLabels[] = {"LEFT", "RIGHT"};
 		const double values[] = {parameters.transform.leftDeltaFraction,
 			parameters.transform.rightDeltaFraction};
 		for (int edge = 0; edge < 2; ++edge) {
 			std::ostringstream value;
 			value << std::showpos << std::fixed << std::setprecision(1) <<
 				values[edge] * 100.0 << "%";
-			const SDL_Rect slider = PerspectiveCorrectionSliderRect(edge);
+			const SDL_Rect slider = layout.sliders[static_cast<std::size_t>(edge)];
 			const double fraction = (values[edge] +
 				jpegview_linux::kMaximumPerspectiveCorrectionFraction) /
 				(2.0 * jpegview_linux::kMaximumPerspectiveCorrectionFraction);
-			paint.sliders[static_cast<std::size_t>(edge)] = {slider, labels[edge],
+			const char* label = layout.veryCompact ? veryCompactLabels[edge] :
+				layout.compact || layout.dialog.w < 450 ? compactLabels[edge] : labels[edge];
+			paint.sliders[static_cast<std::size_t>(edge)] = {slider, label,
 				value.str(), slider.x + static_cast<int>(std::lround(
 					fraction * slider.w)), perspectiveCorrectionActiveSlider_ == edge};
 		}
 		const char* toggleLabels[] = {"Auto-crop uncovered areas (A)",
 			"Preserve source aspect ratio (P)", "Show alignment grid (G)"};
+		const char* compactToggleLabels[] = {"Auto-crop (A)", "Aspect (P)", "Grid (G)"};
+		const char* narrowToggleLabels[] = {"Crop (A)", "Ratio (P)", "Grid (G)"};
+		const char* veryCompactToggleLabels[] = {"Crop A", "Ratio P", "Grid G"};
 		const bool checked[] = {parameters.transform.autoCrop,
 			parameters.transform.preserveAspectRatio, parameters.showGrid};
 		for (int index = 0; index < 3; ++index) {
+			const SDL_Rect toggle = layout.toggles[static_cast<std::size_t>(index)];
+			const char* label = layout.veryCompact ? veryCompactToggleLabels[index] :
+				toggle.w < 110 ? narrowToggleLabels[index] :
+				layout.compact ? compactToggleLabels[index] : toggleLabels[index];
 			paint.toggles[static_cast<std::size_t>(index)] = {
-				PerspectiveCorrectionToggleRect(index), toggleLabels[index],
+				toggle, ClipText(label, toggle.w - 12),
 				checked[index], !paint.applying};
 		}
-		paint.message = ClipText(perspectiveCorrectionDialog_.Message(),
-			paint.dialog.w - 36);
-		const SDL_Rect apply = PerspectiveCorrectionButtonRect(0);
-		const SDL_Rect cancel = PerspectiveCorrectionButtonRect(1);
+		paint.message = layout.message.h > 0 ? ClipText(
+			perspectiveCorrectionDialog_.Message(), layout.message.w) : std::string();
+		const SDL_Rect apply = layout.buttons[0];
+		const SDL_Rect cancel = layout.buttons[1];
 		paint.buttons[0] = {apply, paint.applying ? "APPLYING" : "APPLY",
 			PointInRect(lastMouseX_, lastMouseY_, apply), !paint.applying};
 		paint.buttons[1] = {cancel, "CANCEL",
