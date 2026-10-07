@@ -1020,6 +1020,7 @@ void TestContextMenuCatalogAndState() {
 	state.sortMode = FileList::SortMode::LastModificationTime;
 	state.sortAscending = false;
 	state.imageAvailable = true;
+	state.freeRotationAvailable = true;
 	state.magnifyingGlassEnabled = true;
 	state.pixelColorSamplerEnabled = true;
 	state.doublePageModeEnabled = true;
@@ -1092,6 +1093,7 @@ void TestContextMenuCatalogAndState() {
 		findLabel(advanced, "Current order: D (modification date)") != nullptr,
 		"context menu did not reflect navigation and ordering state");
 	Expect(findCommand(advanced, IDM_CHANGESIZE)->enabled &&
+		findCommand(advanced, IDM_ROTATE)->enabled &&
 		findCommand(advanced, IDM_ROTATE_90_LOSSLESS)->enabled &&
 		findCommand(advanced, IDM_AUTO_CORRECTION)->checked &&
 		findCommand(advanced, IDM_SAVE_PARAMETERS)->enabled &&
@@ -1129,6 +1131,7 @@ void TestContextMenuCatalogAndState() {
 	unavailable.parameterDatabaseAvailable = false;
 	const std::vector<MenuItem> disabled = jpegview_linux::BuildContextMenu(unavailable, true);
 	Expect(!findCommand(disabled, IDM_CHANGESIZE)->enabled &&
+		!findCommand(disabled, IDM_ROTATE)->enabled &&
 		!findCommand(disabled, IDM_ROTATE_90_LOSSLESS)->enabled &&
 		!findCommand(disabled, IDM_AUTO_CORRECTION)->enabled &&
 		!findCommand(disabled, IDM_SAVE_PARAMETERS)->enabled &&
@@ -4234,6 +4237,45 @@ void TestPlaybackSchedulerTimingAndModes() {
 	Expect(pendingMovie.Tick(1039).type == PlaybackActionType::None &&
 		pendingMovie.Tick(1040).type == PlaybackActionType::NextImage,
 		"movie interval did not restart when the cold image committed");
+
+	jpegview_linux::PlaybackScheduler modalAnimation;
+	modalAnimation.ConfigureImage({20, 30}, 0, true, 100);
+	modalAnimation.SetTemporarilyPaused(true, 110);
+	modalAnimation.SetImageReady(false, 120);
+	modalAnimation.SetImageReady(true, 5000);
+	Expect(modalAnimation.AnimationPlaying() && modalAnimation.FrameIndex() == 0 &&
+		!modalAnimation.NextDeadline().has_value() &&
+		modalAnimation.Tick(5000).type == PlaybackActionType::None,
+		"temporary modal pause did not suppress ready animation advancement");
+	modalAnimation.SetTemporarilyPaused(false, 5100);
+	Expect(modalAnimation.NextDeadline() == 5120 &&
+		modalAnimation.Tick(5119).type == PlaybackActionType::None &&
+		modalAnimation.Tick(5120).type == PlaybackActionType::ShowFrame &&
+		modalAnimation.FrameIndex() == 1,
+		"animation did not resume from its committed frame after a modal pause");
+
+	jpegview_linux::PlaybackScheduler modalSlideshow;
+	modalSlideshow.StartSlideshow(1.0, 0);
+	modalSlideshow.SetTemporarilyPaused(true, 100);
+	Expect(!modalSlideshow.NextDeadline().has_value() &&
+		modalSlideshow.Tick(5000).type == PlaybackActionType::None,
+		"temporary modal pause left an expired slideshow deadline active");
+	modalSlideshow.SetTemporarilyPaused(false, 5000);
+	Expect(modalSlideshow.NextDeadline() == 6000 &&
+		modalSlideshow.Tick(5999).type == PlaybackActionType::None &&
+		modalSlideshow.Tick(6000).type == PlaybackActionType::NextImage,
+		"slideshow did not restart its interval after a modal pause");
+
+	jpegview_linux::PlaybackScheduler modalMovie;
+	modalMovie.StartMovie(25.0, 0);
+	modalMovie.SetTemporarilyPaused(true, 10);
+	Expect(!modalMovie.NextDeadline().has_value() &&
+		modalMovie.Tick(1000).type == PlaybackActionType::None,
+		"temporary modal pause left an expired movie deadline active");
+	modalMovie.SetTemporarilyPaused(false, 1000);
+	Expect(modalMovie.NextDeadline() == 1040 &&
+		modalMovie.Tick(1040).type == PlaybackActionType::NextImage,
+		"movie mode did not restart its interval after a modal pause");
 
 	jpegview_linux::PlaybackScheduler wrapping;
 	wrapping.ConfigureImage({20, 20}, 0, true, 0xfffffff5u);

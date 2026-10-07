@@ -299,9 +299,9 @@ repeated as new candidates below.
 These user-facing gaps are also listed in the [Linux README](README.md#known-windows-parity-gaps)
 and remain possible candidates:
 
-- **Free rotation and perspective correction:** interactive rotation and perspective/tilt-correction
-  panels beyond the existing quarter-turn and mirror operations. An optional auto-level angle
-  suggestion from line/horizon detection could complement this work; see
+- **Perspective correction:** an interactive perspective/tilt-correction panel beyond the shipped
+  free-rotation and existing quarter-turn/mirror operations. An optional auto-level angle suggestion
+  from line/horizon detection could complement this work; see
   [issue #252](https://github.com/sylikc/jpegview/issues/252).
 - **Processing-parameter set exchange:** exchange a second parameter set for image comparison; this
   is distinct from the already implemented marked-image/toggle-back workflow.

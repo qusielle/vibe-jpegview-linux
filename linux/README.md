@@ -126,6 +126,14 @@ they support.
    Up/Down rotation turns the open spread as one unit: both pages stay visible and stack vertically
    after a quarter-turn, then return to a horizontal spread when rotated back. The spread remains
    paired if double-page mode is switched off and on while the rotation is applied.
+   Free rotation is available from **Transform image → Rotate...** in the full context menu
+   (`Shift`+right-click). Drag the angle slider or use Left/Right for 0.1° steps; hold Shift for
+   1° steps. Home resets the angle, and A/P/G toggle corner auto-cropping, source-aspect preservation,
+   and the alignment grid. Preview work runs asynchronously at a bounded size; Apply renders the
+   selected angle at full resolution, while Cancel leaves the document unchanged. Applying a
+   nonzero rotation to an animation keeps the displayed frame as a still image. Opening the editor
+   pauses animation, movie, and slideshow timing. Cancel resumes animation from the retained frame;
+   Apply keeps a still frame and resumes an active movie or slideshow interval.
    PageUp/PageDown remain logical previous/next. The pixel color sampler is disabled by default;
    enable **Pixel color sampler** in the context menu to show a pointer-following swatch and
    `#RRGGBBAA` value, and click the readout to copy it. The opt-in preference persists between runs.
@@ -1240,6 +1248,14 @@ and zoom remain responsive. A failed operation keeps the last successfully displ
 to another source cancels a pending edit. Applying rotate, mirror, crop, or resize to an animation
 flattens the frame currently displayed into a still image.
 
+**Rotate...** in the full context menu opens the free-rotation editor. Adjust the angle with its slider,
+mouse wheel, or Left/Right keys (0.1° per step, or 1° with Shift); Home resets to zero. The A, P, and
+G toggles control automatic corner cropping, preservation of the source aspect ratio, and an alignment
+grid over the preview. The preview is prepared off-thread and capped at 2048 pixels per side and four
+megapixels; Apply uses a cancellable full-resolution operation, and Cancel discards the preview. A
+zero-degree Apply is a no-op. Free rotation of an animated image retains the current frame as a still.
+Reloading a changed source closes its editor and discards any pending rotation.
+
 Crop selection mode is off by default. Enable or disable it with Ctrl+E, the last button on the bottom
 navigation panel, or **Crop selection mode** in the regular or selection context menu; its state is
 saved between runs. When enabled, an ordinary drag on an image that fits the view creates a
@@ -1286,14 +1302,15 @@ before it closes the viewer.
 The Linux port does not yet match every user-facing Windows feature. The outstanding items identified
 by comparing the Linux frontend with the Windows menus and feature panels are:
 
-The intentionally disabled context-menu commands are **Rotate...**, **Perspective correction...**,
-**Edit global settings...**, **Edit user settings...**, **Update user settings...**, and **Manage Open
+The intentionally disabled context-menu commands are **Perspective correction...**, **Edit global
+settings...**, **Edit user settings...**, **Update user settings...**, and **Manage Open
 image with menu...**. These map to the gaps below; commands disabled only because their current
 preconditions are unmet (for example, an image-only action when no image is loaded) are not missing
 features.
 
-- **Free rotation and perspective correction.** The quarter-turn/mirror operations are available,
-  but the interactive free-rotation and perspective/tilt-correction panels are not implemented.
+- **Perspective correction.** Free rotation is available from the full context menu; the interactive
+  perspective/tilt-correction panel is not implemented. An optional auto-level angle suggestion from
+  line/horizon detection could complement this work.
 - **Image comparison.** Mark-image/toggle-back is available with Ctrl+M and Ctrl+Left/Right. The
   second processing-parameter set exchange workflow is not implemented.
 - **Settings administration.** Editing global/user Windows configuration files and updating a user

@@ -241,7 +241,18 @@ launch_viewer() {
 	viewer_input=${1:-$temporary/images}
 	viewer_home=${VIEWER_TEST_HOME:-$temporary/home}
 	viewer_config=${VIEWER_TEST_CONFIG_HOME:-$temporary/config}
-	if [ "$perf_trace_pending" -eq 1 ]; then
+	if [ -n "${viewer_slow_map_target:-}" ]; then
+		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
+			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
+			LD_PRELOAD="$temporary/slow_map.so" \
+			JPEGVIEW_TEST_SLOW_MAP="$viewer_slow_map_target" \
+			JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
+			JPEGVIEW_TEST_SLOW_MAP_STARTED="$viewer_slow_map_started" \
+			JPEGVIEW_TEST_SLOW_MAP_RELEASE="$viewer_slow_map_release" \
+			JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$viewer_slow_map_active" \
+			JPEGVIEW_TEST_SLOW_MAP_ARMED="$viewer_slow_map_armed" \
+			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
+	elif [ "$perf_trace_pending" -eq 1 ]; then
 		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
 			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
 			JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
@@ -590,6 +601,426 @@ DISPLAY=":$display_number" xdotool key --window "$window_id" Return
 DISPLAY=":$display_number" xdotool key --window "$window_id" Escape
 assert_title_prefix "03-blue.ppm" "invalid go-to input changed the selected image"
 stop_viewer
+
+# The full Transform image menu opens the free-rotation editor, Escape cancels
+# without changing the selected document, and Apply commits an adjusted angle.
+rotation_previous_state=$XDG_STATE_HOME
+rotation_previous_config_set=${VIEWER_TEST_CONFIG_HOME+x}
+rotation_previous_config=${VIEWER_TEST_CONFIG_HOME-}
+XDG_STATE_HOME="$temporary/free-rotation-state"
+VIEWER_TEST_CONFIG_HOME="$temporary/free-rotation-config"
+export XDG_STATE_HOME VIEWER_TEST_CONFIG_HOME
+rotation_image="$temporary/free-rotation-checker.ppm"
+printf 'P6\n2 2\n255\n\377\000\000\000\377\000\000\000\377\377\377\000' > "$rotation_image"
+launch_viewer "$rotation_image"
+rotation_title_before=$(DISPLAY=":$display_number" window_title_without_position)
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/free-rotation-original.png"
+fi
+DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" > "$temporary/free-rotation-geometry"
+rotation_window_width=$(awk -F= '$1 == "WIDTH" { print $2 }' "$temporary/free-rotation-geometry")
+rotation_window_height=$(awk -F= '$1 == "HEIGHT" { print $2 }' "$temporary/free-rotation-geometry")
+rotation_dialog_border_x=$((rotation_window_width / 2 - 260))
+rotation_dialog_border_y=$((rotation_window_height / 2 - 155))
+rotation_slider_x=$((rotation_window_width / 2 + 60))
+rotation_slider_y=$((rotation_window_height / 2 - 66))
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+DISPLAY=":$display_number" xdotool keydown Shift_L
+DISPLAY=":$display_number" xdotool click 3
+DISPLAY=":$display_number" xdotool keyup Shift_L
+DISPLAY=":$display_number" xdotool key --delay 30 t t t
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/free-rotation-menu.png"
+	DISPLAY=":$display_number" xdotool key Return
+	rotation_editor_opened=0
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/free-rotation-editor.png"
+		rotation_dialog_border=$(convert "$temporary/free-rotation-editor.png" \
+			-format "%[pixel:p{$rotation_dialog_border_x,$rotation_dialog_border_y}]" info:-)
+		if [ "$rotation_dialog_border" = 'srgb(200,210,225)' ]; then
+			rotation_editor_opened=1
+			break
+		fi
+	done
+	if [ "$rotation_editor_opened" -ne 1 ]; then
+		echo "UI smoke test: Transform image did not render the free-rotation editor" >&2
+		exit 1
+	fi
+else
+	DISPLAY=":$display_number" xdotool key Return
+fi
+DISPLAY=":$display_number" xdotool key Escape
+assert_title_prefix "$rotation_title_before" "canceling free rotation changed the current image title"
+if [ "$visual_assertions" -eq 1 ]; then
+	rotation_editor_closed=0
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/free-rotation-canceled.png"
+		rotation_dialog_border=$(convert "$temporary/free-rotation-canceled.png" \
+			-format "%[pixel:p{$rotation_dialog_border_x,$rotation_dialog_border_y}]" info:-)
+		if [ "$rotation_dialog_border" != 'srgb(200,210,225)' ]; then
+			rotation_editor_closed=1
+			break
+		fi
+	done
+	if [ "$rotation_editor_closed" -ne 1 ]; then
+		echo "UI smoke test: Escape did not close the free-rotation editor" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+DISPLAY=":$display_number" xdotool keydown Shift_L
+DISPLAY=":$display_number" xdotool click 3
+DISPLAY=":$display_number" xdotool keyup Shift_L
+DISPLAY=":$display_number" xdotool key --delay 30 t t t
+sleep 0.05
+DISPLAY=":$display_number" xdotool key Return
+if [ "$visual_assertions" -eq 1 ]; then
+	rotation_editor_reopened=0
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/free-rotation-reopened.png"
+		rotation_dialog_border=$(convert "$temporary/free-rotation-reopened.png" \
+			-format "%[pixel:p{$rotation_dialog_border_x,$rotation_dialog_border_y}]" info:-)
+		if [ "$rotation_dialog_border" = 'srgb(200,210,225)' ]; then
+			rotation_editor_reopened=1
+			break
+		fi
+	done
+	if [ "$rotation_editor_reopened" -ne 1 ]; then
+		echo "UI smoke test: free-rotation editor could not be reopened after cancel" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	"$rotation_slider_x" "$rotation_slider_y" click 1
+DISPLAY=":$display_number" xdotool key Return
+if [ "$visual_assertions" -eq 1 ]; then
+	rotation_editor_applied=0
+	for _ in $(seq 1 60); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/free-rotation-applied.png"
+		rotation_dialog_border=$(convert "$temporary/free-rotation-applied.png" \
+			-format "%[pixel:p{$rotation_dialog_border_x,$rotation_dialog_border_y}]" info:-)
+		if [ "$rotation_dialog_border" != 'srgb(200,210,225)' ]; then
+			rotation_editor_applied=1
+			break
+		fi
+	done
+	if [ "$rotation_editor_applied" -ne 1 ]; then
+		echo "UI smoke test: free-rotation Apply did not close after committing the transformed pixels" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	rotation_crop_width=$(identify -format '%w' "$temporary/free-rotation-original.png")
+	rotation_crop_height=$(identify -format '%h' "$temporary/free-rotation-original.png")
+	rotation_crop_width=$((rotation_crop_width * 3 / 4))
+	rotation_crop_height=$((rotation_crop_height * 3 / 4))
+	rotation_crop_x=$((( $(identify -format '%w' "$temporary/free-rotation-original.png") - rotation_crop_width ) / 2))
+	rotation_crop_y=$((( $(identify -format '%h' "$temporary/free-rotation-original.png") - rotation_crop_height ) / 2))
+	convert "$temporary/free-rotation-original.png" -crop \
+		"${rotation_crop_width}x${rotation_crop_height}+${rotation_crop_x}+${rotation_crop_y}" \
+		+repage "$temporary/free-rotation-original-image-area.png"
+	convert "$temporary/free-rotation-applied.png" -crop \
+		"${rotation_crop_width}x${rotation_crop_height}+${rotation_crop_x}+${rotation_crop_y}" \
+		+repage "$temporary/free-rotation-applied-image-area.png"
+	rotation_image_difference=$(compare -metric AE \
+		"$temporary/free-rotation-original-image-area.png" \
+		"$temporary/free-rotation-applied-image-area.png" null: 2>&1 || true)
+	if [ "$rotation_image_difference" = "0" ]; then
+		echo "UI smoke test: free-rotation Apply closed without changing the displayed pixels" >&2
+		exit 1
+	fi
+fi
+stop_viewer
+
+# Cancel a lazy-JPEG rotation while its source decode is held, then verify the
+# late decode restores presentation readiness. A zero-degree Apply also leaves
+# the document unchanged and playback can start afterwards.
+if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+	cc -shared -fPIC "$SCRIPT_DIR/delay_mmap.c" -o "$temporary/slow_map.so" -ldl -pthread
+	rotation_lazy_directory="$temporary/free-rotation-lazy"
+	rotation_lazy_config="$temporary/free-rotation-lazy-config"
+	mkdir -p "$rotation_lazy_directory" "$rotation_lazy_config/jpegview-linux"
+	convert -size 1800x1200 xc:black -quality 90 "$rotation_lazy_directory/01-lazy.jpg"
+	convert -size 1800x1200 xc:white -quality 90 "$rotation_lazy_directory/02-next.jpg"
+	printf 'scale_mode=fit\ncache_size_mb=64\nthumbnail_panel_visible=0\nwrap_around_folder=0\n' \
+		> "$rotation_lazy_config/jpegview-linux/settings.conf"
+	viewer_slow_map_target="$rotation_lazy_directory/01-lazy.jpg"
+	viewer_slow_map_started="$temporary/free-rotation-decode.started"
+	viewer_slow_map_release="$temporary/free-rotation-decode.release"
+	viewer_slow_map_active="$temporary/free-rotation-decode.active"
+	viewer_slow_map_armed="$temporary/free-rotation-decode.armed"
+	rm -f "$viewer_slow_map_started" "$viewer_slow_map_release" \
+		"$viewer_slow_map_active" "$viewer_slow_map_armed"
+	VIEWER_TEST_HOME="$temporary/free-rotation-lazy-home" \
+		VIEWER_TEST_CONFIG_HOME="$rotation_lazy_config" \
+		launch_viewer "$rotation_lazy_directory/01-lazy.jpg"
+	assert_title_prefix "01-lazy.jpg" "lazy-JPEG rotation fixture did not load"
+	rotation_lazy_ready=0
+	for _ in $(seq 1 40); do
+		rotation_lazy_title=$(DISPLAY=":$display_number" window_title_without_position)
+		case "$rotation_lazy_title" in
+			*Loading*|*Preparing*) sleep 0.05 ;;
+			*) rotation_lazy_ready=1; break ;;
+		esac
+	done
+	if [ "$rotation_lazy_ready" -ne 1 ]; then
+		echo "UI smoke test: lazy-JPEG rotation fixture did not finish its initial presentation" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	rotation_lazy_digest=$(sha256sum "$rotation_lazy_directory/01-lazy.jpg" | awk '{print $1}')
+	: > "$viewer_slow_map_armed"
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+	DISPLAY=":$display_number" xdotool keydown Shift_L
+	DISPLAY=":$display_number" xdotool click 3
+	DISPLAY=":$display_number" xdotool keyup Shift_L
+	DISPLAY=":$display_number" xdotool key --delay 30 t t t
+	DISPLAY=":$display_number" xdotool key Return
+	rotation_decode_blocked=0
+	for _ in $(seq 1 100); do
+		if [ -f "$viewer_slow_map_started" ]; then rotation_decode_blocked=1; break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	if [ "$rotation_decode_blocked" -ne 1 ]; then
+		: > "$viewer_slow_map_release"
+		rm -f "$viewer_slow_map_armed"
+		echo "UI smoke test: free-rotation source decode did not reach its controlled barrier" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key Escape
+	assert_title_prefix "01-lazy.jpg" "canceling lazy free rotation changed the selected image"
+	: > "$viewer_slow_map_release"
+	rm -f "$viewer_slow_map_armed"
+	for _ in $(seq 1 100); do
+		if [ ! -e "$viewer_slow_map_active" ]; then break; fi
+		sleep 0.05
+	done
+	sleep 0.75
+	viewer_slow_map_target=''
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+	DISPLAY=":$display_number" xdotool keydown Shift_L
+	DISPLAY=":$display_number" xdotool click 3
+	DISPLAY=":$display_number" xdotool keyup Shift_L
+	DISPLAY=":$display_number" xdotool key --delay 30 t t t
+	sleep 0.05
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.5
+	DISPLAY=":$display_number" xdotool key Return
+	assert_title_prefix "01-lazy.jpg" "zero-degree Apply changed the selected image"
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+	DISPLAY=":$display_number" xdotool keydown Shift_L
+	DISPLAY=":$display_number" xdotool click 3
+	DISPLAY=":$display_number" xdotool keyup Shift_L
+	DISPLAY=":$display_number" xdotool key --delay 30 t t t
+	sleep 0.05
+	DISPLAY=":$display_number" xdotool key Return
+	sleep 0.5
+	DISPLAY=":$display_number" xdotool key Escape
+	assert_title_prefix "01-lazy.jpg" "canceling a decoded lazy-JPEG rotation changed the selection"
+	rotation_lazy_digest_after=$(sha256sum "$rotation_lazy_directory/01-lazy.jpg" | awk '{print $1}')
+	if [ "$rotation_lazy_digest_after" != "$rotation_lazy_digest" ]; then
+		echo "UI smoke test: canceled or zero-degree free rotation changed the JPEG source" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key alt+r
+	assert_title_prefix "[2/2] " "playback remained unready after canceled lazy rotation decode"
+	stop_viewer
+	if [ "$visual_assertions" -eq 1 ]; then
+		# A detected source replacement invalidates the modal session as well
+		# as the pending Apply, rather than retaining an old owner's editor.
+		viewer_slow_map_target="$rotation_lazy_directory/01-lazy.jpg"
+		rm -f "$viewer_slow_map_started" "$viewer_slow_map_release" \
+			"$viewer_slow_map_active" "$viewer_slow_map_armed"
+		VIEWER_TEST_HOME="$temporary/free-rotation-refresh-home" \
+			VIEWER_TEST_CONFIG_HOME="$rotation_lazy_config" \
+			launch_viewer "$rotation_lazy_directory/01-lazy.jpg"
+		assert_title_prefix "01-lazy.jpg" "source-refresh rotation fixture did not load"
+		rotation_refresh_ready=0
+		for _ in $(seq 1 40); do
+			rotation_refresh_title=$(DISPLAY=":$display_number" window_title_without_position)
+			case "$rotation_refresh_title" in
+				*Loading*|*Preparing*) sleep 0.05 ;;
+				*) rotation_refresh_ready=1; break ;;
+			esac
+		done
+		if [ "$rotation_refresh_ready" -ne 1 ]; then
+			echo "UI smoke test: source-refresh fixture did not finish its initial presentation" >&2
+			exit 1
+		fi
+		rotation_refresh_geometry=$(DISPLAY=":$display_number" \
+			xdotool getwindowgeometry --shell "$window_id")
+		rotation_refresh_width=$(printf '%s\n' "$rotation_refresh_geometry" |
+			sed -n 's/^WIDTH=//p')
+		rotation_refresh_height=$(printf '%s\n' "$rotation_refresh_geometry" |
+			sed -n 's/^HEIGHT=//p')
+		rotation_refresh_border_x=$((rotation_refresh_width / 2 - 260))
+		rotation_refresh_border_y=$((rotation_refresh_height / 2 - 155))
+		: > "$viewer_slow_map_armed"
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+		DISPLAY=":$display_number" xdotool keydown Shift_L
+		DISPLAY=":$display_number" xdotool click 3
+		DISPLAY=":$display_number" xdotool keyup Shift_L
+		DISPLAY=":$display_number" xdotool key --delay 30 t t t Return
+		rotation_refresh_blocked=0
+		for _ in $(seq 1 100); do
+			if [ -f "$viewer_slow_map_started" ]; then rotation_refresh_blocked=1; break; fi
+			if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+			sleep 0.05
+		done
+		if [ "$rotation_refresh_blocked" -ne 1 ]; then
+			: > "$viewer_slow_map_release"
+			rm -f "$viewer_slow_map_armed"
+			echo "UI smoke test: source-refresh rotation did not reach its controlled barrier" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool key Right Return
+		touch "$rotation_lazy_directory/01-lazy.jpg"
+		: > "$viewer_slow_map_release"
+		rm -f "$viewer_slow_map_armed"
+		rotation_refresh_closed=0
+		for _ in $(seq 1 100); do
+			sleep 0.05
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/free-rotation-refreshed.png"
+			rotation_refresh_border=$(convert "$temporary/free-rotation-refreshed.png" \
+				-format "%[pixel:p{$rotation_refresh_border_x,$rotation_refresh_border_y}]" info:-)
+			if [ "$rotation_refresh_border" != 'srgb(200,210,225)' ]; then
+				rotation_refresh_closed=1
+				break
+			fi
+		done
+		if [ "$rotation_refresh_closed" -ne 1 ]; then
+			echo "UI smoke test: source refresh retained the previous owner's rotation editor" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		assert_title_prefix "01-lazy.jpg" "source refresh changed the selected image"
+		DISPLAY=":$display_number" xdotool key alt+r
+		assert_title_prefix "[2/2] " "source refresh left rotation playback suppression active"
+		stop_viewer
+	fi
+	viewer_slow_map_target=''
+	unset viewer_slow_map_started viewer_slow_map_release viewer_slow_map_active \
+		viewer_slow_map_armed
+fi
+
+# Playback deadlines are suppressed during the modal editor even if a cached
+# display completion restores image readiness while the editor is open.
+if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
+	rotation_animation_directory="$temporary/free-rotation-animation"
+	rotation_animation_config="$temporary/free-rotation-animation-config"
+	mkdir -p "$rotation_animation_directory" "$rotation_animation_config/jpegview-linux"
+	convert -delay 300 -size 800x600 xc:red -delay 300 -size 800x600 xc:blue \
+		-loop 0 "$rotation_animation_directory/01-animation.gif"
+	printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$rotation_animation_config/jpegview-linux/settings.conf"
+	VIEWER_TEST_HOME="$temporary/free-rotation-animation-home" \
+		VIEWER_TEST_CONFIG_HOME="$rotation_animation_config" \
+		launch_viewer "$rotation_animation_directory/01-animation.gif"
+	assert_title_prefix "01-animation.gif" "free-rotation animation fixture did not load"
+	rotation_animation_ready=0
+	for _ in $(seq 1 40); do
+		rotation_animation_title=$(DISPLAY=":$display_number" window_title_without_position)
+		case "$rotation_animation_title" in
+			*Loading*|*Preparing*) sleep 0.05 ;;
+			*) rotation_animation_ready=1; break ;;
+		esac
+	done
+	if [ "$rotation_animation_ready" -ne 1 ]; then
+		echo "UI smoke test: animated image did not finish its initial presentation" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	rotation_animation_geometry=$(DISPLAY=":$display_number" \
+		xdotool getwindowgeometry --shell "$window_id")
+	rotation_animation_width=$(printf '%s\n' "$rotation_animation_geometry" |
+		sed -n 's/^WIDTH=//p')
+	rotation_animation_height=$(printf '%s\n' "$rotation_animation_geometry" |
+		sed -n 's/^HEIGHT=//p')
+	rotation_animation_sample_x=$((rotation_animation_width / 2 - 310))
+	rotation_animation_sample_y=$((rotation_animation_height / 2))
+	rotation_animation_border_x=$((rotation_animation_width / 2 - 260))
+	rotation_animation_border_y=$((rotation_animation_height / 2 - 155))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$rotation_animation_sample_x" "$rotation_animation_sample_y"
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/free-rotation-animation-before.png"
+	rotation_animation_before_color=$(convert \
+		"$temporary/free-rotation-animation-before.png" \
+		-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+	case "$rotation_animation_before_color" in
+		FF0000|0000FF) ;;
+		*) echo "UI smoke test: animation fixture did not show a solid starting frame ($rotation_animation_before_color)" >&2; exit 1 ;;
+	esac
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+	DISPLAY=":$display_number" xdotool keydown Shift_L
+	DISPLAY=":$display_number" xdotool click 3
+	DISPLAY=":$display_number" xdotool keyup Shift_L
+	sleep 0.05
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 560 192 click 1
+	rotation_animation_editor_opened=0
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/free-rotation-animation-editor.png"
+		rotation_animation_border=$(convert \
+			"$temporary/free-rotation-animation-editor.png" \
+			-format "%[pixel:p{$rotation_animation_border_x,$rotation_animation_border_y}]" info:-)
+		if [ "$rotation_animation_border" = 'srgb(200,210,225)' ]; then
+			rotation_animation_editor_opened=1
+			break
+		fi
+	done
+	if [ "$rotation_animation_editor_opened" -ne 1 ]; then
+		echo "UI smoke test: free rotation did not open for an animated image" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	sleep 3.5
+	DISPLAY=":$display_number" xdotool key Escape
+	sleep 0.15
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/free-rotation-animation-after-modal.png"
+	rotation_animation_after_color=$(convert \
+		"$temporary/free-rotation-animation-after-modal.png" \
+		-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+	if [ "$rotation_animation_after_color" != "$rotation_animation_before_color" ]; then
+		echo "UI smoke test: animation advanced while free rotation was open ($rotation_animation_before_color:$rotation_animation_after_color)" >&2
+		exit 1
+	fi
+	rotation_animation_resumed=0
+	for _ in $(seq 1 70); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/free-rotation-animation-resumed.png"
+		rotation_animation_resumed_color=$(convert \
+			"$temporary/free-rotation-animation-resumed.png" \
+			-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+		if [ "$rotation_animation_resumed_color" != "$rotation_animation_after_color" ]; then
+			rotation_animation_resumed=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$rotation_animation_resumed" -ne 1 ]; then
+		echo "UI smoke test: animation did not resume from its retained frame after rotation" >&2
+		exit 1
+	fi
+	stop_viewer
+fi
+
+XDG_STATE_HOME=$rotation_previous_state
+export XDG_STATE_HOME
+if [ -n "$rotation_previous_config_set" ]; then
+	VIEWER_TEST_CONFIG_HOME=$rotation_previous_config
+	export VIEWER_TEST_CONFIG_HOME
+else
+	unset VIEWER_TEST_CONFIG_HOME
+fi
 
 # A Krita project is a regular image input and presents its embedded flattened
 # image through the normal decoder path.

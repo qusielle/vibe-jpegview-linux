@@ -50,6 +50,20 @@ void PlaybackScheduler::SetImageReady(bool ready, std::uint32_t now) {
 	}
 }
 
+void PlaybackScheduler::SetTemporarilyPaused(bool paused, std::uint32_t now) {
+	if (temporarilyPaused_ == paused) return;
+	temporarilyPaused_ = paused;
+	if (paused || !imageReady_) return;
+	lastInteractionTick_ = now;
+	if (mode_ == PlaybackMode::Movie && !animationPlaying_) {
+		nextTick_ = now + MovieFrameInterval();
+	} else if (animationPlaying_) {
+		ScheduleFrame(now);
+	} else {
+		nextTick_ = 0;
+	}
+}
+
 void PlaybackScheduler::StartSlideshow(double seconds, std::uint32_t now) {
 	animationPlaying_ = false;
 	mode_ = PlaybackMode::Slideshow;
@@ -98,7 +112,7 @@ PlaybackAction PlaybackScheduler::Resume(std::uint32_t now) {
 }
 
 PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
-	if (!imageReady_) return {};
+	if (!imageReady_ || temporarilyPaused_) return {};
 	if (animationPlaying_ && !frameDelaysMs_.empty() && nextTick_ != 0 && Reached(now, nextTick_)) {
 		if (frameIndex_ + 1 < frameDelaysMs_.size()) {
 			++frameIndex_;
@@ -135,7 +149,7 @@ PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 }
 
 std::optional<std::uint32_t> PlaybackScheduler::NextDeadline() const {
-	if (!imageReady_) return std::nullopt;
+	if (!imageReady_ || temporarilyPaused_) return std::nullopt;
 	if (nextTick_ != 0 && (animationPlaying_ || mode_ == PlaybackMode::Movie)) {
 		return nextTick_;
 	}

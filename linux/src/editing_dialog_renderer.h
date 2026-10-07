@@ -15,6 +15,7 @@ struct DialogButtonPaint {
 	SDL_Rect rect{};
 	std::string label;
 	bool hovered = false;
+	bool enabled = true;
 };
 
 struct UnsharpSliderPaint {

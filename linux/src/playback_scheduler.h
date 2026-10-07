@@ -31,6 +31,9 @@ public:
 	void ConfigureStillImage(std::uint32_t now);
 	void NotifyInteraction(std::uint32_t now);
 	void SetImageReady(bool ready, std::uint32_t now);
+	// Suppress scheduled advancement without changing whether a frame is ready.
+	// Resuming starts a fresh interval from the supplied tick.
+	void SetTemporarilyPaused(bool paused, std::uint32_t now);
 
 	void StartSlideshow(double seconds, std::uint32_t now);
 	void StartMovie(double framesPerSecond, std::uint32_t now);
@@ -64,6 +67,7 @@ private:
 	bool hasAnimation_ = false;
 	bool animationPlaying_ = false;
 	bool imageReady_ = true;
+	bool temporarilyPaused_ = false;
 	std::vector<int> frameDelaysMs_;
 	std::size_t frameIndex_ = 0;
 	int loopCount_ = 0;

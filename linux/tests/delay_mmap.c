@@ -61,6 +61,8 @@ static const char* delay_target(int file_descriptor) {
 	const int prefix_match = path_prefix != NULL && *path_prefix != '\0' &&
 		strncmp(pathname, path_prefix, strlen(path_prefix)) == 0;
 	if (!exact_match && !prefix_match) return NULL;
+	const char* armed = getenv("JPEGVIEW_TEST_SLOW_MAP_ARMED");
+	if (armed != NULL && *armed != '\0' && access(armed, F_OK) != 0) return NULL;
 	const char* repeat = getenv("JPEGVIEW_TEST_SLOW_MAP_REPEAT");
 	// Cold-load tests hold concurrent metadata and thumbnail maps for the same source.
 	if (repeat == NULL || strcmp(repeat, "1") != 0) {

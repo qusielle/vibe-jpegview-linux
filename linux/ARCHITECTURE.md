@@ -173,7 +173,11 @@ should normally be added to one of these focused modules and covered by the matc
 - `free_rotation_model`: dialog session state and parameter revisions for free-rotation editing.
   Preview results match both the open session and its current parameter revision; applying freezes
   edits and rejects preview completions until failure resumes editing or the document commit closes
-  the session.
+  the session. Viewer opens it from the full context menu and routes input through the modal event
+  phase. Preview textures are created and destroyed on the renderer thread; a matching final worker
+  result replaces the document only after its renderer texture uploads successfully. Cancel and a
+  zero-degree apply leave the document revision unchanged. Selecting or reloading a source closes
+  its previous editor session and releases modal playback suppression before replacing the owner.
 - `image_document`: lazy current-image metadata plus immutable, shared source and presentation pixels,
   owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer
@@ -410,6 +414,8 @@ should normally be added to one of these focused modules and covered by the matc
   catalog before compact filtering so commands shared by both views keep the same letter and
   underline position; the compact-only “Show Advanced Options” row is assigned afterward.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
+  Temporary modal suppression hides deadlines without changing frame readiness or play intent, then
+  starts a fresh interval when the modal closes.
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
@@ -638,6 +644,9 @@ orchestration, applies file-operation completions, and invokes desktop integrati
 `RendererWindowResources` owns the window/renderer pair, while `RendererTextureOwner` owns image
 textures created by Viewer and renderer adapters own their private text/font textures. Viewer keeps
 texture-cache keys, pins, reservations, and presentation policy. The
+free-rotation preview is a transient Viewer texture with a shared cache reservation; the event phase
+checks its session, parameter revision, and document source before upload, and the renderer phase only
+draws the prepared texture. The
 `FileOperationService` owns slow filesystem operations and process waits; Viewer captures paths,
 image pixels, overwrite decisions, and owner generations before submission, then reconciles a ready
 result on the SDL thread. Image-session, display-preparation, and presentation controllers
@@ -670,6 +679,10 @@ revision, and animation frame before publication. The SDL thread creates a repla
 then applies the new pixels and retires replaced buffers through the shared cache retirement service.
 For animated sources, frame-bound operations pause readiness while the captured frame is processed;
 failure or cancellation resumes playback, while a successful edit keeps that frame as a still image.
+The free-rotation editor suppresses scheduler advancement separately from display readiness, so a
+matching presentation completion can restore readiness without changing the frame under edit. Its
+temporary pause removes playback deadlines until close or successful Apply; source-only decode that
+finishes after Cancel re-requests the selected presentation so readiness follows the visible texture.
 After an in-place save flattens an animation, the scheduler clears active playback and marks the still
 ready, allowing a later slideshow or movie to start without loading another image.
 Viewport pan/zoom can continue during work and final fit/manual mode restoration uses the live viewport

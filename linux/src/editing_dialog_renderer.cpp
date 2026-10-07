@@ -19,11 +19,15 @@ void EditingDialogRendererAdapter::Fill(const SDL_Rect& rect,
 
 void EditingDialogRendererAdapter::DrawButton(const DialogButtonPaint& button,
 	bool compact) {
-	Fill(button.rect, button.hovered ? 52 : 28,
-		button.hovered ? 78 : 28, button.hovered ? 108 : 28, 220);
-	chromeRenderer_.DrawRect(button.rect, 125, 145, 165);
+	const Uint8 red = !button.enabled ? 24 : button.hovered ? 52 : 28;
+	const Uint8 green = !button.enabled ? 26 : button.hovered ? 78 : 28;
+	const Uint8 blue = !button.enabled ? 30 : button.hovered ? 108 : 28;
+	Fill(button.rect, red, green, blue, 220);
+	chromeRenderer_.DrawRect(button.rect, button.enabled ? 125 : 58,
+		button.enabled ? 145 : 62, button.enabled ? 165 : 66);
+	const Uint8 textShade = button.enabled ? 255 : 125;
 	textRenderer_.Draw(button.label, button.rect.x + (compact ? 12 : 6),
-		button.rect.y + 10, kTextScale, 255, 255, 255);
+		button.rect.y + 10, kTextScale, textShade, textShade, textShade);
 }
 
 void EditingDialogRendererAdapter::Render(const UnsharpMaskDialogPaint& paint) {
@@ -117,10 +121,13 @@ void EditingDialogRendererAdapter::Render(const FreeRotationDialogPaint& paint) 
 	}
 	if (!paint.message.empty()) {
 		textRenderer_.Draw(paint.message, paint.dialog.x + 18,
-			paint.dialog.y + paint.dialog.h - 82, kTextScale, 235, 185, 135);
+			paint.dialog.y + paint.dialog.h - 86, kTextScale, 235, 185, 135);
 	}
-	textRenderer_.Draw("LEFT/RIGHT: 0.1 DEG   SHIFT: 1 DEG   HOME: RESET   ENTER: APPLY   ESC: CANCEL",
-		paint.dialog.x + 18, paint.dialog.y + paint.dialog.h - 61,
+	textRenderer_.Draw("ARROWS: 0.1 DEG   SHIFT+ARROW: 1 DEG   HOME: RESET",
+		paint.dialog.x + 18, paint.dialog.y + paint.dialog.h - 73,
+		kTextScale, 155, 165, 178);
+	textRenderer_.Draw("ENTER: APPLY   ESC: CANCEL",
+		paint.dialog.x + 18, paint.dialog.y + paint.dialog.h - 60,
 		kTextScale, 155, 165, 178);
 	for (const DialogButtonPaint& button : paint.buttons) DrawButton(button, true);
 }

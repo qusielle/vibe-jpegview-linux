@@ -70,6 +70,7 @@ struct ContextMenuState {
 	FileList::SortMode sortMode = FileList::SortMode::FileName;
 	bool sortAscending = true;
 	bool imageAvailable = false;
+	bool freeRotationAvailable = false;
 	bool fileListAvailable = false;
 	bool archiveMember = false;
 	bool losslessJpegAvailable = false;
