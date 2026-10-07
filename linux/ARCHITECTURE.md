@@ -572,8 +572,10 @@ should normally be added to one of these focused modules and covered by the matc
   the callback-backed parser without buffering image data.
 - `tiff_metadata_reader`: bounds-checked TIFF parsing over a memory span or read-at source; large
   TIFF files need only read the header, directory tables, and referenced metadata values. Reads check
-  the work context for cancellation. Common shooting fields use IFD0 as a per-field fallback; valid
-  ExifIFD values override it. Signed decimal GPS coordinates are retained alongside the information
+  the work context for cancellation and distinguish unreadable integers from valid zero values.
+  Unreadable required headers or directories fail parsing; unreadable optional fields retain their
+  per-field IFD0 fallback. Valid ExifIFD values override it. Cancellation rejects the result even
+  after an optional read. Signed decimal GPS coordinates are retained alongside the information
   overlay text.
 - `gps_map_action`: validation of the configurable HTTP(S) map URL template and locale-independent
   substitution of signed latitude/longitude values. Viewer exposes the action only for metadata

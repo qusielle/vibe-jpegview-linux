@@ -30,7 +30,8 @@ public:
 
 	bool Read(ExifInfo& info) {
 		if (!InRange(tiffOffset_, 8)) return false;
-		const std::uint16_t byteOrder = Read16(tiffOffset_);
+		std::uint16_t byteOrder = 0;
+		if (!Read16(tiffOffset_, byteOrder)) return false;
 		if (byteOrder == 0x4949) {
 			littleEndian_ = true;
 		} else if (byteOrder == 0x4D4D) {
@@ -38,9 +39,11 @@ public:
 		} else {
 			return false;
 		}
-		if (Read16(tiffOffset_ + 2) != 42) return false;
+		std::uint16_t magic = 0;
+		if (!Read16(tiffOffset_ + 2, magic) || magic != 42) return false;
 
-		const std::uint32_t ifdOffset = Read32(tiffOffset_ + 4);
+		std::uint32_t ifdOffset = 0;
+		if (!Read32(tiffOffset_ + 4, ifdOffset)) return false;
 		std::vector<TiffEntry> ifd0;
 		if (!ReadDirectory(ifdOffset, ifd0)) return false;
 		info.hasExif = true;
@@ -79,7 +82,7 @@ public:
 		if (ReadUnsigned(gpsOffset, gpsDirectoryOffset) && ReadDirectory(gpsDirectoryOffset, gpsIfd)) {
 			ReadGps(gpsIfd, info);
 		}
-		return true;
+		return context_.Continue();
 	}
 
 private:
@@ -99,16 +102,18 @@ private:
 		}
 	}
 
-	std::uint16_t Read16(std::size_t offset) const {
+	bool Read16(std::size_t offset, std::uint16_t& value) const {
 		std::uint8_t bytes[2]{};
-		if (!ReadBytes(offset, bytes, sizeof(bytes))) return 0;
-		return Decode16(bytes);
+		if (!ReadBytes(offset, bytes, sizeof(bytes))) return false;
+		value = Decode16(bytes);
+		return true;
 	}
 
-	std::uint32_t Read32(std::size_t offset) const {
+	bool Read32(std::size_t offset, std::uint32_t& value) const {
 		std::uint8_t bytes[4]{};
-		if (!ReadBytes(offset, bytes, sizeof(bytes))) return 0;
-		return Decode32(bytes);
+		if (!ReadBytes(offset, bytes, sizeof(bytes))) return false;
+		value = Decode32(bytes);
+		return true;
 	}
 
 	std::uint16_t Decode16(const std::uint8_t* bytes) const {
@@ -142,7 +147,8 @@ private:
 	bool ReadDirectory(std::uint32_t relativeOffset, std::vector<TiffEntry>& entries) const {
 		const std::size_t directory = tiffOffset_ + relativeOffset;
 		if (directory < tiffOffset_ || !InRange(directory, 2)) return false;
-		const std::uint16_t count = Read16(directory);
+		std::uint16_t count = 0;
+		if (!Read16(directory, count)) return false;
 		const std::size_t entryBytes = static_cast<std::size_t>(count) * 12;
 		if (count != 0 && entryBytes / 12 != count) return false;
 		if (!InRange(directory + 2, entryBytes)) return false;
@@ -213,7 +219,8 @@ private:
 		if (length <= 4) {
 			location = entry->entryOffset + 8;
 		} else {
-			const std::uint32_t relativeLocation = Read32(entry->entryOffset + 8);
+			std::uint32_t relativeLocation = 0;
+			if (!Read32(entry->entryOffset + 8, relativeLocation)) return false;
 			location = tiffOffset_ + relativeLocation;
 			if (location < tiffOffset_) return false;
 		}
@@ -273,12 +280,14 @@ private:
 			value = byte;
 			return true;
 		}
-		case 3:
-			value = Read16(location);
+		case 3: {
+			std::uint16_t number = 0;
+			if (!Read16(location, number)) return false;
+			value = number;
 			return true;
+		}
 		case 4:
-			value = Read32(location);
-			return true;
+			return Read32(location, value);
 		default:
 			return false;
 		}
@@ -291,12 +300,15 @@ private:
 		std::size_t length = 0;
 		if (!ValueLocation(entry, location, length) || index > (length - 8) / 8) return false;
 		location += index * 8;
+		std::uint32_t rawNumber = 0;
+		std::uint32_t rawDivisor = 0;
+		if (!Read32(location, rawNumber) || !Read32(location + 4, rawDivisor)) return false;
 		const std::int64_t number = entry->type == 10 ?
-			static_cast<std::int64_t>(static_cast<std::int32_t>(Read32(location))) :
-			static_cast<std::int64_t>(Read32(location));
+			static_cast<std::int64_t>(static_cast<std::int32_t>(rawNumber)) :
+			static_cast<std::int64_t>(rawNumber);
 		const std::int64_t divisor = entry->type == 10 ?
-			static_cast<std::int64_t>(static_cast<std::int32_t>(Read32(location + 4))) :
-			static_cast<std::int64_t>(Read32(location + 4));
+			static_cast<std::int64_t>(static_cast<std::int32_t>(rawDivisor)) :
+			static_cast<std::int64_t>(rawDivisor);
 		if (divisor == 0) return false;
 		value = static_cast<double>(number) / static_cast<double>(divisor);
 		if (numerator != nullptr) *numerator = number;

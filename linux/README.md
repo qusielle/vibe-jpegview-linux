@@ -416,10 +416,11 @@ they support.
     EXIF metadata results remain bound to their source identity and request generation and are
     discarded when either becomes stale. Archive-member EXIF reads resume after foreground source
     work so navigation does not permanently lose optional metadata. Common shooting fields use
-    IFD0 as a safe fallback when the ExifIFD is missing or malformed, while valid ExifIFD values
-    take precedence. The selected-image metadata reader identifies JPEG, TIFF, DNG, PNG, APNG, and
-    WebP content from its signature, so a mismatched filename suffix does not select the wrong
-    metadata parser. TIFF and DNG metadata uses bounded reads of directory tables and referenced values
+    IFD0 as a safe fallback when the ExifIFD is missing, malformed, or a field cannot be read,
+    while valid ExifIFD values take precedence. The selected-image metadata reader identifies
+    JPEG, TIFF, DNG, PNG, APNG, and WebP content from its signature, so a mismatched filename
+    suffix does not select the wrong metadata parser. TIFF and DNG metadata uses bounded reads of
+    directory tables and referenced values
     instead of loading the whole image. PNG/APNG `eXIf` chunks are CRC-checked and parsed through
     bounded reads. WebP `EXIF` chunks support the optional `Exif\0\0` prefix. Embedded EXIF payloads
     above 64 MiB are ignored for PNG/APNG and WebP. Rotate/mirror, crop, resize,

@@ -3727,6 +3727,53 @@ void TestTiffMetadataReaderBoundedRandomAccess() {
 		info.isoSpeed == 200,
 		"TIFF metadata parser read the entire backing source or changed parsed values");
 
+	const jpegview_linux::TiffMetadataReadAt unreadableDirectory =
+		[&readAt](std::size_t offset, std::uint8_t* destination, std::size_t length) {
+			return offset != 8 && readAt(offset, destination, length);
+		};
+	info = {};
+	Expect(!jpegview_linux::ReadTiffMetadataFromSource(tiffBytes.size(),
+		unreadableDirectory, 0, info) && !info.hasExif,
+		"failed TIFF directory count read was accepted as an empty directory");
+
+	const std::array<std::uint8_t, 8> exifExposure = {1, 0, 0, 0, 125, 0, 0, 0};
+	const auto exposurePosition = std::search(tiffBytes.begin(), tiffBytes.end(),
+		exifExposure.begin(), exifExposure.end());
+	Expect(exposurePosition != tiffBytes.end(),
+		"TIFF fixture did not contain its ExifIFD exposure value");
+	const std::size_t exposureOffset = static_cast<std::size_t>(
+		exposurePosition - tiffBytes.begin());
+	const jpegview_linux::TiffMetadataReadAt unreadableExifValues =
+		[&readAt, &tiffBytes, exposureOffset](std::size_t offset,
+			std::uint8_t* destination, std::size_t length) {
+			if (offset == exposureOffset ||
+				(length == 2 && offset + 2 <= tiffBytes.size() &&
+					tiffBytes[offset] == 200 && tiffBytes[offset + 1] == 0)) return false;
+			return readAt(offset, destination, length);
+		};
+	info = {};
+	Expect(jpegview_linux::ReadTiffMetadataFromSource(tiffBytes.size(),
+		unreadableExifValues, 0, info) && info.exposureTime == "1/60" &&
+		info.isoSpeed == 400 && info.focalLength == 50.0,
+		"failed ExifIFD value reads overwrote valid per-field IFD0 fallbacks");
+
+	bool canceledDuringRead = false;
+	jpegview_linux::WorkContext canceledWhileReading;
+	canceledWhileReading.shouldContinue = [&canceledDuringRead] {
+		return !canceledDuringRead;
+	};
+	const jpegview_linux::TiffMetadataReadAt cancelDuringRead =
+		[&readAt, &canceledDuringRead, exposureOffset](std::size_t offset,
+			std::uint8_t* destination, std::size_t length) {
+			const bool read = readAt(offset, destination, length);
+			if (offset == exposureOffset) canceledDuringRead = true;
+			return read;
+		};
+	info = {};
+	Expect(!jpegview_linux::ReadTiffMetadataFromSource(tiffBytes.size(),
+		cancelDuringRead, 0, info, canceledWhileReading) && canceledDuringRead,
+		"TIFF parser reported successful metadata after cancellation during a value read");
+
 	const fs::path filename = temporary.path() / "capture.dng";
 	WriteBytes(filename, tiffBytes);
 	info = {};
