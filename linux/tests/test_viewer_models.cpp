@@ -4337,6 +4337,7 @@ void TestModalEventRouterPrecedence() {
 		{&state.fileDialog, ModalEventRoute::FileDialog},
 		{&state.batchCopy, ModalEventRoute::BatchCopy},
 		{&state.resize, ModalEventRoute::Resize},
+		{&state.freeRotation, ModalEventRoute::FreeRotation},
 		{&state.fixedCropSize, ModalEventRoute::FixedCropSize},
 		{&state.goToImageNumber, ModalEventRoute::GoToImageNumber},
 		{&state.unsharpMask, ModalEventRoute::UnsharpMask},

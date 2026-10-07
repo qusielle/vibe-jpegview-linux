@@ -11,6 +11,7 @@ ModalEventRoute ResolveModalEventRoute(const ModalEventState& state) {
 	if (state.fileDialog) return ModalEventRoute::FileDialog;
 	if (state.batchCopy) return ModalEventRoute::BatchCopy;
 	if (state.resize) return ModalEventRoute::Resize;
+	if (state.freeRotation) return ModalEventRoute::FreeRotation;
 	if (state.fixedCropSize) return ModalEventRoute::FixedCropSize;
 	if (state.goToImageNumber) return ModalEventRoute::GoToImageNumber;
 	if (state.unsharpMask) return ModalEventRoute::UnsharpMask;

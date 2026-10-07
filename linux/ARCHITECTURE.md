@@ -504,8 +504,9 @@ should normally be added to one of these focused modules and covered by the matc
   texture and returns null, preserving the callers' existing defer-and-retry contract.
 - `text_renderer`, `chrome_renderer`, `context_menu_renderer`, `file_dialog_renderer`, and
   `editing_dialog_renderer`: SDL drawing adapters that consume prepared paint snapshots and share
-  narrow renderer/font services. Viewer still decides when to draw and builds snapshots from its
-  models; the adapters own their renderer-facing helpers and do not become alternate state owners.
+  narrow renderer/font services. The editing adapter renders free-rotation controls from a paint
+  snapshot; Viewer still owns the dialog and decides when to draw. The adapters own renderer-facing
+  helpers and do not become alternate state owners.
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
   validation and single-pass expansion for the configurable window-title pattern. It caches title
   and information-line formatting by the relevant source, catalog, metadata, and display state, and

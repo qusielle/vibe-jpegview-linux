@@ -88,6 +88,43 @@ void EditingDialogRendererAdapter::Render(const ResizeDialogPaint& paint) {
 	for (const DialogButtonPaint& button : paint.buttons) DrawButton(button, true);
 }
 
+void EditingDialogRendererAdapter::Render(const FreeRotationDialogPaint& paint) {
+	if (!paint.visible || renderer_ == nullptr) return;
+	Fill(paint.dialog, 9, 13, 20, 246);
+	chromeRenderer_.DrawRect(paint.dialog, 200, 210, 225);
+	textRenderer_.Draw("FREE ROTATION", paint.dialog.x + 18,
+		paint.dialog.y + 14, kTextScale, 245, 245, 250);
+	textRenderer_.Draw("ANGLE", paint.dialog.x + 18,
+		paint.dialog.y + 52, kTextScale, 205, 215, 230);
+	textRenderer_.Draw(paint.angleValue, paint.dialog.x + paint.dialog.w -
+		textRenderer_.TextWidth(paint.angleValue, kTextScale) - 18,
+		paint.dialog.y + 52, kTextScale, 235, 240, 245);
+	chromeRenderer_.DrawLine(paint.angleSlider.x, paint.angleSlider.y +
+		paint.angleSlider.h / 2, paint.angleSlider.x + paint.angleSlider.w,
+		paint.angleSlider.y + paint.angleSlider.h / 2, 100, 116, 132);
+	Fill(SDL_Rect{paint.angleKnobX - 5, paint.angleSlider.y +
+		paint.angleSlider.h / 2 - 7, 11, 15}, 130, 205, 240, 255);
+	for (const DialogTogglePaint& toggle : paint.toggles) {
+		const Uint8 shade = toggle.enabled ? 220 : 115;
+		Fill(toggle.rect, toggle.checked ? 45 : 25,
+			toggle.checked ? 68 : 25, toggle.checked ? 92 : 25, 225);
+		chromeRenderer_.DrawRect(toggle.rect,
+			toggle.enabled ? (toggle.checked ? 125 : 75) : 58,
+			toggle.enabled ? (toggle.checked ? 155 : 75) : 62,
+			toggle.enabled ? (toggle.checked ? 195 : 75) : 66);
+		textRenderer_.Draw(toggle.label, toggle.rect.x + 10,
+			toggle.rect.y + 7, kTextScale, shade, shade, shade);
+	}
+	if (!paint.message.empty()) {
+		textRenderer_.Draw(paint.message, paint.dialog.x + 18,
+			paint.dialog.y + paint.dialog.h - 82, kTextScale, 235, 185, 135);
+	}
+	textRenderer_.Draw("LEFT/RIGHT: 0.1 DEG   SHIFT: 1 DEG   HOME: RESET   ENTER: APPLY   ESC: CANCEL",
+		paint.dialog.x + 18, paint.dialog.y + paint.dialog.h - 61,
+		kTextScale, 155, 165, 178);
+	for (const DialogButtonPaint& button : paint.buttons) DrawButton(button, true);
+}
+
 void EditingDialogRendererAdapter::Render(const FixedCropSizeDialogPaint& paint) {
 	if (!paint.visible || renderer_ == nullptr) return;
 	Fill(paint.dialog, 12, 12, 12, 232);

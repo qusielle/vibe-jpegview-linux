@@ -48,6 +48,25 @@ struct ResizeDialogPaint {
 	std::array<DialogButtonPaint, 2> buttons;
 };
 
+struct DialogTogglePaint {
+	SDL_Rect rect{};
+	std::string label;
+	bool checked = false;
+	bool enabled = true;
+};
+
+struct FreeRotationDialogPaint {
+	bool visible = false;
+	bool applying = false;
+	SDL_Rect dialog{};
+	SDL_Rect angleSlider{};
+	int angleKnobX = 0;
+	std::string angleValue;
+	std::string message;
+	std::array<DialogTogglePaint, 3> toggles;
+	std::array<DialogButtonPaint, 2> buttons;
+};
+
 struct CropSizeFieldPaint {
 	SDL_Rect rect{};
 	std::string label;
@@ -105,6 +124,7 @@ public:
 	void SetRenderer(SDL_Renderer* renderer) noexcept { renderer_ = renderer; }
 	void Render(const UnsharpMaskDialogPaint& paint);
 	void Render(const ResizeDialogPaint& paint);
+	void Render(const FreeRotationDialogPaint& paint);
 	void Render(const FixedCropSizeDialogPaint& paint);
 	void Render(const BatchCopyDialogPaint& paint);
 

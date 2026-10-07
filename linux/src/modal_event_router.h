@@ -14,6 +14,7 @@ enum class ModalEventRoute {
 	FileDialog,
 	BatchCopy,
 	Resize,
+	FreeRotation,
 	FixedCropSize,
 	GoToImageNumber,
 	UnsharpMask,
@@ -31,6 +32,7 @@ struct ModalEventState {
 	bool fileDialog = false;
 	bool batchCopy = false;
 	bool resize = false;
+	bool freeRotation = false;
 	bool fixedCropSize = false;
 	bool goToImageNumber = false;
 	bool unsharpMask = false;
