@@ -2,6 +2,8 @@
 
 #include "event_loop_model.h"
 #include "image_processing.h"
+#include "image_transform_geometry.h"
+#include "image_transform_pixels.h"
 #include "perf_diagnostics.h"
 #include "source_work_coordinator.h"
 
@@ -159,6 +161,7 @@ ImageOperationResult ProcessImageOperation(const ImageOperationRequest& request,
 	result.detached = request.document.detached;
 	result.updatesDocument = request.operation.kind == ImageOperationKind::Materialize ||
 		request.operation.kind == ImageOperationKind::Transform ||
+		request.operation.kind == ImageOperationKind::FreeRotate ||
 		request.operation.kind == ImageOperationKind::Crop ||
 		request.operation.kind == ImageOperationKind::Resize ||
 		request.operation.kind == ImageOperationKind::Reprocess ||
@@ -240,6 +243,44 @@ ImageOperationResult ProcessImageOperation(const ImageOperationRequest& request,
 		} else if (request.operation.transform == ImageTransformKind::RotateCounterClockwise) {
 			result.rotationQuarterTurns = (result.rotationQuarterTurns + 3) % 4;
 		}
+		result.modified = true;
+		result.flattenAnimation = request.document.animated;
+		result.success = true;
+		break;
+	}
+	case ImageOperationKind::FreeRotate: {
+		ImageTransformGeometry geometry;
+		if (!BuildFreeRotationGeometry(source->width, source->height,
+			request.operation.clockwiseDegrees, request.operation.autoCrop,
+			request.operation.preserveAspectRatio, geometry)) break;
+		Image rotatedSource;
+		if (!ResampleFreeRotation(*source, geometry,
+			ImageTransformSampling::FinalBicubic, rotatedSource, shouldContinue)) break;
+		result.sourcePixels = OwnImage(std::move(rotatedSource), budget,
+			result.sourceReservation);
+		if (!result.sourcePixels) break;
+		if (!ProcessingChangesPixels(request.document)) {
+			if (!sharePresentation(result.sourcePixels)) break;
+		} else {
+			Image currentPresentation;
+			Image rotatedPresentation;
+			const bool currentProcessingMatches = request.document.presentationPixels &&
+				jpegview_linux::EqualImageProcessing(
+					request.document.materializedProcessing, request.document.processing) &&
+				request.document.materializedAutoContrast == request.document.autoContrast;
+			const Image* presentationToRotate = request.document.presentationPixels.get();
+			if (!currentProcessingMatches) {
+				if (!BuildProcessed(*source, request.document, currentPresentation,
+					shouldContinue)) break;
+				presentationToRotate = &currentPresentation;
+			}
+			if (presentationToRotate == nullptr ||
+				!ResampleFreeRotation(*presentationToRotate, geometry,
+					ImageTransformSampling::FinalBicubic, rotatedPresentation,
+					shouldContinue) ||
+				!makePresentation(std::move(rotatedPresentation))) break;
+		}
+		result.rotationQuarterTurns = 0;
 		result.modified = true;
 		result.flattenAnimation = request.document.animated;
 		result.success = true;

@@ -15,6 +15,7 @@ namespace jpegview_linux {
 enum class ImageOperationKind {
 	Materialize,
 	Transform,
+	FreeRotate,
 	Crop,
 	Resize,
 	Reprocess,
@@ -50,6 +51,9 @@ struct ImageOperationSpec {
 	ImageOperationKind kind = ImageOperationKind::Materialize;
 	bool preserveDocumentPixels = false;
 	ImageTransformKind transform = ImageTransformKind::RotateClockwise;
+	double clockwiseDegrees = 0.0;
+	bool autoCrop = false;
+	bool preserveAspectRatio = false;
 	int left = 0;
 	int top = 0;
 	int right = 0;

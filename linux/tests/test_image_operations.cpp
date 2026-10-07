@@ -2,9 +2,12 @@
 #include "test_support.h"
 #include "gps_map_action.h"
 #include "image_metadata_reader.h"
+#include "image_transform_geometry.h"
+#include "image_transform_pixels.h"
 #include "tiff_metadata_reader.h"
 
 #include <cstring>
+#include <limits>
 
 namespace {
 
@@ -761,14 +764,31 @@ void TestImageOperationWorkerRunsCropAndFlattensCapturedFrame() {
 		"animation-frame document could not install its immutable pixel fixture");
 	const std::vector<std::uint8_t> originalPixels = sourcePixels->bgra;
 	jpegview_linux::ImageDocumentSnapshot cropSnapshot = document.Snapshot();
+	jpegview_linux::ImageOperationWorker worker(budget);
 	jpegview_linux::ImageOperationRequest cropRequest;
 	cropRequest.document = cropSnapshot;
+	jpegview_linux::ImageOperationRequest rotationRequest;
+	rotationRequest.document = cropSnapshot;
+	rotationRequest.operation.kind = jpegview_linux::ImageOperationKind::FreeRotate;
+	rotationRequest.operation.clockwiseDegrees = 27.0;
+	const std::uint64_t rotationGeneration = worker.Request(std::move(rotationRequest));
+	Expect(rotationGeneration != 0 && worker.WaitUntilIdle(std::chrono::seconds(3)),
+		"asynchronous free rotation did not complete within its bounded deadline");
+	auto rotationResult = worker.TakeReady();
+	Expect(rotationResult.has_value() && rotationResult->success &&
+		rotationResult->requestGeneration == rotationGeneration &&
+		rotationResult->updatesDocument && rotationResult->flattenAnimation &&
+		rotationResult->sourcePixels && rotationResult->presentationPixels &&
+		rotationResult->sourcePixels->width != sourcePixels->width &&
+		document.CanApply(*rotationResult) && document.Animated(),
+		"worker rotation failed to produce a provisional animated-frame result");
+	worker.Retire(std::move(*rotationResult));
+
 	cropRequest.operation.kind = jpegview_linux::ImageOperationKind::Crop;
 	cropRequest.operation.left = 1;
 	cropRequest.operation.top = 0;
 	cropRequest.operation.right = 3;
 	cropRequest.operation.bottom = 2;
-	jpegview_linux::ImageOperationWorker worker(budget);
 	const std::uint64_t cropGeneration = worker.Request(std::move(cropRequest));
 	Expect(cropGeneration != 0 && worker.WaitUntilIdle(std::chrono::seconds(3)),
 		"asynchronous crop did not complete within its bounded deadline");
@@ -884,6 +904,43 @@ void TestImageOperationWorkerMatchesTransformsAndPixelPipelines() {
 			result.modified && result.rotationQuarterTurns == transform.second,
 			"worker transform diverged from mutable image transforms or changed alpha, dimensions, or animation state");
 	}
+
+	document.rotationQuarterTurns = 2;
+	for (const auto& cropPolicy : std::vector<std::pair<bool, bool>>{
+		{false, false}, {true, false}, {true, true}}) {
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::FreeRotate;
+		operation.clockwiseDegrees = 27.0;
+		operation.autoCrop = cropPolicy.first;
+		operation.preserveAspectRatio = cropPolicy.second;
+		const jpegview_linux::ImageOperationResult result = run(operation);
+		jpegview_linux::ImageTransformGeometry geometry;
+		Expect(jpegview_linux::BuildFreeRotationGeometry(source->width, source->height,
+			operation.clockwiseDegrees, operation.autoCrop, operation.preserveAspectRatio,
+			geometry), "could not build free-rotation worker reference geometry");
+		jpegview_linux::Image expectedSource;
+		jpegview_linux::Image expectedPresentation;
+		Expect(jpegview_linux::ResampleFreeRotation(*source, geometry,
+			jpegview_linux::ImageTransformSampling::FinalBicubic, expectedSource) &&
+			jpegview_linux::ResampleFreeRotation(processedSource, geometry,
+				jpegview_linux::ImageTransformSampling::FinalBicubic, expectedPresentation),
+			"could not build free-rotation worker parity references");
+		Expect(result.success && result.updatesDocument && result.sourcePixels &&
+			result.presentationPixels && result.flattenAnimation && result.modified &&
+			result.rotationQuarterTurns == 0 &&
+			result.sourcePixels->bgra == expectedSource.bgra &&
+			result.presentationPixels->bgra == expectedPresentation.bgra &&
+			result.presentationPixels->width == geometry.outputWidth &&
+			result.presentationPixels->height == geometry.outputHeight,
+			"free-rotation worker changed processing order, crop policy, or animation metadata");
+	}
+	jpegview_linux::ImageOperationSpec invalidRotation;
+	invalidRotation.kind = jpegview_linux::ImageOperationKind::FreeRotate;
+	invalidRotation.clockwiseDegrees = std::numeric_limits<double>::infinity();
+	const auto invalidRotationResult = run(invalidRotation);
+	Expect(!invalidRotationResult.success && invalidRotationResult.failure.Failed() &&
+		!invalidRotationResult.sourcePixels && !invalidRotationResult.presentationPixels,
+		"free-rotation worker accepted invalid geometry or published partial pixels");
 
 	jpegview_linux::ImageOperationSpec crop;
 	crop.kind = jpegview_linux::ImageOperationKind::Crop;
