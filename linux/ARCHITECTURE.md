@@ -251,7 +251,7 @@ should normally be added to one of these focused modules and covered by the matc
   flattened-preview fallback, which remains selected for actual project containers.
   `image_decoder.cpp` owns validation, append/conversion helpers, source admission, and codec dispatch;
   `image_decoder_stb.cpp`, `image_decoder_jpeg.cpp`, `image_decoder_apng.cpp`,
-  `image_decoder_builtin.cpp`, and `image_decoder_optional.cpp` isolate the corresponding reader
+  `image_decoder_builtin.cpp`, `image_decoder_optional.cpp`, and `image_decoder_svg.cpp` isolate the corresponding reader
   families behind the shared internal interface. `image_writer.cpp` owns validation and dispatch;
   `image_writer_jpeg_png.cpp`, `image_writer_basic.cpp`, and `image_writer_optional.cpp` hold codec
   implementations. Decoder-owned pixel buffers move into `DecodedImage` when the decoder has finished
@@ -264,7 +264,21 @@ should normally be added to one of these focused modules and covered by the matc
   Content dispatch runs inside existing admitted asynchronous source preparation. The reduced-DCT
   display path retains its direct JPEG attempt and only invokes content detection when that attempt
   fails; generic decodes use content signatures first. Unknown and ambiguous formats fall back to
-  the existing extension-based dispatch.
+  the existing extension-based dispatch. SVG/SVGZ use optional librsvg 2.46+ and Cairo support; a
+  local build without those packages retains format recognition but publishes an explicit
+  unavailable-codec error. `image_decoder_svg.cpp` bounds encoded and inflated input, accepts one
+  gzip member, rejects XML DTDs/entities, scripts, XInclude, base URIs, stylesheets, and non-fragment
+  resource references, and parses source dimensions without allocating a source-sized raster. Its
+  display entry point renders directly to a bounded target surface, while ordinary `DecodeImage`
+  calls retain intrinsic pixels for editing, sampling, and full-source histogram work. The decoded
+  source-kind flag comes from content dispatch, so file-backed SVG requests remain vector-backed
+  after another owner has cached source pixels or when the filename suffix is wrong. Histogram
+  preparation computes its spectrum from a separate full-source snapshot while the visible frame is
+  rendered at target size. Thumbnail and visible spread preparation use the same renderer with
+  upscaling disabled only for thumbnails, avoiding source-sized display/thumbnail rasters. Intrinsic
+  font-relative dimensions use librsvg's computed root font size; older supported librsvg versions
+  use their compatible dimension query. SVGZ prefix probing is bounded and distinguishes vector
+  gzip content from other gzip files; folder scans still include only recognized image suffixes.
   JPEG cancellation is checked before opening, after header parsing, between 16-row scanline batches,
   before color conversion/resampling,
   and before publication; opaque codec calls are checked before and after their supported boundaries.
@@ -305,8 +319,11 @@ should normally be added to one of these focused modules and covered by the matc
   Rotated spread partners are oriented on the worker before final slot-size resampling; unrotated
   image requests retain the same processing path. JPEG display requests use native reduced DCT
   decode with swapped target axes for quarter-turns before exact scaling, without requiring a
-  retained full-resolution source frame. Selected display requests clamp their preparation target to
-  the effective source dimensions before key lookup. The renderer destination remains viewport-sized,
+  retained full-resolution source frame. Raster selected display requests clamp their preparation
+  target to the effective source dimensions before key lookup. SVG requests retain the view target
+  for librsvg rendering, bounded by the decoder's axis and pixel limits, while preserving intrinsic
+  source dimensions for viewport math and metadata. SVG thumbnail preparation renders directly to
+  its bounded row size without enlarging small sources. The renderer destination remains viewport-sized,
   so enlargement scales the source-resolution texture and pan changes only its position; neither needs
   another prepared frame. A larger cached representation may serve a smaller request only when source,
   frame, orientation, histogram, and effective processing keys match; the planner protects that

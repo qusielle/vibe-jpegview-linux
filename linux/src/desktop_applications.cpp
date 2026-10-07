@@ -213,6 +213,7 @@ std::string MimeTypeForExtension(const std::string& extension) {
 	if (extension == ".pgm") return "image/x-portable-graymap";
 	if (extension == ".pnm") return "image/x-portable-anymap";
 	if (extension == ".webp") return "image/webp";
+	if (extension == ".svg" || extension == ".svgz") return "image/svg+xml";
 	return {};
 }
 

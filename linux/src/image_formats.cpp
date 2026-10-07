@@ -4,9 +4,11 @@
 #include <array>
 #include <cctype>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <zlib.h>
 
 namespace jpegview_linux {
 namespace {
@@ -73,6 +75,67 @@ bool HasPnmHeader(const std::uint8_t* bytes, std::size_t size) {
 		bytes[2] == '\n' || bytes[2] == '#';
 }
 
+bool LooksLikeSvgXml(const std::uint8_t* bytes, std::size_t size) {
+	if (bytes == nullptr) return false;
+	std::size_t position = 0;
+	if (size >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf) {
+		position = 3;
+	}
+	const auto starts = [bytes, size](std::size_t offset, std::string_view value) {
+		return offset <= size && value.size() <= size - offset &&
+			std::equal(value.begin(), value.end(), bytes + offset,
+				[](char left, std::uint8_t right) {
+					return static_cast<unsigned char>(left) == right;
+				});
+	};
+	for (;;) {
+		while (position < size && (bytes[position] == ' ' || bytes[position] == '\t' ||
+			bytes[position] == '\r' || bytes[position] == '\n')) ++position;
+		if (starts(position, "<?")) {
+			const std::size_t end = std::string_view(
+				reinterpret_cast<const char*>(bytes + position), size - position).find("?>");
+			if (end == std::string_view::npos) return false;
+			position += end + 2;
+			continue;
+		}
+		if (starts(position, "<!--")) {
+			const std::size_t end = std::string_view(
+				reinterpret_cast<const char*>(bytes + position), size - position).find("-->");
+			if (end == std::string_view::npos) return false;
+			position += end + 3;
+			continue;
+		}
+		break;
+	}
+	if (!starts(position, "<") || starts(position, "<!") || starts(position, "</")) return false;
+	++position;
+	const std::size_t nameStart = position;
+	while (position < size && bytes[position] != ' ' && bytes[position] != '\t' &&
+		bytes[position] != '\r' && bytes[position] != '\n' && bytes[position] != '/' &&
+		bytes[position] != '>') ++position;
+	if (position == nameStart) return false;
+	std::string_view name(reinterpret_cast<const char*>(bytes + nameStart), position - nameStart);
+	const std::size_t colon = name.rfind(':');
+	if (colon != std::string_view::npos) name.remove_prefix(colon + 1);
+	return name == "svg";
+}
+
+bool GzipPrefixLooksLikeSvg(const std::uint8_t* bytes, std::size_t size) {
+	if (bytes == nullptr || size < 2 || size > std::numeric_limits<uInt>::max()) return false;
+	z_stream stream{};
+	if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) return false;
+	std::array<std::uint8_t, 8192> output{};
+	stream.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(bytes));
+	stream.avail_in = static_cast<uInt>(size);
+	stream.next_out = output.data();
+	stream.avail_out = static_cast<uInt>(output.size());
+	const int status = inflate(&stream, Z_NO_FLUSH);
+	const std::size_t bytesWritten = output.size() - stream.avail_out;
+	inflateEnd(&stream);
+	return (status == Z_OK || status == Z_STREAM_END || status == Z_BUF_ERROR) &&
+		bytesWritten != 0 && LooksLikeSvgXml(output.data(), bytesWritten);
+}
+
 bool Continue(const std::function<bool()>& shouldContinue) {
 	if (!shouldContinue) return true;
 	try {
@@ -93,13 +156,17 @@ bool IsSupportedImagePath(const std::filesystem::path& path) {
 		".jxr", ".wdp", ".hdp", ".mdp", ".pef", ".dng", ".crw", ".nef", ".cr2",
 		".mrw", ".rw2", ".orf", ".x3f", ".arw", ".kdc", ".nrw", ".dcr", ".sr2",
 		".raf", ".kc2", ".erf", ".3fr", ".raw", ".mef", ".mos", ".mdc", ".cr3",
-		".iiq", ".rwl"};
+		".iiq", ".rwl", ".svg", ".svgz"};
 	const std::string extension = Lower(path.extension().string());
 	return std::find(extensions.begin(), extensions.end(), extension) != extensions.end();
 }
 
 ImageContentFormat DetectImageContent(const std::uint8_t* bytes, std::size_t size) {
 	if (bytes == nullptr || size == 0) return ImageContentFormat::Unknown;
+	if (Matches(bytes, size, 0, "\x1f\x8b")) {
+		return GzipPrefixLooksLikeSvg(bytes, size) ? ImageContentFormat::Svgz :
+			ImageContentFormat::Unknown;
+	}
 	if (Matches(bytes, size, 0, "\xff\xd8\xff")) return ImageContentFormat::Jpeg;
 	if (Matches(bytes, size, 0, "\x89PNG\r\n\x1a\n")) {
 		for (std::size_t offset = 8; offset + 8 <= size;) {
@@ -158,6 +225,7 @@ ImageContentFormat DetectImageContent(const std::uint8_t* bytes, std::size_t siz
 	}
 	if (HasPnmHeader(bytes, size)) return ImageContentFormat::Pnm;
 	if (HasTgaHeader(bytes, size)) return ImageContentFormat::Tga;
+	if (LooksLikeSvgXml(bytes, size)) return ImageContentFormat::Svg;
 	return ImageContentFormat::Unknown;
 }
 
@@ -172,6 +240,16 @@ ImageContentFormat ReadImageContentFormat(const std::filesystem::path& path,
 	const std::size_t bytesRead = static_cast<std::size_t>(input.gcount());
 	ImageContentFormat format = DetectImageContent(header.data(), bytesRead);
 	if (!Continue(shouldContinue)) return ImageContentFormat::Unknown;
+	if (format == ImageContentFormat::Unknown) {
+		std::array<std::uint8_t, 8192> svgProbe{};
+		input.clear();
+		input.seekg(0, std::ios::beg);
+		input.read(reinterpret_cast<char*>(svgProbe.data()),
+			static_cast<std::streamsize>(svgProbe.size()));
+		const std::size_t probeBytes = static_cast<std::size_t>(input.gcount());
+		format = DetectImageContent(svgProbe.data(), probeBytes);
+		if (!Continue(shouldContinue)) return ImageContentFormat::Unknown;
+	}
 	if (format != ImageContentFormat::Png) return format;
 
 	constexpr std::uint64_t maximumPngProbeBytes = 256 * 1024;

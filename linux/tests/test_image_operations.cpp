@@ -3514,6 +3514,9 @@ void TestDesktopApplicationParsingAndExecExpansion() {
 	Expect(jpegview_linux::MimeTypeMatches("*/*", "image/png"), "universal MIME wildcard did not match");
 	Expect(!jpegview_linux::MimeTypeMatches("image/jpeg", "image/png"), "incompatible MIME type matched");
 	Expect(jpegview_linux::MimeTypeForExtension(".jpg") == "image/jpeg", "JPEG MIME mapping is incorrect");
+	Expect(jpegview_linux::MimeTypeForExtension(".svg") == "image/svg+xml" &&
+		jpegview_linux::MimeTypeForExtension(".svgz") == "image/svg+xml",
+		"SVG MIME mapping is incorrect");
 
 	const fs::path image = temporary.path() / "photos" / "a file.jpg";
 	application.name = "Test Viewer";
@@ -3569,7 +3572,8 @@ void TestDefaultViewerRegistration() {
 		"default viewer desktop entry did not safely quote its executable or hide its launcher duplicate");
 	Expect(desktop.find("MimeType=image/jpeg;") != std::string::npos &&
 		desktop.find("image/tiff;") != std::string::npos &&
-		desktop.find("image/jxl;") != std::string::npos,
+		desktop.find("image/jxl;") != std::string::npos &&
+		desktop.find("image/svg+xml;") != std::string::npos,
 		"default viewer desktop entry omitted supported MIME types");
 	jpegview_linux::OpenWithApplication registeredEntry;
 	Expect(!jpegview_linux::ReadDesktopApplication(desktopFile, "image/jpeg", registeredEntry),
@@ -3582,7 +3586,8 @@ void TestDefaultViewerRegistration() {
 		std::string::npos &&
 		associations.find("image/jpeg=jpegview-linux-user.desktop;") != std::string::npos &&
 		associations.find("text/plain=editor.desktop;") != std::string::npos &&
-		associations.find("image/jxl=jpegview-linux-user.desktop;") != std::string::npos,
+		associations.find("image/jxl=jpegview-linux-user.desktop;") != std::string::npos &&
+		associations.find("image/svg+xml=jpegview-linux-user.desktop;") != std::string::npos,
 		"default viewer registration did not preserve unrelated MIME associations");
 	Expect(jpegview_linux::RegisterDefaultViewer(executable, dataHome, configHome, errorMessage),
 		"repeated default viewer registration failed: " + errorMessage);

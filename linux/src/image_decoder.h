@@ -24,22 +24,35 @@ struct DecodedImage {
 	std::vector<DecodedFrame> frames;
 	bool animation = false;
 	int loopCount = 0; // zero means loop forever, as in GIF/WebP.
+	// Set from the decoded content signature, independent of its filename suffix.
+	bool isSvg = false;
 };
 
 bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage, const WorkContext& context = {});
 
 bool IsJpegPath(const std::filesystem::path& filename);
+bool IsSvgPath(const std::filesystem::path& filename);
 
 // Reads display geometry without decoding pixels for sources whose format
-// supports a lightweight metadata path. JPEG currently uses its header reader.
+// supports a lightweight metadata path, including JPEG and SVG/SVGZ.
 bool ReadSourceDimensions(const std::filesystem::path& filename, int& width, int& height,
-	std::string& errorMessage, const WorkContext& context = {});
+	std::string& errorMessage, const WorkContext& context = {}, bool* isSvg = nullptr);
 
 // Reads only the JPEG header. This is used to calculate a stable fitted
 // viewport before committing CPU time and memory to pixel decompression.
 bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage, const WorkContext& context = {});
+
+// SVG and SVGZ dimensions are parsed without rasterizing their source pixels.
+bool ReadSvgDimensions(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage, const WorkContext& context = {});
+
+// Renders an SVG directly to a display-sized raster while preserving its intrinsic dimensions.
+bool DecodeSvgForDisplay(const std::filesystem::path& filename,
+	int targetWidth, int targetHeight, DecodedImage& image,
+	int& sourceWidth, int& sourceHeight, std::string& errorMessage,
+	const WorkContext& context = {}, bool allowUpscale = true);
 
 // Returns the source JPEG's minimum-coded-unit dimensions from its component
 // sampling factors. Lossless crop origins and interior boundaries use these.

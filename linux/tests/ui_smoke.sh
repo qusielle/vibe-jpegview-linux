@@ -5990,4 +5990,47 @@ else
 	echo "UI smoke test: SKIP JPEG-named WebP case (ImageMagick WebP encoder is unavailable)"
 fi
 
+if [ "${JPEGVIEW_TEST_HAS_SVG:-1}" = 1 ]; then
+	mkdir -p "$temporary/svg-images"
+	cat >"$temporary/svg-images/vector.svg" <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400" viewBox="0 0 800 400">
+  <rect width="800" height="400" fill="#e02020"/>
+  <rect x="350" y="150" width="100" height="100" fill="#20e020"/>
+</svg>
+EOF
+	previous_state=$XDG_STATE_HOME
+	XDG_STATE_HOME="$temporary/svg-state"
+	export XDG_STATE_HOME
+	launch_viewer "$temporary/svg-images/vector.svg"
+	assert_title_prefix "vector.svg (800x400" \
+		"SVG source geometry did not reach the viewer title"
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" xdotool key plus
+		sleep 0.2
+		DISPLAY=":$display_number" xdotool key Return
+		vector_rendered=0
+		for _ in $(seq 1 50); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/vector-window.png"
+			vector_green_pixels=$(convert "$temporary/vector-window.png" \
+				-fx 'r < 0.15 && g > 0.8 && b < 0.15 ? 1 : 0' \
+				-format '%[fx:mean*w*h]' info:)
+			if awk -v pixels="$vector_green_pixels" 'BEGIN { exit !(pixels >= 1000) }'; then
+				vector_rendered=1
+				break
+			fi
+			sleep 0.1
+		done
+		if [ "$vector_rendered" -ne 1 ]; then
+			echo "UI smoke test: SVG did not render its center marker through the SDL display path" >&2
+			exit 1
+		fi
+	fi
+	stop_viewer
+	XDG_STATE_HOME=$previous_state
+	export XDG_STATE_HOME
+else
+	echo "UI smoke test: SKIP SVG rendering (build has no librsvg support)"
+fi
+
 echo "UI smoke tests passed"

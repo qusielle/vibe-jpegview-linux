@@ -16,7 +16,7 @@ RUN apt-get update \
     libgif-dev libtiff-dev libwebp-dev libheif-dev libraw-dev libjxr-dev \
     libheif-plugin-libde265 libheif-plugin-x265 \
     libavif-dev libjxl-dev libaom-dev libde265-dev libx265-dev \
-    libbrotli-dev liblcms2-dev xclip wl-clipboard \
+    libbrotli-dev liblcms2-dev librsvg2-dev libxml2-dev xclip wl-clipboard \
  && curl --fail --location --retry 3 "$APPIMAGETOOL_URL" --output /usr/local/bin/appimagetool \
  && chmod 755 /usr/local/bin/appimagetool \
  && if [ -n "$APPIMAGETOOL_SHA256" ]; then echo "$APPIMAGETOOL_SHA256  /usr/local/bin/appimagetool" | sha256sum --check; fi \

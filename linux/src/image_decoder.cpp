@@ -397,6 +397,11 @@ bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 		return decoder_detail::DecodePnm(filename, image, errorMessage);
 	case ImageContentFormat::Qoi:
 		return decoder_detail::DecodeQoi(filename, image, errorMessage);
+	case ImageContentFormat::Svg:
+	case ImageContentFormat::Svgz:
+		if (!decoder_detail::DecodeSvg(filename, image, errorMessage, context)) return false;
+		image.isSvg = true;
+		return true;
 	case ImageContentFormat::Raw:
 #if JPEGVIEW_HAVE_RAW
 		return decoder_detail::DecodeRaw(filename, image, errorMessage);
@@ -452,6 +457,11 @@ bool IsJpegPath(const std::filesystem::path& filename) {
 	return extension == ".jpg" || extension == ".jpeg" || extension == ".jpe";
 }
 
+bool IsSvgPath(const std::filesystem::path& filename) {
+	const std::string extension = decoder_detail::Lower(filename.extension().string());
+	return extension == ".svg" || extension == ".svgz";
+}
+
 bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage, const WorkContext& supplied) {
 	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
@@ -478,14 +488,84 @@ bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& 
 }
 
 bool ReadSourceDimensions(const std::filesystem::path& filename, int& width, int& height,
-	std::string& errorMessage, const WorkContext& context) {
-	if (!IsJpegPath(filename)) {
-		width = 0;
-		height = 0;
-		errorMessage = "source format has no lightweight dimensions reader";
+	std::string& errorMessage, const WorkContext& context, bool* isSvg) {
+	if (isSvg != nullptr) *isSvg = false;
+	if (IsSvgPath(filename)) {
+		const bool succeeded = ReadSvgDimensions(filename, width, height, errorMessage,
+			context);
+		if (succeeded && isSvg != nullptr) *isSvg = true;
+		return succeeded;
+	}
+	if (IsJpegPath(filename)) {
+		if (ReadJpegDimensions(filename, width, height, errorMessage, context)) return true;
+		const ImageContentFormat format = ReadImageContentFormat(filename,
+			[&context] { return context.Continue(); });
+		if (format == ImageContentFormat::Svg || format == ImageContentFormat::Svgz) {
+			const bool succeeded = ReadSvgDimensions(filename, width, height,
+				errorMessage, context);
+			if (succeeded && isSvg != nullptr) *isSvg = true;
+			return succeeded;
+		}
 		return false;
 	}
-	return ReadJpegDimensions(filename, width, height, errorMessage, context);
+	width = 0;
+	height = 0;
+	errorMessage = "source format has no lightweight dimensions reader";
+	return false;
+}
+
+bool ReadSvgDimensions(const std::filesystem::path& filename, int& width,
+	int& height, std::string& errorMessage, const WorkContext& supplied) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
+	width = 0;
+	height = 0;
+	errorMessage.clear();
+	return RunWithSourceAndCpuAdmission(filename, SourceWorkPriority::Metadata,
+		supplied, errorMessage, [&filename, &width, &height, &errorMessage](
+			const WorkContext& context) {
+			if (IsArchiveMemberLocation(filename)) {
+				return WithArchiveMemberFile(filename,
+					[&width, &height, context](const std::filesystem::path& temporary,
+						std::string& decodeError) {
+						return decoder_detail::ReadSvgDimensions(temporary, width, height,
+							decodeError, context);
+					}, errorMessage, nullptr,
+					[context] { return context.Continue(); });
+			}
+			return decoder_detail::ReadSvgDimensions(filename, width, height,
+				errorMessage, context);
+		});
+}
+
+bool DecodeSvgForDisplay(const std::filesystem::path& filename, int targetWidth,
+	int targetHeight, DecodedImage& image, int& sourceWidth, int& sourceHeight,
+	std::string& errorMessage, const WorkContext& supplied, bool allowUpscale) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Decode);
+	image = {};
+	sourceWidth = sourceHeight = 0;
+	errorMessage.clear();
+	return RunWithSourceAndCpuAdmission(filename, SourceWorkPriority::Foreground,
+		supplied, errorMessage, [&filename, targetWidth, targetHeight, &image,
+			&sourceWidth, &sourceHeight, &errorMessage, allowUpscale](const WorkContext& context) {
+			if (targetWidth <= 0 || targetHeight <= 0) {
+				errorMessage = "invalid SVG display request";
+				return false;
+			}
+			if (IsArchiveMemberLocation(filename)) {
+				return WithArchiveMemberFile(filename,
+					[targetWidth, targetHeight, &image, &sourceWidth, &sourceHeight,
+						context, allowUpscale](const std::filesystem::path& temporary,
+						std::string& decodeError) {
+						return decoder_detail::DecodeSvgForDisplay(temporary, targetWidth,
+							targetHeight, image, sourceWidth, sourceHeight, decodeError,
+							context, allowUpscale);
+					}, errorMessage, nullptr,
+					[context] { return context.Continue(); });
+			}
+			return decoder_detail::DecodeSvgForDisplay(filename, targetWidth,
+				targetHeight, image, sourceWidth, sourceHeight, errorMessage, context,
+				allowUpscale);
+		});
 }
 
 bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
@@ -573,6 +653,11 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 				std::string& decodeError) {
 				return DecodeImage(temporary, image, decodeError, context);
 			}, errorMessage, nullptr, [context] { return context.Continue(); });
+	}
+	if (IsSvgPath(filename)) {
+		if (!decoder_detail::DecodeSvg(filename, image, errorMessage, context)) return false;
+		image.isSvg = true;
+		return true;
 	}
 	if (IsJpegPath(filename)) {
 		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,

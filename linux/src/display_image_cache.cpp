@@ -176,7 +176,7 @@ int NormalizeQuarterTurns(int turns) {
 DisplayImageCacheKey MakeCacheKey(const SourceDescriptor& source,
 	std::size_t frameIndex, int width, int height, bool autoContrast,
 	const ImageProcessingParams& processing, int rotationQuarterTurns,
-	bool includeSpectrum) {
+	bool includeSpectrum, bool renderVectorAtTarget = false) {
 	DisplayImageCacheKey key;
 	key.source = source.Key();
 	key.frameIndex = frameIndex;
@@ -185,6 +185,7 @@ DisplayImageCacheKey MakeCacheKey(const SourceDescriptor& source,
 	key.autoContrast = autoContrast;
 	key.includeSpectrum = includeSpectrum;
 	key.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
+	key.renderVectorAtTarget = renderVectorAtTarget;
 	key.processing = EffectiveImageProcessingParams(processing, autoContrast);
 	return key;
 }
@@ -201,7 +202,8 @@ std::string SerializeCacheKey(const DisplayImageCacheKey& key) {
 		<< key.source.backingIdentity.modifiedSeconds << ':'
 		<< key.source.backingIdentity.modifiedNanoseconds << ':' << key.frameIndex << ':'
 		<< key.targetWidth << 'x' << key.targetHeight << ':' << key.autoContrast << ':'
-		<< key.rotationQuarterTurns << ':' << key.includeSpectrum << ':' << std::hexfloat
+		<< key.rotationQuarterTurns << ':' << key.renderVectorAtTarget << ':'
+		<< key.includeSpectrum << ':' << std::hexfloat
 		<< key.processing.contrast << ':' << key.processing.gamma << ':'
 		<< key.processing.saturation << ':' << key.processing.cyanRed << ':'
 		<< key.processing.magentaGreen << ':' << key.processing.yellowBlue << ':'
@@ -234,7 +236,10 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	};
 	if (cancelled()) return {};
 	DecodedImage displayDecoded;
+	DecodedImage svgSpectrumDecoded;
 	const DecodedFrame* decodedFrame = nullptr;
+	const bool fileBackedSvg = !request.decoded &&
+		request.fileBackedFormat == FileBackedDisplayFormat::Svg;
 	if (request.decoded) {
 		decodedFrame = &request.decoded->frames[request.frameIndex];
 	} else {
@@ -242,7 +247,36 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		int sourceHeight = 0;
 		std::string errorMessage;
 		bool decoded = false;
-		if (request.includeSpectrum) {
+		if (request.includeSpectrum && fileBackedSvg) {
+			// Build the histogram from intrinsic source pixels, but keep the visible
+			// frame on the direct vector-to-target path below.
+			decoded = DecodeImage(request.filename, svgSpectrumDecoded,
+				errorMessage, workContext);
+			if (decoded && !svgSpectrumDecoded.isSvg) {
+				errorMessage = "display request no longer contains SVG content";
+				decoded = false;
+			}
+			if (decoded && !svgSpectrumDecoded.frames.empty()) {
+				sourceWidth = svgSpectrumDecoded.frames.front().width;
+				sourceHeight = svgSpectrumDecoded.frames.front().height;
+				const bool swapsAxes = (request.rotationQuarterTurns & 1) != 0;
+				const int renderTargetWidth = swapsAxes ? request.targetHeight : request.targetWidth;
+				const int renderTargetHeight = swapsAxes ? request.targetWidth : request.targetHeight;
+				int renderedSourceWidth = 0;
+				int renderedSourceHeight = 0;
+				decoded = DecodeSvgForDisplay(request.filename, renderTargetWidth,
+					renderTargetHeight, displayDecoded, renderedSourceWidth,
+					renderedSourceHeight, errorMessage, workContext) &&
+					renderedSourceWidth == sourceWidth && renderedSourceHeight == sourceHeight;
+				if (!decoded && errorMessage.empty()) {
+					errorMessage = "SVG source dimensions changed during display preparation";
+				}
+			}
+			if (decoded && svgSpectrumDecoded.frames.empty()) {
+				errorMessage = "SVG decoder returned no source pixels for its histogram";
+				decoded = false;
+			}
+		} else if (request.includeSpectrum) {
 			// Preserve the full-source histogram while keeping its decode and scan off
 			// the event thread. The ordinary fitted-JPEG path remains reduced-DCT.
 			decoded = DecodeImage(request.filename, displayDecoded, errorMessage, workContext);
@@ -250,6 +284,13 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 				sourceWidth = displayDecoded.frames.front().width;
 				sourceHeight = displayDecoded.frames.front().height;
 			}
+		} else if (fileBackedSvg) {
+			const bool swapsAxes = (request.rotationQuarterTurns & 1) != 0;
+			const int renderTargetWidth = swapsAxes ? request.targetHeight : request.targetWidth;
+			const int renderTargetHeight = swapsAxes ? request.targetWidth : request.targetHeight;
+			decoded = DecodeSvgForDisplay(request.filename, renderTargetWidth,
+				renderTargetHeight, displayDecoded, sourceWidth, sourceHeight,
+				errorMessage, workContext);
 		} else {
 			const bool swapsAxes = (request.rotationQuarterTurns & 1) != 0;
 			const int decodeTargetWidth = swapsAxes ? request.targetHeight : request.targetWidth;
@@ -275,16 +316,42 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		workContext.cpuProcessingAlreadyAdmitted = true;
 	}
 	if (!workContext.Continue()) return {};
+	GrayscaleSpectrum spectrum{};
+	bool spectrumPreparedFromSource = false;
+	if (fileBackedSvg && request.includeSpectrum) {
+		if (svgSpectrumDecoded.frames.empty()) return {};
+		DecodedFrame& sourceFrame = svgSpectrumDecoded.frames.front();
+		Image sourceImage;
+		sourceImage.width = sourceFrame.width;
+		sourceImage.height = sourceFrame.height;
+		sourceImage.originalWidth = sourceFrame.width;
+		sourceImage.originalHeight = sourceFrame.height;
+		sourceImage.bgra = std::move(sourceFrame.bgra);
+		sourceImage.hasTransparency = sourceFrame.hasTransparency;
+		{
+			PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Processing);
+			if (!sourceImage.ApplyProcessing(request.processing,
+				request.autoContrast, shouldContinue) || cancelled()) return {};
+		}
+		const std::optional<GrayscaleSpectrum> preparedSpectrum =
+			TryBuildGrayscaleSpectrum(sourceImage.bgra, sourceImage.width,
+				sourceImage.height, shouldContinue);
+		if (!preparedSpectrum || cancelled()) return {};
+		spectrum = *preparedSpectrum;
+		spectrumPreparedFromSource = true;
+	}
 	Image image;
 	if (request.decoded) {
 		if (!image.StoreBGRA(decodedFrame->bgra.data(), decodedFrame->width,
 			decodedFrame->height, decodedFrame->hasTransparency)) return {};
 	} else {
-		// File-backed JPEG pixels are private to this worker. Move them into the
-		// resize stage instead of copying the reduced decode a second time.
+		// File-backed codec pixels are private to this worker. Move them into the
+		// processing stage instead of copying the decoded frame a second time.
 		DecodedFrame& ownedFrame = displayDecoded.frames.front();
-		image.width = image.originalWidth = ownedFrame.width;
-		image.height = image.originalHeight = ownedFrame.height;
+		image.width = ownedFrame.width;
+		image.height = ownedFrame.height;
+		image.originalWidth = request.sourceWidth;
+		image.originalHeight = request.sourceHeight;
 		image.bgra = std::move(ownedFrame.bgra);
 		image.hasTransparency = ownedFrame.hasTransparency;
 	}
@@ -308,17 +375,31 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 		break;
 	}
 	if (cancelled()) return {};
-	GrayscaleSpectrum spectrum{};
-	if (request.includeSpectrum) {
+	if (request.includeSpectrum && !spectrumPreparedFromSource) {
 		const std::optional<GrayscaleSpectrum> preparedSpectrum =
 			TryBuildGrayscaleSpectrum(image.bgra, image.width, image.height,
 				shouldContinue);
 		if (!preparedSpectrum || cancelled()) return {};
 		spectrum = *preparedSpectrum;
 	}
-	if (request.targetWidth < image.width || request.targetHeight < image.height) {
+	int resizeWidth = request.targetWidth;
+	int resizeHeight = request.targetHeight;
+	if (fileBackedSvg) {
+		const double scale = std::min(static_cast<double>(request.targetWidth) / image.width,
+			static_cast<double>(request.targetHeight) / image.height);
+		resizeWidth = std::max(1, static_cast<int>(std::floor(image.width * scale + 0.5)));
+		resizeHeight = std::max(1, static_cast<int>(std::floor(image.height * scale + 0.5)));
+		while (resizeWidth > request.targetWidth || resizeHeight > request.targetHeight) {
+			if (resizeWidth > request.targetWidth) --resizeWidth;
+			if (resizeHeight > request.targetHeight) --resizeHeight;
+		}
+	}
+	if ((fileBackedSvg && (resizeWidth != image.width || resizeHeight != image.height)) ||
+		(!fileBackedSvg && (request.targetWidth < image.width ||
+		 request.targetHeight < image.height))) {
 		PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Resampling);
-		if (!image.Resize(request.targetWidth, request.targetHeight, 3,
+		if (!image.Resize(fileBackedSvg ? resizeWidth : request.targetWidth,
+			fileBackedSvg ? resizeHeight : request.targetHeight, 3,
 			shouldContinue) || cancelled()) return {};
 	}
 
@@ -352,6 +433,7 @@ bool operator==(const DisplayImageCacheKey& left, const DisplayImageCacheKey& ri
 	return left.source == right.source && left.frameIndex == right.frameIndex &&
 		left.targetWidth == right.targetWidth && left.targetHeight == right.targetHeight &&
 		left.rotationQuarterTurns == right.rotationQuarterTurns &&
+		left.renderVectorAtTarget == right.renderVectorAtTarget &&
 		left.autoContrast == right.autoContrast &&
 		left.includeSpectrum == right.includeSpectrum &&
 		EqualEffectiveImageProcessingParams(left.processing, right.processing);
@@ -369,6 +451,7 @@ bool CanReuseDisplayImageRepresentation(const DisplayImageCacheKey& requested,
 		available.targetWidth >= requested.targetWidth &&
 		available.targetHeight >= requested.targetHeight &&
 		requested.rotationQuarterTurns == available.rotationQuarterTurns &&
+		requested.renderVectorAtTarget == available.renderVectorAtTarget &&
 		requested.autoContrast == available.autoContrast &&
 		requested.includeSpectrum == available.includeSpectrum &&
 		EqualEffectiveImageProcessingParams(requested.processing, available.processing);
@@ -384,6 +467,7 @@ std::size_t DisplayImageCacheKeyHash::operator()(const DisplayImageCacheKey& key
 	value = combine(value, std::hash<int>{}(key.targetWidth));
 	value = combine(value, std::hash<int>{}(key.targetHeight));
 	value = combine(value, std::hash<int>{}(key.rotationQuarterTurns));
+	value = combine(value, std::hash<bool>{}(key.renderVectorAtTarget));
 	value = combine(value, std::hash<bool>{}(key.autoContrast));
 	value = combine(value, std::hash<bool>{}(key.includeSpectrum));
 	const ImageProcessingParams& processing = key.processing;
@@ -404,7 +488,11 @@ bool DisplayImageRequest::Valid() const {
 		source.Key() != cacheKey.source ||
 		targetWidth <= 0 || targetHeight <= 0 ||
 		rotationQuarterTurns < 0 || rotationQuarterTurns > 3) return false;
-	if (!decoded) return sourceWidth > 0 && sourceHeight > 0 && IsJpegPath(filename);
+	if (!decoded) {
+		const bool recognizedFileFormat = fileBackedFormat == FileBackedDisplayFormat::Svg ?
+			true : IsJpegPath(filename);
+		return sourceWidth > 0 && sourceHeight > 0 && recognizedFileFormat;
+	}
 	if (frameIndex >= decoded->frames.size()) return false;
 	const DecodedFrame& frame = decoded->frames[frameIndex];
 	return frame.width > 0 && frame.height > 0 && !frame.bgra.empty();
@@ -469,6 +557,7 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	DisplayImageRequest request;
 	request.source = source;
 	request.filename = source.LogicalPath();
+	request.fileBackedFormat = FileBackedDisplayFormat::Jpeg;
 	request.sourceWidth = sourceWidth;
 	request.sourceHeight = sourceHeight;
 	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
@@ -486,6 +575,68 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	return request;
 }
 
+DisplayImageRequest MakeSvgDisplayImageRequest(const fs::path& filename,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority,
+	const ImageProcessingParams& processing, int rotationQuarterTurns,
+	bool includeSpectrum) {
+	return MakeSvgDisplayImageRequest(DescribeImageSource(filename), sourceWidth,
+		sourceHeight, targetWidth, targetHeight, autoContrast, priority, processing,
+		rotationQuarterTurns, includeSpectrum);
+}
+
+DisplayImageRequest MakeSvgDisplayImageRequest(const SourceDescriptor& source,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority,
+	const ImageProcessingParams& processing, int rotationQuarterTurns,
+	bool includeSpectrum) {
+	const DisplayImageTarget bounded = BoundSvgDisplayTarget(targetWidth, targetHeight);
+	DisplayImageRequest request;
+	request.source = source;
+	request.filename = source.LogicalPath();
+	request.fileBackedFormat = FileBackedDisplayFormat::Svg;
+	request.sourceWidth = sourceWidth;
+	request.sourceHeight = sourceHeight;
+	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
+	request.targetWidth = bounded.width;
+	request.targetHeight = bounded.height;
+	request.autoContrast = autoContrast;
+	request.includeSpectrum = includeSpectrum;
+	request.processing = processing;
+	request.priority = priority;
+	if (sourceWidth <= 0 || sourceHeight <= 0 ||
+		request.targetWidth <= 0 || request.targetHeight <= 0) return request;
+	request.cacheKey = MakeCacheKey(source, 0, request.targetWidth,
+		request.targetHeight, autoContrast, processing,
+		request.rotationQuarterTurns, includeSpectrum, true);
+	request.key = SerializeCacheKey(request.cacheKey);
+	return request;
+}
+
+DisplayImageRequest RebuildDisplayImageRequestAtTarget(
+	const DisplayImageRequest& source, int targetWidth, int targetHeight) {
+	DisplayImageRequest request;
+	if (source.decoded) {
+		request = MakeDisplayImageRequest(source.source, source.decoded,
+			source.frameIndex, targetWidth, targetHeight, source.autoContrast,
+			source.priority, source.processing, source.rotationQuarterTurns,
+			source.includeSpectrum);
+	} else if (source.fileBackedFormat == FileBackedDisplayFormat::Svg) {
+		request = MakeSvgDisplayImageRequest(source.source, source.sourceWidth,
+			source.sourceHeight, targetWidth, targetHeight, source.autoContrast,
+			source.priority, source.processing, source.rotationQuarterTurns,
+			source.includeSpectrum);
+	} else {
+		request = MakeJpegDisplayImageRequest(source.source, source.sourceWidth,
+			source.sourceHeight, targetWidth, targetHeight, source.autoContrast,
+			source.priority, source.processing, source.rotationQuarterTurns,
+			source.includeSpectrum);
+	}
+	request.workClass = source.workClass;
+	request.selectionGeneration = source.selectionGeneration;
+	return request;
+}
+
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image) {
 	return image.bgra.size() +
 		(image.spectrum ? sizeof(*image.spectrum) : 0);
@@ -498,6 +649,19 @@ DisplayImageTarget ClampDisplayImageTarget(int sourceWidth, int sourceHeight,
 	const int maximumWidth = swapsAxes ? sourceHeight : sourceWidth;
 	const int maximumHeight = swapsAxes ? sourceWidth : sourceHeight;
 	return {std::min(targetWidth, maximumWidth), std::min(targetHeight, maximumHeight)};
+}
+
+DisplayImageTarget BoundSvgDisplayTarget(int targetWidth, int targetHeight) {
+	if (targetWidth <= 0 || targetHeight <= 0) return {};
+	const long double width = targetWidth;
+	const long double height = targetHeight;
+	const long double scale = std::min({1.0L,
+		static_cast<long double>(65535) / width,
+		static_cast<long double>(65535) / height,
+		std::sqrt(static_cast<long double>(100ull * 1024ull * 1024ull) /
+			(width * height))});
+	return {std::max(1, static_cast<int>(std::floor(width * scale))),
+		std::max(1, static_cast<int>(std::floor(height * scale)))};
 }
 
 bool FailedDisplayRequestNeedsNewResolution(const DisplayImageRequest& request,
@@ -1143,7 +1307,9 @@ struct DisplayImageCache::Impl {
 				work.request.frameIndex, work.request.targetWidth,
 				work.request.targetHeight, work.request.autoContrast,
 				work.request.processing, work.request.rotationQuarterTurns,
-				work.request.includeSpectrum);
+				work.request.includeSpectrum,
+				work.request.fileBackedFormat == FileBackedDisplayFormat::Svg &&
+					!work.request.decoded);
 
 			bool publishedCompletion = false;
 			{
@@ -1408,7 +1574,8 @@ DisplayImageCache::ImagePtr DisplayImageCache::Find(const DisplayImageRequest& r
 	if (!request.Valid()) return {};
 	if (request.cacheKey != MakeCacheKey(request.source, request.frameIndex,
 		request.targetWidth, request.targetHeight, request.autoContrast,
-		request.processing, request.rotationQuarterTurns, request.includeSpectrum) ||
+		request.processing, request.rotationQuarterTurns, request.includeSpectrum,
+		request.fileBackedFormat == FileBackedDisplayFormat::Svg && !request.decoded) ||
 		request.key != SerializeCacheKey(request.cacheKey)) return {};
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	const auto found = impl_->entries.find(request.cacheKey);
@@ -1445,7 +1612,8 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 	if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
 		request.frameIndex, request.targetWidth, request.targetHeight,
 		request.autoContrast, request.processing, request.rotationQuarterTurns,
-		request.includeSpectrum) ||
+		request.includeSpectrum,
+		request.fileBackedFormat == FileBackedDisplayFormat::Svg && !request.decoded) ||
 		request.key != SerializeCacheKey(request.cacheKey)) return;
 	const DisplayImageCacheKey& cacheKey = request.cacheKey;
 	DisplayImageRequest foregroundRequest = request;
@@ -1592,7 +1760,8 @@ void DisplayImageCache::RequestBackgroundBatch(
 			if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
 				request.frameIndex, request.targetWidth, request.targetHeight,
 				request.autoContrast, request.processing, request.rotationQuarterTurns,
-				request.includeSpectrum) ||
+				request.includeSpectrum,
+				request.fileBackedFormat == FileBackedDisplayFormat::Svg && !request.decoded) ||
 				request.key != SerializeCacheKey(request.cacheKey)) continue;
 			const DisplayImageCacheKey& cacheKey = request.cacheKey;
 			DisplayImageRequest classifiedRequest = request;
@@ -1909,7 +2078,8 @@ void DisplayImageCache::Prefetch(const std::vector<DisplayImageRequest>& request
 			if (!request.Valid() || request.cacheKey != MakeCacheKey(request.source,
 				request.frameIndex, request.targetWidth, request.targetHeight,
 				request.autoContrast, request.processing, request.rotationQuarterTurns,
-				request.includeSpectrum) ||
+				request.includeSpectrum,
+				request.fileBackedFormat == FileBackedDisplayFormat::Svg && !request.decoded) ||
 				request.key != SerializeCacheKey(request.cacheKey)) continue;
 			const DisplayImageCacheKey& cacheKey = request.cacheKey;
 			const std::size_t requestPriority = std::max<std::size_t>(1, request.priority);

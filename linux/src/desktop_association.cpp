@@ -153,7 +153,7 @@ const std::vector<std::string>& DefaultViewerMimeTypes() {
 		"image/x-portable-bitmap", "image/x-portable-graymap",
 		"image/x-portable-pixmap", "image/x-portable-arbitrarymap", "image/qoi",
 		"image/webp", "image/tiff", "image/heic", "image/heif", "image/avif",
-		"image/jxl", "image/jxr"};
+		"image/jxl", "image/jxr", "image/svg+xml"};
 	return mimeTypes;
 }
 

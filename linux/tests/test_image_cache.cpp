@@ -1388,6 +1388,103 @@ void TestPromotedActiveSpreadJpegDimensionsKeepCurrentOwner() {
 		"selecting a cold JPEG spread partner did not transfer its blocked dimensions read to current-image ownership");
 }
 
+void TestSvgSourceDimensionsUseDecodedCacheWorker() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "vector.svg";
+	WriteText(filename,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"640\" height=\"480\"/>");
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool callbackCompleted = false;
+	bool dimensionsSucceeded = false;
+	int decodedWidth = 0;
+	int decodedHeight = 0;
+	std::atomic<int> dimensionsReadCount{0};
+	std::atomic<int> pixelDecodeCount{0};
+	jpegview_linux::DecodedImageCache cache(64,
+		[&](const fs::path&, DecodedImage&, std::string&) {
+			++pixelDecodeCount;
+			return false;
+		}, {}, 1,
+		[&](const fs::path& path, int& width, int& height, std::string&) {
+			++dimensionsReadCount;
+			if (path != filename) return false;
+			width = 640;
+			height = 480;
+			return true;
+		});
+	cache.RequestSourceDimensions(filename,
+		[&](const fs::path& completedPath, bool succeeded, int width, int height) {
+			std::lock_guard<std::mutex> lock(mutex);
+			callbackCompleted = completedPath == filename;
+			dimensionsSucceeded = succeeded;
+			decodedWidth = width;
+			decodedHeight = height;
+			changed.notify_all();
+		});
+	bool callbackReached = false;
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		callbackReached = changed.wait_for(lock, std::chrono::seconds(2),
+			[&] { return callbackCompleted; });
+	}
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"SVG source dimensions request did not drain from the cache worker");
+	Expect(callbackReached && dimensionsSucceeded && decodedWidth == 640 &&
+		decodedHeight == 480 && dimensionsReadCount == 1 && pixelDecodeCount == 0,
+		"SVG source geometry was rejected or materialized pixels instead of using the dimensions worker");
+
+#if JPEGVIEW_HAVE_SVG
+	const fs::path mislabeledFilename = temporary.path() / "vector.jpg";
+	WriteText(mislabeledFilename,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"640\" height=\"480\"/>");
+	std::mutex fallbackMutex;
+	std::condition_variable fallbackChanged;
+	bool fallbackDimensionsCompleted = false;
+	bool fallbackDimensionsSucceeded = true;
+	bool fallbackDecodeCompleted = false;
+	bool fallbackDecodeSucceeded = false;
+	jpegview_linux::DecodedImageCache fallbackCache(8 * 1024 * 1024);
+	fallbackCache.RequestSourceDimensions(mislabeledFilename,
+		[&](const fs::path& completedPath, bool succeeded, int, int) {
+			std::lock_guard<std::mutex> lock(fallbackMutex);
+			fallbackDimensionsCompleted = completedPath == mislabeledFilename;
+			fallbackDimensionsSucceeded = succeeded;
+			fallbackChanged.notify_all();
+		});
+	bool fallbackDimensionsReached = false;
+	{
+		std::unique_lock<std::mutex> lock(fallbackMutex);
+		fallbackDimensionsReached = fallbackChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return fallbackDimensionsCompleted; });
+	}
+	Expect(fallbackDimensionsReached && !fallbackDimensionsSucceeded,
+		"a JPEG-suffixed SVG was accepted as a raster-only dimensions result");
+	fallbackCache.RequestSelectedSource(
+		jpegview_linux::DescribeImageSource(mislabeledFilename),
+		[&](const jpegview_linux::SourceDescriptor&,
+			const jpegview_linux::DecodedImageCache::ImagePtr& image,
+			const jpegview_linux::WorkerFailure& failure) {
+			std::lock_guard<std::mutex> lock(fallbackMutex);
+			fallbackDecodeCompleted = true;
+			fallbackDecodeSucceeded = image && !failure.Failed() && image->isSvg &&
+				!image->frames.empty() && image->frames.front().width == 640 &&
+				image->frames.front().height == 480;
+			fallbackChanged.notify_all();
+		});
+	bool fallbackDecodeReached = false;
+	{
+		std::unique_lock<std::mutex> lock(fallbackMutex);
+		fallbackDecodeReached = fallbackChanged.wait_for(lock,
+			std::chrono::seconds(2), [&] { return fallbackDecodeCompleted; });
+	}
+	Expect(fallbackCache.WaitUntilIdle(std::chrono::seconds(2)) &&
+		fallbackDecodeReached && fallbackDecodeSucceeded,
+		"a JPEG-suffixed SVG did not fall through to content-based selected decoding");
+#endif
+}
+
 void TestActiveSpreadPartnerReplacementCancelsObsoleteRequests() {
 	TemporaryDirectory temporary;
 	const fs::path blockedPartner = temporary.path() / "blocked-old-partner.png";
@@ -5949,6 +6046,7 @@ const TestCase kTests[] = {
 	{"decoded-promoted-spread-budget-pressure-preserves-foreground", &TestDecodedPromotedSpreadBudgetPressure},
 	{"decoded-budget-rejection-preserves-queued-active-spread-work", &TestDecodedBudgetRejectionPreservesQueuedActiveSpreadWork},
 	{"jpeg-active-spread-dimensions-survive-paused-prefetch", &TestJpegActiveSpreadDimensionsSurvivePause},
+	{"svg-source-dimensions-use-decoded-cache-worker", &TestSvgSourceDimensionsUseDecodedCacheWorker},
 	{"selected-spread-partner-transfers-blocked-jpeg-dimensions", &TestPromotedActiveSpreadJpegDimensionsKeepCurrentOwner},
 	{"active-spread-partner-replacement-cancels-obsolete-source-work", &TestActiveSpreadPartnerReplacementCancelsObsoleteRequests},
 	{"active-spread-cancellation-uses-submitted-source-identity", &TestActiveSpreadCancellationUsesSubmittedSourceIdentity},

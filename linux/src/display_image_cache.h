@@ -22,6 +22,11 @@
 
 namespace jpegview_linux {
 
+enum class FileBackedDisplayFormat {
+	Jpeg,
+	Svg,
+};
+
 // Exact identity for a renderer-ready bitmap. Optional processing values are
 // normalized when this key is built, so disabled controls do not split cache
 // entries while active pixel-affecting controls remain distinct.
@@ -31,6 +36,7 @@ struct DisplayImageCacheKey {
 	int targetWidth = 0;
 	int targetHeight = 0;
 	int rotationQuarterTurns = 0;
+	bool renderVectorAtTarget = false;
 	bool autoContrast = false;
 	bool includeSpectrum = false;
 	ImageProcessingParams processing;
@@ -55,6 +61,7 @@ struct DisplayImageRequest {
 	std::filesystem::path filename;
 	SourceDescriptor source;
 	std::shared_ptr<const DecodedImage> decoded;
+	FileBackedDisplayFormat fileBackedFormat = FileBackedDisplayFormat::Jpeg;
 	std::size_t frameIndex = 0;
 	int sourceWidth = 0;
 	int sourceHeight = 0;
@@ -145,10 +152,26 @@ DisplayImageRequest MakeJpegDisplayImageRequest(const SourceDescriptor& source,
 	bool autoContrast, std::size_t priority = 0,
 	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
 	bool includeSpectrum = false);
+DisplayImageRequest MakeSvgDisplayImageRequest(const std::filesystem::path& filename,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority = 0,
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
+	bool includeSpectrum = false);
+DisplayImageRequest MakeSvgDisplayImageRequest(const SourceDescriptor& source,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority = 0,
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
+	bool includeSpectrum = false);
+
+// Rebuilds a request at another target size without losing its source kind or
+// pixel/scheduling identity. Cancellation state is deliberately request-local.
+DisplayImageRequest RebuildDisplayImageRequestAtTarget(
+	const DisplayImageRequest& source, int targetWidth, int targetHeight);
 
 std::size_t PreparedDisplayImageBytes(const PreparedDisplayImage& image);
 DisplayImageTarget ClampDisplayImageTarget(int sourceWidth, int sourceHeight,
 	int targetWidth, int targetHeight, int rotationQuarterTurns = 0);
+DisplayImageTarget BoundSvgDisplayTarget(int targetWidth, int targetHeight);
 
 struct DisplayImageCacheDiagnostics {
 	std::size_t cachedBytes = 0;

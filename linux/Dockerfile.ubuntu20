@@ -14,7 +14,7 @@ RUN apt-get -o Acquire::Retries=5 update \
     libsdl2-2.0-0 libpango1.0-dev libfontconfig1-dev fonts-dejavu-core zsync \
     libjpeg-dev libpng-dev libjpeg-turbo-progs libzip-dev libarchive-dev zip \
     libgif-dev libtiff-dev libwebp-dev libwebp6 libheif-dev libraw-dev libjxr-dev \
-    libaom-dev libde265-dev libx265-dev libbrotli-dev liblcms2-dev \
+    libaom-dev libde265-dev libx265-dev libbrotli-dev liblcms2-dev librsvg2-dev libxml2-dev \
     xclip wl-clipboard \
  && curl --fail --location --retry 8 --retry-max-time 90 "$APPIMAGETOOL_URL" --output /usr/local/bin/appimagetool \
  && chmod 755 /usr/local/bin/appimagetool \

@@ -241,7 +241,12 @@ struct DecodedImageCache::Impl {
 		if (!dimensionsReader) {
 			dimensionsReader = [](const fs::path& filename, int& width, int& height,
 				std::string& errorMessage) {
-				return ReadSourceDimensions(filename, width, height, errorMessage);
+				if (IsSvgPath(filename)) {
+					return ReadSourceDimensions(filename, width, height, errorMessage);
+				}
+			bool detectedSvg = false;
+			return ReadSourceDimensions(filename, width, height, errorMessage, {},
+				&detectedSvg) && !detectedSvg;
 			};
 		}
 		retirementState = std::make_shared<RetirementState>();
@@ -687,7 +692,7 @@ struct DecodedImageCache::Impl {
 				}
 			}
 			try {
-				if (dimensionsCompletion) {
+			if (dimensionsCompletion) {
 					deliveredCompletion = true;
 					dimensionsCompletion(work.filename,
 						completed && currentSource, sourceWidth, sourceHeight);
@@ -1162,7 +1167,8 @@ void DecodedImageCache::RequestSourceDimensions(const fs::path& filename,
 
 void DecodedImageCache::RequestSourceDimensions(const SourceDescriptor& source,
 	DimensionsCompletion completion, PerfWorkClass workClass) {
-	if (!completion || !IsJpegPath(source.LogicalPath())) return;
+	if (!completion || (!IsJpegPath(source.LogicalPath()) &&
+		!IsSvgPath(source.LogicalPath()))) return;
 	Impl::Work work;
 	work.filename = source.LogicalPath();
 	work.key = WorkKey(source, true);

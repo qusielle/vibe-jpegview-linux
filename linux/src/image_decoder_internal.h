@@ -104,5 +104,11 @@ bool DecodeAvif(const std::filesystem::path&, DecodedImage&, std::string&);
 bool DecodeJxl(const std::filesystem::path&, DecodedImage&, std::string&);
 bool DecodeJxr(const std::filesystem::path&, DecodedImage&, std::string&);
 bool DecodeRaw(const std::filesystem::path&, DecodedImage&, std::string&);
+bool DecodeSvg(const std::filesystem::path&, DecodedImage&, std::string&,
+	const WorkContext&);
+bool DecodeSvgForDisplay(const std::filesystem::path&, int, int, DecodedImage&,
+	int&, int&, std::string&, const WorkContext&, bool allowUpscale = true);
+bool ReadSvgDimensions(const std::filesystem::path&, int&, int&, std::string&,
+	const WorkContext&);
 
 } // namespace jpegview_linux::decoder_detail

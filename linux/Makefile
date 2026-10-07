@@ -35,6 +35,10 @@ RAW_CFLAGS ?= $(shell pkg-config --cflags libraw 2>/dev/null)
 RAW_LIBS ?= $(shell pkg-config --libs libraw 2>/dev/null)
 LCMS2_CFLAGS ?= $(shell pkg-config --cflags lcms2 2>/dev/null)
 LCMS2_LIBS ?= $(shell pkg-config --libs lcms2 2>/dev/null)
+SVG_CFLAGS ?= $(shell pkg-config --atleast-version=2.46 librsvg-2.0 2>/dev/null && \
+	pkg-config --cflags librsvg-2.0 cairo libxml-2.0 2>/dev/null)
+SVG_LIBS ?= $(shell pkg-config --atleast-version=2.46 librsvg-2.0 2>/dev/null && \
+	pkg-config --libs librsvg-2.0 cairo libxml-2.0 2>/dev/null)
 ZIP_CFLAGS ?= $(shell pkg-config --cflags libzip 2>/dev/null)
 ZIP_LIBS ?= $(shell pkg-config --libs libzip 2>/dev/null || echo -lzip)
 ARCHIVE_CFLAGS ?= $(shell pkg-config --cflags libarchive 2>/dev/null)
@@ -49,7 +53,7 @@ RAW_LIBS := $(filter-out -lstdc++,$(RAW_LIBS))
 
 CODEC_CFLAGS := $(GIF_CFLAGS) $(TIFF_CFLAGS) $(WEBP_CFLAGS) $(HEIF_CFLAGS) \
 	$(AVIF_CFLAGS) $(JXL_CFLAGS) $(JXR_CFLAGS) $(RAW_CFLAGS) $(LCMS2_CFLAGS) \
-	$(ZIP_CFLAGS) $(ARCHIVE_CFLAGS)
+	$(SVG_CFLAGS) $(ZIP_CFLAGS) $(ARCHIVE_CFLAGS)
 CODEC_DEFINES := $(if $(strip $(GIF_LIBS)),-DJPEGVIEW_HAVE_GIF=1,) \
 	$(if $(strip $(TIFF_LIBS)),-DJPEGVIEW_HAVE_TIFF=1,) \
 	$(if $(strip $(WEBP_LIBS)),-DJPEGVIEW_HAVE_WEBP=1,) \
@@ -58,10 +62,11 @@ CODEC_DEFINES := $(if $(strip $(GIF_LIBS)),-DJPEGVIEW_HAVE_GIF=1,) \
 	$(if $(strip $(JXL_LIBS)),-DJPEGVIEW_HAVE_JXL=1,) \
 	$(if $(strip $(JXR_LIBS)),-DJPEGVIEW_HAVE_JXR=1,) \
 	$(if $(strip $(RAW_LIBS)),-DJPEGVIEW_HAVE_RAW=1,) \
-	$(if $(strip $(LCMS2_LIBS)),-DJPEGVIEW_HAVE_LCMS2=1,)
+	$(if $(strip $(LCMS2_LIBS)),-DJPEGVIEW_HAVE_LCMS2=1,) \
+	$(if $(strip $(SVG_LIBS)),-DJPEGVIEW_HAVE_SVG=1,)
 CODEC_LIBS := $(GIF_LIBS) $(TIFF_LIBS) $(WEBP_LIBS) $(HEIF_LIBS) \
 	$(AVIF_LIBS) $(JXL_LIBS) $(JXR_LIBS) $(RAW_LIBS) $(LCMS2_LIBS) \
-	$(ZIP_LIBS) $(ARCHIVE_LIBS)
+	$(SVG_LIBS) $(ZIP_LIBS) $(ARCHIVE_LIBS)
 STATIC_RUNTIME ?= -static-libstdc++ -static-libgcc
 
 BUILD_DIR ?= build
@@ -96,7 +101,7 @@ IMAGE_WRITER_SOURCES := src/image_writer_jpeg_png.cpp src/image_writer_basic.cpp
 	src/image_writer_optional.cpp
 IMAGE_DECODER_SOURCES := src/image_decoder_stb.cpp src/image_decoder_jpeg.cpp \
 	src/image_decoder_apng.cpp src/image_decoder_builtin.cpp \
-	src/image_decoder_optional.cpp
+	src/image_decoder_optional.cpp src/image_decoder_svg.cpp
 ARCHIVE_SOURCE_SOURCES := src/archive_source_catalog.cpp src/archive_source_readers.cpp
 CORE_CPP_SOURCES := \
 	src/perf_diagnostics.cpp src/source_work_coordinator.cpp \
@@ -454,6 +459,7 @@ test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(GPS_EXIF_FI
 	JPEGVIEW_TEST_PERF_TRACE="$(abspath $(BUILD_DIR))/perf-trace-ui.csv" \
 	JPEGVIEW_TEST_HAS_7Z_PLUGIN=$(if $(strip $(SEVENZIP_SOURCE_ROOT)),1,0) \
 		JPEGVIEW_TEST_HAS_RAR_PLUGIN=$(if $(strip $(RAR_BACKEND_ROOT)),1,0) \
+		JPEGVIEW_TEST_HAS_SVG=$(if $(strip $(SVG_LIBS)),1,0) \
 		./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) \
 			$(GPS_EXIF_FIXTURE_WRITER)
 

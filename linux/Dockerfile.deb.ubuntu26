@@ -10,7 +10,7 @@ RUN apt-get update \
     libgif-dev libtiff-dev libwebp-dev libheif-dev libraw-dev libjxr-dev \
     libheif-plugin-libde265 libheif-plugin-x265 \
     libavif-dev libjxl-dev libaom-dev libde265-dev libx265-dev \
-    libbrotli-dev liblcms2-dev \
+    libbrotli-dev liblcms2-dev librsvg2-dev libxml2-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

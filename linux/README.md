@@ -17,9 +17,11 @@ they support.
    whose build and runtime dependencies come from the corresponding standard Ubuntu repositories.
 
 2. **Broad native format and color support.** Linux decoding covers JPEG, PNG/APNG, GIF, BMP, TGA,
-   PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, LibRaw camera formats, and flattened
-   Krita `.kra` projects. Decoding uses recognizable content signatures when the filename suffix is
-   wrong; a regular file explicitly opened with an otherwise unsupported suffix is checked too.
+   PSD, PNM, QOI, WebP, TIFF, HEIF/HEIC, AVIF, JPEG XL, JPEG XR, LibRaw camera formats, flattened
+   Krita `.kra` projects, and static SVG/SVGZ vector images. SVG viewer frames and thumbnails render
+   at their requested sizes; external resources and scripts are not loaded. Decoding uses
+   recognizable content signatures when the filename suffix is wrong; a regular file explicitly
+   opened with an otherwise unsupported suffix is checked too.
    Folder and archive listings remain suffix-filtered, so they do not probe every unknown file. Some
    container-based formats do not have a unique signature and still rely on their suffix. A Krita
    project opens as one image from its root
@@ -764,8 +766,11 @@ make -C linux SDL2_LIBS='-L/path/to/lib -lSDL2'
 ```
 
 Supported input formats are JPEG, PNG/APNG (including animation), GIF (including animation), BMP, TGA, PSD, PNM-family files,
-QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, and LibRaw camera
-formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. When decoding, JPEGView recognizes common image
+QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including animation), JPEG XR/WDP/HDP, static SVG/SVGZ,
+and LibRaw camera formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. SVG/SVGZ use the optional librsvg decoder in local builds;
+the supported release containers include it, while a local build without librsvg reports the format as unavailable. SVGZ input is
+limited to 32 MiB of compressed data and 64 MiB after decompression, and SVG raster dimensions use the existing 100-megapixel
+image limit. SVG rendering does not load external files, network resources, stylesheets, or scripts. When decoding, JPEGView recognizes common image
 signatures independently of the filename suffix and routes them to the matching reader. An
 explicitly opened regular file with an unsupported suffix is also checked by content. Directory,
 Browse, and archive-member listings remain extension-filtered and do not inspect arbitrary files.

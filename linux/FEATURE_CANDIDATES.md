@@ -182,10 +182,6 @@ describe the following ideas:
 The repository's main branch was pushed on 2026-08-21; I also inspected its non-default
 `feature/encrypted-zip` branch. Its README notes that several behaviors are experimental.
 
-- **SVG and SVGZ images:** rasterize vector files to the current view size, rather than always
-  decoding at a fixed intrinsic size. SVG support is also present in
-  [aviscaerulea/jpegview-nt](https://github.com/aviscaerulea/jpegview-nt), another recently
-  updated fork. See [famomatic's supported-format list](https://github.com/famomatic/jpegview/blob/master/README.md).
 - **PDF page browsing:** open a PDF as a multi-page document with page navigation, distinct from
   treating it as a folder image or comic archive. Keep rendering optional if the required PDF
   library is unavailable. See the

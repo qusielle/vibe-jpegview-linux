@@ -1,7 +1,27 @@
 #include "test_harness.h"
 #include "test_support.h"
 
+#include <zlib.h>
+
 namespace {
+
+std::vector<std::uint8_t> MakeSvgz(const std::string& document) {
+	z_stream stream{};
+	if (deflateInit2(&stream, Z_BEST_COMPRESSION, Z_DEFLATED,
+		MAX_WBITS + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) return {};
+	std::vector<std::uint8_t> compressed(static_cast<std::size_t>(
+		deflateBound(&stream, static_cast<uLong>(document.size()))));
+	stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(document.data()));
+	stream.avail_in = static_cast<uInt>(document.size());
+	stream.next_out = compressed.data();
+	stream.avail_out = static_cast<uInt>(compressed.size());
+	const int status = deflate(&stream, Z_FINISH);
+	const std::size_t written = compressed.size() - stream.avail_out;
+	deflateEnd(&stream);
+	if (status != Z_STREAM_END) return {};
+	compressed.resize(written);
+	return compressed;
+}
 
 void TestImageContentFormatDetection() {
 	using jpegview_linux::DetectImageContent;
@@ -35,6 +55,11 @@ void TestImageContentFormatDetection() {
 	expect({'8', 'B', 'P', 'S'}, ImageContentFormat::Psd, "PSD");
 	expect({'P', '6', '\n'}, ImageContentFormat::Pnm, "PNM");
 	expect({'q', 'o', 'i', 'f'}, ImageContentFormat::Qoi, "QOI");
+	const std::string svg = "<?xml version=\"1.0\"?>\n<!-- SVG fixture -->\n"
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"2\">";
+	const std::vector<std::uint8_t> svgBytes(svg.begin(), svg.end());
+	expect(svgBytes, ImageContentFormat::Svg, "SVG XML");
+	expect(MakeSvgz(svg), ImageContentFormat::Svgz, "SVGZ gzip");
 	expect({0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 24, 0},
 		ImageContentFormat::Tga, "TGA");
 	expect({'n', 'o', 't', ' ', 'a', 'n', ' ', 'i', 'm', 'a', 'g', 'e'},
@@ -45,6 +70,289 @@ void TestImageContentFormatDetection() {
 	Expect(jpegview_linux::ReadImageContentFormat(canceledProbe, [] { return false; }) ==
 		ImageContentFormat::Unknown,
 		"content probing ignored cancellation before reading a source");
+}
+
+void TestSvgAndSvgzDecoding() {
+	TemporaryDirectory temporary;
+	const std::string vectorDocument =
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"2\" "
+		"viewBox=\"0 0 4 2\"><rect width=\"2\" height=\"2\" fill=\"#ff0000\"/>"
+		"<rect x=\"2\" width=\"2\" height=\"2\" fill=\"#0000ff\" "
+		"fill-opacity=\"0.5\"/></svg>";
+	const fs::path wrongExtension = temporary.path() / "vector.data";
+	WriteText(wrongExtension, vectorDocument);
+	Expect(!jpegview_linux::IsSupportedImagePath(wrongExtension) &&
+		jpegview_linux::ReadImageContentFormat(wrongExtension) ==
+			jpegview_linux::ImageContentFormat::Svg,
+		"SVG content detection incorrectly depends on the file extension");
+	Expect(jpegview_linux::IsSupportedImagePath(temporary.path() / "vector.SVG"),
+		"SVG extension is not included in ordinary image lists");
+
+#if JPEGVIEW_HAVE_SVG
+	const fs::path mislabeledSvg = temporary.path() / "vector.jpg";
+	WriteText(mislabeledSvg, vectorDocument);
+	int detectedSvgWidth = 0;
+	int detectedSvgHeight = 0;
+	bool detectedSvgFormat = false;
+	std::string dimensionsError;
+	Expect(jpegview_linux::ReadSourceDimensions(mislabeledSvg, detectedSvgWidth,
+		detectedSvgHeight, dimensionsError, {}, &detectedSvgFormat) &&
+		detectedSvgFormat && detectedSvgWidth == 4 && detectedSvgHeight == 2,
+		"JPEG-suffixed SVG content did not retain its detected vector source format");
+	int width = 0;
+	int height = 0;
+	std::string error;
+	const fs::path vectorPath = temporary.path() / "vector.svg";
+	WriteText(vectorPath, vectorDocument);
+	Expect(jpegview_linux::ReadSvgDimensions(vectorPath, width, height, error) &&
+		width == 4 && height == 2,
+		"SVG dimensions were not read from its intrinsic geometry: " + error);
+	DecodedImage decoded;
+	Expect(jpegview_linux::DecodeImage(wrongExtension, decoded, error) &&
+		decoded.frames.size() == 1 && decoded.frames[0].width == 4 &&
+		decoded.frames[0].height == 2 && decoded.isSvg,
+		"content-detected SVG did not decode from a wrong extension: " + error);
+	const auto& pixels = decoded.frames[0].bgra;
+	Expect(pixels[0] == 0 && pixels[1] == 0 && pixels[2] == 255 && pixels[3] == 255 &&
+		pixels[8] >= 250 && pixels[9] == 0 && pixels[10] == 0 &&
+		pixels[11] >= 127 && pixels[11] <= 128,
+		"SVG rasterization did not publish straight-alpha BGRA pixels");
+	const auto directRequest = jpegview_linux::MakeSvgDisplayImageRequest(
+		vectorPath, 4, 2, 40, 30, false);
+	Expect(directRequest.Valid() && !directRequest.decoded &&
+		directRequest.fileBackedFormat == jpegview_linux::FileBackedDisplayFormat::Svg,
+		"SVG display request did not retain its file-backed vector source");
+	const auto wrongExtensionDisplayRequest =
+		jpegview_linux::MakeSvgDisplayImageRequest(wrongExtension, 4, 2,
+			40, 20, false);
+	jpegview_linux::DisplayImageCache wrongExtensionDisplay(1024 * 1024, 1);
+	const auto wrongExtensionPrepared = wrongExtensionDisplay.RequestAndWait(
+		wrongExtensionDisplayRequest);
+	Expect(wrongExtensionDisplayRequest.Valid() && wrongExtensionPrepared &&
+		wrongExtensionPrepared->width == 40 && wrongExtensionPrepared->height == 20,
+		"content-detected SVG could not use the direct file-backed display path from a wrong extension");
+	const auto decodedSvgRequest = jpegview_linux::MakeDisplayImageRequest(
+		vectorPath, std::make_shared<const DecodedImage>(decoded), 0, 40, 20, false);
+	Expect(decodedSvgRequest.Valid() && decodedSvgRequest.key != directRequest.key &&
+		!jpegview_linux::CanReuseDisplayImageRepresentation(
+			directRequest.cacheKey, decodedSvgRequest.cacheKey),
+		"file-backed SVG rendering reused a cache key for source-raster preparation");
+	auto svgRebuildSource = jpegview_linux::MakeSvgDisplayImageRequest(
+		vectorPath, 4, 2, 40, 30, true, 7, {}, 1, true);
+	svgRebuildSource.workClass = jpegview_linux::PerfWorkClass::FocusedPreview;
+	svgRebuildSource.selectionGeneration = 42;
+	const auto rebuiltSvgRequest = jpegview_linux::RebuildDisplayImageRequestAtTarget(
+		svgRebuildSource, 20, 15);
+	Expect(rebuiltSvgRequest.Valid() &&
+		rebuiltSvgRequest.fileBackedFormat == jpegview_linux::FileBackedDisplayFormat::Svg &&
+		!rebuiltSvgRequest.decoded && rebuiltSvgRequest.targetWidth == 20 &&
+		rebuiltSvgRequest.targetHeight == 15 &&
+		rebuiltSvgRequest.rotationQuarterTurns == 1 &&
+		rebuiltSvgRequest.includeSpectrum && rebuiltSvgRequest.autoContrast &&
+		rebuiltSvgRequest.priority == 7 &&
+		rebuiltSvgRequest.workClass == jpegview_linux::PerfWorkClass::FocusedPreview &&
+		rebuiltSvgRequest.selectionGeneration == 42 &&
+		rebuiltSvgRequest.cacheKey.renderVectorAtTarget,
+		"rebuilding a display request lost SVG format, pixel settings or scheduling metadata");
+	const fs::path jpegRequestPath = temporary.path() / "request.jpeg";
+	WriteText(jpegRequestPath, "request identity fixture");
+	auto jpegRebuildSource = jpegview_linux::MakeJpegDisplayImageRequest(
+		jpegRequestPath, 100, 50, 80, 40, false, 3);
+	const auto rebuiltJpegRequest = jpegview_linux::RebuildDisplayImageRequestAtTarget(
+		jpegRebuildSource, 40, 20);
+	Expect(jpegRebuildSource.Valid() && rebuiltJpegRequest.Valid() &&
+		rebuiltJpegRequest.fileBackedFormat == jpegview_linux::FileBackedDisplayFormat::Jpeg &&
+		rebuiltJpegRequest.cacheKey.targetWidth == 40 &&
+		rebuiltJpegRequest.cacheKey.targetHeight == 20 &&
+		rebuiltJpegRequest.priority == 3,
+		"display request reconstruction changed the existing JPEG request identity");
+	const auto rebuiltDecodedRequest = jpegview_linux::RebuildDisplayImageRequestAtTarget(
+		decodedSvgRequest, 20, 10);
+	Expect(rebuiltDecodedRequest.Valid() &&
+		rebuiltDecodedRequest.decoded == decodedSvgRequest.decoded &&
+		rebuiltDecodedRequest.frameIndex == decodedSvgRequest.frameIndex &&
+		!rebuiltDecodedRequest.cacheKey.renderVectorAtTarget,
+		"display request reconstruction converted a decoded raster into a file-backed vector request");
+	jpegview_linux::DisplayImageCache display(1024 * 1024, 1);
+	const auto directPrepared = display.RequestAndWait(directRequest);
+	Expect(directPrepared && directPrepared->width == 40 && directPrepared->height == 20 &&
+		directPrepared->bgra.size() == 40u * 20u * 4u &&
+		directPrepared->source.Metadata().hasDimensions &&
+		directPrepared->source.Metadata().width == 4 &&
+		directPrepared->source.Metadata().height == 2,
+		"SVG display preparation did not rasterize directly at fitted target resolution");
+	DecodedImage noUpscaleSvg;
+	int noUpscaleSourceWidth = 0;
+	int noUpscaleSourceHeight = 0;
+	Expect(jpegview_linux::DecodeSvgForDisplay(vectorPath, 40, 30, noUpscaleSvg,
+		noUpscaleSourceWidth, noUpscaleSourceHeight, error, {}, false) &&
+		noUpscaleSvg.frames.size() == 1 && noUpscaleSvg.frames.front().width == 4 &&
+		noUpscaleSvg.frames.front().height == 2 && noUpscaleSourceWidth == 4 &&
+		noUpscaleSourceHeight == 2,
+		"SVG thumbnail rendering enlarged a source that already fits its requested bounds");
+	const auto rotatedSvgRequest = jpegview_linux::MakeSvgDisplayImageRequest(
+		vectorPath, 4, 2, 20, 40, false, 0, {}, 1);
+	const auto rotatedSvg = display.RequestAndWait(rotatedSvgRequest);
+	Expect(rotatedSvg && rotatedSvg->width == 20 && rotatedSvg->height == 40 &&
+		rotatedSvg->rotationQuarterTurns == 1,
+		"file-backed SVG rendering did not rotate into the requested final dimensions");
+	const auto histogramSvgRequest = jpegview_linux::MakeSvgDisplayImageRequest(
+		vectorPath, 4, 2, 40, 30, false, 0, {}, 0, true);
+	const auto histogramSvg = display.RequestAndWait(histogramSvgRequest);
+	Expect(histogramSvg && histogramSvg->width == 40 && histogramSvg->height == 20 &&
+		histogramSvg->spectrum && histogramSvg->bgra == directPrepared->bgra,
+		"SVG histogram preparation did not retain the direct target-rendered pixels");
+	const fs::path fineDetailPath = temporary.path() / "fine-detail.svg";
+	std::string fineDetailDocument =
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"1\" "
+		"viewBox=\"0 0 4 1\"><rect width=\"4\" height=\"1\" fill=\"white\"/>";
+	for (int stripe = 0; stripe < 40; stripe += 2) {
+		fineDetailDocument += "<rect x=\"" + std::to_string(stripe / 10) + "." +
+			std::to_string(stripe % 10) +
+			"\" width=\"0.05\" height=\"1\" fill=\"black\"/>";
+	}
+	fineDetailDocument += "</svg>";
+	WriteText(fineDetailPath, fineDetailDocument);
+	const auto fineDetailPlain = display.RequestAndWait(
+		jpegview_linux::MakeSvgDisplayImageRequest(fineDetailPath, 4, 1,
+			80, 20, false));
+	const auto fineDetailHistogram = display.RequestAndWait(
+		jpegview_linux::MakeSvgDisplayImageRequest(fineDetailPath, 4, 1,
+			80, 20, false, 0, {}, 0, true));
+	std::size_t fineDetailTransitions = 0;
+	if (fineDetailPlain) {
+		const auto isBlack = [&fineDetailPlain](int x) {
+			return fineDetailPlain->bgra[static_cast<std::size_t>(x) * 4 + 2] < 128;
+		};
+		for (int x = 1; x < fineDetailPlain->width; ++x) {
+			if (isBlack(x) != isBlack(x - 1)) ++fineDetailTransitions;
+		}
+	}
+	Expect(fineDetailPlain && fineDetailHistogram && fineDetailHistogram->spectrum &&
+		fineDetailHistogram->bgra == fineDetailPlain->bgra &&
+		fineDetailTransitions >= 30,
+		"SVG histogram preparation enlarged a low-resolution intrinsic raster instead of preserving fine vector detail");
+	const jpegview_linux::DisplayImageTarget boundedSvgTarget =
+		jpegview_linux::BoundSvgDisplayTarget(100000, 100000);
+	Expect(boundedSvgTarget.width > 0 && boundedSvgTarget.height > 0 &&
+		boundedSvgTarget.width <= 65535 && boundedSvgTarget.height <= 65535 &&
+		static_cast<std::uint64_t>(boundedSvgTarget.width) * boundedSvgTarget.height <=
+			100ull * 1024ull * 1024ull,
+		"SVG display target was not bounded by decoder pixel limits");
+
+	const fs::path physicalUnits = temporary.path() / "physical.svg";
+	WriteText(physicalUnits,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2in\" height=\"25.4mm\"/>");
+	Expect(jpegview_linux::ReadSvgDimensions(physicalUnits, width, height, error) &&
+		width == 192 && height == 96,
+		"SVG physical units were not converted at 96 DPI: " + error);
+	const fs::path fontRelative = temporary.path() / "font-relative.svg";
+	WriteText(fontRelative,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10em\" height=\"5em\" "
+		"font-size=\"20\"/>");
+	Expect(jpegview_linux::ReadSvgDimensions(fontRelative, width, height, error) &&
+		width == 200 && height == 100,
+		"SVG font-relative dimensions ignored the computed root font size: " + error);
+	const fs::path mixedFontUnits = temporary.path() / "mixed-font-units.svg";
+	WriteText(mixedFontUnits,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10em\" height=\"25px\" "
+		"font-size=\"20\"/>");
+	Expect(jpegview_linux::ReadSvgDimensions(mixedFontUnits, width, height, error) &&
+		width == 200 && height == 25,
+		"mixed SVG font-relative and pixel dimensions were not resolved by librsvg: " + error);
+	const fs::path viewBoxOnly = temporary.path() / "viewbox.svg";
+	WriteText(viewBoxOnly,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 400 200\"/>");
+	Expect(jpegview_linux::ReadSvgDimensions(viewBoxOnly, width, height, error) &&
+		width == 400 && height == 200,
+		"SVG viewBox did not provide the fallback intrinsic dimensions: " + error);
+	const fs::path oneDimension = temporary.path() / "one-dimension.svg";
+	WriteText(oneDimension,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"100%\" "
+		"viewBox=\"0 0 200 100\"/>");
+	Expect(jpegview_linux::ReadSvgDimensions(oneDimension, width, height, error) &&
+		width == 120 && height == 60,
+		"SVG percentage dimensions were not derived from the viewBox aspect ratio: " + error);
+	const fs::path defaultSize = temporary.path() / "default.svg";
+	WriteText(defaultSize, "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"2\"/></svg>");
+	Expect(jpegview_linux::ReadSvgDimensions(defaultSize, width, height, error) &&
+		width == 300 && height == 150,
+		"SVG without dimensions did not use the default viewport size: " + error);
+	const fs::path tooLarge = temporary.path() / "too-large.svg";
+	WriteText(tooLarge,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"65536\" height=\"1\"/>");
+	Expect(!jpegview_linux::ReadSvgDimensions(tooLarge, width, height, error) &&
+		width == 0 && height == 0,
+		"SVG dimensions above the decoder limit were accepted");
+
+	const fs::path svgzPath = temporary.path() / "compressed.svgz";
+	const std::vector<std::uint8_t> compressed = MakeSvgz(vectorDocument);
+	Expect(!compressed.empty(), "could not create SVGZ test document");
+	WriteBytes(svgzPath, compressed);
+	Expect(jpegview_linux::ReadImageContentFormat(svgzPath) ==
+		jpegview_linux::ImageContentFormat::Svgz &&
+		jpegview_linux::ReadSvgDimensions(svgzPath, width, height, error) &&
+		width == 4 && height == 2,
+		"valid SVGZ content did not decompress to SVG geometry: " + error);
+	Expect(jpegview_linux::DecodeImage(svgzPath, decoded, error) &&
+		decoded.frames.size() == 1 && decoded.frames[0].width == 4,
+		"valid SVGZ content did not decode: " + error);
+	const fs::path truncatedSvgz = temporary.path() / "truncated.svgz";
+	std::vector<std::uint8_t> truncated = compressed;
+	truncated.resize(truncated.size() - 4);
+	WriteBytes(truncatedSvgz, truncated);
+	Expect(!jpegview_linux::DecodeImage(truncatedSvgz, decoded, error) &&
+		decoded.frames.empty(), "truncated SVGZ input was accepted");
+	const fs::path badCrcSvgz = temporary.path() / "bad-crc.svgz";
+	std::vector<std::uint8_t> badCrc = compressed;
+	badCrc[badCrc.size() - 8] ^= 0x80;
+	WriteBytes(badCrcSvgz, badCrc);
+	Expect(!jpegview_linux::DecodeImage(badCrcSvgz, decoded, error) &&
+		decoded.frames.empty(), "SVGZ with a bad gzip checksum was accepted");
+	std::vector<std::uint8_t> concatenated = compressed;
+	concatenated.insert(concatenated.end(), compressed.begin(), compressed.end());
+	const fs::path concatenatedSvgz = temporary.path() / "concatenated.svgz";
+	WriteBytes(concatenatedSvgz, concatenated);
+	Expect(!jpegview_linux::DecodeImage(concatenatedSvgz, decoded, error) &&
+		decoded.frames.empty(), "concatenated SVGZ gzip members were accepted");
+
+	const std::vector<std::string> rejectedDocuments = {
+		"<!DOCTYPE svg [<!ENTITY x SYSTEM 'file:///etc/passwd'>]>"
+		"<svg xmlns=\"http://www.w3.org/2000/svg\"><text>&x;</text></svg>",
+		"<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"file:///etc/passwd\"/></svg>",
+		"<svg xmlns=\"http://www.w3.org/2000/svg\"><style>rect { fill: url(https://example.com/x) }</style></svg>",
+		"<?xml-stylesheet href=\"file:///tmp/style.css\"?>"
+		"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+	};
+	for (std::size_t index = 0; index < rejectedDocuments.size(); ++index) {
+		const fs::path unsafe = temporary.path() / ("unsafe-" + std::to_string(index) + ".svg");
+		WriteText(unsafe, rejectedDocuments[index]);
+		const bool unsafeDecoded = jpegview_linux::DecodeImage(unsafe, decoded, error);
+		Expect(!unsafeDecoded && decoded.frames.empty(),
+			"SVG external resource or entity policy was not enforced for case " +
+			std::to_string(index) + " (decoded=" + std::to_string(unsafeDecoded) +
+			", error=" + error + ")");
+	}
+	const fs::path localReference = temporary.path() / "local-reference.svg";
+	WriteText(localReference,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\">"
+		"<defs><linearGradient id=\"g\"><stop stop-color=\"red\"/></linearGradient></defs>"
+		"<rect width=\"2\" height=\"1\" fill=\"url(#g)\"/></svg>");
+	Expect(jpegview_linux::DecodeImage(localReference, decoded, error) &&
+		decoded.frames.size() == 1,
+		"SVG local fragment resources were rejected: " + error);
+	const auto canceledContext = jpegview_linux::MakePathWorkContext(vectorPath,
+		jpegview_linux::SourceWorkPriority::Foreground, [] { return false; });
+	Expect(!jpegview_linux::DecodeImage(vectorPath, decoded, error, canceledContext) &&
+		decoded.frames.empty() && error.find("cancel") != std::string::npos,
+		"SVG decode ignored cancellation before parsing");
+#else
+	DecodedImage decoded;
+	std::string error;
+	Expect(!jpegview_linux::DecodeImage(wrongExtension, decoded, error) &&
+		decoded.frames.empty() && error.find("support is not available") != std::string::npos,
+		"build without librsvg did not report the unavailable SVG codec");
+#endif
 }
 
 void TestImageWriterDecoderRoundTrips() {
@@ -2173,6 +2481,7 @@ void TestExifMetadataWorkerPublishesCurrentExceptions() {
 }
 const TestCase kTests[] = {
 	{"image-content-format-detection", &TestImageContentFormatDetection},
+	{"svg-and-svgz-decoding", &TestSvgAndSvgzDecoding},
 	{"image-writer-decoder-round-trips", &TestImageWriterDecoderRoundTrips},
 	{"content-dispatch-preserves-container-policy", &TestContentDispatchPreservesContainerPolicy},
 #if JPEGVIEW_HAVE_WEBP

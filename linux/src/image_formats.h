@@ -25,6 +25,8 @@ enum class ImageContentFormat {
 	Pnm,
 	Qoi,
 	Raw,
+	Svg,
+	Svgz,
 };
 
 bool IsSupportedImagePath(const std::filesystem::path& path);

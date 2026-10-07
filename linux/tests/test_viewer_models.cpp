@@ -2884,6 +2884,31 @@ void TestThumbnailInvalidDescriptorRecapturesRecreatedSource() {
 }
 
 void TestThumbnailBackgroundPreparation() {
+#if JPEGVIEW_HAVE_SVG
+	TemporaryDirectory svgTemporary;
+	const fs::path svgPath = svgTemporary.path() / "large-vector.svg";
+	WriteText(svgPath,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4096\" height=\"2048\">"
+		"<rect width=\"4096\" height=\"2048\" fill=\"#20e020\"/></svg>");
+	const jpegview_linux::SourceDescriptor svgSource =
+		jpegview_linux::DescribeImageSource(svgPath);
+	jpegview_linux::ThumbnailPreparationRequest svgRequest;
+	svgRequest.key = svgSource.Key();
+	svgRequest.maximumWidth = 64;
+	svgRequest.maximumHeight = 48;
+	svgRequest.logicalSource = svgPath;
+	svgRequest.sourceDescriptor = svgSource;
+	jpegview_linux::ThumbnailPreparationWorker svgWorker;
+	Expect(svgWorker.Request(svgRequest) &&
+		svgWorker.WaitUntilIdle(std::chrono::seconds(2)),
+		"thumbnail worker did not render an SVG source to the requested thumbnail bounds");
+	const auto svgResults = svgWorker.TakeCompleted(1);
+	Expect(svgResults.size() == 1 && svgResults.front().image &&
+		svgResults.front().image->width == 64 &&
+		svgResults.front().image->height == 32 &&
+		svgResults.front().image->bgra.size() == 64u * 32u * 4u,
+		"SVG thumbnail output did not preserve aspect ratio at the bounded raster size");
+#endif
 	Expect(jpegview_linux::CanReuseDisplayPixelsForThumbnail(1920, 1080, 4u * 1024u * 1024u) &&
 		!jpegview_linux::CanReuseDisplayPixelsForThumbnail(8000, 6000, 4u * 1024u * 1024u) &&
 		!jpegview_linux::CanReuseDisplayPixelsForThumbnail(0, 1080, 4u * 1024u * 1024u),

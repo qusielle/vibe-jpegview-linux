@@ -273,7 +273,26 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 			request.maximumWidth, request.maximumHeight);
 	} else {
 		std::string errorMessage;
-		if (IsJpegPath(request.logicalSource)) {
+		bool svgRenderedAtTarget = false;
+		if (IsSvgPath(request.logicalSource)) {
+			int intrinsicWidth = 0;
+			int intrinsicHeight = 0;
+			if (DecodeSvgForDisplay(request.logicalSource, request.maximumWidth,
+				request.maximumHeight, decoded, intrinsicWidth, intrinsicHeight,
+				errorMessage, workContext, false) && !decoded.frames.empty() &&
+				shouldContinue()) {
+				const DecodedFrame& frame = decoded.frames.front();
+				sourceWidth = frame.width;
+				sourceHeight = frame.height;
+				hasTransparency = frame.hasTransparency;
+				sourcePixels = &frame.bgra;
+				size = {frame.width, frame.height};
+				svgRenderedAtTarget = true;
+			} else if (!shouldContinue()) {
+				return {};
+			}
+		}
+		if (!svgRenderedAtTarget && IsJpegPath(request.logicalSource)) {
 			int jpegWidth = 0;
 			int jpegHeight = 0;
 			if (ReadJpegDimensions(request.logicalSource, jpegWidth, jpegHeight,
@@ -292,18 +311,22 @@ ThumbnailPreparationWorker::ImagePtr PrepareThumbnail(
 				decoded.frames.empty() || !shouldContinue()) {
 				return {};
 			}
-		} else if (!DecodeImage(request.logicalSource, decoded, errorMessage, workContext) ||
-			decoded.frames.empty() || !shouldContinue()) {
+		} else if (!svgRenderedAtTarget && !IsJpegPath(request.logicalSource) &&
+			(!DecodeImage(request.logicalSource, decoded, errorMessage, workContext) ||
+			 decoded.frames.empty() || !shouldContinue())) {
 			return {};
 		}
-		const DecodedFrame& frame = decoded.frames.front();
-		sourceWidth = frame.width;
-		sourceHeight = frame.height;
-		hasTransparency = frame.hasTransparency;
-		sourcePixels = &frame.bgra;
-		if (size.width <= 0 || size.height <= 0) {
-			size = FitThumbnailSize(sourceWidth, sourceHeight,
-				request.maximumWidth, request.maximumHeight);
+		if (!svgRenderedAtTarget) {
+			if (decoded.frames.empty()) return {};
+			const DecodedFrame& frame = decoded.frames.front();
+			sourceWidth = frame.width;
+			sourceHeight = frame.height;
+			hasTransparency = frame.hasTransparency;
+			sourcePixels = &frame.bgra;
+			if (size.width <= 0 || size.height <= 0) {
+				size = FitThumbnailSize(sourceWidth, sourceHeight,
+					request.maximumWidth, request.maximumHeight);
+			}
 		}
 	}
 	if (size.width <= 0 || size.height <= 0) return {};
