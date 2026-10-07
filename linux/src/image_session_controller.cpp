@@ -78,14 +78,14 @@ ImageSessionStart ImageSessionController::BeginSelection(
 SelectedSourcePreparationAction ImageSessionController::PlanSelectedSourcePreparation(
 	const SelectedSourcePreparationSnapshot& snapshot) const {
 	if (!snapshot.preparationRequested) return SelectedSourcePreparationAction::Skip;
-	if (!snapshot.jpegSource || !snapshot.displayCacheEnabled) {
+	if (!snapshot.sourceSupportsDimensionsProbe || !snapshot.displayCacheEnabled) {
 		return SelectedSourcePreparationAction::DecodeSelectedSource;
 	}
-	if (snapshot.cachedJpegDimensions) {
-		return SelectedSourcePreparationAction::UseCachedJpegDimensions;
+	if (snapshot.cachedSourceDimensions) {
+		return SelectedSourcePreparationAction::UseCachedSourceDimensions;
 	}
-	if (snapshot.sourceValid && !snapshot.jpegDimensionProbeFailed) {
-		return SelectedSourcePreparationAction::RequestJpegDimensions;
+	if (snapshot.sourceValid && !snapshot.sourceDimensionProbeFailed) {
+		return SelectedSourcePreparationAction::RequestSourceDimensions;
 	}
 	return SelectedSourcePreparationAction::DecodeSelectedSource;
 }
@@ -93,7 +93,7 @@ SelectedSourcePreparationAction ImageSessionController::PlanSelectedSourcePrepar
 bool ImageSessionController::ShouldPrepareDecodedSource(
 	const DecodedSourcePreparationSnapshot& snapshot) const {
 	return snapshot.preparationRequested && !snapshot.cachedDisplayReady &&
-		!snapshot.deferredForPossibleSpread && !snapshot.waitingForJpegDimensions;
+		!snapshot.deferredForPossibleSpread && !snapshot.waitingForSourceDimensions;
 }
 
 bool ImageSessionController::MatchesSelection(std::uint64_t generation,

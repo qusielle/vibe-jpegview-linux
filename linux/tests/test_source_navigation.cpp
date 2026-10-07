@@ -199,7 +199,7 @@ void TestProvisionalSourceDescriptorSurvivesStartupReplacement() {
 		"same-path startup scan relabeled the old direct-decode key with the replacement descriptor");
 }
 
-void TestCurrentJpegDimensionsAcceptStableSourceAcrossListRevisions() {
+void TestCurrentSourceDimensionsAcceptStableSourceAcrossListRevisions() {
 	TemporaryDirectory temporary;
 	const fs::path source = temporary.path() / "header.jpg";
 	WriteBytes(source, {0xff, 0xd8, 0xff, 0xd9});
@@ -216,28 +216,28 @@ void TestCurrentJpegDimensionsAcceptStableSourceAcrossListRevisions() {
 		files.MutationRevision() != initialCatalogRevision &&
 		files.DescriptorAt(0)->Key() == requestSource,
 		"startup catalog publication did not preserve the pending JPEG source identity");
-	Expect(jpegview_linux::IsCurrentJpegDimensionsResult(requestGeneration,
+	Expect(jpegview_linux::IsCurrentSourceDimensionsResult(requestGeneration,
 		requestSource, requestGeneration, files.DescriptorAt(0)->Key()),
-		"catalog revision alone rejected the current JPEG header result");
+		"catalog revision alone rejected the current source-dimensions result");
 
 	const jpegview_linux::SourceDescriptor withDimensions =
 		files.DescriptorAt(0)->WithImageProperties(64, 48, false);
 	Expect(files.RefreshSourceDescriptor(withDimensions) &&
 		files.DescriptorRevision() != initialDescriptorRevision &&
 		files.DescriptorAt(0)->Key() == requestSource &&
-		jpegview_linux::IsCurrentJpegDimensionsResult(requestGeneration,
+		jpegview_linux::IsCurrentSourceDimensionsResult(requestGeneration,
 			requestSource, requestGeneration, files.DescriptorAt(0)->Key()),
-		"descriptor revision alone rejected a JPEG header for the same backing source");
+		"descriptor revision alone rejected source dimensions for the same backing source");
 
 	jpegview_linux::SourceIdentity replacementIdentity = requestSource.backingIdentity;
 	++replacementIdentity.modifiedNanoseconds;
 	const jpegview_linux::SourceKey replacementSource(
 		requestSource.logicalPath, replacementIdentity);
-	Expect(!jpegview_linux::IsCurrentJpegDimensionsResult(requestGeneration,
+	Expect(!jpegview_linux::IsCurrentSourceDimensionsResult(requestGeneration,
 		requestSource, requestGeneration, replacementSource) &&
-		!jpegview_linux::IsCurrentJpegDimensionsResult(requestGeneration,
+		!jpegview_linux::IsCurrentSourceDimensionsResult(requestGeneration,
 			requestSource, requestGeneration + 1, requestSource),
-		"JPEG header gate accepted a replaced source or superseded load generation");
+		"source-dimensions gate accepted a replaced source or superseded load generation");
 }
 
 void TestNonCurrentSourceRefreshPreservesSelection() {
@@ -2505,7 +2505,7 @@ const TestCase kTests[] = {
 	{"ordinary-source-metadata-uses-one-statx-request", &TestOrdinarySourceMetadataUsesOneStatxRequest},
 	{"source-descriptor-identity-and-unusual-paths", &TestSourceDescriptorIdentityAndUnusualPaths},
 	{"provisional-source-descriptor-survives-startup-replacement", &TestProvisionalSourceDescriptorSurvivesStartupReplacement},
-	{"current-jpeg-dimensions-stable-source-across-list-revisions", &TestCurrentJpegDimensionsAcceptStableSourceAcrossListRevisions},
+	{"current-source-dimensions-stable-source-across-list-revisions", &TestCurrentSourceDimensionsAcceptStableSourceAcrossListRevisions},
 	{"noncurrent-source-refresh-preserves-selection", &TestNonCurrentSourceRefreshPreservesSelection},
 	{"current-processed-save-preserves-materialized-pixels", &TestCurrentProcessedSavePreservesMaterializedPixels},
 	{"file-dialog-source-refresh-requires-exact-descriptor", &TestFileDialogSourceRefreshRequiresExactDescriptor},

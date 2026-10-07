@@ -40,9 +40,9 @@ bool operator!=(const DecodedImageRequestIdentity& left,
 // configured cache budget.
 std::size_t DecodedImageBytes(const DecodedImage& image);
 
-// A JPEG header result remains usable across catalog/descriptor revisions
+// A source geometry result remains usable across catalog/descriptor revisions
 // while its load generation and backing source identity are still current.
-bool IsCurrentJpegDimensionsResult(std::uint64_t resultGeneration,
+bool IsCurrentSourceDimensionsResult(std::uint64_t resultGeneration,
 	const SourceKey& resultSource, std::uint64_t expectedGeneration,
 	const SourceKey& expectedSource);
 
@@ -125,8 +125,16 @@ public:
 	void ObserveSelectedSource(const SourceDescriptor& source,
 		DetailedCompletion completion,
 		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
-	// Reads only JPEG header dimensions on the existing worker, without retaining
-	// or materializing full-resolution decoded pixels.
+	// Reads source geometry on the existing worker without retaining or
+	// materializing full-resolution decoded pixels.
+	void RequestSourceDimensions(const std::filesystem::path& filename,
+		DimensionsCompletion completion,
+		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
+	void RequestSourceDimensions(const SourceDescriptor& source,
+		DimensionsCompletion completion,
+		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);
+	// JPEG-specific compatibility entry point used by source operations that
+	// require JPEG header semantics.
 	void RequestJpegDimensions(const std::filesystem::path& filename,
 		DimensionsCompletion completion,
 		PerfWorkClass workClass = PerfWorkClass::ActiveImageSpread);

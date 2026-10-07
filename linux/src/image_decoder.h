@@ -31,6 +31,11 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 
 bool IsJpegPath(const std::filesystem::path& filename);
 
+// Reads display geometry without decoding pixels for sources whose format
+// supports a lightweight metadata path. JPEG currently uses its header reader.
+bool ReadSourceDimensions(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage, const WorkContext& context = {});
+
 // Reads only the JPEG header. This is used to calculate a stable fitted
 // viewport before committing CPU time and memory to pixel decompression.
 bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& height,

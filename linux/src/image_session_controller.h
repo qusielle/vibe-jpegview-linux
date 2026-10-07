@@ -25,7 +25,7 @@ struct ImageSessionSelection {
 
 enum class ImageSessionStage {
 	Selected,
-	AwaitingJpegDimensions,
+	AwaitingSourceDimensions,
 	AwaitingDecodedSource,
 	AwaitingDisplayFrame,
 	DisplayFrameReady,
@@ -73,17 +73,17 @@ struct ImageSessionStart {
 
 struct SelectedSourcePreparationSnapshot {
 	bool preparationRequested = true;
-	bool jpegSource = false;
+	bool sourceSupportsDimensionsProbe = false;
 	bool displayCacheEnabled = false;
-	bool cachedJpegDimensions = false;
+	bool cachedSourceDimensions = false;
 	bool sourceValid = false;
-	bool jpegDimensionProbeFailed = false;
+	bool sourceDimensionProbeFailed = false;
 };
 
 enum class SelectedSourcePreparationAction {
 	Skip,
-	UseCachedJpegDimensions,
-	RequestJpegDimensions,
+	UseCachedSourceDimensions,
+	RequestSourceDimensions,
 	DecodeSelectedSource,
 };
 
@@ -91,7 +91,7 @@ struct DecodedSourcePreparationSnapshot {
 	bool preparationRequested = true;
 	bool cachedDisplayReady = false;
 	bool deferredForPossibleSpread = false;
-	bool waitingForJpegDimensions = false;
+	bool waitingForSourceDimensions = false;
 };
 
 // Owns the value state that identifies one selected image independently from

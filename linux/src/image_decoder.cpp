@@ -477,6 +477,17 @@ bool ReadJpegDimensions(const std::filesystem::path& filename, int& width, int& 
 		});
 }
 
+bool ReadSourceDimensions(const std::filesystem::path& filename, int& width, int& height,
+	std::string& errorMessage, const WorkContext& context) {
+	if (!IsJpegPath(filename)) {
+		width = 0;
+		height = 0;
+		errorMessage = "source format has no lightweight dimensions reader";
+		return false;
+	}
+	return ReadJpegDimensions(filename, width, height, errorMessage, context);
+}
+
 bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage, const WorkContext& supplied) {
 	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);

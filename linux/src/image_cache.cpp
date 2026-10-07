@@ -111,7 +111,7 @@ std::size_t DecodedImageBytes(const DecodedImage& image) {
 	return bytes;
 }
 
-bool IsCurrentJpegDimensionsResult(std::uint64_t resultGeneration,
+bool IsCurrentSourceDimensionsResult(std::uint64_t resultGeneration,
 	const SourceKey& resultSource, std::uint64_t expectedGeneration,
 	const SourceKey& expectedSource) {
 	return resultGeneration == expectedGeneration && resultSource == expectedSource;
@@ -241,7 +241,7 @@ struct DecodedImageCache::Impl {
 		if (!dimensionsReader) {
 			dimensionsReader = [](const fs::path& filename, int& width, int& height,
 				std::string& errorMessage) {
-				return ReadJpegDimensions(filename, width, height, errorMessage);
+				return ReadSourceDimensions(filename, width, height, errorMessage);
 			};
 		}
 		retirementState = std::make_shared<RetirementState>();
@@ -1151,16 +1151,16 @@ void DecodedImageCache::ObserveSelectedSource(const SourceDescriptor& source,
 	}
 }
 
-void DecodedImageCache::RequestJpegDimensions(const fs::path& filename,
+void DecodedImageCache::RequestSourceDimensions(const fs::path& filename,
 	DimensionsCompletion completion, PerfWorkClass workClass) {
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
 		if (impl_->stopping) return;
 	}
-	RequestJpegDimensions(DescribeImageSource(filename), std::move(completion), workClass);
+	RequestSourceDimensions(DescribeImageSource(filename), std::move(completion), workClass);
 }
 
-void DecodedImageCache::RequestJpegDimensions(const SourceDescriptor& source,
+void DecodedImageCache::RequestSourceDimensions(const SourceDescriptor& source,
 	DimensionsCompletion completion, PerfWorkClass workClass) {
 	if (!completion || !IsJpegPath(source.LogicalPath())) return;
 	Impl::Work work;
@@ -1203,6 +1203,18 @@ void DecodedImageCache::RequestJpegDimensions(const SourceDescriptor& source,
 		impl_->desiredWork[work.key] = work;
 	}
 	if (queuedWork) impl_->workAvailable.notify_one();
+}
+
+void DecodedImageCache::RequestJpegDimensions(const fs::path& filename,
+	DimensionsCompletion completion, PerfWorkClass workClass) {
+	if (!IsJpegPath(filename)) return;
+	RequestSourceDimensions(filename, std::move(completion), workClass);
+}
+
+void DecodedImageCache::RequestJpegDimensions(const SourceDescriptor& source,
+	DimensionsCompletion completion, PerfWorkClass workClass) {
+	if (!IsJpegPath(source.LogicalPath())) return;
+	RequestSourceDimensions(source, std::move(completion), workClass);
 }
 
 bool DecodedImageCache::CancelActiveSpreadRequest(const fs::path& filename,

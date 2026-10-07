@@ -932,10 +932,12 @@ Viewer tracks the exact cold partner source request. Replacing or retiring that 
 active-spread reads and sets the in-flight cancellation token, suppressing publication after a blocked
 source operation returns; policy suspension preserves and rebinds the same partner request. If the
 partner becomes the selected image, Viewer deactivates its old batch and retires that tracker before
-submitting the current-image JPEG dimensions request. The cache request identity combines `SourceKey`
-and the dimensions-only flag, matching the key used for coalescing; the current mailbox then owns the
-completion. A subsequent partner replacement therefore cannot cancel the promoted read, while a
-different outgoing partner still follows the normal cancellation path.
+submitting the current-image source-dimensions request. The cache request identity combines
+`SourceKey` and the dimensions-only flag, matching the key used for coalescing; the current mailbox
+then owns the completion. A subsequent partner replacement therefore cannot cancel the promoted
+read, while a different outgoing partner still follows the normal cancellation path. The selected
+source preparation state and mailbox use format-neutral geometry names; JPEG remains the current
+reader for this path, while other formats continue through decoded-source preparation.
 Up/Down rotates the current image as before while rotating the spread canvas and page placements as
 a unit. The partner's matching orientation is prepared off the renderer thread; the already
 transformed anchor texture counts as ready, but both pages remain hidden until the partner is ready.

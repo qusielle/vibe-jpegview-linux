@@ -399,22 +399,22 @@ void TestImageSessionControllerPlansSelectedSourcePreparation() {
 	using jpegview_linux::SelectedSourcePreparationSnapshot;
 	ImageSessionController session;
 	SelectedSourcePreparationSnapshot snapshot;
-	snapshot.jpegSource = true;
+	snapshot.sourceSupportsDimensionsProbe = true;
 	snapshot.displayCacheEnabled = true;
 	snapshot.sourceValid = true;
 	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
-		SelectedSourcePreparationAction::RequestJpegDimensions,
+		SelectedSourcePreparationAction::RequestSourceDimensions,
 		"cold valid JPEG did not choose asynchronous dimension preparation");
-	snapshot.cachedJpegDimensions = true;
+	snapshot.cachedSourceDimensions = true;
 	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
-		SelectedSourcePreparationAction::UseCachedJpegDimensions,
+		SelectedSourcePreparationAction::UseCachedSourceDimensions,
 		"cached JPEG dimensions did not bypass the header request");
-	snapshot.cachedJpegDimensions = false;
-	snapshot.jpegDimensionProbeFailed = true;
+	snapshot.cachedSourceDimensions = false;
+	snapshot.sourceDimensionProbeFailed = true;
 	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
 		SelectedSourcePreparationAction::DecodeSelectedSource,
 		"failed JPEG header did not choose the full decode fallback");
-	snapshot.jpegDimensionProbeFailed = false;
+	snapshot.sourceDimensionProbeFailed = false;
 	snapshot.sourceValid = false;
 	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
 		SelectedSourcePreparationAction::DecodeSelectedSource,
@@ -425,11 +425,11 @@ void TestImageSessionControllerPlansSelectedSourcePreparation() {
 		SelectedSourcePreparationAction::Skip,
 		"disabled source preparation still admitted image work");
 	snapshot.preparationRequested = true;
-	snapshot.jpegSource = false;
+	snapshot.sourceSupportsDimensionsProbe = false;
 	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
 		SelectedSourcePreparationAction::DecodeSelectedSource,
 		"non-JPEG source did not use the decoded-image path");
-	snapshot.jpegSource = true;
+	snapshot.sourceSupportsDimensionsProbe = true;
 	snapshot.displayCacheEnabled = false;
 	Expect(session.PlanSelectedSourcePreparation(snapshot) ==
 		SelectedSourcePreparationAction::DecodeSelectedSource,
@@ -446,7 +446,7 @@ void TestImageSessionControllerPlansSelectedSourcePreparation() {
 	Expect(!session.ShouldPrepareDecodedSource(decoded),
 		"spread deferral did not suppress ordinary decoded-source preparation");
 	decoded.deferredForPossibleSpread = false;
-	decoded.waitingForJpegDimensions = true;
+	decoded.waitingForSourceDimensions = true;
 	Expect(!session.ShouldPrepareDecodedSource(decoded),
 		"pending JPEG dimensions allowed a competing decoded-source load");
 }
