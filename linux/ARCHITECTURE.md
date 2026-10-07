@@ -163,10 +163,10 @@ should normally be added to one of these focused modules and covered by the matc
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality downsampling, Catmull–Rom bicubic enlargement, and the automatic/manual picture-level
   processing pipeline.
-- `image_transform_geometry`: validated pixel-center mapping and output bounds for free rotation,
-  including expanded canvas geometry, centered contained cropping, optional source-aspect
-  preservation, and exact orthogonal-turn identification. It performs no pixel allocation or
-  rendering.
+- `image_transform_geometry`: validated pixel-center mappings and output bounds for free rotation
+  and perspective correction, including expanded canvas geometry, centered contained cropping,
+  optional source-aspect preservation, and exact orthogonal-turn identification. Perspective uses
+  a projective inverse map with bounded edge convergence; it performs no pixel allocation or rendering.
 - `image_transform_pixels`: cancellable BGRA resampling through validated image-transform geometry,
   currently preserving affine mappings and exact pixel copies for orthogonal turns, with bilinear
   previews, bicubic final output, transparent uncovered areas, and premultiplied-alpha interpolation.

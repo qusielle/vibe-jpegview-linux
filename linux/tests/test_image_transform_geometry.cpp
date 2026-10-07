@@ -10,8 +10,10 @@
 namespace {
 
 using jpegview_linux::BuildFreeRotationGeometry;
+using jpegview_linux::BuildPerspectiveGeometry;
 using jpegview_linux::ImageTransformGeometry;
 using jpegview_linux::MapDestinationToSource;
+using jpegview_linux::PerspectiveCorrectionParameters;
 
 void Expect(bool condition, const char* message) {
 	if (!condition) throw std::runtime_error(message);
@@ -22,10 +24,28 @@ void ExpectMappedPoint(const ImageTransformGeometry& geometry,
 	double sourceX = 0.0;
 	double sourceY = 0.0;
 	Expect(MapDestinationToSource(geometry, destinationX, destinationY,
-		sourceX, sourceY), "rotation geometry could not map an output point");
+		sourceX, sourceY), "transform geometry could not map an output point");
 	Expect(std::abs(sourceX - expectedX) < 1e-9 &&
 		std::abs(sourceY - expectedY) < 1e-9,
-		"rotation geometry mapped an output point to the wrong source coordinate");
+		"transform geometry mapped an output point to the wrong source coordinate");
+}
+
+void ExpectContainedCorners(const ImageTransformGeometry& geometry) {
+	const std::pair<double, double> corners[] = {
+		{0.0, 0.0},
+		{static_cast<double>(geometry.outputWidth - 1), 0.0},
+		{static_cast<double>(geometry.outputWidth - 1),
+			static_cast<double>(geometry.outputHeight - 1)},
+		{0.0, static_cast<double>(geometry.outputHeight - 1)}};
+	for (const auto& point : corners) {
+		double sourceX = 0.0;
+		double sourceY = 0.0;
+		Expect(MapDestinationToSource(geometry, point.first, point.second,
+			sourceX, sourceY) && sourceX >= -1e-8 && sourceY >= -1e-8 &&
+			sourceX <= geometry.sourceWidth - 1 + 1e-8 &&
+			sourceY <= geometry.sourceHeight - 1 + 1e-8,
+			"perspective auto-crop mapped a corner outside its source image");
+	}
 }
 
 void TestFreeRotationExactAnglesAndCoordinateMapping() {
@@ -151,6 +171,94 @@ void TestFreeRotationQuarterTurnsHonorAspectCrop() {
 	}
 }
 
+void TestPerspectiveGeometryIdentityAndProjectiveMapping() {
+	PerspectiveCorrectionParameters parameters;
+	ImageTransformGeometry identity;
+	Expect(BuildPerspectiveGeometry(100, 60, parameters, identity) &&
+		identity.outputWidth == 100 && identity.outputHeight == 60 &&
+		identity.exactClockwiseQuarterTurns == 0,
+		"zero perspective parameters did not preserve the exact source geometry");
+	ExpectMappedPoint(identity, 0.0, 0.0, 0.0, 0.0);
+	ExpectMappedPoint(identity, 99.0, 59.0, 99.0, 59.0);
+
+	parameters.leftDeltaFraction = 0.1;
+	parameters.rightDeltaFraction = -0.1;
+	parameters.autoCrop = false;
+	ImageTransformGeometry perspective;
+	Expect(BuildPerspectiveGeometry(100, 60, parameters, perspective) &&
+		perspective.outputWidth > 100 && perspective.outputHeight == 60 &&
+		perspective.exactClockwiseQuarterTurns == -1,
+		"uncropped perspective geometry did not expand its trapezoid bounds");
+	const double left = 0.1 * 99.0;
+	const double right = -0.1 * 99.0;
+	const double outputOriginX = std::ceil(left);
+	ExpectMappedPoint(perspective, left + outputOriginX, 0.0, 0.0, 0.0);
+	ExpectMappedPoint(perspective, 99.0 + right + outputOriginX, 0.0, 99.0, 0.0);
+	ExpectMappedPoint(perspective, -left + outputOriginX, 59.0, 0.0, 59.0);
+	ExpectMappedPoint(perspective, 99.0 - right + outputOriginX, 59.0, 99.0, 59.0);
+
+	const double topWidth = 99.0 + right - left;
+	const double bottomWidth = 99.0 - right + left;
+	double sourceX = 0.0;
+	double sourceY = 0.0;
+	Expect(MapDestinationToSource(perspective, 49.5 + outputOriginX, 29.5,
+		sourceX, sourceY), "perspective geometry failed to map its center scanline");
+	const double expectedSourceY = 59.0 * bottomWidth / (topWidth + bottomWidth);
+	Expect(std::abs(sourceY - expectedSourceY) < 1e-9 &&
+		std::abs(sourceY - 29.5) > 1.0,
+		"perspective geometry used affine rather than projective vertical mapping");
+}
+
+void TestPerspectiveGeometryCroppingAndAspectPolicy() {
+	PerspectiveCorrectionParameters parameters;
+	parameters.leftDeltaFraction = 0.1;
+	parameters.rightDeltaFraction = -0.1;
+	ImageTransformGeometry cropped;
+	Expect(BuildPerspectiveGeometry(100, 60, parameters, cropped) &&
+		cropped.outputWidth < 100 && cropped.outputHeight == 60,
+		"perspective auto-crop did not select the contained intersection rectangle");
+	ExpectContainedCorners(cropped);
+
+	parameters.preserveAspectRatio = true;
+	ImageTransformGeometry aspectCropped;
+	Expect(BuildPerspectiveGeometry(100, 60, parameters, aspectCropped) &&
+		aspectCropped.outputWidth < 100 && aspectCropped.outputHeight < 60 &&
+		aspectCropped.outputHeight < cropped.outputHeight,
+		"aspect-preserving perspective crop did not reduce the contained rectangle");
+	ExpectContainedCorners(aspectCropped);
+	const double sourceAspect = 99.0 / 59.0;
+	const double outputAspect = static_cast<double>(aspectCropped.outputWidth - 1) /
+		(aspectCropped.outputHeight - 1);
+	Expect(std::abs(outputAspect - sourceAspect) < 0.04,
+		"aspect-preserving perspective crop changed the source pixel-center aspect ratio");
+}
+
+void TestPerspectiveGeometryRejectsUnsafeParametersAndDimensions() {
+	PerspectiveCorrectionParameters parameters;
+	ImageTransformGeometry geometry;
+	geometry.outputWidth = 71;
+	parameters.leftDeltaFraction = 0.250001;
+	Expect(!BuildPerspectiveGeometry(100, 60, parameters, geometry) &&
+		geometry.outputWidth == 71,
+		"perspective geometry accepted an out-of-range parameter or modified output");
+	parameters.leftDeltaFraction = std::numeric_limits<double>::quiet_NaN();
+	Expect(!BuildPerspectiveGeometry(100, 60, parameters, geometry),
+		"perspective geometry accepted a nonfinite parameter");
+	parameters.leftDeltaFraction = 0.0;
+	Expect(!BuildPerspectiveGeometry(1, 60, parameters, geometry) &&
+		!BuildPerspectiveGeometry(60, 1, parameters, geometry),
+		"perspective geometry accepted a source with no two-dimensional pixel span");
+
+	parameters.autoCrop = false;
+	parameters.leftDeltaFraction = 0.25;
+	parameters.rightDeltaFraction = -0.25;
+	Expect(BuildPerspectiveGeometry(100, 60, parameters, geometry) &&
+		geometry.outputWidth <= 65535 && geometry.outputHeight == 60,
+		"maximum supported perspective adjustments were rejected");
+	Expect(!BuildPerspectiveGeometry(65535, 1500, parameters, geometry),
+		"perspective geometry accepted expanded bounds beyond image limits");
+}
+
 const TestCase kTests[] = {
 	{"free-rotation-exact-angles-and-coordinate-mapping",
 		&TestFreeRotationExactAnglesAndCoordinateMapping},
@@ -160,6 +268,12 @@ const TestCase kTests[] = {
 		&TestFreeRotationRejectsUnsafeInputAndHandlesSingleAxisImages},
 	{"free-rotation-quarter-turns-honor-aspect-crop",
 		&TestFreeRotationQuarterTurnsHonorAspectCrop},
+	{"perspective-geometry-identity-and-projective-mapping",
+		&TestPerspectiveGeometryIdentityAndProjectiveMapping},
+	{"perspective-geometry-cropping-and-aspect-policy",
+		&TestPerspectiveGeometryCroppingAndAspectPolicy},
+	{"perspective-geometry-rejects-unsafe-parameters-and-dimensions",
+		&TestPerspectiveGeometryRejectsUnsafeParametersAndDimensions},
 };
 
 } // namespace

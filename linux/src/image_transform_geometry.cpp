@@ -21,6 +21,44 @@ bool ValidDimensions(int width, int height) {
 		kMaximumImagePixels;
 }
 
+bool ValidPerspectiveFraction(double fraction) {
+	return std::isfinite(fraction) && std::abs(fraction) <= 0.25;
+}
+
+bool SafeExpandedBounds(double minimum, double maximum, int& origin, int& extent) {
+	if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum > maximum) return false;
+	const double roundedMinimum = std::floor(minimum);
+	const double roundedMaximum = std::ceil(maximum);
+	const double span = roundedMaximum - roundedMinimum + 1.0;
+	if (span < 1.0 || span > kMaximumImageDimension ||
+		roundedMinimum < std::numeric_limits<int>::min() ||
+		roundedMinimum > std::numeric_limits<int>::max()) return false;
+	origin = static_cast<int>(roundedMinimum);
+	extent = static_cast<int>(span);
+	return true;
+}
+
+int SafeContainedExtent(double span) {
+	if (!std::isfinite(span) || span < 0.0) return 0;
+	const double extent = std::floor(span + kGeometryEpsilon) + 1.0;
+	if (extent < 1.0 || extent > kMaximumImageDimension) return 0;
+	return static_cast<int>(extent);
+}
+
+std::array<double, 9> MultiplyMatrices(const std::array<double, 9>& left,
+	const std::array<double, 9>& right) {
+	std::array<double, 9> product{};
+	for (int row = 0; row < 3; ++row) {
+		for (int column = 0; column < 3; ++column) {
+			for (int inner = 0; inner < 3; ++inner) {
+				product[row * 3 + column] += left[row * 3 + inner] *
+					right[inner * 3 + column];
+			}
+		}
+	}
+	return product;
+}
+
 int SafeExtent(double halfExtent, bool roundOutward) {
 	if (!std::isfinite(halfExtent) || halfExtent < 0.0) return 0;
 	const double span = 2.0 * halfExtent;
@@ -190,6 +228,98 @@ bool BuildFreeRotationGeometry(int sourceWidth, int sourceHeight,
 		-sine, cosine, halfSourceHeight + sine * outputCenterX - cosine * outputCenterY,
 		0.0, 0.0, 1.0};
 
+	geometry = built;
+	return true;
+}
+
+bool BuildPerspectiveGeometry(int sourceWidth, int sourceHeight,
+	const PerspectiveCorrectionParameters& parameters,
+	ImageTransformGeometry& geometry) {
+	if (!ValidDimensions(sourceWidth, sourceHeight) || sourceWidth < 2 ||
+		sourceHeight < 2 ||
+		!ValidPerspectiveFraction(parameters.leftDeltaFraction) ||
+		!ValidPerspectiveFraction(parameters.rightDeltaFraction)) return false;
+
+	const double pixelWidth = sourceWidth - 1.0;
+	const double pixelHeight = sourceHeight - 1.0;
+	const double left = parameters.leftDeltaFraction * pixelWidth;
+	const double right = parameters.rightDeltaFraction * pixelWidth;
+	const double topWidth = pixelWidth + right - left;
+	const double bottomWidth = pixelWidth - right + left;
+	if (!std::isfinite(topWidth) || !std::isfinite(bottomWidth) ||
+		topWidth <= kGeometryEpsilon || bottomWidth <= kGeometryEpsilon) return false;
+
+	const double minimumX = -std::abs(left);
+	const double maximumX = pixelWidth + std::abs(right);
+	const double convergence = std::abs(left) + std::abs(right);
+	double targetLeft = 0.0;
+	double targetRight = 0.0;
+	double targetTop = 0.0;
+	double targetBottom = pixelHeight;
+	int outputWidth = 0;
+	int outputHeight = 0;
+	int outputOriginX = 0;
+	if (!parameters.autoCrop) {
+		if (!SafeExpandedBounds(minimumX, maximumX, outputOriginX, outputWidth)) return false;
+		outputHeight = sourceHeight;
+		targetLeft = outputOriginX;
+		targetRight = targetLeft + outputWidth - 1.0;
+	} else if (parameters.preserveAspectRatio) {
+		const double pixelCenterAspect = pixelWidth / pixelHeight;
+		const double targetHeightSpan = std::min(pixelHeight,
+			pixelWidth / (pixelCenterAspect + convergence / pixelHeight));
+		const double targetWidthSpan = pixelCenterAspect * targetHeightSpan;
+		outputWidth = SafeContainedExtent(targetWidthSpan);
+		outputHeight = SafeContainedExtent(targetHeightSpan);
+		if (outputWidth == 0 || outputHeight == 0) return false;
+		targetLeft = (pixelWidth - targetWidthSpan) * 0.5;
+		targetRight = targetLeft + targetWidthSpan;
+		targetTop = (pixelHeight - targetHeightSpan) * 0.5;
+		targetBottom = targetTop + targetHeightSpan;
+	} else {
+		targetLeft = std::abs(left);
+		targetRight = pixelWidth - std::abs(right);
+		const double targetWidthSpan = targetRight - targetLeft;
+		if (targetWidthSpan < -kGeometryEpsilon) return false;
+		outputWidth = SafeContainedExtent(std::max(0.0, targetWidthSpan));
+		outputHeight = sourceHeight;
+		if (outputWidth == 0) return false;
+		targetRight = targetLeft + std::max(0.0, targetWidthSpan);
+	}
+	if (!ValidDimensions(outputWidth, outputHeight)) return false;
+
+	const double targetWidthSpan = targetRight - targetLeft;
+	const double targetHeightSpan = targetBottom - targetTop;
+	const double outputToTargetX = outputWidth > 1 ?
+		targetWidthSpan / (outputWidth - 1.0) : 0.0;
+	const double outputToTargetY = outputHeight > 1 ?
+		targetHeightSpan / (outputHeight - 1.0) : 0.0;
+	const std::array<double, 9> targetToSource = {
+		pixelWidth * pixelHeight, 2.0 * pixelWidth * left,
+		-pixelWidth * left * pixelHeight,
+		0.0, bottomWidth * pixelHeight, 0.0,
+		0.0, -(topWidth - bottomWidth), topWidth * pixelHeight};
+	const std::array<double, 9> outputToTarget = {
+		outputToTargetX, 0.0, targetLeft,
+		0.0, outputToTargetY, targetTop,
+		0.0, 0.0, 1.0};
+	const std::array<double, 9> destinationToSource =
+		MultiplyMatrices(targetToSource, outputToTarget);
+	for (double value : destinationToSource) {
+		if (!std::isfinite(value)) return false;
+	}
+
+	ImageTransformGeometry built;
+	built.sourceWidth = sourceWidth;
+	built.sourceHeight = sourceHeight;
+	built.outputWidth = outputWidth;
+	built.outputHeight = outputHeight;
+	built.destinationToSource = destinationToSource;
+	if (parameters.leftDeltaFraction == 0.0 &&
+		parameters.rightDeltaFraction == 0.0 &&
+		outputWidth == sourceWidth && outputHeight == sourceHeight) {
+		built.exactClockwiseQuarterTurns = 0;
+	}
 	geometry = built;
 	return true;
 }
