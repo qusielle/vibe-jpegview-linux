@@ -3,10 +3,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace jpegview_linux {
@@ -21,8 +23,10 @@ struct TiffEntry {
 
 class TiffReader {
 public:
-	TiffReader(const std::uint8_t* bytes, std::size_t bytesLength, std::size_t tiffOffset)
-		: bytes_(bytes), bytesLength_(bytesLength), tiffOffset_(tiffOffset) {}
+	TiffReader(std::size_t bytesLength, const TiffMetadataReadAt& readAt,
+		std::size_t tiffOffset, const WorkContext& context)
+		: bytesLength_(bytesLength), readAt_(readAt), tiffOffset_(tiffOffset),
+		  context_(context) {}
 
 	bool Read(ExifInfo& info) {
 		if (!InRange(tiffOffset_, 8)) return false;
@@ -83,24 +87,46 @@ private:
 		return offset <= bytesLength_ && length <= bytesLength_ - offset;
 	}
 
+	bool ReadBytes(std::size_t offset, std::uint8_t* destination,
+		std::size_t length) const {
+		if (destination == nullptr || !InRange(offset, length) || !context_.Continue()) {
+			return false;
+		}
+		try {
+			return readAt_ && readAt_(offset, destination, length) && context_.Continue();
+		} catch (...) {
+			return false;
+		}
+	}
+
 	std::uint16_t Read16(std::size_t offset) const {
-		if (!InRange(offset, 2)) return 0;
-		if (littleEndian_) return static_cast<std::uint16_t>(bytes_[offset] | (bytes_[offset + 1] << 8));
-		return static_cast<std::uint16_t>((bytes_[offset] << 8) | bytes_[offset + 1]);
+		std::uint8_t bytes[2]{};
+		if (!ReadBytes(offset, bytes, sizeof(bytes))) return 0;
+		return Decode16(bytes);
 	}
 
 	std::uint32_t Read32(std::size_t offset) const {
-		if (!InRange(offset, 4)) return 0;
+		std::uint8_t bytes[4]{};
+		if (!ReadBytes(offset, bytes, sizeof(bytes))) return 0;
+		return Decode32(bytes);
+	}
+
+	std::uint16_t Decode16(const std::uint8_t* bytes) const {
+		if (littleEndian_) return static_cast<std::uint16_t>(bytes[0] | (bytes[1] << 8));
+		return static_cast<std::uint16_t>((bytes[0] << 8) | bytes[1]);
+	}
+
+	std::uint32_t Decode32(const std::uint8_t* bytes) const {
 		if (littleEndian_) {
-			return static_cast<std::uint32_t>(bytes_[offset]) |
-				(static_cast<std::uint32_t>(bytes_[offset + 1]) << 8) |
-				(static_cast<std::uint32_t>(bytes_[offset + 2]) << 16) |
-				(static_cast<std::uint32_t>(bytes_[offset + 3]) << 24);
+			return static_cast<std::uint32_t>(bytes[0]) |
+				(static_cast<std::uint32_t>(bytes[1]) << 8) |
+				(static_cast<std::uint32_t>(bytes[2]) << 16) |
+				(static_cast<std::uint32_t>(bytes[3]) << 24);
 		}
-		return (static_cast<std::uint32_t>(bytes_[offset]) << 24) |
-			(static_cast<std::uint32_t>(bytes_[offset + 1]) << 16) |
-			(static_cast<std::uint32_t>(bytes_[offset + 2]) << 8) |
-			bytes_[offset + 3];
+		return (static_cast<std::uint32_t>(bytes[0]) << 24) |
+			(static_cast<std::uint32_t>(bytes[1]) << 16) |
+			(static_cast<std::uint32_t>(bytes[2]) << 8) |
+			bytes[3];
 	}
 
 	static std::size_t TypeSize(std::uint16_t type) {
@@ -120,15 +146,20 @@ private:
 		const std::size_t entryBytes = static_cast<std::size_t>(count) * 12;
 		if (count != 0 && entryBytes / 12 != count) return false;
 		if (!InRange(directory + 2, entryBytes)) return false;
+		std::vector<std::uint8_t> directoryBytes(entryBytes);
+		if (entryBytes > 0 && !ReadBytes(directory + 2, directoryBytes.data(), entryBytes)) {
+			return false;
+		}
 		entries.clear();
 		entries.reserve(count);
 		for (std::uint16_t index = 0; index < count; ++index) {
-			const std::size_t entryOffset = directory + 2 + static_cast<std::size_t>(index) * 12;
+			const std::uint8_t* rawEntry = directoryBytes.data() +
+				static_cast<std::size_t>(index) * 12;
 			TiffEntry entry;
-			entry.tag = Read16(entryOffset);
-			entry.type = Read16(entryOffset + 2);
-			entry.count = Read32(entryOffset + 4);
-			entry.entryOffset = entryOffset;
+			entry.tag = Decode16(rawEntry);
+			entry.type = Decode16(rawEntry + 2);
+			entry.count = Decode32(rawEntry + 4);
+			entry.entryOffset = directory + 2 + static_cast<std::size_t>(index) * 12;
 			entries.push_back(entry);
 		}
 		return true;
@@ -193,7 +224,9 @@ private:
 		std::size_t location = 0;
 		std::size_t length = 0;
 		if (!ValueLocation(entry, location, length) || length == 0 || length > maximum) return {};
-		std::string value(reinterpret_cast<const char*>(bytes_ + location), length);
+		std::vector<std::uint8_t> bytes(length);
+		if (!ReadBytes(location, bytes.data(), length)) return {};
+		std::string value(reinterpret_cast<const char*>(bytes.data()), length);
 		const std::size_t nul = value.find('\0');
 		if (nul != std::string::npos) value.resize(nul);
 		while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r' || value.back() == '\n')) value.pop_back();
@@ -204,21 +237,22 @@ private:
 		std::size_t location = 0;
 		std::size_t length = 0;
 		if (!ValueLocation(entry, location, length) || length <= 8 || length > 4096) return {};
-		const std::size_t contentOffset = location + 8;
+		std::vector<std::uint8_t> bytes(length);
+		if (!ReadBytes(location, bytes.data(), length)) return {};
 		const std::size_t contentLength = length - 8;
-		if (std::memcmp(bytes_ + location, "ASCII", 5) == 0) {
-			std::string value(reinterpret_cast<const char*>(bytes_ + contentOffset), contentLength);
+		if (std::memcmp(bytes.data(), "ASCII", 5) == 0) {
+			std::string value(reinterpret_cast<const char*>(bytes.data() + 8), contentLength);
 			const std::size_t nul = value.find('\0');
 			if (nul != std::string::npos) value.resize(nul);
 			return value;
 		}
 		// UNICODE comments are retained as a best-effort UTF-16-to-ASCII view.
-		if (std::memcmp(bytes_ + location, "UNICODE", 7) == 0) {
+		if (std::memcmp(bytes.data(), "UNICODE", 7) == 0) {
 			std::string value;
-			for (std::size_t offset = contentOffset; offset + 1 < location + length; offset += 2) {
+			for (std::size_t offset = 8; offset + 1 < length; offset += 2) {
 				const std::uint16_t character = littleEndian_ ?
-					static_cast<std::uint16_t>(bytes_[offset] | (bytes_[offset + 1] << 8)) :
-					static_cast<std::uint16_t>((bytes_[offset] << 8) | bytes_[offset + 1]);
+					static_cast<std::uint16_t>(bytes[offset] | (bytes[offset + 1] << 8)) :
+					static_cast<std::uint16_t>((bytes[offset] << 8) | bytes[offset + 1]);
 				if (character == 0) break;
 				value.push_back(character < 128 ? static_cast<char>(character) : '?');
 			}
@@ -233,9 +267,12 @@ private:
 		if (!ValueLocation(entry, location, length) || entry->count == 0) return false;
 		switch (entry->type) {
 		case 1:
-		case 7:
-			value = bytes_[location];
+		case 7: {
+			std::uint8_t byte = 0;
+			if (!ReadBytes(location, &byte, 1)) return false;
+			value = byte;
 			return true;
+		}
 		case 3:
 			value = Read16(location);
 			return true;
@@ -324,18 +361,66 @@ private:
 		}
 	}
 
-	const std::uint8_t* bytes_ = nullptr;
 	std::size_t bytesLength_ = 0;
+	const TiffMetadataReadAt& readAt_;
 	std::size_t tiffOffset_ = 0;
+	WorkContext context_;
 	bool littleEndian_ = true;
 };
 
 } // namespace
 
+bool ReadTiffMetadataFromSource(std::size_t bytesLength,
+	const TiffMetadataReadAt& readAt, std::size_t tiffOffset,
+	ExifInfo& info, const WorkContext& context) {
+	if (!readAt || !context.Continue()) return false;
+	return TiffReader(bytesLength, readAt, tiffOffset, context).Read(info);
+}
+
 bool ReadTiffMetadata(const std::uint8_t* bytes, std::size_t bytesLength,
-	std::size_t tiffOffset, ExifInfo& info) {
+	std::size_t tiffOffset, ExifInfo& info, const WorkContext& context) {
 	if (bytes == nullptr) return false;
-	return TiffReader(bytes, bytesLength, tiffOffset).Read(info);
+	const TiffMetadataReadAt readAt = [bytes, bytesLength](std::size_t offset,
+		std::uint8_t* destination, std::size_t length) {
+		if (offset > bytesLength || length > bytesLength - offset) return false;
+		if (length != 0) std::memcpy(destination, bytes + offset, length);
+		return true;
+	};
+	return ReadTiffMetadataFromSource(bytesLength, readAt, tiffOffset, info, context);
+}
+
+bool ReadTiffMetadataFile(const std::filesystem::path& filename,
+	ExifInfo& info, const WorkContext& supplied) {
+	info = {};
+	const WorkContext context = ResolveWorkContext(filename,
+		SourceWorkPriority::Metadata, supplied);
+	if (!context.Continue()) return false;
+	std::error_code error;
+	const std::uintmax_t fileSize = std::filesystem::file_size(filename, error);
+	if (error || fileSize == 0 ||
+		fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max()) ||
+		fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::streamoff>::max()) ||
+		fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+		return false;
+	}
+	std::ifstream input(filename, std::ios::binary);
+	if (!input) return false;
+	const std::size_t length = static_cast<std::size_t>(fileSize);
+	const TiffMetadataReadAt readAt = [&input, length, context](std::size_t offset,
+		std::uint8_t* destination, std::size_t bytesToRead) {
+		if (!context.Continue() || offset > length || bytesToRead > length - offset ||
+			bytesToRead > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
+			return false;
+		}
+		input.clear();
+		input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+		if (!input) return false;
+		if (bytesToRead == 0) return true;
+		input.read(reinterpret_cast<char*>(destination),
+			static_cast<std::streamsize>(bytesToRead));
+		return static_cast<std::size_t>(input.gcount()) == bytesToRead && context.Continue();
+	};
+	return ReadTiffMetadataFromSource(length, readAt, 0, info, context);
 }
 
 } // namespace jpegview_linux

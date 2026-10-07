@@ -1,6 +1,9 @@
 #include "test_harness.h"
 #include "test_support.h"
 #include "gps_map_action.h"
+#include "tiff_metadata_reader.h"
+
+#include <cstring>
 
 namespace {
 
@@ -3700,6 +3703,44 @@ void TestExifIfd0ShootingFieldFallback() {
 	verifyFallback("malformed-exif-ifd.jpg", true, true);
 }
 
+void TestTiffMetadataReaderBoundedRandomAccess() {
+	TemporaryDirectory temporary;
+	const std::vector<std::uint8_t> exifPayload =
+		ExifFixture().Build(true, false, true);
+	const std::vector<std::uint8_t> tiffBytes(exifPayload.begin() + 6,
+		exifPayload.end());
+	std::size_t bytesRead = 0;
+	const jpegview_linux::TiffMetadataReadAt readAt =
+		[&tiffBytes, &bytesRead](std::size_t offset, std::uint8_t* destination,
+			std::size_t length) {
+			if (offset > tiffBytes.size() || length > tiffBytes.size() - offset) return false;
+			std::memcpy(destination, tiffBytes.data() + offset, length);
+			bytesRead += length;
+			return true;
+		};
+	jpegview_linux::ExifInfo info;
+	constexpr std::size_t logicalSourceSize = 64u * 1024u * 1024u;
+	Expect(jpegview_linux::ReadTiffMetadataFromSource(logicalSourceSize, readAt, 0, info),
+		"TIFF metadata parser failed with a bounded random-access source");
+	Expect(bytesRead < logicalSourceSize && info.exposureTime == "1/125" &&
+		info.isoSpeed == 200,
+		"TIFF metadata parser read the entire backing source or changed parsed values");
+
+	const fs::path filename = temporary.path() / "capture.dng";
+	WriteBytes(filename, tiffBytes);
+	info = {};
+	Expect(jpegview_linux::ReadTiffMetadataFile(filename, info) && info.hasExif &&
+		info.cameraModel == "Acme Model" && info.exposureTime == "1/125" &&
+		info.isoSpeed == 200,
+		"TIFF file reader did not seek to and parse metadata without an Exif APP1 wrapper");
+
+	jpegview_linux::WorkContext canceled;
+	canceled.shouldContinue = [] { return false; };
+	info = {};
+	Expect(!jpegview_linux::ReadTiffMetadataFromSource(logicalSourceSize, readAt, 0,
+		info, canceled), "TIFF metadata parser ignored source cancellation");
+}
+
 void TestFileOperationFolderExifDatesUpdatesOnlyRegularImages() {
 	TemporaryDirectory temporary;
 	const fs::path folder = temporary.path() / "images";
@@ -3781,6 +3822,7 @@ const TestCase kTests[] = {
 	{"gps-map-provider-url-validation-and-coordinate-formatting", &TestGpsMapProviderUrlValidationAndCoordinateFormatting},
 	{"exif-and-jpeg-comment-parsing", &TestExifAndJpegCommentParsing},
 	{"exif-ifd0-shooting-field-fallback", &TestExifIfd0ShootingFieldFallback},
+	{"tiff-metadata-bounded-random-access", &TestTiffMetadataReaderBoundedRandomAccess},
 	{"file-operation-folder-exif-dates-update-only-regular-images", &TestFileOperationFolderExifDatesUpdatesOnlyRegularImages},
 };
 

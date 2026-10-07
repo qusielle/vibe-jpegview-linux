@@ -72,7 +72,8 @@ bool ReadJpegMetadata(const fs::path& filename, ExifInfo& info, std::string& jpe
 			static_cast<std::streamsize>(payloadLength))) break;
 		if (marker == 0xE1 && payloadLength >= 6 &&
 			std::memcmp(payload.data(), "Exif\0\0", 6) == 0) {
-			foundMetadata = ReadTiffMetadata(payload.data(), payload.size(), 6, info) ||
+			foundMetadata = ReadTiffMetadata(payload.data(), payload.size(), 6, info,
+				context) ||
 				foundMetadata;
 		} else if (marker == 0xFE && jpegComment.empty() && payloadLength > 0) {
 			jpegComment = TrimAscii(payload.data(), payloadLength);
