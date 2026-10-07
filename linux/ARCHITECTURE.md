@@ -184,6 +184,10 @@ should normally be added to one of these focused modules and covered by the matc
   result replaces the document only after its renderer texture uploads successfully. Cancel and a
   zero-degree apply leave the document revision unchanged. Selecting or reloading a source closes
   its previous editor session and releases modal playback suppression before replacing the owner.
+- `perspective_correction_model`: bounded edge-adjustment, crop/aspect and grid state for the
+  perspective-correction dialog, including session and preview revisions. Apply freezes edits and
+  rejects stale previews until failure resumes the editor or a successful document commit closes it.
+  SDL input, preview pixels, and document ownership remain in the Viewer and operation worker.
 - `image_document`: lazy current-image metadata plus immutable, shared source and presentation pixels,
   owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer

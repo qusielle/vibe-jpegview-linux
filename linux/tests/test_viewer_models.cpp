@@ -1,6 +1,7 @@
 #include "test_harness.h"
 #include "test_support.h"
 #include "free_rotation_model.h"
+#include "perspective_correction_model.h"
 
 #include <limits>
 
@@ -88,6 +89,73 @@ void TestFreeRotationDialogControllerTracksPreviewAndApplyOwnership() {
 	Expect(controller.Open(40, 20) && controller.SessionId() != firstSession &&
 		!controller.MatchesPreview(firstSession, initialRevision),
 		"reopened free-rotation session accepted a completion from its previous owner");
+	controller.Close();
+}
+
+void TestPerspectiveCorrectionDialogControllerTracksPreviewAndApplyOwnership() {
+	using Controller = jpegview_linux::PerspectiveCorrectionDialogController;
+	Controller controller;
+	Expect(!controller.Open(1, 300) && !controller.IsOpen(),
+		"perspective dialog accepted a source axis too narrow for projective correction");
+	Expect(controller.Open(1600, 900) && controller.IsOpen() &&
+		controller.CurrentPhase() == Controller::Phase::Editing &&
+		controller.SourceWidth() == 1600 && controller.SourceHeight() == 900,
+		"perspective dialog did not open for a valid source");
+	const std::uint64_t firstSession = controller.SessionId();
+	const std::uint64_t initialRevision = controller.PreviewRevision();
+	Expect(firstSession != 0 && initialRevision != 0 &&
+		controller.Parameters().transform.leftDeltaFraction == 0.0 &&
+		controller.Parameters().transform.rightDeltaFraction == 0.0 &&
+		controller.Parameters().transform.autoCrop &&
+		!controller.Parameters().transform.preserveAspectRatio &&
+		controller.Parameters().showGrid &&
+		controller.MatchesPreview(firstSession, initialRevision),
+		"perspective dialog defaults or initial preview identity changed");
+
+	Expect(controller.SetLeftDeltaFraction(0.1) &&
+		!controller.MatchesPreview(firstSession, initialRevision),
+		"left-edge editing did not invalidate the previous preview revision");
+	const std::uint64_t leftRevision = controller.PreviewRevision();
+	Expect(!controller.SetLeftDeltaFraction(0.1) &&
+		controller.PreviewRevision() == leftRevision &&
+		!controller.SetLeftDeltaFraction(std::numeric_limits<double>::infinity()) &&
+		controller.SetRightDeltaFraction(-0.1) &&
+		controller.SetAutoCrop(false) &&
+		controller.SetPreserveAspectRatio(true) &&
+		controller.SetGridVisible(false),
+		"perspective edits did not preserve finite inputs or revision ordering");
+	Expect(controller.SetLeftDeltaFraction(0.9) &&
+		controller.Parameters().transform.leftDeltaFraction ==
+			jpegview_linux::kMaximumPerspectiveCorrectionFraction &&
+		controller.SetRightDeltaFraction(-0.9) &&
+		controller.Parameters().transform.rightDeltaFraction ==
+			-jpegview_linux::kMaximumPerspectiveCorrectionFraction,
+		"perspective edge movement exceeded the geometry's supported bounds");
+	const double beforeInvalidNudge = controller.Parameters().transform.leftDeltaFraction;
+	Expect(!controller.NudgeLeftDelta(std::numeric_limits<double>::quiet_NaN()) &&
+		controller.Parameters().transform.leftDeltaFraction == beforeInvalidNudge &&
+		controller.NudgeLeftDelta(-1.0) &&
+		controller.Parameters().transform.leftDeltaFraction ==
+			-jpegview_linux::kMaximumPerspectiveCorrectionFraction,
+		"perspective nudges accepted nonfinite values or failed to clamp");
+
+	Expect(controller.BeginApply() && controller.IsApplying() &&
+		!controller.MatchesPreview(firstSession, controller.PreviewRevision()) &&
+		!controller.SetRightDeltaFraction(0.2) && !controller.BeginApply(),
+		"applying perspective correction did not freeze parameters and preview work");
+	controller.ResumeEditing("temporary upload failure");
+	Expect(!controller.IsApplying() && controller.IsOpen() &&
+		controller.Message() == "temporary upload failure",
+		"failed perspective application did not restore editable dialog state");
+	controller.SetMessage("preview ready");
+	Expect(controller.Message() == "preview ready" && controller.BeginApply(),
+		"perspective dialog did not accept a later apply retry");
+	controller.CompleteApply();
+	Expect(!controller.IsOpen() && controller.CurrentPhase() == Controller::Phase::Closed,
+		"successful perspective correction did not close its editor session");
+	Expect(controller.Open(40, 20) && controller.SessionId() != firstSession &&
+		!controller.MatchesPreview(firstSession, initialRevision),
+		"reopened perspective session accepted a completion from its former owner");
 	controller.Close();
 }
 
@@ -4706,6 +4774,7 @@ void TestRendererWindowResourceOwnership() {
 const TestCase kTests[] = {
 	{"viewport-modes-and-geometry", &TestViewportModesAndGeometry},
 	{"free-rotation-dialog-controller-tracks-preview-and-apply-ownership", &TestFreeRotationDialogControllerTracksPreviewAndApplyOwnership},
+	{"perspective-correction-dialog-controller-tracks-preview-and-apply-ownership", &TestPerspectiveCorrectionDialogControllerTracksPreviewAndApplyOwnership},
 	{"viewport-manual-zoom-pan-and-restore", &TestViewportManualZoomPanAndRestore},
 	{"pending-viewport-intents-replay-after-dimensions", &TestPendingViewportIntentsReplayAfterDimensions},
 	{"zoom-navigator-geometry-and-panning", &TestZoomNavigatorGeometryAndPanning},

@@ -4,6 +4,8 @@
 
 namespace jpegview_linux {
 
+constexpr double kMaximumPerspectiveCorrectionFraction = 0.25;
+
 struct ImageTransformGeometry {
 	int sourceWidth = 0;
 	int sourceHeight = 0;

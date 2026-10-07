@@ -22,7 +22,8 @@ bool ValidDimensions(int width, int height) {
 }
 
 bool ValidPerspectiveFraction(double fraction) {
-	return std::isfinite(fraction) && std::abs(fraction) <= 0.25;
+	return std::isfinite(fraction) &&
+		std::abs(fraction) <= kMaximumPerspectiveCorrectionFraction;
 }
 
 bool SafeExpandedBounds(double minimum, double maximum, int& origin, int& extent) {
