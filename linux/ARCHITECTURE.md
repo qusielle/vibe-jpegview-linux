@@ -170,6 +170,10 @@ should normally be added to one of these focused modules and covered by the matc
 - `image_transform_pixels`: cancellable BGRA resampling for free rotation, with exact pixel copies
   for orthogonal turns, bilinear previews, bicubic final output, transparent uncovered areas, and
   premultiplied-alpha interpolation.
+- `free_rotation_model`: dialog session state and parameter revisions for free-rotation editing.
+  Preview results match both the open session and its current parameter revision; applying freezes
+  edits and rejects preview completions until failure resumes editing or the document commit closes
+  the session.
 - `image_document`: lazy current-image metadata plus immutable, shared source and presentation pixels,
   owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer
@@ -1152,11 +1156,12 @@ roots or adding plugin inputs from silently reusing an older plugin. Sanitizer b
 `tests/test_main.cpp` runs every registered case by default and preserves the stable test-name strings
 when cases are grouped into `source_navigation`, `work_admission`, `codec_display`, `image_cache`,
 `image_operations`, `image_transform_geometry`, `image_transform_pixels`, `viewer_models`, and
-`dialogs_sessions`. `--suite` and `--filter` select focused cases for local iteration; `make test`
-always runs the complete suite and its performance-trace validation. `make test-perf` is opt-in and
-measures synthetic 4000x2500 BGRA image processing and resizing. It reports timings and deterministic
-pixel checksums without hardware-dependent thresholds; it is not a substitute for a real
-photo-directory and renderer benchmark.
+`dialogs_sessions`. The `viewer_models` suite covers free-rotation parameter bounds, revision changes,
+session replacement, and apply/failure transitions. `--suite` and `--filter` select focused cases for
+local iteration. `make test` always runs the complete suite and its performance-trace validation.
+`make test-perf` is opt-in and measures synthetic 4000x2500 BGRA image processing and resizing. It
+reports timings and deterministic pixel checksums without hardware-dependent thresholds; it is not a
+substitute for a real photo-directory and renderer benchmark.
 
 Published AppImages receive `APPIMAGE_UPDATE_INFORMATION` from `release-assets.sh`; local and
 branch-build AppImages omit it unless explicitly requested. Each Ubuntu release uses AppImage's

@@ -1,5 +1,8 @@
 #include "test_harness.h"
 #include "test_support.h"
+#include "free_rotation_model.h"
+
+#include <limits>
 
 namespace {
 
@@ -34,6 +37,58 @@ void TestViewportModesAndGeometry() {
 	Expect(viewport.FillWithCrop() && viewport.NoEnlarge(), "fill-no-enlarge mode did not load");
 	viewport.LoadScaleMode("unknown", false, 1.0);
 	Expect(std::string(viewport.ScaleMode()) == "fit_no_enlarge", "unknown scale mode did not use safe default");
+}
+
+void TestFreeRotationDialogControllerTracksPreviewAndApplyOwnership() {
+	using Controller = jpegview_linux::FreeRotationDialogController;
+	Controller controller;
+	Expect(!controller.Open(0, 10) && !controller.IsOpen(),
+		"free-rotation dialog accepted invalid source dimensions");
+	Expect(controller.Open(1200, 800) && controller.IsOpen() &&
+		controller.CurrentPhase() == Controller::Phase::Editing &&
+		controller.SourceWidth() == 1200 && controller.SourceHeight() == 800,
+		"free-rotation dialog did not open for the selected image");
+	const std::uint64_t firstSession = controller.SessionId();
+	const std::uint64_t initialRevision = controller.PreviewRevision();
+	Expect(firstSession != 0 && initialRevision != 0 &&
+		controller.Parameters().clockwiseDegrees == 0.0 &&
+		controller.Parameters().autoCrop &&
+		controller.Parameters().preserveAspectRatio &&
+		controller.Parameters().showGrid &&
+		controller.MatchesPreview(firstSession, initialRevision),
+		"free-rotation defaults or initial preview identity changed");
+
+	Expect(controller.SetAngleDegrees(12.5) &&
+		!controller.MatchesPreview(firstSession, initialRevision),
+		"editing the angle did not invalidate the previous preview revision");
+	const std::uint64_t changedRevision = controller.PreviewRevision();
+	Expect(!controller.SetAngleDegrees(12.5) &&
+		controller.PreviewRevision() == changedRevision &&
+		!controller.SetAngleDegrees(std::numeric_limits<double>::infinity()) &&
+		controller.SetAutoCrop(false) && controller.SetPreserveAspectRatio(false) &&
+		controller.SetGridVisible(false),
+		"free-rotation edits did not preserve finite values and revision ordering");
+	Expect(controller.NudgeAngle(500.0) &&
+		controller.Parameters().clockwiseDegrees == 180.0,
+		"free-rotation angle nudges did not clamp at the supported slider limit");
+	Expect(controller.BeginApply() && controller.IsApplying() &&
+		!controller.MatchesPreview(firstSession, controller.PreviewRevision()) &&
+		!controller.SetAngleDegrees(25.0) && !controller.BeginApply(),
+		"applying rotation did not freeze settings and invalidate pending preview work");
+	controller.ResumeEditing("temporary upload failure");
+	Expect(!controller.IsApplying() && controller.IsOpen() &&
+		controller.Message() == "temporary upload failure",
+		"failed application did not restore the editable dialog state");
+	controller.SetMessage("preview ready");
+	Expect(controller.Message() == "preview ready" &&
+		controller.BeginApply(), "free-rotation dialog did not accept a later retry");
+	controller.CompleteApply();
+	Expect(!controller.IsOpen() && controller.CurrentPhase() == Controller::Phase::Closed,
+		"successful apply did not close the free-rotation session");
+	Expect(controller.Open(40, 20) && controller.SessionId() != firstSession &&
+		!controller.MatchesPreview(firstSession, initialRevision),
+		"reopened free-rotation session accepted a completion from its previous owner");
+	controller.Close();
 }
 
 void TestViewportManualZoomPanAndRestore() {
@@ -4607,6 +4662,7 @@ void TestRendererWindowResourceOwnership() {
 }
 const TestCase kTests[] = {
 	{"viewport-modes-and-geometry", &TestViewportModesAndGeometry},
+	{"free-rotation-dialog-controller-tracks-preview-and-apply-ownership", &TestFreeRotationDialogControllerTracksPreviewAndApplyOwnership},
 	{"viewport-manual-zoom-pan-and-restore", &TestViewportManualZoomPanAndRestore},
 	{"pending-viewport-intents-replay-after-dimensions", &TestPendingViewportIntentsReplayAfterDimensions},
 	{"zoom-navigator-geometry-and-panning", &TestZoomNavigatorGeometryAndPanning},
