@@ -557,9 +557,11 @@ should normally be added to one of these focused modules and covered by the matc
   the printer reads the prepared file. Temporary-image cleanup uses source admission for the same
   file path, so it waits for an active reader before removing the file and its private directory;
   unpublished operation outputs use scoped cleanup on every exit.
-- `exif_reader`: JPEG metadata parsing from IFD0 and ExifIFD. Common shooting fields use IFD0 as a
-  per-field fallback; valid ExifIFD values override it. Signed decimal GPS coordinates are retained
-  alongside their compact information-overlay text.
+- `exif_reader`: bounded JPEG APP1/COM segment traversal and comment parsing; embedded TIFF data is
+  handed to `tiff_metadata_reader`.
+- `tiff_metadata_reader`: bounds-checked TIFF parsing over a caller-owned byte span. Common shooting
+  fields use IFD0 as a per-field fallback; valid ExifIFD values override it. Signed decimal GPS
+  coordinates are retained alongside their compact information-overlay text.
 - `gps_map_action`: validation of the configurable HTTP(S) map URL template and locale-independent
   substitution of signed latitude/longitude values. Viewer exposes the action only for metadata
   matching the selected source, through the EXIF location row and a conditional context-menu entry;
