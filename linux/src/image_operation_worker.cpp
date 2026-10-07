@@ -247,7 +247,7 @@ bool ResizeTransformPreviewBase(std::shared_ptr<Image>& previewBase,
 
 template <typename GeometryBuilder>
 bool PrepareBoundedTransformPreviewBase(const Image& source, const Image& input,
-	GeometryBuilder buildGeometry, SharedCacheBudget& budget,
+	GeometryBuilder buildGeometry, int minimumBaseDimension, SharedCacheBudget& budget,
 	const std::function<bool()>& shouldContinue,
 	std::shared_ptr<Image>& previewBase, CacheReservation& previewReservation,
 	ImageTransformGeometry& previewGeometry) {
@@ -265,8 +265,12 @@ bool PrepareBoundedTransformPreviewBase(const Image& source, const Image& input,
 		kMaximumTransformPreviewDimension) / maximumExpandedDimension);
 	scale = std::min(scale, std::sqrt(static_cast<double>(
 		kMaximumTransformPreviewPixels) / expandedPixels));
-	int previewWidth = std::max(1, static_cast<int>(std::llround(source.width * scale)));
-	int previewHeight = std::max(1, static_cast<int>(std::llround(source.height * scale)));
+	const int minimumWidth = std::min(source.width, minimumBaseDimension);
+	const int minimumHeight = std::min(source.height, minimumBaseDimension);
+	int previewWidth = std::max(minimumWidth,
+		static_cast<int>(std::llround(source.width * scale)));
+	int previewHeight = std::max(minimumHeight,
+		static_cast<int>(std::llround(source.height * scale)));
 	try {
 		previewBase = std::make_shared<Image>();
 	} catch (const std::exception&) {
@@ -296,13 +300,13 @@ bool PrepareBoundedTransformPreviewBase(const Image& source, const Image& input,
 		shrink = std::min(shrink, 0.99 * static_cast<double>(
 			kMaximumTransformPreviewDimension) /
 			std::max(previewGeometry.outputWidth, previewGeometry.outputHeight));
-		previewWidth = std::max(1, static_cast<int>(
+		previewWidth = std::max(minimumWidth, static_cast<int>(
 			std::floor(previewBase->width * shrink)));
-		previewHeight = std::max(1, static_cast<int>(
+		previewHeight = std::max(minimumHeight, static_cast<int>(
 			std::floor(previewBase->height * shrink)));
 		if (previewWidth == previewBase->width && previewHeight == previewBase->height) {
-			if (previewWidth >= previewHeight && previewWidth > 1) --previewWidth;
-			else if (previewHeight > 1) --previewHeight;
+			if (previewWidth >= previewHeight && previewWidth > minimumWidth) --previewWidth;
+			else if (previewHeight > minimumHeight) --previewHeight;
 			else return false;
 		}
 		if (!ResizeTransformPreviewBase(previewBase, previewWidth, previewHeight,
@@ -317,7 +321,8 @@ bool PrepareBoundedTransformPreviewBase(const Image& source, const Image& input,
 template <typename GeometryBuilder>
 bool PrepareTransformPreview(const Image& source,
 	const ImageDocumentSnapshot& document, GeometryBuilder buildGeometry,
-	SharedCacheBudget& budget, const std::function<bool()>& shouldContinue,
+	int minimumBaseDimension, SharedCacheBudget& budget,
+	const std::function<bool()>& shouldContinue,
 	std::shared_ptr<const Image>& output, CacheReservation& outputReservation) {
 	const bool processingMatches = document.presentationPixels &&
 		HasPixels(*document.presentationPixels) &&
@@ -331,7 +336,8 @@ bool PrepareTransformPreview(const Image& source,
 	CacheReservation previewReservation;
 	ImageTransformGeometry previewGeometry;
 	if (!PrepareBoundedTransformPreviewBase(source, input, buildGeometry,
-		budget, shouldContinue, previewBase, previewReservation, previewGeometry)) return false;
+		minimumBaseDimension, budget, shouldContinue, previewBase,
+		previewReservation, previewGeometry)) return false;
 	if (!processingMatches && ProcessingChangesPixels(document) &&
 		!previewBase->ApplyProcessing(document.processing, document.autoContrast,
 			shouldContinue)) return false;
@@ -351,7 +357,7 @@ bool PrepareFreeRotationPreview(const Image& source,
 			operation.clockwiseDegrees, operation.autoCrop,
 			operation.preserveAspectRatio, geometry);
 	};
-	return PrepareTransformPreview(source, document, buildGeometry, budget,
+	return PrepareTransformPreview(source, document, buildGeometry, 1, budget,
 		shouldContinue, output, outputReservation);
 }
 
@@ -363,7 +369,7 @@ bool PreparePerspectivePreview(const Image& source,
 		ImageTransformGeometry& geometry) {
 		return BuildPerspectiveGeometry(width, height, operation.perspective, geometry);
 	};
-	return PrepareTransformPreview(source, document, buildGeometry, budget,
+	return PrepareTransformPreview(source, document, buildGeometry, 2, budget,
 		shouldContinue, output, outputReservation);
 }
 

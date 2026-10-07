@@ -193,8 +193,10 @@ should normally be added to one of these focused modules and covered by the matc
   rotation and perspective previews return images bounded to 2048 pixels per side and 4 MP without
   changing the document. Shared transform-preview and final-transform helpers apply one geometry to
   source and presentation pixels, retain the effective processing snapshot, and account for output
-  allocations before resampling begins. Perspective operations use projective geometry and the same
-  alpha-aware resampler as final rotations. Only a matching successful revision can be applied.
+  allocations before resampling begins. Perspective preview bases retain at least two source pixels
+  per axis through initial scaling and later output-bound reductions, as required by their geometry;
+  the output crop can still collapse to one pixel. Perspective operations use projective geometry and
+  the same alpha-aware resampler as final rotations. Only a matching successful revision can be applied.
   Viewer creates any replacement SDL texture before swapping document pixels, so failure or staleness
   preserves the last successful presentation. Large result and decoded-buffer references retire off
   the event thread.

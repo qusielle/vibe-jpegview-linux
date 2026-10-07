@@ -1201,6 +1201,34 @@ void TestTransformPreviewsBoundLargeSourcePixels() {
 		"large perspective preview exceeded its output-pixel or dimension bound");
 }
 
+void TestPerspectivePreviewsRetainThinSourceAxes() {
+	for (const auto& dimensions : std::vector<std::pair<int, int>>{
+		{2, 3000}, {3000, 2}, {2049, 2}}) {
+		auto source = std::make_shared<jpegview_linux::Image>(
+			MakeIndexedImage(dimensions.first, dimensions.second));
+		const auto budget = std::make_shared<jpegview_linux::SharedCacheBudget>(0);
+		for (const auto& cropPolicy : std::vector<std::pair<bool, bool>>{
+			{false, false}, {true, false}, {true, true}}) {
+			jpegview_linux::ImageOperationRequest request;
+			request.document.sourcePixels = source;
+			request.operation.kind = jpegview_linux::ImageOperationKind::PerspectivePreview;
+			request.operation.perspective.leftDeltaFraction = 0.25;
+			request.operation.perspective.rightDeltaFraction = -0.25;
+			request.operation.perspective.autoCrop = cropPolicy.first;
+			request.operation.perspective.preserveAspectRatio = cropPolicy.second;
+			const auto result = jpegview_linux::ProcessImageOperation(request,
+				[] { return true; }, *budget);
+			Expect(result.success && result.outputPixels && !result.updatesDocument &&
+				!result.sourcePixels && !result.presentationPixels &&
+				std::max(result.outputPixels->width, result.outputPixels->height) <= 2048 &&
+				static_cast<std::uint64_t>(result.outputPixels->width) *
+					result.outputPixels->height <= 4ull * 1024ull * 1024ull &&
+				budget->Snapshot().activeWorkingBytes == result.outputPixels->bgra.size(),
+				"thin perspective preview failed, exceeded output bounds, or retained staging charges");
+		}
+	}
+}
+
 void TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource() {
 	TemporaryDirectory temporary;
 	const fs::path sourcePath = temporary.path() / "in-place-save.png";
@@ -4338,6 +4366,7 @@ const TestCase kTests[] = {
 	{"image-operation-worker-runs-crop-and-flattens-captured-frame", &TestImageOperationWorkerRunsCropAndFlattensCapturedFrame},
 	{"image-operation-worker-matches-transforms-and-pixel-pipelines", &TestImageOperationWorkerMatchesTransformsAndPixelPipelines},
 	{"transform-previews-bound-large-source-pixels", &TestTransformPreviewsBoundLargeSourcePixels},
+	{"perspective-previews-retain-thin-source-axes", &TestPerspectivePreviewsRetainThinSourceAxes},
 	{"in-place-save-materializes-lazy-document-and-rebinds-source", &TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource},
 	{"image-operation-worker-supersedes-and-survives-failures", &TestImageOperationWorkerSupersedesAndSurvivesFailures},
 	{"picture-levels-store-round-trip", &TestPictureLevelsStoreRoundTrip},
