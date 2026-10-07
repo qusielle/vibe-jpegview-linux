@@ -259,6 +259,44 @@ void TestPerspectiveGeometryRejectsUnsafeParametersAndDimensions() {
 		"perspective geometry accepted expanded bounds beyond image limits");
 }
 
+void TestPerspectiveGeometryContainsAsymmetricAspectCrops() {
+	const std::pair<int, int> dimensions[] = {
+		{2, 2}, {2, 60}, {100, 60}, {60, 100}, {65535, 1500}};
+	const double fractions[] = {-0.25, -0.1, 0.0, 0.1, 0.25};
+	for (const auto& size : dimensions) {
+		for (double left : fractions) {
+			for (double right : fractions) {
+				PerspectiveCorrectionParameters parameters;
+				parameters.leftDeltaFraction = left;
+				parameters.rightDeltaFraction = right;
+				parameters.preserveAspectRatio = true;
+				ImageTransformGeometry geometry;
+				Expect(BuildPerspectiveGeometry(size.first, size.second, parameters,
+					geometry), "asymmetric perspective aspect crop was rejected");
+				ExpectContainedCorners(geometry);
+			}
+		}
+	}
+}
+
+void TestPerspectiveGeometryCentersSinglePixelCrops() {
+	PerspectiveCorrectionParameters parameters;
+	parameters.leftDeltaFraction = 0.25;
+	parameters.rightDeltaFraction = -0.25;
+	ImageTransformGeometry geometry;
+	Expect(BuildPerspectiveGeometry(2, 2, parameters, geometry) &&
+		geometry.outputWidth == 1 && geometry.outputHeight == 2,
+		"narrow perspective crop did not produce its one-pixel output axis");
+	ExpectMappedPoint(geometry, 0.0, 0.0, 0.5, 0.0);
+	ExpectMappedPoint(geometry, 0.0, 1.0, 0.5, 1.0);
+
+	parameters.preserveAspectRatio = true;
+	Expect(BuildPerspectiveGeometry(2, 2, parameters, geometry) &&
+		geometry.outputWidth == 1 && geometry.outputHeight == 1,
+		"small perspective aspect crop did not produce one output pixel");
+	ExpectMappedPoint(geometry, 0.0, 0.0, 0.5, 0.75);
+}
+
 const TestCase kTests[] = {
 	{"free-rotation-exact-angles-and-coordinate-mapping",
 		&TestFreeRotationExactAnglesAndCoordinateMapping},
@@ -274,6 +312,10 @@ const TestCase kTests[] = {
 		&TestPerspectiveGeometryCroppingAndAspectPolicy},
 	{"perspective-geometry-rejects-unsafe-parameters-and-dimensions",
 		&TestPerspectiveGeometryRejectsUnsafeParametersAndDimensions},
+	{"perspective-geometry-contains-asymmetric-aspect-crops",
+		&TestPerspectiveGeometryContainsAsymmetricAspectCrops},
+	{"perspective-geometry-centers-single-pixel-crops",
+		&TestPerspectiveGeometryCentersSinglePixelCrops},
 };
 
 } // namespace

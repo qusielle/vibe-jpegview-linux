@@ -33,10 +33,11 @@ bool BuildFreeRotationGeometry(int sourceWidth, int sourceHeight,
 	ImageTransformGeometry& geometry);
 
 // Builds a projective correction from a source rectangle to a symmetric
-// horizontal trapezoid. Auto-crop selects a centered rectangle contained by
-// the trapezoid; aspect preservation constrains that rectangle to the source's
-// pixel-center aspect ratio. Without auto-crop, the expanded canvas leaves
-// uncovered areas transparent during resampling.
+// horizontal trapezoid. Auto-crop selects a contained edge-intersection rectangle;
+// aspect preservation instead selects a centered rectangle constrained by both
+// edges and the source's pixel-center aspect ratio. An axis reduced to one pixel
+// samples the crop center. Without auto-crop, the expanded canvas leaves uncovered
+// areas transparent during resampling.
 bool BuildPerspectiveGeometry(int sourceWidth, int sourceHeight,
 	const PerspectiveCorrectionParameters& parameters,
 	ImageTransformGeometry& geometry);

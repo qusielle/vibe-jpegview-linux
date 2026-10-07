@@ -251,7 +251,7 @@ bool BuildPerspectiveGeometry(int sourceWidth, int sourceHeight,
 
 	const double minimumX = -std::abs(left);
 	const double maximumX = pixelWidth + std::abs(right);
-	const double convergence = std::abs(left) + std::abs(right);
+	const double centeredConvergence = 2.0 * std::max(std::abs(left), std::abs(right));
 	double targetLeft = 0.0;
 	double targetRight = 0.0;
 	double targetTop = 0.0;
@@ -267,7 +267,7 @@ bool BuildPerspectiveGeometry(int sourceWidth, int sourceHeight,
 	} else if (parameters.preserveAspectRatio) {
 		const double pixelCenterAspect = pixelWidth / pixelHeight;
 		const double targetHeightSpan = std::min(pixelHeight,
-			pixelWidth / (pixelCenterAspect + convergence / pixelHeight));
+			pixelWidth / (pixelCenterAspect + centeredConvergence / pixelHeight));
 		const double targetWidthSpan = pixelCenterAspect * targetHeightSpan;
 		outputWidth = SafeContainedExtent(targetWidthSpan);
 		outputHeight = SafeContainedExtent(targetHeightSpan);
@@ -294,14 +294,18 @@ bool BuildPerspectiveGeometry(int sourceWidth, int sourceHeight,
 		targetWidthSpan / (outputWidth - 1.0) : 0.0;
 	const double outputToTargetY = outputHeight > 1 ?
 		targetHeightSpan / (outputHeight - 1.0) : 0.0;
+	const double outputTargetOriginX = outputWidth > 1 ?
+		targetLeft : (targetLeft + targetRight) * 0.5;
+	const double outputTargetOriginY = outputHeight > 1 ?
+		targetTop : (targetTop + targetBottom) * 0.5;
 	const std::array<double, 9> targetToSource = {
 		pixelWidth * pixelHeight, 2.0 * pixelWidth * left,
 		-pixelWidth * left * pixelHeight,
 		0.0, bottomWidth * pixelHeight, 0.0,
 		0.0, -(topWidth - bottomWidth), topWidth * pixelHeight};
 	const std::array<double, 9> outputToTarget = {
-		outputToTargetX, 0.0, targetLeft,
-		0.0, outputToTargetY, targetTop,
+		outputToTargetX, 0.0, outputTargetOriginX,
+		0.0, outputToTargetY, outputTargetOriginY,
 		0.0, 0.0, 1.0};
 	const std::array<double, 9> destinationToSource =
 		MultiplyMatrices(targetToSource, outputToTarget);

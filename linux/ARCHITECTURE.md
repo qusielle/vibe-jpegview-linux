@@ -166,7 +166,9 @@ should normally be added to one of these focused modules and covered by the matc
 - `image_transform_geometry`: validated pixel-center mappings and output bounds for free rotation
   and perspective correction, including expanded canvas geometry, centered contained cropping,
   optional source-aspect preservation, and exact orthogonal-turn identification. Perspective uses
-  a projective inverse map with bounded edge convergence; it performs no pixel allocation or rendering.
+  a projective inverse map with bounded edge convergence. Aspect-preserving crops remain centered
+  and constrain both edges independently, including unequal adjustments; a cropped axis reduced to
+  one pixel samples its center. It performs no pixel allocation or rendering.
 - `image_transform_pixels`: cancellable BGRA resampling through validated image-transform geometry,
   currently preserving affine mappings and exact pixel copies for orthogonal turns, with bilinear
   previews, bicubic final output, transparent uncovered areas, and premultiplied-alpha interpolation.
