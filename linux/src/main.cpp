@@ -8419,6 +8419,13 @@ private:
 				SetMagnifyingGlassEnabled(!magnifyingGlass_.Enabled());
 			}
 			break;
+		case jpegview_linux::kCommandTogglePixelColorSampler:
+			runtimeSettings_.Values().pixelColorSamplerEnabled =
+				!runtimeSettings_.Values().pixelColorSamplerEnabled;
+			InvalidatePixelColorSampler();
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+			SaveSettings();
+			break;
 		case jpegview_linux::kCommandToggleDoublePageMode:
 			doublePageModeEnabled_ = !doublePageModeEnabled_;
 			runtimeSettings_.Values().doublePageModeEnabled = doublePageModeEnabled_;
@@ -8671,6 +8678,7 @@ private:
 		state.navigationPanelAutoReveal = runtimeSettings_.Values().navigationPanelAutoReveal;
 		state.thumbnailPanelVisible = runtimeSettings_.Values().thumbnailPanelVisible;
 		state.showZoomNavigator = runtimeSettings_.Values().showZoomNavigator;
+		state.pixelColorSamplerEnabled = runtimeSettings_.Values().pixelColorSamplerEnabled;
 		state.magnifyingGlassEnabled = magnifyingGlass_.Enabled();
 		state.doublePageModeEnabled = doublePageModeEnabled_;
 		state.mangaReadingOrderEnabled = mangaReadingOrderEnabled_;
@@ -11181,7 +11189,8 @@ private:
 	}
 
 	void UpdatePixelColorSampler() {
-		if (!PixelColorSamplerOwnerCommitted() || PixelColorSamplerUiBlocked() ||
+		if (!runtimeSettings_.Values().pixelColorSamplerEnabled ||
+			!PixelColorSamplerOwnerCommitted() || PixelColorSamplerUiBlocked() ||
 			CurrentImage().width <= 0 || CurrentImage().height <= 0) {
 			InvalidatePixelColorSampler();
 			return;

@@ -1196,6 +1196,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"copy-selection-on-release was enabled by default");
 	Expect(!jpegview_linux::ViewerSettings{}.fitRelativeZoomMode,
 		"fit-relative zoom was enabled in the built-in settings defaults");
+	Expect(!jpegview_linux::ViewerSettings{}.pixelColorSamplerEnabled,
+		"pixel color sampler was enabled in the built-in settings defaults");
 	Expect(jpegview_linux::ViewerSettings{}.gpsMapProviderUrl ==
 		jpegview_linux::kDefaultGpsMapProviderUrl,
 		"GPS map provider did not retain the built-in URL template");
@@ -1209,6 +1211,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.navigationPanelAutoReveal = false;
 	expected.thumbnailPanelVisible = true;
 	expected.showZoomNavigator = false;
+	expected.pixelColorSamplerEnabled = true;
 	expected.doublePageModeEnabled = true;
 	expected.mangaReadingOrderEnabled = true;
 	expected.mangaModeInvertsLeftRight = false;
@@ -1273,6 +1276,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"saved config did not explain title codes beside the custom pattern");
 	Expect(settingsContents.find("copy_selection_on_release=1\n") != std::string::npos,
 		"saved config omitted the enabled copy-selection-on-release setting");
+	Expect(settingsContents.find("pixel_color_sampler_enabled=1\n") != std::string::npos,
+		"saved config omitted the enabled pixel color sampler preference");
 	const std::size_t titleSettingPosition = settingsContents.find("window_title_pattern=");
 	const std::size_t titleCommentPosition = settingsContents.rfind("# Window title codes:", titleSettingPosition);
 	const std::string titleCommentText = titleSettingPosition == std::string::npos ||
@@ -1297,6 +1302,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"thumbnail panel visibility did not round-trip");
 	Expect(loaded.showZoomNavigator == expected.showZoomNavigator,
 		"zoom navigator visibility did not round-trip");
+	Expect(loaded.pixelColorSamplerEnabled == expected.pixelColorSamplerEnabled,
+		"pixel color sampler preference did not round-trip");
 	Expect(loaded.doublePageModeEnabled == expected.doublePageModeEnabled &&
 		loaded.mangaReadingOrderEnabled == expected.mangaReadingOrderEnabled &&
 		loaded.mangaModeInvertsLeftRight == expected.mangaModeInvertsLeftRight &&
@@ -1366,7 +1373,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"fixed_crop_screen_pixels=maybe\ndefault_selection_mode=1\n"
 		"selection_mode_enabled=maybe\n"
 		"copy_selection_on_release=maybe\n"
-		"show_zoom_navigator=maybe\nmanga_mode_inverts_left_right=maybe\n"
+		"show_zoom_navigator=maybe\npixel_color_sampler_enabled=maybe\n"
+		"manga_mode_inverts_left_right=maybe\n"
 		"spacebar_navigates_images=maybe\nfolder_wrap_around=maybe\n"
 		"fit_relative_zoom_mode=maybe\n"
 		"transparency_pattern=diagonal\n"
@@ -1387,6 +1395,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"malformed copy-selection-on-release setting did not retain its default");
 	Expect(loaded.showZoomNavigator,
 		"malformed zoom navigator visibility did not retain its enabled default");
+	Expect(!loaded.pixelColorSamplerEnabled,
+		"missing or malformed pixel sampler setting did not retain its disabled default");
 	Expect(!loaded.doublePageModeEnabled && !loaded.mangaReadingOrderEnabled,
 		"missing double-page settings did not retain their disabled defaults");
 	Expect(loaded.mangaModeInvertsLeftRight,

@@ -180,12 +180,15 @@ should normally be added to one of these focused modules and covered by the matc
 - `go_to_image_number_model`: one-based input validation for selecting an entry in the active
   ordered file list; it leaves list ownership and the subsequent image load to the Viewer.
 - `pixel_color_sampler`: bounds-checked BGRA document-source sampling, RGBA hex formatting, and the
-  renderer-independent readout cache/pin/copy state. Materialized source pixels include geometry
-  edits such as rotate and crop, but exclude non-destructive levels processing; a lazy document uses
-  its active decoded frame. If a fitted JPEG has only reduced display pixels, the Viewer starts an
-  optional full-source decode only after pointer motion over the committed image. Button presses
-  update the sampler gate immediately; admission and completion also check SDL's current button
-  mask so stationary held buttons cannot admit optional decoding through stale motion state.
+  renderer-independent readout cache/pin/copy state. The `pixel_color_sampler_enabled` preference
+  defaults to false and is toggled from the context menu; while disabled, Viewer clears the readout,
+  retires sampler-owned pixels, and admits no optional source decode. Materialized source pixels
+  include geometry edits such as rotate and crop, but exclude non-destructive levels processing; a
+  lazy document uses its active decoded frame. If a fitted JPEG has only reduced display pixels, the
+  Viewer starts an optional full-source decode only after pointer motion over the committed image.
+  Button presses update the sampler gate immediately; admission and completion also check SDL's
+  current button mask so stationary held buttons cannot admit optional decoding through stale
+  motion state.
   This decode uses focused-preview priority, keeping selected presentation and spread work ahead of
   this optional detail. It observes the shared decoded-image cache through a separate generation-checked channel,
   so the sampler neither replaces selected-load completion nor lowers existing decode priority or

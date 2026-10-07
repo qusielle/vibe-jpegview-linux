@@ -934,6 +934,11 @@ void TestContextMenuCatalogAndState() {
 		magnifyingGlass->shortcut == "Z" && !magnifyingGlass->checked &&
 		!magnifyingGlass->enabled,
 		"context menu did not expose the image-dependent magnifying-glass toggle");
+	const MenuItem* pixelColorSampler = findCommand(compact,
+		jpegview_linux::kCommandTogglePixelColorSampler);
+	Expect(pixelColorSampler != nullptr && pixelColorSampler->label == "Pixel color sampler" &&
+		!pixelColorSampler->checked && pixelColorSampler->enabled,
+		"context menu did not expose the disabled-by-default pixel sampler toggle");
 	const MenuItem* doublePageMode = findCommand(compact,
 		jpegview_linux::kCommandToggleDoublePageMode);
 	const MenuItem* mangaReadingOrder = findCommand(compact,
@@ -961,6 +966,7 @@ void TestContextMenuCatalogAndState() {
 	state.sortAscending = false;
 	state.imageAvailable = true;
 	state.magnifyingGlassEnabled = true;
+	state.pixelColorSamplerEnabled = true;
 	state.doublePageModeEnabled = true;
 	state.mangaReadingOrderEnabled = true;
 	state.losslessJpegAvailable = true;
@@ -1016,6 +1022,8 @@ void TestContextMenuCatalogAndState() {
 	Expect(findCommand(advanced, jpegview_linux::kCommandToggleMagnifyingGlass)->enabled &&
 		findCommand(advanced, jpegview_linux::kCommandToggleMagnifyingGlass)->checked,
 		"context menu did not reflect the active magnifying-glass state");
+	Expect(findCommand(advanced, jpegview_linux::kCommandTogglePixelColorSampler)->checked,
+		"context menu did not reflect the active pixel color sampler preference");
 	Expect(findCommand(advanced, jpegview_linux::kCommandToggleSelectionMode)->checked,
 		"context menu did not reflect enabled crop selection mode");
 	state.showZoomNavigator = false;

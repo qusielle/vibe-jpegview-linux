@@ -42,6 +42,7 @@ struct ViewerSettings {
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
 	bool showZoomNavigator = true;
+	bool pixelColorSamplerEnabled = false;
 	bool doublePageModeEnabled = false;
 	bool mangaReadingOrderEnabled = false;
 	bool mangaModeInvertsLeftRight = true;

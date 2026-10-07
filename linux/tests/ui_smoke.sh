@@ -611,17 +611,47 @@ if [ -n "$krita_project" ]; then
 	stop_viewer
 fi
 
-# The DOC readout samples a decoded pixel in RGBA order and copies its value
-# when clicked.
+# The pixel color sampler is off by default; when enabled, its DOC readout
+# samples a decoded pixel in RGBA order and copies its value when clicked.
 pixel_sampler_directory="$temporary/pixel-sampler"
 mkdir -p "$pixel_sampler_directory"
 pixel_sampler_previous_state=$XDG_STATE_HOME
+pixel_sampler_previous_config_set=${VIEWER_TEST_CONFIG_HOME+x}
+pixel_sampler_previous_config=${VIEWER_TEST_CONFIG_HOME-}
 XDG_STATE_HOME="$temporary/pixel-sampler-state"
+VIEWER_TEST_CONFIG_HOME="$temporary/pixel-sampler-default-config"
+export VIEWER_TEST_CONFIG_HOME
 export XDG_STATE_HOME
 printf 'P3\n2 2\n255\n18 52 86 18 52 86 18 52 86 18 52 86\n' \
 	> "$pixel_sampler_directory/01-sampler.ppm"
 launch_viewer "$pixel_sampler_directory"
 assert_title_prefix "01-sampler.ppm" "pixel-sampler fixture did not load"
+sampler_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+sampler_window_width=$(printf '%s\n' "$sampler_geometry" | sed -n 's/^WIDTH=//p')
+sampler_window_height=$(printf '%s\n' "$sampler_geometry" | sed -n 's/^HEIGHT=//p')
+sampler_x=$((sampler_window_width / 2))
+sampler_y=$((sampler_window_height / 2))
+clear_clipboard_text
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" "$sampler_x" "$sampler_y"
+sleep 0.15
+DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+	$((sampler_x + 62)) $((sampler_y + 20))
+DISPLAY=":$display_number" xdotool click --window "$window_id" 1
+disabled_sample=$(DISPLAY=":$display_number" xclip -selection clipboard -o 2>/dev/null || true)
+if [ "$disabled_sample" = '#123456FF' ]; then
+	echo "UI smoke test: default-disabled pixel color sampler copied a readout" >&2
+	exit 1
+fi
+stop_viewer
+
+pixel_sampler_enabled_config="$temporary/pixel-sampler-enabled-config/jpegview-linux"
+mkdir -p "$pixel_sampler_enabled_config"
+printf 'pixel_color_sampler_enabled=1\n' > "$pixel_sampler_enabled_config/settings.conf"
+XDG_STATE_HOME="$temporary/pixel-sampler-enabled-state"
+VIEWER_TEST_CONFIG_HOME="$temporary/pixel-sampler-enabled-config"
+export XDG_STATE_HOME VIEWER_TEST_CONFIG_HOME
+launch_viewer "$pixel_sampler_directory"
+assert_title_prefix "01-sampler.ppm" "enabled pixel-sampler fixture did not load"
 sampler_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
 sampler_window_width=$(printf '%s\n' "$sampler_geometry" | sed -n 's/^WIDTH=//p')
 sampler_window_height=$(printf '%s\n' "$sampler_geometry" | sed -n 's/^HEIGHT=//p')
@@ -648,6 +678,12 @@ DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 8 8
 stop_viewer
 XDG_STATE_HOME=$pixel_sampler_previous_state
 export XDG_STATE_HOME
+if [ -n "$pixel_sampler_previous_config_set" ]; then
+	VIEWER_TEST_CONFIG_HOME=$pixel_sampler_previous_config
+	export VIEWER_TEST_CONFIG_HOME
+else
+	unset VIEWER_TEST_CONFIG_HOME
+fi
 
 # A fitted JPEG stays on its reduced display path until pointer motion asks the
 # sampler for source pixels. This exercises the sampler-only decode channel,
@@ -657,7 +693,8 @@ if command -v convert >/dev/null 2>&1; then
 	lazy_sampler_config="$temporary/pixel-sampler-lazy-config/jpegview-linux"
 	mkdir -p "$lazy_sampler_config"
 	convert -size 1800x1200 xc:black -quality 90 "$lazy_sampler_jpeg"
-	printf 'scale_mode=fit\ncache_size_mb=128\n' > "$lazy_sampler_config/settings.conf"
+	printf 'scale_mode=fit\ncache_size_mb=128\npixel_color_sampler_enabled=1\n' \
+		> "$lazy_sampler_config/settings.conf"
 	pixel_sampler_previous_state=$XDG_STATE_HOME
 	pixel_sampler_previous_config_set=${VIEWER_TEST_CONFIG_HOME+x}
 	pixel_sampler_previous_config=${VIEWER_TEST_CONFIG_HOME-}

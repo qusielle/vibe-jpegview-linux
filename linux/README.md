@@ -126,15 +126,16 @@ they support.
    Up/Down rotation turns the open spread as one unit: both pages stay visible and stack vertically
    after a quarter-turn, then return to a horizontal spread when rotated back. The spread remains
    paired if double-page mode is switched off and on while the rotation is applied.
-   PageUp/PageDown remain logical previous/next. A pointer-following pixel sampler shows a swatch and
-   `#RRGGBBAA` value; clicking the readout copies it. It samples decoded source pixels before live
+   PageUp/PageDown remain logical previous/next. The pixel color sampler is disabled by default;
+   enable **Pixel color sampler** in the context menu to show a pointer-following swatch and
+   `#RRGGBBAA` value, and click the readout to copy it. The opt-in preference persists between runs.
+   The sampler reads decoded source pixels before live
    non-destructive levels adjustments and display scaling. For a fitted JPEG that is displayed from
    reduced pixels, full-resolution sampling starts asynchronously after the pointer moves over the
    committed image; opening an image with a stationary pointer does not trigger that extra decode.
    Rotate, mirror, and crop update the sampled document coordinates while preserving the source
-   colors. The two checkable
-   controls appear in the navigation panel and context menu. Page pairs follow
-   [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
+   colors. Crop selection and double-page controls appear in the navigation panel and context menu.
+   Page pairs follow [YACReader's 9.9.1.0 behavior](https://github.com/YACReader/yacreader/blob/982d58246cdd3b42b00b6aaaef5666c73869174d/YACReader/render.cpp#L446-L566).
    Spread navigation prepares both pages at their final slot sizes through background workers and
    reveals them together in one frame; while a cold spread is being prepared, the viewer does not
    flash the anchor page alone or shift it when its partner arrives.
@@ -1004,10 +1005,12 @@ native in-app file browser with **Browse** and **Recents** tabs.
 When the pointer is over the selected image, the `DOC` readout shows its decoded or materialized
 document pixel as `#RRGGBBAA`; click the readout to copy the value. This samples before live,
 non-destructive levels adjustments and display scaling, so it may differ from the displayed color.
-Fitted JPEGs can initially use reduced display pixels; the sampler requests full source pixels
-asynchronously after pointer motion over the committed image, leaving normal opening and viewing
-on the reduced path. Holding any mouse button suppresses the readout and new optional source
-decodes, including a stationary press without further pointer motion.
+The sampler is off by default. Choose **Pixel color sampler** in the context menu to enable it; this
+choice persists in `pixel_color_sampler_enabled` in `settings.conf`. Fitted JPEGs can initially use
+reduced display pixels; the enabled sampler requests full source pixels asynchronously after pointer
+motion over the committed image, leaving normal opening and viewing on the reduced path. Holding any
+mouse button suppresses the readout and new optional source decodes, including a stationary press
+without further pointer motion.
 Clicking blank space inside the dialog leaves it open; press Escape to cancel.
 Browse filters filenames while Recents filters full file paths; both searches are case-insensitive.
 The Recents tab contains one MRU image per parent folder, keeps its own selection and filter while

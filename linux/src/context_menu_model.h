@@ -18,6 +18,7 @@ constexpr int kCommandEditPictureLevels = -7;
 constexpr int kCommandToggleZoomNavigator = -9;
 constexpr int kCommandAdvancedConfiguration = -14;
 constexpr int kCommandOpenGpsLocation = -16;
+constexpr int kCommandTogglePixelColorSampler = -17;
 
 struct MenuItem {
 	std::string label;
@@ -59,6 +60,7 @@ struct ContextMenuState {
 	bool navigationPanelAutoReveal = true;
 	bool thumbnailPanelVisible = false;
 	bool showZoomNavigator = true;
+	bool pixelColorSamplerEnabled = false;
 	bool magnifyingGlassEnabled = false;
 	bool doublePageModeEnabled = false;
 	bool mangaReadingOrderEnabled = false;

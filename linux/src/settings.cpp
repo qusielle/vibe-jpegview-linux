@@ -130,6 +130,9 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		} else if (key == "show_zoom_navigator") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.showZoomNavigator = parsed;
+		} else if (key == "pixel_color_sampler_enabled") {
+			bool parsed = false;
+			if (ParseBoolStrict(value, parsed)) loaded.pixelColorSamplerEnabled = parsed;
 		} else if (key == "double_page_mode_enabled") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.doublePageModeEnabled = parsed;
@@ -332,6 +335,8 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "navigation_panel_auto_reveal=" << (settings.navigationPanelAutoReveal ? 1 : 0) << '\n'
 		       << "thumbnail_panel_visible=" << (settings.thumbnailPanelVisible ? 1 : 0) << '\n'
 		       << "show_zoom_navigator=" << (settings.showZoomNavigator ? 1 : 0) << '\n'
+		       << "# Show the pointer-following document-pixel color readout. Disabled by default.\n"
+		       << "pixel_color_sampler_enabled=" << (settings.pixelColorSamplerEnabled ? 1 : 0) << '\n'
 		       << "double_page_mode_enabled=" << (settings.doublePageModeEnabled ? 1 : 0) << '\n'
 		       << "manga_reading_order_enabled=" << (settings.mangaReadingOrderEnabled ? 1 : 0) << '\n'
 		       << "manga_mode_inverts_left_right=" << (settings.mangaModeInvertsLeftRight ? 1 : 0) << '\n'
