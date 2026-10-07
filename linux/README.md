@@ -55,7 +55,9 @@ they support.
    the display frame. Up to four hardware-aware, low-priority workers prepare
    nearby images concurrently. A bounded planner estimates each fitted frame's bytes and admits the
    nearest requests within the shared cache budget after reserving the selected source-resolution frame;
-   this avoids sizing every neighbor from the selected image's zoom. Large JPEG input is memory-mapped,
+   this avoids sizing every neighbor from the selected image's zoom. SVG/SVGZ neighbors render directly
+   at their fitted sizes without retaining intrinsic source rasters for speculative preparation.
+   Large JPEG input is memory-mapped,
    letting native decoding and repeated neighboring access use the kernel page cache without an extra
    stdio copy layer. Prepared frames are then uploaded incrementally and retained as renderer-ready
    textures. The closest next and previous files take

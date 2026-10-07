@@ -1078,11 +1078,11 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 	std::vector<jpegview_linux::DisplayPrefetchCandidate> candidates;
 	for (int index = 0; index < 4; ++index) {
 		const fs::path filename = temporary.path() /
-			("planner-" + std::to_string(index) + ".jpg");
+			("planner-" + std::to_string(index) + (index == 0 ? ".svg" : ".jpg"));
 		WriteText(filename, "captured source descriptor");
 		const auto source = jpegview_linux::DescribeImageSource(filename);
 		candidates.push_back({filename, source, static_cast<std::size_t>(index),
-			static_cast<std::size_t>(index + 1), {}, false, true});
+			static_cast<std::size_t>(index + 1), {}, false, index != 0});
 	}
 	std::atomic<int> dimensionReads{0};
 	jpegview_linux::DisplayPrefetchPlannerWorker planner(
@@ -1121,6 +1121,10 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 		dimensionReads.load() == 2,
 		"JPEG planner did not honor the captured revisions or bounded neighbor window");
 	const auto& result = ready.front();
+	Expect(result.requests[1].fileBackedFormat ==
+		jpegview_linux::FileBackedDisplayFormat::Svg &&
+		result.requests[1].cacheKey.renderVectorAtTarget && !result.requests[1].decoded,
+		"SVG neighbor planning lost its file-backed vector identity");
 	Expect(jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
 		request.catalogRevision, request.descriptorRevision, request.viewportRevision,
 		request.currentIndex, request.preferredDirection, request.viewport,
@@ -1238,6 +1242,84 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 		retriedAdmissionResults.front().dimensions.size() == 1 &&
 		admissionDimensionReads.load() == 1,
 		"planner admission exception escaped its worker or prevented a valid retry");
+}
+
+void TestSvgNeighborPrefetchUsesTargetRendering() {
+	TemporaryDirectory temporary;
+	const fs::path large = temporary.path() / "large.svg";
+	const fs::path compressed = temporary.path() / "small.svgz";
+	const fs::path unknown = temporary.path() / "explicit.data";
+	const fs::path malformed = temporary.path() / "malformed.svg";
+	const std::string smallDocument =
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"2\">"
+		"<rect width=\"4\" height=\"2\" fill=\"red\"/></svg>";
+	WriteText(large,
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"9000\" height=\"10000\">"
+		"<rect width=\"9000\" height=\"10000\" fill=\"green\"/></svg>");
+	WriteBytes(compressed, MakeSvgz(smallDocument));
+	WriteText(unknown, smallDocument);
+	WriteText(malformed, "<svg broken");
+	const fs::path archive = temporary.path() / "vectors.zip";
+	WriteZipArchive(archive, {{"small.svg", unknown}});
+	const fs::path member = archive / "small.svg";
+	jpegview_linux::DisplayPrefetchPlannerRequest plan;
+	plan.currentIndex = 0;
+	plan.pageCount = 6;
+	plan.maximumCount = 5;
+	plan.imageAreaWidth = 320;
+	plan.imageAreaHeight = 400;
+	plan.viewport.noEnlarge = false;
+	plan.maximumPreparedBytes = 1024u * 1024u;
+	for (const fs::path& filename : {large, compressed, member, unknown, malformed}) {
+		const std::size_t position = plan.neighbors.size() + 1;
+		plan.neighbors.push_back({filename, jpegview_linux::DescribeImageSource(filename),
+			position, position, {}, false, false});
+	}
+	jpegview_linux::DisplayPrefetchPlannerWorker planner;
+	const std::uint64_t generation = planner.Request(plan);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(3)),
+		"SVG neighbor dimensions planning did not finish before its deadline");
+	const auto results = planner.TakeReady();
+	Expect(results.size() == 1 && results.front().generation == generation &&
+		!results.front().failure.Failed(), "SVG neighbor planner did not publish its current generation");
+#if JPEGVIEW_HAVE_SVG
+	const auto& result = results.front();
+	Expect(result.requests.size() == 3 && result.dimensions.size() == 3,
+		"SVG/SVGZ and archive neighbors were omitted or unknown/malformed sources were admitted");
+	jpegview_linux::DisplayImageCache display(plan.maximumPreparedBytes, 1);
+	for (const auto& request : result.requests) {
+		Expect(request.Valid() && !request.decoded && request.cacheKey.renderVectorAtTarget &&
+			request.fileBackedFormat == jpegview_linux::FileBackedDisplayFormat::Svg,
+			"SVG neighbor prefetch retained an intrinsic raster instead of its vector source");
+		const auto selected = jpegview_linux::MakeSvgDisplayImageRequest(request.source,
+			request.sourceWidth, request.sourceHeight, request.targetWidth,
+			request.targetHeight, false);
+		const auto prepared = display.RequestAndWait(request);
+		Expect(prepared && prepared->width <= 320 && prepared->height <= 400 &&
+			prepared->bgra.size() <= plan.maximumPreparedBytes &&
+			selected.key == request.key && display.Find(selected) == prepared,
+			"bounded SVG neighbor pixels were unavailable to the selected display request");
+	}
+	Expect(result.requests[0].sourceWidth == 9000 && result.requests[0].sourceHeight == 10000 &&
+		result.requests[1].targetWidth == 128 && result.requests[1].targetHeight == 64 &&
+		result.requests[2].source.Key().backingIdentity ==
+			jpegview_linux::DescribeImageSource(archive).Key().backingIdentity,
+		"SVG neighbor rendering lost intrinsic geometry, vector upscaling, or archive backing identity");
+	plan.maximumPreparedBytes = 0;
+	for (std::size_t index = 0; index < 2; ++index) {
+		plan.retainedTextures.push_back({result.requests[index].key, result.requests[index].cacheKey});
+	}
+	planner.Request(plan);
+	Expect(planner.WaitUntilIdle(std::chrono::seconds(3)),
+		"retained SVG neighbor planning did not finish before its deadline");
+	const auto retained = planner.TakeReady();
+	Expect(retained.size() == 1 && retained.front().requests.empty() &&
+		retained.front().protectedTextureKeys.size() == 2,
+		"SVG neighbors were redundantly prepared or lost nearest protection with a full budget");
+#else
+	Expect(results.front().requests.empty() && results.front().dimensions.empty(),
+		"neighbor planning admitted SVG sources without the optional decoder");
+#endif
 }
 
 
@@ -2498,6 +2580,7 @@ const TestCase kTests[] = {
 	{"perf-context-and-pending-input-diagnostics", &TestPerfContextAndPendingInputDiagnostics},
 	{"decoded-prefetch-work-class-attribution", &TestDecodedPrefetchWorkClassAttribution},
 	{"display-prefetch-planner-worker-snapshots-and-cancellation", &TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation},
+	{"svg-neighbor-prefetch-uses-target-rendering", &TestSvgNeighborPrefetchUsesTargetRendering},
 	{"display-resolution-request-canonicalization", &TestDisplayResolutionRequestCanonicalization},
 	{"failed-display-request-resolution-recovery", &TestFailedDisplayRequestResolutionRecovery},
 	{"display-prefetch-uses-fitted-resolution", &TestDisplayPrefetchUsesFittedResolution},

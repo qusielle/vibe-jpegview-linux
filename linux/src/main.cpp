@@ -2649,7 +2649,7 @@ private:
 			const jpegview_linux::SourceDescriptor* sourceEntry = fileList_.DescriptorAt(fileIndex);
 			if (sourceEntry == nullptr) continue;
 			jpegview_linux::SourceDescriptor source = *sourceEntry;
-			if (jpegview_linux::IsJpegPath(filename)) {
+			if (jpegview_linux::IsJpegPath(filename) || jpegview_linux::IsSvgPath(filename)) {
 				int cachedWidth = 0;
 				int cachedHeight = 0;
 				if (CachedSourceDimensions(source, cachedWidth, cachedHeight)) {
@@ -2762,7 +2762,8 @@ private:
 					}
 				});
 			}, [](const fs::path& filename) {
-				return !jpegview_linux::IsJpegPath(filename);
+				return !jpegview_linux::IsJpegPath(filename) &&
+					!jpegview_linux::IsSvgPath(filename);
 			}, 2, [this](std::size_t index) {
 				return fileList_.DescriptorAt(index);
 			});

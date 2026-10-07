@@ -345,10 +345,14 @@ should normally be added to one of these focused modules and covered by the matc
   likewise use the effective class for cache admission; header-only JPEG dimension requests use
   the decoded worker without retaining full-resolution pixels. The viewer captures a bounded
   neighbor window with catalog, descriptor, current-index, direction, fitted-prefetch viewport, and
-  per-file processing snapshots. `display_prefetch_planner` probes missing JPEG dimensions and builds
-  requests on a worker; the SDL owner applies results only when those captured revisions and viewport
-  still match. Pan and replacement cancel obsolete planner work. Viewport invalidation retains the
-  publication batch for a still-current active-spread dimensions read, while source or mode
+  per-file processing snapshots. `display_prefetch_planner` probes missing JPEG and SVG/SVGZ dimensions
+  and builds requests on a worker. SVG neighbors use file-backed vector requests with the same keys
+  as selected display preparation, bypassing intrinsic pixel decoding in generic neighbor prefetch.
+  Their fitted targets may exceed intrinsic dimensions and retain the shared prepared-frame budget,
+  nearest-neighbor priority, and backing-source admission. The SDL owner applies results only when
+  those captured revisions and viewport still match. Pan and replacement cancel obsolete planner work.
+  Viewport invalidation retains the publication batch for a still-current active-spread dimensions read,
+  while source or mode
   replacement deactivates that request's batch. A decoded insertion that cannot fit prunes queued
   speculation only; foreground and active-spread work continues draining, including metadata-only
   partner requests. Neighbor-batch bookkeeping releases decoded aliases after the display cache

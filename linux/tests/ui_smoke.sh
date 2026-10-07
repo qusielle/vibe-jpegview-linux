@@ -5992,6 +5992,15 @@ fi
 
 if [ "${JPEGVIEW_TEST_HAS_SVG:-1}" = 1 ]; then
 	mkdir -p "$temporary/svg-images"
+	mkdir -p "$temporary/svg-config/jpegview-linux"
+	printf 'scale_mode=fit\ncache_size_mb=128\nthumbnail_panel_visible=0\ndouble_page_mode_enabled=0\nshow_histogram=0\n' \
+		> "$temporary/svg-config/jpegview-linux/settings.conf"
+	cat >"$temporary/svg-images/01-neighbor.svg" <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" width="4096" height="2048">
+  <rect width="4096" height="2048" fill="#20e020"/>
+</svg>
+EOF
+	cp "$temporary/svg-images/01-neighbor.svg" "$temporary/svg-images/02-neighbor.svg"
 	cat >"$temporary/svg-images/vector.svg" <<'EOF'
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="400" viewBox="0 0 800 400">
   <rect width="800" height="400" fill="#e02020"/>
@@ -6001,9 +6010,24 @@ EOF
 	previous_state=$XDG_STATE_HOME
 	XDG_STATE_HOME="$temporary/svg-state"
 	export XDG_STATE_HOME
-	launch_viewer "$temporary/svg-images/vector.svg"
+	svg_prefetch_trace="$temporary/svg-prefetch.csv"
+	JPEGVIEW_PERF_TRACE="$svg_prefetch_trace" VIEWER_TEST_CONFIG_HOME="$temporary/svg-config" \
+		launch_viewer "$temporary/svg-images/vector.svg"
 	assert_title_prefix "vector.svg (800x400" \
 		"SVG source geometry did not reach the viewer title"
+	svg_neighbors_ready=0
+	for _ in $(seq 1 100); do
+		if awk -F, '$2 == "texture_upload" && $6 == "nearest_navigation_neighbor" { count++ }
+			END { exit !(count >= 2) }' "$svg_prefetch_trace" 2>/dev/null; then
+			svg_neighbors_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$svg_neighbors_ready" -ne 1 ]; then
+		echo "UI smoke test: SVG neighbors did not reach fitted speculative textures" >&2
+		exit 1
+	fi
 	if [ "$visual_assertions" -eq 1 ]; then
 		DISPLAY=":$display_number" xdotool key plus
 		sleep 0.2
@@ -6027,6 +6051,17 @@ EOF
 		fi
 	fi
 	stop_viewer
+	if ! awk -F, '
+		$2 == "cache_snapshot" && $13 == "\"decoded\"" {
+			seen = 1
+			if ($7 > 0 || $8 > 0) intrinsic_pixels = 1
+		}
+		$2 == "cache_snapshot" && $13 == "\"decoded_retention_denied\"" { intrinsic_pixels = 1 }
+		END { exit !(seen && !intrinsic_pixels) }
+		' "$svg_prefetch_trace"; then
+		echo "UI smoke test: SVG neighbor prefetch materialized intrinsic source rasters" >&2
+		exit 1
+	fi
 	XDG_STATE_HOME=$previous_state
 	export XDG_STATE_HOME
 else

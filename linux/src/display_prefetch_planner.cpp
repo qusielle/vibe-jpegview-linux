@@ -47,7 +47,8 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 		const bool admissionBudgetAvailable =
 			request.maximumPreparedBytes - estimatedPreparedBytes >= 4;
 		if (!admissionBudgetAvailable && candidate.priority > 2) continue;
-		if (!candidate.jpeg) continue;
+		const bool svg = IsSvgPath(candidate.filename);
+		if (!candidate.jpeg && !svg) continue;
 		PerfContextScope perfContext(candidate.priority <= 2 ?
 			PerfWorkClass::NearestNavigationNeighbor :
 			PerfWorkClass::DistantSpeculation, PerfExecution::WorkerThread);
@@ -96,12 +97,16 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 			request.imageAreaWidth, request.imageAreaHeight);
 		const ViewportRect target = viewport.Destination(sourceWidth, sourceHeight,
 			request.imageAreaWidth, request.imageAreaHeight);
-		const DisplayImageTarget resolution = ClampDisplayImageTarget(sourceWidth,
-			sourceHeight, target.width, target.height);
-		DisplayImageRequest displayRequest = MakeJpegDisplayImageRequest(
-			candidate.source, sourceWidth, sourceHeight,
-			resolution.width, resolution.height,
-			candidate.autoContrast, candidate.priority, candidate.processing);
+		const DisplayImageTarget resolution = svg ?
+			BoundSvgDisplayTarget(target.width, target.height) :
+			ClampDisplayImageTarget(sourceWidth, sourceHeight, target.width, target.height);
+		DisplayImageRequest displayRequest = svg ?
+			MakeSvgDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
+				resolution.width, resolution.height, candidate.autoContrast,
+				candidate.priority, candidate.processing) :
+			MakeJpegDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
+				resolution.width, resolution.height, candidate.autoContrast,
+				candidate.priority, candidate.processing);
 		displayRequest.workClass = candidate.priority <= 2 ?
 			PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
 		if (!displayRequest.Valid()) continue;
@@ -210,8 +215,9 @@ struct DisplayPrefetchPlannerWorker::Impl {
 			WorkContext context = ResolveWorkContext(source.LogicalPath(),
 				SourceWorkPriority::Metadata);
 			context.shouldContinue = shouldContinue;
-			const bool read = ReadJpegDimensions(source.LogicalPath(), width, height,
-				errorMessage, context);
+			const bool read = IsSvgPath(source.LogicalPath()) ?
+				ReadSvgDimensions(source.LogicalPath(), width, height, errorMessage, context) :
+				ReadJpegDimensions(source.LogicalPath(), width, height, errorMessage, context);
 			return read && shouldContinue();
 		};
 		}

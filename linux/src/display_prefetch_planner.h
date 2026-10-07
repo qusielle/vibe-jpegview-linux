@@ -106,7 +106,7 @@ bool MatchesDisplayPrefetchSnapshot(const DisplayPrefetchPlannerResult& result,
 	std::size_t currentIndex, int preferredDirection,
 	const ViewportSnapshot& viewport, int imageAreaWidth, int imageAreaHeight);
 
-// One cancellable worker probes only the JPEGs in a bounded, captured neighbor
+// One cancellable worker probes JPEGs and SVG/SVGZ in a bounded, captured neighbor
 // window and turns their dimensions into renderer-ready request descriptors.
 // It never touches SDL objects or mutable viewer state.
 class DisplayPrefetchPlannerWorker {
