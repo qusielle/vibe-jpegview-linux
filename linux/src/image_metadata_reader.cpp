@@ -64,6 +64,8 @@ bool ReadImageMetadata(const fs::path& filename, ExifInfo& info,
 	case ImageContentFormat::Png:
 	case ImageContentFormat::Apng:
 		return detail::ReadPngMetadata(filename, info, context);
+	case ImageContentFormat::WebP:
+		return detail::ReadWebpMetadata(filename, info, context);
 	case ImageContentFormat::Tiff:
 		return ReadTiffMetadataFile(filename, info, context);
 	case ImageContentFormat::Raw:

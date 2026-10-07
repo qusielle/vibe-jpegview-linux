@@ -3922,6 +3922,113 @@ void TestPngAndApngExifMetadata() {
 		"PNG reader accepted an eXIf chunk extending beyond the file");
 }
 
+void AppendLittleEndian32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+	bytes.push_back(static_cast<std::uint8_t>(value));
+	bytes.push_back(static_cast<std::uint8_t>(value >> 8));
+	bytes.push_back(static_cast<std::uint8_t>(value >> 16));
+	bytes.push_back(static_cast<std::uint8_t>(value >> 24));
+}
+
+void AppendWebpChunk(std::vector<std::uint8_t>& output, const std::string& type,
+	const std::vector<std::uint8_t>& data) {
+	Expect(type.size() == 4, "test WebP chunk type is not four bytes");
+	output.insert(output.end(), type.begin(), type.end());
+	AppendLittleEndian32(output, static_cast<std::uint32_t>(data.size()));
+	output.insert(output.end(), data.begin(), data.end());
+	if ((data.size() & 1u) != 0) output.push_back(0);
+}
+
+std::vector<std::uint8_t> BuildWebpWithExif(const std::vector<std::uint8_t>& tiff,
+	bool withExifPrefix, bool includeOddChunk) {
+	std::vector<std::uint8_t> webp = {
+		'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+	AppendWebpChunk(webp, "VP8X", {0x08, 0, 0, 0, 1, 0, 0, 1, 0, 0});
+	AppendWebpChunk(webp, "VP8 ", {0});
+	if (includeOddChunk) AppendWebpChunk(webp, "JUNK", {0x5a});
+	std::vector<std::uint8_t> exif;
+	if (withExifPrefix) {
+		exif.insert(exif.end(), {'E', 'x', 'i', 'f', 0, 0});
+	}
+	exif.insert(exif.end(), tiff.begin(), tiff.end());
+	if ((exif.size() & 1u) == 0) exif.push_back(0);
+	AppendWebpChunk(webp, "EXIF", exif);
+	const std::uint32_t riffSize = static_cast<std::uint32_t>(webp.size() - 8);
+	webp[4] = static_cast<std::uint8_t>(riffSize);
+	webp[5] = static_cast<std::uint8_t>(riffSize >> 8);
+	webp[6] = static_cast<std::uint8_t>(riffSize >> 16);
+	webp[7] = static_cast<std::uint8_t>(riffSize >> 24);
+	return webp;
+}
+
+void TestWebpExifMetadata() {
+	TemporaryDirectory temporary;
+	const std::vector<std::uint8_t> payload = ExifFixture().Build(true, false, true);
+	const std::vector<std::uint8_t> tiff(payload.begin() + 6, payload.end());
+	const fs::path wrongExtension = temporary.path() / "capture.image-data";
+	WriteBytes(wrongExtension, BuildWebpWithExif(tiff, false, true));
+	jpegview_linux::ExifInfo info;
+	std::string comment;
+	Expect(jpegview_linux::ReadImageContentFormat(wrongExtension) ==
+		jpegview_linux::ImageContentFormat::WebP &&
+		jpegview_linux::ReadImageMetadata(wrongExtension, info, comment) &&
+		info.hasExif && info.cameraModel == "Acme Model" &&
+		info.exposureTime == "1/125" && info.isoSpeed == 200,
+		"WebP EXIF metadata was not selected by content for a file with the wrong suffix");
+
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(wrongExtension);
+	jpegview_linux::ExifMetadataWorker metadataWorker;
+	const std::uint64_t generation = metadataWorker.Request(source);
+	const bool workerIdle = metadataWorker.WaitUntilIdle(std::chrono::seconds(3));
+	const auto workerResults = metadataWorker.TakeReady();
+	Expect(generation != 0 && workerIdle && workerResults.size() == 1 &&
+		workerResults.front().generation == generation &&
+		workerResults.front().source == source.Key() &&
+		workerResults.front().metadataAvailable &&
+		workerResults.front().metadata.exposureTime == "1/125",
+		"metadata worker did not publish WebP EXIF for the selected source");
+
+	const fs::path prefixedExif = temporary.path() / "capture.webp";
+	WriteBytes(prefixedExif, BuildWebpWithExif(tiff, true, false));
+	info = {};
+	Expect(jpegview_linux::ReadImageMetadata(prefixedExif, info, comment) &&
+		info.hasExif && info.cameraModel == "Acme Model" &&
+		info.focalLength == 50.0,
+		"WebP reader did not accept an Exif-prefixed TIFF payload");
+
+	auto malformedSize = BuildWebpWithExif(tiff, false, false);
+	malformedSize[4] = 0xff;
+	malformedSize[5] = 0xff;
+	malformedSize[6] = 0xff;
+	malformedSize[7] = 0x7f;
+	const fs::path malformedSizePath = temporary.path() / "bad-container.webp";
+	WriteBytes(malformedSizePath, malformedSize);
+	info.hasExif = true;
+	info.cameraModel = "stale metadata";
+	Expect(!jpegview_linux::ReadImageMetadata(malformedSizePath, info, comment) &&
+		!info.hasExif && info.cameraModel.empty(),
+		"WebP reader accepted a RIFF size extending beyond the file");
+
+	auto malformedChunk = BuildWebpWithExif(tiff, false, false);
+	const std::array<std::uint8_t, 4> exifType = {'E', 'X', 'I', 'F'};
+	const auto typePosition = std::search(malformedChunk.begin(), malformedChunk.end(),
+		exifType.begin(), exifType.end());
+	Expect(typePosition != malformedChunk.end(),
+		"test WebP did not contain its EXIF chunk");
+	const std::size_t typeOffset = static_cast<std::size_t>(
+		typePosition - malformedChunk.begin());
+	malformedChunk[typeOffset + 4] = 0xff;
+	malformedChunk[typeOffset + 5] = 0xff;
+	malformedChunk[typeOffset + 6] = 0xff;
+	malformedChunk[typeOffset + 7] = 0xff;
+	const fs::path malformedChunkPath = temporary.path() / "bad-chunk.webp";
+	WriteBytes(malformedChunkPath, malformedChunk);
+	info = {};
+	Expect(!jpegview_linux::ReadImageMetadata(malformedChunkPath, info, comment) &&
+		!info.hasExif,
+		"WebP reader accepted an EXIF chunk extending beyond the RIFF container");
+}
+
 void TestFileOperationFolderExifDatesUpdatesOnlyRegularImages() {
 	TemporaryDirectory temporary;
 	const fs::path folder = temporary.path() / "images";
@@ -4006,6 +4113,7 @@ const TestCase kTests[] = {
 	{"tiff-metadata-bounded-random-access", &TestTiffMetadataReaderBoundedRandomAccess},
 	{"image-metadata-reader-dispatches-by-content", &TestImageMetadataReaderDispatchesByContent},
 	{"png-and-apng-exif-metadata", &TestPngAndApngExifMetadata},
+	{"webp-exif-metadata", &TestWebpExifMetadata},
 	{"file-operation-folder-exif-dates-update-only-regular-images", &TestFileOperationFolderExifDatesUpdatesOnlyRegularImages},
 };
 

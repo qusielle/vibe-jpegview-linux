@@ -270,10 +270,6 @@ repeated as new candidates below.
 - **Sort by capture date:** add EXIF capture-time ordering, with a documented fallback for missing
   dates and stable tie-breaking. Metadata lookup should not put a full-folder scan on the event
   thread. See [issue #224](https://github.com/sylikc/jpegview/issues/224).
-- **More resilient capture metadata:** IFD0 shooting-field fallback and content-selected JPEG,
-  TIFF, DNG, PNG, and APNG readers are implemented with regression fixtures. Add WebP `EXIF` chunk
-  support next, while keeping metadata work on the selected-image worker. See
-  [issue #393](https://github.com/sylikc/jpegview/issues/393).
 - **Show the embedded profile name in image information:** Linux already applies embedded ICC
   profiles, but does not identify the profile in its information overlay. Add a concise profile
   description when available; pixel dimensions are already shown, so a megapixel count from
