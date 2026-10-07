@@ -60,6 +60,7 @@ public:
 		info.imageDescription = ReadString(Find(ifd0, 0x010E));
 		info.software = ReadString(Find(ifd0, 0x0131));
 		info.dateTime = ReadString(Find(ifd0, 0x0132));
+		ReadShootingFields(ifd0, info);
 
 		std::vector<TiffEntry> exifIfd;
 		const TiffEntry* exifOffset = Find(ifd0, 0x8769);
@@ -69,22 +70,7 @@ public:
 		}
 		if (!exifIfd.empty()) {
 			info.acquisitionDate = ReadString(Find(exifIfd, 0x9003));
-			const TiffEntry* exposure = Find(exifIfd, 0x829A);
-			info.exposureTime = ReadRationalText(exposure, false);
-			const TiffEntry* exposureBias = Find(exifIfd, 0x9204);
-			info.hasExposureBias = ReadDouble(exposureBias, info.exposureBias);
-			const TiffEntry* flash = Find(exifIfd, 0x9209);
-			std::uint32_t flashValue = 0;
-			info.hasFlash = ReadUnsigned(flash, flashValue);
-			info.flashFired = (flashValue & 1u) != 0;
-			info.hasFocalLength = ReadDouble(Find(exifIfd, 0x920A), info.focalLength);
-			info.hasFNumber = ReadDouble(Find(exifIfd, 0x829D), info.fNumber);
-			const TiffEntry* iso = Find(exifIfd, 0x8827);
-			if (iso == nullptr) iso = Find(exifIfd, 0x8833);
-			std::uint32_t isoValue = 0;
-			if (ReadUnsigned(iso, isoValue) && isoValue <= static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
-				info.isoSpeed = static_cast<int>(isoValue);
-			}
+			ReadShootingFields(exifIfd, info);
 			info.userComment = ReadUserComment(Find(exifIfd, 0x9286));
 			if (info.userComment == "User comments") info.userComment.clear();
 		}
@@ -159,6 +145,39 @@ private:
 			if (entry.tag == tag) return &entry;
 		}
 		return nullptr;
+	}
+
+	void ReadShootingFields(const std::vector<TiffEntry>& entries, ExifInfo& info) const {
+		const std::string exposureTime = ReadRationalText(Find(entries, 0x829A), false);
+		if (!exposureTime.empty()) info.exposureTime = exposureTime;
+
+		double value = 0.0;
+		if (ReadDouble(Find(entries, 0x9204), value)) {
+			info.hasExposureBias = true;
+			info.exposureBias = value;
+		}
+
+		std::uint32_t flashValue = 0;
+		if (ReadUnsigned(Find(entries, 0x9209), flashValue)) {
+			info.hasFlash = true;
+			info.flashFired = (flashValue & 1u) != 0;
+		}
+		if (ReadDouble(Find(entries, 0x920A), value)) {
+			info.hasFocalLength = true;
+			info.focalLength = value;
+		}
+		if (ReadDouble(Find(entries, 0x829D), value)) {
+			info.hasFNumber = true;
+			info.fNumber = value;
+		}
+
+		const TiffEntry* iso = Find(entries, 0x8827);
+		std::uint32_t isoValue = 0;
+		bool hasIso = ReadUnsigned(iso, isoValue);
+		if (!hasIso) hasIso = ReadUnsigned(Find(entries, 0x8833), isoValue);
+		if (hasIso && isoValue <= static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+			info.isoSpeed = static_cast<int>(isoValue);
+		}
 	}
 
 	bool ValueLocation(const TiffEntry* entry, std::size_t& location, std::size_t& length) const {

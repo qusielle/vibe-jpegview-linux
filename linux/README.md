@@ -415,7 +415,9 @@ they support.
     invalidated when their captured catalog, descriptor, viewport, or source state no longer matches;
     EXIF metadata results remain bound to their source identity and request generation and are
     discarded when either becomes stale. Archive-member EXIF reads resume after foreground source
-    work so navigation does not permanently lose optional metadata. Rotate/mirror, crop, resize,
+    work so navigation does not permanently lose optional metadata. Common shooting fields use
+    IFD0 as a safe fallback when the ExifIFD is missing or malformed, while valid ExifIFD values
+    take precedence. Rotate/mirror, crop, resize,
     full-resolution processing, and output-size preparation now use revision-checked worker results;
     identity processing shares its immutable source allocation with the presentation. Large evicted CPU
     buffers are retired on workers rather than destroyed on the event thread. Previously viewed and

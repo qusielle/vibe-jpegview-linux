@@ -3447,27 +3447,44 @@ public:
 		Write32(10, 8);
 	}
 
-	std::vector<std::uint8_t> Build() {
-		const std::uint32_t ifd0 = AddDirectory(7);
-		const std::uint32_t exif = AddDirectory(8);
+	std::vector<std::uint8_t> Build(bool includeExifDirectory = true,
+		bool malformedExifDirectory = false, bool includeIfd0ShootingFields = false) {
+		const std::size_t ifd0EntryCount = 6 + (includeExifDirectory ? 1 : 0) +
+			(includeIfd0ShootingFields ? 6 : 0);
+		const std::uint32_t ifd0 = AddDirectory(ifd0EntryCount);
+		const std::uint32_t exif = includeExifDirectory ? AddDirectory(8) : 0;
 		const std::uint32_t gps = AddDirectory(6);
 		SetEntry(ifd0, 0, 0x010F, 2, 5, AddString("Acme"));
 		SetEntry(ifd0, 1, 0x0110, 2, 6, AddString("Model"));
 		SetEntry(ifd0, 2, 0x010E, 2, 12, AddString("A test image"));
 		SetEntry(ifd0, 3, 0x0131, 2, 6, AddString("Tester"));
 		SetEntry(ifd0, 4, 0x0132, 2, 20, AddString("2024:01:02 03:04:05"));
-		SetEntry(ifd0, 5, 0x8769, 4, 1, exif);
-		SetEntry(ifd0, 6, 0x8825, 4, 1, gps);
+		std::size_t ifd0Entry = 5;
+		if (includeIfd0ShootingFields) {
+			SetEntry(ifd0, ifd0Entry++, 0x829A, 5, 1, AddRational(1, 60));
+			SetEntry(ifd0, ifd0Entry++, 0x9204, 10, 1, AddRational(-2, 3));
+			SetEntryInline16(ifd0, ifd0Entry++, 0x9209, 3, 1, 0);
+			SetEntry(ifd0, ifd0Entry++, 0x920A, 5, 1, AddRational(85, 1));
+			SetEntry(ifd0, ifd0Entry++, 0x829D, 5, 1, AddRational(14, 10));
+			SetEntryInline16(ifd0, ifd0Entry++, 0x8827, 3, 1, 400);
+		}
+		if (includeExifDirectory) {
+			SetEntry(ifd0, ifd0Entry++, 0x8769, 4, 1,
+				malformedExifDirectory ? 0xffffffffu : exif);
+		}
+		SetEntry(ifd0, ifd0Entry, 0x8825, 4, 1, gps);
 
-		SetEntry(exif, 0, 0x9003, 2, 20, AddString("2024:02:03 04:05:06"));
-		SetEntry(exif, 1, 0x829A, 5, 1, AddRational(1, 125));
-		SetEntry(exif, 2, 0x9204, 10, 1, AddRational(-1, 3));
-		SetEntryInline16(exif, 3, 0x9209, 3, 1, 1);
-		SetEntry(exif, 4, 0x920A, 5, 1, AddRational(50, 1));
-		SetEntry(exif, 5, 0x829D, 5, 1, AddRational(28, 10));
-		SetEntryInline16(exif, 6, 0x8827, 3, 1, 200);
-		std::vector<std::uint8_t> comment = {'A', 'S', 'C', 'I', 'I', 0, 0, 0, 'h', 'e', 'l', 'l', 'o', 0};
-		SetEntry(exif, 7, 0x9286, 7, static_cast<std::uint32_t>(comment.size()), AddBytes(comment));
+		if (includeExifDirectory) {
+			SetEntry(exif, 0, 0x9003, 2, 20, AddString("2024:02:03 04:05:06"));
+			SetEntry(exif, 1, 0x829A, 5, 1, AddRational(1, 125));
+			SetEntry(exif, 2, 0x9204, 10, 1, AddRational(-1, 3));
+			SetEntryInline16(exif, 3, 0x9209, 3, 1, 1);
+			SetEntry(exif, 4, 0x920A, 5, 1, AddRational(50, 1));
+			SetEntry(exif, 5, 0x829D, 5, 1, AddRational(28, 10));
+			SetEntryInline16(exif, 6, 0x8827, 3, 1, 200);
+			std::vector<std::uint8_t> comment = {'A', 'S', 'C', 'I', 'I', 0, 0, 0, 'h', 'e', 'l', 'l', 'o', 0};
+			SetEntry(exif, 7, 0x9286, 7, static_cast<std::uint32_t>(comment.size()), AddBytes(comment));
+		}
 
 		SetEntryInlineBytes(gps, 0, 0x0001, 2, 2, {'S', 0});
 		SetEntry(gps, 1, 0x0002, 5, 3, AddRationals({{12, 1}, {34, 1}, {56, 1}}));
@@ -3581,7 +3598,8 @@ void TestExifAndJpegCommentParsing() {
 	std::string error;
 	Expect(jpegview_linux::WriteImage(jpeg, pixels.data(), 2, 2, options, error),
 		"cannot create EXIF fixture JPEG: " + error);
-	const std::vector<std::uint8_t> withExif = InsertJpegSegment(ReadBytes(jpeg), 0xe1, ExifFixture().Build());
+	const std::vector<std::uint8_t> withExif = InsertJpegSegment(ReadBytes(jpeg), 0xe1,
+		ExifFixture().Build(true, false, true));
 	const std::vector<std::uint8_t> withComment = InsertJpegSegment(withExif, 0xfe,
 		std::vector<std::uint8_t>{'t', 'e', 's', 't', ' ', 'c', 'o', 'm', 'm', 'e', 'n', 't'});
 	WriteBytes(jpeg, withComment);
@@ -3649,6 +3667,37 @@ void TestExifAndJpegCommentParsing() {
 	comment.clear();
 	Expect(!jpegview_linux::ReadJpegMetadata(malformed, info, comment), "malformed metadata should be treated as absent");
 	Expect(!info.hasExif, "malformed metadata was incorrectly accepted as EXIF");
+}
+
+void TestExifIfd0ShootingFieldFallback() {
+	TemporaryDirectory temporary;
+	const fs::path base = temporary.path() / "base.jpg";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	ImageWriteOptions options;
+	options.jpegQuality = 100;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(base, pixels.data(), 2, 2, options, error),
+		"cannot create IFD0 fallback fixture JPEG: " + error);
+	const std::vector<std::uint8_t> jpeg = ReadBytes(base);
+
+	const auto verifyFallback = [&](const std::string& name, bool includeExifDirectory,
+		bool malformedExifDirectory) {
+		const fs::path filename = temporary.path() / name;
+		WriteBytes(filename, InsertJpegSegment(jpeg, 0xe1,
+			ExifFixture().Build(includeExifDirectory, malformedExifDirectory, true)));
+		jpegview_linux::ExifInfo info;
+		std::string comment;
+		Expect(jpegview_linux::ReadJpegMetadata(filename, info, comment),
+			"IFD0 shooting fields were rejected from " + name);
+		Expect(info.hasExif && info.exposureTime == "1/60" && info.hasExposureBias &&
+			std::abs(info.exposureBias + 2.0 / 3.0) < 0.0001 &&
+			info.hasFlash && !info.flashFired && info.hasFocalLength &&
+			std::abs(info.focalLength - 85.0) < 0.0001 && info.hasFNumber &&
+			std::abs(info.fNumber - 1.4) < 0.0001 && info.isoSpeed == 400,
+			"valid IFD0 shooting fields were not used when ExifIFD was absent or malformed");
+	};
+	verifyFallback("without-exif-ifd.jpg", false, false);
+	verifyFallback("malformed-exif-ifd.jpg", true, true);
 }
 
 void TestFileOperationFolderExifDatesUpdatesOnlyRegularImages() {
@@ -3731,6 +3780,7 @@ const TestCase kTests[] = {
 	{"external-command-planning", &TestExternalCommandPlanning},
 	{"gps-map-provider-url-validation-and-coordinate-formatting", &TestGpsMapProviderUrlValidationAndCoordinateFormatting},
 	{"exif-and-jpeg-comment-parsing", &TestExifAndJpegCommentParsing},
+	{"exif-ifd0-shooting-field-fallback", &TestExifIfd0ShootingFieldFallback},
 	{"file-operation-folder-exif-dates-update-only-regular-images", &TestFileOperationFolderExifDatesUpdatesOnlyRegularImages},
 };
 
