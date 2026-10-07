@@ -163,6 +163,10 @@ should normally be added to one of these focused modules and covered by the matc
 - `image`: validated mutable BGRA storage, half-open crop extraction, rotate/mirror transforms,
   high-quality downsampling, Catmull–Rom bicubic enlargement, and the automatic/manual picture-level
   processing pipeline.
+- `image_transform_geometry`: validated pixel-center mapping and output bounds for free rotation,
+  including expanded canvas geometry, centered contained cropping, optional source-aspect
+  preservation, and exact orthogonal-turn identification. It performs no pixel allocation or
+  rendering.
 - `image_document`: lazy current-image metadata plus immutable, shared source and presentation pixels,
   owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer
@@ -1142,11 +1146,12 @@ roots or adding plugin inputs from silently reusing an older plugin. Sanitizer b
 
 `tests/test_main.cpp` runs every registered case by default and preserves the stable test-name strings
 when cases are grouped into `source_navigation`, `work_admission`, `codec_display`, `image_cache`,
-`image_operations`, `viewer_models`, and `dialogs_sessions`. `--suite` and `--filter` select focused
-cases for local iteration; `make test` always runs the complete suite and its performance-trace
-validation. `make test-perf` is opt-in and measures synthetic 4000x2500 BGRA image processing and
-resizing. It reports timings and deterministic pixel checksums without hardware-dependent thresholds;
-it is not a substitute for a real photo-directory and renderer benchmark.
+`image_operations`, `image_transform_geometry`, `viewer_models`, and `dialogs_sessions`. `--suite`
+and `--filter` select focused cases for local iteration; `make test` always runs the complete suite
+and its performance-trace validation. `make test-perf` is opt-in and measures synthetic 4000x2500
+BGRA image processing and resizing. It reports timings and deterministic pixel checksums without
+hardware-dependent thresholds; it is not a substitute for a real photo-directory and renderer
+benchmark.
 
 Published AppImages receive `APPIMAGE_UPDATE_INFORMATION` from `release-assets.sh`; local and
 branch-build AppImages omit it unless explicitly requested. Each Ubuntu release uses AppImage's

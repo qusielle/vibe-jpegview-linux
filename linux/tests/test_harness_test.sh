@@ -17,6 +17,7 @@ work_admission
 codec_display
 image_cache
 image_operations
+image_transform_geometry
 viewer_models
 dialogs_sessions
 EOF

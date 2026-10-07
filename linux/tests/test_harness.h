@@ -19,6 +19,7 @@ const TestSuite& GetWorkAdmissionSuite();
 const TestSuite& GetCodecDisplaySuite();
 const TestSuite& GetImageCacheSuite();
 const TestSuite& GetImageOperationsSuite();
+const TestSuite& GetImageTransformGeometrySuite();
 const TestSuite& GetViewerModelsSuite();
 const TestSuite& GetDialogsSessionsSuite();
 

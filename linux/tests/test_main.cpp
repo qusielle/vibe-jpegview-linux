@@ -16,6 +16,7 @@ const std::vector<const TestSuite*>& TestSuites() {
 		&GetCodecDisplaySuite(),
 		&GetImageCacheSuite(),
 		&GetImageOperationsSuite(),
+		&GetImageTransformGeometrySuite(),
 		&GetViewerModelsSuite(),
 		&GetDialogsSessionsSuite(),
 	};

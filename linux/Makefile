@@ -108,6 +108,7 @@ CORE_CPP_SOURCES := \
 	src/event_loop_model.cpp src/modal_event_router.cpp \
 	src/image_spectrum_worker.cpp src/image_document.cpp \
 	src/image_operation_worker.cpp src/file_operation_service.cpp \
+	src/image_transform_geometry.cpp \
 	src/external_process.cpp src/exif_metadata_worker.cpp \
 	src/pending_image_intents.cpp src/archive_source.cpp \
 	$(ARCHIVE_SOURCE_SOURCES) src/cache_policy.cpp \
@@ -144,7 +145,8 @@ APP_CPP_SOURCES := src/main.cpp $(CORE_CPP_SOURCES) \
 TEST_SUITE_CPP_SOURCES := tests/test_main.cpp \
 	tests/test_source_navigation.cpp tests/test_work_admission.cpp \
 	tests/test_codec_display.cpp tests/test_image_cache.cpp \
-	tests/test_image_operations.cpp tests/test_viewer_models.cpp \
+	tests/test_image_operations.cpp tests/test_image_transform_geometry.cpp \
+	tests/test_viewer_models.cpp \
 	tests/test_dialogs_sessions.cpp
 TEST_CPP_SOURCES := $(TEST_SUITE_CPP_SOURCES) $(CORE_CPP_SOURCES) \
 	$(SDL_ADAPTER_CPP_SOURCES) $(BACKEND_CPP_SOURCES)
