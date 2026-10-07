@@ -1089,6 +1089,7 @@ void TestContextMenuCatalogAndState() {
 	state.sortAscending = false;
 	state.imageAvailable = true;
 	state.freeRotationAvailable = true;
+	state.perspectiveCorrectionAvailable = true;
 	state.magnifyingGlassEnabled = true;
 	state.pixelColorSamplerEnabled = true;
 	state.doublePageModeEnabled = true;
@@ -1162,6 +1163,7 @@ void TestContextMenuCatalogAndState() {
 		"context menu did not reflect navigation and ordering state");
 	Expect(findCommand(advanced, IDM_CHANGESIZE)->enabled &&
 		findCommand(advanced, IDM_ROTATE)->enabled &&
+		findCommand(advanced, IDM_PERSPECTIVE)->enabled &&
 		findCommand(advanced, IDM_ROTATE_90_LOSSLESS)->enabled &&
 		findCommand(advanced, IDM_AUTO_CORRECTION)->checked &&
 		findCommand(advanced, IDM_SAVE_PARAMETERS)->enabled &&
@@ -1200,6 +1202,7 @@ void TestContextMenuCatalogAndState() {
 	const std::vector<MenuItem> disabled = jpegview_linux::BuildContextMenu(unavailable, true);
 	Expect(!findCommand(disabled, IDM_CHANGESIZE)->enabled &&
 		!findCommand(disabled, IDM_ROTATE)->enabled &&
+		!findCommand(disabled, IDM_PERSPECTIVE)->enabled &&
 		!findCommand(disabled, IDM_ROTATE_90_LOSSLESS)->enabled &&
 		!findCommand(disabled, IDM_AUTO_CORRECTION)->enabled &&
 		!findCommand(disabled, IDM_SAVE_PARAMETERS)->enabled &&
@@ -4448,6 +4451,7 @@ void TestModalEventRouterPrecedence() {
 		{&state.batchCopy, ModalEventRoute::BatchCopy},
 		{&state.resize, ModalEventRoute::Resize},
 		{&state.freeRotation, ModalEventRoute::FreeRotation},
+		{&state.perspectiveCorrection, ModalEventRoute::PerspectiveCorrection},
 		{&state.fixedCropSize, ModalEventRoute::FixedCropSize},
 		{&state.goToImageNumber, ModalEventRoute::GoToImageNumber},
 		{&state.unsharpMask, ModalEventRoute::UnsharpMask},

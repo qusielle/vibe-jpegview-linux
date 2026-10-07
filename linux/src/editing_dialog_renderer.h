@@ -68,6 +68,24 @@ struct FreeRotationDialogPaint {
 	std::array<DialogButtonPaint, 2> buttons;
 };
 
+struct PerspectiveSliderPaint {
+	SDL_Rect rect{};
+	std::string label;
+	std::string value;
+	int knobX = 0;
+	bool focused = false;
+};
+
+struct PerspectiveCorrectionDialogPaint {
+	bool visible = false;
+	bool applying = false;
+	SDL_Rect dialog{};
+	std::array<PerspectiveSliderPaint, 2> sliders;
+	std::array<DialogTogglePaint, 3> toggles;
+	std::string message;
+	std::array<DialogButtonPaint, 2> buttons;
+};
+
 struct CropSizeFieldPaint {
 	SDL_Rect rect{};
 	std::string label;
@@ -126,6 +144,7 @@ public:
 	void Render(const UnsharpMaskDialogPaint& paint);
 	void Render(const ResizeDialogPaint& paint);
 	void Render(const FreeRotationDialogPaint& paint);
+	void Render(const PerspectiveCorrectionDialogPaint& paint);
 	void Render(const FixedCropSizeDialogPaint& paint);
 	void Render(const BatchCopyDialogPaint& paint);
 

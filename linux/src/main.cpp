@@ -38,6 +38,7 @@
 #include "crop_selection_model.h"
 #include "crop_size_dialog_model.h"
 #include "free_rotation_model.h"
+#include "perspective_correction_model.h"
 #include "go_to_image_number_model.h"
 #include "pixel_color_sampler.h"
 #include "zoom_navigator_model.h"
@@ -538,6 +539,8 @@ private:
 		Transform,
 		FreeRotationPreview,
 		FreeRotation,
+		PerspectiveCorrectionPreview,
+		PerspectiveCorrection,
 		Crop,
 		Resize,
 		Reprocess,
@@ -777,6 +780,8 @@ private:
 		jpegview_linux::UiCompletionWakeup().SetPostFunction({});
 		if (freeRotationDialog_.IsOpen()) CloseFreeRotationDialog(false);
 		else DestroyFreeRotationPreview();
+		if (perspectiveCorrectionDialog_.IsOpen()) ClosePerspectiveCorrectionDialog(false);
+		else DestroyPerspectiveCorrectionPreview();
 		fileOperationService_.Stop();
 		imageSpectrumWorker_.Stop();
 		fileDialogPreviewLoader_.Shutdown();
@@ -2035,6 +2040,7 @@ private:
 			return false;
 		}
 		if (freeRotationDialog_.IsOpen()) CloseFreeRotationDialog();
+		if (perspectiveCorrectionDialog_.IsOpen()) ClosePerspectiveCorrectionDialog();
 		CancelPendingImageOperation();
 		CancelImageSpectrumBeforeImageMutation();
 		const fs::path targetPath = AbsoluteNormalized(fileList_.Current());
@@ -2820,6 +2826,9 @@ private:
 		} else if (purpose == ImageOperationPurpose::FreeRotationPreview ||
 			purpose == ImageOperationPurpose::FreeRotation) {
 			freeRotationDialog_.SetMessage("Waiting for selected image");
+		} else if (purpose == ImageOperationPurpose::PerspectiveCorrectionPreview ||
+			purpose == ImageOperationPurpose::PerspectiveCorrection) {
+			perspectiveCorrectionDialog_.SetMessage("Waiting for selected image");
 		} else {
 			SetTitle("Waiting for selected image before image operation");
 		}
@@ -2896,6 +2905,10 @@ private:
 				freeRotationDialog_.SetMessage("Preparing source pixels for preview");
 			} else if (pending.purpose == ImageOperationPurpose::FreeRotation) {
 				freeRotationDialog_.SetMessage("Preparing source pixels for rotation");
+			} else if (pending.purpose == ImageOperationPurpose::PerspectiveCorrectionPreview) {
+				perspectiveCorrectionDialog_.SetMessage("Preparing source pixels for preview");
+			} else if (pending.purpose == ImageOperationPurpose::PerspectiveCorrection) {
+				perspectiveCorrectionDialog_.SetMessage("Preparing source pixels for correction");
 			} else {
 				SetTitle("Preparing source pixels for image operation");
 			}
@@ -2903,7 +2916,9 @@ private:
 		}
 		if (imageDocument_.Animated() && playback_.AnimationPlaying() &&
 			pending.purpose != ImageOperationPurpose::FreeRotationPreview &&
-			pending.purpose != ImageOperationPurpose::FreeRotation) {
+			pending.purpose != ImageOperationPurpose::FreeRotation &&
+			pending.purpose != ImageOperationPurpose::PerspectiveCorrectionPreview &&
+			pending.purpose != ImageOperationPurpose::PerspectiveCorrection) {
 			pending.pausedAnimationPlayback = true;
 			playback_.SetImageReady(false, SDL_GetTicks());
 		}
@@ -2926,6 +2941,10 @@ private:
 			freeRotationDialog_.SetMessage("Preparing preview");
 		} else if (pending.purpose == ImageOperationPurpose::FreeRotation) {
 			freeRotationDialog_.SetMessage("Applying rotation");
+		} else if (pending.purpose == ImageOperationPurpose::PerspectiveCorrectionPreview) {
+			perspectiveCorrectionDialog_.SetMessage("Preparing preview");
+		} else if (pending.purpose == ImageOperationPurpose::PerspectiveCorrection) {
+			perspectiveCorrectionDialog_.SetMessage("Applying perspective correction");
 		} else {
 			SetTitle("Preparing image operation");
 		}
@@ -2947,6 +2966,13 @@ private:
 			break;
 		case ImageOperationPurpose::FreeRotation:
 			freeRotationDialog_.ResumeEditing("Rotation failed: " + detail);
+			break;
+		case ImageOperationPurpose::PerspectiveCorrectionPreview:
+			perspectiveCorrectionDialog_.SetMessage("Preview failed: " + detail);
+			break;
+		case ImageOperationPurpose::PerspectiveCorrection:
+			perspectiveCorrectionDialog_.ResumeEditing(
+				"Perspective correction failed: " + detail);
 			break;
 		case ImageOperationPurpose::Transform:
 			SetTitle("Image transform failed: " + detail);
@@ -2978,6 +3004,7 @@ private:
 		const jpegview_linux::ImageOperationResult& result) const {
 		if (pending.purpose == ImageOperationPurpose::Transform ||
 			pending.purpose == ImageOperationPurpose::FreeRotation ||
+			pending.purpose == ImageOperationPurpose::PerspectiveCorrection ||
 			pending.purpose == ImageOperationPurpose::Crop ||
 			pending.purpose == ImageOperationPurpose::Resize) return true;
 		return pending.purpose == ImageOperationPurpose::Reprocess &&
@@ -3035,6 +3062,51 @@ private:
 				result->failure.kind != jpegview_linux::WorkerFailureKind::Cancelled) {
 				freeRotationDialog_.SetMessage("Preview failed: " +
 					(result->failure.message.empty() ? "operation failed" : result->failure.message));
+			}
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			imageOperationWorker_.Retire(std::move(*result));
+			replayLaterIntents();
+			return;
+		}
+		if (pending.purpose == ImageOperationPurpose::PerspectiveCorrectionPreview) {
+			const bool currentPreview = perspectiveCorrectionDialog_.MatchesPreview(
+				pending.transformEditorSessionId, pending.transformPreviewRevision) &&
+				imageDocument_.Matches(result->expected);
+			if (currentPreview && result->success && result->outputPixels) {
+				SDL_Texture* previewTexture = CreateTexture(*result->outputPixels);
+				if (previewTexture == nullptr) {
+					perspectiveCorrectionDialog_.SetMessage("Could not upload preview");
+				} else {
+					DestroyPerspectiveCorrectionPreview();
+					const std::size_t bytes = result->outputPixels->bgra.size();
+					perspectiveCorrectionTextureReservation_ = cacheBudget_->TrackTemporary(
+						bytes, jpegview_linux::CacheMemoryCategory::ActiveWorkingData);
+					if (!perspectiveCorrectionTextureReservation_) {
+						DestroyTextureMeasured(previewTexture);
+						perspectiveCorrectionDialog_.SetMessage(
+							"Could not account preview memory");
+					} else {
+						perspectiveCorrectionPreviewTexture_ = previewTexture;
+						perspectiveCorrectionPreviewWidth_ = result->outputPixels->width;
+						perspectiveCorrectionPreviewHeight_ = result->outputPixels->height;
+						perspectiveCorrectionPreviewHasTransparency_ =
+							result->outputPixels->hasTransparency;
+						perspectiveCorrectionPreviewSessionId_ =
+							pending.transformEditorSessionId;
+						perspectiveCorrectionPreviewRevision_ =
+							pending.transformPreviewRevision;
+						const SDL_Rect area = ImageAreaRect();
+						perspectiveCorrectionPreviewViewport_.Fit(
+							perspectiveCorrectionPreviewWidth_,
+							perspectiveCorrectionPreviewHeight_, area.w, area.h);
+						perspectiveCorrectionDialog_.SetMessage({});
+					}
+				}
+			} else if (currentPreview &&
+				result->failure.kind != jpegview_linux::WorkerFailureKind::Cancelled) {
+				perspectiveCorrectionDialog_.SetMessage("Preview failed: " +
+					(result->failure.message.empty() ? "operation failed" :
+						result->failure.message));
 			}
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 			imageOperationWorker_.Retire(std::move(*result));
@@ -3105,6 +3177,15 @@ private:
 				cropSelection_.SetImageSize(CurrentImage().width, CurrentImage().height);
 				RestoreScaleMode(viewport_.Snapshot());
 				CompleteFreeRotationApply(true);
+			} else if (pending.purpose == ImageOperationPurpose::PerspectiveCorrection) {
+				currentSpreadRotationValid_ = false;
+				currentSourcePageDimensions_.reset();
+				ClearCropSelection();
+				CancelImageSpectrumBeforeImageMutation();
+				imageSession_.MarkDocumentChanged();
+				cropSelection_.SetImageSize(CurrentImage().width, CurrentImage().height);
+				RestoreScaleMode(viewport_.Snapshot());
+				CompletePerspectiveCorrectionApply(true);
 			} else if (pending.purpose == ImageOperationPurpose::Crop ||
 				pending.purpose == ImageOperationPurpose::Resize) {
 				currentSpreadRotationValid_ = false;
@@ -3122,6 +3203,7 @@ private:
 			RefreshDoublePageRenderState();
 			if (pending.purpose == ImageOperationPurpose::Transform ||
 				pending.purpose == ImageOperationPurpose::FreeRotation ||
+				pending.purpose == ImageOperationPurpose::PerspectiveCorrection ||
 				pending.purpose == ImageOperationPurpose::Crop ||
 				pending.purpose == ImageOperationPurpose::Resize) SetTitle();
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
@@ -7388,7 +7470,8 @@ private:
 		if (contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ || aboutOpen_ || helpOpen_ ||
 			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
-			freeRotationDialog_.IsOpen() || (SDL_GetModState() & blockedModifierMask) != 0) {
+			freeRotationDialog_.IsOpen() || perspectiveCorrectionDialog_.IsOpen() ||
+			(SDL_GetModState() & blockedModifierMask) != 0) {
 			heldNavigation_.Reset();
 			return;
 		}
@@ -8262,6 +8345,9 @@ private:
 		case IDM_ROTATE:
 			OpenFreeRotationDialog();
 			break;
+		case IDM_PERSPECTIVE:
+			OpenPerspectiveCorrectionDialog();
+			break;
 		case IDM_CROP_SEL:
 			CropCurrentSelection();
 			break;
@@ -8776,6 +8862,9 @@ private:
 		state.sortAscending = fileList_.IsSortedAscending();
 		state.imageAvailable = CurrentImage().width > 0;
 		state.freeRotationAvailable = state.imageAvailable && !clipboardMode_ &&
+			!currentSelectedLoadPending_ && !pendingImageOperation_.has_value();
+		state.perspectiveCorrectionAvailable = CurrentImage().width >= 2 &&
+			CurrentImage().height >= 2 && !clipboardMode_ &&
 			!currentSelectedLoadPending_ && !pendingImageOperation_.has_value();
 		state.fileListAvailable = !fileList_.Empty() && !clipboardMode_;
 		state.archiveMember = archiveMember;
@@ -9416,7 +9505,8 @@ private:
 		if (fileList_.Empty() || CurrentImage().width <= 0 || CurrentImage().height <= 0 ||
 			currentSelectedLoadPending_ || pendingImageOperation_.has_value() ||
 			!pendingMaterializationIntents_.empty() || batchCopyDialog_.IsOpen() ||
-			resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() || unsharpDialogOpen_ ||
+			resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
+			perspectiveCorrectionDialog_.IsOpen() || unsharpDialogOpen_ ||
 			pictureLevelsPanelOpen_ || confirmationOpen_ || aboutOpen_ || helpOpen_ ||
 			archivePasswordDialog_.IsOpen() || advancedConfiguration_.IsOpen()) return;
 		if (!freeRotationDialog_.Open(CurrentImage().width, CurrentImage().height)) return;
@@ -9586,6 +9676,345 @@ private:
 		}
 		const SDL_Rect apply = FreeRotationButtonRect(0);
 		const SDL_Rect cancel = FreeRotationButtonRect(1);
+		paint.buttons[0] = {apply, paint.applying ? "APPLYING" : "APPLY",
+			PointInRect(lastMouseX_, lastMouseY_, apply), !paint.applying};
+		paint.buttons[1] = {cancel, "CANCEL",
+			PointInRect(lastMouseX_, lastMouseY_, cancel), true};
+		editingDialogRenderer_.Render(paint);
+	}
+
+	SDL_Rect PerspectiveCorrectionDialogRect() const {
+		int windowWidth = 0;
+		int windowHeight = 0;
+		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
+		const int width = std::min(620, std::max(440, windowWidth - 32));
+		const int height = std::min(390, std::max(350, windowHeight - 32));
+		return {std::max(0, (windowWidth - width) / 2),
+			std::max(0, (windowHeight - height) / 2), width, height};
+	}
+
+	SDL_Rect PerspectiveCorrectionSliderRect(int edge) const {
+		const SDL_Rect dialog = PerspectiveCorrectionDialogRect();
+		return {dialog.x + 24, dialog.y + 86 + edge * 60,
+			dialog.w - 48, 22};
+	}
+
+	SDL_Rect PerspectiveCorrectionToggleRect(int index) const {
+		const SDL_Rect dialog = PerspectiveCorrectionDialogRect();
+		return {dialog.x + 18, dialog.y + 184 + index * 28,
+			dialog.w - 36, 26};
+	}
+
+	SDL_Rect PerspectiveCorrectionButtonRect(int button) const {
+		const SDL_Rect dialog = PerspectiveCorrectionDialogRect();
+		const int y = dialog.y + dialog.h - 43;
+		if (button == 0) return {dialog.x + dialog.w - 198, y, 86, 30};
+		if (button == 1) return {dialog.x + dialog.w - 102, y, 86, 30};
+		return {};
+	}
+
+	void DestroyPerspectiveCorrectionPreview() {
+		if (perspectiveCorrectionPreviewTexture_ != nullptr) {
+			DestroyTextureMeasured(perspectiveCorrectionPreviewTexture_,
+				perspectiveCorrectionTextureReservation_.Bytes());
+			perspectiveCorrectionPreviewTexture_ = nullptr;
+		}
+		perspectiveCorrectionTextureReservation_.Reset();
+		perspectiveCorrectionPreviewWidth_ = 0;
+		perspectiveCorrectionPreviewHeight_ = 0;
+		perspectiveCorrectionPreviewHasTransparency_ = false;
+		perspectiveCorrectionPreviewSessionId_ = 0;
+		perspectiveCorrectionPreviewRevision_ = 0;
+	}
+
+	void CancelPerspectiveCorrectionPreviewRequest() {
+		if (!pendingImageOperation_.has_value() ||
+			pendingImageOperation_->purpose !=
+				ImageOperationPurpose::PerspectiveCorrectionPreview) return;
+		pendingImageOperation_.reset();
+		imageOperationWorker_.Cancel();
+	}
+
+	bool RequestPerspectiveCorrectionPreview() {
+		if (!perspectiveCorrectionDialog_.IsOpen() ||
+			perspectiveCorrectionDialog_.IsApplying() || fileList_.Empty() ||
+			currentSelectedLoadPending_) return false;
+		if (pendingImageOperation_.has_value()) {
+			if (pendingImageOperation_->purpose !=
+				ImageOperationPurpose::PerspectiveCorrectionPreview) return false;
+			CancelPerspectiveCorrectionPreviewRequest();
+		}
+		DestroyPerspectiveCorrectionPreview();
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::PerspectivePreview;
+		operation.perspective = perspectiveCorrectionDialog_.Parameters().transform;
+		perspectiveCorrectionDialog_.SetMessage("Preparing preview");
+		if (!RequestImageOperation(operation,
+			ImageOperationPurpose::PerspectiveCorrectionPreview)) {
+			perspectiveCorrectionDialog_.SetMessage("Could not start preview");
+			return false;
+		}
+		if (pendingImageOperation_.has_value() &&
+			pendingImageOperation_->purpose ==
+				ImageOperationPurpose::PerspectiveCorrectionPreview) {
+			pendingImageOperation_->transformEditorSessionId =
+				perspectiveCorrectionDialog_.SessionId();
+			pendingImageOperation_->transformPreviewRevision =
+				perspectiveCorrectionDialog_.PreviewRevision();
+		}
+		return true;
+	}
+
+	void ClosePerspectiveCorrectionDialog(bool resumePlayback = true) {
+		if (!perspectiveCorrectionDialog_.IsOpen()) return;
+		if (pendingImageOperation_.has_value() &&
+			pendingImageOperation_->purpose ==
+				ImageOperationPurpose::PerspectiveCorrection) {
+			CancelPendingImageOperation();
+		} else {
+			CancelPerspectiveCorrectionPreviewRequest();
+		}
+		perspectiveCorrectionDialog_.Close();
+		perspectiveCorrectionDraggingSlider_ = -1;
+		DestroyPerspectiveCorrectionPreview();
+		if (perspectiveCorrectionModalPlaybackSuppressed_) {
+			perspectiveCorrectionModalPlaybackSuppressed_ = false;
+			if (resumePlayback) playback_.SetTemporarilyPaused(false, SDL_GetTicks());
+		}
+		SetTitle();
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+	}
+
+	void CompletePerspectiveCorrectionApply(bool resumePlayback) {
+		perspectiveCorrectionDialog_.CompleteApply();
+		perspectiveCorrectionDraggingSlider_ = -1;
+		DestroyPerspectiveCorrectionPreview();
+		const bool wasSuppressed = perspectiveCorrectionModalPlaybackSuppressed_;
+		perspectiveCorrectionModalPlaybackSuppressed_ = false;
+		if (wasSuppressed && resumePlayback) playback_.SetTemporarilyPaused(false,
+			SDL_GetTicks());
+		SetTitle();
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+	}
+
+	void OpenPerspectiveCorrectionDialog() {
+		if (fileList_.Empty() || CurrentImage().width < 2 || CurrentImage().height < 2 ||
+			currentSelectedLoadPending_ || pendingImageOperation_.has_value() ||
+			!pendingMaterializationIntents_.empty() || batchCopyDialog_.IsOpen() ||
+			resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() || unsharpDialogOpen_ ||
+			freeRotationDialog_.IsOpen() || pictureLevelsPanelOpen_ || confirmationOpen_ ||
+			aboutOpen_ || helpOpen_ ||
+			archivePasswordDialog_.IsOpen() || advancedConfiguration_.IsOpen()) return;
+		if (!perspectiveCorrectionDialog_.Open(CurrentImage().width, CurrentImage().height)) return;
+		contextMenuOpen_ = false;
+		fileDialogOpen_ = false;
+		batchCopyDialog_.Close();
+		perspectiveCorrectionModalPlaybackSuppressed_ = true;
+		playback_.SetTemporarilyPaused(true, SDL_GetTicks());
+		const SDL_Rect area = ImageAreaRect();
+		perspectiveCorrectionPreviewViewport_.Fit(CurrentImage().width,
+			CurrentImage().height, area.w, area.h);
+		perspectiveCorrectionActiveSlider_ = 0;
+		(void)RequestPerspectiveCorrectionPreview();
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+	}
+
+	void ApplyPerspectiveCorrectionDialog() {
+		const auto& correction = perspectiveCorrectionDialog_.Parameters().transform;
+		if (std::abs(correction.leftDeltaFraction) < 1e-12 &&
+			std::abs(correction.rightDeltaFraction) < 1e-12) {
+			ClosePerspectiveCorrectionDialog();
+			return;
+		}
+		if (!perspectiveCorrectionDialog_.BeginApply()) return;
+		CancelPerspectiveCorrectionPreviewRequest();
+		jpegview_linux::ImageOperationSpec operation;
+		operation.kind = jpegview_linux::ImageOperationKind::PerspectiveCorrect;
+		operation.perspective = correction;
+		if (!RequestImageOperation(operation,
+			ImageOperationPurpose::PerspectiveCorrection)) {
+			perspectiveCorrectionDialog_.ResumeEditing(
+				"Perspective correction could not be queued");
+		}
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+	}
+
+	void SetPerspectiveCorrectionSliderFromPointer(int edge, int pointerX) {
+		if (!perspectiveCorrectionDialog_.IsOpen() ||
+			perspectiveCorrectionDialog_.IsApplying() || edge < 0 || edge > 1) return;
+		const SDL_Rect slider = PerspectiveCorrectionSliderRect(edge);
+		const int x = std::clamp(pointerX, slider.x, slider.x + slider.w);
+		const double fraction = static_cast<double>(x - slider.x) /
+			static_cast<double>(std::max(1, slider.w));
+		const double value = -jpegview_linux::kMaximumPerspectiveCorrectionFraction +
+			fraction * 2.0 * jpegview_linux::kMaximumPerspectiveCorrectionFraction;
+		const bool changed = edge == 0 ?
+			perspectiveCorrectionDialog_.SetLeftDeltaFraction(value) :
+			perspectiveCorrectionDialog_.SetRightDeltaFraction(value);
+		if (changed) (void)RequestPerspectiveCorrectionPreview();
+	}
+
+	void NudgePerspectiveCorrectionSlider(double direction, bool fine) {
+		if (!perspectiveCorrectionDialog_.IsOpen() ||
+			perspectiveCorrectionDialog_.IsApplying()) return;
+		const double delta = direction * (fine ? 0.001 : 0.005);
+		const bool changed = perspectiveCorrectionActiveSlider_ == 0 ?
+			perspectiveCorrectionDialog_.NudgeLeftDelta(delta) :
+			perspectiveCorrectionDialog_.NudgeRightDelta(delta);
+		if (changed) (void)RequestPerspectiveCorrectionPreview();
+	}
+
+	void TogglePerspectiveCorrectionOption(int index) {
+		if (perspectiveCorrectionDialog_.IsApplying()) return;
+		const auto& parameters = perspectiveCorrectionDialog_.Parameters();
+		bool changed = false;
+		if (index == 0) changed = perspectiveCorrectionDialog_.SetAutoCrop(
+			!parameters.transform.autoCrop);
+		else if (index == 1) changed = perspectiveCorrectionDialog_.SetPreserveAspectRatio(
+			!parameters.transform.preserveAspectRatio);
+		else if (index == 2) changed = perspectiveCorrectionDialog_.SetGridVisible(
+			!parameters.showGrid);
+		if (changed) (void)RequestPerspectiveCorrectionPreview();
+	}
+
+	void HandlePerspectiveCorrectionDialogEvents(const SDL_Event& event, bool& running) {
+		switch (event.type) {
+		case SDL_QUIT:
+			running = false;
+			break;
+		case SDL_WINDOWEVENT:
+			if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+				perspectiveCorrectionDraggingSlider_ = -1;
+			} else if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+				event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+				const SDL_Rect area = ImageAreaRect();
+				perspectiveCorrectionPreviewViewport_.Fit(
+					perspectiveCorrectionPreviewWidth_,
+					perspectiveCorrectionPreviewHeight_, area.w, area.h);
+			}
+			break;
+		case SDL_KEYDOWN: {
+			if (event.key.repeat != 0) break;
+			const Sint32 key = event.key.keysym.sym;
+			const bool shift = (event.key.keysym.mod & 0x0003u) != 0;
+			if (key == SDLK_ESCAPE) {
+				ClosePerspectiveCorrectionDialog();
+			} else if (key == SDLK_RETURN) {
+				ApplyPerspectiveCorrectionDialog();
+			} else if (key == SDLK_TAB && !perspectiveCorrectionDialog_.IsApplying()) {
+				perspectiveCorrectionActiveSlider_ =
+					1 - perspectiveCorrectionActiveSlider_;
+			} else if (key == SDLK_HOME && !perspectiveCorrectionDialog_.IsApplying()) {
+				const bool leftChanged =
+					perspectiveCorrectionDialog_.SetLeftDeltaFraction(0.0);
+				const bool rightChanged =
+					perspectiveCorrectionDialog_.SetRightDeltaFraction(0.0);
+				if (leftChanged || rightChanged) (void)RequestPerspectiveCorrectionPreview();
+			} else if ((key == SDLK_LEFT || key == SDLK_RIGHT) &&
+				!perspectiveCorrectionDialog_.IsApplying()) {
+				NudgePerspectiveCorrectionSlider(key == SDLK_RIGHT ? 1.0 : -1.0, shift);
+			} else if (key == 'a') {
+				TogglePerspectiveCorrectionOption(0);
+			} else if (key == 'p') {
+				TogglePerspectiveCorrectionOption(1);
+			} else if (key == 'g') {
+				TogglePerspectiveCorrectionOption(2);
+			}
+			break;
+		}
+		case SDL_MOUSEMOTION:
+			lastMouseX_ = event.motion.x;
+			lastMouseY_ = event.motion.y;
+			if (perspectiveCorrectionDraggingSlider_ >= 0) {
+				SetPerspectiveCorrectionSliderFromPointer(
+					perspectiveCorrectionDraggingSlider_, event.motion.x);
+			}
+			break;
+		case SDL_MOUSEBUTTONDOWN:
+			if (event.button.button != SDL_BUTTON_LEFT) break;
+			lastMouseX_ = event.button.x;
+			lastMouseY_ = event.button.y;
+			if (PointInRect(event.button.x, event.button.y,
+				PerspectiveCorrectionButtonRect(0))) {
+				ApplyPerspectiveCorrectionDialog();
+			} else if (PointInRect(event.button.x, event.button.y,
+				PerspectiveCorrectionButtonRect(1))) {
+				ClosePerspectiveCorrectionDialog();
+			} else {
+				for (int edge = 0; edge < 2; ++edge) {
+					if (!PointInRect(event.button.x, event.button.y,
+						PerspectiveCorrectionSliderRect(edge))) continue;
+					perspectiveCorrectionActiveSlider_ = edge;
+					perspectiveCorrectionDraggingSlider_ = edge;
+					SetPerspectiveCorrectionSliderFromPointer(edge, event.button.x);
+					return;
+				}
+				for (int index = 0; index < 3; ++index) {
+					if (!PointInRect(event.button.x, event.button.y,
+						PerspectiveCorrectionToggleRect(index))) continue;
+					TogglePerspectiveCorrectionOption(index);
+					break;
+				}
+			}
+			break;
+		case SDL_MOUSEBUTTONUP:
+			if (event.button.button == SDL_BUTTON_LEFT) {
+				perspectiveCorrectionDraggingSlider_ = -1;
+			}
+			break;
+		case SDL_MOUSEWHEEL: {
+			const int ticks = std::clamp(event.wheel.y, -20, 20);
+			const bool shift = (static_cast<Uint16>(SDL_GetModState()) & 0x0003u) != 0;
+			const double delta = ticks * (shift ? 0.001 : 0.005);
+			if (perspectiveCorrectionActiveSlider_ == 0) {
+				if (perspectiveCorrectionDialog_.NudgeLeftDelta(delta)) {
+					(void)RequestPerspectiveCorrectionPreview();
+				}
+			} else if (perspectiveCorrectionDialog_.NudgeRightDelta(delta)) {
+				(void)RequestPerspectiveCorrectionPreview();
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+
+	void RenderPerspectiveCorrectionDialog() {
+		if (!perspectiveCorrectionDialog_.IsOpen()) return;
+		jpegview_linux::PerspectiveCorrectionDialogPaint paint;
+		paint.visible = true;
+		paint.applying = perspectiveCorrectionDialog_.IsApplying();
+		paint.dialog = PerspectiveCorrectionDialogRect();
+		const auto& parameters = perspectiveCorrectionDialog_.Parameters();
+		const char* labels[] = {"LEFT EDGE CONVERGENCE", "RIGHT EDGE CONVERGENCE"};
+		const double values[] = {parameters.transform.leftDeltaFraction,
+			parameters.transform.rightDeltaFraction};
+		for (int edge = 0; edge < 2; ++edge) {
+			std::ostringstream value;
+			value << std::showpos << std::fixed << std::setprecision(1) <<
+				values[edge] * 100.0 << "%";
+			const SDL_Rect slider = PerspectiveCorrectionSliderRect(edge);
+			const double fraction = (values[edge] +
+				jpegview_linux::kMaximumPerspectiveCorrectionFraction) /
+				(2.0 * jpegview_linux::kMaximumPerspectiveCorrectionFraction);
+			paint.sliders[static_cast<std::size_t>(edge)] = {slider, labels[edge],
+				value.str(), slider.x + static_cast<int>(std::lround(
+					fraction * slider.w)), perspectiveCorrectionActiveSlider_ == edge};
+		}
+		const char* toggleLabels[] = {"Auto-crop uncovered areas (A)",
+			"Preserve source aspect ratio (P)", "Show alignment grid (G)"};
+		const bool checked[] = {parameters.transform.autoCrop,
+			parameters.transform.preserveAspectRatio, parameters.showGrid};
+		for (int index = 0; index < 3; ++index) {
+			paint.toggles[static_cast<std::size_t>(index)] = {
+				PerspectiveCorrectionToggleRect(index), toggleLabels[index],
+				checked[index], !paint.applying};
+		}
+		paint.message = ClipText(perspectiveCorrectionDialog_.Message(),
+			paint.dialog.w - 36);
+		const SDL_Rect apply = PerspectiveCorrectionButtonRect(0);
+		const SDL_Rect cancel = PerspectiveCorrectionButtonRect(1);
 		paint.buttons[0] = {apply, paint.applying ? "APPLYING" : "APPLY",
 			PointInRect(lastMouseX_, lastMouseY_, apply), !paint.applying};
 		paint.buttons[1] = {cancel, "CANCEL",
@@ -11413,6 +11842,7 @@ private:
 		return contextMenuOpen_ || fileDialogOpen_ ||
 			advancedConfiguration_.IsOpen() || batchCopyDialog_.IsOpen() ||
 			resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() || freeRotationDialog_.IsOpen() ||
+			perspectiveCorrectionDialog_.IsOpen() ||
 			goToImageNumberDialog_.IsOpen() || unsharpDialogOpen_ ||
 			pictureLevelsPanelOpen_ || aboutOpen_ || helpOpen_ || confirmationOpen_ ||
 			archivePasswordDialog_.IsOpen() || clipboardMode_;
@@ -11830,7 +12260,8 @@ private:
 			cropSelection_.HasSelection() || cropMouseDragging_ || pictureLevelsPanelOpen_ ||
 			unsharpDialogOpen_ || contextMenuOpen_ || fileDialogOpen_ || confirmationOpen_ ||
 			aboutOpen_ || helpOpen_ || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
-			batchCopyDialog_.IsOpen() || freeRotationDialog_.IsOpen()) return false;
+			batchCopyDialog_.IsOpen() || freeRotationDialog_.IsOpen() ||
+			perspectiveCorrectionDialog_.IsOpen()) return false;
 		const SDL_Rect area = ImageAreaRect();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
 			dimensions.first, dimensions.second, area.w, area.h);
@@ -12541,7 +12972,7 @@ private:
 		if (!runtimeSettings_.Values().infoVisible || fileList_.Empty() || contextMenuOpen_ || fileDialogOpen_ ||
 			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() ||
-			freeRotationDialog_.IsOpen()) return false;
+			freeRotationDialog_.IsOpen() || perspectiveCorrectionDialog_.IsOpen()) return false;
 		const jpegview_linux::InformationOverlayPaintPlan& paint = BuildImageInfoPaintPlan();
 		if (jpegview_linux::Contains(paint.spectrumButton, x, y)) {
 			runtimeSettings_.Values().showHistogram = !runtimeSettings_.Values().showHistogram;
@@ -12560,7 +12991,7 @@ private:
 		if (!runtimeSettings_.Values().navigationPanelEnabled || !controlsVisible_ || contextMenuOpen_ || fileDialogOpen_ ||
 			advancedConfiguration_.IsOpen() ||
 			batchCopyDialog_.IsOpen() || resizeDialog_.IsOpen() || cropSizeDialog_.IsOpen() ||
-			freeRotationDialog_.IsOpen()) return;
+			freeRotationDialog_.IsOpen() || perspectiveCorrectionDialog_.IsOpen()) return;
 		const jpegview_linux::NavigationPanelPaint paint = CurrentNavigationPanelPaint();
 		const SDL_Rect panel = SdlRect(paint.panel);
 		const jpegview_linux::NavigationButtonPaint* hoveredButton = nullptr;
@@ -12934,6 +13365,7 @@ private:
 			modalState.batchCopy = batchCopyDialog_.IsOpen();
 			modalState.resize = resizeDialog_.IsOpen();
 			modalState.freeRotation = freeRotationDialog_.IsOpen();
+			modalState.perspectiveCorrection = perspectiveCorrectionDialog_.IsOpen();
 			modalState.fixedCropSize = cropSizeDialog_.IsOpen();
 			modalState.goToImageNumber = goToImageNumberDialog_.IsOpen();
 			modalState.unsharpMask = unsharpDialogOpen_;
@@ -12978,6 +13410,10 @@ private:
 			}
 			if (modalRoute == jpegview_linux::ModalEventRoute::FreeRotation) {
 				HandleFreeRotationDialogEvents(event, running);
+				continue;
+			}
+			if (modalRoute == jpegview_linux::ModalEventRoute::PerspectiveCorrection) {
+				HandlePerspectiveCorrectionDialogEvents(event, running);
 				continue;
 			}
 			if (modalRoute == jpegview_linux::ModalEventRoute::FixedCropSize) {
@@ -13346,6 +13782,8 @@ private:
 		const bool spreadModelReady = !fileList_.Empty() &&
 			presentationController_.SpreadReady(currentIndex);
 		const bool freeRotationOpen = freeRotationDialog_.IsOpen();
+		const bool perspectiveCorrectionOpen = perspectiveCorrectionDialog_.IsOpen();
+		const bool transformEditorOpen = freeRotationOpen || perspectiveCorrectionOpen;
 		SDL_Rect destination = CurrentPageScreenRect(imageArea);
 		SDL_Texture* renderTexture = nullptr;
 		SDL_Texture* nextPageTexture = nullptr;
@@ -13368,6 +13806,28 @@ private:
 					currentDestination.y + imageArea.y,
 					currentDestination.width, currentDestination.height};
 			}
+		} else if (perspectiveCorrectionOpen) {
+			if (perspectiveCorrectionPreviewTexture_ != nullptr &&
+				perspectiveCorrectionPreviewSessionId_ ==
+					perspectiveCorrectionDialog_.SessionId() &&
+				perspectiveCorrectionPreviewRevision_ ==
+					perspectiveCorrectionDialog_.PreviewRevision()) {
+				renderTexture = perspectiveCorrectionPreviewTexture_;
+				const jpegview_linux::ViewportRect previewDestination =
+					perspectiveCorrectionPreviewViewport_.Destination(
+						perspectiveCorrectionPreviewWidth_,
+						perspectiveCorrectionPreviewHeight_, imageArea.w, imageArea.h);
+				destination = {previewDestination.x + imageArea.x,
+					previewDestination.y + imageArea.y, previewDestination.width,
+					previewDestination.height};
+			} else {
+				renderTexture = texture_ != nullptr ? texture_ : DisplayTextureForRender();
+				const jpegview_linux::ViewportRect currentDestination = viewport_.Destination(
+					CurrentImage().width, CurrentImage().height, imageArea.w, imageArea.h);
+				destination = {currentDestination.x + imageArea.x,
+					currentDestination.y + imageArea.y,
+					currentDestination.width, currentDestination.height};
+			}
 		} else if (activeDoublePageRender_.has_value() && spreadModelReady) {
 			renderTexture = activeDoublePageRender_->transformedAnchorTexture ? texture_ :
 				PeekDisplayTexture(presentationController_.AnchorTextureKey());
@@ -13376,13 +13836,13 @@ private:
 			!presentationController_.SuppressSinglePage(currentIndex)) {
 			renderTexture = DisplayTextureForRender();
 		}
-		const bool spreadTexturesReady = !freeRotationOpen && activeDoublePageRender_.has_value() &&
+		const bool spreadTexturesReady = !transformEditorOpen && activeDoublePageRender_.has_value() &&
 			spreadModelReady && renderTexture != nullptr && nextPageTexture != nullptr;
-		const bool suppressSingleImage = freeRotationOpen ?
+		const bool suppressSingleImage = transformEditorOpen ?
 			(!selectedImageLoaded || renderTexture == nullptr) :
 			(!selectedImageLoaded || presentationController_.SuppressSinglePage(currentIndex) ||
 				(activeDoublePageRender_.has_value() && !spreadTexturesReady));
-		const SDL_Rect nextPageDestination = !freeRotationOpen && activeDoublePageRender_.has_value() ?
+		const SDL_Rect nextPageDestination = !transformEditorOpen && activeDoublePageRender_.has_value() ?
 			NextPageScreenRect(imageArea) : SDL_Rect{};
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		SDL_SetRenderDrawColor(renderer_, 18, 18, 18, 255);
@@ -13400,18 +13860,30 @@ private:
 			if (renderTexture != nullptr) SDL_RenderCopy(renderer_, renderTexture, nullptr, &destination);
 			SDL_RenderCopy(renderer_, nextPageTexture, nullptr, &nextPageDestination);
 		} else if (!suppressSingleImage) {
-			const bool imageHasTransparency = freeRotationOpen &&
-				freeRotationPreviewTexture_ == renderTexture ?
-				freeRotationPreviewHasTransparency_ : CurrentImage().hasTransparency;
-			if (imageHasTransparency || (!freeRotationOpen && transitionTexture_ != nullptr &&
+			const bool perspectivePreviewIsCurrent = perspectiveCorrectionOpen &&
+				perspectiveCorrectionPreviewTexture_ == renderTexture &&
+				perspectiveCorrectionPreviewSessionId_ ==
+					perspectiveCorrectionDialog_.SessionId() &&
+				perspectiveCorrectionPreviewRevision_ ==
+					perspectiveCorrectionDialog_.PreviewRevision();
+			const bool freeRotationPreviewIsCurrent = freeRotationOpen &&
+				freeRotationPreviewTexture_ == renderTexture &&
+				freeRotationPreviewSessionId_ == freeRotationDialog_.SessionId() &&
+				freeRotationPreviewRevision_ == freeRotationDialog_.PreviewRevision();
+			const bool imageHasTransparency = freeRotationPreviewIsCurrent ?
+				freeRotationPreviewHasTransparency_ : perspectivePreviewIsCurrent ?
+					perspectiveCorrectionPreviewHasTransparency_ : CurrentImage().hasTransparency;
+			if (imageHasTransparency || (!transformEditorOpen && transitionTexture_ != nullptr &&
 				transitionHasTransparency_)) {
 				RenderTransparencyBackground(destination, imageArea);
 			}
-			if (freeRotationOpen) {
+			if (transformEditorOpen) {
 				if (renderTexture != nullptr) SDL_RenderCopy(renderer_, renderTexture, nullptr, &destination);
-				if (freeRotationPreviewTexture_ == renderTexture &&
-					freeRotationPreviewRevision_ == freeRotationDialog_.PreviewRevision() &&
-					freeRotationDialog_.Parameters().showGrid) {
+				const bool showGrid = freeRotationPreviewIsCurrent ?
+					freeRotationDialog_.Parameters().showGrid :
+					perspectivePreviewIsCurrent &&
+					perspectiveCorrectionDialog_.Parameters().showGrid;
+				if (showGrid) {
 					for (int division = 1; division <= 2; ++division) {
 						const int x = destination.x + destination.w * division / 3;
 						const int y = destination.y + destination.h * division / 3;
@@ -13426,8 +13898,8 @@ private:
 			}
 		}
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
-		if (!suppressSingleImage && !freeRotationOpen) RenderCropSelection();
-		if (!freeRotationOpen) {
+		if (!suppressSingleImage && !transformEditorOpen) RenderCropSelection();
+		if (!transformEditorOpen) {
 			RenderZoomNavigator(renderTexture, nextPageTexture);
 			RenderMagnifyingGlass(renderTexture);
 		}
@@ -13453,6 +13925,7 @@ private:
 		RenderArchivePasswordDialog();
 		RenderPixelColorSampler();
 		RenderFreeRotationDialog();
+		RenderPerspectiveCorrectionDialog();
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
 		diagnostics.End(jpegview_linux::PerfMetric::FrameBuild, frameStart);
 		{
@@ -13669,6 +14142,13 @@ private:
 	bool freeRotationPreviewHasTransparency_ = false;
 	std::uint64_t freeRotationPreviewSessionId_ = 0;
 	std::uint64_t freeRotationPreviewRevision_ = 0;
+	SDL_Texture* perspectiveCorrectionPreviewTexture_ = nullptr;
+	jpegview_linux::CacheReservation perspectiveCorrectionTextureReservation_;
+	int perspectiveCorrectionPreviewWidth_ = 0;
+	int perspectiveCorrectionPreviewHeight_ = 0;
+	bool perspectiveCorrectionPreviewHasTransparency_ = false;
+	std::uint64_t perspectiveCorrectionPreviewSessionId_ = 0;
+	std::uint64_t perspectiveCorrectionPreviewRevision_ = 0;
 	Image displayImage_;
 	SDL_Texture* displayTexture_ = nullptr;
 	int displayTextureWidth_ = 0;
@@ -13733,6 +14213,9 @@ private:
 	bool unsharpDialogOpen_ = false;
 	bool freeRotationAngleDragging_ = false;
 	bool rotationModalPlaybackSuppressed_ = false;
+	int perspectiveCorrectionActiveSlider_ = 0;
+	int perspectiveCorrectionDraggingSlider_ = -1;
+	bool perspectiveCorrectionModalPlaybackSuppressed_ = false;
 	int unsharpDraggingControl_ = -1;
 	jpegview_linux::ImageProcessingParams unsharpOriginalProcessing_;
 	double unsharpOriginalRadius_ = 1.0;
@@ -13866,6 +14349,8 @@ private:
 	jpegview_linux::BatchCopyDialogController batchCopyDialog_;
 	jpegview_linux::FreeRotationDialogController freeRotationDialog_;
 	jpegview_linux::Viewport freeRotationPreviewViewport_;
+	jpegview_linux::PerspectiveCorrectionDialogController perspectiveCorrectionDialog_;
+	jpegview_linux::Viewport perspectiveCorrectionPreviewViewport_;
 	jpegview_linux::ResizeDialogController resizeDialog_;
 	jpegview_linux::CropSizeDialogController cropSizeDialog_;
 	jpegview_linux::GoToImageNumberModel goToImageNumberDialog_;

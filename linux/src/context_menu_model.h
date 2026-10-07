@@ -71,6 +71,7 @@ struct ContextMenuState {
 	bool sortAscending = true;
 	bool imageAvailable = false;
 	bool freeRotationAvailable = false;
+	bool perspectiveCorrectionAvailable = false;
 	bool fileListAvailable = false;
 	bool archiveMember = false;
 	bool losslessJpegAvailable = false;

@@ -187,7 +187,11 @@ should normally be added to one of these focused modules and covered by the matc
 - `perspective_correction_model`: bounded edge-adjustment, crop/aspect and grid state for the
   perspective-correction dialog, including session and preview revisions. Apply freezes edits and
   rejects stale previews until failure resumes the editor or a successful document commit closes it.
-  SDL input, preview pixels, and document ownership remain in the Viewer and operation worker.
+  Viewer opens it from the full context menu, routes its input through the modal event phase, and owns
+  its renderer-thread preview texture/reservation. Its preview pauses animation without advancing
+  frame-readiness state; every close, source replacement, and successful Apply releases that pause.
+  Pixel work remains in the image operation worker, and a matching full-resolution result replaces
+  the document only after the new texture uploads successfully.
 - `image_document`: lazy current-image metadata plus immutable, shared source and presentation pixels,
   owner/source identity, document revision, frame identity, effective processing snapshots, edit state,
   and transfer of replaced pixel ownership to retirement. No-op processing aliases the source buffer

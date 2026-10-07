@@ -93,6 +93,27 @@ write_solid_ppm() {
 	} > "$filename"
 }
 
+write_gradient_ppm() {
+	filename=$1
+	width=$2
+	height=$3
+	{
+		printf 'P3\n%s %s\n255\n' "$width" "$height"
+		y=0
+		while [ "$y" -lt "$height" ]; do
+			x=0
+			while [ "$x" -lt "$width" ]; do
+				red=$((x * 255 / (width - 1)))
+				green=$((y * 255 / (height - 1)))
+				blue=$(((x + y) * 255 / (width + height - 2)))
+				printf '%s %s %s\n' "$red" "$green" "$blue"
+				x=$((x + 1))
+			done
+			y=$((y + 1))
+		done
+	} > "$filename"
+}
+
 gps_map_image=''
 if [ -x "$GPS_EXIF_FIXTURE_WRITER" ] && command -v convert >/dev/null 2>&1; then
 	write_solid_ppm "$temporary/gps-source.ppm" 35 80 120
@@ -730,6 +751,136 @@ if [ "$visual_assertions" -eq 1 ]; then
 		"$temporary/free-rotation-applied-image-area.png" null: 2>&1 || true)
 	if [ "$rotation_image_difference" = "0" ]; then
 		echo "UI smoke test: free-rotation Apply closed without changing the displayed pixels" >&2
+		exit 1
+	fi
+fi
+stop_viewer
+
+# Perspective correction is available from the full transform menu. Cancel
+# preserves the image; changing an edge and applying updates the displayed
+# document through the asynchronous operation path.
+perspective_image="$temporary/perspective-gradient.ppm"
+write_gradient_ppm "$perspective_image" 64 48
+launch_viewer "$perspective_image"
+perspective_title_before=$(DISPLAY=":$display_number" window_title_without_position)
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/perspective-original.png"
+fi
+DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" \
+	> "$temporary/perspective-geometry"
+perspective_window_width=$(awk -F= '$1 == "WIDTH" { print $2 }' \
+	"$temporary/perspective-geometry")
+perspective_window_height=$(awk -F= '$1 == "HEIGHT" { print $2 }' \
+	"$temporary/perspective-geometry")
+perspective_dialog_width=$((perspective_window_width - 32))
+perspective_dialog_height=$((perspective_window_height - 32))
+if [ "$perspective_dialog_width" -gt 620 ]; then perspective_dialog_width=620; fi
+if [ "$perspective_dialog_width" -lt 440 ]; then perspective_dialog_width=440; fi
+if [ "$perspective_dialog_height" -gt 390 ]; then perspective_dialog_height=390; fi
+if [ "$perspective_dialog_height" -lt 350 ]; then perspective_dialog_height=350; fi
+perspective_dialog_border_x=$(((perspective_window_width - perspective_dialog_width) / 2))
+perspective_dialog_border_y=$(((perspective_window_height - perspective_dialog_height) / 2))
+open_perspective_menu() {
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
+	DISPLAY=":$display_number" xdotool keydown Shift_L
+	DISPLAY=":$display_number" xdotool click 3
+	DISPLAY=":$display_number" xdotool keyup Shift_L
+	# In the advanced menu V cycles from the navigation-panel command to the
+	# perspective entry; Return activates the selected command.
+	DISPLAY=":$display_number" xdotool key --delay 30 v v
+	DISPLAY=":$display_number" xdotool key Return
+}
+perspective_editor_opened=0
+open_perspective_menu
+if [ "$visual_assertions" -eq 1 ]; then
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-editor.png"
+		perspective_border=$(convert "$temporary/perspective-editor.png" \
+			-format "%[pixel:p{$perspective_dialog_border_x,$perspective_dialog_border_y}]" info:-)
+		if [ "$perspective_border" = 'srgb(200,210,225)' ]; then
+			perspective_editor_opened=1
+			break
+		fi
+	done
+	if [ "$perspective_editor_opened" -ne 1 ]; then
+		echo "UI smoke test: Perspective correction did not open from the full transform menu" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key Escape
+assert_title_prefix "$perspective_title_before" \
+	"canceling perspective correction changed the current image title"
+if [ "$visual_assertions" -eq 1 ]; then
+	perspective_editor_closed=0
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-canceled.png"
+		perspective_border=$(convert "$temporary/perspective-canceled.png" \
+			-format "%[pixel:p{$perspective_dialog_border_x,$perspective_dialog_border_y}]" info:-)
+		if [ "$perspective_border" != 'srgb(200,210,225)' ]; then
+			perspective_editor_closed=1
+			break
+		fi
+	done
+	if [ "$perspective_editor_closed" -ne 1 ]; then
+		echo "UI smoke test: Escape did not close the perspective-correction editor" >&2
+		exit 1
+	fi
+fi
+open_perspective_menu
+if [ "$visual_assertions" -eq 1 ]; then
+	perspective_editor_reopened=0
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-reopened.png"
+		perspective_border=$(convert "$temporary/perspective-reopened.png" \
+			-format "%[pixel:p{$perspective_dialog_border_x,$perspective_dialog_border_y}]" info:-)
+		if [ "$perspective_border" = 'srgb(200,210,225)' ]; then
+			perspective_editor_reopened=1
+			break
+		fi
+	done
+	if [ "$perspective_editor_reopened" -ne 1 ]; then
+		echo "UI smoke test: perspective-correction editor could not be reopened after cancel" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+fi
+DISPLAY=":$display_number" xdotool key --repeat 12 --delay 20 Right
+DISPLAY=":$display_number" xdotool key Return
+if [ "$visual_assertions" -eq 1 ]; then
+	perspective_editor_applied=0
+	for _ in $(seq 1 80); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-applied.png"
+		perspective_border=$(convert "$temporary/perspective-applied.png" \
+			-format "%[pixel:p{$perspective_dialog_border_x,$perspective_dialog_border_y}]" info:-)
+		if [ "$perspective_border" != 'srgb(200,210,225)' ]; then
+			perspective_editor_applied=1
+			break
+		fi
+	done
+	if [ "$perspective_editor_applied" -ne 1 ]; then
+		echo "UI smoke test: Perspective correction Apply did not close after committing" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/perspective-applied-final.png"
+	perspective_image_difference=$(compare -metric AE \
+		"$temporary/perspective-original.png" \
+		"$temporary/perspective-applied-final.png" null: 2>&1 || true)
+	if [ "$perspective_image_difference" = "0" ]; then
+		echo "UI smoke test: Perspective correction Apply closed without changing the displayed pixels" >&2
 		exit 1
 	fi
 fi

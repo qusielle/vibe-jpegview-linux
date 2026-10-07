@@ -1243,10 +1243,11 @@ configuration. The `%pictures%` placeholder maps to `$XDG_PICTURES_DIR` or `$HOM
 the aspect ratio, and the point, Lanczos/Bicubic, sharpen-low, and sharpen-medium filters are available.
 The resize is applied to the processed image in memory and can then be saved with `Ctrl+S`; `Ctrl+Shift+R`
 opens the same dialog directly.
-Rotate/mirror, in-memory crop, resize, and full-resolution processing run in the background while pan
-and zoom remain responsive. A failed operation keeps the last successfully displayed image. Navigating
-to another source cancels a pending edit. Applying rotate, mirror, crop, or resize to an animation
-flattens the frame currently displayed into a still image.
+Rotate/mirror, free rotation, perspective correction, in-memory crop, resize, and full-resolution
+processing run in the background while pan and zoom remain responsive. A failed operation keeps the
+last successfully displayed image. Navigating to another source cancels a pending edit. Applying
+rotate, mirror, crop, resize, free rotation, or perspective correction to an animation flattens the
+frame currently displayed into a still image.
 
 **Rotate...** in the full context menu opens the free-rotation editor. Adjust the angle with its slider,
 mouse wheel, or Left/Right keys (0.1° per step, or 1° with Shift); Home resets to zero. The A, P, and
@@ -1256,6 +1257,17 @@ megapixels; Apply uses a cancellable full-resolution operation, and Cancel disca
 zero-degree Apply is a no-op. A crop reduced to one row still samples the rotated image across the
 whole row. Free rotation of an animated image retains the current frame as a still.
 Reloading a changed source closes its editor and discards any pending rotation.
+
+**Perspective correction...** in the full context menu opens a preview editor with separate left- and
+right-edge convergence sliders. Each slider moves the corresponding upper/lower edge endpoints in
+opposite directions, up to 25% of the source width. Drag a slider, use the mouse wheel or Left/Right
+keys to adjust it, and use Tab to select the other edge; Shift uses finer keyboard or wheel steps.
+Home resets both adjustments. A toggles auto-cropping to covered pixels, P preserves the source aspect
+ratio, and G shows an alignment grid. The preview is generated off-thread and bounded to 2048 pixels
+per side and four megapixels. Apply runs a cancellable full-resolution correction; Cancel leaves the
+document unchanged, and applying zero edge adjustments is a no-op. An animated image retains its
+currently displayed frame as a still. Reloading a changed source closes the editor and discards pending
+correction work.
 
 Crop selection mode is off by default. Enable or disable it with Ctrl+E, the last button on the bottom
 navigation panel, or **Crop selection mode** in the regular or selection context menu; its state is
@@ -1303,15 +1315,12 @@ before it closes the viewer.
 The Linux port does not yet match every user-facing Windows feature. The outstanding items identified
 by comparing the Linux frontend with the Windows menus and feature panels are:
 
-The intentionally disabled context-menu commands are **Perspective correction...**, **Edit global
-settings...**, **Edit user settings...**, **Update user settings...**, and **Manage Open
+The intentionally disabled context-menu commands are **Edit global settings...**, **Edit user
+settings...**, **Update user settings...**, and **Manage Open
 image with menu...**. These map to the gaps below; commands disabled only because their current
 preconditions are unmet (for example, an image-only action when no image is loaded) are not missing
 features.
 
-- **Perspective correction.** Free rotation is available from the full context menu; the interactive
-  perspective/tilt-correction panel is not implemented. An optional auto-level angle suggestion from
-  line/horizon detection could complement this work.
 - **Image comparison.** Mark-image/toggle-back is available with Ctrl+M and Ctrl+Left/Right. The
   second processing-parameter set exchange workflow is not implemented.
 - **Settings administration.** Editing global/user Windows configuration files and updating a user
