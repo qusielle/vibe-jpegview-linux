@@ -110,7 +110,9 @@ bool BuildFreeRotationGeometry(int sourceWidth, int sourceHeight,
 		kExactAngleTolerance / 90.0;
 	const int exactTurns = exactQuarterTurn ?
 		(static_cast<int>(nearestQuarterTurn) % 4 + 4) % 4 : -1;
-	if (exactQuarterTurn) {
+	const bool quarterTurnNeedsAspectCrop = exactQuarterTurn && exactTurns % 2 != 0 &&
+		autoCrop && preserveAspectRatio && sourceWidth != sourceHeight;
+	if (exactQuarterTurn && !quarterTurnNeedsAspectCrop) {
 		ImageTransformGeometry built;
 		built.sourceWidth = sourceWidth;
 		built.sourceHeight = sourceHeight;

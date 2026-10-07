@@ -121,6 +121,36 @@ void TestFreeRotationRejectsUnsafeInputAndHandlesSingleAxisImages() {
 		"auto-cropped single-axis source did not use its documented one-pixel fallback");
 }
 
+void TestFreeRotationQuarterTurnsHonorAspectCrop() {
+	for (double angle : {-90.0, 90.0}) {
+		ImageTransformGeometry cropped;
+		Expect(BuildFreeRotationGeometry(4000, 2500, angle, true, true, cropped) &&
+			cropped.outputWidth == 2500 && cropped.outputHeight == 1562 &&
+			cropped.exactClockwiseQuarterTurns == -1,
+			"exact quarter-turn bypassed the source-aspect auto-crop policy");
+		for (double adjacentAngle : {angle - 0.1, angle + 0.1}) {
+			ImageTransformGeometry adjacent;
+			Expect(BuildFreeRotationGeometry(4000, 2500, adjacentAngle, true, true,
+				adjacent) && std::abs(adjacent.outputWidth - cropped.outputWidth) <= 4 &&
+				std::abs(adjacent.outputHeight - cropped.outputHeight) <= 4,
+				"aspect-preserving rotation dimensions jumped at a quarter-turn");
+		}
+		for (bool preserveAspectRatio : {false, true}) {
+			ImageTransformGeometry fullFrame;
+			Expect(BuildFreeRotationGeometry(4000, 2500, angle, false,
+				preserveAspectRatio, fullFrame) && fullFrame.outputWidth == 2500 &&
+				fullFrame.outputHeight == 4000 && fullFrame.exactClockwiseQuarterTurns >= 0,
+				"uncropped quarter-turn stopped preserving the exact full-frame mapping");
+		}
+		ImageTransformGeometry unconstrained;
+		Expect(BuildFreeRotationGeometry(4000, 2500, angle, true, false,
+			unconstrained) && unconstrained.outputWidth == 2500 &&
+			unconstrained.outputHeight == 4000 &&
+			unconstrained.exactClockwiseQuarterTurns >= 0,
+			"unconstrained auto-crop discarded part of an exact quarter-turn");
+	}
+}
+
 const TestCase kTests[] = {
 	{"free-rotation-exact-angles-and-coordinate-mapping",
 		&TestFreeRotationExactAnglesAndCoordinateMapping},
@@ -128,6 +158,8 @@ const TestCase kTests[] = {
 		&TestFreeRotationBoundsCroppingAndAspectPolicy},
 	{"free-rotation-rejects-unsafe-input-and-handles-single-axis-images",
 		&TestFreeRotationRejectsUnsafeInputAndHandlesSingleAxisImages},
+	{"free-rotation-quarter-turns-honor-aspect-crop",
+		&TestFreeRotationQuarterTurnsHonorAspectCrop},
 };
 
 } // namespace
