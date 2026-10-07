@@ -4,9 +4,6 @@ FROM ubuntu:20.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-ARG APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-ARG APPIMAGETOOL_SHA256=
-
 RUN apt-get -o Acquire::Retries=5 update \
  && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     g++ make cmake ninja-build pkg-config curl ca-certificates file patchelf nasm git \
@@ -16,9 +13,6 @@ RUN apt-get -o Acquire::Retries=5 update \
     libgif-dev libtiff-dev libwebp-dev libwebp6 libheif-dev libraw-dev libjxr-dev \
     libaom-dev libde265-dev libx265-dev libbrotli-dev liblcms2-dev librsvg2-dev libxml2-dev \
     xclip wl-clipboard \
- && curl --fail --location --retry 8 --retry-max-time 90 "$APPIMAGETOOL_URL" --output /usr/local/bin/appimagetool \
- && chmod 755 /usr/local/bin/appimagetool \
- && if [ -n "$APPIMAGETOOL_SHA256" ]; then echo "$APPIMAGETOOL_SHA256  /usr/local/bin/appimagetool" | sha256sum --check; fi \
  && rm -rf /var/lib/apt/lists/*
 
 # Focal has the native GIF/TIFF/WebP/HEIF/RAW/JPEG-XR development packages,
@@ -104,20 +98,28 @@ COPY --from=highway-jxl /usr/local/ /usr/local/
 COPY --from=aom-avif /usr/local/ /usr/local/
 RUN ldconfig
 
-WORKDIR /src
-COPY . /src
-COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
-RUN sh /src/linux/fetch-7zip-source.sh /opt/jpegview/7zip-24.09
+COPY linux/fetch-7zip-source.sh linux/install-rust-toolchain.sh linux/fetch-rars-source.sh linux/retry-command.sh /tmp/jpegview-build-scripts/
+RUN sh /tmp/jpegview-build-scripts/fetch-7zip-source.sh /opt/jpegview/7zip-24.09
 ENV SEVENZIP_SOURCE_ROOT=/opt/jpegview/7zip-24.09 \
 	SEVENZIP_SOURCE_ARCHIVE=/opt/jpegview/7zip-24.09-source.tar.gz
-RUN sh /src/linux/install-rust-toolchain.sh /opt/jpegview/rust-1.89 \
- && sh /src/linux/fetch-rars-source.sh /opt/jpegview/rars-afc60e4
+RUN sh /tmp/jpegview-build-scripts/install-rust-toolchain.sh /opt/jpegview/rust-1.89 \
+ && sh /tmp/jpegview-build-scripts/fetch-rars-source.sh /opt/jpegview/rars-afc60e4
 ENV RUSTUP_HOME=/opt/jpegview/rust-1.89/rustup \
 	CARGO_HOME=/opt/jpegview/rust-1.89/cargo \
 	PATH="/opt/jpegview/rust-1.89/cargo/bin:${PATH}" \
 	RAR_BACKEND_ROOT=/src/linux/rar_backend \
 	RAR_SOURCE_ARCHIVE=/opt/jpegview/rars-afc60e4-source.tar.gz \
 	RAR_LICENSE_FILE=/opt/jpegview/rars-afc60e4-COPYING
+
+ARG APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+ARG APPIMAGETOOL_SHA256=
+RUN curl --fail --location --retry 8 --retry-max-time 90 "$APPIMAGETOOL_URL" --output /usr/local/bin/appimagetool \
+ && chmod 755 /usr/local/bin/appimagetool \
+ && if [ -n "$APPIMAGETOOL_SHA256" ]; then echo "$APPIMAGETOOL_SHA256  /usr/local/bin/appimagetool" | sha256sum --check; fi
+
+WORKDIR /src
+COPY . /src
+COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
 RUN chmod 755 /usr/local/bin/jpegview-docker-build
 
 # The viewer and core-test executable are independent link targets. Build

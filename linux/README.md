@@ -669,6 +669,11 @@ target. Local Make/package-script invocations without `SEVENZIP_SOURCE_ROOT` or 
 retain the documented unavailable fallbacks. The host only needs Docker; build outputs are written to a host
 `out/` directory:
 
+The Dockerfiles copy only the pinned-source download helpers before fetching 7-Zip, Rust, and RAR.
+They copy the full source tree after those stable layers, so a source-only edit can reuse the downloads
+with a persistent BuildKit cache. AppImage tool downloads also have their own layer, separate from
+APT package installation.
+
 ```sh
 mkdir -p out
 DOCKER_BUILDKIT=1 JPEGVIEW_RETRY_ATTEMPTS=10 \

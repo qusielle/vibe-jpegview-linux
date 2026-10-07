@@ -853,6 +853,11 @@ bundles use the same `lib/jpegview-linux/` layout next to the executable and inc
 and sources. Ordinary local builds select explicit unavailable-backend fallbacks unless
 `SEVENZIP_SOURCE_ROOT` and/or `RAR_BACKEND_ROOT` are set.
 
+Dockerfiles copy the small source-fetch helper set before downloading pinned 7-Zip, Rust, and RAR
+inputs, then copy the full repository only after those cacheable layers. The AppImage tool download
+also has a separate layer from APT installation, so source edits and tool pin changes do not force
+unrelated package or pinned-source downloads when a persistent BuildKit cache is available.
+
 Docker image downloads tolerate transient repository/CDN failures at each layer. Ubuntu 20 APT has
 five acquisition retries and its source downloads allow eight retries; the shared 7-Zip/Rust
 downloads also allow eight retries, and the pinned RAR Git fetch uses the retry-command helper.

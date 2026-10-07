@@ -13,20 +13,22 @@ RUN apt-get update \
     libbrotli-dev liblcms2-dev librsvg2-dev libxml2-dev \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src
-COPY . /src
-COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
-RUN sh /src/linux/fetch-7zip-source.sh /opt/jpegview/7zip-24.09
+COPY linux/fetch-7zip-source.sh linux/install-rust-toolchain.sh linux/fetch-rars-source.sh linux/retry-command.sh /tmp/jpegview-build-scripts/
+RUN sh /tmp/jpegview-build-scripts/fetch-7zip-source.sh /opt/jpegview/7zip-24.09
 ENV SEVENZIP_SOURCE_ROOT=/opt/jpegview/7zip-24.09 \
 	SEVENZIP_SOURCE_ARCHIVE=/opt/jpegview/7zip-24.09-source.tar.gz
-RUN sh /src/linux/install-rust-toolchain.sh /opt/jpegview/rust-1.89 \
- && sh /src/linux/fetch-rars-source.sh /opt/jpegview/rars-afc60e4
+RUN sh /tmp/jpegview-build-scripts/install-rust-toolchain.sh /opt/jpegview/rust-1.89 \
+ && sh /tmp/jpegview-build-scripts/fetch-rars-source.sh /opt/jpegview/rars-afc60e4
 ENV RUSTUP_HOME=/opt/jpegview/rust-1.89/rustup \
 	CARGO_HOME=/opt/jpegview/rust-1.89/cargo \
 	PATH="/opt/jpegview/rust-1.89/cargo/bin:${PATH}" \
 	RAR_BACKEND_ROOT=/src/linux/rar_backend \
 	RAR_SOURCE_ARCHIVE=/opt/jpegview/rars-afc60e4-source.tar.gz \
 	RAR_LICENSE_FILE=/opt/jpegview/rars-afc60e4-COPYING
+
+WORKDIR /src
+COPY . /src
+COPY linux/docker-build.sh /usr/local/bin/jpegview-docker-build
 RUN chmod 755 /usr/local/bin/jpegview-docker-build
 
 VOLUME ["/out"]
