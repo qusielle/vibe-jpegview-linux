@@ -153,6 +153,17 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 	const std::string sortingLabel = "Current order: " +
 		std::string(SortModeShortLabel(state.sortMode)) + " (" +
 		SortModeDescription(state.sortMode) + ")";
+	const bool movieMode = state.playbackMode == PlaybackMode::Movie;
+	const std::string animationDelayLabel = "  Frame delay: " +
+		std::to_string(std::clamp(state.animationDelayMs, 10, 60000)) + " ms" +
+		(state.animationDelayOverridden ? " (custom" : " (source") +
+		(movieMode ? "; Movie uses FPS)" : ")");
+	const bool animationControlsEnabled = state.animationAvailable &&
+		state.animationControlsAvailable && state.playbackMode != PlaybackMode::Slideshow;
+	const std::string animationToggleLabel = state.animationManuallyPaused ?
+		(movieMode ? "  Resume Movie" : "  Resume animation") :
+		(state.animationPlaying ? "  Freeze animation" :
+			(movieMode ? "  Pause Movie" : "  Resume animation"));
 	const char* nextPageShortcut = state.mangaReadingOrderEnabled ? "Left/PgDn" : "Right/PgDn";
 	const char* previousPageShortcut = state.mangaReadingOrderEnabled ? "Right/PgUp" : "Left/PgUp";
 	std::vector<MenuItem> items = {
@@ -322,6 +333,21 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		{"    Normal", IDM_EFFECTTIME_NORMAL, false, state.transitionDurationMs == 500, true, nullptr, true},
 		{"    Slow", IDM_EFFECTTIME_SLOW, false, state.transitionDurationMs == 1000, true, nullptr, true},
 		{"    Very slow", IDM_EFFECTTIME_VERY_SLOW, false, state.transitionDurationMs == 2000, true, nullptr, true},
+		{nullptr, 0, true},
+		{"Animation frame controls", 0, false, false, true, nullptr, true},
+		{"  Previous frame", kCommandAnimationPreviousFrame, false, false,
+			animationControlsEnabled, "[", true},
+		{animationToggleLabel.c_str(),
+			kCommandAnimationTogglePlayback, false, false, animationControlsEnabled, "P", true},
+		{"  Next frame", kCommandAnimationNextFrame, false, false,
+			animationControlsEnabled, "]", true},
+		{animationDelayLabel.c_str(), 0, false, false, false, nullptr, true},
+		{"  Faster", kCommandAnimationFaster, false, false,
+			animationControlsEnabled && state.animationDelayMs > 10, "Alt+]", true},
+		{"  Slower", kCommandAnimationSlower, false, false,
+			animationControlsEnabled && state.animationDelayMs < 60000, "Alt+[", true},
+		{"  Restore source frame delays", kCommandAnimationResetDelays, false, false,
+			animationControlsEnabled && state.animationDelayOverridden, "Alt+P", true},
 		{"  Resume playback", IDM_SLIDESHOW_RESUME, false, false,
 			(!state.animationPlaying &&
 				(state.playbackMode != PlaybackMode::None || state.animationAvailable)), "Alt+R", true},

@@ -14,6 +14,12 @@ constexpr int kCommandToggleMagnifyingGlass = -11;
 constexpr int kCommandToggleDoublePageMode = -12;
 constexpr int kCommandToggleMangaReadingOrder = -13;
 constexpr int kCommandGoToImageNumber = -15;
+constexpr int kCommandAnimationPreviousFrame = -18;
+constexpr int kCommandAnimationNextFrame = -19;
+constexpr int kCommandAnimationTogglePlayback = -20;
+constexpr int kCommandAnimationFaster = -21;
+constexpr int kCommandAnimationSlower = -22;
+constexpr int kCommandAnimationResetDelays = -23;
 
 // Returns the original Windows command ID for a supported SDL key event.
 // Escape depends on whether playback is active: it stops playback first and

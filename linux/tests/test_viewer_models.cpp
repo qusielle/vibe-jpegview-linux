@@ -1075,6 +1075,9 @@ void TestContextMenuCatalogAndState() {
 
 	ContextMenuState state;
 	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
+	Expect(findCommand(compact, jpegview_linux::kCommandAnimationPreviousFrame) == nullptr &&
+		findCommand(compact, jpegview_linux::kCommandAnimationNextFrame) == nullptr,
+		"compact context menu exposed advanced animation frame controls");
 	Expect(findCommand(compact, jpegview_linux::kCommandOpenGpsLocation) == nullptr,
 		"GPS map action was shown without image coordinates");
 	state.gpsLocationAvailable = true;
@@ -1184,6 +1187,10 @@ void TestContextMenuCatalogAndState() {
 
 	state.playbackMode = jpegview_linux::PlaybackMode::Movie;
 	state.animationAvailable = true;
+	state.animationControlsAvailable = true;
+	state.animationPlaying = true;
+	state.animationDelayMs = 250;
+	state.animationDelayOverridden = true;
 	state.movieFramesPerSecond = 50.0;
 	state.infoVisible = true;
 	state.filenameVisible = true;
@@ -1217,6 +1224,72 @@ void TestContextMenuCatalogAndState() {
 	state.transitionDurationMs = 1000;
 	state.openWithApplicationNames = {"Photo Editor", u8"写真工具"};
 	const std::vector<MenuItem> advanced = jpegview_linux::BuildContextMenu(state, true);
+	const MenuItem* animationPrevious = findCommand(advanced,
+		jpegview_linux::kCommandAnimationPreviousFrame);
+	const MenuItem* animationToggle = findCommand(advanced,
+		jpegview_linux::kCommandAnimationTogglePlayback);
+	const MenuItem* animationNext = findCommand(advanced,
+		jpegview_linux::kCommandAnimationNextFrame);
+	const MenuItem* animationFaster = findCommand(advanced,
+		jpegview_linux::kCommandAnimationFaster);
+	const MenuItem* animationSlower = findCommand(advanced,
+		jpegview_linux::kCommandAnimationSlower);
+	const MenuItem* animationReset = findCommand(advanced,
+		jpegview_linux::kCommandAnimationResetDelays);
+	Expect(animationPrevious != nullptr && animationPrevious->enabled &&
+		animationPrevious->shortcut == "[" && animationToggle != nullptr &&
+		animationToggle->enabled && animationToggle->label == "  Freeze animation" &&
+		animationToggle->shortcut == "P" && animationNext != nullptr &&
+		animationNext->enabled && animationNext->shortcut == "]",
+		"advanced context menu did not expose usable previous/freeze/next animation controls");
+	Expect(findLabel(advanced, "  Frame delay: 250 ms (custom; Movie uses FPS)") != nullptr &&
+		animationFaster != nullptr && animationFaster->enabled &&
+		animationFaster->shortcut == "Alt+]" && animationSlower != nullptr &&
+		animationSlower->enabled && animationSlower->shortcut == "Alt+[" &&
+		animationReset != nullptr && animationReset->enabled &&
+		animationReset->shortcut == "Alt+P",
+		"advanced context menu did not report or control the current frame delay");
+	state.animationPlaying = false;
+	state.animationManuallyPaused = true;
+	const std::vector<MenuItem> frozenAnimation =
+		jpegview_linux::BuildContextMenu(state, true);
+	const MenuItem* resumeAnimation = findCommand(frozenAnimation,
+		jpegview_linux::kCommandAnimationTogglePlayback);
+	Expect(resumeAnimation != nullptr && resumeAnimation->enabled &&
+		resumeAnimation->label == "  Resume Movie",
+		"context menu did not offer resume after a manual Movie freeze");
+	state.animationManuallyPaused = false;
+	state.animationDelayMs = 10;
+	const std::vector<MenuItem> minimumDelayMenu =
+		jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(minimumDelayMenu, jpegview_linux::kCommandAnimationFaster) != nullptr &&
+		!findCommand(minimumDelayMenu, jpegview_linux::kCommandAnimationFaster)->enabled,
+		"context menu allowed an animation delay below the minimum");
+	state.animationDelayMs = 60000;
+	const std::vector<MenuItem> maximumDelayMenu =
+		jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(maximumDelayMenu, jpegview_linux::kCommandAnimationSlower) != nullptr &&
+		!findCommand(maximumDelayMenu, jpegview_linux::kCommandAnimationSlower)->enabled,
+		"context menu allowed an animation delay above the maximum");
+	state.animationControlsAvailable = false;
+	const std::vector<MenuItem> unavailableAnimation =
+		jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(unavailableAnimation,
+		jpegview_linux::kCommandAnimationPreviousFrame) != nullptr &&
+		!findCommand(unavailableAnimation,
+			jpegview_linux::kCommandAnimationPreviousFrame)->enabled &&
+		!findCommand(unavailableAnimation,
+			jpegview_linux::kCommandAnimationTogglePlayback)->enabled,
+		"context menu left animation controls enabled while the display owner was busy");
+	state.animationControlsAvailable = true;
+	state.playbackMode = jpegview_linux::PlaybackMode::Slideshow;
+	const std::vector<MenuItem> slideshowAnimation =
+		jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(slideshowAnimation,
+		jpegview_linux::kCommandAnimationPreviousFrame) != nullptr &&
+		!findCommand(slideshowAnimation,
+			jpegview_linux::kCommandAnimationPreviousFrame)->enabled,
+		"animation controls appeared while slideshow mode owned file advancement");
 	const MenuItem* expandedAdvancedConfiguration = findCommand(advanced,
 		jpegview_linux::kCommandAdvancedConfiguration);
 	Expect(immediatelyBefore(advanced, jpegview_linux::kCommandAdvancedConfiguration, IDM_HELP) &&
@@ -4556,12 +4629,49 @@ void TestPlaybackSchedulerAnimationFrameControls() {
 		!delays.ResetAnimationDelay(700),
 		"restoring native delays did not clear the override or retain original frame timing");
 
+	jpegview_linux::PlaybackScheduler delayBounds;
+	delayBounds.ConfigureImage({10, 60000}, 0, true, 0);
+	delayBounds.StartMovie(25.0, 0);
+	Expect(!delayBounds.AdjustAnimationDelay(-50, 1) &&
+		delayBounds.Mode() == PlaybackMode::Movie &&
+		!delayBounds.AnimationDelayOverrideMs().has_value() &&
+		delayBounds.NextDeadline() == 40,
+		"faster-at-minimum changed timing mode despite having no effective delay change");
+	delayBounds.StepAnimationFrame(1, 2);
+	Expect(!delayBounds.AdjustAnimationDelay(50, 3) &&
+		delayBounds.Mode() == PlaybackMode::Movie &&
+		delayBounds.AnimationManuallyPaused() &&
+		!delayBounds.AnimationDelayOverrideMs().has_value() &&
+		!delayBounds.NextDeadline().has_value(),
+		"slower-at-maximum changed playback state despite having no effective delay change");
+
 	jpegview_linux::PlaybackScheduler unavailable;
 	unavailable.ConfigureImage({100}, 0, false, 0);
 	Expect(unavailable.StepAnimationFrame(1, 1).type == PlaybackActionType::None &&
 		!unavailable.AdjustAnimationDelay(50, 2) &&
 		!unavailable.ResetAnimationDelay(3),
 		"still images accepted animation-only frame or delay controls");
+
+	jpegview_linux::PlaybackScheduler failedPresentation;
+	failedPresentation.ConfigureImage({20, 30}, 0, true, 0);
+	Expect(failedPresentation.Tick(20).frameIndex == 1,
+		"display-failure fixture did not request its next animation frame");
+	failedPresentation.SetImageReady(false, 20);
+	failedPresentation.FrameDisplayFailed(0);
+	Expect(failedPresentation.FrameIndex() == 0 &&
+		!failedPresentation.AnimationPlaying() && failedPresentation.ImageReady() &&
+		!failedPresentation.NextDeadline().has_value(),
+		"failed animation upload left the scheduler pointing at an unpresented frame");
+	failedPresentation.StepAnimationFrame(1, 21);
+	failedPresentation.FrameDisplayFailed(0);
+	Expect(failedPresentation.FrameIndex() == 0 &&
+		failedPresentation.AnimationManuallyPaused() &&
+		!failedPresentation.AnimationPlaying(),
+		"failed manual frame upload lost the committed frame or user's freeze intent");
+	failedPresentation.ToggleAnimationPlayback(22);
+	Expect(failedPresentation.FrameIndex() == 0 &&
+		failedPresentation.AnimationPlaying() && failedPresentation.NextDeadline() == 42,
+		"manual resume after a failed frame did not continue from the visible frame");
 }
 
 void TestEventLoopInvalidationDeadlinesWakeupsAndMotion() {

@@ -45,7 +45,7 @@ public:
 	bool ResetAnimationDelay(std::uint32_t now);
 	PlaybackAction Tick(std::uint32_t now);
 	std::optional<std::uint32_t> NextDeadline() const;
-	void FrameDisplayFailed();
+	void FrameDisplayFailed(std::optional<std::size_t> presentedFrame = std::nullopt);
 
 	PlaybackMode Mode() const { return mode_; }
 	bool AnimationPlaying() const { return animationPlaying_; }

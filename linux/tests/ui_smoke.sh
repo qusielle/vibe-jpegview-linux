@@ -1180,6 +1180,77 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 		FF0000|0000FF) ;;
 		*) echo "UI smoke test: animation fixture did not show a solid starting frame ($rotation_animation_before_color)" >&2; exit 1 ;;
 	esac
+	rotation_animation_original_color=$rotation_animation_before_color
+	DISPLAY=":$display_number" xdotool key p
+	sleep 0.45
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/free-rotation-animation-frozen-before.png"
+	rotation_animation_frozen_before=$(convert \
+		"$temporary/free-rotation-animation-frozen-before.png" \
+		-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+	sleep 0.45
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/free-rotation-animation-frozen-after.png"
+	rotation_animation_frozen_after=$(convert \
+		"$temporary/free-rotation-animation-frozen-after.png" \
+		-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+	if [ "$rotation_animation_frozen_before" != "$rotation_animation_frozen_after" ]; then
+		echo "UI smoke test: P did not freeze the displayed animation frame" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key bracketright
+	rotation_animation_stepped_color=''
+	for _ in $(seq 1 40); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/free-rotation-animation-next-frame.png"
+		rotation_animation_stepped_color=$(convert \
+			"$temporary/free-rotation-animation-next-frame.png" \
+			-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+		if [ "$rotation_animation_stepped_color" != "$rotation_animation_frozen_after" ]; then
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$rotation_animation_stepped_color" = "$rotation_animation_frozen_after" ]; then
+		echo "UI smoke test: ] did not step to the next animation frame" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key bracketleft
+	rotation_animation_reversed_color=''
+	for _ in $(seq 1 40); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/free-rotation-animation-previous-frame.png"
+		rotation_animation_reversed_color=$(convert \
+			"$temporary/free-rotation-animation-previous-frame.png" \
+			-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+		if [ "$rotation_animation_reversed_color" = "$rotation_animation_original_color" ]; then
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$rotation_animation_reversed_color" != "$rotation_animation_original_color" ]; then
+		echo "UI smoke test: [ did not reverse to the previous animation frame" >&2
+		exit 1
+	fi
+	assert_title_prefix "01-animation.gif" "frame stepping changed the selected file"
+	DISPLAY=":$display_number" xdotool key p
+	rotation_animation_resumed_color=''
+	for _ in $(seq 1 70); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/free-rotation-animation-control-resume.png"
+		rotation_animation_resumed_color=$(convert \
+			"$temporary/free-rotation-animation-control-resume.png" \
+			-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+		if [ "$rotation_animation_resumed_color" != "$rotation_animation_original_color" ]; then
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$rotation_animation_resumed_color" = "$rotation_animation_original_color" ]; then
+		echo "UI smoke test: P did not resume animation after manual frame stepping" >&2
+		exit 1
+	fi
+	rotation_animation_before_color=$rotation_animation_resumed_color
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400
 	DISPLAY=":$display_number" xdotool keydown Shift_L
 	DISPLAY=":$display_number" xdotool click 3

@@ -704,6 +704,13 @@ Timed playback produces no navigation while the current JPEG header is pending a
 slideshow or movie interval from the successful display commit. Rotate and mirror commands wait for
 the matching header continuation before materializing pixels; a pending slideshow transition retains
 the outgoing frame and starts when the incoming image is ready.
+For animated sources, Viewer records the presented frame only after its matching display request
+commits. The information overlay reads that committed identity while another frame is preparing;
+manual steps pass through the same `SetAnimationFrame` and texture pipeline as timed advances. A failed
+frame display restores the scheduler and document to the last committed frame. The scheduler keeps
+manual freeze separate from modal/readiness suppression, and a delay override changes timing without
+mutating pixels or cache identity. Manual controls are admitted only while the selected animated frame
+is ready and no image or file operation owns it.
 Pixel-edit workers operate on immutable source snapshots and validate the selected owner, document
 revision, and animation frame before publication. The SDL thread creates a replacement texture first,
 then applies the new pixels and retires replaced buffers through the shared cache retirement service.

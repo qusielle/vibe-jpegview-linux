@@ -14,6 +14,9 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	if (alt && !ctrl && !shift && key == SDLK_LEFT) return kCommandPreviousSiblingFolder;
 	if (alt && !ctrl && !shift && key == SDLK_RIGHT) return kCommandNextSiblingFolder;
 	if (alt && !ctrl && !shift && key == SDLK_r) return IDM_SLIDESHOW_RESUME;
+	if (alt && !ctrl && !shift && key == SDLK_LEFTBRACKET) return kCommandAnimationSlower;
+	if (alt && !ctrl && !shift && key == SDLK_RIGHTBRACKET) return kCommandAnimationFaster;
+	if (alt && !ctrl && !shift && key == 'p') return kCommandAnimationResetDelays;
 	if (alt) return 0;
 	if (ctrl && !shift && (key == SDLK_LEFT || key == SDLK_RIGHT)) return IDM_TOGGLE;
 
@@ -48,6 +51,9 @@ int CommandForKey(const SDL_KeyboardEvent& event, bool playbackActive) {
 	if (!ctrl && !shift && key == 'z') return kCommandToggleMagnifyingGlass;
 	if (!ctrl && !shift && key == 'd') return kCommandToggleDoublePageMode;
 	if (!ctrl && !shift && key == 'j') return kCommandToggleMangaReadingOrder;
+	if (!ctrl && !shift && key == SDLK_LEFTBRACKET) return kCommandAnimationPreviousFrame;
+	if (!ctrl && !shift && key == SDLK_RIGHTBRACKET) return kCommandAnimationNextFrame;
+	if (!ctrl && !shift && key == 'p') return kCommandAnimationTogglePlayback;
 	if (!ctrl && !shift && key == SDLK_F7) return IDM_LOOP_FOLDER;
 	if (!ctrl && !shift && key == SDLK_F8) return IDM_LOOP_RECURSIVELY;
 	if (!ctrl && !shift && key == SDLK_F9) return IDM_LOOP_SIBLINGS;

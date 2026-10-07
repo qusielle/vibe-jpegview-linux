@@ -1070,6 +1070,7 @@ private:
 		pendingImageIntents_.Cancel();
 		ClearPendingTransitionFrame();
 		pendingMaterializationIntents_.clear();
+		presentedAnimationFrame_.reset();
 		currentDisplayRequest_.reset();
 		CancelPendingImageOperation();
 		CancelImageSpectrumBeforeImageMutation();
@@ -1100,6 +1101,12 @@ private:
 		const bool currentRequest = IsCurrentSelectedDisplayRequest(generation, source, key);
 		if (!currentRequest) return;
 		if (failedCurrentDisplayKey_ == key) failedCurrentDisplayKey_.clear();
+		if (playback_.HasAnimation() && currentDecoded_ &&
+			currentDisplayRequest_->frameIndex < currentDecoded_->frames.size()) {
+			presentedAnimationFrame_ = currentDisplayRequest_->frameIndex;
+		} else {
+			presentedAnimationFrame_.reset();
+		}
 		RecordPresentedDisplayTexture(key);
 		if (!currentSelectedLoadPending_) {
 			playback_.SetImageReady(true, SDL_GetTicks());
@@ -1166,7 +1173,11 @@ private:
 		if (fileList_.Empty()) return;
 		failedCurrentDisplayKey_ = key;
 		if (currentDecoded_ && currentDecoded_->animation) {
-			playback_.FrameDisplayFailed();
+			const std::optional<std::size_t> visibleFrame = presentedAnimationFrame_;
+			playback_.FrameDisplayFailed(visibleFrame);
+			if (visibleFrame.has_value() && currentAnimationFrame_ != *visibleFrame) {
+				(void)SetAnimationFrame(*visibleFrame);
+			}
 		} else {
 			playback_.SetImageReady(true, SDL_GetTicks());
 		}
@@ -2102,6 +2113,7 @@ private:
 		BeginPixelColorSamplerOwner(loadGeneration, source.Key());
 		currentSelectedLoadPending_ = true;
 		currentSelectedStartupLoad_ = startupLoad;
+		presentedAnimationFrame_.reset();
 		currentJpegHeaderPending_ = false;
 		pendingSelectedDisplayKey_.clear();
 		pendingImageIntents_.Begin(targetPath, source.Key(), loadGeneration);
@@ -3159,6 +3171,7 @@ private:
 			if (!preserveLazySavePresentation) currentDisplayRequest_.reset();
 			if (result->flattenAnimation) {
 				playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
+				presentedAnimationFrame_.reset();
 				retired.decoded = std::move(currentDecoded_);
 			}
 			if (pending.purpose == ImageOperationPurpose::Transform) {
@@ -5551,6 +5564,7 @@ private:
 		imageDocument_.SetAnimation(false);
 		imageDocument_.SetFrameIndex(0);
 		currentAnimationFrame_ = 0;
+		presentedAnimationFrame_.reset();
 		playback_.ConfigureStillImage(SDL_GetTicks());
 		jpegview_linux::RetiredImageBuffers retired;
 		retired.decoded = std::move(currentDecoded_);
@@ -7351,11 +7365,7 @@ private:
 	}
 
 	void ResumePlayback() {
-		const jpegview_linux::PlaybackAction action = playback_.Resume(SDL_GetTicks());
-		if (action.type == jpegview_linux::PlaybackActionType::ShowFrame &&
-			!SetAnimationFrame(action.frameIndex)) {
-			playback_.FrameDisplayFailed();
-		}
+		ApplyPlaybackAction(playback_.Resume(SDL_GetTicks()));
 		SetTitle();
 	}
 
@@ -7445,9 +7455,14 @@ private:
 	}
 
 	void TickPlayback() {
-		const jpegview_linux::PlaybackAction action = playback_.Tick(SDL_GetTicks());
+		ApplyPlaybackAction(playback_.Tick(SDL_GetTicks()));
+	}
+
+	void ApplyPlaybackAction(const jpegview_linux::PlaybackAction& action) {
 		if (action.type == jpegview_linux::PlaybackActionType::ShowFrame) {
-			if (!SetAnimationFrame(action.frameIndex)) playback_.FrameDisplayFailed();
+			if (!SetAnimationFrame(action.frameIndex)) {
+				playback_.FrameDisplayFailed(presentedAnimationFrame_);
+			}
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
 		} else if (action.type == jpegview_linux::PlaybackActionType::NextImage) {
 			const NavigationAttemptResult navigation = NextImage();
@@ -7461,6 +7476,54 @@ private:
 			} else {
 				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
 			}
+		}
+	}
+
+	bool CanControlCurrentAnimation() const {
+		return playback_.HasAnimation() &&
+			playback_.Mode() != jpegview_linux::PlaybackMode::Slideshow &&
+			playback_.ImageReady() && presentedAnimationFrame_.has_value() &&
+			!currentSelectedLoadPending_ && !pendingImageOperation_.has_value() &&
+			!pendingFileOperation_.has_value() && pendingMaterializationIntents_.empty() &&
+			failedCurrentDisplayKey_.empty();
+	}
+
+	void ExecuteAnimationControlCommand(int command) {
+		if (!CanControlCurrentAnimation()) return;
+		const std::uint32_t now = SDL_GetTicks();
+		jpegview_linux::PlaybackAction action;
+		bool changed = false;
+		switch (command) {
+		case jpegview_linux::kCommandAnimationPreviousFrame:
+			action = playback_.StepAnimationFrame(-1, now);
+			changed = action.type == jpegview_linux::PlaybackActionType::ShowFrame;
+			break;
+		case jpegview_linux::kCommandAnimationNextFrame:
+			action = playback_.StepAnimationFrame(1, now);
+			changed = action.type == jpegview_linux::PlaybackActionType::ShowFrame;
+			break;
+		case jpegview_linux::kCommandAnimationTogglePlayback:
+			action = playback_.ToggleAnimationPlayback(now);
+			changed = true;
+			break;
+		case jpegview_linux::kCommandAnimationFaster:
+			changed = playback_.AdjustAnimationDelay(-50, now);
+			break;
+		case jpegview_linux::kCommandAnimationSlower:
+			changed = playback_.AdjustAnimationDelay(50, now);
+			break;
+		case jpegview_linux::kCommandAnimationResetDelays:
+			changed = playback_.ResetAnimationDelay(now);
+			break;
+		default:
+			return;
+		}
+		if (action.type != jpegview_linux::PlaybackActionType::None) {
+			ApplyPlaybackAction(action);
+		}
+		if (changed) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+			SetTitle();
 		}
 	}
 
@@ -7561,10 +7624,27 @@ private:
 			CurrentImage().originalWidth, CurrentImage().originalHeight,
 			sourceMetadata.hasFileSize ? jpegview_linux::FormatFileSize(sourceMetadata.fileSize) :
 				std::string()));
-		if (currentDecoded_ && currentDecoded_->frames.size() > 1) {
-			lines.push_back("Frame: " + std::to_string(playback_.FrameIndex() + 1) + "/" +
-				std::to_string(currentDecoded_->frames.size()));
-			lines.push_back(std::string("Playback: ") + (playback_.AnimationPlaying() ? "playing" : "paused"));
+		if (playback_.HasAnimation() && currentDecoded_ &&
+			currentDecoded_->frames.size() > 1) {
+			const std::size_t frameCount = currentDecoded_->frames.size();
+			const std::size_t displayedFrame = std::min(
+				presentedAnimationFrame_.value_or(currentAnimationFrame_), frameCount - 1);
+			lines.push_back("Frame: " + std::to_string(displayedFrame + 1) + "/" +
+				std::to_string(frameCount));
+			std::string playbackStatus;
+			if (!playback_.ImageReady()) {
+				playbackStatus = "loading frame " +
+					std::to_string(std::min(playback_.FrameIndex(), frameCount - 1) + 1);
+			} else if (playback_.AnimationManuallyPaused()) {
+				playbackStatus = "frozen";
+			} else {
+				playbackStatus = playback_.AnimationPlaying() ? "playing" : "paused";
+			}
+			lines.push_back("Playback: " + playbackStatus);
+			if (playback_.Mode() != jpegview_linux::PlaybackMode::Movie) {
+				lines.push_back("Frame delay: " + std::to_string(playback_.FrameDelayMs()) +
+					" ms" + (playback_.AnimationDelayOverrideMs().has_value() ? " (custom)" : ""));
+			}
 		}
 		if (CurrentImage().width != CurrentImage().originalWidth || CurrentImage().height != CurrentImage().originalHeight) {
 			lines.push_back("Displayed size: " + std::to_string(CurrentImage().width) + " x " + std::to_string(CurrentImage().height));
@@ -7626,7 +7706,11 @@ private:
 			<< CurrentImagePositionText().size() << ':' << CurrentImagePositionText() << '|'
 			<< CurrentImage().originalWidth << ':' << CurrentImage().originalHeight << '|'
 			<< CurrentImage().width << ':' << CurrentImage().height << '|'
-			<< playback_.FrameIndex() << ':' << playback_.AnimationPlaying() << '|'
+			<< playback_.FrameIndex() << ':' << playback_.AnimationPlaying() << ':'
+			<< playback_.AnimationManuallyPaused() << ':' << playback_.ImageReady() << ':'
+			<< (presentedAnimationFrame_.has_value() ? *presentedAnimationFrame_ :
+				std::numeric_limits<std::size_t>::max()) << ':' << playback_.FrameDelayMs() << ':'
+			<< playback_.AnimationDelayOverrideMs().has_value() << '|'
 			<< (currentDecoded_ ? currentDecoded_->frames.size() : 0) << ':'
 			<< imageInfoMetadataRevision_;
 		return imageInfoLineCache_.GetOrBuild(key.str(), [this] {
@@ -8337,6 +8421,14 @@ private:
 			return;
 		}
 		switch (command) {
+		case jpegview_linux::kCommandAnimationPreviousFrame:
+		case jpegview_linux::kCommandAnimationNextFrame:
+		case jpegview_linux::kCommandAnimationTogglePlayback:
+		case jpegview_linux::kCommandAnimationFaster:
+		case jpegview_linux::kCommandAnimationSlower:
+		case jpegview_linux::kCommandAnimationResetDelays:
+			ExecuteAnimationControlCommand(command);
+			break;
 		case jpegview_linux::kCommandOpenGpsLocation:
 			OpenGpsMap();
 			break;
@@ -8843,6 +8935,11 @@ private:
 		state.playbackMode = playback_.Mode();
 		state.animationPlaying = playback_.AnimationPlaying();
 		state.animationAvailable = playback_.HasAnimation();
+		state.animationControlsAvailable = CanControlCurrentAnimation();
+		state.animationManuallyPaused = playback_.AnimationManuallyPaused();
+		state.animationDelayOverridden =
+			playback_.AnimationDelayOverrideMs().has_value();
+		state.animationDelayMs = playback_.FrameDelayMs();
 		state.movieFramesPerSecond = playback_.MovieFramesPerSecond();
 		state.infoVisible = runtimeSettings_.Values().infoVisible;
 		state.gpsLocationAvailable = CurrentGpsCoordinatesAvailable();
@@ -13142,7 +13239,7 @@ private:
 		int windowHeight = 0;
 		SDL_GetWindowSize(window_, &windowWidth, &windowHeight);
 		const int width = std::min(940, std::max(480, windowWidth - 40));
-		const int height = std::min(360, std::max(300, windowHeight - 40));
+		const int height = std::min(390, std::max(320, windowHeight - 40));
 		const SDL_Rect panel{(windowWidth - width) / 2, (windowHeight - height) / 2, width, height};
 		SDL_SetRenderDrawColor(renderer_, 8, 8, 8, 235);
 		SDL_RenderFillRect(renderer_, &panel);
@@ -13152,7 +13249,7 @@ private:
 		const std::string spaceHelp = runtimeSettings_.Values().spacebarNavigatesImages ?
 			"Navigate: Space next; Shift+Space previous; Return fit; Ctrl+Return fill with crop; +/- zoom" :
 			"Scale: Space fit/actual; Return fit; Ctrl+Return fill with crop; +/- zoom";
-		const std::array<std::string, 10> lines = {
+		const std::array<std::string, 11> lines = {
 			"Navigate: Ctrl+G number; arrows/wheel; Home/End; Alt+arrows sibling folders",
 			"Zoom/pan: Ctrl+wheel or Ctrl+Up/Down; drag; Shift+Arrow; Z lens; wheel resizes it",
 			"Navigator: hover upper-right when magnified; click or drag its map to reposition",
@@ -13161,11 +13258,12 @@ private:
 			"Files: Ctrl+O open; Ctrl+S save processed; Ctrl+Shift+S save displayed size",
 			"Clipboard: Ctrl+C copy image; Ctrl+Shift+C copy path; Ctrl+V paste PNG",
 			"Adjustments: Up/Down rotate; F5 auto correction; F6 local density; Ctrl+Shift+R resize",
+			"Animation: [ / ] step; P freeze/resume; Alt+[ / ] delay; Alt+P reset delays",
 			"View/window: D double page; J manga; Ctrl+M mark; F11 full; Shift+F11 title; Shift+F12 top",
 			"Dialogs: Ctrl+Tab switches Browse/Recents; type to filter; arrows/pages select; wheel scrolls; drag to resize"};
 		for (std::size_t index = 0; index < lines.size(); ++index) {
 			DrawText(ClipText(lines[index], width - 36), panel.x + 18,
-				panel.y + 48 + static_cast<int>(index) * 27, kUiTextScale, 220, 225, 235);
+				panel.y + 46 + static_cast<int>(index) * 22, kUiTextScale, 220, 225, 235);
 		}
 		DrawText("Right-click: compact; Shift+right: full; Menu: compact; Esc/F1 closes",
 			panel.x + 18, panel.y + height - 32, kUiTextScale, 180, 190, 205);
@@ -14186,6 +14284,7 @@ private:
 		std::uint64_t lastPerfSnapshotUs_ = 0;
 	jpegview_linux::DecodedImageCache::ImagePtr currentDecoded_;
 	std::size_t currentAnimationFrame_ = 0;
+	std::optional<std::size_t> presentedAnimationFrame_;
 	std::optional<jpegview_linux::DisplayImageRequest> currentDisplayRequest_;
 	SDL_Texture* transitionTexture_ = nullptr;
 	int transitionOriginalBlendMode_ = SDL_BLENDMODE_NONE;

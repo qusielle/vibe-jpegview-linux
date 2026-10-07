@@ -177,6 +177,7 @@ bool PlaybackScheduler::AdjustAnimationDelay(int deltaMs, std::uint32_t now) {
 		*frameDelayOverrideMs_ : OriginalFrameDelayMs();
 	const long long adjusted = std::clamp(current + static_cast<long long>(deltaMs),
 		10ll, 60000ll);
+	if (adjusted == current) return false;
 	frameDelayOverrideMs_ = static_cast<int>(adjusted);
 	mode_ = PlaybackMode::None;
 	slideshowSeconds_ = 0.0;
@@ -258,10 +259,15 @@ std::optional<std::uint32_t> PlaybackScheduler::NextDeadline() const {
 	return std::nullopt;
 }
 
-void PlaybackScheduler::FrameDisplayFailed() {
+void PlaybackScheduler::FrameDisplayFailed(
+	std::optional<std::size_t> presentedFrame) {
 	animationPlaying_ = false;
 	imageReady_ = true;
 	nextTick_ = 0;
+	if (presentedFrame.has_value() && *presentedFrame < frameDelaysMs_.size()) {
+		frameIndex_ = *presentedFrame;
+		sequenceExhausted_ = false;
+	}
 }
 
 std::uint32_t PlaybackScheduler::MovieFrameInterval() const {

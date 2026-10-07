@@ -51,6 +51,10 @@ struct ContextMenuState {
 	PlaybackMode playbackMode = PlaybackMode::None;
 	bool animationPlaying = false;
 	bool animationAvailable = false;
+	bool animationControlsAvailable = false;
+	bool animationManuallyPaused = false;
+	bool animationDelayOverridden = false;
+	int animationDelayMs = 100;
 	double movieFramesPerSecond = 25.0;
 	bool infoVisible = false;
 	bool gpsLocationAvailable = false;

@@ -198,11 +198,6 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   extensions share a basename, such as `photo.jpg` and `photo.png`. Keep this separate from
   perceptual duplicate detection, and leave it off by default because those files may be different
   edits. See the fork's [HideSameName setting](https://github.com/sdneon/jpegview/blob/master/README.md).
-- **Animated-image frame controls:** step backward/forward through frames, freeze/resume, and adjust
-  frame delay while viewing an animation. This is separate from the existing movie-mode FPS
-  candidate, which advances between files. See the fork's
-  [multi-frame navigation documentation](https://github.com/sdneon/jpegview/blob/master/README.md).
-
 ### Platform and performance ideas from other recently pushed branches
 
 - **User-editable keymap:** load command-to-shortcut mappings from an XDG user configuration file,
