@@ -118,7 +118,7 @@ CORE_CPP_SOURCES := \
 	src/zoom_navigator_model.cpp \
 	src/magnifying_glass_model.cpp src/advanced_configuration_model.cpp \
 	src/image_formats.cpp src/input_commands.cpp src/exif_reader.cpp \
-	src/image_metadata_reader.cpp \
+	src/image_metadata_reader.cpp src/image_metadata_png.cpp \
 	src/tiff_metadata_reader.cpp \
 	src/image_writer.cpp $(IMAGE_WRITER_SOURCES) \
 	src/image_decoder.cpp $(IMAGE_DECODER_SOURCES) \

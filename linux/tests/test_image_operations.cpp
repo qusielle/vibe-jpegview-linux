@@ -3807,6 +3807,121 @@ void TestImageMetadataReaderDispatchesByContent() {
 		"unsupported content retained metadata from the previous source");
 }
 
+std::vector<std::uint8_t> BuildPngWithExif(const std::vector<std::uint8_t>& tiff,
+	bool animated, bool afterImageData = false) {
+	std::vector<std::uint8_t> png = {
+		0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+	AppendPngChunk(png, "IHDR", {0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0});
+	if (animated) {
+		AppendPngChunk(png, "acTL", {0, 0, 0, 1, 0, 0, 0, 0});
+		std::vector<std::uint8_t> frameControl;
+		AppendBigEndian32(frameControl, 0);
+		AppendBigEndian32(frameControl, 1);
+		AppendBigEndian32(frameControl, 1);
+		AppendBigEndian32(frameControl, 0);
+		AppendBigEndian32(frameControl, 0);
+		AppendBigEndian16(frameControl, 1);
+		AppendBigEndian16(frameControl, 10);
+		frameControl.push_back(0);
+		frameControl.push_back(0);
+		AppendPngChunk(png, "fcTL", frameControl);
+	}
+	if (!afterImageData) AppendPngChunk(png, "eXIf", tiff);
+	const std::vector<std::uint8_t> scanline = {0, 0, 0, 0};
+	uLongf compressedSize = compressBound(scanline.size());
+	std::vector<std::uint8_t> compressed(compressedSize);
+	Expect(compress2(compressed.data(), &compressedSize, scanline.data(),
+		scanline.size(), Z_BEST_COMPRESSION) == Z_OK,
+		"could not compress test PNG image data");
+	compressed.resize(compressedSize);
+	AppendPngChunk(png, "IDAT", compressed);
+	if (afterImageData) AppendPngChunk(png, "eXIf", tiff);
+	AppendPngChunk(png, "IEND", {});
+	return png;
+}
+
+void TestPngAndApngExifMetadata() {
+	TemporaryDirectory temporary;
+	const std::vector<std::uint8_t> payload = ExifFixture().Build(true, false, true);
+	const std::vector<std::uint8_t> tiff(payload.begin() + 6, payload.end());
+	const fs::path pngPath = temporary.path() / "capture.png";
+	WriteBytes(pngPath, BuildPngWithExif(tiff, false));
+	jpegview_linux::ExifInfo info;
+	std::string comment;
+	Expect(jpegview_linux::ReadImageContentFormat(pngPath) ==
+		jpegview_linux::ImageContentFormat::Png &&
+		jpegview_linux::ReadImageMetadata(pngPath, info, comment) && info.hasExif &&
+		info.cameraModel == "Acme Model" && info.exposureTime == "1/125" &&
+		info.isoSpeed == 200,
+		"PNG eXIf metadata was not dispatched and parsed from its TIFF payload");
+
+	const jpegview_linux::SourceDescriptor pngSource =
+		jpegview_linux::DescribeImageSource(pngPath);
+	jpegview_linux::ExifMetadataWorker metadataWorker;
+	const std::uint64_t generation = metadataWorker.Request(pngSource);
+	const bool workerIdle = metadataWorker.WaitUntilIdle(std::chrono::seconds(3));
+	const auto workerResults = metadataWorker.TakeReady();
+	Expect(generation != 0 && workerIdle && workerResults.size() == 1 &&
+		workerResults.front().generation == generation &&
+		workerResults.front().source == pngSource.Key() &&
+		workerResults.front().metadataAvailable &&
+		workerResults.front().metadata.exposureTime == "1/125",
+		"metadata worker did not publish the PNG eXIf fields for the selected source");
+
+	const fs::path apngPath = temporary.path() / "animated.png";
+	WriteBytes(apngPath, BuildPngWithExif(tiff, true));
+	info = {};
+	Expect(jpegview_linux::ReadImageContentFormat(apngPath) ==
+		jpegview_linux::ImageContentFormat::Apng &&
+		jpegview_linux::ReadImageMetadata(apngPath, info, comment) && info.hasExif &&
+		info.cameraModel == "Acme Model",
+		"APNG eXIf metadata was not read through the PNG metadata path");
+
+	const fs::path afterImagePath = temporary.path() / "after-image-data.png";
+	WriteBytes(afterImagePath, BuildPngWithExif(tiff, false, true));
+	info = {};
+	Expect(jpegview_linux::ReadImageMetadata(afterImagePath, info, comment) &&
+		info.hasExif && info.cameraModel == "Acme Model",
+		"PNG reader did not find eXIf after the image data chunk");
+
+	std::vector<std::uint8_t> largeExif = tiff;
+	largeExif.resize(300u * 1024u, 0);
+	const fs::path largeExifPath = temporary.path() / "large-exif.png";
+	WriteBytes(largeExifPath, BuildPngWithExif(largeExif, false));
+	Expect(jpegview_linux::ReadImageContentFormat(largeExifPath) ==
+		jpegview_linux::ImageContentFormat::Unknown &&
+		jpegview_linux::ReadImageMetadata(largeExifPath, info, comment) &&
+		info.hasExif && info.cameraModel == "Acme Model",
+		"metadata dispatch did not recover a PNG whose ancillary chunk exceeded the format probe");
+
+	auto badCrc = BuildPngWithExif(tiff, false);
+	const std::array<std::uint8_t, 4> exifType = {'e', 'X', 'I', 'f'};
+	const auto typePosition = std::search(badCrc.begin(), badCrc.end(),
+		exifType.begin(), exifType.end());
+	Expect(typePosition != badCrc.end(), "test PNG did not contain its eXIf chunk");
+	const std::size_t typeOffset = static_cast<std::size_t>(typePosition - badCrc.begin());
+	const std::uint32_t chunkLength = ReadBigEndian32(badCrc, typeOffset - 4);
+	badCrc[typeOffset + 4 + chunkLength] ^= 1;
+	const fs::path badCrcPath = temporary.path() / "bad-crc.png";
+	WriteBytes(badCrcPath, badCrc);
+	info = {};
+	Expect(!jpegview_linux::ReadImageMetadata(badCrcPath, info, comment) && !info.hasExif,
+		"PNG reader accepted eXIf metadata with a corrupt chunk CRC");
+
+	const fs::path malformedPath = temporary.path() / "malformed.png";
+	auto malformed = BuildPngWithExif(tiff, false);
+	malformed[typeOffset - 4] = 0x7f;
+	malformed[typeOffset - 3] = 0xff;
+	malformed[typeOffset - 2] = 0xff;
+	malformed[typeOffset - 1] = 0xff;
+	WriteBytes(malformedPath, malformed);
+	info.hasExif = true;
+	info.cameraModel = "stale metadata";
+	Expect(!jpegview_linux::ReadImageMetadata(malformedPath, info, comment) &&
+		!info.hasExif && info.cameraModel.empty(),
+		"PNG reader accepted an eXIf chunk extending beyond the file");
+}
+
 void TestFileOperationFolderExifDatesUpdatesOnlyRegularImages() {
 	TemporaryDirectory temporary;
 	const fs::path folder = temporary.path() / "images";
@@ -3890,6 +4005,7 @@ const TestCase kTests[] = {
 	{"exif-ifd0-shooting-field-fallback", &TestExifIfd0ShootingFieldFallback},
 	{"tiff-metadata-bounded-random-access", &TestTiffMetadataReaderBoundedRandomAccess},
 	{"image-metadata-reader-dispatches-by-content", &TestImageMetadataReaderDispatchesByContent},
+	{"png-and-apng-exif-metadata", &TestPngAndApngExifMetadata},
 	{"file-operation-folder-exif-dates-update-only-regular-images", &TestFileOperationFolderExifDatesUpdatesOnlyRegularImages},
 };
 
