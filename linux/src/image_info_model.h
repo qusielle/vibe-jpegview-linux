@@ -55,6 +55,11 @@ std::string FormatImageDimensionsAndSize(int width, int height,
 
 std::string FormatModificationDateLine(std::string_view date);
 
+// Describes playback intent, not whether the next frame is still being
+// prepared. Frame readiness is transient during normal animation playback.
+std::string FormatAnimationPlaybackStatus(bool animationPlaying,
+	bool manuallyPaused);
+
 // Avoids repeating title-template expansion while its source, document, and
 // display-position revisions are unchanged.
 class WindowTitleFormatCache {

@@ -1233,7 +1233,7 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 	mkdir -p "$rotation_animation_directory" "$rotation_animation_config/jpegview-linux"
 	convert -delay 300 -size 800x600 xc:red -delay 300 -size 800x600 xc:blue \
 		-loop 0 "$rotation_animation_directory/01-animation.gif"
-	printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+	printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\ninfo_visible=1\n' \
 		> "$rotation_animation_config/jpegview-linux/settings.conf"
 	VIEWER_TEST_HOME="$temporary/free-rotation-animation-home" \
 		VIEWER_TEST_CONFIG_HOME="$rotation_animation_config" \
@@ -1258,6 +1258,37 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 		sed -n 's/^WIDTH=//p')
 	rotation_animation_height=$(printf '%s\n' "$rotation_animation_geometry" |
 		sed -n 's/^HEIGHT=//p')
+	animation_status_mask="$temporary/animation-playback-status.png"
+	animation_status_capture="$temporary/animation-playback-status-window.png"
+	capture_animation_status_mask() {
+		mask_path=$1
+		DISPLAY=":$display_number" import -window "$window_id" "$animation_status_capture"
+		convert "$animation_status_capture" -crop 320x22+0+68 +repage \
+			-colorspace Gray -threshold 70% "$mask_path"
+	}
+	# The status row is the fourth line in the top-left information panel. Thresholding
+	# removes the changing red/blue image behind its translucent panel.
+	capture_animation_status_mask "$temporary/animation-playback-playing.png"
+	DISPLAY=":$display_number" xdotool key p
+	sleep 0.15
+	capture_animation_status_mask "$temporary/animation-playback-frozen.png"
+	if compare -metric AE "$temporary/animation-playback-playing.png" \
+		"$temporary/animation-playback-frozen.png" null: >/dev/null 2>&1; then
+		echo "UI smoke test: playback information row was not visible at the expected position" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key p
+	sleep 0.15
+	capture_animation_status_mask "$temporary/animation-playback-playing.png"
+	for _ in $(seq 1 30); do
+		capture_animation_status_mask "$animation_status_mask"
+		if ! compare -metric AE "$temporary/animation-playback-playing.png" \
+			"$animation_status_mask" null: >/dev/null 2>&1; then
+			echo "UI smoke test: playback information text changed during normal GIF playback" >&2
+			exit 1
+		fi
+		sleep 0.05
+	done
 	rotation_animation_sample_x=$((rotation_animation_width / 2 - 310))
 	rotation_animation_sample_y=$((rotation_animation_height / 2))
 	rotation_animation_border_x=$((rotation_animation_width / 2 - 260))

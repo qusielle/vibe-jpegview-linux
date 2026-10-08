@@ -186,6 +186,12 @@ std::string FormatModificationDateLine(std::string_view date) {
 	return std::string(date);
 }
 
+std::string FormatAnimationPlaybackStatus(bool animationPlaying,
+	bool manuallyPaused) {
+	if (manuallyPaused) return "frozen";
+	return animationPlaying ? "playing" : "paused";
+}
+
 const std::string& WindowTitleFormatCache::GetOrBuild(const std::string& key,
 	const std::function<std::string()>& builder) {
 	if (!valid_ || key_ != key) {

@@ -4150,6 +4150,10 @@ void TestImageInfoFormatting() {
 	Expect(jpegview_linux::FormatModificationDateLine("2026-09-19 12:34:56") ==
 		"2026-09-19 12:34:56",
 		"modification date popup text still includes a label");
+	Expect(jpegview_linux::FormatAnimationPlaybackStatus(true, false) == "playing" &&
+		jpegview_linux::FormatAnimationPlaybackStatus(false, false) == "paused" &&
+		jpegview_linux::FormatAnimationPlaybackStatus(false, true) == "frozen",
+		"animation information status did not reflect playback or manual freeze state");
 	Expect(jpegview_linux::FormatFileSize(1536) == "1.5 KB",
 		"file-size formatting changed while moving it into the information model");
 	Expect(jpegview_linux::FormatFileSize(1023) == "1023 B" &&

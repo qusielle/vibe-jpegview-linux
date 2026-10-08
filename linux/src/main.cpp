@@ -7638,15 +7638,9 @@ private:
 				presentedAnimationFrame_.value_or(currentAnimationFrame_), frameCount - 1);
 			lines.push_back("Frame: " + std::to_string(displayedFrame + 1) + "/" +
 				std::to_string(frameCount));
-			std::string playbackStatus;
-			if (!playback_.ImageReady()) {
-				playbackStatus = "loading frame " +
-					std::to_string(std::min(playback_.FrameIndex(), frameCount - 1) + 1);
-			} else if (playback_.AnimationManuallyPaused()) {
-				playbackStatus = "frozen";
-			} else {
-				playbackStatus = playback_.AnimationPlaying() ? "playing" : "paused";
-			}
+			const std::string playbackStatus =
+				jpegview_linux::FormatAnimationPlaybackStatus(
+					playback_.AnimationPlaying(), playback_.AnimationManuallyPaused());
 			lines.push_back("Playback: " + playbackStatus);
 			if (playback_.Mode() != jpegview_linux::PlaybackMode::Movie) {
 				lines.push_back("Frame delay: " + std::to_string(playback_.FrameDelayMs()) +
@@ -7714,7 +7708,7 @@ private:
 			<< CurrentImage().originalWidth << ':' << CurrentImage().originalHeight << '|'
 			<< CurrentImage().width << ':' << CurrentImage().height << '|'
 			<< playback_.FrameIndex() << ':' << playback_.AnimationPlaying() << ':'
-			<< playback_.AnimationManuallyPaused() << ':' << playback_.ImageReady() << ':'
+			<< playback_.AnimationManuallyPaused() << ':'
 			<< (presentedAnimationFrame_.has_value() ? *presentedAnimationFrame_ :
 				std::numeric_limits<std::size_t>::max()) << ':' << playback_.FrameDelayMs() << ':'
 			<< playback_.AnimationDelayOverrideMs().has_value() << '|'
