@@ -167,7 +167,7 @@ bool DecodeGif(const std::filesystem::path& filename, DecodedImage& image,
 			}
 		}
 		if (!AppendBGRA(image, gif->SWidth, gif->SHeight, canvas.data(),
-			std::max(100, control.DelayTime * 10), errorMessage)) {
+			control.DelayTime * 10, errorMessage)) {
 			return false;
 		}
 		if (control.DisposalMode == DISPOSE_BACKGROUND) {
@@ -184,8 +184,10 @@ bool DecodeGif(const std::filesystem::path& filename, DecodedImage& image,
 			canvas = previous;
 		}
 	}
+	if (image.frames.empty()) return false;
 	image.animation = image.frames.size() > 1;
-	return !image.frames.empty();
+	image.isGif = true;
+	return true;
 }
 #endif
 

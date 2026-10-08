@@ -5,11 +5,20 @@
 #include <limits>
 
 namespace jpegview_linux {
+namespace {
+
+constexpr int kMinimumFrameDelayMs = 10;
+constexpr int kMaximumAdjustableFrameDelayMs = 60000;
+constexpr int kMaximumSourceFrameDelayMs = 655350;
+
+} // namespace
 
 void PlaybackScheduler::ConfigureImage(std::vector<int> frameDelaysMs,
-	int loopCount, bool animated, std::uint32_t now) {
+	int loopCount, bool animated, std::uint32_t now,
+	FrameDelayPolicy frameDelayPolicy) {
 	frameDelaysMs_ = std::move(frameDelaysMs);
 	frameDelayOverrideMs_.reset();
+	frameDelayPolicy_ = frameDelayPolicy;
 	loopCount_ = std::max(0, loopCount);
 	completedLoops_ = 0;
 	frameIndex_ = 0;
@@ -17,8 +26,9 @@ void PlaybackScheduler::ConfigureImage(std::vector<int> frameDelaysMs,
 	manualResumeAnimation_ = false;
 	sequenceExhausted_ = false;
 	hasAnimation_ = animated && frameDelaysMs_.size() > 1 &&
-		std::any_of(frameDelaysMs_.begin(), frameDelaysMs_.end(),
-			[](int delay) { return delay > 0; });
+		(frameDelayPolicy_ == FrameDelayPolicy::SourceLocked ||
+			std::any_of(frameDelaysMs_.begin(), frameDelaysMs_.end(),
+				[](int delay) { return delay > 0; }));
 	lastInteractionTick_ = now;
 	animationPlaying_ = hasAnimation_ && mode_ != PlaybackMode::Slideshow;
 	if (animationPlaying_) {
@@ -172,11 +182,12 @@ PlaybackAction PlaybackScheduler::ToggleAnimationPlayback(std::uint32_t now) {
 }
 
 bool PlaybackScheduler::AdjustAnimationDelay(int deltaMs, std::uint32_t now) {
-	if (!hasAnimation_ || deltaMs == 0) return false;
+	if (!hasAnimation_ || SourceFrameDelaysLocked() || deltaMs == 0) return false;
 	const long long current = frameDelayOverrideMs_.has_value() ?
 		*frameDelayOverrideMs_ : OriginalFrameDelayMs();
 	const long long adjusted = std::clamp(current + static_cast<long long>(deltaMs),
-		10ll, 60000ll);
+		static_cast<long long>(kMinimumFrameDelayMs),
+		static_cast<long long>(kMaximumAdjustableFrameDelayMs));
 	if (adjusted == current) return false;
 	frameDelayOverrideMs_ = static_cast<int>(adjusted);
 	mode_ = PlaybackMode::None;
@@ -193,7 +204,7 @@ bool PlaybackScheduler::AdjustAnimationDelay(int deltaMs, std::uint32_t now) {
 }
 
 bool PlaybackScheduler::ResetAnimationDelay(std::uint32_t now) {
-	if (!hasAnimation_ || !frameDelayOverrideMs_.has_value()) return false;
+	if (!hasAnimation_ || SourceFrameDelaysLocked() || !frameDelayOverrideMs_.has_value()) return false;
 	frameDelayOverrideMs_.reset();
 	mode_ = PlaybackMode::None;
 	slideshowSeconds_ = 0.0;
@@ -277,12 +288,15 @@ std::uint32_t PlaybackScheduler::MovieFrameInterval() const {
 
 void PlaybackScheduler::ScheduleFrame(std::uint32_t now) {
 	int delay = 100;
-	if (mode_ == PlaybackMode::Movie) {
+	if (mode_ == PlaybackMode::Movie && !SourceFrameDelaysLocked()) {
 		delay = static_cast<int>(MovieFrameInterval());
 	} else {
 		delay = FrameDelayMs();
 	}
-	nextTick_ = now + static_cast<std::uint32_t>(std::clamp(delay, 10, 60000));
+	const int maximumDelay = SourceFrameDelaysLocked() ?
+		kMaximumSourceFrameDelayMs : kMaximumAdjustableFrameDelayMs;
+	nextTick_ = now + static_cast<std::uint32_t>(std::clamp(delay,
+		kMinimumFrameDelayMs, maximumDelay));
 }
 
 PlaybackAction PlaybackScheduler::StartAnimation(std::uint32_t now) {
@@ -309,7 +323,9 @@ int PlaybackScheduler::FrameDelayMs() const {
 
 int PlaybackScheduler::OriginalFrameDelayMs() const {
 	if (frameIndex_ >= frameDelaysMs_.size()) return 100;
-	return std::clamp(frameDelaysMs_[frameIndex_], 10, 60000);
+	const int maximumDelay = SourceFrameDelaysLocked() ?
+		kMaximumSourceFrameDelayMs : kMaximumAdjustableFrameDelayMs;
+	return std::clamp(frameDelaysMs_[frameIndex_], kMinimumFrameDelayMs, maximumDelay);
 }
 
 bool PlaybackScheduler::Reached(std::uint32_t now, std::uint32_t deadline) {

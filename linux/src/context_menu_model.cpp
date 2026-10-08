@@ -155,11 +155,16 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		SortModeDescription(state.sortMode) + ")";
 	const bool movieMode = state.playbackMode == PlaybackMode::Movie;
 	const std::string animationDelayLabel = "  Frame delay: " +
-		std::to_string(std::clamp(state.animationDelayMs, 10, 60000)) + " ms" +
+		std::to_string(state.animationDelaySourceLocked ?
+			std::max(10, state.animationDelayMs) :
+			std::clamp(state.animationDelayMs, 10, 60000)) + " ms" +
 		(state.animationDelayOverridden ? " (custom" : " (source") +
-		(movieMode ? "; Movie uses FPS)" : ")");
+		(state.animationDelaySourceLocked ? "; GIF timing)" :
+			(movieMode ? "; Movie uses FPS)" : ")"));
 	const bool animationControlsEnabled = state.animationAvailable &&
 		state.animationControlsAvailable && state.playbackMode != PlaybackMode::Slideshow;
+	const bool animationDelayControlsEnabled = animationControlsEnabled &&
+		!state.animationDelaySourceLocked;
 	const std::string animationToggleLabel = state.animationManuallyPaused ?
 		(movieMode ? "  Resume Movie" : "  Resume animation") :
 		(state.animationPlaying ? "  Freeze animation" :
@@ -343,11 +348,11 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 			animationControlsEnabled, "]", true},
 		{animationDelayLabel.c_str(), 0, false, false, false, nullptr, true},
 		{"  Faster", kCommandAnimationFaster, false, false,
-			animationControlsEnabled && state.animationDelayMs > 10, "Alt+]", true},
+			animationDelayControlsEnabled && state.animationDelayMs > 10, "Alt+]", true},
 		{"  Slower", kCommandAnimationSlower, false, false,
-			animationControlsEnabled && state.animationDelayMs < 60000, "Alt+[", true},
+			animationDelayControlsEnabled && state.animationDelayMs < 60000, "Alt+[", true},
 		{"  Restore source frame delays", kCommandAnimationResetDelays, false, false,
-			animationControlsEnabled && state.animationDelayOverridden, "Alt+P", true},
+			animationDelayControlsEnabled && state.animationDelayOverridden, "Alt+P", true},
 		{"  Resume playback", IDM_SLIDESHOW_RESUME, false, false,
 			(!state.animationPlaying &&
 				(state.playbackMode != PlaybackMode::None || state.animationAvailable)), "Alt+R", true},

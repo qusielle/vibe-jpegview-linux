@@ -1109,7 +1109,9 @@ private:
 		}
 		RecordPresentedDisplayTexture(key);
 		if (!currentSelectedLoadPending_) {
-			playback_.SetImageReady(true, SDL_GetTicks());
+			if (!ImageOperationOwnsAnimationPause()) {
+				playback_.SetImageReady(true, SDL_GetTicks());
+			}
 			return;
 		}
 		const std::optional<jpegview_linux::ImageSessionSelection> selection =
@@ -1137,7 +1139,9 @@ private:
 		const jpegview_linux::ExifDateActionCompletion deferredAction =
 			deferredExifDateAction_.MarkImageCommitted(selection->filename, source);
 		if (deferredAction.runDeferredAction) TouchCurrentImage(true);
-		playback_.SetImageReady(true, SDL_GetTicks());
+		if (!ImageOperationOwnsAnimationPause()) {
+			playback_.SetImageReady(true, SDL_GetTicks());
+		}
 		if (pendingTransitionFrame_.texture != nullptr) {
 			TransitionFrame previous;
 			MoveTransitionFrame(previous, pendingTransitionFrame_);
@@ -1172,14 +1176,16 @@ private:
 		}
 		if (fileList_.Empty()) return;
 		failedCurrentDisplayKey_ = key;
-		if (currentDecoded_ && currentDecoded_->animation) {
-			const std::optional<std::size_t> visibleFrame = presentedAnimationFrame_;
-			playback_.FrameDisplayFailed(visibleFrame);
-			if (visibleFrame.has_value() && currentAnimationFrame_ != *visibleFrame) {
-				(void)SetAnimationFrame(*visibleFrame);
+		if (!ImageOperationOwnsAnimationPause()) {
+			if (currentDecoded_ && currentDecoded_->animation) {
+				const std::optional<std::size_t> visibleFrame = presentedAnimationFrame_;
+				playback_.FrameDisplayFailed(visibleFrame);
+				if (visibleFrame.has_value() && currentAnimationFrame_ != *visibleFrame) {
+					(void)SetAnimationFrame(*visibleFrame);
+				}
+			} else {
+				playback_.SetImageReady(true, SDL_GetTicks());
 			}
-		} else {
-			playback_.SetImageReady(true, SDL_GetTicks());
 		}
 		SetTitle(fileList_.Current().filename().string() +
 			" — display update failed: " + errorMessage);
@@ -1294,7 +1300,9 @@ private:
 			frameDelaysMs.push_back(std::max(10, frame.delayMs));
 		}
 		playback_.ConfigureImage(std::move(frameDelaysMs), currentDecoded_->loopCount,
-			currentDecoded_->animation, SDL_GetTicks());
+			currentDecoded_->animation, SDL_GetTicks(), currentDecoded_->isGif ?
+				jpegview_linux::FrameDelayPolicy::SourceLocked :
+				jpegview_linux::FrameDelayPolicy::Adjustable);
 		playback_.SetImageReady(false, SDL_GetTicks());
 		if (currentSelectedLoadPending_) {
 			const std::optional<jpegview_linux::ImageSessionSelection> selection =
@@ -2826,6 +2834,13 @@ private:
 		if (!pending.pausedAnimationPlayback) return;
 		pending.pausedAnimationPlayback = false;
 		playback_.SetImageReady(true, SDL_GetTicks());
+	}
+
+	bool ImageOperationOwnsAnimationPause() const {
+		return (pendingImageOperation_.has_value() &&
+			pendingImageOperation_->pausedAnimationPlayback) ||
+			(pendingFileOperation_.has_value() &&
+				pendingFileOperation_->resumeAnimationOnCompletion);
 	}
 
 	void ShowImageOperationWaitingForSelectedCommit(ImageOperationPurpose purpose) {
@@ -7642,7 +7657,8 @@ private:
 				jpegview_linux::FormatAnimationPlaybackStatus(
 					playback_.AnimationPlaying(), playback_.AnimationManuallyPaused());
 			lines.push_back("Playback: " + playbackStatus);
-			if (playback_.Mode() != jpegview_linux::PlaybackMode::Movie) {
+			if (playback_.Mode() != jpegview_linux::PlaybackMode::Movie ||
+				playback_.SourceFrameDelaysLocked()) {
 				lines.push_back("Frame delay: " + std::to_string(playback_.FrameDelayMs()) +
 					" ms" + (playback_.AnimationDelayOverrideMs().has_value() ? " (custom)" : ""));
 			}
@@ -8940,6 +8956,7 @@ private:
 		state.animationManuallyPaused = playback_.AnimationManuallyPaused();
 		state.animationDelayOverridden =
 			playback_.AnimationDelayOverrideMs().has_value();
+		state.animationDelaySourceLocked = playback_.SourceFrameDelaysLocked();
 		state.animationDelayMs = playback_.FrameDelayMs();
 		state.movieFramesPerSecond = playback_.MovieFramesPerSecond();
 		state.infoVisible = runtimeSettings_.Values().infoVisible;

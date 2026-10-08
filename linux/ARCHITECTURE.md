@@ -286,8 +286,10 @@ should normally be added to one of these focused modules and covered by the matc
   and before publication; opaque codec calls are checked before and after their supported boundaries.
   callback exception boundaries remain in place, and callbacks are never thrown across C codec frames.
   Decoded frames carry alpha-presence metadata so opaque-image textures can keep blending
-  disabled. If giflib is unavailable, the built-in `stb_image` path still returns a GIF's first frame;
-  animation delays and compositing require the giflib decoder.
+  disabled. The giflib decoder preserves each GIF frame's encoded centisecond delay and marks the
+  decoded image so playback can keep those delays source-locked. If giflib is unavailable, the
+  built-in `stb_image` path still returns a GIF's first frame; animation delays and compositing
+  require the giflib decoder.
 - `image.cpp` keeps the scalar resize algorithm as the pixel oracle while caching complete resampling
   kernel sets in a shared 8 MiB LRU keyed by source axis, target axis, and filter. Kernel construction
   and eviction destruction happen outside the cache lock, incomplete/canceled kernels are not retained,
@@ -461,14 +463,17 @@ should normally be added to one of these focused modules and covered by the matc
   underline position; the compact-only “Show Advanced Options” row is assigned afterward.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
   It tracks explicit user freeze separately from image readiness and temporary modal suppression.
+  GIF frames always use their decoded source delays, including in Movie mode, and reject delay
+  overrides. The scheduler keeps the GIF format's full 655,350 ms delay range; zero-delay frames use
+  the 10 ms minimum timer interval. Other animated formats retain Movie's selected frame rate and
+  a per-image uniform delay override clamped to 10–60,000 ms; resetting the override restores their
+  original per-frame timing.
   Manual frame stepping wraps only within the current animation and freezes every playback deadline,
   including Movie's folder-advance deadline; resuming a manually held last frame continues from that
-  frame, while a naturally exhausted finite animation restarts from frame zero. A per-image uniform
-  delay override is clamped to 10–60,000 ms, replaces each source frame's native delay for scheduling,
-  and can be reset to restore the original per-frame timings. Changing or resetting that override
-  returns timing to native animation mode rather than Movie or slideshow timing. Temporary modal
-  suppression still preserves the separate user play/freeze intent and starts a fresh interval when
-  the modal closes.
+  frame, while a naturally exhausted finite animation restarts from frame zero. Changing or resetting
+  a non-GIF delay override returns timing to native animation mode rather than Movie or slideshow
+  timing. Temporary modal suppression still preserves the separate user play/freeze intent and starts
+  a fresh interval when the modal closes.
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
@@ -741,6 +746,8 @@ revision, and animation frame before publication. The SDL thread creates a repla
 then applies the new pixels and retires replaced buffers through the shared cache retirement service.
 For animated sources, frame-bound operations pause readiness while the captured frame is processed;
 failure or cancellation resumes playback, while a successful edit keeps that frame as a still image.
+An already-pending display completion or failure must not release that operation-owned pause; only
+the operation's terminal path may resume playback.
 The free-rotation editor suppresses scheduler advancement separately from display readiness, so a
 matching presentation completion can restore readiness without changing the frame under edit. Its
 temporary pause removes playback deadlines until close or successful Apply; source-only decode that

@@ -19,6 +19,11 @@ enum class PlaybackActionType {
 	NextImage,
 };
 
+enum class FrameDelayPolicy {
+	Adjustable,
+	SourceLocked,
+};
+
 struct PlaybackAction {
 	PlaybackActionType type = PlaybackActionType::None;
 	std::size_t frameIndex = 0;
@@ -27,7 +32,8 @@ struct PlaybackAction {
 class PlaybackScheduler {
 public:
 	void ConfigureImage(std::vector<int> frameDelaysMs, int loopCount,
-		bool animated, std::uint32_t now);
+		bool animated, std::uint32_t now,
+		FrameDelayPolicy frameDelayPolicy = FrameDelayPolicy::Adjustable);
 	void ConfigureStillImage(std::uint32_t now);
 	void NotifyInteraction(std::uint32_t now);
 	void SetImageReady(bool ready, std::uint32_t now);
@@ -51,6 +57,9 @@ public:
 	bool AnimationPlaying() const { return animationPlaying_; }
 	bool AnimationManuallyPaused() const { return manuallyPaused_; }
 	bool HasAnimation() const { return hasAnimation_; }
+	bool SourceFrameDelaysLocked() const {
+		return hasAnimation_ && frameDelayPolicy_ == FrameDelayPolicy::SourceLocked;
+	}
 	bool ImageReady() const { return imageReady_; }
 	std::size_t FrameIndex() const { return frameIndex_; }
 	int FrameDelayMs() const;
@@ -83,6 +92,7 @@ private:
 	bool temporarilyPaused_ = false;
 	std::vector<int> frameDelaysMs_;
 	std::optional<int> frameDelayOverrideMs_;
+	FrameDelayPolicy frameDelayPolicy_ = FrameDelayPolicy::Adjustable;
 	std::size_t frameIndex_ = 0;
 	int loopCount_ = 0;
 	int completedLoops_ = 0;

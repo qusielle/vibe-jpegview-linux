@@ -54,6 +54,7 @@ struct ContextMenuState {
 	bool animationControlsAvailable = false;
 	bool animationManuallyPaused = false;
 	bool animationDelayOverridden = false;
+	bool animationDelaySourceLocked = false;
 	int animationDelayMs = 100;
 	double movieFramesPerSecond = 25.0;
 	bool infoVisible = false;
