@@ -1,6 +1,12 @@
 #pragma once
 
+#include "archive_source.h"
 #include "double_page_model.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
 
 namespace jpegview_linux {
 
@@ -11,6 +17,66 @@ struct PresentationNavigationState {
 	bool spreadActive = false;
 	bool anchorTextureReady = false;
 	bool partnerTextureReady = false;
+};
+
+struct AnimationFramePresentationIdentity {
+	SourceKey source;
+	std::uint64_t ownerGeneration = 0;
+	std::uint64_t documentRevision = 0;
+	std::size_t frameIndex = 0;
+};
+
+struct AnimationFramePresentationTarget {
+	AnimationFramePresentationIdentity owner;
+	std::uint64_t targetGeneration = 0;
+	std::size_t frameIndex = 0;
+	int width = 0;
+	int height = 0;
+	bool hasTransparency = false;
+	std::string requestKey;
+	bool ready = false;
+};
+
+// Tracks a committed animation frame separately from the frame whose display
+// preparation is in flight. It owns only value identities, never pixels or
+// renderer resources.
+class AnimationFramePresentationModel {
+public:
+	void SetCommitted(const AnimationFramePresentationIdentity& identity);
+	std::uint64_t BeginTarget(const AnimationFramePresentationIdentity& owner,
+		std::size_t frameIndex, int width, int height, bool hasTransparency);
+	bool SetTargetRequestKey(std::uint64_t targetGeneration,
+		const std::string& requestKey);
+	bool MarkTargetReady(std::uint64_t targetGeneration,
+		const AnimationFramePresentationIdentity& owner,
+		const std::string& requestKey);
+	bool CanCommitTarget(std::uint64_t targetGeneration,
+		const AnimationFramePresentationIdentity& owner,
+		const std::string& requestKey) const;
+	bool CommitTarget(std::uint64_t targetGeneration,
+		const AnimationFramePresentationIdentity& owner,
+		const std::string& requestKey, std::uint64_t documentRevision);
+	bool FailTarget(std::uint64_t targetGeneration,
+		const AnimationFramePresentationIdentity& owner,
+		const std::string& requestKey);
+	void CancelTarget();
+	const std::optional<AnimationFramePresentationIdentity>& Committed() const {
+		return committed_;
+	}
+	const std::optional<AnimationFramePresentationTarget>& Target() const {
+		return target_;
+	}
+
+private:
+	bool TargetMatches(std::uint64_t targetGeneration,
+		const AnimationFramePresentationIdentity& owner,
+		const std::string& requestKey) const;
+	static bool SameOwner(const AnimationFramePresentationIdentity& left,
+		const AnimationFramePresentationIdentity& right);
+
+	std::optional<AnimationFramePresentationIdentity> committed_;
+	std::optional<AnimationFramePresentationTarget> target_;
+	std::uint64_t nextTargetGeneration_ = 0;
 };
 
 enum class SpreadPreparationAction {

@@ -2,6 +2,94 @@
 
 namespace jpegview_linux {
 
+bool AnimationFramePresentationModel::SameOwner(
+	const AnimationFramePresentationIdentity& left,
+	const AnimationFramePresentationIdentity& right) {
+	return left.source == right.source &&
+		left.ownerGeneration == right.ownerGeneration &&
+		left.documentRevision == right.documentRevision &&
+		left.frameIndex == right.frameIndex;
+}
+
+void AnimationFramePresentationModel::SetCommitted(
+	const AnimationFramePresentationIdentity& identity) {
+	committed_ = identity;
+	if (target_.has_value() && !SameOwner(target_->owner, identity)) {
+		target_.reset();
+	}
+}
+
+std::uint64_t AnimationFramePresentationModel::BeginTarget(
+	const AnimationFramePresentationIdentity& owner, std::size_t frameIndex,
+	int width, int height, bool hasTransparency) {
+	if (!committed_.has_value() || !SameOwner(*committed_, owner) ||
+		width <= 0 || height <= 0) return 0;
+	++nextTargetGeneration_;
+	if (nextTargetGeneration_ == 0) ++nextTargetGeneration_;
+	target_ = AnimationFramePresentationTarget{owner, nextTargetGeneration_,
+		frameIndex, width, height, hasTransparency, {}, false};
+	return nextTargetGeneration_;
+}
+
+bool AnimationFramePresentationModel::SetTargetRequestKey(
+	std::uint64_t targetGeneration, const std::string& requestKey) {
+	if (!target_.has_value() || target_->targetGeneration != targetGeneration ||
+		requestKey.empty()) return false;
+	target_->requestKey = requestKey;
+	target_->ready = false;
+	return true;
+}
+
+bool AnimationFramePresentationModel::TargetMatches(
+	std::uint64_t targetGeneration,
+	const AnimationFramePresentationIdentity& owner,
+	const std::string& requestKey) const {
+	return target_.has_value() && committed_.has_value() &&
+		target_->targetGeneration == targetGeneration &&
+		SameOwner(target_->owner, owner) && SameOwner(*committed_, owner) &&
+		!requestKey.empty() && target_->requestKey == requestKey;
+}
+
+bool AnimationFramePresentationModel::MarkTargetReady(
+	std::uint64_t targetGeneration,
+	const AnimationFramePresentationIdentity& owner,
+	const std::string& requestKey) {
+	if (!TargetMatches(targetGeneration, owner, requestKey)) return false;
+	target_->ready = true;
+	return true;
+}
+
+bool AnimationFramePresentationModel::CanCommitTarget(
+	std::uint64_t targetGeneration,
+	const AnimationFramePresentationIdentity& owner,
+	const std::string& requestKey) const {
+	return TargetMatches(targetGeneration, owner, requestKey) && target_->ready;
+}
+
+bool AnimationFramePresentationModel::CommitTarget(
+	std::uint64_t targetGeneration,
+	const AnimationFramePresentationIdentity& owner,
+	const std::string& requestKey, std::uint64_t documentRevision) {
+	if (!CanCommitTarget(targetGeneration, owner, requestKey)) return false;
+	committed_ = AnimationFramePresentationIdentity{owner.source,
+		owner.ownerGeneration, documentRevision, target_->frameIndex};
+	target_.reset();
+	return true;
+}
+
+bool AnimationFramePresentationModel::FailTarget(
+	std::uint64_t targetGeneration,
+	const AnimationFramePresentationIdentity& owner,
+	const std::string& requestKey) {
+	if (!TargetMatches(targetGeneration, owner, requestKey)) return false;
+	target_.reset();
+	return true;
+}
+
+void AnimationFramePresentationModel::CancelTarget() {
+	target_.reset();
+}
+
 SpreadPreparationDecision PresentationController::PlanSpreadPreparation(
 	const SpreadPreparationSnapshot& snapshot) const {
 	if (snapshot.pageCount == 0 || snapshot.selectedIndex >= snapshot.pageCount) return {};

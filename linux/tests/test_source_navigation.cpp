@@ -2233,6 +2233,58 @@ void TestPresentationControllerGatesHeldNavigationOnFirstFrame() {
 		"pending selection or JPEG header completion allowed repeat navigation");
 }
 
+void TestAnimationFramePresentationKeepsCommittedOwnerUntilTargetCommit() {
+	using jpegview_linux::AnimationFramePresentationIdentity;
+	using jpegview_linux::AnimationFramePresentationModel;
+	AnimationFramePresentationModel presentation;
+	const jpegview_linux::SourceKey source("animated.gif",
+		jpegview_linux::SourceIdentity{1, 2, 3, 4, 5, true});
+	const AnimationFramePresentationIdentity committed{source, 7, 12, 0};
+	presentation.SetCommitted(committed);
+	const std::uint64_t target = presentation.BeginTarget(committed,
+		1, 640, 480, true);
+	Expect(target != 0 && presentation.Committed().has_value() &&
+		presentation.Committed()->frameIndex == 0 &&
+		presentation.Committed()->documentRevision == 12 &&
+		presentation.Target().has_value() && !presentation.Target()->ready,
+		"staging an animation frame changed the committed frame before preparation");
+	Expect(!presentation.SetTargetRequestKey(target, {}) &&
+		presentation.SetTargetRequestKey(target, "frame-one-request"),
+		"animation target did not require and retain its display request identity");
+	Expect(!presentation.MarkTargetReady(target + 1, committed,
+		"frame-one-request") && !presentation.MarkTargetReady(target, committed,
+		"stale-frame-request") &&
+		presentation.MarkTargetReady(target, committed, "frame-one-request") &&
+		presentation.CanCommitTarget(target, committed, "frame-one-request"),
+		"animation target accepted stale readiness or rejected its matching completion");
+	Expect(presentation.CommitTarget(target, committed, "frame-one-request", 13) &&
+		presentation.Committed()->frameIndex == 1 &&
+		presentation.Committed()->documentRevision == 13 &&
+		!presentation.Target().has_value(),
+		"matching renderer-ready frame did not atomically become the committed owner");
+
+	const AnimationFramePresentationIdentity frameOne = *presentation.Committed();
+	const std::uint64_t failedTarget = presentation.BeginTarget(frameOne,
+		0, 640, 480, true);
+	Expect(presentation.SetTargetRequestKey(failedTarget, "frame-zero-failed") &&
+		presentation.FailTarget(failedTarget, frameOne, "frame-zero-failed") &&
+		presentation.Committed()->frameIndex == 1 &&
+		!presentation.Target().has_value(),
+		"failed target replaced the committed frame or remained active");
+
+	const std::uint64_t staleTarget = presentation.BeginTarget(frameOne,
+		0, 640, 480, true);
+	Expect(presentation.SetTargetRequestKey(staleTarget, "frame-zero-stale"),
+		"could not stage a target for stale-owner coverage");
+	AnimationFramePresentationIdentity replacement = frameOne;
+	++replacement.ownerGeneration;
+	presentation.SetCommitted(replacement);
+	Expect(!presentation.MarkTargetReady(staleTarget, frameOne,
+		"frame-zero-stale") && !presentation.Target().has_value() &&
+		presentation.Committed()->ownerGeneration == replacement.ownerGeneration,
+		"owner replacement allowed a stale animation frame completion to publish");
+}
+
 void TestPresentationControllerPlansSpreadPreparationWithoutRenderer() {
 	using jpegview_linux::PresentationController;
 	using jpegview_linux::SpreadPreparationAction;
@@ -2525,6 +2577,7 @@ const TestCase kTests[] = {
 	{"double-page-pairing-navigation-and-reading-order", &TestDoublePagePairingNavigationAndReadingOrder},
 	{"double-page-presentation-atomic-commit", &TestDoublePagePresentationCommitsSpreadAtomically},
 	{"presentation-controller-first-frame-navigation-gate", &TestPresentationControllerGatesHeldNavigationOnFirstFrame},
+	{"animation-frame-presentation-keeps-committed-owner", &TestAnimationFramePresentationKeepsCommittedOwnerUntilTargetCommit},
 	{"presentation-controller-plans-spread-preparation-without-renderer", &TestPresentationControllerPlansSpreadPreparationWithoutRenderer},
 	{"presentation-controller-plans-spread-requests-and-fallbacks", &TestPresentationControllerPlansSpreadRequestsAndFallbacks},
 	{"double-page-refresh-invalidates-visible-partner-geometry", &TestDoublePageRefreshInvalidatesVisiblePartnerGeometry},

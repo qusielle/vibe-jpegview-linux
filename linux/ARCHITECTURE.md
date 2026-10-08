@@ -103,8 +103,11 @@ should normally be added to one of these focused modules and covered by the matc
 - `presentation_controller`: presentation and held-navigation readiness layered over
   `DoublePagePresentationModel`. It accepts selected-load, JPEG-header, spread, texture-readiness, and
   first-frame acknowledgement values; it also plans single-page fallback, dimension waits, rotated
-  spread geometry, and pair-request admission from value snapshots. It owns no SDL resources. The
-  renderer acknowledges the spread only after `SDL_RenderPresent` returns.
+  spread geometry, and pair-request admission from value snapshots. Its animation-frame transition
+  model keeps the committed frame identity separate from one provisional target, accepts readiness
+  only for the matching source, owner generation, document revision, target generation, and display
+  request key, and commits or fails that target without owning pixels or SDL resources. The renderer
+  acknowledges the spread only after `SDL_RenderPresent` returns.
 - `archive_source` and its internal modules: `archive_source.cpp` owns the public generic
   container/member API, source identity, session-password lifecycle, and bounded temporary-member
   extraction. `archive_source_catalog.cpp` owns catalog-cache/coalescing policy, while
