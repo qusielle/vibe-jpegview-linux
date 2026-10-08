@@ -458,7 +458,9 @@ should normally be added to one of these focused modules and covered by the matc
 - `magnifying_glass_model`: lens enable/size/zoom state and bounds, wheel-modifier transitions,
   and pointer-centered mapping from a clipped image source crop into lens content geometry.
 - `resize_model`: resize-dialog values, aspect-ratio coupling, limits, filter selection, and pure
-  focus/text-editing transitions.
+  focus/text-editing transitions. The New Size percentage slider derives a valid range from output
+  dimensions and the pixel cap, keeps the percentage field and proportional dimensions synchronized,
+  and occupies its own keyboard-focus stop.
 - `context_menu_model`: the complete menu catalog, state-derived enablement/checkmarks,
   compact/advanced filtering, actionable-item keyboard navigation, and deterministic letter
   mnemonic assignment with duplicate-letter matching/cycling. Mnemonics are assigned to the full

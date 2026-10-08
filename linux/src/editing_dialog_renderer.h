@@ -40,12 +40,22 @@ struct ResizeFieldPaint {
 	bool focused = false;
 };
 
+struct ResizeSliderPaint {
+	SDL_Rect rect{};
+	int minimumPercent = 1;
+	int maximumPercent = 400;
+	int valuePercent = 100;
+	int knobX = 0;
+	bool focused = false;
+};
+
 struct ResizeDialogPaint {
 	bool visible = false;
 	SDL_Rect dialog{};
 	std::string originalSize;
 	std::string message;
 	std::array<ResizeFieldPaint, 4> fields;
+	ResizeSliderPaint percentSlider;
 	std::array<DialogButtonPaint, 2> buttons;
 };
 

@@ -19,6 +19,10 @@ public:
 	bool UpdateFrom(int changedField);
 	bool Target(int& width, int& height) const;
 	void CycleFilter(int direction);
+	int SliderMinimumPercent() const;
+	int SliderMaximumPercent() const;
+	int SliderPercent() const;
+	bool SetSliderPercent(int percent);
 
 	int OriginalWidth() const { return originalWidth_; }
 	int OriginalHeight() const { return originalHeight_; }
@@ -42,6 +46,9 @@ private:
 
 class ResizeDialogController {
 public:
+	static constexpr int kPercentSliderFocus = ResizeModel::kFilterCount;
+	static constexpr int kFocusCount = kPercentSliderFocus + 1;
+
 	void Open(int originalWidth, int originalHeight);
 	void Close();
 	void MoveFocus(int direction);

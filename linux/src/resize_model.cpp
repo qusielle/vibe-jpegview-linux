@@ -11,6 +11,7 @@ namespace {
 
 constexpr int kMaxImageDimension = 65535;
 constexpr std::uint64_t kMaxImagePixels = 100ull * 1024ull * 1024ull;
+constexpr int kMaxSliderPercent = 400;
 constexpr const char* kInvalidSizeMessage =
 	"Size must be positive and no larger than 65535 x 65535 / 100 MP";
 
@@ -77,6 +78,51 @@ void ResizeModel::CycleFilter(int direction) {
 	filter_ = (filter_ + direction % kFilterCount + kFilterCount) % kFilterCount;
 }
 
+int ResizeModel::SliderMinimumPercent() const {
+	if (originalWidth_ <= 0 || originalHeight_ <= 0) return 1;
+	const int shortestDimension = std::min(originalWidth_, originalHeight_);
+	return std::max(1, 50 / shortestDimension +
+		(50 % shortestDimension == 0 ? 0 : 1));
+}
+
+int ResizeModel::SliderMaximumPercent() const {
+	if (originalWidth_ <= 0 || originalHeight_ <= 0) return kMaxSliderPercent;
+	const int minimum = SliderMinimumPercent();
+	int maximum = std::min(kMaxSliderPercent,
+		(kMaxImageDimension * 100) / originalWidth_);
+	maximum = std::min(maximum,
+		(kMaxImageDimension * 100) / originalHeight_);
+	const long double sourcePixels = static_cast<long double>(originalWidth_) *
+		static_cast<long double>(originalHeight_);
+	const long double pixelLimit = std::sqrt(
+		static_cast<long double>(kMaxImagePixels) * 10000.0L / sourcePixels);
+	maximum = std::min(maximum, static_cast<int>(std::floor(pixelLimit)));
+	while (maximum >= minimum) {
+		const int width = static_cast<int>(std::llround(
+			static_cast<double>(originalWidth_) * maximum / 100.0));
+		const int height = static_cast<int>(std::llround(
+			static_cast<double>(originalHeight_) * maximum / 100.0));
+		if (ValidSize(width, height)) return maximum;
+		--maximum;
+	}
+	return minimum;
+}
+
+int ResizeModel::SliderPercent() const {
+	const int minimum = SliderMinimumPercent();
+	const int maximum = SliderMaximumPercent();
+	double percent = 100.0;
+	if (!ParsePercent(percent)) percent = 100.0;
+	return static_cast<int>(std::llround(std::clamp(percent,
+		static_cast<double>(minimum), static_cast<double>(maximum))));
+}
+
+bool ResizeModel::SetSliderPercent(int percent) {
+	percent = std::clamp(percent, SliderMinimumPercent(), SliderMaximumPercent());
+	percentText_ = std::to_string(percent);
+	return UpdateFrom(kPercentField);
+}
+
 const char* ResizeModel::FilterName() const {
 	static constexpr const char* names[kFilterCount] = {
 		"BOX / POINT", "LANCZOS / BICUBIC", "SHARPEN LOW", "SHARPEN MEDIUM"
@@ -127,13 +173,28 @@ void ResizeDialogController::Close() {
 
 void ResizeDialogController::MoveFocus(int direction) {
 	if (direction == 0) return;
-	focusedField_ = (focusedField_ + (direction < 0 ? ResizeModel::kFilterCount - 1 : 1)) %
-		ResizeModel::kFilterCount;
+	static constexpr int focusOrder[kFocusCount] = {
+		ResizeModel::kPercentField,
+		kPercentSliderFocus,
+		ResizeModel::kWidthField,
+		ResizeModel::kHeightField,
+		ResizeModel::kFilterField,
+	};
+	int orderIndex = 0;
+	for (int index = 0; index < kFocusCount; ++index) {
+		if (focusOrder[index] == focusedField_) {
+			orderIndex = index;
+			break;
+		}
+	}
+	orderIndex = (orderIndex + (direction < 0 ? kFocusCount - 1 : 1)) %
+		kFocusCount;
+	focusedField_ = focusOrder[orderIndex];
 	inputPrimed_ = true;
 }
 
 void ResizeDialogController::SelectField(int field) {
-	if (field < ResizeModel::kPercentField || field > ResizeModel::kFilterField) return;
+	if (field < ResizeModel::kPercentField || field > kPercentSliderFocus) return;
 	focusedField_ = field;
 	inputPrimed_ = true;
 }

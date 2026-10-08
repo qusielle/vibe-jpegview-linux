@@ -164,6 +164,8 @@ constexpr int kResizePercent = 0;
 constexpr int kResizeWidth = 1;
 constexpr int kResizeHeight = 2;
 constexpr int kResizeFilter = 3;
+constexpr int kResizePercentSlider =
+	jpegview_linux::ResizeDialogController::kPercentSliderFocus;
 constexpr int kResizeApply = 0;
 constexpr int kResizeCancel = 1;
 constexpr int kCropSizeApply = 0;
@@ -10214,7 +10216,34 @@ private:
 
 	SDL_Rect ResizeFieldRect(int field) const {
 		const SDL_Rect dialog = ResizeDialogRect();
-		return SDL_Rect{dialog.x + 190, dialog.y + 70 + field * 42, 220, 28};
+		const int width = field == kResizePercent ? 110 : 220;
+		return SDL_Rect{dialog.x + 190, dialog.y + 70 + field * 42, width, 28};
+	}
+
+	SDL_Rect ResizePercentSliderRect() const {
+		const SDL_Rect dialog = ResizeDialogRect();
+		return SDL_Rect{dialog.x + 320, dialog.y + 70, dialog.w - 340, 28};
+	}
+
+	void SetResizePercentSliderValue(int percent) {
+		if (resizeDialog_.Model().SetSliderPercent(percent)) {
+			resizeDialog_.SetMessage({});
+		} else if (!resizeDialog_.Model().ValidationMessage().empty()) {
+			resizeDialog_.SetMessage(resizeDialog_.Model().ValidationMessage());
+		}
+	}
+
+	void SetResizePercentSliderFromPointer(int pointerX) {
+		const SDL_Rect slider = ResizePercentSliderRect();
+		const int left = slider.x + 8;
+		const int right = slider.x + slider.w - 8;
+		const int x = std::clamp(pointerX, left, right);
+		const double fraction = static_cast<double>(x - left) /
+			static_cast<double>(std::max(1, right - left));
+		const int minimum = resizeDialog_.Model().SliderMinimumPercent();
+		const int maximum = resizeDialog_.Model().SliderMaximumPercent();
+		SetResizePercentSliderValue(minimum + static_cast<int>(std::lround(
+			fraction * (maximum - minimum))));
 	}
 
 	SDL_Rect ResizeButtonRect(int button) const {
@@ -10236,6 +10265,7 @@ private:
 	void OpenResizeDialog() {
 		if (CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		resizeDialog_.Open(CurrentImage().width, CurrentImage().height);
+		resizePercentSliderDragging_ = false;
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
 		batchCopyDialog_.Close();
@@ -10244,6 +10274,7 @@ private:
 
 	void CloseResizeDialog() {
 		SDL_StopTextInput();
+		resizePercentSliderDragging_ = false;
 		resizeDialog_.Close();
 	}
 
@@ -10258,6 +10289,7 @@ private:
 			CloseResizeDialog();
 			return;
 		}
+		resizePercentSliderDragging_ = false;
 		jpegview_linux::ImageOperationSpec operation;
 		operation.kind = jpegview_linux::ImageOperationKind::Resize;
 		operation.width = width;
@@ -10273,8 +10305,15 @@ private:
 		case SDL_QUIT:
 			running = false;
 			break;
+		case SDL_WINDOWEVENT:
+			if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+				resizePercentSliderDragging_ = false;
+			}
+			break;
 		case SDL_KEYDOWN: {
-			if (event.key.repeat != 0) break;
+			const bool sliderFocused =
+				resizeDialog_.FocusedField() == kResizePercentSlider;
+			if (event.key.repeat != 0 && !sliderFocused) break;
 			const Uint16 modifiers = event.key.keysym.mod;
 			const bool shift = (modifiers & 0x0003u) != 0;
 			const bool ctrl = (modifiers & 0x00C0u) != 0;
@@ -10284,6 +10323,14 @@ private:
 				ApplyResizeDialog();
 			} else if (event.key.keysym.sym == SDLK_TAB) {
 				resizeDialog_.MoveFocus(shift ? -1 : 1);
+			} else if (sliderFocused &&
+				(event.key.keysym.sym == SDLK_LEFT ||
+					event.key.keysym.sym == SDLK_RIGHT)) {
+				const int direction = event.key.keysym.sym == SDLK_RIGHT ? 1 : -1;
+				SetResizePercentSliderValue(resizeDialog_.Model().SliderPercent() +
+					direction * (shift ? 10 : 1));
+			} else if (sliderFocused && event.key.keysym.sym == SDLK_HOME) {
+				SetResizePercentSliderValue(100);
 			} else if (ctrl && event.key.keysym.sym == 'a') {
 				resizeDialog_.SelectAll();
 			} else if (resizeDialog_.FocusedField() <= kResizeHeight && event.key.keysym.sym == SDLK_BACKSPACE) {
@@ -10305,6 +10352,9 @@ private:
 		case SDL_MOUSEMOTION:
 			lastMouseX_ = event.motion.x;
 			lastMouseY_ = event.motion.y;
+			if (resizePercentSliderDragging_) {
+				SetResizePercentSliderFromPointer(event.motion.x);
+			}
 			break;
 		case SDL_MOUSEBUTTONDOWN:
 			if (event.button.button != SDL_BUTTON_LEFT) break;
@@ -10312,6 +10362,11 @@ private:
 				ApplyResizeDialog();
 			} else if (PointInRect(event.button.x, event.button.y, ResizeButtonRect(kResizeCancel))) {
 				CloseResizeDialog();
+			} else if (PointInRect(event.button.x, event.button.y,
+				ResizePercentSliderRect())) {
+				resizeDialog_.SelectField(kResizePercentSlider);
+				resizePercentSliderDragging_ = true;
+				SetResizePercentSliderFromPointer(event.button.x);
 			} else {
 				for (int field = kResizePercent; field <= kResizeFilter; ++field) {
 					if (!PointInRect(event.button.x, event.button.y, ResizeFieldRect(field))) continue;
@@ -10319,6 +10374,11 @@ private:
 					else resizeDialog_.SelectField(field);
 					break;
 				}
+			}
+			break;
+		case SDL_MOUSEBUTTONUP:
+			if (event.button.button == SDL_BUTTON_LEFT) {
+				resizePercentSliderDragging_ = false;
 			}
 			break;
 		default:
@@ -10334,6 +10394,18 @@ private:
 		paint.originalSize = std::to_string(resizeDialog_.Model().OriginalWidth()) + "X" +
 			std::to_string(resizeDialog_.Model().OriginalHeight());
 		paint.message = ClipText(resizeDialog_.Message(), paint.dialog.w - 40);
+		const SDL_Rect sliderRect = ResizePercentSliderRect();
+		const int sliderMinimum = resizeDialog_.Model().SliderMinimumPercent();
+		const int sliderMaximum = resizeDialog_.Model().SliderMaximumPercent();
+		const int sliderPercent = resizeDialog_.Model().SliderPercent();
+		const int sliderLeft = sliderRect.x + 8;
+		const int sliderRight = sliderRect.x + sliderRect.w - 8;
+		const double sliderFraction = static_cast<double>(sliderPercent - sliderMinimum) /
+			static_cast<double>(std::max(1, sliderMaximum - sliderMinimum));
+		paint.percentSlider = {sliderRect, sliderMinimum, sliderMaximum, sliderPercent,
+			sliderLeft + static_cast<int>(std::lround(
+				sliderFraction * (sliderRight - sliderLeft))),
+			resizeDialog_.FocusedField() == kResizePercentSlider};
 		const char* labels[] = {"NEW SIZE", "NEW WIDTH", "NEW HEIGHT", "FILTER"};
 		for (int fieldIndex = kResizePercent; fieldIndex <= kResizeFilter; ++fieldIndex) {
 			const std::size_t index = static_cast<std::size_t>(fieldIndex);
@@ -14527,6 +14599,7 @@ private:
 	jpegview_linux::PerspectiveCorrectionDialogController perspectiveCorrectionDialog_;
 	jpegview_linux::Viewport perspectiveCorrectionPreviewViewport_;
 	jpegview_linux::ResizeDialogController resizeDialog_;
+	bool resizePercentSliderDragging_ = false;
 	jpegview_linux::CropSizeDialogController cropSizeDialog_;
 	jpegview_linux::GoToImageNumberModel goToImageNumberDialog_;
 	jpegview_linux::AdvancedConfigurationModel advancedConfiguration_;

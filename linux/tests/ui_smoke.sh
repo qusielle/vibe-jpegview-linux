@@ -2661,9 +2661,11 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+shift+r
 	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+a
 	DISPLAY=":$display_number" xdotool type --window "$window_id" --delay 30 '50'
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Tab
+	DISPLAY=":$display_number" xdotool key --window "$window_id" --repeat 3 --delay 30 Right
 	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
-	assert_title_prefix "01-resize.png (300x150," \
-		"asynchronous resize did not commit the 50-percent document and texture"
+	assert_title_prefix "01-resize.png (318x159," \
+		"repeated resize slider arrows did not commit the edited 53-percent size"
 	if [ "$(identify -format '%wx%h' "$resize_directory/01-resize.png")" != "600x300" ]; then
 		echo "UI smoke test: in-memory resize unexpectedly changed the source file" >&2
 		exit 1
@@ -2684,6 +2686,27 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			exit 1
 		fi
 	fi
+	DISPLAY=":$display_number" xdotool key --window "$window_id" ctrl+shift+r
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Tab
+	viewer_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+	viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+	viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+	resize_dialog_width=$((viewer_width - 40))
+	resize_dialog_height=$((viewer_height - 40))
+	if [ "$resize_dialog_width" -gt 620 ]; then resize_dialog_width=620; fi
+	if [ "$resize_dialog_width" -lt 470 ]; then resize_dialog_width=470; fi
+	if [ "$resize_dialog_height" -gt 360 ]; then resize_dialog_height=360; fi
+	if [ "$resize_dialog_height" -lt 320 ]; then resize_dialog_height=320; fi
+	resize_dialog_x=$(((viewer_width - resize_dialog_width) / 2))
+	resize_dialog_y=$(((viewer_height - resize_dialog_height) / 2))
+	resize_slider_right_x=$((resize_dialog_x + resize_dialog_width - 28))
+	resize_slider_y=$((resize_dialog_y + 84))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$resize_slider_right_x" "$resize_slider_y" click 1
+	DISPLAY=":$display_number" xdotool key --window "$window_id" shift+Left
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Return
+	assert_title_prefix "01-resize.png (1240x620," \
+		"resize slider mouse or Shift+Left did not apply the 390-percent size"
 	stop_viewer
 
 	# Saving over the selected source must materialize its lazy document pixels,

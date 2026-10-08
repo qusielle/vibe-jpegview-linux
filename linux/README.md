@@ -396,8 +396,11 @@ they support.
 10. **Batch rename/copy and image resizing.** The batch dialog supports image selection, previews,
     saved Windows-compatible naming patterns, safe same-folder renames, and copying into newly
     created directories without overwrites. The resize dialog preserves aspect ratio across percent,
-    width, and height fields and provides point, Lanczos/Bicubic, sharpen-low, and sharpen-medium
-    filters. Both areas were separated into independently tested planning/model modules.
+    width, and height fields and adds a percentage slider beside the editable New Size field. The
+    slider stays within valid output dimensions and the 100-megapixel limit; Left/Right changes it by
+    1%, Shift+Left/Right by 10%, and Home selects 100% when valid. Point, Lanczos/Bicubic,
+    sharpen-low, and sharpen-medium filters are available. Both areas were separated into
+    independently tested planning/model modules.
 
 11. **Image processing and animation.** The Windows picture-level panel is ported: contrast,
     brightness/gamma, saturation, three color-balance axes, local shadow/highlight correction,
@@ -1260,9 +1263,13 @@ save it as a template, and rename within the folder or copy into newly-created s
 overwriting existing files. Its pattern can also be edited under Performance & batch in Advanced
 configuration. The `%pictures%` placeholder maps to `$XDG_PICTURES_DIR` or `$HOME/Pictures`.
 `Change size...` is ported from the Windows Resize dialog: percentage, width, and height edits retain
-the aspect ratio, and the point, Lanczos/Bicubic, sharpen-low, and sharpen-medium filters are available.
-The resize is applied to the processed image in memory and can then be saved with `Ctrl+S`; `Ctrl+Shift+R`
-opens the same dialog directly.
+the aspect ratio, and a percentage slider sits beside the editable New Size field. The slider covers
+the valid portion of 1–400%, subject to output-dimension and 100-megapixel limits; the text field
+remains available for other valid percentages. Focus the slider with Tab, use Left/Right for 1% steps
+or Shift+Left/Right for 10% steps, and hold an arrow to repeat; Home selects 100% when valid. The
+point, Lanczos/Bicubic, sharpen-low, and sharpen-medium filters are available. The resize is applied
+to the processed image in memory and can then be saved with `Ctrl+S`; `Ctrl+Shift+R` opens the same
+dialog directly.
 Rotate/mirror, free rotation, perspective correction, in-memory crop, resize, and full-resolution
 processing run in the background while pan and zoom remain responsive. A failed operation keeps the
 last successfully displayed image. Navigating to another source cancels a pending edit. Applying

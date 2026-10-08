@@ -4,6 +4,7 @@
 #include "text_renderer.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace jpegview_linux {
 namespace {
@@ -84,12 +85,43 @@ void EditingDialogRendererAdapter::Render(const ResizeDialogPaint& paint) {
 				field.rect.y + 9, kTextScale, 185, 185, 185);
 		}
 	}
+	const ResizeSliderPaint& slider = paint.percentSlider;
+	if (slider.rect.w > 0) {
+		const int left = slider.rect.x + 8;
+		const int right = slider.rect.x + slider.rect.w - 8;
+		const int trackY = slider.rect.y + slider.rect.h / 2;
+		const int span = std::max(1, slider.maximumPercent - slider.minimumPercent);
+		const auto percentX = [&](int percent) {
+			const double fraction = static_cast<double>(percent - slider.minimumPercent) /
+				static_cast<double>(span);
+			return left + static_cast<int>(std::lround(fraction * (right - left)));
+		};
+		chromeRenderer_.DrawRect(slider.rect,
+			slider.focused ? 100 : 65, slider.focused ? 145 : 75,
+			slider.focused ? 190 : 85);
+		chromeRenderer_.DrawLine(left, trackY, right, trackY,
+			slider.focused ? 115 : 85, slider.focused ? 140 : 100,
+			slider.focused ? 170 : 115);
+		for (int tick = 100; tick <= slider.maximumPercent; tick += 100) {
+			if (tick <= slider.minimumPercent) continue;
+			const int tickX = percentX(tick);
+			chromeRenderer_.DrawLine(tickX, trackY - 3, tickX, trackY + 4,
+				135, 145, 155);
+		}
+		const SDL_Rect knob{slider.knobX - 5,
+			trackY - 8, 11, 17};
+		Fill(knob, slider.focused ? 145 : 115,
+			slider.focused ? 210 : 175, 235, 255);
+	}
 	if (!paint.message.empty()) {
 		textRenderer_.Draw(paint.message, paint.dialog.x + 20,
 			paint.dialog.y + paint.dialog.h - 82, kTextScale, 235, 180, 130);
 	}
-	textRenderer_.Draw("TAB: NEXT FIELD   ARROWS: CHANGE FILTER/FIELD   ENTER: APPLY   ESC: CANCEL",
-		paint.dialog.x + 20, paint.dialog.y + paint.dialog.h - 62,
+	textRenderer_.Draw("ON SLIDER: LEFT/RIGHT 1% (SHIFT: 10%)  HOME: 100%",
+		paint.dialog.x + 20, paint.dialog.y + paint.dialog.h - 72,
+		kTextScale, 160, 160, 160);
+	textRenderer_.Draw("ARROWS: FILTER/FIELD   TAB: NEXT   ENTER: APPLY   ESC: CANCEL",
+		paint.dialog.x + 20, paint.dialog.y + paint.dialog.h - 60,
 		kTextScale, 160, 160, 160);
 	for (const DialogButtonPaint& button : paint.buttons) DrawButton(button, true);
 }

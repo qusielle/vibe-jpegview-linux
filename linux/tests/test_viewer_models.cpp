@@ -806,6 +806,38 @@ void TestResizeModelAspectRatioValidationAndFilters() {
 		"resize model did not initialize percentage");
 	Expect(model.Filter() == 2 && std::string(model.FilterName()) == "SHARPEN LOW",
 		"resize model default filter changed");
+	int sliderWidth = 0;
+	int sliderHeight = 0;
+	Expect(model.SliderMinimumPercent() == 1 && model.SliderMaximumPercent() == 400 &&
+		model.SliderPercent() == 100,
+		"resize percentage slider did not expose its default range and position");
+	Expect(model.SetSliderPercent(150) && model.SliderPercent() == 150 &&
+		model.FieldText(jpegview_linux::ResizeModel::kPercentField) == "150" &&
+		model.FieldText(jpegview_linux::ResizeModel::kWidthField) == "600" &&
+		model.FieldText(jpegview_linux::ResizeModel::kHeightField) == "300",
+		"resize slider did not update the editable percentage and proportional dimensions");
+	Expect(model.SetSliderPercent(1000) && model.SliderPercent() == 400 &&
+		model.FieldText(jpegview_linux::ResizeModel::kWidthField) == "1600" &&
+		model.FieldText(jpegview_linux::ResizeModel::kHeightField) == "800",
+		"resize slider did not clamp to its upper percentage limit");
+	model.FieldText(jpegview_linux::ResizeModel::kPercentField) = "500";
+	Expect(model.UpdateFrom(jpegview_linux::ResizeModel::kPercentField) &&
+		model.SliderPercent() == 400 &&
+		model.FieldText(jpegview_linux::ResizeModel::kPercentField) == "500" &&
+		model.Target(sliderWidth, sliderHeight) && sliderWidth == 2000 &&
+		sliderHeight == 1000,
+		"editable percentage field did not retain a valid value above the slider range");
+	model.Reset(1, 1);
+	Expect(model.SliderMinimumPercent() == 50 && model.SliderMaximumPercent() == 400 &&
+		model.SetSliderPercent(1) && model.Target(sliderWidth, sliderHeight) &&
+		sliderWidth == 1 && sliderHeight == 1,
+		"resize slider did not preserve a nonzero target for a one-pixel source");
+	model.Reset(40000, 40000);
+	Expect(model.SliderMaximumPercent() == 25 && model.SetSliderPercent(25) &&
+		model.Target(sliderWidth, sliderHeight) && sliderWidth == 10000 &&
+		sliderHeight == 10000,
+		"resize slider did not clamp to the 100-megapixel output limit");
+	model.Reset(400, 200);
 
 	model.FieldText(jpegview_linux::ResizeModel::kPercentField) = "50";
 	Expect(model.UpdateFrom(jpegview_linux::ResizeModel::kPercentField), "valid resize percentage was rejected");
@@ -858,6 +890,9 @@ void TestResizeDialogController() {
 		dialog.Model().FieldText(jpegview_linux::ResizeModel::kHeightField) == "101",
 		"resize dialog did not filter text or update coupled dimensions");
 	dialog.MoveFocus(1);
+	Expect(dialog.FocusedField() == jpegview_linux::ResizeDialogController::kPercentSliderFocus,
+		"resize dialog tab order skipped the New Size slider");
+	dialog.MoveFocus(1);
 	Expect(dialog.FocusedField() == jpegview_linux::ResizeModel::kWidthField,
 		"resize dialog did not move focus forward");
 	dialog.AppendText("100");
@@ -873,8 +908,16 @@ void TestResizeDialogController() {
 	Expect(dialog.Target(width, height) && width == 8 && height == 4,
 		"resize dialog Backspace did not recalculate its target");
 	dialog.MoveFocus(-1);
+	Expect(dialog.FocusedField() == jpegview_linux::ResizeDialogController::kPercentSliderFocus,
+		"resize dialog did not move backward from width to the New Size slider");
+	dialog.MoveFocus(-1);
 	Expect(dialog.FocusedField() == jpegview_linux::ResizeModel::kPercentField,
 		"resize dialog did not move focus backward");
+	dialog.SelectField(jpegview_linux::ResizeDialogController::kPercentSliderFocus);
+	dialog.AppendText("123");
+	Expect(dialog.FocusedField() == jpegview_linux::ResizeDialogController::kPercentSliderFocus &&
+		dialog.Model().FieldText(jpegview_linux::ResizeModel::kPercentField) == "2",
+		"resize dialog treated slider focus as editable text input");
 	dialog.SelectField(jpegview_linux::ResizeModel::kFilterField);
 	const int previousFilter = dialog.Model().Filter();
 	dialog.CycleFilter(1);
