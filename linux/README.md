@@ -1347,6 +1347,7 @@ defaults to 100 ms, and a nonzero delay shorter than 20 ms is raised to 20 ms. T
 animated or multi-page images at a selected fixed rate (5, 10, 25, 30, 50, or 100 fps), overriding
 their embedded per-frame timing while Movie mode is active, and advances a folder of still images
 when the current image has no frames.
+Starting Movie after a finite animation has finished restarts it from its first frame.
 The original frame loop count is honored when a format provides one. GIFs without a looping
 extension play once; an explicit zero repeat count loops forever, and a positive repeat count adds
 that many passes after the first. `Alt+R` resumes stopped playback.

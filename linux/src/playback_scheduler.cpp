@@ -90,7 +90,7 @@ void PlaybackScheduler::StartSlideshow(double seconds, std::uint32_t now) {
 	lastInteractionTick_ = now;
 }
 
-void PlaybackScheduler::StartMovie(double framesPerSecond, std::uint32_t now) {
+PlaybackAction PlaybackScheduler::StartMovie(double framesPerSecond, std::uint32_t now) {
 	mode_ = PlaybackMode::Movie;
 	manuallyPaused_ = false;
 	manualResumeAnimation_ = false;
@@ -98,8 +98,10 @@ void PlaybackScheduler::StartMovie(double framesPerSecond, std::uint32_t now) {
 	movieFramesPerSecond_ = std::clamp(framesPerSecond, 1.0, 100.0);
 	lastInteractionTick_ = now;
 	animationPlaying_ = hasAnimation_;
+	if (animationPlaying_ && sequenceExhausted_) return StartAnimation(now);
 	if (animationPlaying_) ScheduleFrame(now);
 	else nextTick_ = now + MovieFrameInterval();
+	return {};
 }
 
 void PlaybackScheduler::Stop(std::uint32_t now) {

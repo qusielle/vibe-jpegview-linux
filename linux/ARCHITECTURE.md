@@ -484,7 +484,9 @@ should normally be added to one of these focused modules and covered by the matc
   by another playback advance; Movie-generated navigation retains the mode across files.
   Manual frame stepping wraps only within the current animation and freezes every playback deadline,
   including Movie's folder-advance deadline; resuming a manually held last frame continues from that
-  frame, while a naturally exhausted finite animation restarts from frame zero. Finite exhaustion
+  frame, while a naturally exhausted finite animation restarts from frame zero, including when Movie
+  FPS is selected. Starting Movie returns the required frame action through Viewer's presentation
+  path before readiness resumes. Finite exhaustion
   carries an overlay invalidation even when no frame or file action is returned, so the playback
   status refreshes before the event loop returns to idle. Changing or resetting
   a delay override or Movie FPS selection returns timing to native animation mode when source delays

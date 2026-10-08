@@ -1376,6 +1376,24 @@ void TestContextMenuCatalogAndState() {
 			jpegview_linux::kCommandAnimationTogglePlayback)->enabled,
 		"context menu left animation controls enabled while the display owner was busy");
 	state.animationControlsAvailable = true;
+	jpegview_linux::ContextMenuState exhaustedGifState;
+	exhaustedGifState.imageAvailable = true;
+	exhaustedGifState.animationAvailable = true;
+	exhaustedGifState.animationControlsAvailable = true;
+	exhaustedGifState.freeRotationAvailable = true;
+	exhaustedGifState.perspectiveCorrectionAvailable = true;
+	exhaustedGifState.fileListAvailable = true;
+	exhaustedGifState.pictureLevelsAvailable = true;
+	exhaustedGifState.parameterDatabaseAvailable = true;
+	const std::vector<MenuItem> exhaustedGifMenu =
+		jpegview_linux::BuildContextMenu(exhaustedGifState, true);
+	int movieSelection = -1;
+	for (int press = 0; press < 3; ++press)
+		movieSelection = jpegview_linux::NextMenuMnemonicSelection(
+			exhaustedGifMenu, 'k', movieSelection);
+	Expect(movieSelection >= 0 &&
+		exhaustedGifMenu[static_cast<size_t>(movieSelection)].command == IDM_MOVIE_5_FPS,
+		"completed GIF menu mnemonic sequence did not select Movie without executing Resume");
 	state.playbackMode = jpegview_linux::PlaybackMode::Slideshow;
 	const std::vector<MenuItem> slideshowAnimation =
 		jpegview_linux::BuildContextMenu(state, true);
@@ -4611,6 +4629,32 @@ void TestPlaybackSchedulerTimingAndModes() {
 	Expect(resumed.type == PlaybackActionType::ShowFrame && resumed.frameIndex == 0 &&
 		scheduler.AnimationPlaying() && scheduler.NextTick() == 320,
 		"animation resume did not rewind a completed sequence");
+	jpegview_linux::PlaybackScheduler exhaustedMovie;
+	exhaustedMovie.ConfigureImage({20, 40}, 1, true, 0,
+		jpegview_linux::kMaximumGifFrameDelayMs);
+	exhaustedMovie.Tick(20);
+	exhaustedMovie.Tick(60);
+	const auto movieRestart = exhaustedMovie.StartMovie(25.0, 100);
+	Expect(movieRestart.type == PlaybackActionType::ShowFrame &&
+		movieRestart.frameIndex == 0 && exhaustedMovie.FrameIndex() == 0 &&
+		exhaustedMovie.CompletedLoops() == 0 && exhaustedMovie.AnimationPlaying() &&
+		exhaustedMovie.Mode() == PlaybackMode::Movie,
+		"entering Movie on an exhausted GIF did not request its first frame as a new sequence");
+	exhaustedMovie.SetImageReady(false, 100);
+	Expect(!exhaustedMovie.NextDeadline().has_value() &&
+		exhaustedMovie.Tick(1000).type == PlaybackActionType::None,
+		"Movie advanced before the restarted first frame was presented");
+	exhaustedMovie.SetImageReady(true, 1000);
+	Expect(exhaustedMovie.Tick(1039).type == PlaybackActionType::None &&
+		exhaustedMovie.Tick(1040).type == PlaybackActionType::ShowFrame &&
+		exhaustedMovie.FrameIndex() == 1 &&
+		exhaustedMovie.Tick(1080).type == PlaybackActionType::NextImage,
+		"restarted Movie skipped frames or ignored its presented-frame interval");
+	exhaustedMovie.StepAnimationFrame(-1, 1090);
+	const std::size_t manuallyHeldFrame = exhaustedMovie.FrameIndex();
+	Expect(exhaustedMovie.StartMovie(25.0, 1100).type == PlaybackActionType::None &&
+		exhaustedMovie.FrameIndex() == manuallyHeldFrame,
+		"entering Movie rewound a manually held animation frame");
 	scheduler.FrameDisplayFailed();
 	Expect(!scheduler.AnimationPlaying() && scheduler.NextTick() == 0,
 		"failed animation frame did not stop scheduling");

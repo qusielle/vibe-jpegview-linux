@@ -7395,7 +7395,7 @@ private:
 	}
 
 	void StartMovie(double framesPerSecond) {
-		playback_.StartMovie(framesPerSecond, SDL_GetTicks());
+		ApplyPlaybackAction(playback_.StartMovie(framesPerSecond, SDL_GetTicks()));
 		SetTitle();
 	}
 

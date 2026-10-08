@@ -41,7 +41,7 @@ public:
 	void SetTemporarilyPaused(bool paused, std::uint32_t now);
 
 	void StartSlideshow(double seconds, std::uint32_t now);
-	void StartMovie(double framesPerSecond, std::uint32_t now);
+	PlaybackAction StartMovie(double framesPerSecond, std::uint32_t now);
 	void Stop(std::uint32_t now);
 	PlaybackAction Resume(std::uint32_t now);
 	PlaybackAction StepAnimationFrame(int direction, std::uint32_t now);

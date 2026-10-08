@@ -1656,6 +1656,7 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 	mkdir -p "$finite_animation_directory"
 	convert -delay 300 -size 800x600 xc:red -delay 300 -size 800x600 xc:blue \
 		-loop 1 "$finite_animation_directory/01-finite.gif"
+	write_ppm "$finite_animation_directory/02-still.ppm" 0 255 0
 	VIEWER_TEST_HOME="$temporary/finite-animation-home" \
 		VIEWER_TEST_CONFIG_HOME="$rotation_animation_config" \
 		launch_viewer "$finite_animation_directory/01-finite.gif"
@@ -1689,6 +1690,28 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 	done
 	if [ "$finite_animation_exhausted" -ne 1 ]; then
 		echo "UI smoke test: finite GIF did not refresh its paused status on the last frame ($finite_animation_color)" >&2
+		exit 1
+	fi
+	# Entering Movie after natural completion must show the first GIF frame
+	# before another pass finishes and advances to the following still image.
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 40 40
+	DISPLAY=":$display_number" xdotool keydown Shift_L
+	DISPLAY=":$display_number" xdotool click 3
+	DISPLAY=":$display_number" xdotool keyup Shift_L
+	# Three K presses select Movie's 5 fps entry without executing Resume playback.
+	# The context-menu model regression covers this repeated mnemonic sequence.
+	DISPLAY=":$display_number" xdotool key --delay 30 k k k
+	DISPLAY=":$display_number" xdotool key Return
+	movie_restart_first_frame=0
+	for _ in $(seq 1 20); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/movie-restart.png"
+		movie_restart_color=$(convert "$temporary/movie-restart.png" \
+			-format "%[hex:p{$((finite_animation_width / 2)),$((finite_animation_height / 2))}]" info:)
+		if [ "$movie_restart_color" = FF0000 ]; then movie_restart_first_frame=1; break; fi
+		sleep 0.02
+	done
+	if [ "$movie_restart_first_frame" -ne 1 ]; then
+		echo "UI smoke test: Movie skipped the completed GIF's first frame ($movie_restart_color)" >&2
 		exit 1
 	fi
 	stop_viewer
