@@ -470,7 +470,10 @@ should normally be added to one of these focused modules and covered by the matc
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
   It tracks explicit user freeze separately from image readiness and temporary modal suppression.
   GIF centisecond delays are normalized by the decoder to milliseconds, with missing or zero delays
-  defaulted to 100 ms and nonzero delays clamped to at least 20 ms. Normal animation playback uses
+  defaulted to 100 ms and nonzero delays clamped to at least 20 ms. Loop counts describe
+  total sequence passes: the GIF decoder converts a positive Netscape repeat count to repeats plus
+  one, preserves explicit zero as infinite playback, and defaults a missing looping extension to
+  one pass. Normal animation playback uses
   embedded per-frame delays; an explicitly selected Movie FPS overrides them for GIFs as well as
   other animated formats. Faster/slower controls create a per-image uniform delay override for every
   animation. Reset clears a manual delay override or exits Movie mode for the current animation and

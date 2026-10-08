@@ -848,10 +848,54 @@ void TestAnimatedImageDecoders() {
 	Expect(decodedGif, "cannot decode GIF: " + error);
 	Expect(HasCodecSourceReadTrace("giflib", gif.size()),
 		"giflib direct-read trace did not report timed bytes under the focused-preview worker class");
-	Expect(decoded.animation && decoded.isGif && decoded.frames.size() == 2 && decoded.loopCount == 1,
+	Expect(decoded.animation && decoded.isGif && decoded.frames.size() == 2 && decoded.loopCount == 2,
 		"GIF animation metadata is incorrect");
 	Expect(decoded.frames[0].delayMs == 70 && decoded.frames[1].delayMs == 20,
 		"GIF frame delays did not preserve their encoded centisecond values");
+	const std::vector<std::uint8_t> loopExtension = {
+		0x21, 0xff, 0x0b, 'N', 'E', 'T', 'S', 'C', 'A', 'P', 'E', '2', '.', '0',
+		0x03, 0x01, 0x01, 0x00, 0x00};
+	const auto loopStart = std::search(gif.begin(), gif.end(),
+		loopExtension.begin(), loopExtension.end());
+	Expect(loopStart != gif.end(), "GIF fixture has no looping extension");
+	const std::size_t loopOffset = static_cast<std::size_t>(loopStart - gif.begin());
+	const auto checkLoops = [&](const std::vector<std::uint8_t>& bytes,
+		int expectedPasses, const char* label) {
+		const fs::path filename = temporary.path() / (std::string(label) + ".gif");
+		WriteBytes(filename, bytes);
+		DecodedImage result;
+		Expect(jpegview_linux::DecodeImage(filename, result, error),
+			std::string("cannot decode GIF loop fixture: ") + label + ": " + error);
+		Expect(result.loopCount == expectedPasses,
+			std::string("incorrect total GIF passes: ") + label);
+		jpegview_linux::PlaybackScheduler scheduler;
+		scheduler.ConfigureImage({result.frames[0].delayMs, result.frames[1].delayMs},
+			result.loopCount, result.animation, 0, jpegview_linux::kMaximumGifFrameDelayMs);
+		for (int pass = 1; pass <= 2; ++pass) {
+			Expect(scheduler.Tick(scheduler.NextTick()).type ==
+				jpegview_linux::PlaybackActionType::ShowFrame && scheduler.FrameIndex() == 1,
+				std::string("GIF did not advance to the last frame: ") + label);
+			const auto action = scheduler.Tick(scheduler.NextTick());
+			const bool shouldStop = expectedPasses > 0 && pass == expectedPasses;
+			Expect(scheduler.AnimationPlaying() != shouldStop &&
+				action.type == (shouldStop ? jpegview_linux::PlaybackActionType::None :
+					jpegview_linux::PlaybackActionType::ShowFrame),
+				std::string("GIF playback used incorrect repeat semantics: ") + label);
+			if (shouldStop) break;
+		}
+	};
+	checkLoops(gif, 2, "one-repeat");
+	std::vector<std::uint8_t> noLoopGif = gif;
+	noLoopGif.erase(noLoopGif.begin() + static_cast<std::ptrdiff_t>(loopOffset),
+		noLoopGif.begin() + static_cast<std::ptrdiff_t>(loopOffset + loopExtension.size()));
+	checkLoops(noLoopGif, 1, "no-loop-extension");
+	std::vector<std::uint8_t> infiniteGif = gif;
+	infiniteGif[loopOffset + 16] = 0;
+	checkLoops(infiniteGif, 0, "infinite-repeat");
+	std::vector<std::uint8_t> maximumRepeatGif = gif;
+	maximumRepeatGif[loopOffset + 16] = 0xff;
+	maximumRepeatGif[loopOffset + 17] = 0xff;
+	checkLoops(maximumRepeatGif, 65536, "maximum-repeat");
 	const auto gifDelayOffset = [](const std::vector<std::uint8_t>& bytes,
 		std::size_t requested) {
 		std::size_t found = 0;

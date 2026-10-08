@@ -23,7 +23,7 @@ struct DecodedFrame {
 struct DecodedImage {
 	std::vector<DecodedFrame> frames;
 	bool animation = false;
-	int loopCount = 0; // zero means loop forever, as in GIF/WebP.
+	int loopCount = 0; // total sequence passes; zero means loop forever.
 	bool isGif = false;
 	// Set from the decoded content signature, independent of its filename suffix.
 	bool isSvg = false;

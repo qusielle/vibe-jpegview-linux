@@ -87,11 +87,13 @@ int GifLoopCount(const GifFileType* gif) {
 				continue;
 			}
 			if (netscapeApplication && block.ByteCount >= 3 && block.Bytes[0] == 1) {
-				return block.Bytes[1] | (static_cast<int>(block.Bytes[2]) << 8);
+				const int repeats = block.Bytes[1] | (static_cast<int>(block.Bytes[2]) << 8);
+				// GIF stores repeats after the initial pass; the scheduler counts total passes.
+				return repeats == 0 ? 0 : repeats + 1;
 			}
 		}
 	}
-	return 0;
+	return 1;
 }
 
 struct GifInput {
