@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <utility>
@@ -187,9 +188,23 @@ std::string FormatModificationDateLine(std::string_view date) {
 }
 
 std::string FormatAnimationPlaybackStatus(bool animationPlaying,
-	bool manuallyPaused) {
-	if (manuallyPaused) return "frozen";
-	return animationPlaying ? "playing" : "paused";
+	bool manuallyPaused, std::optional<double> framesPerSecond) {
+	std::string status = manuallyPaused ? "frozen" :
+		(animationPlaying ? "playing" : "paused");
+	if (!framesPerSecond.has_value() || !std::isfinite(*framesPerSecond) ||
+		*framesPerSecond <= 0.0) {
+		return status;
+	}
+
+	std::ostringstream rate;
+	rate << std::fixed << std::setprecision(1) << *framesPerSecond;
+	std::string formattedRate = rate.str();
+	if (formattedRate.size() >= 2 &&
+		formattedRate.compare(formattedRate.size() - 2, 2, ".0") == 0) {
+		formattedRate.resize(formattedRate.size() - 2);
+	}
+	status += " (" + formattedRate + " fps)";
+	return status;
 }
 
 const std::string& WindowTitleFormatCache::GetOrBuild(const std::string& key,

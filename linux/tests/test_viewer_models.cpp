@@ -4299,6 +4299,14 @@ void TestImageInfoFormatting() {
 		jpegview_linux::FormatAnimationPlaybackStatus(false, false) == "paused" &&
 		jpegview_linux::FormatAnimationPlaybackStatus(false, true) == "frozen",
 		"animation information status did not reflect playback or manual freeze state");
+	Expect(jpegview_linux::FormatAnimationPlaybackStatus(true, false, 1000.0 / 70.0) ==
+		"playing (14.3 fps)" &&
+		jpegview_linux::FormatAnimationPlaybackStatus(false, true, 25.0) ==
+		"frozen (25 fps)",
+		"GIF playback status did not include a readable effective frame rate");
+	Expect(jpegview_linux::FormatAnimationPlaybackStatus(true, false, 0.0) == "playing" &&
+		jpegview_linux::FormatAnimationPlaybackStatus(true, false, -1.0) == "playing",
+		"invalid animation rates should not be shown in the playback status");
 	Expect(jpegview_linux::FormatFileSize(1536) == "1.5 KB",
 		"file-size formatting changed while moving it into the information model");
 	Expect(jpegview_linux::FormatFileSize(1023) == "1023 B" &&

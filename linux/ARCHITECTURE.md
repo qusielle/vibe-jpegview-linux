@@ -482,8 +482,10 @@ should normally be added to one of these focused modules and covered by the matc
   including Movie's folder-advance deadline; resuming a manually held last frame continues from that
   frame, while a naturally exhausted finite animation restarts from frame zero. Changing or resetting
   a delay override or Movie FPS selection returns timing to native animation mode when source delays
-  are restored. Temporary modal suppression still preserves the separate user play/freeze intent and
-  starts a fresh interval when the modal closes.
+  are restored. The GIF information overlay reports the effective rate from the current frame delay,
+  or the selected Movie rate while Movie mode overrides source timing. Temporary modal suppression
+  still preserves the separate user play/freeze intent and starts a fresh interval when the modal
+  closes.
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus
@@ -588,8 +590,10 @@ should normally be added to one of these focused modules and covered by the matc
 - `image_info_model`: stable image-position, dimensions, date, and file-size presentation, plus
   validation and single-pass expansion for the configurable window-title pattern. It caches title
   and information-line formatting by the relevant source, catalog, metadata, and display state, and
-  tracks the last title sent to SDL. Archive-member titles and overlays use the uncompressed member
-  size carried by the captured source descriptor, not the backing container size.
+  tracks the last title sent to SDL. Animated GIF playback lines include the effective frames-per-second
+  rate and refresh when the displayed timing, playback mode, or selected Movie rate changes.
+  Archive-member titles and overlays use the uncompressed member size carried by the captured source
+  descriptor, not the backing container size.
 - `exif_metadata_worker`: cancellable, generation-checked optional EXIF/comment reads. Results carry
   the captured `SourceKey`; Viewer applies metadata only when both source and request generation
   still match, so slow metadata cannot delay initial image presentation or overwrite another image.

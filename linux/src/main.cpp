@@ -7673,9 +7673,18 @@ private:
 				presentedAnimationFrame_.value_or(currentAnimationFrame_), frameCount - 1);
 			lines.push_back("Frame: " + std::to_string(displayedFrame + 1) + "/" +
 				std::to_string(frameCount));
+			std::optional<double> gifFramesPerSecond;
+			if (currentDecoded_->isGif) {
+				if (playback_.Mode() == jpegview_linux::PlaybackMode::Movie) {
+					gifFramesPerSecond = playback_.MovieFramesPerSecond();
+				} else if (playback_.FrameDelayMs() > 0) {
+					gifFramesPerSecond = 1000.0 / playback_.FrameDelayMs();
+				}
+			}
 			const std::string playbackStatus =
 				jpegview_linux::FormatAnimationPlaybackStatus(
-					playback_.AnimationPlaying(), playback_.AnimationManuallyPaused());
+					playback_.AnimationPlaying(), playback_.AnimationManuallyPaused(),
+					gifFramesPerSecond);
 			lines.push_back("Playback: " + playbackStatus);
 			if (playback_.Mode() != jpegview_linux::PlaybackMode::Movie) {
 				lines.push_back("Frame delay: " + std::to_string(playback_.FrameDelayMs()) +
@@ -7746,7 +7755,9 @@ private:
 			<< playback_.AnimationManuallyPaused() << ':'
 			<< (presentedAnimationFrame_.has_value() ? *presentedAnimationFrame_ :
 				std::numeric_limits<std::size_t>::max()) << ':' << playback_.FrameDelayMs() << ':'
-			<< playback_.AnimationDelayOverrideMs().has_value() << '|'
+			<< playback_.AnimationDelayOverrideMs().has_value() << ':'
+			<< static_cast<int>(playback_.Mode()) << ':' << std::setprecision(17) <<
+				playback_.MovieFramesPerSecond() << '|'
 			<< (currentDecoded_ ? currentDecoded_->frames.size() : 0) << ':'
 			<< imageInfoMetadataRevision_;
 		return imageInfoLineCache_.GetOrBuild(key.str(), [this] {
