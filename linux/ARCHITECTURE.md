@@ -272,8 +272,9 @@ should normally be added to one of these focused modules and covered by the matc
   the existing extension-based dispatch. SVG/SVGZ use optional librsvg 2.46+ and Cairo support; a
   local build without those packages retains format recognition but publishes an explicit
   unavailable-codec error. `image_decoder_svg.cpp` bounds encoded and inflated input, accepts one
-  gzip member, rejects XML DTDs/entities, scripts, XInclude, base URIs, stylesheets, and non-fragment
-  resource references, and parses source dimensions without allocating a source-sized raster. Its
+  gzip member, strips a simple external SVG document type declaration without loading it, and rejects
+  internal DTD subsets/entities, scripts, XInclude, base URIs, stylesheets, and non-fragment resource
+  references. It parses source dimensions without allocating a source-sized raster. Its
   display entry point renders directly to a bounded target surface, while ordinary `DecodeImage`
   calls retain intrinsic pixels for editing, sampling, and full-source histogram work. The decoded
   source-kind flag comes from content dispatch, so file-backed SVG requests remain vector-backed

@@ -6383,6 +6383,8 @@ if [ "${JPEGVIEW_TEST_HAS_SVG:-1}" = 1 ]; then
 EOF
 	cp "$temporary/svg-images/01-neighbor.svg" "$temporary/svg-images/02-neighbor.svg"
 	cat >"$temporary/svg-images/vector.svg" <<'EOF'
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="400" viewBox="0 0 800 400">
   <rect width="800" height="400" fill="#e02020"/>
   <rect x="350" y="150" width="100" height="100" fill="#20e020"/>

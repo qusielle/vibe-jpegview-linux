@@ -23,6 +23,14 @@ std::vector<std::uint8_t> MakeSvgz(const std::string& document) {
 	return compressed;
 }
 
+std::string MakeSvgWithExternalDoctype() {
+	return "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+		"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\"\n"
+		"  \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n"
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"2\">"
+		"<rect width=\"4\" height=\"2\" fill=\"#336699\"/></svg>";
+}
+
 void TestImageContentFormatDetection() {
 	using jpegview_linux::DetectImageContent;
 	using jpegview_linux::ImageContentFormat;
@@ -59,6 +67,11 @@ void TestImageContentFormatDetection() {
 		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"2\">";
 	const std::vector<std::uint8_t> svgBytes(svg.begin(), svg.end());
 	expect(svgBytes, ImageContentFormat::Svg, "SVG XML");
+	const std::string svgWithDoctype = MakeSvgWithExternalDoctype();
+	const std::vector<std::uint8_t> svgDoctypeBytes(svgWithDoctype.begin(),
+		svgWithDoctype.end());
+	expect(svgDoctypeBytes, ImageContentFormat::Svg,
+		"SVG XML with an external SVG 1.1 document type");
 	expect(MakeSvgz(svg), ImageContentFormat::Svgz, "SVGZ gzip");
 	expect({0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 24, 0},
 		ImageContentFormat::Tga, "TGA");
@@ -87,6 +100,11 @@ void TestSvgAndSvgzDecoding() {
 		"SVG content detection incorrectly depends on the file extension");
 	Expect(jpegview_linux::IsSupportedImagePath(temporary.path() / "vector.SVG"),
 		"SVG extension is not included in ordinary image lists");
+	const fs::path externalDoctypePath = temporary.path() / "matplotlib.svg";
+	WriteText(externalDoctypePath, MakeSvgWithExternalDoctype());
+	Expect(jpegview_linux::ReadImageContentFormat(externalDoctypePath) ==
+		jpegview_linux::ImageContentFormat::Svg,
+		"SVG with a standard external doctype was not recognized by content detection");
 
 #if JPEGVIEW_HAVE_SVG
 	const fs::path mislabeledSvg = temporary.path() / "vector.jpg";
@@ -112,6 +130,20 @@ void TestSvgAndSvgzDecoding() {
 		decoded.frames.size() == 1 && decoded.frames[0].width == 4 &&
 		decoded.frames[0].height == 2 && decoded.isSvg,
 		"content-detected SVG did not decode from a wrong extension: " + error);
+	DecodedImage doctypeDecoded;
+	Expect(jpegview_linux::DecodeImage(externalDoctypePath, doctypeDecoded, error) &&
+		doctypeDecoded.isSvg && doctypeDecoded.frames.size() == 1 &&
+		doctypeDecoded.frames.front().width == 4 &&
+		doctypeDecoded.frames.front().height == 2,
+		"SVG with a standard external document type did not decode: " + error);
+	const fs::path internalEntityPath = temporary.path() / "internal-entity.svg";
+	WriteText(internalEntityPath,
+		"<!DOCTYPE svg [<!ENTITY unsafe \"external-data\">]>"
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"2\">"
+		"<text>&unsafe;</text></svg>");
+	DecodedImage internalEntityDecoded;
+	Expect(!jpegview_linux::DecodeImage(internalEntityPath, internalEntityDecoded, error),
+		"SVG internal document type subsets and entities were accepted");
 	const auto& pixels = decoded.frames[0].bgra;
 	Expect(pixels[0] == 0 && pixels[1] == 0 && pixels[2] == 255 && pixels[3] == 255 &&
 		pixels[8] >= 250 && pixels[9] == 0 && pixels[10] == 0 &&

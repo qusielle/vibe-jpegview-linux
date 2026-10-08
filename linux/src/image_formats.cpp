@@ -75,6 +75,46 @@ bool HasPnmHeader(const std::uint8_t* bytes, std::size_t size) {
 		bytes[2] == '\n' || bytes[2] == '#';
 }
 
+bool SkipSvgDoctype(const std::uint8_t* bytes, std::size_t size,
+	std::size_t& position) {
+	constexpr std::string_view declaration = "<!DOCTYPE";
+	const auto starts = [bytes, size](std::size_t offset, std::string_view value) {
+		return offset <= size && value.size() <= size - offset &&
+			std::equal(value.begin(), value.end(), bytes + offset,
+				[](char left, std::uint8_t right) {
+					return static_cast<unsigned char>(left) == right;
+				});
+	};
+	const auto whitespace = [bytes, size](std::size_t offset) {
+		return offset < size && (bytes[offset] == ' ' || bytes[offset] == '\t' ||
+			bytes[offset] == '\r' || bytes[offset] == '\n');
+	};
+	if (!starts(position, declaration)) return false;
+	position += declaration.size();
+	if (!whitespace(position)) return false;
+	while (whitespace(position)) ++position;
+	if (!starts(position, "svg") || position + 3 >= size ||
+		(!whitespace(position + 3) && bytes[position + 3] != '>')) return false;
+	position += 3;
+	char quote = 0;
+	for (; position < size; ++position) {
+		const std::uint8_t value = bytes[position];
+		if (quote != 0) {
+			if (value == static_cast<std::uint8_t>(quote)) quote = 0;
+			continue;
+		}
+		if (value == '\'' || value == '"') {
+			quote = static_cast<char>(value);
+		} else if (value == '[') {
+			return false;
+		} else if (value == '>') {
+			++position;
+			return true;
+		}
+	}
+	return false;
+}
+
 bool LooksLikeSvgXml(const std::uint8_t* bytes, std::size_t size) {
 	if (bytes == nullptr) return false;
 	std::size_t position = 0;
@@ -103,6 +143,10 @@ bool LooksLikeSvgXml(const std::uint8_t* bytes, std::size_t size) {
 				reinterpret_cast<const char*>(bytes + position), size - position).find("-->");
 			if (end == std::string_view::npos) return false;
 			position += end + 3;
+			continue;
+		}
+		if (starts(position, "<!DOCTYPE")) {
+			if (!SkipSvgDoctype(bytes, size, position)) return false;
 			continue;
 		}
 		break;

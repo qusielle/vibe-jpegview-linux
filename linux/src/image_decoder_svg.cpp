@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -182,6 +183,112 @@ bool IsWhitespace(char value) {
 	return value == ' ' || value == '\t' || value == '\r' || value == '\n';
 }
 
+bool StartsAt(const std::vector<std::uint8_t>& bytes, std::size_t offset,
+	std::string_view value) {
+	return offset <= bytes.size() && value.size() <= bytes.size() - offset &&
+		std::equal(value.begin(), value.end(), bytes.begin() +
+			static_cast<std::ptrdiff_t>(offset),
+			[](char left, std::uint8_t right) {
+				return static_cast<unsigned char>(left) == right;
+			});
+}
+
+bool FindXmlPrologTerminator(const std::vector<std::uint8_t>& xml,
+	std::size_t position, std::string_view terminator, std::size_t& after,
+	std::string& errorMessage, const WorkContext& context) {
+	for (std::size_t index = position; index < xml.size(); ++index) {
+		if ((index & 0xfffu) == 0 && !Continue(context)) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
+		if (StartsAt(xml, index, terminator)) {
+			after = index + terminator.size();
+			return true;
+		}
+	}
+	errorMessage = "malformed SVG XML prolog";
+	return false;
+}
+
+bool StripExternalSvgDoctype(std::vector<std::uint8_t>& xml,
+	std::string& errorMessage, const WorkContext& context) {
+	// Common SVG 1.1 declarations are compatibility metadata; remove them before
+	// either XML parser sees the document so external subsets are never loaded.
+	std::size_t position = xml.size() >= 3 && xml[0] == 0xef &&
+		xml[1] == 0xbb && xml[2] == 0xbf ? 3 : 0;
+	for (;;) {
+		if (!Continue(context)) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
+		while (position < xml.size() && IsWhitespace(static_cast<char>(xml[position]))) {
+			++position;
+		}
+		if (StartsAt(xml, position, "<?")) {
+			std::size_t after = 0;
+			if (!FindXmlPrologTerminator(xml, position + 2, "?>", after,
+				errorMessage, context)) return false;
+			position = after;
+			continue;
+		}
+		if (StartsAt(xml, position, "<!--")) {
+			std::size_t after = 0;
+			if (!FindXmlPrologTerminator(xml, position + 4, "-->", after,
+				errorMessage, context)) return false;
+			position = after;
+			continue;
+		}
+		if (!StartsAt(xml, position, "<!DOCTYPE")) return true;
+
+		const std::size_t declarationStart = position;
+		position += std::string_view("<!DOCTYPE").size();
+		if (position >= xml.size() || !IsWhitespace(static_cast<char>(xml[position]))) {
+			errorMessage = "malformed SVG document type declaration";
+			return false;
+		}
+		while (position < xml.size() && IsWhitespace(static_cast<char>(xml[position]))) {
+			++position;
+		}
+		const std::size_t nameStart = position;
+		while (position < xml.size() && !IsWhitespace(static_cast<char>(xml[position])) &&
+			xml[position] != '>' && xml[position] != '[') ++position;
+		if (position - nameStart != 3 || !StartsAt(xml, nameStart, "svg")) {
+			errorMessage = "SVG document type declaration must name svg";
+			return false;
+		}
+
+		char quote = 0;
+		std::size_t declarationEnd = std::string::npos;
+		for (std::size_t index = position; index < xml.size(); ++index) {
+			if ((index & 0xfffu) == 0 && !Continue(context)) {
+				errorMessage = "source work was cancelled";
+				return false;
+			}
+			const char value = static_cast<char>(xml[index]);
+			if (quote != 0) {
+				if (value == quote) quote = 0;
+				continue;
+			}
+			if (value == '\'' || value == '"') {
+				quote = value;
+			} else if (value == '[') {
+				errorMessage = "SVG internal document type subsets and entities are not supported";
+				return false;
+			} else if (value == '>') {
+				declarationEnd = index + 1;
+				break;
+			}
+		}
+		if (declarationEnd == std::string::npos || quote != 0) {
+			errorMessage = "malformed SVG document type declaration";
+			return false;
+		}
+		xml.erase(xml.begin() + static_cast<std::ptrdiff_t>(declarationStart),
+			xml.begin() + static_cast<std::ptrdiff_t>(declarationEnd));
+		return true;
+	}
+}
+
 bool ValidateCssReferences(const std::string& css) {
 	std::string normalized;
 	try {
@@ -350,7 +457,7 @@ bool ValidateSvgNodeTree(xmlDoc* document, xmlNode* root, std::string& errorMess
 	return true;
 }
 
-bool ValidateSvgXml(const std::vector<std::uint8_t>& xml, std::string& errorMessage,
+bool ValidateSvgXml(std::vector<std::uint8_t>& xml, std::string& errorMessage,
 	const WorkContext& context) {
 	if (xml.empty() || xml.size() > kMaximumDecodedSvgBytes ||
 		xml.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
@@ -361,6 +468,7 @@ bool ValidateSvgXml(const std::vector<std::uint8_t>& xml, std::string& errorMess
 		errorMessage = "source work was cancelled";
 		return false;
 	}
+	if (!StripExternalSvgDoctype(xml, errorMessage, context)) return false;
 	const int options = XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING |
 		XML_PARSE_COMPACT;
 	XmlDocPtr document(xmlReadMemory(reinterpret_cast<const char*>(xml.data()),

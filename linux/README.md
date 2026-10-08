@@ -783,7 +783,8 @@ QOI, WebP (including animation), TIFF, HEIF/HEIC, AVIF, JPEG XL (including anima
 and LibRaw camera formats such as CR3, CR2, NEF, DNG, ARW, RAF, and RW2. SVG/SVGZ use the optional librsvg decoder in local builds;
 the supported release containers include it, while a local build without librsvg reports the format as unavailable. SVGZ input is
 limited to 32 MiB of compressed data and 64 MiB after decompression, and SVG raster dimensions use the existing 100-megapixel
-image limit. SVG rendering does not load external files, network resources, stylesheets, or scripts. When decoding, JPEGView recognizes common image
+image limit. A simple external SVG document type declaration is removed without fetching its DTD; internal DTD subsets and
+entities remain unsupported. SVG rendering does not load external files, network resources, stylesheets, or scripts. When decoding, JPEGView recognizes common image
 signatures independently of the filename suffix and routes them to the matching reader. An
 explicitly opened regular file with an unsupported suffix is also checked by content. Directory,
 Browse, and archive-member listings remain extension-filtered and do not inspect arbitrary files.
