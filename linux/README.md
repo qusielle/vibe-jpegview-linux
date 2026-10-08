@@ -141,9 +141,10 @@ they support.
    retained frame. Apply keeps a still frame and resumes an active movie or slideshow interval.
    **Transform image → Perspective correction...** opens a separate editor with left- and right-edge
    convergence sliders, automatic cropping, source-aspect preservation, and an alignment grid.
-   Its bounded preview runs asynchronously and keeps the last completed image visible while the
-   sliders are adjusted; one final preview is prepared after a drag is released. Apply corrects the
-   full-resolution image in memory.
+   Tab selects an edge; Left/Right adjusts its slider, and holding an arrow repeats the adjustment.
+   Hold Shift for finer changes; Home resets both sliders. Its bounded preview runs asynchronously
+   and keeps the last completed image visible while the sliders are adjusted; one final preview is
+   prepared after a drag is released. Apply corrects the full-resolution image in memory.
    Cancel and zero-adjustment Apply leave the document unchanged. Opening the editor pauses playback;
    Cancel resumes it, while applying a correction retains an animation's displayed frame as a still.
    PageUp/PageDown remain logical previous/next. The pixel color sampler is disabled by default;

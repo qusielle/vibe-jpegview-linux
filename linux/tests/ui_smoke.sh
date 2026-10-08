@@ -1086,6 +1086,35 @@ if [ "$visual_assertions" -eq 1 ]; then
 		cat "$temporary/viewer.log" >&2
 		exit 1
 	fi
+	# Arrow keys adjust the selected edge once per press and continue while
+	# held, matching the free-rotation dialog's key-repeat behavior.
+	perspective_slider_row_x=$((perspective_dialog_border_x + 24))
+	perspective_slider_row_y=$((perspective_dialog_border_y + 86))
+	perspective_slider_row_width=$((perspective_dialog_width - 48))
+	DISPLAY=":$display_number" xdotool windowactivate --sync "$window_id"
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Right
+	sleep 0.05
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/perspective-slider-single.png"
+	convert "$temporary/perspective-slider-single.png" -crop \
+		"${perspective_slider_row_width}x22+$perspective_slider_row_x+$perspective_slider_row_y" +repage \
+		"$temporary/perspective-slider-single-row.png"
+	DISPLAY=":$display_number" xdotool keydown Right
+	sleep 1.2
+	DISPLAY=":$display_number" xdotool keyup Right
+	sleep 0.05
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/perspective-slider-held.png"
+	convert "$temporary/perspective-slider-held.png" -crop \
+		"${perspective_slider_row_width}x22+$perspective_slider_row_x+$perspective_slider_row_y" +repage \
+		"$temporary/perspective-slider-held-row.png"
+	perspective_repeat_difference=$(compare -metric AE \
+		"$temporary/perspective-slider-single-row.png" \
+		"$temporary/perspective-slider-held-row.png" null: 2>&1 || true)
+	if [ "$perspective_repeat_difference" = "0" ]; then
+		echo "UI smoke test: holding Right did not repeat perspective-correction adjustment" >&2
+		exit 1
+	fi
 	perspective_image_region_x=100
 	perspective_image_region_y=300
 	convert "$temporary/perspective-original.png" -crop \

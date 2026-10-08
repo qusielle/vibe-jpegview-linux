@@ -208,10 +208,10 @@ void EditingDialogRendererAdapter::Render(const PerspectiveCorrectionDialogPaint
 	}
 	if (paint.helpY >= 0) {
 		if (paint.compact) {
-			textRenderer_.Draw("ARROWS: ADJUST   ENTER: APPLY   ESC: CANCEL",
+			textRenderer_.Draw("HOLD ARROWS: ADJUST   ENTER: APPLY   ESC: CANCEL",
 				paint.dialog.x + 18, paint.helpY, kTextScale, 155, 165, 178);
 		} else {
-			textRenderer_.Draw("TAB: SELECT EDGE   LEFT/RIGHT: ADJUST   SHIFT: FINE   HOME: RESET",
+			textRenderer_.Draw("TAB: SELECT EDGE   HOLD ARROWS: ADJUST   SHIFT: FINE   HOME: RESET",
 				paint.dialog.x + 18, paint.helpY, kTextScale, 155, 165, 178);
 			textRenderer_.Draw("A: AUTO-CROP   P: ASPECT   G: GRID   ENTER: APPLY   ESC: CANCEL",
 				paint.dialog.x + 18, paint.helpY + 15, kTextScale, 155, 165, 178);

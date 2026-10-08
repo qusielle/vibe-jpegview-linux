@@ -10061,8 +10061,8 @@ private:
 			}
 			break;
 		case SDL_KEYDOWN: {
-			if (event.key.repeat != 0) break;
 			const Sint32 key = event.key.keysym.sym;
+			if (event.key.repeat != 0 && key != SDLK_LEFT && key != SDLK_RIGHT) break;
 			const bool shift = (event.key.keysym.mod & 0x0003u) != 0;
 			if (key == SDLK_ESCAPE) {
 				ClosePerspectiveCorrectionDialog();
