@@ -4837,7 +4837,50 @@ DISPLAY=":$display_number" xdotool key Right
 assert_title_prefix "04-yellow.ppm" "Escape did not close Browse during a large-directory listing"
 DISPLAY=":$display_number" xdotool key Left
 assert_title_prefix "03-blue.ppm" "large-directory Escape test did not restore the starting image"
+
+# Closing the application during a large startup scan must stop the event loop
+# immediately, unmap the window before worker cleanup, and still exit cleanly.
+stop_viewer
+launch_viewer "$slow_browse_directory"
+close_started_ns=$(date +%s%N)
+DISPLAY=":$display_number" xdotool key Escape
+close_window_deadline=20
+while [ "$close_window_deadline" -gt 0 ]; do
+	visible_viewer_windows=$(DISPLAY=":$display_number" xdotool search \
+		--onlyvisible --class jpegview-linux 2>/dev/null || true)
+	if ! printf '%s\n' "$visible_viewer_windows" | grep -Fxq "$window_id"; then
+		break
+	fi
+	sleep 0.05
+	close_window_deadline=$((close_window_deadline - 1))
+done
+if [ "$close_window_deadline" -eq 0 ]; then
+	echo "UI smoke test: application window stayed visible after Escape during a large directory scan" >&2
+	exit 1
+fi
+close_process_deadline=200
+while [ "$close_process_deadline" -gt 0 ]; do
+	viewer_process_state=$(ps -o stat= -p "$viewer_pid" 2>/dev/null | tr -d ' ' || true)
+	case "$viewer_process_state" in
+		''|Z*) break ;;
+	esac
+	sleep 0.05
+	close_process_deadline=$((close_process_deadline - 1))
+done
+if [ "$close_process_deadline" -eq 0 ]; then
+	echo "UI smoke test: application did not finish shutdown after Escape" >&2
+	exit 1
+fi
+wait "$viewer_pid" || true
+viewer_pid=''
+close_elapsed_ms=$((($(date +%s%N) - close_started_ns) / 1000000))
+if [ "$close_elapsed_ms" -gt 2000 ]; then
+	echo "UI smoke test: Escape shutdown took ${close_elapsed_ms}ms with 15,000 directory entries" >&2
+	exit 1
+fi
 rm -rf -- "$slow_browse_directory"
+launch_viewer "$temporary/images/03-blue.ppm"
+assert_title_prefix "03-blue.ppm" "large-directory shutdown did not restore the UI test viewer"
 
 DISPLAY=":$display_number" xdotool key ctrl+o
 click_file_dialog_sort

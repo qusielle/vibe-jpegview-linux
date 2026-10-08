@@ -3636,6 +3636,62 @@ void TestThumbnailRetirementDoesNotDeduplicateReusedAddress() {
 		"a new thumbnail owner at a reused address was discarded or destroyed on the caller");
 }
 
+void TestLargeThumbnailRepositoryRetiresWithoutQuadraticQueueSearch() {
+	using Image = jpegview_linux::PreparedThumbnailImage;
+	using ImagePtr = jpegview_linux::ThumbnailPreparationWorker::ImagePtr;
+	constexpr std::size_t imageCount = 15000;
+	struct DestructionProbe {
+		std::mutex mutex;
+		std::size_t count = 0;
+		bool offCaller = true;
+	};
+	const std::thread::id caller = std::this_thread::get_id();
+	auto probe = std::make_shared<DestructionProbe>();
+	jpegview_linux::InMemoryThumbnailRepository repository;
+	repository.SetGeometry(1, 1);
+	jpegview_linux::ThumbnailPreparationWorker worker(
+		[](const jpegview_linux::ThumbnailPreparationRequest&) { return ImagePtr{}; });
+	for (std::size_t index = 0; index < imageCount; ++index) {
+		Image* image = new Image();
+		image->key = jpegview_linux::SourceKey("bulk-retirement-" +
+			std::to_string(index));
+		image->width = image->height = 1;
+		image->bgra.assign(4, 255);
+		ImagePtr retained(image, [probe, caller](const Image* retired) {
+			{
+				std::lock_guard<std::mutex> lock(probe->mutex);
+				++probe->count;
+				probe->offCaller = probe->offCaller &&
+					std::this_thread::get_id() != caller;
+			}
+			delete retired;
+		});
+		Expect(repository.Store(retained) ==
+			jpegview_linux::ThumbnailPixelStoreOutcome::Stored,
+			"large thumbnail-retirement fixture stopped retaining entries");
+	}
+	const auto clearStarted = std::chrono::steady_clock::now();
+	std::size_t releasedImages = 0;
+	std::size_t queuedAtEndOfRelease = 0;
+	repository.Clear([&](const ImagePtr& image) {
+		worker.Retire(image);
+		++releasedImages;
+		if (releasedImages == imageCount) {
+			queuedAtEndOfRelease = worker.GetDiagnostics().retiredThumbnailImages;
+		}
+	});
+	const auto clearDuration = std::chrono::steady_clock::now() - clearStarted;
+	Expect(releasedImages == imageCount && queuedAtEndOfRelease == imageCount &&
+		repository.Diagnostics().imageCount == 0,
+		"large repository clear lost or duplicated a thumbnail retirement");
+	Expect(clearDuration < std::chrono::seconds(2),
+		"15,000-thumbnail retirement enqueue exceeded its linear-time budget");
+	worker.Shutdown();
+	std::lock_guard<std::mutex> lock(probe->mutex);
+	Expect(probe->count == imageCount && probe->offCaller,
+		"large thumbnail retirement did not release every image off the caller thread");
+}
+
 void TestThumbnailQueueDisplacementReturnsSchedulerWork() {
 	std::mutex retirementMutex;
 	std::condition_variable retirementChanged;
@@ -5251,6 +5307,7 @@ const TestCase kTests[] = {
 	{"thumbnail-oversized-and-allocation-failure", &TestThumbnailOversizedAndAllocationFailure},
 	{"thumbnail-shutdown-retires-without-event-loop", &TestThumbnailShutdownRetiresWithoutEventLoop},
 	{"thumbnail-retirement-address-reuse-uses-owner-identity", &TestThumbnailRetirementDoesNotDeduplicateReusedAddress},
+	{"large-thumbnail-repository-retirement-is-linear", &TestLargeThumbnailRepositoryRetiresWithoutQuadraticQueueSearch},
 	{"thumbnail-queue-displacement-returns-scheduler-work", &TestThumbnailQueueDisplacementReturnsSchedulerWork},
 	{"thumbnail-file-backed-preparation-and-shutdown", &TestThumbnailFileBackedPreparationAndShutdown},
 	{"thumbnail-downsampling-antialiasing", &TestThumbnailDownsamplingAntialiasing},

@@ -369,6 +369,7 @@ struct ThumbnailPreparationWorker::Impl {
 		std::mutex mutex;
 		std::condition_variable available;
 		std::deque<ImagePtr> images;
+		std::unordered_set<const PreparedThumbnailImage*> queuedImages;
 		std::weak_ptr<const PreparedThumbnailImage> retiringOwner;
 		bool stopping = false;
 	};
@@ -425,8 +426,10 @@ struct ThumbnailPreparationWorker::Impl {
 					}
 					continue;
 				}
+				const PreparedThumbnailImage* identity = ready->get();
 				image = std::move(*ready);
 				state->images.erase(ready);
+				state->queuedImages.erase(identity);
 				state->retiringOwner = image;
 			}
 			image.reset();
@@ -441,17 +444,26 @@ struct ThumbnailPreparationWorker::Impl {
 		if (!image) return;
 		const PreparedThumbnailImage* identity = image.get();
 		try {
+			bool wakeRetirementWorker = false;
 			{
 				std::lock_guard<std::mutex> lock(retirementState->mutex);
-				if (SameSharedOwnership(image, retirementState->retiringOwner) ||
-					std::any_of(retirementState->images.begin(), retirementState->images.end(),
-						[identity](const ImagePtr& queued) { return queued.get() == identity; })) return;
-				if (!retirementWorker.joinable()) {
-					retirementWorker = std::thread([state = retirementState] { Retire(state); });
+				if (SameSharedOwnership(image, retirementState->retiringOwner)) return;
+				const auto inserted = retirementState->queuedImages.insert(identity);
+				if (!inserted.second) return;
+				try {
+					if (!retirementWorker.joinable()) {
+						retirementWorker = std::thread([state = retirementState] {
+							Retire(state);
+						});
+					}
+					wakeRetirementWorker = retirementState->images.empty();
+					retirementState->images.push_back(image);
+				} catch (...) {
+					retirementState->queuedImages.erase(identity);
+					throw;
 				}
-				retirementState->images.push_back(image);
 			}
-			retirementState->available.notify_one();
+			if (wakeRetirementWorker) retirementState->available.notify_one();
 		} catch (...) {
 			// Keep allocation failures from killing a worker. The source queue lock
 			// has been released before this last-owner fallback runs.

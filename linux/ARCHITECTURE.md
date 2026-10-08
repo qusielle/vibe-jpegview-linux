@@ -538,7 +538,11 @@ should normally be added to one of these focused modules and covered by the matc
   oversized geometry is rejected at request admission. The worker waits for renderer consumption or
   cancellation to release a reservation, while canceled and uploaded thumbnail buffers move to a
   worker-owned retirement queue. Shutdown drains that queue without event-loop activity, or leaves
-  its shared state running while an external pixel handle remains. When a prepared-frame request
+  its shared state running while an external pixel handle remains. Retirement deduplication uses an
+  indexed identity set so clearing a full active-list thumbnail repository remains linear in the
+  number of retained images; active-owner matching must still distinguish a reused address from the
+  shared owner currently being destroyed. Accepted application exit skips the remaining update/render
+  cycle and hides the window before orderly worker and renderer cleanup. When a prepared-frame request
   displaces farther queued file work,
   the admission returns that file request's identity to the scheduler for retry. `TickThumbnailPreload`
   only admits requests, consumes one completion

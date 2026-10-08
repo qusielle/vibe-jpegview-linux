@@ -457,10 +457,11 @@ public:
 			const int waitTimeoutMs = frameInvalidator_.NeedsRender() ? 0 :
 				NextEventWaitTimeoutMs(SDL_GetTicks());
 			HandleEvents(running, waitTimeoutMs);
+			if (quitRequested_) running = false;
+			if (!running) break;
 			if (jpegview_linux::UiCompletionWakeup().Pending()) {
 				jpegview_linux::UiCompletionWakeup().Consume();
 			}
-			if (quitRequested_) running = false;
 			TickPlayback();
 			UpdateInteractionWorkPolicy();
 			TickFileListScan();
@@ -510,6 +511,7 @@ public:
 			RecordPeriodicPerformanceSnapshots();
 		}
 
+		if (window_ != nullptr) SDL_HideWindow(window_);
 		Cleanup();
 		return deferredExitCode_;
 	}
@@ -13525,7 +13527,7 @@ private:
 			}
 			return SDL_PollEvent(&event) != 0;
 		};
-		while (readNextEvent()) {
+		while (running && readNextEvent()) {
 			if (event.type == SDL_MOUSEMOTION) {
 				jpegview_linux::MouseMotionSample motion{event.motion.x, event.motion.y,
 					event.motion.xrel, event.motion.yrel, event.motion.state};

@@ -1141,7 +1141,8 @@ visibility choices. The navigation panel hover preference and current file-order
 also saved, together with the thumbnail-panel visibility and zoom-navigator preference. These
 settings are stored in
 `${XDG_CONFIG_HOME:-$HOME/.config}/jpegview-linux/settings.conf`. Esc stops an active slideshow first,
-matching the Windows default escape command, and otherwise quits.
+matching the Windows default escape command, and otherwise hides the window immediately before orderly
+worker and renderer cleanup.
 
 Recent paths and per-file view snapshots are kept in
 `${XDG_STATE_HOME:-$HOME/.local/state}/jpegview-linux/recent-files.db`, separately from settings.

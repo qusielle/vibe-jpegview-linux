@@ -277,6 +277,7 @@ void SDL_GetVersion(SDL_version* version);
 SDL_Window* SDL_CreateWindow(const char* title, int x, int y, int w, int h, Uint32 flags);
 void SDL_DestroyWindow(SDL_Window* window);
 void SDL_ShowWindow(SDL_Window* window);
+void SDL_HideWindow(SDL_Window* window);
 int SDL_SetWindowFullscreen(SDL_Window* window, Uint32 flags);
 void SDL_MaximizeWindow(SDL_Window* window);
 void SDL_RestoreWindow(SDL_Window* window);
