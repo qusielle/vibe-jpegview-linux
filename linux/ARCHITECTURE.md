@@ -469,17 +469,18 @@ should normally be added to one of these focused modules and covered by the matc
   underline position; the compact-only “Show Advanced Options” row is assigned afterward.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
   It tracks explicit user freeze separately from image readiness and temporary modal suppression.
-  GIF frames always use their decoded source delays, including in Movie mode, and reject delay
-  overrides. The scheduler keeps the GIF format's full 655,350 ms delay range; zero-delay frames use
-  the 10 ms minimum timer interval. Other animated formats retain Movie's selected frame rate and
-  a per-image uniform delay override clamped to 10–60,000 ms; resetting the override restores their
-  original per-frame timing.
+  GIF centisecond delays are normalized by the decoder to milliseconds, with missing or zero delays
+  defaulted to 100 ms and nonzero delays clamped to at least 20 ms. Normal animation playback uses
+  embedded per-frame delays; an explicitly selected Movie FPS overrides them for GIFs as well as
+  other animated formats. Faster/slower controls create a per-image uniform delay override for every
+  animation, and reset restores original frame timing. The scheduler receives a per-image delay limit:
+  655,350 ms for GIF and 60,000 ms for other formats; manual overrides use the same limit.
   Manual frame stepping wraps only within the current animation and freezes every playback deadline,
   including Movie's folder-advance deadline; resuming a manually held last frame continues from that
   frame, while a naturally exhausted finite animation restarts from frame zero. Changing or resetting
-  a non-GIF delay override returns timing to native animation mode rather than Movie or slideshow
-  timing. Temporary modal suppression still preserves the separate user play/freeze intent and starts
-  a fresh interval when the modal closes.
+  a delay override returns timing to native animation mode rather than Movie or slideshow timing.
+  Temporary modal suppression still preserves the separate user play/freeze intent and starts a fresh
+  interval when the modal closes.
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus

@@ -413,9 +413,11 @@ they support.
     on workers, including edited images; it shows a loading state while a matching result is pending.
     Pan, zoom, and pointer movement reuse the current histogram and cached overlay layout. Window
     resizing keeps the histogram and recalculates layout only when its geometry changes. Animated GIF,
-    APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. Movie mode supports fixed frame
-    rates and folder advancement, slideshow transitions are rendered natively after cold images are
-    presented, and slideshow/movie timers resume from each successful display commit. Timed playback
+    APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. GIF delays default to 100 ms
+    when missing or zero and are clamped to at least 20 ms. Movie mode supports fixed frame rates and
+    folder advancement; its selected rate overrides source delays for GIFs and other animations.
+    Slideshow transitions are rendered natively after cold images are presented, and slideshow/movie
+    timers resume from each successful display commit. Timed playback
     stops cleanly when it reaches a non-wrapping folder boundary. Alt+R resumes, and Escape stops active
     playback before quitting. Decoded pixels, prepared display frames, and
     retained renderer textures share one memory budget with per-layer LRU retention, while a
@@ -1340,22 +1342,23 @@ them. `lp`, `gsettings`, `feh`, and `nitrogen` remain host desktop integrations.
 are also needed for image copy/paste in a local non-AppImage build.
 
 Animated GIF, APNG, WebP, AVIF, and JPEG XL images start playing automatically at their embedded frame
-delays. GIF playback always uses the delay encoded for each frame, including in Movie mode; its frame
-delay cannot be overridden. A zero-delay GIF frame uses the viewer's 10 ms minimum timer interval.
-The `Movie` menu plays other animated or multi-page images at a selected
-fixed rate (5, 10, 25, 30, 50, or 100 fps), and advances a folder of still images when the current
-image has no frames.
+delays. GIF delays are converted from hundredths of a second to milliseconds; a missing or zero delay
+defaults to 100 ms, and a nonzero delay shorter than 20 ms is raised to 20 ms. The `Movie` menu plays
+animated or multi-page images at a selected fixed rate (5, 10, 25, 30, 50, or 100 fps), overriding
+their embedded per-frame timing while Movie mode is active, and advances a folder of still images
+when the current image has no frames.
 The original frame loop count is honored when a format provides one. `Alt+R` resumes stopped playback.
 For an animated image, `[` and `]` step backward and forward through its frames, wrapping within
 that image and freezing playback on the selected frame; holding either key repeats the step as each
-frame becomes ready. `P` resumes or freezes animation. For non-GIF animations, `Alt+[` adds 50 ms to
-each frame delay, `Alt+]` removes 50 ms, and `Alt+P` restores the source frame delays. The override
-stays with the current image until it is replaced or reloaded and is not saved in settings or Recents.
-Non-GIF delay overrides are bounded to 10–60,000 ms. Changing or resetting a delay stops Movie or
-slideshow timing for the current image and uses animation frame timing; a custom delay remains active
-until reset or image replacement. Movie's selected FPS remains its separate timing control for other
-animated formats. Manual frame holds also stop Movie from advancing to another file. These controls
-are disabled during slideshow mode and while the selected frame or an image/file operation is pending.
+frame becomes ready. `P` resumes or freezes animation. For any animated format, `Alt+[` adds 50 ms to
+each frame delay, `Alt+]` removes 50 ms, and `Alt+P` restores the source frame delays. These controls
+are available for GIFs too. The override stays with the current image until it is replaced or reloaded
+and is not saved in settings or Recents. Overrides are bounded to 10–60,000 ms, or 10–655,350 ms for
+GIF. Changing or resetting a delay stops Movie or slideshow timing for the current image and uses
+animation frame timing; a custom delay remains active until reset or image replacement. The selected
+Movie FPS overrides source timing while Movie mode is active. Manual frame holds also stop Movie from
+advancing to another file. These controls are disabled during slideshow mode and while the selected
+frame or an image/file operation is pending.
 The F2 picture-information panel keeps its playback label stable while the next frame is prepared;
 its `Frame` line updates when
 that frame is presented. The full context menu lists the available controls and current delay. Failed

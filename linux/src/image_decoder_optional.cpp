@@ -141,9 +141,12 @@ bool DecodeGif(const std::filesystem::path& filename, DecodedImage& image,
 		GraphicsControlBlock control{};
 		if (DGifSavedExtensionToGCB(gif, imageIndex, &control) != GIF_OK) {
 			control.DisposalMode = DISPOSAL_UNSPECIFIED;
-			control.DelayTime = 10;
+			control.DelayTime = 0;
 			control.TransparentColor = NO_TRANSPARENT_COLOR;
 		}
+		int frameDelayMs = control.DelayTime * 10;
+		if (frameDelayMs == 0) frameDelayMs = 100;
+		else if (frameDelayMs < 20) frameDelayMs = 20;
 		if (control.DisposalMode == DISPOSE_PREVIOUS) previous = canvas;
 		const ColorMapObject* colorMap = saved.ImageDesc.ColorMap != nullptr ?
 			saved.ImageDesc.ColorMap : gif->SColorMap;
@@ -167,7 +170,7 @@ bool DecodeGif(const std::filesystem::path& filename, DecodedImage& image,
 			}
 		}
 		if (!AppendBGRA(image, gif->SWidth, gif->SHeight, canvas.data(),
-			control.DelayTime * 10, errorMessage)) {
+			frameDelayMs, errorMessage)) {
 			return false;
 		}
 		if (control.DisposalMode == DISPOSE_BACKGROUND) {

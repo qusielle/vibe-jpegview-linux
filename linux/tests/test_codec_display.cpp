@@ -852,6 +852,49 @@ void TestAnimatedImageDecoders() {
 		"GIF animation metadata is incorrect");
 	Expect(decoded.frames[0].delayMs == 70 && decoded.frames[1].delayMs == 20,
 		"GIF frame delays did not preserve their encoded centisecond values");
+	const auto gifDelayOffset = [](const std::vector<std::uint8_t>& bytes,
+		std::size_t requested) {
+		std::size_t found = 0;
+		for (std::size_t index = 0; index + 7 < bytes.size(); ++index) {
+			if (bytes[index] == 0x21 && bytes[index + 1] == 0xf9 &&
+				bytes[index + 2] == 0x04 && found++ == requested) {
+				return index + 4;
+			}
+		}
+		return bytes.size();
+	};
+	std::vector<std::uint8_t> zeroAndShortDelayGif = gif;
+	const std::size_t firstDelayOffset = gifDelayOffset(zeroAndShortDelayGif, 0);
+	const std::size_t secondDelayOffset = gifDelayOffset(zeroAndShortDelayGif, 1);
+	Expect(firstDelayOffset < zeroAndShortDelayGif.size() &&
+		secondDelayOffset < zeroAndShortDelayGif.size(),
+		"GIF fixture did not contain both frame delay controls");
+	zeroAndShortDelayGif[firstDelayOffset] = 0;
+	zeroAndShortDelayGif[secondDelayOffset] = 1;
+	const fs::path zeroAndShortGifFile = temporary.path() / "zero-and-short.gif";
+	WriteBytes(zeroAndShortGifFile, zeroAndShortDelayGif);
+	DecodedImage normalizedGif;
+	Expect(jpegview_linux::DecodeImage(zeroAndShortGifFile, normalizedGif, error),
+		"cannot decode zero and short-delay GIF: " + error);
+	Expect(normalizedGif.frames.size() == 2 &&
+		normalizedGif.frames[0].delayMs == 100 &&
+		normalizedGif.frames[1].delayMs == 20,
+		"GIF zero and sub-20ms delays were not normalized to 100ms and 20ms");
+	std::vector<std::uint8_t> missingDelayGif = gif;
+	const std::size_t missingDelayOffset = gifDelayOffset(missingDelayGif, 0);
+	Expect(missingDelayOffset < missingDelayGif.size(),
+		"GIF fixture did not contain a removable frame delay control");
+	missingDelayGif.erase(missingDelayGif.begin() +
+		static_cast<std::ptrdiff_t>(missingDelayOffset - 4),
+		missingDelayGif.begin() + static_cast<std::ptrdiff_t>(missingDelayOffset + 4));
+	const fs::path missingDelayGifFile = temporary.path() / "missing-delay.gif";
+	WriteBytes(missingDelayGifFile, missingDelayGif);
+	DecodedImage defaultDelayGif;
+	Expect(jpegview_linux::DecodeImage(missingDelayGifFile, defaultDelayGif, error),
+		"cannot decode GIF without frame delay metadata: " + error);
+	Expect(defaultDelayGif.frames.size() == 2 &&
+		defaultDelayGif.frames[0].delayMs == 100,
+		"GIF frame without delay metadata did not use the 100ms default");
 #else
 	Expect(jpegview_linux::DecodeImage(gifFile, decoded, error),
 		"stb fallback could not decode the first GIF frame: " + error);

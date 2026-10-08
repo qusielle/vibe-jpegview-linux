@@ -1298,7 +1298,7 @@ void TestContextMenuCatalogAndState() {
 		animationReset->shortcut == "Alt+P",
 		"advanced context menu did not report or control the current frame delay");
 	state.animationDelayOverridden = false;
-	state.animationDelaySourceLocked = true;
+	state.animationDelayMaximumMs = jpegview_linux::kMaximumGifFrameDelayMs;
 	state.animationDelayMs = 70;
 	const std::vector<MenuItem> gifTimingMenu =
 		jpegview_linux::BuildContextMenu(state, true);
@@ -1308,11 +1308,33 @@ void TestContextMenuCatalogAndState() {
 		jpegview_linux::kCommandAnimationSlower);
 	const MenuItem* gifReset = findCommand(gifTimingMenu,
 		jpegview_linux::kCommandAnimationResetDelays);
-	Expect(findLabel(gifTimingMenu, "  Frame delay: 70 ms (source; GIF timing)") != nullptr &&
-		gifFaster != nullptr && !gifFaster->enabled && gifSlower != nullptr &&
-		!gifSlower->enabled && gifReset != nullptr && !gifReset->enabled,
-		"GIF context menu did not preserve or lock the embedded frame delay");
-	state.animationDelaySourceLocked = false;
+	Expect(findLabel(gifTimingMenu, "  Frame delay: 70 ms (source; Movie uses FPS)") != nullptr &&
+		gifFaster != nullptr && gifFaster->enabled && gifSlower != nullptr &&
+		gifSlower->enabled && gifReset != nullptr && !gifReset->enabled,
+		"GIF context menu did not keep source timing by default with delay controls available");
+	state.animationDelayOverridden = true;
+	state.animationDelayMs = 120;
+	const std::vector<MenuItem> overriddenGifTimingMenu =
+		jpegview_linux::BuildContextMenu(state, true);
+	Expect(findLabel(overriddenGifTimingMenu,
+		"  Frame delay: 120 ms (custom; Movie uses FPS)") != nullptr &&
+		findCommand(overriddenGifTimingMenu,
+			jpegview_linux::kCommandAnimationFaster)->enabled &&
+		findCommand(overriddenGifTimingMenu,
+			jpegview_linux::kCommandAnimationSlower)->enabled &&
+		findCommand(overriddenGifTimingMenu,
+			jpegview_linux::kCommandAnimationResetDelays)->enabled,
+		"GIF context menu did not expose active faster, slower, and reset overrides");
+	state.animationDelayOverridden = false;
+	state.animationDelayMs = 655350;
+	const std::vector<MenuItem> maximumGifDelayMenu =
+		jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(maximumGifDelayMenu,
+		jpegview_linux::kCommandAnimationFaster)->enabled &&
+		!findCommand(maximumGifDelayMenu,
+			jpegview_linux::kCommandAnimationSlower)->enabled,
+		"GIF delay controls did not respect the maximum source delay boundary");
+	state.animationDelayMaximumMs = jpegview_linux::kMaximumAdjustableFrameDelayMs;
 	state.animationPlaying = false;
 	state.animationManuallyPaused = true;
 	const std::vector<MenuItem> frozenAnimation =
@@ -4780,28 +4802,32 @@ void TestPlaybackSchedulerAnimationFrameControls() {
 
 	jpegview_linux::PlaybackScheduler gifTiming;
 	gifTiming.ConfigureImage({70, 20}, 0, true, 100,
-		jpegview_linux::FrameDelayPolicy::SourceLocked);
-	gifTiming.StartMovie(100.0, 100);
-	Expect(gifTiming.SourceFrameDelaysLocked() &&
-		gifTiming.Mode() == PlaybackMode::Movie && gifTiming.NextTick() == 170 &&
-		gifTiming.FrameDelayMs() == 70 && !gifTiming.AdjustAnimationDelay(-50, 100) &&
-		!gifTiming.AdjustAnimationDelay(50, 100) && !gifTiming.ResetAnimationDelay(100) &&
-		!gifTiming.AnimationDelayOverrideMs().has_value(),
-		"GIF playback replaced embedded timing with Movie FPS or a manual delay override");
-	Expect(gifTiming.Tick(169).type == PlaybackActionType::None &&
-		gifTiming.Tick(170).type == PlaybackActionType::ShowFrame &&
-		gifTiming.FrameIndex() == 1 && gifTiming.FrameDelayMs() == 20 &&
-		gifTiming.NextTick() == 190,
-		"GIF playback did not schedule each frame using its own embedded delay");
-	jpegview_linux::PlaybackScheduler zeroDelayGif;
-	zeroDelayGif.ConfigureImage({0, 0}, 0, true, 0,
-		jpegview_linux::FrameDelayPolicy::SourceLocked);
-	Expect(zeroDelayGif.HasAnimation() && zeroDelayGif.NextTick() == 10 &&
-		zeroDelayGif.Tick(10).type == PlaybackActionType::ShowFrame,
-		"a zero-delay GIF did not continue at the minimum supported timer interval");
+		jpegview_linux::kMaximumGifFrameDelayMs);
+	Expect(gifTiming.NextTick() == 170 && gifTiming.FrameDelayMs() == 70,
+		"GIF did not use the embedded frame delay by default");
+	gifTiming.StartMovie(25.0, 100);
+	Expect(gifTiming.Mode() == PlaybackMode::Movie && gifTiming.NextTick() == 140 &&
+		gifTiming.FrameDelayMs() == 70,
+		"explicit Movie FPS did not override GIF frame timing");
+	Expect(gifTiming.Tick(140).type == PlaybackActionType::ShowFrame &&
+		gifTiming.FrameIndex() == 1 && gifTiming.NextTick() == 180,
+		"Movie FPS did not remain active for the next GIF frame");
+	Expect(gifTiming.AdjustAnimationDelay(50, 200) &&
+		gifTiming.Mode() == PlaybackMode::None && gifTiming.AnimationPlaying() &&
+		gifTiming.FrameDelayMs() == 70 && gifTiming.AnimationDelayOverrideMs() == 70 &&
+		gifTiming.NextTick() == 270,
+		"GIF slower control did not override the current source delay");
+	Expect(gifTiming.ResetAnimationDelay(300) &&
+		!gifTiming.AnimationDelayOverrideMs().has_value() &&
+		gifTiming.FrameDelayMs() == 20 && gifTiming.NextTick() == 320,
+		"GIF delay reset did not restore the current frame's source delay");
+	Expect(gifTiming.AdjustAnimationDelay(-50, 400) &&
+		gifTiming.FrameDelayMs() == 10 && gifTiming.AnimationDelayOverrideMs() == 10 &&
+		gifTiming.NextTick() == 410,
+		"GIF faster control did not override source timing at the minimum delay");
 	jpegview_linux::PlaybackScheduler maximumDelayGif;
-	maximumDelayGif.ConfigureImage({655350, 10}, 0, true, 0,
-		jpegview_linux::FrameDelayPolicy::SourceLocked);
+	maximumDelayGif.ConfigureImage({jpegview_linux::kMaximumGifFrameDelayMs, 10},
+		0, true, 0, jpegview_linux::kMaximumGifFrameDelayMs);
 	Expect(maximumDelayGif.FrameDelayMs() == 655350 &&
 		maximumDelayGif.NextTick() == 655350,
 		"the maximum delay encoded by a GIF was shortened by the scheduler");

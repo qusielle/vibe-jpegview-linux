@@ -154,17 +154,16 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		std::string(SortModeShortLabel(state.sortMode)) + " (" +
 		SortModeDescription(state.sortMode) + ")";
 	const bool movieMode = state.playbackMode == PlaybackMode::Movie;
+	const int maximumAnimationDelayMs = std::max(10,
+		state.animationDelayMaximumMs);
 	const std::string animationDelayLabel = "  Frame delay: " +
-		std::to_string(state.animationDelaySourceLocked ?
-			std::max(10, state.animationDelayMs) :
-			std::clamp(state.animationDelayMs, 10, 60000)) + " ms" +
+		std::to_string(std::clamp(state.animationDelayMs, 10,
+			maximumAnimationDelayMs)) + " ms" +
 		(state.animationDelayOverridden ? " (custom" : " (source") +
-		(state.animationDelaySourceLocked ? "; GIF timing)" :
-			(movieMode ? "; Movie uses FPS)" : ")"));
+		(movieMode ? "; Movie uses FPS)" : ")");
 	const bool animationControlsEnabled = state.animationAvailable &&
 		state.animationControlsAvailable && state.playbackMode != PlaybackMode::Slideshow;
-	const bool animationDelayControlsEnabled = animationControlsEnabled &&
-		!state.animationDelaySourceLocked;
+	const bool animationDelayControlsEnabled = animationControlsEnabled;
 	const std::string animationToggleLabel = state.animationManuallyPaused ?
 		(movieMode ? "  Resume Movie" : "  Resume animation") :
 		(state.animationPlaying ? "  Freeze animation" :
@@ -350,7 +349,8 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		{"  Faster", kCommandAnimationFaster, false, false,
 			animationDelayControlsEnabled && state.animationDelayMs > 10, "Alt+]", true},
 		{"  Slower", kCommandAnimationSlower, false, false,
-			animationDelayControlsEnabled && state.animationDelayMs < 60000, "Alt+[", true},
+			animationDelayControlsEnabled &&
+				state.animationDelayMs < maximumAnimationDelayMs, "Alt+[", true},
 		{"  Restore source frame delays", kCommandAnimationResetDelays, false, false,
 			animationDelayControlsEnabled && state.animationDelayOverridden, "Alt+P", true},
 		{"  Resume playback", IDM_SLIDESHOW_RESUME, false, false,
