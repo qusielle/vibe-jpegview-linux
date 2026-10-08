@@ -125,7 +125,7 @@ void EditingDialogRendererAdapter::Render(const FreeRotationDialogPaint& paint) 
 		textRenderer_.Draw(paint.message, paint.dialog.x + 18,
 			paint.dialog.y + paint.dialog.h - 86, kTextScale, 235, 185, 135);
 	}
-	textRenderer_.Draw("ARROWS: 0.1 DEG   SHIFT+ARROW: 1 DEG   HOME: RESET",
+	textRenderer_.Draw("HOLD ARROWS: 0.1 DEG   SHIFT+ARROW: 1 DEG   HOME: RESET",
 		paint.dialog.x + 18, paint.dialog.y + paint.dialog.h - 73,
 		kTextScale, 155, 165, 178);
 	textRenderer_.Draw("ENTER: APPLY   ESC: CANCEL",

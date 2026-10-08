@@ -131,13 +131,14 @@ they support.
    after a quarter-turn, then return to a horizontal spread when rotated back. The spread remains
    paired if double-page mode is switched off and on while the rotation is applied.
    Free rotation is available from **Transform image → Rotate...** in the full context menu
-   (`Shift`+right-click). Drag the angle slider or use Left/Right for 0.1° steps; hold Shift for
-   1° steps. Home resets the angle, and A/P/G toggle corner auto-cropping, source-aspect preservation,
-   and the alignment grid. Preview work runs asynchronously at a bounded size; Apply renders the
-   selected angle at full resolution, while Cancel leaves the document unchanged. Applying a
-   nonzero rotation to an animation keeps the displayed frame as a still image. Opening the editor
-   pauses animation, movie, and slideshow timing. Cancel resumes animation from the retained frame;
-   Apply keeps a still frame and resumes an active movie or slideshow interval.
+   (`Shift`+right-click). Drag the angle slider or use Left/Right for 0.1° steps; hold an arrow to
+   repeat, and hold Shift for 1° steps. Home resets the angle, and A/P/G toggle corner auto-cropping,
+   source-aspect preservation, and the alignment grid. Preview work runs asynchronously at a bounded
+   size; Apply renders the selected angle at full resolution, while Cancel leaves the document
+   unchanged.
+   Applying a nonzero rotation to an animation keeps the displayed frame as a still image. Opening
+   the editor pauses animation, movie, and slideshow timing. Cancel resumes animation from its
+   retained frame. Apply keeps a still frame and resumes an active movie or slideshow interval.
    **Transform image → Perspective correction...** opens a separate editor with left- and right-edge
    convergence sliders, automatic cropping, source-aspect preservation, and an alignment grid.
    Its bounded preview runs asynchronously, and Apply corrects the full-resolution image in memory.
@@ -1267,14 +1268,14 @@ rotate, mirror, crop, resize, free rotation, or perspective correction to an ani
 frame currently displayed into a still image.
 
 **Rotate...** in the full context menu opens the free-rotation editor. Adjust the angle with its slider,
-mouse wheel, or Left/Right keys (0.1° per step, or 1° with Shift); Home resets to zero. While dragging
-the slider, the last completed preview stays visible and preview processing waits until release, so
-angles passed during a slow update are not displayed. The A, P, and G toggles control automatic corner
-cropping, preservation of the source aspect ratio, and an alignment grid over the preview. The preview
-is prepared off-thread and capped at 2048 pixels per side and four megapixels; Apply uses a cancellable
-full-resolution operation, and Cancel discards the preview. A zero-degree Apply is a no-op. A crop
-reduced to one row still samples the rotated image across the whole row. Free rotation of an animated
-image retains the current frame as a still.
+mouse wheel, or Left/Right keys (0.1° per step, or 1° with Shift); holding an arrow repeats the
+adjustment. Home resets to zero. While dragging the slider, the last completed preview stays visible
+and preview processing waits until release, so angles passed during a slow update are not displayed.
+The A, P, and G toggles control automatic corner cropping, preservation of the source aspect ratio,
+and an alignment grid over the preview. The preview is prepared off-thread and capped at 2048 pixels
+per side and four megapixels; Apply uses a cancellable full-resolution operation, and Cancel discards
+the preview. A zero-degree Apply is a no-op, and a crop reduced to one row still samples the rotated
+image across the whole row. Free rotation of an animated image retains the current frame as a still.
 Reloading a changed source closes its editor and discards any pending rotation.
 
 **Perspective correction...** in the full context menu opens a preview editor with separate left- and

@@ -736,6 +736,35 @@ if [ "$visual_assertions" -eq 1 ]; then
 	fi
 fi
 
+# Arrow keys adjust the angle once per press and continue while held, using
+# the same system key-repeat events as ordinary keyboard input.
+if [ "$visual_assertions" -eq 1 ]; then
+	rotation_angle_row_x=$((rotation_window_width / 2 - 250))
+	rotation_angle_row_y=$((rotation_window_height / 2 - 111))
+	DISPLAY=":$display_number" xdotool key --window "$window_id" Right
+	sleep 0.05
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/free-rotation-angle-single.png"
+	convert "$temporary/free-rotation-angle-single.png" -crop \
+		"500x20+$rotation_angle_row_x+$rotation_angle_row_y" +repage \
+		"$temporary/free-rotation-angle-single-row.png"
+	DISPLAY=":$display_number" xdotool windowactivate --sync "$window_id"
+	DISPLAY=":$display_number" xdotool keydown Right
+	sleep 1.2
+	DISPLAY=":$display_number" xdotool keyup Right
+	sleep 0.05
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/free-rotation-angle-held.png"
+	convert "$temporary/free-rotation-angle-held.png" -crop \
+		"500x20+$rotation_angle_row_x+$rotation_angle_row_y" +repage \
+		"$temporary/free-rotation-angle-held-row.png"
+	rotation_repeat_difference=$(compare -metric AE \
+		"$temporary/free-rotation-angle-single-row.png" \
+		"$temporary/free-rotation-angle-held-row.png" null: 2>&1 || true)
+	if [ "$rotation_repeat_difference" = "0" ]; then
+		echo "UI smoke test: holding Right did not repeat free-rotation angle adjustment" >&2
+		exit 1
+	fi
+fi
+
 # A completed preview must remain visible while a later slider drag is in
 # progress. The preview worker must not publish any intermediate drag angle.
 if [ "$visual_assertions" -eq 1 ]; then
