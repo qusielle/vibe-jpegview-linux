@@ -10,6 +10,8 @@
 
 namespace jpegview_linux {
 
+class PlaybackScheduler;
+
 inline constexpr char kDefaultWindowTitlePattern[] = "[%p] %f (%m) - %a";
 inline constexpr std::size_t kMaximumWindowTitlePatternBytes = 1024;
 inline constexpr char kWindowTitlePatternHelpLine1[] =
@@ -59,6 +61,11 @@ std::string FormatModificationDateLine(std::string_view date);
 // prepared. Frame readiness is transient during normal animation playback.
 std::string FormatAnimationPlaybackStatus(bool animationPlaying,
 	bool manuallyPaused, std::optional<double> framesPerSecond = std::nullopt);
+
+// Source timing follows the frame actually presented while the scheduler may
+// already own a later frame awaiting preparation. Movie timing is uniform.
+std::string FormatAnimationPlaybackStatus(const PlaybackScheduler& playback,
+	std::size_t displayedFrame, bool isGif);
 
 // Avoids repeating title-template expansion while its source, document, and
 // display-position revisions are unchanged.

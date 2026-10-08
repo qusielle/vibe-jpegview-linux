@@ -61,6 +61,7 @@ public:
 	std::size_t FrameIndex() const { return frameIndex_; }
 	int MaximumFrameDelayMs() const { return maximumFrameDelayMs_; }
 	int FrameDelayMs() const;
+	int FrameDelayMs(std::size_t frameIndex) const;
 	int OriginalFrameDelayMs() const;
 	std::optional<int> AnimationDelayOverrideMs() const { return frameDelayOverrideMs_; }
 	double SlideshowSeconds() const { return slideshowSeconds_; }
@@ -70,6 +71,7 @@ public:
 	int CompletedLoops() const { return completedLoops_; }
 
 private:
+	int OriginalFrameDelayMs(std::size_t frameIndex) const;
 	std::uint32_t MovieFrameInterval() const;
 	void ScheduleFrame(std::uint32_t now);
 	PlaybackAction StartAnimation(std::uint32_t now);

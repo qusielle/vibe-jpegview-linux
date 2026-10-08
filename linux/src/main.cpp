@@ -7673,21 +7673,12 @@ private:
 				presentedAnimationFrame_.value_or(currentAnimationFrame_), frameCount - 1);
 			lines.push_back("Frame: " + std::to_string(displayedFrame + 1) + "/" +
 				std::to_string(frameCount));
-			std::optional<double> gifFramesPerSecond;
-			if (currentDecoded_->isGif) {
-				if (playback_.Mode() == jpegview_linux::PlaybackMode::Movie) {
-					gifFramesPerSecond = playback_.MovieFramesPerSecond();
-				} else if (playback_.FrameDelayMs() > 0) {
-					gifFramesPerSecond = 1000.0 / playback_.FrameDelayMs();
-				}
-			}
 			const std::string playbackStatus =
 				jpegview_linux::FormatAnimationPlaybackStatus(
-					playback_.AnimationPlaying(), playback_.AnimationManuallyPaused(),
-					gifFramesPerSecond);
+					playback_, displayedFrame, currentDecoded_->isGif);
 			lines.push_back("Playback: " + playbackStatus);
 			if (playback_.Mode() != jpegview_linux::PlaybackMode::Movie) {
-				lines.push_back("Frame delay: " + std::to_string(playback_.FrameDelayMs()) +
+				lines.push_back("Frame delay: " + std::to_string(playback_.FrameDelayMs(displayedFrame)) +
 					" ms" + (playback_.AnimationDelayOverrideMs().has_value() ? " (custom)" : ""));
 			}
 		}
@@ -7751,10 +7742,11 @@ private:
 			<< CurrentImagePositionText().size() << ':' << CurrentImagePositionText() << '|'
 			<< CurrentImage().originalWidth << ':' << CurrentImage().originalHeight << '|'
 			<< CurrentImage().width << ':' << CurrentImage().height << '|'
-			<< playback_.FrameIndex() << ':' << playback_.AnimationPlaying() << ':'
+			<< playback_.AnimationPlaying() << ':'
 			<< playback_.AnimationManuallyPaused() << ':'
 			<< (presentedAnimationFrame_.has_value() ? *presentedAnimationFrame_ :
-				std::numeric_limits<std::size_t>::max()) << ':' << playback_.FrameDelayMs() << ':'
+				std::numeric_limits<std::size_t>::max()) << ':' <<
+				playback_.FrameDelayMs(presentedAnimationFrame_.value_or(currentAnimationFrame_)) << ':'
 			<< playback_.AnimationDelayOverrideMs().has_value() << ':'
 			<< static_cast<int>(playback_.Mode()) << ':' << std::setprecision(17) <<
 				playback_.MovieFramesPerSecond() << '|'

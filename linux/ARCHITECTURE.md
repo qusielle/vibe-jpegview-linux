@@ -754,8 +754,9 @@ slideshow or movie interval from the successful display commit. Rotate and mirro
 the matching header continuation before materializing pixels; a pending slideshow transition retains
 the outgoing frame and starts when the incoming image is ready.
 For animated sources, Viewer records the presented frame only after its matching display request
-commits. The information overlay reads that committed identity while another frame is preparing;
-manual steps pass through the same `SetAnimationFrame` and texture pipeline as timed advances. A failed
+commits. The information overlay reads that committed identity and its matching delay/rate while
+another frame is preparing; its cache key excludes the scheduler's provisional frame index.
+Manual steps pass through the same `SetAnimationFrame` and texture pipeline as timed advances. A failed
 frame display restores the scheduler and document to the last committed frame. Viewer carries
 the selected owner generation on prepared-cache texture uploads even after the initial display commit,
 so their failure recovery and stale-completion checks use the same identity as worker completions.

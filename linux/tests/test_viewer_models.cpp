@@ -4307,6 +4307,47 @@ void TestImageInfoFormatting() {
 	Expect(jpegview_linux::FormatAnimationPlaybackStatus(true, false, 0.0) == "playing" &&
 		jpegview_linux::FormatAnimationPlaybackStatus(true, false, -1.0) == "playing",
 		"invalid animation rates should not be shown in the playback status");
+	jpegview_linux::PlaybackScheduler presentedTiming;
+	presentedTiming.ConfigureImage({70, 200}, 0, true, 0,
+		jpegview_linux::kMaximumGifFrameDelayMs);
+	std::size_t displayedFrame = 0;
+	int timingBuilds = 0;
+	jpegview_linux::ImageInfoLineCache timingCache;
+	const auto presentedStatus = [&]() -> std::string {
+		const std::string status = jpegview_linux::FormatAnimationPlaybackStatus(
+			presentedTiming, displayedFrame, true);
+		const std::string key = std::to_string(displayedFrame) + ':' + status + ':' +
+			std::to_string(presentedTiming.FrameDelayMs(displayedFrame));
+		return timingCache.GetOrBuild(key, [&] {
+			++timingBuilds;
+			return std::vector<std::string>{status};
+		}).front();
+	};
+	Expect(presentedStatus() == "playing (14.3 fps)" && timingBuilds == 1,
+		"GIF information did not show the first presented frame's rate");
+	Expect(presentedTiming.Tick(70).frameIndex == 1,
+		"GIF information fixture did not request its second frame");
+	presentedTiming.SetImageReady(false, 70);
+	Expect(presentedTiming.FrameDelayMs() == 200 &&
+		presentedTiming.FrameDelayMs(displayedFrame) == 70 &&
+		presentedStatus() == "playing (14.3 fps)" && timingBuilds == 1,
+		"GIF information changed its rate or rebuilt text before the frame was presented");
+	displayedFrame = 1;
+	presentedTiming.SetImageReady(true, 100);
+	Expect(presentedStatus() == "playing (5 fps)" && timingBuilds == 2,
+		"GIF information did not refresh when a different-delay frame was presented");
+	Expect(presentedTiming.AdjustAnimationDelay(50, 110) &&
+		presentedTiming.FrameDelayMs(0) == 250 && presentedStatus() == "playing (4 fps)" &&
+		timingBuilds == 3,
+		"GIF information did not apply a uniform custom delay to the displayed frame");
+	presentedTiming.StartMovie(25.0, 120);
+	Expect(presentedStatus() == "playing (25 fps)" && timingBuilds == 4,
+		"GIF information did not refresh for Movie's uniform rate");
+	Expect(presentedTiming.ResetAnimationDelay(130) &&
+		presentedStatus() == "playing (5 fps)" && timingBuilds == 5 &&
+		jpegview_linux::FormatAnimationPlaybackStatus(presentedTiming, displayedFrame, false) ==
+			"playing",
+		"restoring source timing did not refresh the GIF rate or added a rate to another format");
 	Expect(jpegview_linux::FormatFileSize(1536) == "1.5 KB",
 		"file-size formatting changed while moving it into the information model");
 	Expect(jpegview_linux::FormatFileSize(1023) == "1023 B" &&

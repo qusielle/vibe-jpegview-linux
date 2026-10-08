@@ -1367,9 +1367,10 @@ controls are disabled during slideshow mode and while the selected frame or an i
 is pending.
 The F2 picture-information panel keeps its playback label stable while the next frame is prepared;
 its `Frame` line updates when that frame is presented. For animated GIFs, the `Playback` line also
-shows the effective current rate in frames per second: it follows the current frame delay during
-normal playback and the selected rate in Movie mode, and updates when timing changes. The full context
-menu lists the available controls and current delay. Failed
+shows the effective current rate in frames per second: it follows the displayed frame delay during
+normal playback and the selected rate in Movie mode, and updates when timing changes.
+The rate and `Frame delay` line stay with the displayed frame while another frame is preparing.
+The full context menu lists the available controls and current delay. Failed
 frame steps return to the last successfully displayed frame and keep it frozen.
 When automatic slideshow or movie advancement reaches a non-wrapping folder boundary, playback stops
 instead of repeatedly rebuilding the final image. `Esc` stops animation, movie, or slideshow playback

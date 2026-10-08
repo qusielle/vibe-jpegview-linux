@@ -1,4 +1,5 @@
 #include "image_info_model.h"
+#include "playback_scheduler.h"
 
 #include <algorithm>
 #include <array>
@@ -205,6 +206,17 @@ std::string FormatAnimationPlaybackStatus(bool animationPlaying,
 	}
 	status += " (" + formattedRate + " fps)";
 	return status;
+}
+
+std::string FormatAnimationPlaybackStatus(const PlaybackScheduler& playback,
+	std::size_t displayedFrame, bool isGif) {
+	std::optional<double> framesPerSecond;
+	if (isGif) {
+		framesPerSecond = playback.Mode() == PlaybackMode::Movie ?
+			playback.MovieFramesPerSecond() : 1000.0 / playback.FrameDelayMs(displayedFrame);
+	}
+	return FormatAnimationPlaybackStatus(playback.AnimationPlaying(),
+		playback.AnimationManuallyPaused(), framesPerSecond);
 }
 
 const std::string& WindowTitleFormatCache::GetOrBuild(const std::string& key,

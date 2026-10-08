@@ -320,13 +320,21 @@ PlaybackAction PlaybackScheduler::StartAnimation(std::uint32_t now) {
 }
 
 int PlaybackScheduler::FrameDelayMs() const {
+	return FrameDelayMs(frameIndex_);
+}
+
+int PlaybackScheduler::FrameDelayMs(std::size_t frameIndex) const {
 	if (frameDelayOverrideMs_.has_value()) return *frameDelayOverrideMs_;
-	return OriginalFrameDelayMs();
+	return OriginalFrameDelayMs(frameIndex);
 }
 
 int PlaybackScheduler::OriginalFrameDelayMs() const {
-	if (frameIndex_ >= frameDelaysMs_.size()) return 100;
-	return std::clamp(frameDelaysMs_[frameIndex_], kMinimumFrameDelayMs,
+	return OriginalFrameDelayMs(frameIndex_);
+}
+
+int PlaybackScheduler::OriginalFrameDelayMs(std::size_t frameIndex) const {
+	if (frameIndex >= frameDelaysMs_.size()) return 100;
+	return std::clamp(frameDelaysMs_[frameIndex], kMinimumFrameDelayMs,
 		maximumFrameDelayMs_);
 }
 
