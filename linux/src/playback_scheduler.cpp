@@ -217,6 +217,13 @@ bool PlaybackScheduler::ResetAnimationDelay(std::uint32_t now) {
 	return true;
 }
 
+bool PlaybackScheduler::LeaveMovieForManualNavigation(std::uint32_t now) {
+	if (mode_ != PlaybackMode::Movie) return false;
+	if (hasAnimation_) return ResetAnimationDelay(now);
+	Stop(now);
+	return true;
+}
+
 PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 	if (!imageReady_ || temporarilyPaused_ || manuallyPaused_) return {};
 	if (animationPlaying_ && !frameDelaysMs_.empty() && nextTick_ != 0 && Reached(now, nextTick_)) {

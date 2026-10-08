@@ -7227,7 +7227,9 @@ private:
 		SetTitle();
 	}
 
-	NavigationAttemptResult NextImage(bool showPendingNavigation = false) {
+	NavigationAttemptResult NextImage(bool showPendingNavigation = false,
+		bool playbackDriven = false) {
+		if (!playbackDriven) playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
 		if (clipboardMode_) RestoreClipboardImage();
 		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
 			transitionEffect_ != IDM_EFFECT_NONE;
@@ -7275,6 +7277,7 @@ private:
 	}
 
 	void PreviousImage(bool showPendingNavigation = false) {
+		playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
 		if (clipboardMode_) RestoreClipboardImage();
 		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
 			transitionEffect_ != IDM_EFFECT_NONE;
@@ -7319,6 +7322,7 @@ private:
 	void NavigateToSiblingFolder(int direction) {
 		if (clipboardMode_) RestoreClipboardImage();
 		if (fileList_.Empty() || (direction != -1 && direction != 1)) return;
+		playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
 		RequestFileListScan(direction < 0 ?
 			jpegview_linux::FileList::ScanOperation::PreviousSibling :
 			jpegview_linux::FileList::ScanOperation::NextSibling,
@@ -7328,6 +7332,7 @@ private:
 	void FirstImage() {
 		if (clipboardMode_) RestoreClipboardImage();
 		if (fileList_.Empty() || fileList_.CurrentIndex() == 0) return;
+		playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
 		fileList_.First();
 		LoadCurrent(1);
 	}
@@ -7335,6 +7340,7 @@ private:
 	void LastImage() {
 		if (clipboardMode_) RestoreClipboardImage();
 		if (fileList_.Empty() || fileList_.CurrentIndex() + 1 == fileList_.Size()) return;
+		playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
 		fileList_.Last();
 		LoadCurrent(-1);
 	}
@@ -7500,7 +7506,8 @@ private:
 			}
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
 		} else if (action.type == jpegview_linux::PlaybackActionType::NextImage) {
-			const NavigationAttemptResult navigation = NextImage();
+			// A Movie-owned advance keeps Movie mode active across the new image.
+			const NavigationAttemptResult navigation = NextImage(false, true);
 			if (navigation == NavigationAttemptResult::Blocked) {
 				StopPlaybackAfterFailedBoundaryScan();
 			} else if (navigation == NavigationAttemptResult::PendingDirectoryScan) {
@@ -8536,6 +8543,7 @@ private:
 			break;
 		case IDM_TOGGLE:
 			if (fileList_.HasMarkedFile()) {
+				playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
 				if (clipboardMode_) RestoreClipboardImage();
 				const fs::path markedTarget = fileList_.MarkedToggleTarget();
 				const fs::path previousPath = fileList_.Current();
@@ -10620,7 +10628,10 @@ private:
 		const std::size_t previous = fileList_.CurrentIndex();
 		CloseGoToImageNumberDialog();
 		if (*target == previous) return;
-		if (fileList_.Select(*target)) LoadCurrent(*target > previous ? 1 : -1);
+		if (fileList_.Select(*target)) {
+			playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
+			LoadCurrent(*target > previous ? 1 : -1);
+		}
 	}
 
 	void HandleGoToImageNumberDialogEvents(const SDL_Event& event, bool& running) {
@@ -13211,7 +13222,10 @@ private:
 			const SDL_Rect row{panel.x, slot.y, panel.w, rowHeight};
 			if (!PointInRect(x, y, row) || slot.current) continue;
 			const int direction = slot.fileIndex > fileList_.CurrentIndex() ? 1 : -1;
-			if (fileList_.Select(slot.fileIndex)) LoadCurrent(direction);
+			if (fileList_.Select(slot.fileIndex)) {
+				playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
+				LoadCurrent(direction);
+			}
 			break;
 		}
 		return true;

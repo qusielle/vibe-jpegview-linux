@@ -1348,6 +1348,8 @@ animated or multi-page images at a selected fixed rate (5, 10, 25, 30, 50, or 10
 their embedded per-frame timing while Movie mode is active, and advances a folder of still images
 when the current image has no frames.
 The original frame loop count is honored when a format provides one. `Alt+R` resumes stopped playback.
+Manually navigating to another file while Movie is active exits Movie mode, so the selected file stays
+current; an animated target then uses its embedded frame delays.
 For an animated image, `[` and `]` step backward and forward through its frames, wrapping within
 that image and freezing playback on the selected frame; holding either key repeats the step as each
 frame becomes ready. `P` resumes or freezes animation. For any animated format, `Alt+[` adds 50 ms to

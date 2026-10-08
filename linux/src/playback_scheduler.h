@@ -47,6 +47,8 @@ public:
 	PlaybackAction ToggleAnimationPlayback(std::uint32_t now);
 	bool AdjustAnimationDelay(int deltaMs, std::uint32_t now);
 	bool ResetAnimationDelay(std::uint32_t now);
+	// Manual file selection stops Movie's automatic folder advancement.
+	bool LeaveMovieForManualNavigation(std::uint32_t now);
 	PlaybackAction Tick(std::uint32_t now);
 	std::optional<std::uint32_t> NextDeadline() const;
 	void FrameDisplayFailed(std::optional<std::size_t> presentedFrame = std::nullopt);

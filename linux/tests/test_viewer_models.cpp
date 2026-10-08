@@ -4760,7 +4760,8 @@ void TestPlaybackSchedulerAnimationFrameControls() {
 	movie.ToggleAnimationPlayback(1000);
 	Expect(movie.AnimationPlaying() && movie.NextDeadline() == 1040 &&
 		movie.Tick(1039).type == PlaybackActionType::None &&
-		movie.Tick(1040).type == PlaybackActionType::NextImage,
+		movie.Tick(1040).type == PlaybackActionType::NextImage &&
+		movie.Mode() == PlaybackMode::Movie,
 		"resuming a manually stepped Movie frame did not preserve Movie FPS and loop behavior");
 	Expect(movie.ToggleAnimationPlayback(1041).type == PlaybackActionType::None &&
 		movie.AnimationManuallyPaused() && !movie.NextDeadline().has_value() &&
@@ -4817,6 +4818,43 @@ void TestPlaybackSchedulerAnimationFrameControls() {
 	Expect(gifTiming.Mode() == PlaybackMode::Movie && gifTiming.NextTick() == 140 &&
 		gifTiming.FrameDelayMs() == 70,
 		"explicit Movie FPS did not override GIF frame timing");
+	jpegview_linux::PlaybackScheduler manuallyNavigatedMovie;
+	manuallyNavigatedMovie.ConfigureImage({70, 40}, 0, true, 100,
+		jpegview_linux::kMaximumGifFrameDelayMs);
+	manuallyNavigatedMovie.StartMovie(25.0, 100);
+	Expect(manuallyNavigatedMovie.LeaveMovieForManualNavigation(110) &&
+		manuallyNavigatedMovie.Mode() == PlaybackMode::None &&
+		manuallyNavigatedMovie.AnimationPlaying() &&
+		!manuallyNavigatedMovie.AnimationDelayOverrideMs().has_value() &&
+		manuallyNavigatedMovie.NextTick() == 180,
+		"manual file navigation did not leave Movie FPS and resume GIF source timing");
+	manuallyNavigatedMovie.SetImageReady(false, 110);
+	manuallyNavigatedMovie.ConfigureImage({50, 90}, 0, true, 120,
+		jpegview_linux::kMaximumGifFrameDelayMs);
+	manuallyNavigatedMovie.SetImageReady(true, 130);
+	Expect(manuallyNavigatedMovie.Mode() == PlaybackMode::None &&
+		manuallyNavigatedMovie.AnimationPlaying() &&
+		manuallyNavigatedMovie.FrameDelayMs() == 50 &&
+		manuallyNavigatedMovie.NextTick() == 180 &&
+		manuallyNavigatedMovie.Tick(180).type == PlaybackActionType::ShowFrame &&
+		manuallyNavigatedMovie.FrameIndex() == 1,
+		"manually selected GIF did not use its embedded frame delay after Movie mode ended");
+	manuallyNavigatedMovie.SetImageReady(false, 181);
+	manuallyNavigatedMovie.ConfigureImage({}, 0, false, 190);
+	manuallyNavigatedMovie.SetImageReady(true, 200);
+	Expect(manuallyNavigatedMovie.Mode() == PlaybackMode::None &&
+		!manuallyNavigatedMovie.AnimationPlaying() &&
+		!manuallyNavigatedMovie.NextDeadline().has_value() &&
+		manuallyNavigatedMovie.Tick(1000).type == PlaybackActionType::None,
+		"manual navigation to a still image resumed Movie folder advancement");
+	jpegview_linux::PlaybackScheduler manuallyAdjustedDelay;
+	manuallyAdjustedDelay.ConfigureImage({70, 40}, 0, true, 100,
+		jpegview_linux::kMaximumGifFrameDelayMs);
+	Expect(manuallyAdjustedDelay.AdjustAnimationDelay(50, 110) &&
+		!manuallyAdjustedDelay.LeaveMovieForManualNavigation(120) &&
+		manuallyAdjustedDelay.Mode() == PlaybackMode::None &&
+		manuallyAdjustedDelay.AnimationDelayOverrideMs() == 120,
+		"manual navigation preparation changed an ordinary frame-delay override");
 	Expect(gifTiming.Tick(140).type == PlaybackActionType::ShowFrame &&
 		gifTiming.FrameIndex() == 1 && gifTiming.NextTick() == 180,
 		"Movie FPS did not remain active for the next GIF frame");

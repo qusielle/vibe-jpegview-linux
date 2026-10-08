@@ -476,6 +476,8 @@ should normally be added to one of these focused modules and covered by the matc
   animation. Reset clears a manual delay override or exits Movie mode for the current animation and
   resumes its embedded frame delays. The scheduler receives a per-image delay limit: 655,350 ms for
   GIF and 60,000 ms for other formats; manual overrides use the same limit.
+  User-initiated file navigation leaves Movie mode so the selected target is not immediately replaced
+  by another playback advance; Movie-generated navigation retains the mode across files.
   Manual frame stepping wraps only within the current animation and freezes every playback deadline,
   including Movie's folder-advance deadline; resuming a manually held last frame continues from that
   frame, while a naturally exhausted finite animation restarts from frame zero. Changing or resetting
