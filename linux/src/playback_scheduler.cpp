@@ -33,7 +33,7 @@ void PlaybackScheduler::ConfigureImage(std::vector<int> frameDelaysMs,
 	} else if (mode_ == PlaybackMode::Movie) {
 		nextTick_ = now + MovieFrameInterval();
 	} else {
-		nextTick_ = 0;
+		nextTick_.reset();
 	}
 }
 
@@ -53,13 +53,13 @@ void PlaybackScheduler::SetImageReady(bool ready, std::uint32_t now) {
 	if (!ready) return;
 	lastInteractionTick_ = now;
 	if (manuallyPaused_) {
-		nextTick_ = 0;
+		nextTick_.reset();
 	} else if (mode_ == PlaybackMode::Movie && !animationPlaying_) {
 		nextTick_ = now + MovieFrameInterval();
 	} else if (animationPlaying_) {
 		ScheduleFrame(now);
 	} else {
-		nextTick_ = 0;
+		nextTick_.reset();
 	}
 }
 
@@ -69,13 +69,13 @@ void PlaybackScheduler::SetTemporarilyPaused(bool paused, std::uint32_t now) {
 	if (paused || !imageReady_) return;
 	lastInteractionTick_ = now;
 	if (manuallyPaused_) {
-		nextTick_ = 0;
+		nextTick_.reset();
 	} else if (mode_ == PlaybackMode::Movie && !animationPlaying_) {
 		nextTick_ = now + MovieFrameInterval();
 	} else if (animationPlaying_) {
 		ScheduleFrame(now);
 	} else {
-		nextTick_ = 0;
+		nextTick_.reset();
 	}
 }
 
@@ -86,7 +86,7 @@ void PlaybackScheduler::StartSlideshow(double seconds, std::uint32_t now) {
 	mode_ = PlaybackMode::Slideshow;
 	slideshowSeconds_ = std::max(0.1, seconds);
 	lastSlideshowSeconds_ = slideshowSeconds_;
-	nextTick_ = 0;
+	nextTick_.reset();
 	lastInteractionTick_ = now;
 }
 
@@ -108,7 +108,7 @@ void PlaybackScheduler::Stop(std::uint32_t now) {
 	animationPlaying_ = false;
 	manuallyPaused_ = false;
 	manualResumeAnimation_ = false;
-	nextTick_ = 0;
+	nextTick_.reset();
 	lastInteractionTick_ = now;
 }
 
@@ -131,7 +131,7 @@ PlaybackAction PlaybackScheduler::StepAnimationFrame(int direction,
 	manualResumeAnimation_ = mode_ != PlaybackMode::Slideshow;
 	manuallyPaused_ = true;
 	animationPlaying_ = false;
-	nextTick_ = 0;
+	nextTick_.reset();
 	completedLoops_ = 0;
 	sequenceExhausted_ = false;
 	if (direction < 0) {
@@ -152,7 +152,7 @@ PlaybackAction PlaybackScheduler::ToggleAnimationPlayback(std::uint32_t now) {
 		if (mode_ == PlaybackMode::Movie && !animationPlaying_) {
 			nextTick_ = now + MovieFrameInterval();
 		} else {
-			nextTick_ = 0;
+			nextTick_.reset();
 		}
 		return {};
 	}
@@ -160,19 +160,19 @@ PlaybackAction PlaybackScheduler::ToggleAnimationPlayback(std::uint32_t now) {
 		manuallyPaused_ = true;
 		manualResumeAnimation_ = true;
 		animationPlaying_ = false;
-		nextTick_ = 0;
+		nextTick_.reset();
 		return {};
 	}
 	if (mode_ == PlaybackMode::Movie) {
 		manuallyPaused_ = true;
 		manualResumeAnimation_ = false;
-		nextTick_ = 0;
+		nextTick_.reset();
 		return {};
 	}
 	if (mode_ == PlaybackMode::Slideshow) {
 		manuallyPaused_ = true;
 		manualResumeAnimation_ = false;
-		nextTick_ = 0;
+		nextTick_.reset();
 		return {};
 	}
 	return StartAnimation(now);
@@ -196,7 +196,7 @@ bool PlaybackScheduler::AdjustAnimationDelay(int deltaMs, std::uint32_t now) {
 	animationPlaying_ = true;
 	lastInteractionTick_ = now;
 	if (imageReady_ && !temporarilyPaused_) ScheduleFrame(now);
-	else nextTick_ = 0;
+	else nextTick_.reset();
 	return true;
 }
 
@@ -213,7 +213,7 @@ bool PlaybackScheduler::ResetAnimationDelay(std::uint32_t now) {
 	animationPlaying_ = true;
 	lastInteractionTick_ = now;
 	if (imageReady_ && !temporarilyPaused_) ScheduleFrame(now);
-	else nextTick_ = 0;
+	else nextTick_.reset();
 	return true;
 }
 
@@ -226,7 +226,8 @@ bool PlaybackScheduler::LeaveMovieForManualNavigation(std::uint32_t now) {
 
 PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 	if (!imageReady_ || temporarilyPaused_ || manuallyPaused_) return {};
-	if (animationPlaying_ && !frameDelaysMs_.empty() && nextTick_ != 0 && Reached(now, nextTick_)) {
+	if (animationPlaying_ && !frameDelaysMs_.empty() &&
+		nextTick_.has_value() && Reached(now, *nextTick_)) {
 		if (frameIndex_ + 1 < frameDelaysMs_.size()) {
 			++frameIndex_;
 			ScheduleFrame(now);
@@ -241,7 +242,7 @@ PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 				nextTick_ = now + MovieFrameInterval();
 				return {PlaybackActionType::NextImage, 0};
 			}
-			nextTick_ = 0;
+			nextTick_.reset();
 			return {};
 		}
 		frameIndex_ = 0;
@@ -250,7 +251,7 @@ PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 	}
 
 	if (mode_ == PlaybackMode::Movie && !animationPlaying_ &&
-		nextTick_ != 0 && Reached(now, nextTick_)) {
+		nextTick_.has_value() && Reached(now, *nextTick_)) {
 		nextTick_ = now + MovieFrameInterval();
 		return {PlaybackActionType::NextImage, 0};
 	}
@@ -264,7 +265,7 @@ PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 
 std::optional<std::uint32_t> PlaybackScheduler::NextDeadline() const {
 	if (!imageReady_ || temporarilyPaused_ || manuallyPaused_) return std::nullopt;
-	if (nextTick_ != 0 && (animationPlaying_ || mode_ == PlaybackMode::Movie)) {
+	if (nextTick_.has_value() && (animationPlaying_ || mode_ == PlaybackMode::Movie)) {
 		return nextTick_;
 	}
 	if (mode_ == PlaybackMode::Slideshow && slideshowSeconds_ > 0.0) {
@@ -279,7 +280,7 @@ void PlaybackScheduler::FrameDisplayFailed(
 	std::optional<std::size_t> presentedFrame) {
 	animationPlaying_ = false;
 	imageReady_ = true;
-	nextTick_ = 0;
+	nextTick_.reset();
 	if (presentedFrame.has_value() && *presentedFrame < frameDelaysMs_.size()) {
 		frameIndex_ = *presentedFrame;
 		sequenceExhausted_ = false;
@@ -315,7 +316,7 @@ PlaybackAction PlaybackScheduler::StartAnimation(std::uint32_t now) {
 	animationPlaying_ = true;
 	lastInteractionTick_ = now;
 	if (imageReady_ && !temporarilyPaused_) ScheduleFrame(now);
-	else nextTick_ = 0;
+	else nextTick_.reset();
 	return action;
 }
 

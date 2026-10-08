@@ -4761,6 +4761,30 @@ void TestPlaybackSchedulerTimingAndModes() {
 		wrapping.Tick(8).type == PlaybackActionType::None &&
 		wrapping.Tick(9).type == PlaybackActionType::ShowFrame,
 		"animation deadline comparison failed across tick wraparound");
+	wrapping.ConfigureImage({20, 40}, 0, true, 0xffffffecu,
+		jpegview_linux::kMaximumGifFrameDelayMs);
+	Expect(wrapping.NextDeadline() == 0u &&
+		wrapping.Tick(0xffffffffu).type == PlaybackActionType::None &&
+		wrapping.Tick(0u).type == PlaybackActionType::ShowFrame &&
+		wrapping.FrameIndex() == 1 && wrapping.NextDeadline() == 40u,
+		"an animation deadline wrapping exactly to zero stalled playback");
+	wrapping.SetImageReady(false, 1);
+	wrapping.SetImageReady(true, 0xffffffd8u);
+	Expect(wrapping.NextDeadline() == 0u &&
+		wrapping.Tick(0u).type == PlaybackActionType::ShowFrame &&
+		wrapping.FrameIndex() == 0,
+		"renderer readiness lost an animation deadline wrapping exactly to zero");
+	wrapping.ConfigureImage({}, 0, false, 0xffffffd8u);
+	wrapping.StartMovie(25.0, 0xffffffd8u);
+	Expect(wrapping.NextDeadline() == 0u &&
+		wrapping.Tick(0xffffffffu).type == PlaybackActionType::None &&
+		wrapping.Tick(0u).type == PlaybackActionType::NextImage &&
+		wrapping.NextDeadline() == 40u,
+		"a Movie deadline wrapping exactly to zero stalled folder playback");
+	wrapping.Stop(1);
+	Expect(!wrapping.NextDeadline().has_value() &&
+		wrapping.Tick(40u).type == PlaybackActionType::None,
+		"stopping playback retained a scheduled zero-valued deadline");
 	wrapping.StartSlideshow(0.1, 0xfffffff0u);
 	Expect(wrapping.Tick(83).type == PlaybackActionType::None &&
 		wrapping.Tick(84).type == PlaybackActionType::NextImage,

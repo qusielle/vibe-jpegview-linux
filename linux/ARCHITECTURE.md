@@ -468,6 +468,7 @@ should normally be added to one of these focused modules and covered by the matc
   catalog before compact filtering so commands shared by both views keep the same letter and
   underline position; the compact-only “Show Advanced Options” row is assigned afterward.
 - `playback_scheduler`: wrap-safe animation, movie, and slideshow timing expressed as Viewer actions.
+  Animation and Movie deadlines use optional state so tick zero remains a valid wrapped deadline.
   It tracks explicit user freeze separately from image readiness and temporary modal suppression.
   GIF centisecond delays are normalized by the decoder to milliseconds, with missing or zero delays
   defaulted to 100 ms and nonzero delays clamped to at least 20 ms. Loop counts describe

@@ -67,7 +67,7 @@ public:
 	double SlideshowSeconds() const { return slideshowSeconds_; }
 	double LastSlideshowSeconds() const { return lastSlideshowSeconds_; }
 	double MovieFramesPerSecond() const { return movieFramesPerSecond_; }
-	std::uint32_t NextTick() const { return nextTick_; }
+	std::uint32_t NextTick() const { return nextTick_.value_or(0); }
 	int CompletedLoops() const { return completedLoops_; }
 
 private:
@@ -81,7 +81,7 @@ private:
 	double slideshowSeconds_ = 0.0;
 	double lastSlideshowSeconds_ = 3.0;
 	double movieFramesPerSecond_ = 25.0;
-	std::uint32_t nextTick_ = 0;
+	std::optional<std::uint32_t> nextTick_;
 	std::uint32_t lastInteractionTick_ = 0;
 	bool hasAnimation_ = false;
 	bool animationPlaying_ = false;
