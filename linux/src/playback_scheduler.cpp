@@ -201,7 +201,8 @@ bool PlaybackScheduler::AdjustAnimationDelay(int deltaMs, std::uint32_t now) {
 }
 
 bool PlaybackScheduler::ResetAnimationDelay(std::uint32_t now) {
-	if (!hasAnimation_ || !frameDelayOverrideMs_.has_value()) return false;
+	if (!hasAnimation_ ||
+		(!frameDelayOverrideMs_.has_value() && mode_ != PlaybackMode::Movie)) return false;
 	frameDelayOverrideMs_.reset();
 	mode_ = PlaybackMode::None;
 	slideshowSeconds_ = 0.0;

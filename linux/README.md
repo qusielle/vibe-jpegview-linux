@@ -1352,13 +1352,15 @@ For an animated image, `[` and `]` step backward and forward through its frames,
 that image and freezing playback on the selected frame; holding either key repeats the step as each
 frame becomes ready. `P` resumes or freezes animation. For any animated format, `Alt+[` adds 50 ms to
 each frame delay, `Alt+]` removes 50 ms, and `Alt+P` restores the source frame delays. These controls
-are available for GIFs too. The override stays with the current image until it is replaced or reloaded
+are available for GIFs too. `Alt+P` is also available while Movie FPS is overriding an animated
+image's source delays; it exits Movie mode for that image and resumes playback at each frame's
+embedded delay. A manual delay override stays with the current image until it is replaced or reloaded
 and is not saved in settings or Recents. Overrides are bounded to 10–60,000 ms, or 10–655,350 ms for
-GIF. Changing or resetting a delay stops Movie or slideshow timing for the current image and uses
-animation frame timing; a custom delay remains active until reset or image replacement. The selected
-Movie FPS overrides source timing while Movie mode is active. Manual frame holds also stop Movie from
-advancing to another file. These controls are disabled during slideshow mode and while the selected
-frame or an image/file operation is pending.
+GIF. Changing or restoring a delay uses animation frame timing for the current image; a custom delay
+remains active until reset or image replacement. The selected Movie FPS overrides source timing while
+Movie mode is active. Manual frame holds also stop Movie from advancing to another file. These
+controls are disabled during slideshow mode and while the selected frame or an image/file operation
+is pending.
 The F2 picture-information panel keeps its playback label stable while the next frame is prepared;
 its `Frame` line updates when
 that frame is presented. The full context menu lists the available controls and current delay. Failed

@@ -352,7 +352,8 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 			animationDelayControlsEnabled &&
 				state.animationDelayMs < maximumAnimationDelayMs, "Alt+[", true},
 		{"  Restore source frame delays", kCommandAnimationResetDelays, false, false,
-			animationDelayControlsEnabled && state.animationDelayOverridden, "Alt+P", true},
+			animationDelayControlsEnabled &&
+				(state.animationDelayOverridden || movieMode), "Alt+P", true},
 		{"  Resume playback", IDM_SLIDESHOW_RESUME, false, false,
 			(!state.animationPlaying &&
 				(state.playbackMode != PlaybackMode::None || state.animationAvailable)), "Alt+R", true},

@@ -1300,6 +1300,14 @@ void TestContextMenuCatalogAndState() {
 	state.animationDelayOverridden = false;
 	state.animationDelayMaximumMs = jpegview_linux::kMaximumGifFrameDelayMs;
 	state.animationDelayMs = 70;
+	state.playbackMode = jpegview_linux::PlaybackMode::None;
+	const std::vector<MenuItem> defaultGifTimingMenu =
+		jpegview_linux::BuildContextMenu(state, true);
+	Expect(findLabel(defaultGifTimingMenu, "  Frame delay: 70 ms (source)") != nullptr &&
+		!findCommand(defaultGifTimingMenu,
+			jpegview_linux::kCommandAnimationResetDelays)->enabled,
+		"GIF source timing offered a reset when no timing override was active");
+	state.playbackMode = jpegview_linux::PlaybackMode::Movie;
 	const std::vector<MenuItem> gifTimingMenu =
 		jpegview_linux::BuildContextMenu(state, true);
 	const MenuItem* gifFaster = findCommand(gifTimingMenu,
@@ -1310,8 +1318,8 @@ void TestContextMenuCatalogAndState() {
 		jpegview_linux::kCommandAnimationResetDelays);
 	Expect(findLabel(gifTimingMenu, "  Frame delay: 70 ms (source; Movie uses FPS)") != nullptr &&
 		gifFaster != nullptr && gifFaster->enabled && gifSlower != nullptr &&
-		gifSlower->enabled && gifReset != nullptr && !gifReset->enabled,
-		"GIF context menu did not keep source timing by default with delay controls available");
+		gifSlower->enabled && gifReset != nullptr && gifReset->enabled,
+		"GIF context menu did not offer restoring source timing while Movie FPS overrides it");
 	state.animationDelayOverridden = true;
 	state.animationDelayMs = 120;
 	const std::vector<MenuItem> overriddenGifTimingMenu =
@@ -4812,6 +4820,11 @@ void TestPlaybackSchedulerAnimationFrameControls() {
 	Expect(gifTiming.Tick(140).type == PlaybackActionType::ShowFrame &&
 		gifTiming.FrameIndex() == 1 && gifTiming.NextTick() == 180,
 		"Movie FPS did not remain active for the next GIF frame");
+	Expect(gifTiming.ResetAnimationDelay(150) &&
+		gifTiming.Mode() == PlaybackMode::None && gifTiming.AnimationPlaying() &&
+		!gifTiming.AnimationDelayOverrideMs().has_value() &&
+		gifTiming.FrameDelayMs() == 20 && gifTiming.NextTick() == 170,
+		"restoring GIF source delays did not leave Movie FPS timing");
 	Expect(gifTiming.AdjustAnimationDelay(50, 200) &&
 		gifTiming.Mode() == PlaybackMode::None && gifTiming.AnimationPlaying() &&
 		gifTiming.FrameDelayMs() == 70 && gifTiming.AnimationDelayOverrideMs() == 70 &&
