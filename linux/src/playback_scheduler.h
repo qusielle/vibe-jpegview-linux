@@ -25,6 +25,7 @@ constexpr int kMaximumGifFrameDelayMs = 655350;
 struct PlaybackAction {
 	PlaybackActionType type = PlaybackActionType::None;
 	std::size_t frameIndex = 0;
+	bool overlayChanged = false;
 };
 
 class PlaybackScheduler {

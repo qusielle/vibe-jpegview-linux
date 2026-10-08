@@ -7500,6 +7500,9 @@ private:
 	}
 
 	void ApplyPlaybackAction(const jpegview_linux::PlaybackAction& action) {
+		if (action.overlayChanged) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+		}
 		if (action.type == jpegview_linux::PlaybackActionType::ShowFrame) {
 			if (!SetAnimationFrame(action.frameIndex)) {
 				playback_.FrameDisplayFailed(presentedAnimationFrame_);

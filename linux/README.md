@@ -1370,6 +1370,7 @@ its `Frame` line updates when that frame is presented. For animated GIFs, the `P
 shows the effective current rate in frames per second: it follows the displayed frame delay during
 normal playback and the selected rate in Movie mode, and updates when timing changes.
 The rate and `Frame delay` line stay with the displayed frame while another frame is preparing.
+When a finite animation finishes, the playback label changes to `paused` while its last frame stays visible.
 The full context menu lists the available controls and current delay. Failed
 frame steps return to the last successfully displayed frame and keep it frozen.
 When automatic slideshow or movie advancement reaches a non-wrapping folder boundary, playback stops

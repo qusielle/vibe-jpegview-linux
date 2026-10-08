@@ -4601,9 +4601,12 @@ void TestPlaybackSchedulerTimingAndModes() {
 		scheduler.FrameIndex() == 0 && scheduler.CompletedLoops() == 1,
 		"animation did not wrap after its first loop");
 	scheduler.Tick(170);
-	Expect(scheduler.Tick(200).type == PlaybackActionType::None &&
+	const auto exhausted = scheduler.Tick(200);
+	Expect(exhausted.type == PlaybackActionType::None && exhausted.overlayChanged &&
 		!scheduler.AnimationPlaying() && scheduler.CompletedLoops() == 2,
-		"finite animation did not stop after its declared loop count");
+		"finite animation did not stop and request an overlay refresh after its declared loop count");
+	Expect(!scheduler.Tick(201).overlayChanged,
+		"exhausted animation requested repeated overlay redraws while idle");
 	const jpegview_linux::PlaybackAction resumed = scheduler.Resume(300);
 	Expect(resumed.type == PlaybackActionType::ShowFrame && resumed.frameIndex == 0 &&
 		scheduler.AnimationPlaying() && scheduler.NextTick() == 320,

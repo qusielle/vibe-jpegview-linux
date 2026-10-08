@@ -243,7 +243,7 @@ PlaybackAction PlaybackScheduler::Tick(std::uint32_t now) {
 				return {PlaybackActionType::NextImage, 0};
 			}
 			nextTick_.reset();
-			return {};
+			return {PlaybackActionType::None, frameIndex_, true};
 		}
 		frameIndex_ = 0;
 		ScheduleFrame(now);

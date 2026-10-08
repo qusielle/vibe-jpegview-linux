@@ -1649,6 +1649,49 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 	assert_held_animation_steps bracketright forward
 	assert_held_animation_steps bracketleft backward
 	stop_viewer
+
+	# A finite GIF must refresh its paused status without further input when
+	# its final frame interval expires. Compare against a manually stopped row.
+	finite_animation_directory="$temporary/finite-animation"
+	mkdir -p "$finite_animation_directory"
+	convert -delay 300 -size 800x600 xc:red -delay 300 -size 800x600 xc:blue \
+		-loop 1 "$finite_animation_directory/01-finite.gif"
+	VIEWER_TEST_HOME="$temporary/finite-animation-home" \
+		VIEWER_TEST_CONFIG_HOME="$rotation_animation_config" \
+		launch_viewer "$finite_animation_directory/01-finite.gif"
+	assert_title_prefix "01-finite.gif" "finite animation fixture did not load"
+	DISPLAY=":$display_number" xdotool key Escape
+	sleep 0.15
+	capture_animation_status_mask "$temporary/finite-animation-paused.png"
+	stop_viewer
+	VIEWER_TEST_HOME="$temporary/finite-animation-home" \
+		VIEWER_TEST_CONFIG_HOME="$rotation_animation_config" \
+		launch_viewer "$finite_animation_directory/01-finite.gif"
+	finite_animation_geometry=$(DISPLAY=":$display_number" \
+		xdotool getwindowgeometry --shell "$window_id")
+	finite_animation_width=$(printf '%s\n' "$finite_animation_geometry" | sed -n 's/^WIDTH=//p')
+	finite_animation_height=$(printf '%s\n' "$finite_animation_geometry" | sed -n 's/^HEIGHT=//p')
+	finite_animation_color=''
+	finite_animation_exhausted=0
+	for _ in $(seq 1 120); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/finite-animation.png"
+		finite_animation_color=$(convert "$temporary/finite-animation.png" \
+			-format "%[hex:p{$((finite_animation_width / 2)),$((finite_animation_height / 2))}]" info:)
+		if [ "$finite_animation_color" = 0000FF ]; then
+			capture_animation_status_mask "$animation_status_mask"
+			if compare -metric AE "$temporary/finite-animation-paused.png" \
+				"$animation_status_mask" null: >/dev/null 2>&1; then
+				finite_animation_exhausted=1
+				break
+			fi
+		fi
+		sleep 0.05
+	done
+	if [ "$finite_animation_exhausted" -ne 1 ]; then
+		echo "UI smoke test: finite GIF did not refresh its paused status on the last frame ($finite_animation_color)" >&2
+		exit 1
+	fi
+	stop_viewer
 fi
 
 XDG_STATE_HOME=$rotation_previous_state
