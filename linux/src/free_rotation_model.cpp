@@ -99,6 +99,10 @@ bool FreeRotationDialogController::MatchesPreview(std::uint64_t sessionId,
 		previewRevision_ == revision;
 }
 
+bool FreeRotationDialogController::OwnsPreviewSession(std::uint64_t sessionId) const {
+	return IsOpen() && sessionId != 0 && sessionId_ == sessionId;
+}
+
 void FreeRotationDialogController::AdvancePreviewRevision() {
 	++previewRevision_;
 	if (previewRevision_ == 0) previewRevision_ = 1;

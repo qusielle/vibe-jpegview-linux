@@ -57,11 +57,13 @@ void TestFreeRotationDialogControllerTracksPreviewAndApplyOwnership() {
 		controller.Parameters().autoCrop &&
 		controller.Parameters().preserveAspectRatio &&
 		controller.Parameters().showGrid &&
+		controller.OwnsPreviewSession(firstSession) &&
 		controller.MatchesPreview(firstSession, initialRevision),
 		"free-rotation defaults or initial preview identity changed");
 
 	Expect(controller.SetAngleDegrees(12.5) &&
-		!controller.MatchesPreview(firstSession, initialRevision),
+		!controller.MatchesPreview(firstSession, initialRevision) &&
+		controller.OwnsPreviewSession(firstSession),
 		"editing the angle did not invalidate the previous preview revision");
 	const std::uint64_t changedRevision = controller.PreviewRevision();
 	Expect(!controller.SetAngleDegrees(12.5) &&
@@ -75,6 +77,7 @@ void TestFreeRotationDialogControllerTracksPreviewAndApplyOwnership() {
 		"free-rotation angle nudges did not clamp at the supported slider limit");
 	Expect(controller.BeginApply() && controller.IsApplying() &&
 		!controller.MatchesPreview(firstSession, controller.PreviewRevision()) &&
+		controller.OwnsPreviewSession(firstSession) &&
 		!controller.SetAngleDegrees(25.0) && !controller.BeginApply(),
 		"applying rotation did not freeze settings and invalidate pending preview work");
 	controller.ResumeEditing("temporary upload failure");
@@ -85,9 +88,11 @@ void TestFreeRotationDialogControllerTracksPreviewAndApplyOwnership() {
 	Expect(controller.Message() == "preview ready" &&
 		controller.BeginApply(), "free-rotation dialog did not accept a later retry");
 	controller.CompleteApply();
-	Expect(!controller.IsOpen() && controller.CurrentPhase() == Controller::Phase::Closed,
+	Expect(!controller.IsOpen() && controller.CurrentPhase() == Controller::Phase::Closed &&
+		!controller.OwnsPreviewSession(firstSession),
 		"successful apply did not close the free-rotation session");
 	Expect(controller.Open(40, 20) && controller.SessionId() != firstSession &&
+		!controller.OwnsPreviewSession(firstSession) &&
 		!controller.MatchesPreview(firstSession, initialRevision),
 		"reopened free-rotation session accepted a completion from its previous owner");
 	controller.Close();

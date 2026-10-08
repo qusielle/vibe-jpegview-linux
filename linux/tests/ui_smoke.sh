@@ -653,7 +653,7 @@ XDG_STATE_HOME="$temporary/free-rotation-state"
 VIEWER_TEST_CONFIG_HOME="$temporary/free-rotation-config"
 export XDG_STATE_HOME VIEWER_TEST_CONFIG_HOME
 rotation_image="$temporary/free-rotation-checker.ppm"
-printf 'P6\n2 2\n255\n\377\000\000\000\377\000\000\000\377\377\377\000' > "$rotation_image"
+write_gradient_ppm "$rotation_image" 1024 768
 launch_viewer "$rotation_image"
 rotation_title_before=$(DISPLAY=":$display_number" window_title_without_position)
 if [ "$visual_assertions" -eq 1 ]; then
@@ -735,8 +735,101 @@ if [ "$visual_assertions" -eq 1 ]; then
 		exit 1
 	fi
 fi
-DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
-	"$rotation_slider_x" "$rotation_slider_y" click 1
+
+# A completed preview must remain visible while a later slider drag is in
+# progress. The preview worker must not publish any intermediate drag angle.
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" xdotool key --window "$window_id" g
+	rotation_image_region_x=$((rotation_window_width / 2 - 350))
+	rotation_image_region_y=$((rotation_window_height / 2 - 50))
+	convert "$temporary/free-rotation-original.png" -crop \
+		"40x100+$rotation_image_region_x+$rotation_image_region_y" +repage \
+		"$temporary/free-rotation-preview-baseline.png"
+	rotation_preview_angle_x=$((rotation_window_width / 2 + 120))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$rotation_preview_angle_x" "$rotation_slider_y" click 1
+	rotation_preview_ready=0
+	for _ in $(seq 1 100); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/free-rotation-preview-poll.png"
+		convert "$temporary/free-rotation-preview-poll.png" -crop \
+			"40x100+$rotation_image_region_x+$rotation_image_region_y" +repage \
+			"$temporary/free-rotation-preview-current.png"
+		rotation_preview_difference=$(compare -metric AE \
+			"$temporary/free-rotation-preview-baseline.png" \
+			"$temporary/free-rotation-preview-current.png" null: 2>&1 || true)
+		if [ "$rotation_preview_difference" != "0" ]; then
+			rotation_preview_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$rotation_preview_ready" -ne 1 ]; then
+		echo "UI smoke test: free-rotation preview did not display the selected angle" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	cp "$temporary/free-rotation-preview-current.png" \
+		"$temporary/free-rotation-preview-baseline.png"
+	rotation_drag_target_x=$((rotation_window_width / 2 - 120))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$rotation_preview_angle_x" "$rotation_slider_y" mousedown 1
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$rotation_drag_target_x" "$rotation_slider_y"
+	sleep 0.05
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/free-rotation-drag-first.png"
+	convert "$temporary/free-rotation-drag-first.png" -crop \
+		"40x100+$rotation_image_region_x+$rotation_image_region_y" +repage \
+		"$temporary/free-rotation-drag-first-region.png"
+	rotation_drag_difference=$(compare -metric AE \
+		"$temporary/free-rotation-preview-baseline.png" \
+		"$temporary/free-rotation-drag-first-region.png" null: 2>&1 || true)
+	if [ "$rotation_drag_difference" != "0" ]; then
+		echo "UI smoke test: free-rotation slider drag replaced the last completed preview" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$((rotation_window_width / 2 + 230))" "$rotation_slider_y"
+	sleep 0.05
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/free-rotation-drag-second.png"
+	convert "$temporary/free-rotation-drag-second.png" -crop \
+		"40x100+$rotation_image_region_x+$rotation_image_region_y" +repage \
+		"$temporary/free-rotation-drag-second-region.png"
+	rotation_drag_difference=$(compare -metric AE \
+		"$temporary/free-rotation-preview-baseline.png" \
+		"$temporary/free-rotation-drag-second-region.png" null: 2>&1 || true)
+	DISPLAY=":$display_number" xdotool mouseup 1
+	if [ "$rotation_drag_difference" != "0" ]; then
+		echo "UI smoke test: free-rotation drag displayed an intermediate angle" >&2
+		exit 1
+	fi
+	rotation_latest_preview_ready=0
+	for _ in $(seq 1 100); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/free-rotation-latest-poll.png"
+		convert "$temporary/free-rotation-latest-poll.png" -crop \
+			"40x100+$rotation_image_region_x+$rotation_image_region_y" +repage \
+			"$temporary/free-rotation-latest-current.png"
+		rotation_latest_difference=$(compare -metric AE \
+			"$temporary/free-rotation-preview-baseline.png" \
+			"$temporary/free-rotation-latest-current.png" null: 2>&1 || true)
+		if [ "$rotation_latest_difference" != "0" ]; then
+			rotation_latest_preview_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$rotation_latest_preview_ready" -ne 1 ]; then
+		echo "UI smoke test: free-rotation did not publish the final released slider angle" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+else
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$rotation_slider_x" "$rotation_slider_y" click 1
+fi
 DISPLAY=":$display_number" xdotool key Return
 if [ "$visual_assertions" -eq 1 ]; then
 	rotation_editor_applied=0

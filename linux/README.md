@@ -1267,12 +1267,14 @@ rotate, mirror, crop, resize, free rotation, or perspective correction to an ani
 frame currently displayed into a still image.
 
 **Rotate...** in the full context menu opens the free-rotation editor. Adjust the angle with its slider,
-mouse wheel, or Left/Right keys (0.1° per step, or 1° with Shift); Home resets to zero. The A, P, and
-G toggles control automatic corner cropping, preservation of the source aspect ratio, and an alignment
-grid over the preview. The preview is prepared off-thread and capped at 2048 pixels per side and four
-megapixels; Apply uses a cancellable full-resolution operation, and Cancel discards the preview. A
-zero-degree Apply is a no-op. A crop reduced to one row still samples the rotated image across the
-whole row. Free rotation of an animated image retains the current frame as a still.
+mouse wheel, or Left/Right keys (0.1° per step, or 1° with Shift); Home resets to zero. While dragging
+the slider, the last completed preview stays visible and preview processing waits until release, so
+angles passed during a slow update are not displayed. The A, P, and G toggles control automatic corner
+cropping, preservation of the source aspect ratio, and an alignment grid over the preview. The preview
+is prepared off-thread and capped at 2048 pixels per side and four megapixels; Apply uses a cancellable
+full-resolution operation, and Cancel discards the preview. A zero-degree Apply is a no-op. A crop
+reduced to one row still samples the rotated image across the whole row. Free rotation of an animated
+image retains the current frame as a still.
 Reloading a changed source closes its editor and discards any pending rotation.
 
 **Perspective correction...** in the full context menu opens a preview editor with separate left- and

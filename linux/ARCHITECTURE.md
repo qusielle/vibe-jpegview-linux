@@ -177,13 +177,15 @@ should normally be added to one of these focused modules and covered by the matc
   and premultiplied-alpha interpolation. Collapsed one-pixel output axes sample their center line;
   both affine source coordinates advance across columns even when the output has only one row.
 - `free_rotation_model`: dialog session state and parameter revisions for free-rotation editing.
-  Preview results match both the open session and its current parameter revision; applying freezes
-  edits and rejects preview completions until failure resumes editing or the document commit closes
-  the session. Viewer opens it from the full context menu and routes input through the modal event
-  phase. Preview textures are created and destroyed on the renderer thread; a matching final worker
-  result replaces the document only after its renderer texture uploads successfully. Cancel and a
-  zero-degree apply leave the document revision unchanged. Selecting or reloading a source closes
-  its previous editor session and releases modal playback suppression before replacing the owner.
+  Preview results match both the open session and its current parameter revision, while the last
+  completed preview remains displayable for that session during later work. Slider drags cancel stale
+  preview work and defer a new request until release. Applying freezes edits and rejects preview
+  completions until failure resumes editing or the document commit closes the session. Viewer opens it
+  from the full context menu and routes input through the modal event phase. Preview textures are
+  created and destroyed on the renderer thread; a matching final worker result replaces the document
+  only after its renderer texture uploads successfully. Cancel and a zero-degree apply leave the
+  document revision unchanged. Selecting or reloading a source closes its previous editor session and
+  releases modal playback suppression before replacing the owner.
 - `perspective_correction_model`: bounded edge-adjustment, crop/aspect and grid state for the
   perspective-correction dialog, including session and preview revisions. Apply freezes edits and
   rejects stale previews until failure resumes the editor or a successful document commit closes it.

@@ -41,6 +41,7 @@ public:
 	const std::string& Message() const { return message_; }
 	std::uint64_t SessionId() const { return sessionId_; }
 	std::uint64_t PreviewRevision() const { return previewRevision_; }
+	bool OwnsPreviewSession(std::uint64_t sessionId) const;
 	bool MatchesPreview(std::uint64_t sessionId, std::uint64_t revision) const;
 
 private:

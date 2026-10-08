@@ -3043,29 +3043,34 @@ private:
 				pending.transformEditorSessionId, pending.transformPreviewRevision) &&
 				imageDocument_.Matches(result->expected);
 			if (currentPreview && result->success && result->outputPixels) {
-				SDL_Texture* previewTexture = CreateTexture(*result->outputPixels);
-				if (previewTexture == nullptr) {
-					freeRotationDialog_.SetMessage("Could not upload preview");
+				const std::size_t bytes = result->outputPixels->bgra.size();
+				auto nextReservation = cacheBudget_->TrackTemporary(bytes,
+					jpegview_linux::CacheMemoryCategory::ActiveWorkingData);
+				if (!nextReservation) {
+					freeRotationDialog_.SetMessage("Could not account preview memory");
 				} else {
-					DestroyFreeRotationPreview();
-					const std::size_t bytes = result->outputPixels->bgra.size();
-					freeRotationTextureReservation_ = cacheBudget_->TrackTemporary(bytes,
-						jpegview_linux::CacheMemoryCategory::ActiveWorkingData);
-					if (!freeRotationTextureReservation_) {
-						DestroyTextureMeasured(previewTexture);
-						freeRotationDialog_.SetMessage("Could not account preview memory");
+					SDL_Texture* previewTexture = CreateTexture(*result->outputPixels);
+					if (previewTexture == nullptr) {
+						freeRotationDialog_.SetMessage("Could not upload preview");
 					} else {
+						SDL_Texture* previousTexture = freeRotationPreviewTexture_;
+						auto previousReservation =
+							std::move(freeRotationTextureReservation_);
 						freeRotationPreviewTexture_ = previewTexture;
+						freeRotationTextureReservation_ = std::move(nextReservation);
 						freeRotationPreviewWidth_ = result->outputPixels->width;
 						freeRotationPreviewHeight_ = result->outputPixels->height;
 						freeRotationPreviewHasTransparency_ =
 							result->outputPixels->hasTransparency;
 						freeRotationPreviewSessionId_ = pending.transformEditorSessionId;
-						freeRotationPreviewRevision_ = pending.transformPreviewRevision;
 						const SDL_Rect area = ImageAreaRect();
 						freeRotationPreviewViewport_.Fit(freeRotationPreviewWidth_,
 							freeRotationPreviewHeight_, area.w, area.h);
 						freeRotationDialog_.SetMessage({});
+						if (previousTexture != nullptr) {
+							DestroyTextureMeasured(previousTexture, previousReservation.Bytes());
+						}
+						previousReservation.Reset();
 					}
 				}
 			} else if (currentPreview &&
@@ -9534,7 +9539,6 @@ private:
 		freeRotationPreviewHeight_ = 0;
 		freeRotationPreviewHasTransparency_ = false;
 		freeRotationPreviewSessionId_ = 0;
-		freeRotationPreviewRevision_ = 0;
 	}
 
 	void CancelFreeRotationPreviewRequest() {
@@ -9547,11 +9551,16 @@ private:
 	bool RequestFreeRotationPreview() {
 		if (!freeRotationDialog_.IsOpen() || freeRotationDialog_.IsApplying() ||
 			fileList_.Empty() || currentSelectedLoadPending_) return false;
+		if (freeRotationAngleDragging_) {
+			freeRotationAngleDragChanged_ = true;
+			CancelFreeRotationPreviewRequest();
+			freeRotationDialog_.SetMessage("Release to update preview");
+			return true;
+		}
 		if (pendingImageOperation_.has_value()) {
 			if (pendingImageOperation_->purpose != ImageOperationPurpose::FreeRotationPreview) return false;
 			CancelFreeRotationPreviewRequest();
 		}
-		DestroyFreeRotationPreview();
 		jpegview_linux::ImageOperationSpec operation;
 		operation.kind = jpegview_linux::ImageOperationKind::FreeRotatePreview;
 		operation.clockwiseDegrees = freeRotationDialog_.Parameters().clockwiseDegrees;
@@ -9580,6 +9589,7 @@ private:
 		}
 		freeRotationDialog_.Close();
 		freeRotationAngleDragging_ = false;
+		freeRotationAngleDragChanged_ = false;
 		DestroyFreeRotationPreview();
 		if (rotationModalPlaybackSuppressed_) {
 			rotationModalPlaybackSuppressed_ = false;
@@ -9592,6 +9602,7 @@ private:
 	void CompleteFreeRotationApply(bool resumePlayback) {
 		freeRotationDialog_.CompleteApply();
 		freeRotationAngleDragging_ = false;
+		freeRotationAngleDragChanged_ = false;
 		DestroyFreeRotationPreview();
 		const bool wasSuppressed = rotationModalPlaybackSuppressed_;
 		rotationModalPlaybackSuppressed_ = false;
@@ -9610,6 +9621,8 @@ private:
 			pictureLevelsPanelOpen_ || confirmationOpen_ || aboutOpen_ || helpOpen_ ||
 			archivePasswordDialog_.IsOpen() || advancedConfiguration_.IsOpen()) return;
 		if (!freeRotationDialog_.Open(CurrentImage().width, CurrentImage().height)) return;
+		freeRotationAngleDragging_ = false;
+		freeRotationAngleDragChanged_ = false;
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
 		batchCopyDialog_.Close();
@@ -9628,6 +9641,8 @@ private:
 			return;
 		}
 		if (!freeRotationDialog_.BeginApply()) return;
+		freeRotationAngleDragging_ = false;
+		freeRotationAngleDragChanged_ = false;
 		CancelFreeRotationPreviewRequest();
 		jpegview_linux::ImageOperationSpec operation;
 		operation.kind = jpegview_linux::ImageOperationKind::FreeRotate;
@@ -9647,8 +9662,17 @@ private:
 		const double fraction = static_cast<double>(x - slider.x) /
 			static_cast<double>(std::max(1, slider.w));
 		if (freeRotationDialog_.SetAngleDegrees(-180.0 + fraction * 360.0)) {
+			freeRotationAngleDragChanged_ = true;
 			(void)RequestFreeRotationPreview();
 		}
+	}
+
+	void FinishFreeRotationAngleDrag() {
+		if (!freeRotationAngleDragging_) return;
+		freeRotationAngleDragging_ = false;
+		const bool changed = freeRotationAngleDragChanged_;
+		freeRotationAngleDragChanged_ = false;
+		if (changed) (void)RequestFreeRotationPreview();
 	}
 
 	void ToggleFreeRotationOption(int index) {
@@ -9670,7 +9694,7 @@ private:
 			break;
 		case SDL_WINDOWEVENT:
 			if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-				freeRotationAngleDragging_ = false;
+				FinishFreeRotationAngleDrag();
 			} else if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
 				event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
 				const SDL_Rect area = ImageAreaRect();
@@ -9723,6 +9747,7 @@ private:
 			} else if (PointInRect(event.button.x, event.button.y,
 				FreeRotationAngleSliderRect())) {
 				freeRotationAngleDragging_ = true;
+				freeRotationAngleDragChanged_ = false;
 				SetFreeRotationAngleFromSlider(event.button.x);
 			} else {
 				for (int index = 0; index < 3; ++index) {
@@ -9734,7 +9759,7 @@ private:
 			}
 			break;
 		case SDL_MOUSEBUTTONUP:
-			if (event.button.button == SDL_BUTTON_LEFT) freeRotationAngleDragging_ = false;
+			if (event.button.button == SDL_BUTTON_LEFT) FinishFreeRotationAngleDrag();
 			break;
 		case SDL_MOUSEWHEEL: {
 			const int ticks = std::clamp(event.wheel.y, -20, 20);
@@ -13899,8 +13924,7 @@ private:
 		SDL_Texture* nextPageTexture = nullptr;
 		if (freeRotationOpen) {
 			if (freeRotationPreviewTexture_ != nullptr &&
-				freeRotationPreviewSessionId_ == freeRotationDialog_.SessionId() &&
-				freeRotationPreviewRevision_ == freeRotationDialog_.PreviewRevision()) {
+				freeRotationDialog_.OwnsPreviewSession(freeRotationPreviewSessionId_)) {
 				renderTexture = freeRotationPreviewTexture_;
 				const jpegview_linux::ViewportRect previewDestination =
 					freeRotationPreviewViewport_.Destination(freeRotationPreviewWidth_,
@@ -13976,11 +14000,10 @@ private:
 					perspectiveCorrectionDialog_.SessionId() &&
 				perspectiveCorrectionPreviewRevision_ ==
 					perspectiveCorrectionDialog_.PreviewRevision();
-			const bool freeRotationPreviewIsCurrent = freeRotationOpen &&
+			const bool freeRotationPreviewIsDisplayed = freeRotationOpen &&
 				freeRotationPreviewTexture_ == renderTexture &&
-				freeRotationPreviewSessionId_ == freeRotationDialog_.SessionId() &&
-				freeRotationPreviewRevision_ == freeRotationDialog_.PreviewRevision();
-			const bool imageHasTransparency = freeRotationPreviewIsCurrent ?
+				freeRotationDialog_.OwnsPreviewSession(freeRotationPreviewSessionId_);
+			const bool imageHasTransparency = freeRotationPreviewIsDisplayed ?
 				freeRotationPreviewHasTransparency_ : perspectivePreviewIsCurrent ?
 					perspectiveCorrectionPreviewHasTransparency_ : CurrentImage().hasTransparency;
 			if (imageHasTransparency || (!transformEditorOpen && transitionTexture_ != nullptr &&
@@ -13989,7 +14012,7 @@ private:
 			}
 			if (transformEditorOpen) {
 				if (renderTexture != nullptr) SDL_RenderCopy(renderer_, renderTexture, nullptr, &destination);
-				const bool showGrid = freeRotationPreviewIsCurrent ?
+				const bool showGrid = freeRotationPreviewIsDisplayed ?
 					freeRotationDialog_.Parameters().showGrid :
 					perspectivePreviewIsCurrent &&
 					perspectiveCorrectionDialog_.Parameters().showGrid;
@@ -14251,7 +14274,6 @@ private:
 	int freeRotationPreviewHeight_ = 0;
 	bool freeRotationPreviewHasTransparency_ = false;
 	std::uint64_t freeRotationPreviewSessionId_ = 0;
-	std::uint64_t freeRotationPreviewRevision_ = 0;
 	SDL_Texture* perspectiveCorrectionPreviewTexture_ = nullptr;
 	jpegview_linux::CacheReservation perspectiveCorrectionTextureReservation_;
 	int perspectiveCorrectionPreviewWidth_ = 0;
@@ -14323,6 +14345,7 @@ private:
 	int levelsDraggingControl_ = -1;
 	bool unsharpDialogOpen_ = false;
 	bool freeRotationAngleDragging_ = false;
+	bool freeRotationAngleDragChanged_ = false;
 	bool rotationModalPlaybackSuppressed_ = false;
 	int perspectiveCorrectionActiveSlider_ = 0;
 	int perspectiveCorrectionDraggingSlider_ = -1;
