@@ -1232,6 +1232,7 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 	rotation_animation_config="$temporary/free-rotation-animation-config"
 	mkdir -p "$rotation_animation_directory" "$rotation_animation_config/jpegview-linux"
 	convert -delay 300 -size 800x600 xc:red -delay 300 -size 800x600 xc:blue \
+		-delay 300 -size 800x600 xc:lime -delay 300 -size 800x600 xc:yellow \
 		-loop 0 "$rotation_animation_directory/01-animation.gif"
 	printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\ninfo_visible=1\n' \
 		> "$rotation_animation_config/jpegview-linux/settings.conf"
@@ -1301,7 +1302,7 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 		"$temporary/free-rotation-animation-before.png" \
 		-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
 	case "$rotation_animation_before_color" in
-		FF0000|0000FF) ;;
+		FF0000|0000FF|00FF00|FFFF00) ;;
 		*) echo "UI smoke test: animation fixture did not show a solid starting frame ($rotation_animation_before_color)" >&2; exit 1 ;;
 	esac
 	rotation_animation_original_color=$rotation_animation_before_color
@@ -1428,6 +1429,41 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 		echo "UI smoke test: animation did not resume from its retained frame after rotation" >&2
 		exit 1
 	fi
+	DISPLAY=":$display_number" xdotool key p
+	sleep 0.15
+	assert_held_animation_steps() {
+		held_animation_key=$1
+		held_animation_direction=$2
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/held-animation-start.png"
+		held_animation_color=$(convert "$temporary/held-animation-start.png" \
+			-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+		held_animation_colors=" $held_animation_color "
+		held_animation_color_count=1
+		DISPLAY=":$display_number" xdotool keydown "$held_animation_key"
+		for _ in $(seq 1 40); do
+			sleep 0.05
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/held-animation-frame.png"
+			held_animation_color=$(convert "$temporary/held-animation-frame.png" \
+				-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
+			case "$held_animation_colors" in
+				*" $held_animation_color "*) ;;
+				*)
+					held_animation_colors="$held_animation_colors$held_animation_color "
+					held_animation_color_count=$((held_animation_color_count + 1))
+					;;
+			esac
+		done
+		DISPLAY=":$display_number" xdotool keyup "$held_animation_key"
+		# The initial press visits one frame; a held repeat must reach another.
+		if [ "$held_animation_color_count" -lt 3 ]; then
+			echo "UI smoke test: holding $held_animation_direction did not step through multiple animation frames ($held_animation_colors)" >&2
+			exit 1
+		fi
+	}
+	assert_held_animation_steps bracketright forward
+	assert_held_animation_steps bracketleft backward
 	stop_viewer
 fi
 

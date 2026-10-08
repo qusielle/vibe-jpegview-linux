@@ -13683,6 +13683,9 @@ private:
 					(modifiers & 0x0003u) != 0 &&
 					(event.key.keysym.sym == SDLK_LEFT || event.key.keysym.sym == SDLK_RIGHT ||
 						event.key.keysym.sym == SDLK_UP || event.key.keysym.sym == SDLK_DOWN);
+				const bool repeatableAnimationStepKey = (modifiers & 0x03C3u) == 0 &&
+					(event.key.keysym.sym == SDLK_LEFTBRACKET ||
+						event.key.keysym.sym == SDLK_RIGHTBRACKET);
 				if (plainNavigationKey || spaceNavigationKey) {
 					interactionWorkPolicy_.NotifyActivity(
 						jpegview_linux::InteractionActivity::HeldNavigation);
@@ -13691,7 +13694,7 @@ private:
 				// physical press. Apply shift-pan repeats directly, but let image
 				// navigation poll key state after each frame to avoid a backlog.
 				if (event.key.repeat != 0 && !plainNavigationKey && !shiftPanKey &&
-					!spaceNavigationKey) break;
+					!spaceNavigationKey && !repeatableAnimationStepKey) break;
 				if (spaceNavigationKey && event.key.repeat != 0) {
 					heldNavigation_.KeyDown(spaceNavigationDirection,
 						event.key.keysym.scancode, true, shiftSpaceNavigation);

@@ -1329,12 +1329,13 @@ delays. The `Movie` menu plays animated or multi-page images at a selected fixed
 30, 50, or 100 fps), and advances a folder of still images when the current image has no frames.
 The original frame loop count is honored when a format provides one. `Alt+R` resumes stopped playback.
 For an animated image, `[` and `]` step backward and forward through its frames, wrapping within
-that image and freezing playback on the selected frame; `P` resumes or freezes animation. `Alt+[` adds
-50 ms to each frame delay, `Alt+]` removes 50 ms, and `Alt+P` restores the source frame delays. The
-override stays with the current image until it is replaced or reloaded and is not saved in settings
-or Recents. Delays are bounded to 10–60,000 ms. Changing or resetting a delay stops Movie or slideshow
-timing for the current image and uses animation frame timing; a custom delay remains active until
-reset or image replacement. Movie's selected FPS remains its separate timing control. Manual frame
+that image and freezing playback on the selected frame; holding either key repeats the step as each
+frame becomes ready. `P` resumes or freezes animation. `Alt+[` adds 50 ms to each frame delay,
+`Alt+]` removes 50 ms, and `Alt+P` restores the source frame delays. The override stays with the current
+image until it is replaced or reloaded and is not saved in settings or Recents. Delays are bounded to
+10–60,000 ms. Changing or resetting a delay stops Movie or slideshow timing for the current image and
+uses animation frame timing; a custom delay remains active until reset or image replacement. Movie's
+selected FPS remains its separate timing control. Manual frame
 holds also stop Movie from advancing to another file. These controls are disabled during slideshow
 mode and while the selected frame or an image/file operation is pending. The F2 picture-information
 panel keeps its playback label stable while the next frame is prepared; its `Frame` line updates when
