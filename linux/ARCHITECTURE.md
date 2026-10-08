@@ -189,11 +189,14 @@ should normally be added to one of these focused modules and covered by the matc
 - `perspective_correction_model`: bounded edge-adjustment, crop/aspect and grid state for the
   perspective-correction dialog, including session and preview revisions. Apply freezes edits and
   rejects stale previews until failure resumes the editor or a successful document commit closes it.
+  Slider drags cancel pending preview work and queue one replacement at release; while a newer preview
+  is prepared, the last successfully uploaded texture remains visible for the current dialog session.
   Viewer opens it from the full context menu, routes its input through the modal event phase, and owns
-  its renderer-thread preview texture/reservation. Its preview pauses animation without advancing
+  its renderer-thread preview texture/reservation. A replacement texture and reservation replace the
+  old pair only after admission and upload succeed. Its preview pauses animation without advancing
   frame-readiness state; every close, source replacement, and successful Apply releases that pause.
-  Pixel work remains in the image operation worker, and a matching full-resolution result replaces
-  the document only after the new texture uploads successfully.
+  Pixel work remains in the image operation worker, and a matching full-resolution result replaces the
+  document only after the new texture uploads successfully.
 - `perspective_dialog_layout`: pure window-relative placement for the perspective editor. It switches
   to a compact control arrangement in short windows, keeping mouse targets inside the client area;
   Viewer recomputes the layout after window resizing. Dense layouts reserve separate option and action

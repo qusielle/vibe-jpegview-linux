@@ -900,8 +900,8 @@ fi
 stop_viewer
 
 # Perspective correction is available from the full transform menu. Cancel
-# preserves the image; changing an edge and applying updates the displayed
-# document through the asynchronous operation path.
+# preserves the image; the last completed preview remains visible while an
+# edge slider is dragged, and release publishes the final preview.
 perspective_image="$temporary/perspective-gradient.ppm"
 write_gradient_ppm "$perspective_image" 64 48
 launch_viewer "$perspective_image"
@@ -1039,14 +1039,140 @@ if ! resize_viewer_window 640 240; then
 	echo "UI smoke test: viewer did not restore the perspective test window size" >&2
 	exit 1
 fi
-perspective_dialog_border_x=16
-perspective_dialog_border_y=8
-perspective_dialog_width=608
-perspective_dialog_height=224
-perspective_button_y=$((perspective_dialog_border_y + perspective_dialog_height - 43 + 15))
+stop_viewer
+perspective_preview_image="$temporary/perspective-preview-gradient.ppm"
+cp "$rotation_image" "$perspective_preview_image"
+launch_viewer "$perspective_preview_image"
+assert_title_prefix "perspective-preview-gradient.ppm" \
+	"large perspective preview fixture did not load"
+if ! resize_viewer_window 1000 700; then
+	cat "$temporary/viewer.log" >&2
+	echo "UI smoke test: viewer did not resize for perspective preview checks" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id" \
+	> "$temporary/perspective-geometry"
+perspective_window_width=$(awk -F= '$1 == "WIDTH" { print $2 }' \
+	"$temporary/perspective-geometry")
+perspective_window_height=$(awk -F= '$1 == "HEIGHT" { print $2 }' \
+	"$temporary/perspective-geometry")
+perspective_dialog_width=$((perspective_window_width - 32))
+perspective_dialog_height=$((perspective_window_height - 16))
+if [ "$perspective_dialog_width" -gt 620 ]; then perspective_dialog_width=620; fi
+if [ "$perspective_dialog_height" -gt 390 ]; then perspective_dialog_height=390; fi
+perspective_dialog_border_x=$(((perspective_window_width - perspective_dialog_width) / 2))
+perspective_dialog_border_y=$(((perspective_window_height - perspective_dialog_height) / 2))
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/perspective-original.png"
+fi
 open_perspective_menu
-DISPLAY=":$display_number" xdotool key --repeat 12 --delay 20 Right
-perspective_apply_x=$((perspective_dialog_border_x + perspective_dialog_width - 198 + 43))
+if [ "$visual_assertions" -eq 1 ]; then
+	perspective_editor_opened=0
+	for _ in $(seq 1 40); do
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-editor-for-drag.png"
+		perspective_border=$(convert "$temporary/perspective-editor-for-drag.png" \
+			-format "%[pixel:p{$perspective_dialog_border_x,$perspective_dialog_border_y}]" info:-)
+		if [ "$perspective_border" = 'srgb(200,210,225)' ]; then
+			perspective_editor_opened=1
+			break
+		fi
+	done
+	if [ "$perspective_editor_opened" -ne 1 ]; then
+		echo "UI smoke test: Perspective correction did not open for preview checks" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	perspective_image_region_x=100
+	perspective_image_region_y=300
+	convert "$temporary/perspective-original.png" -crop \
+		"80x180+$perspective_image_region_x+$perspective_image_region_y" +repage \
+		"$temporary/perspective-original-region.png"
+	DISPLAY=":$display_number" xdotool key --window "$window_id" g
+	perspective_slider_left_x=$((perspective_dialog_border_x + 24 + 515))
+	perspective_slider_y=$((perspective_dialog_border_y + 86 + 11))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$perspective_slider_left_x" "$perspective_slider_y" click 1
+	perspective_first_preview_ready=0
+	for _ in $(seq 1 100); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-first-preview-poll.png"
+		convert "$temporary/perspective-first-preview-poll.png" -crop \
+			"80x180+$perspective_image_region_x+$perspective_image_region_y" +repage \
+			"$temporary/perspective-first-preview-region.png"
+		perspective_preview_difference=$(compare -metric AE \
+			"$temporary/perspective-original-region.png" \
+			"$temporary/perspective-first-preview-region.png" null: 2>&1 || true)
+		if [ "$perspective_preview_difference" != "0" ]; then
+			perspective_first_preview_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$perspective_first_preview_ready" -ne 1 ]; then
+		echo "UI smoke test: first perspective slider preview was not displayed" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	cp "$temporary/perspective-first-preview-region.png" \
+		"$temporary/perspective-preview-baseline.png"
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$perspective_slider_left_x" "$perspective_slider_y" mousedown 1
+	perspective_drag_middle_x=$((perspective_dialog_border_x + 24 + 286))
+	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+		"$perspective_drag_middle_x" "$perspective_slider_y"
+	for drag_stage in middle target; do
+		if [ "$drag_stage" = target ]; then
+			perspective_drag_target_x=$((perspective_dialog_border_x + 24 + 114))
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+				"$perspective_drag_target_x" "$perspective_slider_y"
+		fi
+		sleep 0.05
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-drag-$drag_stage.png"
+		convert "$temporary/perspective-drag-$drag_stage.png" -crop \
+			"80x180+$perspective_image_region_x+$perspective_image_region_y" +repage \
+			"$temporary/perspective-drag-$drag_stage-region.png"
+		perspective_drag_difference=$(compare -metric AE \
+			"$temporary/perspective-preview-baseline.png" \
+			"$temporary/perspective-drag-$drag_stage-region.png" null: 2>&1 || true)
+		if [ "$perspective_drag_difference" != "0" ]; then
+			DISPLAY=":$display_number" xdotool mouseup 1
+			echo "UI smoke test: perspective slider drag replaced the last completed preview" >&2
+			exit 1
+		fi
+	done
+	DISPLAY=":$display_number" xdotool mouseup 1
+	perspective_latest_preview_ready=0
+	for _ in $(seq 1 100); do
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/perspective-latest-poll.png"
+		convert "$temporary/perspective-latest-poll.png" -crop \
+			"80x180+$perspective_image_region_x+$perspective_image_region_y" +repage \
+			"$temporary/perspective-latest-region.png"
+		perspective_latest_difference=$(compare -metric AE \
+			"$temporary/perspective-preview-baseline.png" \
+			"$temporary/perspective-latest-region.png" null: 2>&1 || true)
+		if [ "$perspective_latest_difference" != "0" ]; then
+			perspective_latest_preview_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$perspective_latest_preview_ready" -ne 1 ]; then
+		echo "UI smoke test: perspective correction did not publish the released slider value" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+fi
+perspective_button_y=$((perspective_dialog_border_y + perspective_dialog_height - 13 - 30 + 15))
+perspective_apply_x=$((perspective_dialog_border_x + perspective_dialog_width - 16 - 86 * 2 - 10 + 43))
+if [ "$visual_assertions" -ne 1 ]; then
+	DISPLAY=":$display_number" xdotool key --repeat 12 --delay 20 Right
+fi
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 	"$perspective_apply_x" "$perspective_button_y" click 1
 if [ "$visual_assertions" -eq 1 ]; then

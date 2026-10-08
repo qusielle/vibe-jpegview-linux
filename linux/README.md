@@ -141,7 +141,9 @@ they support.
    retained frame. Apply keeps a still frame and resumes an active movie or slideshow interval.
    **Transform image → Perspective correction...** opens a separate editor with left- and right-edge
    convergence sliders, automatic cropping, source-aspect preservation, and an alignment grid.
-   Its bounded preview runs asynchronously, and Apply corrects the full-resolution image in memory.
+   Its bounded preview runs asynchronously and keeps the last completed image visible while the
+   sliders are adjusted; one final preview is prepared after a drag is released. Apply corrects the
+   full-resolution image in memory.
    Cancel and zero-adjustment Apply leave the document unchanged. Opening the editor pauses playback;
    Cancel resumes it, while applying a correction retains an animation's displayed frame as a still.
    PageUp/PageDown remain logical previous/next. The pixel color sampler is disabled by default;
@@ -1284,11 +1286,13 @@ opposite directions, up to 25% of the source width. Drag a slider, use the mouse
 keys to adjust it, and use Tab to select the other edge; Shift uses finer keyboard or wheel steps.
 Home resets both adjustments. A toggles auto-cropping to covered pixels, P preserves the source aspect
 ratio, and G shows an alignment grid. The preview is generated off-thread and bounded to 2048 pixels
-per side and four megapixels. Apply runs a cancellable full-resolution correction; Cancel leaves the
-document unchanged, and applying zero edge adjustments is a no-op. An animated image retains its
-currently displayed frame as a still. Reloading a changed source closes the editor and discards pending
-correction work. The editor switches to a compact layout in short windows so its sliders, options, and
-Apply/Cancel controls remain available; it recalculates the layout when the window is resized.
+per side and four megapixels. The last completed preview remains visible while a newer one is
+prepared; slider drags cancel obsolete work and prepare one preview at the final released position.
+Apply runs a cancellable full-resolution correction; Cancel leaves the document unchanged, and
+applying zero edge adjustments is a no-op. An animated image retains its currently displayed frame as
+a still. Reloading a changed source closes the editor and discards pending correction work. The editor
+switches to a compact layout in short windows so its sliders, options, and Apply/Cancel controls remain
+available; it recalculates the layout when the window is resized.
 At the smallest sizes, shorter control labels replace the full wording and optional help/status text
 is hidden.
 
