@@ -1,5 +1,6 @@
 #include "image_decoder_internal.h"
 
+#include "exif_orientation.h"
 #include "perf_diagnostics.h"
 
 #include <algorithm>
@@ -298,7 +299,7 @@ toff_t SizeTiff(thandle_t handle) {
 }
 
 bool DecodeTiff(const std::filesystem::path& filename, DecodedImage& image,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& context) {
 	CodecSourceReadTracker sourceReads("libtiff");
 	std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(nullptr, &std::fclose);
 	TiffInput input;
@@ -321,11 +322,16 @@ bool DecodeTiff(const std::filesystem::path& filename, DecodedImage& image,
 	}
 	std::unique_ptr<TIFF, decltype(&TIFFClose)> tiffOwner(tiff, &TIFFClose);
 	for (tdir_t directory = 0; TIFFSetDirectory(tiff, directory) != 0; ++directory) {
+		if (!context.Continue()) {
+			errorMessage = "TIFF decode was cancelled";
+			return false;
+		}
 		uint32_t width = 0;
 		uint32_t height = 0;
 		if (TIFFGetField(tiff, TIFFTAG_IMAGEWIDTH, &width) == 0 ||
 			TIFFGetField(tiff, TIFFTAG_IMAGELENGTH, &height) == 0 ||
-			width > std::numeric_limits<int>::max() || height > std::numeric_limits<int>::max()) {
+			width > std::numeric_limits<int>::max() || height > std::numeric_limits<int>::max() ||
+			!ValidDimensions(static_cast<int>(width), static_cast<int>(height), errorMessage)) {
 			errorMessage = "invalid TIFF dimensions";
 			return false;
 		}
@@ -337,19 +343,52 @@ bool DecodeTiff(const std::filesystem::path& filename, DecodedImage& image,
 			errorMessage = "out of memory";
 			return false;
 		}
-		if (!TIFFReadRGBAImageOriented(tiff, width, height, raster.data(), ORIENTATION_TOPLEFT, 0)) {
+		struct RgbaImageOwner {
+			TIFFRGBAImage image{};
+			bool active = false;
+			~RgbaImageOwner() {
+				if (active) TIFFRGBAImageEnd(&image);
+			}
+		} rgbaOwner;
+		char rgbaError[1024]{};
+		if (!TIFFRGBAImageBegin(&rgbaOwner.image, tiff, 1, rgbaError)) {
 			errorMessage = "TIFF frame decode failed";
 			return false;
 		}
-		std::vector<std::uint8_t> bgra(pixelCount * 4);
-		for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
-			const uint32_t rgba = raster[pixel];
-			bgra[pixel * 4] = TIFFGetB(rgba);
-			bgra[pixel * 4 + 1] = TIFFGetG(rgba);
-			bgra[pixel * 4 + 2] = TIFFGetR(rgba);
-			bgra[pixel * 4 + 3] = TIFFGetA(rgba);
+		rgbaOwner.active = true;
+		int orientation = rgbaOwner.image.orientation;
+		if (!IsValidExifOrientation(orientation)) orientation = ORIENTATION_TOPLEFT;
+		// Ask libtiff for the stored top-left raster; the shared EXIF transform below
+		// handles all eight orientations, including the axis-swapping cases it cannot rotate.
+		rgbaOwner.image.orientation = ORIENTATION_TOPLEFT;
+		rgbaOwner.image.req_orientation = ORIENTATION_TOPLEFT;
+		if (!TIFFRGBAImageGet(&rgbaOwner.image, raster.data(), width, height)) {
+			errorMessage = "TIFF frame decode failed";
+			return false;
 		}
-		if (!AppendBGRA(image, static_cast<int>(width), static_cast<int>(height), std::move(bgra), 0, errorMessage)) {
+		TIFFRGBAImageEnd(&rgbaOwner.image);
+		rgbaOwner.active = false;
+		std::vector<std::uint8_t> bgra(pixelCount * 4);
+		for (uint32_t y = 0; y < height; ++y) {
+			if ((y & 15u) == 0 && !context.Continue()) {
+				errorMessage = "TIFF decode was cancelled";
+				return false;
+			}
+			for (uint32_t x = 0; x < width; ++x) {
+				const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
+				const uint32_t rgba = raster[pixel];
+				bgra[pixel * 4] = TIFFGetB(rgba);
+				bgra[pixel * 4 + 1] = TIFFGetG(rgba);
+				bgra[pixel * 4 + 2] = TIFFGetR(rgba);
+				bgra[pixel * 4 + 3] = TIFFGetA(rgba);
+			}
+		}
+		int orientedWidth = static_cast<int>(width);
+		int orientedHeight = static_cast<int>(height);
+		if (!ApplyExifOrientation(orientation, orientedWidth, orientedHeight,
+			bgra, errorMessage, [&context] { return context.Continue(); }) ||
+			!AppendBGRA(image, orientedWidth, orientedHeight, std::move(bgra),
+				0, errorMessage)) {
 			return false;
 		}
 	}

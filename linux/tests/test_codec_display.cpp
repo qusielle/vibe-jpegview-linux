@@ -1,7 +1,15 @@
 #include "test_harness.h"
 #include "test_support.h"
+#include "image_metadata_reader.h"
 
+#include <array>
 #include <zlib.h>
+
+#if JPEGVIEW_HAVE_TIFF
+extern "C" {
+#include <tiffio.h>
+}
+#endif
 
 namespace {
 
@@ -546,6 +554,46 @@ void TestContentDispatchPreservesContainerPolicy() {
 }
 
 #if JPEGVIEW_HAVE_WEBP
+void AppendTestWebpChunk(std::vector<std::uint8_t>& output, const char* type,
+	const std::vector<std::uint8_t>& payload) {
+	output.insert(output.end(), type, type + 4);
+	const std::uint32_t size = static_cast<std::uint32_t>(payload.size());
+	output.push_back(static_cast<std::uint8_t>(size));
+	output.push_back(static_cast<std::uint8_t>(size >> 8));
+	output.push_back(static_cast<std::uint8_t>(size >> 16));
+	output.push_back(static_cast<std::uint8_t>(size >> 24));
+	output.insert(output.end(), payload.begin(), payload.end());
+	if ((payload.size() & 1u) != 0) output.push_back(0);
+}
+
+std::vector<std::uint8_t> AddWebpExifOrientation(
+	const std::vector<std::uint8_t>& encoded, int width, int height, int orientation) {
+	Expect(encoded.size() >= 20 && encoded[0] == 'R' && encoded[1] == 'I' &&
+		encoded[2] == 'F' && encoded[3] == 'F' && encoded[8] == 'W' &&
+		encoded[9] == 'E' && encoded[10] == 'B' && encoded[11] == 'P',
+		"orientation fixture source has no WebP RIFF header");
+	std::vector<std::uint8_t> result(encoded.begin(), encoded.begin() + 12);
+	std::vector<std::uint8_t> extendedHeader = {0x08, 0, 0, 0};
+	for (int shift : {0, 8, 16}) {
+		extendedHeader.push_back(static_cast<std::uint8_t>((width - 1) >> shift));
+	}
+	for (int shift : {0, 8, 16}) {
+		extendedHeader.push_back(static_cast<std::uint8_t>((height - 1) >> shift));
+	}
+	AppendTestWebpChunk(result, "VP8X", extendedHeader);
+	result.insert(result.end(), encoded.begin() + 12, encoded.end());
+	const std::vector<std::uint8_t> tiff = {
+		'I', 'I', 42, 0, 8, 0, 0, 0, 1, 0,
+		0x12, 0x01, 3, 0, 1, 0, 0, 0,
+		static_cast<std::uint8_t>(orientation), 0, 0, 0, 0, 0, 0, 0};
+	AppendTestWebpChunk(result, "EXIF", tiff);
+	const std::uint32_t riffSize = static_cast<std::uint32_t>(result.size() - 8);
+	for (int byte = 0; byte < 4; ++byte) {
+		result[4 + byte] = static_cast<std::uint8_t>(riffSize >> (byte * 8));
+	}
+	return result;
+}
+
 void TestPhotoSizedLossyVp8WebPDecode() {
 	TemporaryDirectory temporary;
 	constexpr int width = 1920;
@@ -632,6 +680,28 @@ void TestPhotoSizedLossyVp8WebPDecode() {
 	}
 	Expect(frame.bgra[sample + 3] == 255,
 		"opaque lossy VP8 WebP unexpectedly decoded a transparent center pixel");
+
+	const fs::path orientedPath = temporary.path() / "oriented-vp8.webp";
+	WriteBytes(orientedPath,
+		AddWebpExifOrientation(ReadBytes(unknownSuffixFilename), width, height, 6));
+	DecodedImage oriented;
+	error.clear();
+	Expect(jpegview_linux::DecodeImage(orientedPath, oriented, error) &&
+		oriented.frames.size() == 1 && oriented.frames.front().width == height &&
+		oriented.frames.front().height == width,
+		"WebP decoder did not apply axis-swapping EXIF orientation: " + error);
+	for (const std::pair<int, int>& point : {std::make_pair(17, 33),
+		std::make_pair(500, 700)}) {
+		const std::size_t sourceOffset =
+			(static_cast<std::size_t>(point.second) * width + point.first) * 4;
+		const std::size_t targetOffset =
+			(static_cast<std::size_t>(point.first) * height +
+			(height - 1 - point.second)) * 4;
+		Expect(std::equal(frame.bgra.begin() + sourceOffset,
+			frame.bgra.begin() + sourceOffset + 4,
+			oriented.frames.front().bgra.begin() + targetOffset),
+			"WebP EXIF orientation changed pixel colors or mapped them incorrectly");
+	}
 
 	DecodedImage displayDecoded;
 	int sourceWidth = 0;
@@ -971,6 +1041,29 @@ void TestDecoderFailures() {
 		"truncated native JPEG decode did not fail cleanly");
 }
 
+std::vector<std::uint8_t> AddJpegExifOrientation(
+	const std::vector<std::uint8_t>& jpeg, int orientation) {
+	const std::vector<std::uint8_t> payload = {
+		'E', 'x', 'i', 'f', 0, 0,
+		'I', 'I', 42, 0, 8, 0, 0, 0,
+		1, 0,
+		0x12, 0x01, 3, 0, 1, 0, 0, 0,
+		static_cast<std::uint8_t>(orientation), 0, 0, 0,
+		0, 0, 0, 0};
+	Expect(jpeg.size() >= 2 && jpeg[0] == 0xff && jpeg[1] == 0xd8,
+		"orientation fixture source has no JPEG start marker");
+	const std::size_t segmentLength = payload.size() + 2;
+	std::vector<std::uint8_t> output;
+	output.reserve(jpeg.size() + payload.size() + 4);
+	output.insert(output.end(), jpeg.begin(), jpeg.begin() + 2);
+	output.insert(output.end(), {0xff, 0xe1,
+		static_cast<std::uint8_t>(segmentLength >> 8),
+		static_cast<std::uint8_t>(segmentLength)});
+	output.insert(output.end(), payload.begin(), payload.end());
+	output.insert(output.end(), jpeg.begin() + 2, jpeg.end());
+	return output;
+}
+
 void TestJpegDisplayDecodeScaling() {
 	TemporaryDirectory temporary;
 	const fs::path filename = temporary.path() / "large-preview.jpg";
@@ -1001,6 +1094,72 @@ void TestJpegDisplayDecodeScaling() {
 	Expect(jpegview_linux::ReadJpegDimensions(filename, headerWidth, headerHeight, error) &&
 		headerWidth == width && headerHeight == height,
 		"JPEG header probe returned incorrect source dimensions");
+	DecodedImage storedPixels;
+	Expect(jpegview_linux::DecodeImage(filename, storedPixels, error) &&
+		storedPixels.frames.size() == 1 && storedPixels.frames.front().width == width &&
+		storedPixels.frames.front().height == height,
+		"cannot decode the un-oriented JPEG pixel reference: " + error);
+	const std::vector<std::uint8_t> encodedJpeg = ReadBytes(filename);
+	for (int orientation = 1; orientation <= 8; ++orientation) {
+		const fs::path orientedPath = temporary.path() /
+			("orientation-" + std::to_string(orientation) + ".jpg");
+		WriteBytes(orientedPath, AddJpegExifOrientation(encodedJpeg, orientation));
+		int orientedSourceWidth = 0;
+		int orientedSourceHeight = 0;
+		Expect(jpegview_linux::ReadJpegDimensions(orientedPath, orientedSourceWidth,
+			orientedSourceHeight, error),
+			"EXIF-oriented JPEG dimensions could not be read: " + error);
+		const bool swapsAxes = orientation >= 5;
+		Expect(orientedSourceWidth == (swapsAxes ? height : width) &&
+			orientedSourceHeight == (swapsAxes ? width : height),
+			"EXIF orientation did not affect JPEG source dimensions");
+		DecodedImage orientedPixels;
+		Expect(jpegview_linux::DecodeImage(orientedPath, orientedPixels, error) &&
+			orientedPixels.frames.size() == 1 &&
+			orientedPixels.frames.front().width == orientedSourceWidth &&
+			orientedPixels.frames.front().height == orientedSourceHeight,
+			"JPEG decode did not apply EXIF orientation " +
+			std::to_string(orientation) + ": " + error);
+		const auto mapped = [orientation, width, height](int x, int y) {
+			switch (orientation) {
+			case 2: return std::pair<int, int>{width - 1 - x, y};
+			case 3: return std::pair<int, int>{width - 1 - x, height - 1 - y};
+			case 4: return std::pair<int, int>{x, height - 1 - y};
+			case 5: return std::pair<int, int>{y, x};
+			case 6: return std::pair<int, int>{height - 1 - y, x};
+			case 7: return std::pair<int, int>{height - 1 - y, width - 1 - x};
+			case 8: return std::pair<int, int>{y, width - 1 - x};
+			default: return std::pair<int, int>{x, y};
+			}
+		};
+		for (const std::pair<int, int>& point : {std::make_pair(7, 13),
+			std::make_pair(44, 35)}) {
+			const std::size_t sourceOffset =
+				(static_cast<std::size_t>(point.second) * width + point.first) * 4;
+			const auto target = mapped(point.first, point.second);
+			const std::size_t targetOffset =
+				(static_cast<std::size_t>(target.second) * orientedSourceWidth +
+				target.first) * 4;
+			Expect(std::equal(storedPixels.frames.front().bgra.begin() + sourceOffset,
+				storedPixels.frames.front().bgra.begin() + sourceOffset + 4,
+				orientedPixels.frames.front().bgra.begin() + targetOffset),
+				"EXIF orientation changed source pixel colors or mapped them incorrectly");
+		}
+	}
+	const fs::path portraitJpeg = temporary.path() / "orientation-6.jpg";
+	int portraitWidth = 0;
+	int portraitHeight = 0;
+	DecodedImage portraitPreview;
+	int portraitSourceWidth = 0;
+	int portraitSourceHeight = 0;
+	Expect(jpegview_linux::ReadJpegDimensions(portraitJpeg, portraitWidth,
+		portraitHeight, error) && portraitWidth == height && portraitHeight == width &&
+		jpegview_linux::DecodeJpegForDisplay(portraitJpeg, 9, 7, portraitPreview,
+			portraitSourceWidth, portraitSourceHeight, error) &&
+		portraitSourceWidth == height && portraitSourceHeight == width &&
+		portraitPreview.frames.front().width >= 9 &&
+		portraitPreview.frames.front().height >= 7,
+		"portrait JPEG display dimensions or reduced decode ignored EXIF orientation: " + error);
 	const jpegview_linux::SourceDescriptor cropSource =
 		jpegview_linux::DescribeImageSource(filename);
 	const jpegview_linux::WorkContext cropWork = jpegview_linux::MakeWorkContext(
@@ -1089,6 +1248,56 @@ void TestJpegDisplayDecodeScaling() {
 		rotatedPrepared->bgra.size() == 8u * 10u * 4u,
 		"reduced-DCT JPEG preparation did not rotate before producing the final slot size");
 }
+
+#if JPEGVIEW_HAVE_TIFF
+void TestTiffExifOrientation() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "portrait-exif.tif";
+	TIFF* tiff = TIFFOpen(filename.string().c_str(), "w");
+	Expect(tiff != nullptr, "cannot create oriented TIFF fixture");
+	const bool tagsSet =
+		TIFFSetField(tiff, TIFFTAG_IMAGEWIDTH, 2u) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, 3u) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, 3) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, 8) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_ORIENTATION, ORIENTATION_RIGHTTOP) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_NONE) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_ROWSPERSTRIP, 3u) == 1;
+	bool rowsWritten = tagsSet;
+	for (std::uint32_t y = 0; rowsWritten && y < 3; ++y) {
+		std::array<std::uint8_t, 6> row{};
+		for (std::uint32_t x = 0; x < 2; ++x) {
+			const std::uint8_t value = static_cast<std::uint8_t>((y * 2 + x + 1) * 30);
+			row[x * 3] = value;
+			row[x * 3 + 1] = value;
+			row[x * 3 + 2] = value;
+		}
+		rowsWritten = TIFFWriteScanline(tiff, row.data(), y, 0) >= 0;
+	}
+	TIFFClose(tiff);
+	Expect(tagsSet && rowsWritten, "cannot write oriented TIFF fixture data");
+
+	jpegview_linux::DecodedImage decoded;
+	std::string error;
+	Expect(jpegview_linux::DecodeImage(filename, decoded, error) &&
+		decoded.frames.size() == 1 && decoded.frames.front().width == 3 &&
+		decoded.frames.front().height == 2,
+		"TIFF decoder did not apply its EXIF orientation: " + error);
+	const std::array<std::uint8_t, 6> expected = {150, 90, 30, 180, 120, 60};
+	for (std::size_t pixel = 0; pixel < expected.size(); ++pixel) {
+		Expect(decoded.frames.front().bgra[pixel * 4] == expected[pixel] &&
+			decoded.frames.front().bgra[pixel * 4 + 1] == expected[pixel] &&
+			decoded.frames.front().bgra[pixel * 4 + 2] == expected[pixel],
+			"TIFF EXIF orientation mapped a stored pixel to the wrong location");
+	}
+	jpegview_linux::ExifInfo metadata;
+	Expect(jpegview_linux::ReadImageMetadata(filename, metadata, error) &&
+		metadata.imageOrientation == 6,
+		"TIFF metadata reader did not expose the IFD0 orientation tag");
+}
+#endif
 
 
 void TestPerfContextAndPendingInputDiagnostics() {
@@ -2696,6 +2905,9 @@ const TestCase kTests[] = {
 	{"direct-codec-source-read-attribution", &TestDirectCodecSourceReadAttribution},
 	{"decoder-failures", &TestDecoderFailures},
 	{"jpeg-display-decode-scaling", &TestJpegDisplayDecodeScaling},
+#if JPEGVIEW_HAVE_TIFF
+	{"tiff-exif-orientation", &TestTiffExifOrientation},
+#endif
 	{"perf-context-and-pending-input-diagnostics", &TestPerfContextAndPendingInputDiagnostics},
 	{"decoded-prefetch-work-class-attribution", &TestDecodedPrefetchWorkClassAttribution},
 	{"display-prefetch-planner-worker-snapshots-and-cancellation", &TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation},

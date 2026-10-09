@@ -13,6 +13,7 @@ namespace jpegview_linux {
 // image buffer is released.
 struct ExifInfo {
 	bool hasExif = false;
+	int imageOrientation = 1;
 	std::string cameraModel;
 	std::string imageDescription;
 	std::string software;

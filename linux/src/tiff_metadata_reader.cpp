@@ -47,6 +47,11 @@ public:
 		std::vector<TiffEntry> ifd0;
 		if (!ReadDirectory(ifdOffset, ifd0)) return false;
 		info.hasExif = true;
+		std::uint32_t imageOrientation = 0;
+		if (ReadUnsigned(Find(ifd0, 0x0112), imageOrientation) &&
+			imageOrientation >= 1 && imageOrientation <= 8) {
+			info.imageOrientation = static_cast<int>(imageOrientation);
+		}
 
 		const TiffEntry* model = Find(ifd0, 0x0110);
 		const TiffEntry* make = Find(ifd0, 0x010F);

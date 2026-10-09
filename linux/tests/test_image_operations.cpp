@@ -1,11 +1,13 @@
 #include "test_harness.h"
 #include "test_support.h"
 #include "gps_map_action.h"
+#include "exif_orientation.h"
 #include "image_metadata_reader.h"
 #include "image_transform_geometry.h"
 #include "image_transform_pixels.h"
 #include "tiff_metadata_reader.h"
 
+#include <array>
 #include <cstring>
 #include <limits>
 
@@ -63,6 +65,61 @@ void TestImageStorageTransformsAndValidation() {
 	Expect(!malformed.Rotate(true) && !malformed.Mirror(true) &&
 		!malformed.Resize(1, 1) && !malformed.Crop(0, 0, 1, 1) && !malformed.AutoContrast(),
 		"image operations accepted a truncated pixel buffer");
+}
+
+void TestExifOrientationPixelTransforms() {
+	const jpegview_linux::Image source = MakeIndexedImage(2, 3);
+	struct OrientationCase {
+		int orientation;
+		int width;
+		int height;
+		std::vector<std::uint8_t> blue;
+	};
+	const std::array<OrientationCase, 8> cases = {{
+		{1, 2, 3, {1, 2, 3, 4, 5, 6}},
+		{2, 2, 3, {2, 1, 4, 3, 6, 5}},
+		{3, 2, 3, {6, 5, 4, 3, 2, 1}},
+		{4, 2, 3, {5, 6, 3, 4, 1, 2}},
+		{5, 3, 2, {1, 3, 5, 2, 4, 6}},
+		{6, 3, 2, {5, 3, 1, 6, 4, 2}},
+		{7, 3, 2, {6, 4, 2, 5, 3, 1}},
+		{8, 3, 2, {2, 4, 6, 1, 3, 5}}
+	}};
+	for (const OrientationCase& test : cases) {
+		std::vector<std::uint8_t> pixels = source.bgra;
+		int width = source.width;
+		int height = source.height;
+		std::string error;
+		Expect(jpegview_linux::IsValidExifOrientation(test.orientation) &&
+			jpegview_linux::ExifOrientationSwapsAxes(test.orientation) ==
+				(test.orientation >= 5),
+			"EXIF orientation validity or axis-swap classification is incorrect");
+		Expect(jpegview_linux::ApplyExifOrientation(test.orientation, width, height,
+			pixels, error) && width == test.width && height == test.height,
+			"EXIF orientation produced incorrect dimensions: " + error);
+		std::vector<std::uint8_t> actualBlue;
+		for (std::size_t offset = 0; offset < pixels.size(); offset += 4) {
+			actualBlue.push_back(pixels[offset]);
+		}
+		Expect(actualBlue == test.blue,
+			"EXIF orientation " + std::to_string(test.orientation) +
+			" mapped pixels incorrectly");
+	}
+
+	std::vector<std::uint8_t> cancellable(32u * 32u * 4u, 73);
+	const std::vector<std::uint8_t> original = cancellable;
+	int checks = 0;
+	int width = 32;
+	int height = 32;
+	std::string error;
+	Expect(!jpegview_linux::ApplyExifOrientation(6, width, height, cancellable,
+		error, [&checks] { return ++checks < 3; }) && checks == 3 &&
+		width == 32 && height == 32 && cancellable == original &&
+		error.find("cancelled") != std::string::npos,
+		"canceled EXIF orientation changed pixels or dimensions");
+	Expect(!jpegview_linux::ApplyExifOrientation(9, width, height, cancellable,
+		error) && width == 32 && height == 32 && cancellable == original,
+		"invalid EXIF orientation changed a pixel buffer");
 }
 
 void TestImageCropCopiesHalfOpenRectangle() {
@@ -3696,9 +3753,10 @@ public:
 	}
 
 	std::vector<std::uint8_t> Build(bool includeExifDirectory = true,
-		bool malformedExifDirectory = false, bool includeIfd0ShootingFields = false) {
+		bool malformedExifDirectory = false, bool includeIfd0ShootingFields = false,
+		int imageOrientation = 0) {
 		const std::size_t ifd0EntryCount = 6 + (includeExifDirectory ? 1 : 0) +
-			(includeIfd0ShootingFields ? 6 : 0);
+			(includeIfd0ShootingFields ? 6 : 0) + (imageOrientation != 0 ? 1 : 0);
 		const std::uint32_t ifd0 = AddDirectory(ifd0EntryCount);
 		const std::uint32_t exif = includeExifDirectory ? AddDirectory(8) : 0;
 		const std::uint32_t gps = AddDirectory(6);
@@ -3719,6 +3777,10 @@ public:
 		if (includeExifDirectory) {
 			SetEntry(ifd0, ifd0Entry++, 0x8769, 4, 1,
 				malformedExifDirectory ? 0xffffffffu : exif);
+		}
+		if (imageOrientation != 0) {
+			SetEntryInline16(ifd0, ifd0Entry++, 0x0112, 3, 1,
+				static_cast<std::uint16_t>(imageOrientation));
 		}
 		SetEntry(ifd0, ifd0Entry, 0x8825, 4, 1, gps);
 
@@ -3847,7 +3909,7 @@ void TestExifAndJpegCommentParsing() {
 	Expect(jpegview_linux::WriteImage(jpeg, pixels.data(), 2, 2, options, error),
 		"cannot create EXIF fixture JPEG: " + error);
 	const std::vector<std::uint8_t> withExif = InsertJpegSegment(ReadBytes(jpeg), 0xe1,
-		ExifFixture().Build(true, false, true));
+		ExifFixture().Build(true, false, true, 6));
 	const std::vector<std::uint8_t> withComment = InsertJpegSegment(withExif, 0xfe,
 		std::vector<std::uint8_t>{'t', 'e', 's', 't', ' ', 'c', 'o', 'm', 'm', 'e', 'n', 't'});
 	WriteBytes(jpeg, withComment);
@@ -3861,6 +3923,8 @@ void TestExifAndJpegCommentParsing() {
 	Expect(info.software == "Tester", "software metadata was parsed incorrectly");
 	Expect(info.dateTime == "2024:01:02 03:04:05", "IFD0 date was parsed incorrectly");
 	Expect(info.acquisitionDate == "2024:02:03 04:05:06", "EXIF acquisition date was parsed incorrectly");
+	Expect(info.imageOrientation == 6,
+		"EXIF orientation tag was not parsed from the JPEG IFD0 directory");
 	Expect(info.exposureTime == "1/125", "exposure time was parsed incorrectly");
 	Expect(info.hasExposureBias, "exposure bias was not detected");
 	ExpectNear(info.exposureBias, -1.0 / 3.0, 0.0001, "exposure bias was parsed incorrectly");
@@ -4099,16 +4163,21 @@ void TestImageMetadataReaderDispatchesByContent() {
 }
 
 std::vector<std::uint8_t> BuildPngWithExif(const std::vector<std::uint8_t>& tiff,
-	bool animated, bool afterImageData = false) {
+	bool animated, bool afterImageData = false, std::uint32_t width = 1,
+	std::uint32_t height = 1) {
 	std::vector<std::uint8_t> png = {
 		0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
-	AppendPngChunk(png, "IHDR", {0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0});
+	std::vector<std::uint8_t> imageHeader;
+	AppendBigEndian32(imageHeader, width);
+	AppendBigEndian32(imageHeader, height);
+	imageHeader.insert(imageHeader.end(), {8, 2, 0, 0, 0});
+	AppendPngChunk(png, "IHDR", imageHeader);
 	if (animated) {
 		AppendPngChunk(png, "acTL", {0, 0, 0, 1, 0, 0, 0, 0});
 		std::vector<std::uint8_t> frameControl;
 		AppendBigEndian32(frameControl, 0);
-		AppendBigEndian32(frameControl, 1);
-		AppendBigEndian32(frameControl, 1);
+		AppendBigEndian32(frameControl, width);
+		AppendBigEndian32(frameControl, height);
 		AppendBigEndian32(frameControl, 0);
 		AppendBigEndian32(frameControl, 0);
 		AppendBigEndian16(frameControl, 1);
@@ -4118,7 +4187,13 @@ std::vector<std::uint8_t> BuildPngWithExif(const std::vector<std::uint8_t>& tiff
 		AppendPngChunk(png, "fcTL", frameControl);
 	}
 	if (!afterImageData) AppendPngChunk(png, "eXIf", tiff);
-	const std::vector<std::uint8_t> scanline = {0, 0, 0, 0};
+	std::vector<std::uint8_t> scanline;
+	scanline.reserve(static_cast<std::size_t>(height) *
+		(static_cast<std::size_t>(width) * 3 + 1));
+	for (std::uint32_t row = 0; row < height; ++row) {
+		scanline.push_back(0);
+		scanline.resize(scanline.size() + static_cast<std::size_t>(width) * 3, 0);
+	}
 	uLongf compressedSize = compressBound(scanline.size());
 	std::vector<std::uint8_t> compressed(compressedSize);
 	Expect(compress2(compressed.data(), &compressedSize, scanline.data(),
@@ -4146,6 +4221,19 @@ void TestPngAndApngExifMetadata() {
 		info.isoSpeed == 200,
 		"PNG eXIf metadata was not dispatched and parsed from its TIFF payload");
 
+	const std::vector<std::uint8_t> orientationPayload =
+		ExifFixture().Build(false, false, false, 6);
+	const std::vector<std::uint8_t> orientationTiff(
+		orientationPayload.begin() + 6, orientationPayload.end());
+	const fs::path orientedPngPath = temporary.path() / "portrait-exif.png";
+	WriteBytes(orientedPngPath,
+		BuildPngWithExif(orientationTiff, false, false, 2, 3));
+	jpegview_linux::DecodedImage orientedPng;
+	Expect(jpegview_linux::DecodeImage(orientedPngPath, orientedPng, comment) &&
+		orientedPng.frames.size() == 1 && orientedPng.frames.front().width == 3 &&
+		orientedPng.frames.front().height == 2,
+		"PNG decoder did not apply its EXIF axis-swapping orientation");
+
 	const jpegview_linux::SourceDescriptor pngSource =
 		jpegview_linux::DescribeImageSource(pngPath);
 	jpegview_linux::ExifMetadataWorker metadataWorker;
@@ -4167,6 +4255,14 @@ void TestPngAndApngExifMetadata() {
 		jpegview_linux::ReadImageMetadata(apngPath, info, comment) && info.hasExif &&
 		info.cameraModel == "Acme Model",
 		"APNG eXIf metadata was not read through the PNG metadata path");
+	const fs::path orientedApngPath = temporary.path() / "portrait-exif.apng";
+	WriteBytes(orientedApngPath,
+		BuildPngWithExif(orientationTiff, true, false, 2, 3));
+	jpegview_linux::DecodedImage orientedApng;
+	Expect(jpegview_linux::DecodeImage(orientedApngPath, orientedApng, comment) &&
+		!orientedApng.frames.empty() && orientedApng.frames.front().width == 3 &&
+		orientedApng.frames.front().height == 2,
+		"APNG decoder did not apply EXIF orientation to its frame");
 
 	const fs::path afterImagePath = temporary.path() / "after-image-data.png";
 	WriteBytes(afterImagePath, BuildPngWithExif(tiff, false, true));
@@ -4359,6 +4455,7 @@ void TestFileOperationFolderExifDatesUpdatesOnlyRegularImages() {
 }
 const TestCase kTests[] = {
 	{"image-storage-transforms-and-validation", &TestImageStorageTransformsAndValidation},
+	{"exif-orientation-pixel-transforms", &TestExifOrientationPixelTransforms},
 	{"image-crop-copies-half-open-rectangle", &TestImageCropCopiesHalfOpenRectangle},
 	{"crop-selection-model-geometry-and-manipulation", &TestCropSelectionModelGeometryAndManipulation},
 	{"lossless-jpeg-crop-availability-policy", &TestLosslessJpegCropAvailabilityPolicy},

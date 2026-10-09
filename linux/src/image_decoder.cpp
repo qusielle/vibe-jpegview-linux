@@ -1,7 +1,9 @@
 #include "image_decoder.h"
 #include "image_decoder_internal.h"
 #include "archive_source.h"
+#include "exif_orientation.h"
 #include "image_formats.h"
+#include "image_metadata_reader.h"
 #include "perf_diagnostics.h"
 #include "source_work_coordinator.h"
 
@@ -311,6 +313,29 @@ bool IsRawPath(const std::filesystem::path& filename) {
 	return std::find(extensions.begin(), extensions.end(), extension) != extensions.end();
 }
 
+bool ApplyEmbeddedExifOrientation(const std::filesystem::path& filename,
+	DecodedImage& image, std::string& errorMessage, const WorkContext& context) {
+	ExifInfo metadata;
+	std::string ignoredComment;
+	if (!ReadImageMetadata(filename, metadata, ignoredComment, context)) {
+		if (!context.Continue()) {
+			errorMessage = "source work was cancelled";
+			image = {};
+			return false;
+		}
+		return true;
+	}
+	if (metadata.imageOrientation == 1) return true;
+	for (DecodedFrame& frame : image.frames) {
+		if (!ApplyExifOrientation(metadata.imageOrientation, frame.width, frame.height,
+			frame.bgra, errorMessage, [&context] { return context.Continue(); })) {
+			image = {};
+			return false;
+		}
+	}
+	return true;
+}
+
 bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 	ImageContentFormat format, DecodedImage& image, std::string& errorMessage,
 	const WorkContext& context) {
@@ -323,9 +348,11 @@ bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,
 			nullptr, nullptr, context);
 	case ImageContentFormat::Png:
-		return decoder_detail::DecodeStb(filename, image, errorMessage);
+		return decoder_detail::DecodeStb(filename, image, errorMessage) &&
+			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 	case ImageContentFormat::Apng:
-		return decoder_detail::DecodeApng(filename, image, errorMessage);
+		return decoder_detail::DecodeApng(filename, image, errorMessage) &&
+			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 	case ImageContentFormat::Gif:
 #if JPEGVIEW_HAVE_GIF
 		return decoder_detail::DecodeGif(filename, image, errorMessage);
@@ -337,14 +364,15 @@ bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 		return decoder_detail::DecodeStb(filename, image, errorMessage);
 	case ImageContentFormat::WebP:
 #if JPEGVIEW_HAVE_WEBP
-		return decoder_detail::DecodeWebP(filename, image, errorMessage);
+		return decoder_detail::DecodeWebP(filename, image, errorMessage) &&
+			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 #else
 		errorMessage = "WebP content detected, but WebP support is not available in this build";
 		return false;
 #endif
 	case ImageContentFormat::Tiff: {
 #if JPEGVIEW_HAVE_TIFF
-		if (decoder_detail::DecodeTiff(filename, image, errorMessage)) return true;
+		if (decoder_detail::DecodeTiff(filename, image, errorMessage, context)) return true;
 		const std::string tiffError = errorMessage;
 #if JPEGVIEW_HAVE_RAW
 		image = {};
@@ -670,17 +698,21 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 		return decoder_detail::DecodeStb(filename, image, errorMessage);
 #endif
 	}
-	if (extension == ".apng") return decoder_detail::DecodeApng(filename, image, errorMessage);
+	if (extension == ".apng") {
+		return decoder_detail::DecodeApng(filename, image, errorMessage) &&
+			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
+	}
 	if (extension == ".webp") {
 #if JPEGVIEW_HAVE_WEBP
-		return decoder_detail::DecodeWebP(filename, image, errorMessage);
+		return decoder_detail::DecodeWebP(filename, image, errorMessage) &&
+			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 #else
 		return decoder_detail::DecodeStb(filename, image, errorMessage);
 #endif
 	}
 	if (extension == ".tif" || extension == ".tiff") {
 #if JPEGVIEW_HAVE_TIFF
-		return decoder_detail::DecodeTiff(filename, image, errorMessage);
+		return decoder_detail::DecodeTiff(filename, image, errorMessage, context);
 #else
 		errorMessage = "TIFF support is not available in this build";
 		return false;
@@ -734,7 +766,8 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 		return decoder_detail::DecodePnm(filename, image, errorMessage);
 	}
 	if (extension == ".qoi") return decoder_detail::DecodeQoi(filename, image, errorMessage);
-	return decoder_detail::DecodeStb(filename, image, errorMessage);
+	return decoder_detail::DecodeStb(filename, image, errorMessage) &&
+		ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 		});
 }
 } // namespace jpegview_linux

@@ -260,7 +260,12 @@ should normally be added to one of these focused modules and covered by the matc
   `image_decoder.cpp` owns validation, append/conversion helpers, source admission, and codec dispatch;
   `image_decoder_stb.cpp`, `image_decoder_jpeg.cpp`, `image_decoder_apng.cpp`,
   `image_decoder_builtin.cpp`, `image_decoder_optional.cpp`, and `image_decoder_svg.cpp` isolate the corresponding reader
-  families behind the shared internal interface. `image_writer.cpp` owns validation and dispatch;
+  families behind the shared internal interface. `exif_orientation` owns the validated BGRA pixel
+  transform for EXIF orientations 1-8. JPEG decoding reads orientation from saved APP1 markers and
+  reports oriented dimensions in header and reduced-DCT paths; PNG/APNG and WebP apply the same
+  transform after decoding, while TIFF resets libtiff to stored raster order before applying it.
+  This keeps source geometry and displayed pixels aligned, including the four axis-swapping cases.
+  `image_writer.cpp` owns validation and dispatch;
   `image_writer_jpeg_png.cpp`, `image_writer_basic.cpp`, and `image_writer_optional.cpp` hold codec
   implementations. Decoder-owned pixel buffers move into `DecodedImage` when the decoder has finished
   using them. Mapped JPEG inputs and non-longjmp codec handles use scope ownership; libjpeg/libpng
@@ -665,7 +670,7 @@ should normally be added to one of these focused modules and covered by the matc
   file path, so it waits for an active reader before removing the file and its private directory;
   unpublished operation outputs use scoped cleanup on every exit.
 - `exif_reader`: bounded JPEG APP1/COM segment traversal and comment parsing; embedded TIFF data is
-  handed to `tiff_metadata_reader`.
+  handed to `tiff_metadata_reader`, which also reads the IFD0 orientation tag.
 - `image_metadata_reader`: selected-image metadata dispatch from the detected content signature.
   JPEG, standalone TIFF, DNG, PNG, APNG, and WebP content share the existing worker and
   source-generation checks; directory scans do not probe metadata for every listed image. A PNG

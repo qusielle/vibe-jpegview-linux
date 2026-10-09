@@ -35,7 +35,9 @@ they support.
    were made portable across Ubuntu 20.04 and newer distributions, including giflib installations
    without pkg-config metadata and HEIF encoders with different supported profiles. Transparent PNG
    and other alpha-bearing images display over a configurable black, white, or checkerboard
-   background without flattening or changing their source pixels.
+   background without flattening or changing their source pixels. JPEG, PNG/APNG, WebP, and TIFF
+   decoding applies all eight EXIF orientations to the displayed pixels; JPEG dimension probes also
+   use oriented dimensions so portrait/landscape classification matches the image on screen.
 
 3. **High-quality viewing, fitting, zooming, and panning.** JPEGView's high-quality downsampling and
    sharpening path was ported, with Catmull–Rom bicubic enlargement and a shared 1 GiB image-cache

@@ -98,7 +98,8 @@ bool DecodePsd(const std::filesystem::path&, DecodedImage&, std::string&);
 bool DecodePnm(const std::filesystem::path&, DecodedImage&, std::string&);
 bool DecodeGif(const std::filesystem::path&, DecodedImage&, std::string&);
 bool DecodeWebP(const std::filesystem::path&, DecodedImage&, std::string&);
-bool DecodeTiff(const std::filesystem::path&, DecodedImage&, std::string&);
+bool DecodeTiff(const std::filesystem::path&, DecodedImage&, std::string&,
+    const WorkContext&);
 bool DecodeHeif(const std::filesystem::path&, DecodedImage&, std::string&);
 bool DecodeAvif(const std::filesystem::path&, DecodedImage&, std::string&);
 bool DecodeJxl(const std::filesystem::path&, DecodedImage&, std::string&);

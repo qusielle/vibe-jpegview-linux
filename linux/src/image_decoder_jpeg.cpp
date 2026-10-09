@@ -1,13 +1,16 @@
 #include "image_decoder_internal.h"
 
 #include "archive_source.h"
+#include "exif_orientation.h"
 #include "perf_diagnostics.h"
+#include "tiff_metadata_reader.h"
 
 #include <algorithm>
 #include <array>
 #include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <limits>
 #include <sys/mman.h>
@@ -86,6 +89,27 @@ void JpegErrorExit(j_common_ptr common) {
 
 void SuppressJpegMessage(j_common_ptr) {}
 
+int ReadJpegExifOrientation(const jpeg_decompress_struct& decoder,
+	const WorkContext& context) {
+	for (jpeg_saved_marker_ptr marker = decoder.marker_list;
+		marker != nullptr; marker = marker->next) {
+		if (marker->marker != JPEG_APP0 + 1 || marker->data_length < 6 ||
+			std::memcmp(marker->data, "Exif\0\0", 6) != 0) continue;
+		try {
+			ExifInfo metadata;
+			if (ReadTiffMetadata(marker->data, marker->data_length, 6,
+				metadata, context) && metadata.hasExif &&
+				IsValidExifOrientation(metadata.imageOrientation)) {
+				return metadata.imageOrientation;
+			}
+		} catch (...) {
+			// Invalid optional metadata must not make an otherwise valid JPEG fail.
+		}
+		if (!context.Continue()) return 1;
+	}
+	return 1;
+}
+
 bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage, const WorkContext& context) {
 	if (!context.Continue()) {
@@ -110,7 +134,9 @@ bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height
 	jpeg_create_decompress(&decoder);
 	created = true;
 	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
+	jpeg_save_markers(&decoder, JPEG_APP0 + 1, 0xFFFFu);
 	const bool headerValid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK;
+	const int orientation = headerValid ? ReadJpegExifOrientation(decoder, context) : 1;
 	if (!context.Continue()) {
 		jpeg_destroy_decompress(&decoder);
 		UnmapInput(input);
@@ -121,8 +147,10 @@ bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height
 		ValidDimensions(static_cast<int>(decoder.image_width),
 			static_cast<int>(decoder.image_height), errorMessage);
 	if (valid) {
-		width = static_cast<int>(decoder.image_width);
-		height = static_cast<int>(decoder.image_height);
+		const int storedWidth = static_cast<int>(decoder.image_width);
+		const int storedHeight = static_cast<int>(decoder.image_height);
+		width = ExifOrientationSwapsAxes(orientation) ? storedHeight : storedWidth;
+		height = ExifOrientationSwapsAxes(orientation) ? storedWidth : storedHeight;
 	}
 	jpeg_destroy_decompress(&decoder);
 	UnmapInput(input);
@@ -166,7 +194,9 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	jpeg_create_decompress(&decoder);
 	created = true;
 	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
+	jpeg_save_markers(&decoder, JPEG_APP0 + 1, 0xFFFFu);
 	const bool headerValid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK;
+	const int orientation = headerValid ? ReadJpegExifOrientation(decoder, context) : 1;
 	if (!context.Continue()) {
 		jpeg_destroy_decompress(&decoder);
 		UnmapInput(input);
@@ -181,16 +211,25 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		if (errorMessage.empty()) errorMessage = "invalid JPEG header";
 		return false;
 	}
-	if (sourceWidth != nullptr) *sourceWidth = static_cast<int>(decoder.image_width);
-	if (sourceHeight != nullptr) *sourceHeight = static_cast<int>(decoder.image_height);
+	const int storedWidth = static_cast<int>(decoder.image_width);
+	const int storedHeight = static_cast<int>(decoder.image_height);
+	if (sourceWidth != nullptr) {
+		*sourceWidth = ExifOrientationSwapsAxes(orientation) ? storedHeight : storedWidth;
+	}
+	if (sourceHeight != nullptr) {
+		*sourceHeight = ExifOrientationSwapsAxes(orientation) ? storedWidth : storedHeight;
+	}
 	if (minimumWidth > 0 && minimumHeight > 0) {
+		const unsigned int rawMinimumWidth = static_cast<unsigned int>(
+			ExifOrientationSwapsAxes(orientation) ? minimumHeight : minimumWidth);
+		const unsigned int rawMinimumHeight = static_cast<unsigned int>(
+			ExifOrientationSwapsAxes(orientation) ? minimumWidth : minimumHeight);
 		for (const unsigned int denominator : {8u, 4u, 2u}) {
 			const unsigned int scaledWidth =
 				(decoder.image_width + denominator - 1) / denominator;
 			const unsigned int scaledHeight =
 				(decoder.image_height + denominator - 1) / denominator;
-			if (scaledWidth >= static_cast<unsigned int>(minimumWidth) &&
-				scaledHeight >= static_cast<unsigned int>(minimumHeight)) {
+			if (scaledWidth >= rawMinimumWidth && scaledHeight >= rawMinimumHeight) {
 				decoder.scale_num = 1;
 				decoder.scale_denom = denominator;
 				break;
@@ -289,6 +328,12 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 			errorMessage = "JPEG decode was cancelled";
 			return false;
 		}
+		if (!ApplyExifOrientation(orientation, frame->width, frame->height,
+			frame->bgra, errorMessage, [&context] { return context.Continue(); })) {
+			delete frame;
+			directFrame = nullptr;
+			return false;
+		}
 		image.frames.push_back(std::move(*frame));
 		delete frame;
 		directFrame = nullptr;
@@ -336,6 +381,11 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		frame.width = width;
 		frame.height = height;
 		frame.bgra = std::move(bgra);
+		if (!ApplyExifOrientation(orientation, frame.width, frame.height,
+			frame.bgra, errorMessage, [&context] { return context.Continue(); })) {
+			std::free(const_cast<std::uint8_t*>(pixels));
+			return false;
+		}
 		image.frames.push_back(std::move(frame));
 	} catch (const std::exception&) {
 		std::free(const_cast<std::uint8_t*>(pixels));
