@@ -1377,6 +1377,7 @@ frame steps return to the last successfully displayed frame and keep it frozen.
 While another frame is being prepared, the current frame remains visible and is still used by the
 pixel sampler, Copy, and image operations. The new frame appears only after its matching display
 texture is ready; an edit started during preparation applies to the visible frame.
+After that edit turns the animation into a still image, slideshow or Movie can be started normally.
 When automatic slideshow or movie advancement reaches a non-wrapping folder boundary, playback stops
 instead of repeatedly rebuilding the final image. `Esc` stops animation, movie, or slideshow playback
 before it closes the viewer.

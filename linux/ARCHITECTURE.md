@@ -783,6 +783,10 @@ frame target from publication until the operation reaches a terminal result. Cop
 and preview work therefore continue to refer to the visible frame while that target prepares. A
 successful edit applies to the captured frame and cancels a now-obsolete target when it flattens the
 animation; failure or cancellation releases the hold so a still-current ready target may publish.
+The final publication-hold release attempts that commit, then independently restores playback
+readiness for the current committed selection, including a retained still whose edit canceled the
+target. Nested holds, a pending target, an operation-owned playback pause, initial loads, and failed
+or replaced document owners continue to suppress readiness.
 An already-pending display completion or failure cannot release an operation-owned hold. Free rotation,
 perspective correction, and resize dialogs also hold a pending frame target for their modal session, so
 the frame under the editor does not change before Apply or Cancel resolves it.

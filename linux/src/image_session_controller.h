@@ -107,6 +107,7 @@ public:
 	bool ShouldPrepareDecodedSource(
 		const DecodedSourcePreparationSnapshot& snapshot) const;
 	bool MatchesSelection(std::uint64_t generation, const SourceKey& source) const;
+	bool MatchesCommittedSelection(std::uint64_t generation, const SourceKey& source) const;
 	ImageSessionStage Stage() const { return stage_; }
 	bool SetStage(std::uint64_t generation, const SourceKey& source,
 		ImageSessionStage stage);

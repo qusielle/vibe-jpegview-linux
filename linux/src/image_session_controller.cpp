@@ -102,6 +102,11 @@ bool ImageSessionController::MatchesSelection(std::uint64_t generation,
 		selection_->source.Key() == source;
 }
 
+bool ImageSessionController::MatchesCommittedSelection(std::uint64_t generation,
+	const SourceKey& source) const {
+	return stage_ == ImageSessionStage::Committed && MatchesSelection(generation, source);
+}
+
 bool ImageSessionController::SetStage(std::uint64_t generation,
 	const SourceKey& source, ImageSessionStage stage) {
 	if (!MatchesSelection(generation, source) ||

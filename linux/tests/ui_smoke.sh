@@ -3136,6 +3136,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			convert -delay 1000 -size 800x600 xc:red \
 				-delay 1000 -size 800x600 xc:blue -loop 0 \
 				"$frame_transform_directory/01-frame-transform.gif"
+			convert -size 800x600 xc:lime "$frame_transform_directory/02-after-transform.ppm"
 			printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
 				> "$frame_transform_config/settings.conf"
 			viewer_frame_barrier_armed="$temporary/frame-transform-barrier-armed"
@@ -3205,6 +3206,25 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 				cat "$temporary/viewer.log" >&2
 				exit 1
 			fi
+			# Flattening cancels the provisional frame. Releasing its final hold
+			# must leave the retained still ready for newly started playback.
+			DISPLAY=":$display_number" xdotool key 1
+			assert_title_prefix "02-after-transform.ppm" \
+				"slideshow did not advance after a held GIF frame was flattened"
+			after_transform_color=''
+			for _ in $(seq 1 100); do
+				DISPLAY=":$display_number" import -window "$window_id" \
+					"$temporary/frame-transform-slideshow.png"
+				after_transform_color=$(convert "$temporary/frame-transform-slideshow.png" \
+					-format '%[hex:p{640,400}]' info:)
+				if [ "$after_transform_color" = 00FF00 ]; then break; fi
+				sleep 0.05
+			done
+			if [ "$after_transform_color" != 00FF00 ]; then
+				echo "UI smoke test: slideshow did not present the image after the flattened GIF ($after_transform_color)" >&2
+				exit 1
+			fi
+			DISPLAY=":$display_number" xdotool key Escape
 			stop_viewer
 			viewer_frame_barrier_armed=''
 			unset viewer_frame_barrier_started viewer_frame_barrier_release

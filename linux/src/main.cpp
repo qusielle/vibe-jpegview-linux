@@ -3099,9 +3099,13 @@ private:
 		if (!holdsPublication) return;
 		holdsPublication = false;
 		if (animationFramePublicationHolds_ != 0) --animationFramePublicationHolds_;
-		if (animationFramePublicationHolds_ == 0 &&
-			CommitPendingAnimationFrameDisplay() &&
-			!ImageOperationOwnsAnimationPause()) {
+		if (animationFramePublicationHolds_ != 0) return;
+		(void)CommitPendingAnimationFrameDisplay();
+		if (!ImageOperationOwnsAnimationPause() && !currentSelectedLoadPending_ &&
+			!fileList_.Empty() && CurrentImage().width > 0 && CurrentImage().height > 0 &&
+			imageSession_.MatchesCommittedSelection(imageDocument_.OwnerGeneration(),
+				imageDocument_.Source()) && imageSession_.Selection()->filename ==
+				AbsoluteNormalized(fileList_.Current())) {
 			SetAnimationImageReadiness(true, SDL_GetTicks());
 		}
 	}

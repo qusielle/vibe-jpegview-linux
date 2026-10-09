@@ -307,6 +307,8 @@ void TestImageSessionSelectedLoadCommitsOnlyReadyCurrentOwner() {
 	jpegview_linux::ImageSessionController session;
 	jpegview_linux::RecentFiles recent;
 	const auto start = session.BeginSelection(firstSource, first, {}, {}, true);
+	Expect(!session.MatchesCommittedSelection(start.selection.generation, firstSource.Key()),
+		"initial selected work was eligible to restore committed playback readiness");
 	Expect(session.Stage() == jpegview_linux::ImageSessionStage::Selected &&
 		session.SetStage(start.selection.generation, firstSource.Key(),
 			jpegview_linux::ImageSessionStage::AwaitingDisplayFrame) &&
@@ -317,6 +319,10 @@ void TestImageSessionSelectedLoadCommitsOnlyReadyCurrentOwner() {
 		session.Stage() == jpegview_linux::ImageSessionStage::Committed &&
 		session.LoadedPath() == fs::absolute(first).lexically_normal(),
 		"selected-load stage did not require a matching renderer-ready owner before Recents commit");
+	Expect(session.MatchesCommittedSelection(start.selection.generation, firstSource.Key()) &&
+		!session.MatchesCommittedSelection(start.selection.generation + 1, firstSource.Key()) &&
+		!session.MatchesCommittedSelection(start.selection.generation, failedSource.Key()),
+		"committed playback readiness accepted a stale or different-source document owner");
 	Expect(session.Generation() == start.selection.generation &&
 		session.MatchesSelection(start.selection.generation, firstSource.Key()) &&
 		!session.MatchesSelection(0, firstSource.Key()) &&
@@ -324,6 +330,9 @@ void TestImageSessionSelectedLoadCommitsOnlyReadyCurrentOwner() {
 		!session.MatchesSelection(start.selection.generation, failedSource.Key()),
 		"committing a selection lost its display owner or accepted a zero, stale, or different-source owner");
 	const auto sameSourceStart = session.BeginSelection(firstSource, first, {}, {}, true);
+	Expect(!session.MatchesCommittedSelection(start.selection.generation, firstSource.Key()) &&
+		!session.MatchesCommittedSelection(sameSourceStart.selection.generation, firstSource.Key()),
+		"same-source pending replacement inherited committed playback readiness");
 	Expect(!sameSourceStart.effects.clearPreviousPresentation &&
 		sameSourceStart.selection.generation > start.selection.generation &&
 		!session.MatchesSelection(start.selection.generation, firstSource.Key()) &&
@@ -340,6 +349,8 @@ void TestImageSessionSelectedLoadCommitsOnlyReadyCurrentOwner() {
 		!session.CommitSelectedLoad(failedStart.selection.generation,
 			failedSource.Key(), failed, recent),
 		"failed selected work replaced the last committed image history");
+	Expect(!session.MatchesCommittedSelection(failedStart.selection.generation, failedSource.Key()),
+		"failed selected work was eligible to restore committed playback readiness");
 }
 
 void TestSelectedSourceDecodeChannelRejectsStaleOwnerCompletions() {
