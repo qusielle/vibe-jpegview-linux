@@ -8,6 +8,7 @@ BINARY=${1:-./build/jpegview-linux}
 ARCHIVE_FIXTURE_WRITER=${2:-}
 RAR_FIXTURE_WRITER=${3:-}
 GPS_EXIF_FIXTURE_WRITER=${4:-}
+PENDING_ANIMATION_FRAME_BARRIER=${5:-}
 perf_trace_path=${JPEGVIEW_TEST_PERF_TRACE:-}
 if [ ! -x "$BINARY" ]; then
 	echo "UI smoke test: binary not found: $BINARY" >&2
@@ -262,7 +263,15 @@ launch_viewer() {
 	viewer_input=${1:-$temporary/images}
 	viewer_home=${VIEWER_TEST_HOME:-$temporary/home}
 	viewer_config=${VIEWER_TEST_CONFIG_HOME:-$temporary/config}
-	if [ -n "${viewer_slow_map_target:-}" ]; then
+	if [ -n "${viewer_frame_barrier_armed:-}" ]; then
+		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
+			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
+			LD_PRELOAD="$PENDING_ANIMATION_FRAME_BARRIER" \
+			JPEGVIEW_TEST_FRAME_BARRIER_ARMED="$viewer_frame_barrier_armed" \
+			JPEGVIEW_TEST_FRAME_BARRIER_STARTED="$viewer_frame_barrier_started" \
+			JPEGVIEW_TEST_FRAME_BARRIER_RELEASE="$viewer_frame_barrier_release" \
+			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
+	elif [ -n "${viewer_slow_map_target:-}" ]; then
 		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
 			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
 			LD_PRELOAD="$temporary/slow_map.so" \
@@ -3000,6 +3009,209 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	# Materializing one animation frame for Copy must not make later frames reuse
 	# that frame's full-resolution pixels.
 	if command -v xclip >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
+		if [ "${JPEGVIEW_TEST_HAS_GIFLIB:-0}" = 1 ] &&
+			[ -f "$PENDING_ANIMATION_FRAME_BARRIER" ]; then
+			assert_pending_animation_frame_barrier() {
+				barrier_started=0
+				for _ in $(seq 1 300); do
+					if [ -f "$viewer_frame_barrier_started" ]; then
+						barrier_started=1
+						break
+					fi
+					if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+					sleep 0.02
+				done
+				if [ "$barrier_started" -ne 1 ]; then
+					echo "UI smoke test: animation operation did not reach the controlled frame-copy barrier" >&2
+					cat "$temporary/viewer.log" >&2
+					exit 1
+				fi
+			}
+
+			frame_barrier_directory="$temporary/animation-frame-publication"
+			frame_barrier_config="$temporary/animation-frame-publication-config/jpegview-linux"
+			mkdir -p "$frame_barrier_directory" "$frame_barrier_config"
+			convert -delay 1000 -size 800x600 xc:red \
+				-delay 1000 -size 800x600 xc:blue -loop 0 \
+				"$frame_barrier_directory/01-frame-publication.gif"
+			printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\ninfo_visible=1\npixel_color_sampler_enabled=1\n' \
+				> "$frame_barrier_config/settings.conf"
+			viewer_frame_barrier_armed="$temporary/frame-barrier-armed"
+			viewer_frame_barrier_started="$temporary/frame-barrier-started"
+			viewer_frame_barrier_release="$temporary/frame-barrier-release"
+			VIEWER_TEST_HOME="$temporary/frame-barrier-home" \
+				VIEWER_TEST_CONFIG_HOME="$temporary/animation-frame-publication-config" \
+				launch_viewer "$frame_barrier_directory/01-frame-publication.gif"
+			assert_title_prefix "01-frame-publication.gif" \
+				"frame-publication animation fixture did not load"
+			viewer_geometry=$(DISPLAY=":$display_number" \
+				xdotool getwindowgeometry --shell "$window_id")
+			viewer_width=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^WIDTH=//p')
+			viewer_height=$(printf '%s\n' "$viewer_geometry" | sed -n 's/^HEIGHT=//p')
+			initial_frame_ready=0
+			for _ in $(seq 1 100); do
+				DISPLAY=":$display_number" import -window "$window_id" \
+					"$temporary/frame-publication-initial.png"
+				initial_frame_color=$(convert \
+					"$temporary/frame-publication-initial.png" \
+					-format "%[hex:p{$((viewer_width / 2)),$((viewer_height / 2))}]" info:)
+				if [ "$initial_frame_color" = FF0000 ]; then
+					initial_frame_ready=1
+					break
+				fi
+				sleep 0.05
+			done
+			if [ "$initial_frame_ready" -ne 1 ]; then
+				echo "UI smoke test: initial GIF frame did not become visible ($initial_frame_color)" >&2
+				exit 1
+			fi
+			DISPLAY=":$display_number" xdotool key p
+			: > "$viewer_frame_barrier_armed"
+			DISPLAY=":$display_number" xdotool key bracketright
+			assert_pending_animation_frame_barrier
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/frame-publication-pending.png"
+			pending_frame_color=$(convert "$temporary/frame-publication-pending.png" \
+				-format "%[hex:p{$((viewer_width / 2)),$((viewer_height / 2))}]" info:)
+			if [ "$pending_frame_color" != FF0000 ]; then
+				echo "UI smoke test: provisional GIF frame replaced the visible frame before its operation completed ($pending_frame_color)" >&2
+				exit 1
+			fi
+			clear_clipboard_text
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+				"$((viewer_width / 2))" "$((viewer_height / 2))"
+			sleep 0.15
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
+				"$((viewer_width / 2 + 62))" "$((viewer_height / 2 + 20))"
+			DISPLAY=":$display_number" xdotool click --window "$window_id" 1
+			frame_sampler_color=$(DISPLAY=":$display_number" \
+				xclip -selection clipboard -o 2>/dev/null || true)
+			if [ "$frame_sampler_color" != '#FF0000FF' ]; then
+				echo "UI smoke test: pixel sampler read the pending GIF frame instead of the visible frame ($frame_sampler_color)" >&2
+				exit 1
+			fi
+			DISPLAY=":$display_number" xdotool key ctrl+c
+			copied_frame_color=''
+			for _ in $(seq 1 40); do
+				if DISPLAY=":$display_number" xclip -selection clipboard -t image/png -o \
+					> "$temporary/frame-publication-copy.png" 2>/dev/null; then
+					copied_frame_color=$(convert \
+						"$temporary/frame-publication-copy.png" \
+						-format '%[hex:p{400,300}]' info: 2>/dev/null || true)
+					if [ "${#copied_frame_color}" -eq 8 ]; then
+						copied_frame_color=${copied_frame_color%??}
+					fi
+					if [ "$copied_frame_color" = FF0000 ]; then break; fi
+				fi
+				sleep 0.05
+			done
+			if [ "$copied_frame_color" != FF0000 ]; then
+				echo "UI smoke test: Copy used a GIF frame other than the visible committed frame ($copied_frame_color)" >&2
+				exit 1
+			fi
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 8 8
+			: > "$viewer_frame_barrier_release"
+			published_frame_color=''
+			for _ in $(seq 1 100); do
+				DISPLAY=":$display_number" import -window "$window_id" \
+					"$temporary/frame-publication-complete.png"
+				published_frame_color=$(convert \
+					"$temporary/frame-publication-complete.png" \
+					-format "%[hex:p{$((viewer_width / 2)),$((viewer_height / 2))}]" info:)
+				if [ "$published_frame_color" = 0000FF ]; then break; fi
+				sleep 0.05
+			done
+			if [ "$published_frame_color" != 0000FF ]; then
+				echo "UI smoke test: ready GIF frame was not published after its operation completed ($published_frame_color)" >&2
+				cat "$temporary/viewer.log" >&2
+				exit 1
+			fi
+			stop_viewer
+			viewer_frame_barrier_armed=''
+			unset viewer_frame_barrier_started viewer_frame_barrier_release
+
+			frame_transform_directory="$temporary/animation-frame-transform"
+			frame_transform_config="$temporary/animation-frame-transform-config/jpegview-linux"
+			mkdir -p "$frame_transform_directory" "$frame_transform_config"
+			convert -delay 1000 -size 800x600 xc:red \
+				-delay 1000 -size 800x600 xc:blue -loop 0 \
+				"$frame_transform_directory/01-frame-transform.gif"
+			printf 'scale_mode=fit\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+				> "$frame_transform_config/settings.conf"
+			viewer_frame_barrier_armed="$temporary/frame-transform-barrier-armed"
+			viewer_frame_barrier_started="$temporary/frame-transform-barrier-started"
+			viewer_frame_barrier_release="$temporary/frame-transform-barrier-release"
+			VIEWER_TEST_HOME="$temporary/frame-transform-home" \
+				VIEWER_TEST_CONFIG_HOME="$temporary/animation-frame-transform-config" \
+				launch_viewer "$frame_transform_directory/01-frame-transform.gif"
+			assert_title_prefix "01-frame-transform.gif" \
+				"frame-transform animation fixture did not load"
+			frame_transform_initial_ready=0
+			for _ in $(seq 1 100); do
+				DISPLAY=":$display_number" import -window "$window_id" \
+					"$temporary/frame-transform-initial.png"
+				frame_transform_initial_color=$(convert \
+					"$temporary/frame-transform-initial.png" \
+					-format '%[hex:p{640,400}]' info:)
+				if [ "$frame_transform_initial_color" = FF0000 ]; then
+					frame_transform_initial_ready=1
+					break
+				fi
+				sleep 0.05
+			done
+			if [ "$frame_transform_initial_ready" -ne 1 ]; then
+				echo "UI smoke test: transform GIF initial frame did not become visible ($frame_transform_initial_color)" >&2
+				exit 1
+			fi
+			DISPLAY=":$display_number" xdotool key p
+			: > "$viewer_frame_barrier_armed"
+			DISPLAY=":$display_number" xdotool key bracketright
+			assert_pending_animation_frame_barrier
+			DISPLAY=":$display_number" xdotool key Down
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/frame-transform-pending.png"
+			pending_transform_color=$(convert "$temporary/frame-transform-pending.png" \
+				-format '%[hex:p{640,400}]' info:)
+			if [ "$pending_transform_color" != FF0000 ]; then
+				echo "UI smoke test: transform showed the pending GIF frame before its source pixels were ready ($pending_transform_color)" >&2
+				exit 1
+			fi
+			: > "$viewer_frame_barrier_release"
+			rotated_frame_ready=0
+			rotated_frame_width=''
+			rotated_frame_height=''
+			rotated_frame_color=''
+			for _ in $(seq 1 100); do
+				DISPLAY=":$display_number" xdotool key ctrl+c
+				if DISPLAY=":$display_number" xclip -selection clipboard -t image/png -o \
+					> "$temporary/frame-transform-copy.png" 2>/dev/null; then
+					rotated_frame_width=$(identify -format '%w' \
+						"$temporary/frame-transform-copy.png" 2>/dev/null || true)
+					rotated_frame_height=$(identify -format '%h' \
+						"$temporary/frame-transform-copy.png" 2>/dev/null || true)
+					rotated_frame_color=$(convert \
+						"$temporary/frame-transform-copy.png" \
+						-format '%[hex:p{300,400}]' info: 2>/dev/null || true)
+					if [ "$rotated_frame_width:$rotated_frame_height" = 600:800 ] &&
+						[ "${rotated_frame_color%??}" = FF0000 ]; then
+						rotated_frame_ready=1
+						break
+					fi
+				fi
+				sleep 0.05
+			done
+			if [ "$rotated_frame_ready" -ne 1 ]; then
+				echo "UI smoke test: transform did not publish the captured visible GIF frame as a rotated still ($rotated_frame_width:$rotated_frame_height/$rotated_frame_color)" >&2
+				cat "$temporary/viewer.log" >&2
+				exit 1
+			fi
+			stop_viewer
+			viewer_frame_barrier_armed=''
+			unset viewer_frame_barrier_started viewer_frame_barrier_release
+		else
+			echo "UI smoke test: SKIP pending animation frame ownership (requires giflib, xclip, ImageMagick visual tools, and the frame barrier helper)"
+		fi
+
 		animation_directory="$temporary/animation-materialization"
 		animation_config="$temporary/animation-materialization-config"
 		mkdir -p "$animation_directory" "$animation_config/jpegview-linux"

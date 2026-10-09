@@ -173,6 +173,7 @@ ARCHIVE_FIXTURE_WRITER := $(BUILD_DIR)/write-7z-fixture
 RAR_FIXTURE_WRITER := $(BUILD_DIR)/write-rar-fixture
 GPS_EXIF_FIXTURE_WRITER := $(BUILD_DIR)/write-gps-exif-fixture
 ENCRYPTED_ZIP_FIXTURE_WRITER := $(BUILD_DIR)/write-encrypted-zip-fixture
+PENDING_ANIMATION_FRAME_BARRIER := $(BUILD_DIR)/pending-animation-frame-barrier.so
 APP_OBJECT_DIR := $(BUILD_DIR)/obj/app
 TEST_OBJECT_DIR := $(BUILD_DIR)/obj/tests
 PERF_OBJECT_DIR := $(BUILD_DIR)/obj/perf
@@ -449,7 +450,12 @@ $(ENCRYPTED_ZIP_FIXTURE_WRITER): tests/write_encrypted_zip_fixture.cpp \
 regen-encrypted-zip-fixture: $(ENCRYPTED_ZIP_FIXTURE_WRITER)
 	$(ENCRYPTED_ZIP_FIXTURE_WRITER) tests/fixtures/encrypted-zip.zip
 
-test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(GPS_EXIF_FIXTURE_WRITER)
+$(PENDING_ANIMATION_FRAME_BARRIER): tests/pending_animation_frame_barrier.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -shared -fPIC -Wall -Wextra -Werror $< -o $@ -ldl
+
+test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) \
+	$(GPS_EXIF_FIXTURE_WRITER) $(PENDING_ANIMATION_FRAME_BARRIER)
 	@version_output=$$($(TARGET) --version); \
 	expected_version="JPEGView Linux $(VERSION)"; \
 	if [ "$$version_output" != "$$expected_version" ]; then \
@@ -458,10 +464,11 @@ test-ui: $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) $(GPS_EXIF_FI
 	fi
 	JPEGVIEW_TEST_PERF_TRACE="$(abspath $(BUILD_DIR))/perf-trace-ui.csv" \
 	JPEGVIEW_TEST_HAS_7Z_PLUGIN=$(if $(strip $(SEVENZIP_SOURCE_ROOT)),1,0) \
-		JPEGVIEW_TEST_HAS_RAR_PLUGIN=$(if $(strip $(RAR_BACKEND_ROOT)),1,0) \
-		JPEGVIEW_TEST_HAS_SVG=$(if $(strip $(SVG_LIBS)),1,0) \
-		./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) \
-			$(GPS_EXIF_FIXTURE_WRITER)
+	JPEGVIEW_TEST_HAS_RAR_PLUGIN=$(if $(strip $(RAR_BACKEND_ROOT)),1,0) \
+	JPEGVIEW_TEST_HAS_SVG=$(if $(strip $(SVG_LIBS)),1,0) \
+	JPEGVIEW_TEST_HAS_GIFLIB=$(if $(strip $(GIF_LIBS)),1,0) \
+	./tests/ui_smoke.sh $(TARGET) $(ARCHIVE_FIXTURE_WRITER) $(RAR_FIXTURE_WRITER) \
+		$(GPS_EXIF_FIXTURE_WRITER) $(PENDING_ANIMATION_FRAME_BARRIER)
 
 test-version:
 	sh tests/version_test.sh

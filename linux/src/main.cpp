@@ -567,6 +567,7 @@ private:
 		bool fullSize = true;
 		bool keepSpreadRotation = false;
 		bool pausedAnimationPlayback = false;
+		bool holdsAnimationFramePublication = false;
 		bool overwriteConfirmed = false;
 		fs::path output;
 	};
@@ -588,6 +589,7 @@ private:
 		bool inPlaceSave = false;
 		bool flattenAnimationOnSuccess = false;
 		bool resumeAnimationOnCompletion = false;
+		bool holdsAnimationFramePublication = false;
 	};
 
 	struct TemporaryCleanupRequest {
@@ -1052,11 +1054,201 @@ private:
 		const jpegview_linux::SourceKey& source, const std::string& key) const {
 		if (!imageSession_.MatchesSelection(generation, source) ||
 			imageSession_.Stage() == jpegview_linux::ImageSessionStage::Failed ||
-			!currentDisplayRequest_.has_value() ||
+			key.empty()) return false;
+		const std::optional<jpegview_linux::AnimationFramePresentationTarget>& target =
+			animationFramePresentation_.Target();
+		if (target.has_value() && pendingAnimationFrameDisplayRequest_.has_value() &&
+			target->owner.source == source &&
+			target->owner.ownerGeneration == generation &&
+			target->owner.documentRevision == imageDocument_.Revision() &&
+			target->requestKey == key &&
+			pendingAnimationFrameDisplayRequest_->key == key &&
+			pendingAnimationFrameDisplayRequest_->source.Key() == source &&
+			pendingAnimationFrameDisplayRequest_->selectionGeneration == generation) {
+			return true;
+		}
+		if (!currentDisplayRequest_.has_value() ||
 			currentDisplayRequest_->source.Key() != source ||
 			currentDisplayRequest_->key != key) return false;
 		return !currentSelectedLoadPending_ || pendingSelectedDisplayKey_.empty() ||
 			pendingSelectedDisplayKey_ == key;
+	}
+
+	void CancelPendingAnimationFrameDisplay() {
+		if (animationFramePresentation_.Target().has_value() &&
+			!animationFramePresentation_.Target()->requestKey.empty()) {
+			SetDisplayTextureProtection(animationFramePresentation_.Target()->requestKey,
+				jpegview_linux::CacheProtectionTier::DistantSpeculation);
+		}
+		animationFramePresentation_.CancelTarget();
+		pendingAnimationFrameDisplayRequest_.reset();
+	}
+
+	bool RestartPendingAnimationFrameDisplayForCurrentDocument(
+		const jpegview_linux::AnimationFramePresentationTarget& target) {
+		if (target.owner.source != imageDocument_.Source() ||
+			target.owner.ownerGeneration != imageDocument_.OwnerGeneration() ||
+			target.owner.frameIndex != imageDocument_.FrameIndex() ||
+			currentAnimationFrame_ != imageDocument_.FrameIndex() ||
+			target.owner.documentRevision == imageDocument_.Revision()) return false;
+		const std::size_t targetFrame = target.frameIndex;
+		CancelPendingAnimationFrameDisplay();
+		animationFramePresentation_.SetCommitted({imageDocument_.Source(),
+			imageDocument_.OwnerGeneration(), imageDocument_.Revision(),
+			imageDocument_.FrameIndex()});
+		return SetAnimationFrame(targetFrame);
+	}
+
+	bool CommitPendingAnimationFrameDisplay() {
+		const std::optional<jpegview_linux::AnimationFramePresentationTarget>& targetRef =
+			animationFramePresentation_.Target();
+		if (!targetRef.has_value() || !pendingAnimationFrameDisplayRequest_.has_value() ||
+			animationFramePublicationHolds_ != 0) return false;
+		const jpegview_linux::AnimationFramePresentationTarget target = *targetRef;
+		if (RestartPendingAnimationFrameDisplayForCurrentDocument(target)) return false;
+		if (!target.ready) return false;
+		const jpegview_linux::DisplayImageRequest request =
+			*pendingAnimationFrameDisplayRequest_;
+		if (!animationFramePresentation_.CanCommitTarget(target.targetGeneration,
+			target.owner, target.requestKey) || request.key != target.requestKey ||
+			request.frameIndex != target.frameIndex ||
+			request.source.Key() != target.owner.source ||
+			imageDocument_.Source() != target.owner.source ||
+			imageDocument_.OwnerGeneration() != target.owner.ownerGeneration ||
+			imageDocument_.Revision() != target.owner.documentRevision ||
+			imageDocument_.FrameIndex() != target.owner.frameIndex ||
+			currentAnimationFrame_ != target.owner.frameIndex ||
+			!currentDecoded_ || target.frameIndex >= currentDecoded_->frames.size() ||
+			request.source.Key() != imageDocument_.Source()) {
+			CancelPendingAnimationFrameDisplay();
+			return false;
+		}
+		if (FindDisplayTexture(request.key) == nullptr) {
+			return false;
+		}
+
+		const jpegview_linux::DecodedFrame& frame =
+			currentDecoded_->frames[target.frameIndex];
+		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
+		if (texture_ != nullptr) {
+			DestroyTextureMeasured(texture_);
+			texture_ = nullptr;
+		}
+		jpegview_linux::RetiredImageBuffers retired = imageDocument_.SetFrame(
+			target.frameIndex, currentDecoded_->animation, frame.width, frame.height,
+			frame.hasTransparency);
+		imageOperationWorker_.Retire(std::move(retired));
+		imageModified_ = false;
+		currentPixelsDetachedFromSource_ = false;
+		currentImageRotationQuarterTurns_ = 0;
+		currentSpreadRotationValid_ = false;
+		editedImageSpectrumValid_ = false;
+		currentSourcePageDimensions_ =
+			jpegview_linux::PageDimensions{frame.width, frame.height};
+		currentAnimationFrame_ = target.frameIndex;
+		presentedAnimationFrame_ = target.frameIndex;
+		CancelImageSpectrumBeforeImageMutation();
+		currentDisplayRequest_ = request;
+		pendingAnimationFrameDisplayRequest_.reset();
+		if (!animationFramePresentation_.CommitTarget(target.targetGeneration,
+			target.owner, target.requestKey, imageDocument_.Revision())) {
+			// The value identity was checked before document mutation. Keep the model
+			// synchronized if a future change ever makes the second check fail.
+			animationFramePresentation_.SetCommitted({imageDocument_.Source(),
+				imageDocument_.OwnerGeneration(), imageDocument_.Revision(),
+				imageDocument_.FrameIndex()});
+		}
+		RestoreScaleMode(viewportSnapshot);
+		cropSelection_.SetImageSize(CurrentImage().width, CurrentImage().height);
+		RecordPresentedDisplayTexture(request.key);
+		RefreshDoublePageRenderState();
+		SetTitle();
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Animation);
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
+		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+		return true;
+	}
+
+	void RequestPendingAnimationFrameDisplay() {
+		const std::optional<jpegview_linux::AnimationFramePresentationTarget>& targetRef =
+			animationFramePresentation_.Target();
+		if (!targetRef.has_value()) return;
+		const jpegview_linux::AnimationFramePresentationTarget target = *targetRef;
+		if (RestartPendingAnimationFrameDisplayForCurrentDocument(target)) return;
+		if (fileList_.Empty() || !currentDecoded_ ||
+			target.frameIndex >= currentDecoded_->frames.size() ||
+			target.owner.source != imageDocument_.Source() ||
+			target.owner.ownerGeneration != imageDocument_.OwnerGeneration() ||
+			target.owner.documentRevision != imageDocument_.Revision() ||
+			target.owner.frameIndex != imageDocument_.FrameIndex()) {
+			CancelPendingAnimationFrameDisplay();
+			return;
+		}
+		const jpegview_linux::DecodedFrame& frame = currentDecoded_->frames[target.frameIndex];
+		const SDL_Rect area = ImageAreaRect();
+		jpegview_linux::Viewport targetViewport = viewport_;
+		targetViewport.Restore(viewport_.Snapshot(), frame.width, frame.height,
+			area.w, area.h);
+		const jpegview_linux::ViewportRect destination = targetViewport.Destination(
+			frame.width, frame.height, area.w, area.h);
+		const jpegview_linux::DisplayImageTarget resolution =
+			jpegview_linux::ClampDisplayImageTarget(frame.width, frame.height,
+				destination.width, destination.height);
+		if (resolution.width <= 0 || resolution.height <= 0) return;
+		const jpegview_linux::SourceDescriptor source =
+			SourceDescriptorForPath(fileList_.Current());
+		if (source.Key() != target.owner.source) {
+			CancelPendingAnimationFrameDisplay();
+			playback_.FrameDisplayFailed(presentedAnimationFrame_);
+			return;
+		}
+		jpegview_linux::DisplayImageRequest request =
+			jpegview_linux::MakeDisplayImageRequest(source, currentDecoded_,
+				target.frameIndex, resolution.width, resolution.height,
+				autoContrastEnabled_, 0, imageProcessing_, 0, false);
+		if (!request.Valid()) return;
+		request.selectionGeneration = imageSession_.Generation();
+		request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+		std::size_t bestBytes = std::numeric_limits<std::size_t>::max();
+		const DisplayTextureCacheEntry* bestRepresentation = nullptr;
+		for (const auto& cached : displayTextureCache_) {
+			if (!jpegview_linux::CanReuseDisplayImageRepresentation(
+				request.cacheKey, cached.second.cacheKey) ||
+				cached.second.bytes >= bestBytes) continue;
+			bestBytes = cached.second.bytes;
+			bestRepresentation = &cached.second;
+		}
+		if (bestRepresentation != nullptr &&
+			bestRepresentation->cacheKey != request.cacheKey) {
+			request = jpegview_linux::RebuildDisplayImageRequestAtTarget(request,
+				bestRepresentation->cacheKey.targetWidth,
+				bestRepresentation->cacheKey.targetHeight);
+			request.selectionGeneration = imageSession_.Generation();
+			request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+		}
+		if (target.requestKey != request.key &&
+			!animationFramePresentation_.SetTargetRequestKey(target.targetGeneration,
+				request.key)) return;
+		pendingAnimationFrameDisplayRequest_ = request;
+		SetDisplayTextureProtection(request.key,
+			jpegview_linux::CacheProtectionTier::Active);
+		if (FindDisplayTexture(request.key) != nullptr) {
+			MarkSelectedDisplayFrameReady(request.selectionGeneration,
+				request.source.Key(), request.key);
+			return;
+		}
+		const auto prepared = displayImageCache_.Find(request);
+		if (!prepared) {
+			displayImageCache_.Request(request);
+			return;
+		}
+		PendingTextureUpload pending;
+		pending.image = prepared;
+		pending.priority = {request.workClass, request.priority};
+		pending.lastAttemptRetainedCapacityRevision =
+			cacheBudget_->RetainedCapacityRevision();
+		pending.selectionGeneration = request.selectionGeneration;
+		QueuePendingTextureUpload(std::move(pending));
 	}
 
 	void FailCurrentSelectedLoad(std::uint64_t generation,
@@ -1073,6 +1265,7 @@ private:
 		pendingCurrentDecodedSource_.reset();
 		pendingImageIntents_.Cancel();
 		ClearPendingTransitionFrame();
+		CancelPendingAnimationFrameDisplay();
 		pendingMaterializationIntents_.clear();
 		presentedAnimationFrame_.reset();
 		currentDisplayRequest_.reset();
@@ -1102,6 +1295,23 @@ private:
 
 	void MarkSelectedDisplayFrameReady(std::uint64_t generation,
 		const jpegview_linux::SourceKey& source, const std::string& key) {
+		const std::optional<jpegview_linux::AnimationFramePresentationTarget>& target =
+			animationFramePresentation_.Target();
+		if (target.has_value() && pendingAnimationFrameDisplayRequest_.has_value() &&
+			target->owner.source == source &&
+			target->owner.ownerGeneration == generation &&
+			target->owner.documentRevision == imageDocument_.Revision() &&
+			target->requestKey == key &&
+			pendingAnimationFrameDisplayRequest_->key == key) {
+			if (!animationFramePresentation_.MarkTargetReady(target->targetGeneration,
+				target->owner, key)) return;
+			if (animationFramePublicationHolds_ == 0 &&
+				CommitPendingAnimationFrameDisplay() &&
+				!ImageOperationOwnsAnimationPause()) {
+				SetAnimationImageReadiness(true, SDL_GetTicks());
+			}
+			return;
+		}
 		const bool currentRequest = IsCurrentSelectedDisplayRequest(generation, source, key);
 		if (!currentRequest) return;
 		if (failedCurrentDisplayKey_ == key) failedCurrentDisplayKey_.clear();
@@ -1111,10 +1321,18 @@ private:
 		} else {
 			presentedAnimationFrame_.reset();
 		}
+		if (!currentSelectedLoadPending_ && playback_.HasAnimation() && currentDecoded_) {
+			animationFramePresentation_.SetCommitted({source,
+				imageDocument_.OwnerGeneration(), imageDocument_.Revision(),
+				currentDisplayRequest_->frameIndex});
+		} else if (!currentSelectedLoadPending_) {
+			animationFramePresentation_.CancelTarget();
+		}
 		RecordPresentedDisplayTexture(key);
 		if (!currentSelectedLoadPending_) {
-			if (!ImageOperationOwnsAnimationPause()) {
-				playback_.SetImageReady(true, SDL_GetTicks());
+			if (!ImageOperationOwnsAnimationPause() &&
+				!animationFramePresentation_.Target().has_value()) {
+				SetAnimationImageReadiness(true, SDL_GetTicks());
 			}
 			return;
 		}
@@ -1128,6 +1346,11 @@ private:
 			FailCurrentSelectedLoad(generation, source,
 				"selected image history could not be committed", false);
 			return;
+		}
+		if (playback_.HasAnimation() && currentDecoded_) {
+			animationFramePresentation_.SetCommitted({source,
+				imageDocument_.OwnerGeneration(), imageDocument_.Revision(),
+				currentDisplayRequest_->frameIndex});
 		}
 		imageSession_.ClearClipboardReturnViewport();
 		currentSelectedLoadPending_ = false;
@@ -1144,7 +1367,7 @@ private:
 			deferredExifDateAction_.MarkImageCommitted(selection->filename, source);
 		if (deferredAction.runDeferredAction) TouchCurrentImage(true);
 		if (!ImageOperationOwnsAnimationPause()) {
-			playback_.SetImageReady(true, SDL_GetTicks());
+			SetAnimationImageReadiness(true, SDL_GetTicks());
 		}
 		if (pendingTransitionFrame_.texture != nullptr) {
 			TransitionFrame previous;
@@ -1164,6 +1387,31 @@ private:
 	void HandleCurrentDisplayFailure(std::uint64_t generation,
 		const jpegview_linux::SourceKey& source, const std::string& key,
 		const std::string& errorMessage) {
+		const std::optional<jpegview_linux::AnimationFramePresentationTarget>& target =
+			animationFramePresentation_.Target();
+		if (target.has_value() && pendingAnimationFrameDisplayRequest_.has_value() &&
+			target->owner.source == source &&
+			target->owner.ownerGeneration == generation &&
+			target->requestKey == key &&
+			pendingAnimationFrameDisplayRequest_->key == key &&
+			imageSession_.MatchesSelection(generation, source)) {
+			(void)animationFramePresentation_.FailTarget(target->targetGeneration,
+				target->owner, key);
+			pendingAnimationFrameDisplayRequest_.reset();
+			SetDisplayTextureProtection(key,
+				jpegview_linux::CacheProtectionTier::DistantSpeculation);
+			if (!ImageOperationOwnsAnimationPause()) {
+				playback_.FrameDisplayFailed(presentedAnimationFrame_);
+				if (animationFramePublicationHolds_ != 0) {
+					playback_.SetImageReady(false, SDL_GetTicks());
+				}
+			}
+			SetTitle(fileList_.Current().filename().string() +
+				" — animation frame update failed: " + errorMessage);
+			frameInvalidator_.Mark(
+				jpegview_linux::FrameInvalidationReason::Animation);
+			return;
+		}
 		if (!currentDisplayRequest_.has_value() ||
 			currentDisplayRequest_->key != key ||
 			currentDisplayRequest_->source.Key() != source ||
@@ -1181,14 +1429,12 @@ private:
 		if (fileList_.Empty()) return;
 		failedCurrentDisplayKey_ = key;
 		if (!ImageOperationOwnsAnimationPause()) {
-			if (currentDecoded_ && currentDecoded_->animation) {
+			if (currentDecoded_ && currentDecoded_->animation &&
+				!animationFramePresentation_.Target().has_value()) {
 				const std::optional<std::size_t> visibleFrame = presentedAnimationFrame_;
 				playback_.FrameDisplayFailed(visibleFrame);
-				if (visibleFrame.has_value() && currentAnimationFrame_ != *visibleFrame) {
-					(void)SetAnimationFrame(*visibleFrame);
-				}
-			} else {
-				playback_.SetImageReady(true, SDL_GetTicks());
+			} else if (!animationFramePresentation_.Target().has_value()) {
+				SetAnimationImageReadiness(true, SDL_GetTicks());
 			}
 		}
 		SetTitle(fileList_.Current().filename().string() +
@@ -1255,9 +1501,10 @@ private:
 					errorMessage, passwordFailure);
 			} else if (pendingImageOperation_.has_value() &&
 				pendingImageOperation_->workerGeneration == 0) {
-				const ImageOperationPurpose purpose = pendingImageOperation_->purpose;
+				PendingImageOperation pending = std::move(*pendingImageOperation_);
 				pendingImageOperation_.reset();
-				ReportImageOperationFailure(purpose, errorMessage);
+				ResumeImageOperationPlayback(pending);
+				ReportImageOperationFailure(pending.purpose, errorMessage);
 				if (!pendingMaterializationIntents_.empty()) {
 					ReplayPendingMaterializationIntents();
 				}
@@ -2099,6 +2346,7 @@ private:
 		// cancellation here would otherwise make a reversal look like the committed
 		// image still owned the live viewport.
 		CancelPendingCurrentSourceDimensions();
+		CancelPendingAnimationFrameDisplay();
 		const jpegview_linux::SourceDescriptor source =
 			SourceDescriptorForPath(fileList_.Current());
 		ClearCropSelection();
@@ -2829,15 +3077,41 @@ private:
 
 	void CancelPendingImageOperation() {
 		if (!pendingImageOperation_.has_value()) return;
-		ResumeImageOperationPlayback(*pendingImageOperation_);
+		PendingImageOperation pending = std::move(*pendingImageOperation_);
 		pendingImageOperation_.reset();
+		ResumeImageOperationPlayback(pending);
 		imageOperationWorker_.Cancel();
 	}
 
+	void SetAnimationImageReadiness(bool ready, std::uint32_t now) {
+		if (ready && (animationFramePublicationHolds_ != 0 ||
+			animationFramePresentation_.Target().has_value())) ready = false;
+		playback_.SetImageReady(ready, now);
+	}
+
+	void HoldPendingAnimationFrameForModal(bool& ownsHold) {
+		if (ownsHold || !animationFramePresentation_.Target().has_value()) return;
+		ownsHold = true;
+		++animationFramePublicationHolds_;
+	}
+
+	void ReleaseAnimationFramePublicationHold(bool& holdsPublication) {
+		if (!holdsPublication) return;
+		holdsPublication = false;
+		if (animationFramePublicationHolds_ != 0) --animationFramePublicationHolds_;
+		if (animationFramePublicationHolds_ == 0 &&
+			CommitPendingAnimationFrameDisplay() &&
+			!ImageOperationOwnsAnimationPause()) {
+			SetAnimationImageReadiness(true, SDL_GetTicks());
+		}
+	}
+
 	void ResumeImageOperationPlayback(PendingImageOperation& pending) {
+		ReleaseAnimationFramePublicationHold(
+			pending.holdsAnimationFramePublication);
 		if (!pending.pausedAnimationPlayback) return;
 		pending.pausedAnimationPlayback = false;
-		playback_.SetImageReady(true, SDL_GetTicks());
+		SetAnimationImageReadiness(true, SDL_GetTicks());
 	}
 
 	bool ImageOperationOwnsAnimationPause() const {
@@ -2887,6 +3161,11 @@ private:
 		pending.output = output;
 		pending.overwriteConfirmed = purpose == ImageOperationPurpose::Save &&
 			fileDialogOverwriteConfirmed_;
+		pending.holdsAnimationFramePublication =
+			animationFramePresentation_.Target().has_value();
+		if (pending.holdsAnimationFramePublication) {
+			++animationFramePublicationHolds_;
+		}
 		pendingImageOperation_ = std::move(pending);
 		if (admission ==
 			jpegview_linux::PendingImageOperationAdmission::WaitForSelectedCommit) {
@@ -2901,6 +3180,7 @@ private:
 		PendingImageOperation& pending = *pendingImageOperation_;
 		if (pending.workerGeneration != 0) return true;
 		if (!imageDocument_.Matches(pending.document)) {
+			ResumeImageOperationPlayback(pending);
 			pendingImageOperation_.reset();
 			return false;
 		}
@@ -2922,6 +3202,7 @@ private:
 			const jpegview_linux::SourceDescriptor source =
 				SourceDescriptorForPath(fileList_.Current());
 			if (source.Key() != pending.document.source) {
+				ResumeImageOperationPlayback(pending);
 				pendingImageOperation_.reset();
 				return false;
 			}
@@ -3057,6 +3338,10 @@ private:
 		}
 		PendingImageOperation pending = std::move(*pendingImageOperation_);
 		pendingImageOperation_.reset();
+		const std::optional<std::size_t> pendingAnimationTargetFrame =
+			animationFramePresentation_.Target().has_value() ?
+				std::optional<std::size_t>(
+					animationFramePresentation_.Target()->frameIndex) : std::nullopt;
 		if (pending.purpose == ImageOperationPurpose::FreeRotationPreview) {
 			const bool currentPreview = freeRotationDialog_.MatchesPreview(
 				pending.transformEditorSessionId, pending.transformPreviewRevision) &&
@@ -3098,6 +3383,7 @@ private:
 					(result->failure.message.empty() ? "operation failed" : result->failure.message));
 			}
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			ResumeImageOperationPlayback(pending);
 			imageOperationWorker_.Retire(std::move(*result));
 			replayLaterIntents();
 			return;
@@ -3152,6 +3438,7 @@ private:
 						result->failure.message));
 			}
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+			ResumeImageOperationPlayback(pending);
 			imageOperationWorker_.Retire(std::move(*result));
 			replayLaterIntents();
 			return;
@@ -3183,9 +3470,15 @@ private:
 					return;
 				}
 			}
+			if (animationFramePresentation_.Target().has_value()) {
+				CancelPendingAnimationFrameDisplay();
+			}
 			jpegview_linux::RetiredImageBuffers retired;
 			if (!imageDocument_.Apply(*result, retired)) {
 				if (replacementTexture != nullptr) DestroyTextureMeasured(replacementTexture);
+				if (pendingAnimationTargetFrame.has_value()) {
+					(void)SetAnimationFrame(*pendingAnimationTargetFrame);
+				}
 				ResumeImageOperationPlayback(pending);
 				imageOperationWorker_.Retire(std::move(*result));
 				replayLaterIntents();
@@ -3200,6 +3493,7 @@ private:
 				pending.operation.preserveDocumentPixels;
 			if (!preserveLazySavePresentation) currentDisplayRequest_.reset();
 			if (result->flattenAnimation) {
+				CancelPendingAnimationFrameDisplay();
 				playback_.ConfigureImage({}, 0, false, SDL_GetTicks());
 				presentedAnimationFrame_.reset();
 				retired.decoded = std::move(currentDecoded_);
@@ -3243,6 +3537,15 @@ private:
 				(result->modified || result->detached)) {
 				CancelImageSpectrumBeforeImageMutation();
 			}
+			if (!result->flattenAnimation && imageDocument_.Animated() && currentDecoded_) {
+				animationFramePresentation_.SetCommitted({imageDocument_.Source(),
+					imageDocument_.OwnerGeneration(), imageDocument_.Revision(),
+					imageDocument_.FrameIndex()});
+				if (pendingAnimationTargetFrame.has_value() &&
+					*pendingAnimationTargetFrame != currentAnimationFrame_) {
+					(void)SetAnimationFrame(*pendingAnimationTargetFrame);
+				}
+			}
 			imageOperationWorker_.Retire(std::move(retired));
 			RefreshDoublePageRenderState();
 			if (pending.purpose == ImageOperationPurpose::Transform ||
@@ -3264,14 +3567,18 @@ private:
 						const bool deferPlaybackResume =
 							pending.operation.preserveDocumentPixels && pending.document.animated &&
 							pending.pausedAnimationPlayback;
+						const bool transferFramePublicationHold =
+							deferPlaybackResume &&
+							pending.holdsAnimationFramePublication;
 						const bool queued = CompleteImageSave(pending.output, result->outputPixels,
 							result->outputReservation.ShareAlias(),
 							pending.overwriteConfirmed,
 							pending.operation.preserveDocumentPixels,
 							pending.operation.preserveDocumentPixels && pending.document.animated,
-							deferPlaybackResume);
+							deferPlaybackResume, transferFramePublicationHold);
 						if (queued && deferPlaybackResume) {
 							pending.pausedAnimationPlayback = false;
+							pending.holdsAnimationFramePublication = false;
 						}
 					}
 					break;
@@ -3888,10 +4195,18 @@ private:
 			}
 			if (currentSelectedLoadPending_ &&
 				failure.key != pendingSelectedDisplayKey_) continue;
-			if (!currentDisplayRequest_.has_value() ||
-				failure.key != currentDisplayRequest_->key) continue;
+			const std::optional<jpegview_linux::AnimationFramePresentationTarget>& target =
+				animationFramePresentation_.Target();
+			const bool pendingAnimationFailure = target.has_value() &&
+				pendingAnimationFrameDisplayRequest_.has_value() &&
+				target->owner.source == failure.cacheKey.source &&
+				target->owner.ownerGeneration == failure.selectionGeneration &&
+				target->requestKey == failure.key;
+			if (!pendingAnimationFailure &&
+				(!currentDisplayRequest_.has_value() ||
+				failure.key != currentDisplayRequest_->key)) continue;
 			HandleCurrentDisplayFailure(failure.selectionGeneration,
-				currentDisplayRequest_->source.Key(), failure.key,
+				failure.cacheKey.source, failure.key,
 				failure.failure.message);
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 		}
@@ -4329,6 +4644,7 @@ private:
 	}
 
 	void UpdateCurrentDisplayTextureRequest() {
+		RequestPendingAnimationFrameDisplay();
 		if (fileList_.Empty() || (!clipboardMode_ && imageSession_.LoadedPath() !=
 			AbsoluteNormalized(fileList_.Current())) ||
 			presentationController_.SuppressSinglePage(fileList_.CurrentIndex())) return;
@@ -4439,6 +4755,8 @@ private:
 	}
 
 	bool IsPinnedDisplayTexture(const std::string& key) const {
+		if (pendingAnimationFrameDisplayRequest_.has_value() &&
+			pendingAnimationFrameDisplayRequest_->key == key) return true;
 		return jpegview_linux::IsDisplayTexturePinned(key, transitionDisplayKey_,
 			pendingTransitionFrame_.displayKey, transitionCaptureDisplayKey_,
 			lastPresentedDisplayKey_, LastPresentedTextureMatchesCurrentSource(),
@@ -5431,7 +5749,7 @@ private:
 			if (pending.resumeAnimationOnCompletion && ownerCurrent &&
 				!(result->success && result->replacedSelectedSource &&
 					pending.flattenAnimationOnSuccess)) {
-				playback_.SetImageReady(true, SDL_GetTicks());
+				SetAnimationImageReadiness(true, SDL_GetTicks());
 			}
 			break;
 		case jpegview_linux::FileOperationKind::CopyImage:
@@ -5560,6 +5878,8 @@ private:
 			break;
 		}
 		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+		ReleaseAnimationFramePublicationHold(
+			pending.holdsAnimationFramePublication);
 		ScheduleTemporaryCleanup();
 	}
 
@@ -5568,7 +5888,8 @@ private:
 		jpegview_linux::CacheReservation imageReservation,
 		bool overwriteConfirmed,
 		bool inPlaceSave, bool flattenAnimationOnSuccess,
-		bool resumeAnimationOnCompletion) {
+		bool resumeAnimationOnCompletion,
+		bool holdsAnimationFramePublication) {
 		jpegview_linux::ImageWriteOptions options;
 		jpegview_linux::SaveImageOperation operation;
 		operation.output = output;
@@ -5586,6 +5907,7 @@ private:
 		pending.inPlaceSave = inPlaceSave;
 		pending.flattenAnimationOnSuccess = flattenAnimationOnSuccess;
 		pending.resumeAnimationOnCompletion = resumeAnimationOnCompletion;
+		pending.holdsAnimationFramePublication = holdsAnimationFramePublication;
 		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
 			fileDialogMessage_ = "Save failed: another file operation is still in progress";
 			return false;
@@ -5596,6 +5918,7 @@ private:
 
 	void StopAnimationAfterSavedSourceReplacement() {
 		if (!imageDocument_.Animated()) return;
+		CancelPendingAnimationFrameDisplay();
 		imageDocument_.SetAnimation(false);
 		imageDocument_.SetFrameIndex(0);
 		currentAnimationFrame_ = 0;
@@ -6051,14 +6374,14 @@ private:
 			playbackBoundaryScanGeneration_ != fileListScanGeneration_) return;
 		playbackBoundaryScanGeneration_ = 0;
 		if (!currentSelectedLoadPending_) {
-			playback_.SetImageReady(true, SDL_GetTicks());
+			SetAnimationImageReadiness(true, SDL_GetTicks());
 		}
 	}
 
 	void StopPlaybackAfterFailedBoundaryScan() {
 		const std::uint32_t now = SDL_GetTicks();
 		playback_.Stop(now);
-		if (!currentSelectedLoadPending_) playback_.SetImageReady(true, now);
+		if (!currentSelectedLoadPending_) SetAnimationImageReadiness(true, now);
 	}
 
 	void RetireFileListBoundPresentation() {
@@ -7613,27 +7936,26 @@ private:
 
 	bool SetAnimationFrame(std::size_t index) {
 		if (!currentDecoded_ || index >= currentDecoded_->frames.size()) return false;
-		CancelPendingImageOperation();
-		CancelImageSpectrumBeforeImageMutation();
-		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
 		const jpegview_linux::DecodedFrame& frame = currentDecoded_->frames[index];
-		jpegview_linux::RetiredImageBuffers retired = imageDocument_.SetFrame(
-			index, currentDecoded_->animation, frame.width, frame.height,
-			frame.hasTransparency);
-		imageOperationWorker_.Retire(std::move(retired));
-		imageModified_ = false;
-		currentPixelsDetachedFromSource_ = false;
-		currentImageRotationQuarterTurns_ = 0;
-		currentSpreadRotationValid_ = false;
-		editedImageSpectrumValid_ = false;
-		currentSourcePageDimensions_ =
-			jpegview_linux::PageDimensions{frame.width, frame.height};
-		currentAnimationFrame_ = index;
-		currentDisplayRequest_.reset();
+		const jpegview_linux::AnimationFramePresentationIdentity committed{
+			imageDocument_.Source(), imageDocument_.OwnerGeneration(),
+			imageDocument_.Revision(), imageDocument_.FrameIndex()};
+		const std::optional<jpegview_linux::AnimationFramePresentationIdentity>& current =
+			animationFramePresentation_.Committed();
+		if (!current.has_value() || current->source != committed.source ||
+			current->ownerGeneration != committed.ownerGeneration ||
+			current->documentRevision != committed.documentRevision ||
+			current->frameIndex != committed.frameIndex) {
+			animationFramePresentation_.SetCommitted(committed);
+		}
+		const std::uint64_t targetGeneration =
+			animationFramePresentation_.BeginTarget(committed, index,
+				frame.width, frame.height, frame.hasTransparency);
+		if (targetGeneration == 0) return false;
+		pendingAnimationFrameDisplayRequest_.reset();
 		failedCurrentDisplayKey_.clear();
-		RestoreScaleMode(viewportSnapshot);
 		playback_.SetImageReady(false, SDL_GetTicks());
-		RequestCurrentDisplayFrame();
+		RequestPendingAnimationFrameDisplay();
 		return true;
 	}
 
@@ -9581,7 +9903,9 @@ private:
 	void CancelFreeRotationPreviewRequest() {
 		if (!pendingImageOperation_.has_value() ||
 			pendingImageOperation_->purpose != ImageOperationPurpose::FreeRotationPreview) return;
+		PendingImageOperation pending = std::move(*pendingImageOperation_);
 		pendingImageOperation_.reset();
+		ResumeImageOperationPlayback(pending);
 		imageOperationWorker_.Cancel();
 	}
 
@@ -9632,6 +9956,8 @@ private:
 			rotationModalPlaybackSuppressed_ = false;
 			if (resumePlayback) playback_.SetTemporarilyPaused(false, SDL_GetTicks());
 		}
+		ReleaseAnimationFramePublicationHold(
+			freeRotationAnimationFramePublicationHeld_);
 		SetTitle();
 		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 	}
@@ -9643,6 +9969,8 @@ private:
 		DestroyFreeRotationPreview();
 		const bool wasSuppressed = rotationModalPlaybackSuppressed_;
 		rotationModalPlaybackSuppressed_ = false;
+		ReleaseAnimationFramePublicationHold(
+			freeRotationAnimationFramePublicationHeld_);
 		if (wasSuppressed && resumePlayback) playback_.SetTemporarilyPaused(false,
 			SDL_GetTicks());
 		SetTitle();
@@ -9658,6 +9986,8 @@ private:
 			pictureLevelsPanelOpen_ || confirmationOpen_ || aboutOpen_ || helpOpen_ ||
 			archivePasswordDialog_.IsOpen() || advancedConfiguration_.IsOpen()) return;
 		if (!freeRotationDialog_.Open(CurrentImage().width, CurrentImage().height)) return;
+		HoldPendingAnimationFrameForModal(
+			freeRotationAnimationFramePublicationHeld_);
 		freeRotationAngleDragging_ = false;
 		freeRotationAngleDragChanged_ = false;
 		contextMenuOpen_ = false;
@@ -9889,7 +10219,9 @@ private:
 		if (!pendingImageOperation_.has_value() ||
 			pendingImageOperation_->purpose !=
 				ImageOperationPurpose::PerspectiveCorrectionPreview) return;
+		PendingImageOperation pending = std::move(*pendingImageOperation_);
 		pendingImageOperation_.reset();
+		ResumeImageOperationPlayback(pending);
 		imageOperationWorker_.Cancel();
 	}
 
@@ -9943,6 +10275,8 @@ private:
 			perspectiveCorrectionModalPlaybackSuppressed_ = false;
 			if (resumePlayback) playback_.SetTemporarilyPaused(false, SDL_GetTicks());
 		}
+		ReleaseAnimationFramePublicationHold(
+			perspectiveAnimationFramePublicationHeld_);
 		SetTitle();
 		frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
 	}
@@ -9954,6 +10288,8 @@ private:
 		DestroyPerspectiveCorrectionPreview();
 		const bool wasSuppressed = perspectiveCorrectionModalPlaybackSuppressed_;
 		perspectiveCorrectionModalPlaybackSuppressed_ = false;
+		ReleaseAnimationFramePublicationHold(
+			perspectiveAnimationFramePublicationHeld_);
 		if (wasSuppressed && resumePlayback) playback_.SetTemporarilyPaused(false,
 			SDL_GetTicks());
 		SetTitle();
@@ -9969,6 +10305,8 @@ private:
 			aboutOpen_ || helpOpen_ ||
 			archivePasswordDialog_.IsOpen() || advancedConfiguration_.IsOpen()) return;
 		if (!perspectiveCorrectionDialog_.Open(CurrentImage().width, CurrentImage().height)) return;
+		HoldPendingAnimationFrameForModal(
+			perspectiveAnimationFramePublicationHeld_);
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
 		batchCopyDialog_.Close();
@@ -10280,6 +10618,7 @@ private:
 	void OpenResizeDialog() {
 		if (CurrentImage().width <= 0 || CurrentImage().height <= 0) return;
 		resizeDialog_.Open(CurrentImage().width, CurrentImage().height);
+		HoldPendingAnimationFrameForModal(resizeAnimationFramePublicationHeld_);
 		resizePercentSliderDragging_ = false;
 		contextMenuOpen_ = false;
 		fileDialogOpen_ = false;
@@ -10291,6 +10630,7 @@ private:
 		SDL_StopTextInput();
 		resizePercentSliderDragging_ = false;
 		resizeDialog_.Close();
+		ReleaseAnimationFramePublicationHold(resizeAnimationFramePublicationHeld_);
 	}
 
 	void ApplyResizeDialog() {
@@ -14366,6 +14706,7 @@ private:
 	std::string pendingSelectedDisplayKey_;
 	std::vector<jpegview_linux::PendingImageIntent> pendingMaterializationIntents_;
 	std::optional<PendingImageOperation> pendingImageOperation_;
+	std::size_t animationFramePublicationHolds_ = 0;
 	bool pendingImageIntentLimitReached_ = false;
 	std::uint64_t exifMetadataRequestGeneration_ = 0;
 	jpegview_linux::SourceKey exifMetadataSource_;
@@ -14373,6 +14714,7 @@ private:
 	std::uint64_t imageInfoMetadataRevision_ = 0;
 	std::optional<ActiveSpreadSourceRequest> activeSpreadSourceRequest_;
 	jpegview_linux::PresentationController presentationController_;
+	jpegview_linux::AnimationFramePresentationModel animationFramePresentation_;
 	bool deferredCurrentDisplayPreparation_ = false;
 	double initialSlideshowSeconds_ = 0.0;
 	jpegview_linux::PlaybackScheduler playback_;
@@ -14438,6 +14780,7 @@ private:
 	std::size_t currentAnimationFrame_ = 0;
 	std::optional<std::size_t> presentedAnimationFrame_;
 	std::optional<jpegview_linux::DisplayImageRequest> currentDisplayRequest_;
+	std::optional<jpegview_linux::DisplayImageRequest> pendingAnimationFrameDisplayRequest_;
 	SDL_Texture* transitionTexture_ = nullptr;
 	int transitionOriginalBlendMode_ = SDL_BLENDMODE_NONE;
 	int transitionWidth_ = 0;
@@ -14480,10 +14823,13 @@ private:
 	bool freeRotationAngleDragging_ = false;
 	bool freeRotationAngleDragChanged_ = false;
 	bool rotationModalPlaybackSuppressed_ = false;
+	bool freeRotationAnimationFramePublicationHeld_ = false;
 	int perspectiveCorrectionActiveSlider_ = 0;
 	int perspectiveCorrectionDraggingSlider_ = -1;
 	bool perspectiveCorrectionSliderDragChanged_ = false;
 	bool perspectiveCorrectionModalPlaybackSuppressed_ = false;
+	bool perspectiveAnimationFramePublicationHeld_ = false;
+	bool resizeAnimationFramePublicationHeld_ = false;
 	int unsharpDraggingControl_ = -1;
 	jpegview_linux::ImageProcessingParams unsharpOriginalProcessing_;
 	double unsharpOriginalRadius_ = 1.0;

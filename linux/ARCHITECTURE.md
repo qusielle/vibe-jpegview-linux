@@ -764,20 +764,28 @@ the outgoing frame and starts when the incoming image is ready.
 For animated sources, Viewer records the presented frame only after its matching display request
 commits. The information overlay reads that committed identity and its matching delay/rate while
 another frame is preparing; its cache key excludes the scheduler's provisional frame index.
-Manual steps pass through the same `SetAnimationFrame` and texture pipeline as timed advances. A failed
-frame display restores the scheduler and document to the last committed frame. Viewer carries
-the selected owner generation on prepared-cache texture uploads even after the initial display commit,
-so their failure recovery and stale-completion checks use the same identity as worker completions.
+Manual and timed steps create a provisional frame target without changing `ImageDocument`, the committed
+frame index, or current image geometry. The target carries its source, owner generation, document
+revision, frame index, target generation, and display-request key. Only a matching renderer-ready
+texture can install its frame pixels and geometry and advance the committed identity. A failed or stale
+target leaves the last committed frame, viewport, sampler source, and edit source intact and restores
+the scheduler to that frame. Viewer carries the selected owner generation on prepared-cache texture
+uploads even after the initial display commit, so failure recovery and stale-completion checks use the
+same identity as worker completions.
 The scheduler keeps manual freeze separate from modal/readiness suppression, and a delay override
 changes timing without mutating pixels or cache identity. Manual controls are admitted only while the
 selected animated frame is ready and no image or file operation owns it.
 Pixel-edit workers operate on immutable source snapshots and validate the selected owner, document
 revision, and animation frame before publication. The SDL thread creates a replacement texture first,
 then applies the new pixels and retires replaced buffers through the shared cache retirement service.
-For animated sources, frame-bound operations pause readiness while the captured frame is processed;
-failure or cancellation resumes playback, while a successful edit keeps that frame as a still image.
-An already-pending display completion or failure must not release that operation-owned pause; only
-the operation's terminal path may resume playback.
+For animated sources, a frame-bound operation snapshots the committed document and holds a pending
+frame target from publication until the operation reaches a terminal result. Copy, sampling, saving,
+and preview work therefore continue to refer to the visible frame while that target prepares. A
+successful edit applies to the captured frame and cancels a now-obsolete target when it flattens the
+animation; failure or cancellation releases the hold so a still-current ready target may publish.
+An already-pending display completion or failure cannot release an operation-owned hold. Free rotation,
+perspective correction, and resize dialogs also hold a pending frame target for their modal session, so
+the frame under the editor does not change before Apply or Cancel resolves it.
 The free-rotation editor suppresses scheduler advancement separately from display readiness, so a
 matching presentation completion can restore readiness without changing the frame under edit. Its
 temporary pause removes playback deadlines until close or successful Apply; source-only decode that
