@@ -286,6 +286,8 @@ void PlaybackScheduler::FrameDisplayFailed(
 	if (presentedFrame.has_value() && *presentedFrame < frameDelaysMs_.size()) {
 		frameIndex_ = *presentedFrame;
 		sequenceExhausted_ = false;
+		manuallyPaused_ = true;
+		manualResumeAnimation_ = mode_ != PlaybackMode::Slideshow;
 	}
 }
 

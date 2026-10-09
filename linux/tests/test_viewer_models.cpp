@@ -5048,6 +5048,47 @@ void TestPlaybackSchedulerAnimationFrameControls() {
 		"manual resume after a failed frame did not continue from the visible frame");
 }
 
+void TestPlaybackSchedulerHeldFrameFailureKeepsPresentedFrame() {
+	using jpegview_linux::PlaybackActionType;
+	using jpegview_linux::PlaybackMode;
+	for (const PlaybackMode mode : {PlaybackMode::None, PlaybackMode::Movie,
+		PlaybackMode::Slideshow}) {
+		jpegview_linux::PlaybackScheduler scheduler;
+		scheduler.ConfigureImage({1000, 1000, 1000}, 0, true, 0);
+		if (mode == PlaybackMode::Movie) scheduler.StartMovie(5.0, 0);
+		const std::uint32_t frameTick = mode == PlaybackMode::Movie ? 200 : 1000;
+		Expect(scheduler.Tick(frameTick).frameIndex == 1 && scheduler.AnimationPlaying(),
+			"held failure fixture did not prepare its second frame during playback");
+		scheduler.SetImageReady(false, frameTick);
+		if (mode == PlaybackMode::Slideshow) scheduler.StartSlideshow(0.1, frameTick);
+		scheduler.FrameDisplayFailed(0);
+		scheduler.SetImageReady(false, frameTick);
+		Expect(scheduler.FrameIndex() == 0 && !scheduler.ImageReady() &&
+			!scheduler.AnimationPlaying() && !scheduler.NextDeadline().has_value() &&
+			scheduler.Tick(5000).type == PlaybackActionType::None,
+			"held target failure lost the presented frame or released operation readiness");
+		scheduler.SetImageReady(true, 5000);
+		Expect(scheduler.ImageReady() && scheduler.AnimationManuallyPaused() &&
+			!scheduler.NextDeadline().has_value() &&
+			scheduler.Tick(10000).type == PlaybackActionType::None,
+			"final hold release resumed failed-frame animation or folder advancement");
+		if (mode == PlaybackMode::Slideshow) {
+			scheduler.Resume(10000);
+			Expect(scheduler.Tick(10100).type == PlaybackActionType::NextImage,
+				"explicit slideshow resume remained suppressed after a held frame failure");
+			scheduler.Stop(10100);
+		}
+		const auto step = scheduler.StepAnimationFrame(1, 11000);
+		Expect(step.type == PlaybackActionType::ShowFrame && step.frameIndex == 1,
+			"step after a held target failure skipped the frame after the presented owner");
+		scheduler.FrameDisplayFailed(0);
+		scheduler.ToggleAnimationPlayback(12000);
+		Expect(scheduler.FrameIndex() == 0 && scheduler.AnimationPlaying() &&
+			scheduler.NextDeadline().has_value(),
+			"explicit animation resume did not leave the failed-frame freeze");
+	}
+}
+
 void TestEventLoopInvalidationDeadlinesWakeupsAndMotion() {
 	using jpegview_linux::FrameInvalidationReason;
 	using jpegview_linux::FrameInvalidator;
@@ -5514,6 +5555,7 @@ const TestCase kTests[] = {
 	{"system-font-resolution-and-unicode-rendering", &TestSystemFontResolutionAndUnicodeRendering},
 	{"playback-scheduler-timing-and-modes", &TestPlaybackSchedulerTimingAndModes},
 	{"playback-scheduler-animation-frame-controls", &TestPlaybackSchedulerAnimationFrameControls},
+	{"playback-scheduler-held-frame-failure", &TestPlaybackSchedulerHeldFrameFailureKeepsPresentedFrame},
 	{"event-loop-invalidation-deadlines-wakeups-and-motion", &TestEventLoopInvalidationDeadlinesWakeupsAndMotion},
 	{"modal-event-router-precedence", &TestModalEventRouterPrecedence},
 	{"go-to-image-number-model", &TestGoToImageNumberModel},

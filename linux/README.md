@@ -1374,6 +1374,8 @@ The rate and `Frame delay` line stay with the displayed frame while another fram
 When a finite animation finishes, the playback label changes to `paused` while its last frame stays visible.
 The full context menu lists the available controls and current delay. Failed
 frame steps return to the last successfully displayed frame and keep it frozen.
+This also applies when the failure occurs during a read-only image operation; completing that
+operation does not resume animation or automatic folder advancement.
 While another frame is being prepared, the current frame remains visible and is still used by the
 pixel sampler, Copy, and image operations. The new frame appears only after its matching display
 texture is ready; an edit started during preparation applies to the visible frame.

@@ -1400,11 +1400,9 @@ private:
 			pendingAnimationFrameDisplayRequest_.reset();
 			SetDisplayTextureProtection(key,
 				jpegview_linux::CacheProtectionTier::DistantSpeculation);
-			if (!ImageOperationOwnsAnimationPause()) {
-				playback_.FrameDisplayFailed(presentedAnimationFrame_);
-				if (animationFramePublicationHolds_ != 0) {
-					playback_.SetImageReady(false, SDL_GetTicks());
-				}
+			playback_.FrameDisplayFailed(presentedAnimationFrame_);
+			if (animationFramePublicationHolds_ != 0 || ImageOperationOwnsAnimationPause()) {
+				playback_.SetImageReady(false, SDL_GetTicks());
 			}
 			SetTitle(fileList_.Current().filename().string() +
 				" — animation frame update failed: " + errorMessage);

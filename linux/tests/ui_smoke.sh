@@ -41,6 +41,8 @@ window_manager_pid=''
 viewer_pid=''
 
 cleanup() {
+	if [ -n "${viewer_frame_barrier_release:-}" ]; then : > "$viewer_frame_barrier_release"; fi
+	if [ -n "${viewer_operation_barrier_release:-}" ]; then : > "$viewer_operation_barrier_release"; fi
 	if [ -n "$viewer_pid" ]; then kill "$viewer_pid" 2>/dev/null || true; fi
 	if [ -n "$window_manager_pid" ]; then kill "$window_manager_pid" 2>/dev/null || true; fi
 	if [ -n "$xvfb_pid" ]; then kill "$xvfb_pid" 2>/dev/null || true; fi
@@ -270,6 +272,10 @@ launch_viewer() {
 			JPEGVIEW_TEST_FRAME_BARRIER_ARMED="$viewer_frame_barrier_armed" \
 			JPEGVIEW_TEST_FRAME_BARRIER_STARTED="$viewer_frame_barrier_started" \
 			JPEGVIEW_TEST_FRAME_BARRIER_RELEASE="$viewer_frame_barrier_release" \
+			JPEGVIEW_TEST_OPERATION_BARRIER_ARMED="${viewer_operation_barrier_armed:-}" \
+			JPEGVIEW_TEST_OPERATION_BARRIER_STARTED="${viewer_operation_barrier_started:-}" \
+			JPEGVIEW_TEST_OPERATION_BARRIER_RELEASE="${viewer_operation_barrier_release:-}" \
+			JPEGVIEW_TEST_FRAME_UPLOAD_FAILURE="${viewer_frame_upload_failure:-}" \
 			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
 	elif [ -n "${viewer_slow_map_target:-}" ]; then
 		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
@@ -3228,6 +3234,113 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			stop_viewer
 			viewer_frame_barrier_armed=''
 			unset viewer_frame_barrier_started viewer_frame_barrier_release
+			# Fail blue's upload while Copy is held on the committed red frame.
+			# Releasing Copy must retain the failure freeze and the next step must
+			# request blue (frame 1), rather than skipping to green (frame 2).
+			for failure_mode in movie slideshow; do
+				failure_directory="$temporary/animation-frame-failure-$failure_mode"
+				failure_config="$temporary/animation-frame-failure-$failure_mode-config/jpegview-linux"
+				mkdir -p "$failure_directory" "$failure_config"
+				convert -delay 1000 -size 800x600 xc:red \
+					-delay 1000 -size 800x600 xc:blue \
+					-delay 1000 -size 800x600 xc:lime -loop 0 \
+					"$failure_directory/01-frame-failure.gif"
+				convert -size 800x600 xc:yellow "$failure_directory/02-after-failure.ppm"
+				printf 'scale_mode=fit\nsort_mode=file_name\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+					> "$failure_config/settings.conf"
+				viewer_frame_barrier_armed="$temporary/$failure_mode-frame-armed"
+				viewer_frame_barrier_started="$temporary/$failure_mode-frame-started"
+				viewer_frame_barrier_release="$temporary/$failure_mode-frame-release"
+				viewer_operation_barrier_armed="$temporary/$failure_mode-copy-armed"
+				viewer_operation_barrier_started="$temporary/$failure_mode-copy-started"
+				viewer_operation_barrier_release="$temporary/$failure_mode-copy-release"
+				viewer_frame_upload_failure="$temporary/$failure_mode-upload-failed"
+				VIEWER_TEST_HOME="$temporary/animation-frame-failure-$failure_mode-home" \
+					VIEWER_TEST_CONFIG_HOME="${failure_config%/jpegview-linux}" \
+					launch_viewer "$failure_directory/01-frame-failure.gif"
+				failure_initial_color=''
+				for _ in $(seq 1 100); do
+					DISPLAY=":$display_number" import -window "$window_id" \
+						"$temporary/frame-failure-initial.png"
+					failure_initial_color=$(convert "$temporary/frame-failure-initial.png" \
+						-format '%[hex:p{640,400}]' info:)
+					if [ "$failure_initial_color" = FF0000 ]; then break; fi
+					sleep 0.05
+				done
+				if [ "$failure_initial_color" != FF0000 ]; then
+					echo "UI smoke test: frame-failure fixture did not present red ($failure_initial_color)" >&2
+					exit 1
+				fi
+				: > "$viewer_frame_barrier_armed"
+				DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 40 40
+				DISPLAY=":$display_number" xdotool keydown Shift_L
+				DISPLAY=":$display_number" xdotool click 3
+				DISPLAY=":$display_number" xdotool keyup Shift_L
+				DISPLAY=":$display_number" xdotool key --delay 30 k k k
+				DISPLAY=":$display_number" xdotool key Return
+				assert_pending_animation_frame_barrier
+				clear_clipboard_text
+				: > "$viewer_operation_barrier_armed"
+				DISPLAY=":$display_number" xdotool key ctrl+c
+				for _ in $(seq 1 300); do
+					if [ -f "$viewer_operation_barrier_started" ]; then break; fi
+					sleep 0.02
+				done
+				if [ ! -f "$viewer_operation_barrier_started" ]; then
+					echo "UI smoke test: Copy did not reach its committed-frame barrier" >&2
+					cat "$temporary/viewer.log" >&2
+					exit 1
+				fi
+				if [ "$failure_mode" = slideshow ]; then
+					DISPLAY=":$display_number" xdotool key 1
+				fi
+				: > "$viewer_frame_barrier_release"
+				for _ in $(seq 1 100); do
+					if [ -f "$viewer_frame_upload_failure" ]; then break; fi
+					sleep 0.05
+				done
+				if [ ! -f "$viewer_frame_upload_failure" ]; then
+					echo "UI smoke test: held target did not present its injected upload failure" >&2
+					cat "$temporary/viewer.log" >&2
+					exit 1
+				fi
+				: > "$viewer_operation_barrier_release"
+				assert_title_prefix "Copied original-size image to clipboard" \
+					"held Copy did not finish after the animation frame failed"
+				for _ in $(seq 1 50); do
+					DISPLAY=":$display_number" import -window "$window_id" \
+						"$temporary/frame-failure-frozen.png"
+					failure_frozen_color=$(convert "$temporary/frame-failure-frozen.png" \
+						-format '%[hex:p{640,400}]' info:)
+					if [ "$failure_frozen_color" != FF0000 ]; then
+						echo "UI smoke test: releasing Copy resumed $failure_mode after target failure ($failure_frozen_color)" >&2
+						exit 1
+					fi
+					sleep 0.03
+				done
+				if [ "$failure_mode" = slideshow ]; then
+					DISPLAY=":$display_number" xdotool key Escape
+				fi
+				DISPLAY=":$display_number" xdotool key bracketright
+				failure_step_color=''
+				for _ in $(seq 1 100); do
+					DISPLAY=":$display_number" import -window "$window_id" \
+						"$temporary/frame-failure-step.png"
+					failure_step_color=$(convert "$temporary/frame-failure-step.png" \
+						-format '%[hex:p{640,400}]' info:)
+					if [ "$failure_step_color" = 0000FF ]; then break; fi
+					sleep 0.05
+				done
+				if [ "$failure_step_color" != 0000FF ]; then
+					echo "UI smoke test: next step after held failure skipped frame 1 ($failure_step_color)" >&2
+					exit 1
+				fi
+				stop_viewer
+				viewer_frame_barrier_armed=''
+				unset viewer_frame_barrier_started viewer_frame_barrier_release \
+					viewer_operation_barrier_armed viewer_operation_barrier_started \
+					viewer_operation_barrier_release viewer_frame_upload_failure
+			done
 		else
 			echo "UI smoke test: SKIP pending animation frame ownership (requires giflib, xclip, ImageMagick visual tools, and the frame barrier helper)"
 		fi

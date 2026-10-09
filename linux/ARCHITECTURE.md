@@ -772,6 +772,11 @@ target leaves the last committed frame, viewport, sampler source, and edit sourc
 the scheduler to that frame. Viewer carries the selected owner generation on prepared-cache texture
 uploads even after the initial display commit, so failure recovery and stale-completion checks use the
 same identity as worker completions.
+Matching target failures also roll the scheduler back while an image operation owns its pause.
+The retained presented frame gains an explicit freeze; releasing readiness or publication holds
+for read-only work cannot restart animation or Movie/slideshow folder advancement until the user
+resumes or steps. A successful edit that flattens animation explicitly reconfigures playback for
+its resulting still image and follows the post-edit playback mode.
 The scheduler keeps manual freeze separate from modal/readiness suppression, and a delay override
 changes timing without mutating pixels or cache identity. Manual controls are admitted only while the
 selected animated frame is ready and no image or file operation owns it.
