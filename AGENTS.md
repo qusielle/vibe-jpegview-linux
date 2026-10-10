@@ -56,6 +56,8 @@ retain appropriate attribution. Keep behavior-preserving refactors separate from
 - Preserve the initial worktree state. Do not use destructive reset/checkout commands or broad file
   deletion to get a clean tree. Before removing or regenerating files, inspect the exact targets and
   limit the operation to task-owned outputs.
+- Put temporary files created for repository work under `out/tmp/` (create it when needed) instead
+  of the shared `/tmp`; set `TMPDIR` to `out/tmp/` for tools that honor it when practical.
 - Keep a concise record of changed files, exact checks and their outcomes, known limitations, and the
   resulting commit. Re-run any check made stale by later edits. In the handoff, distinguish passed,
   failed, and unrun checks; never imply that an unavailable check passed.
