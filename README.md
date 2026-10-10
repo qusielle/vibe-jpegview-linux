@@ -32,6 +32,25 @@ guides ([English](src/HowToInstall.txt), [Russian](src/HowToInstall_ru.txt)), an
 - Integrate with the Linux desktop through AppImage and `.deb` packages, system applications,
   clipboard tools, and user-local default-viewer registration.
 
+## Screenshots
+
+Select a preview to open the full-size screenshot.
+
+<table>
+<tr>
+<td align="center"><a href="linux/screenshots/main-window-panels.png"><img src="linux/screenshots/main-window-panels.png" width="360" alt="JPEGView Linux main window with the navigation panel and thumbnails"></a><br>Main viewer</td>
+<td align="center"><a href="linux/screenshots/open-dialog-preview.png"><img src="linux/screenshots/open-dialog-preview.png" width="360" alt="JPEGView Linux open dialog with image list and selected-image preview"></a><br>Open dialog</td>
+</tr>
+<tr>
+<td align="center"><a href="linux/screenshots/double-page-mode.png"><img src="linux/screenshots/double-page-mode.png" width="360" alt="JPEGView Linux displaying two pages side by side"></a><br>Double-page reading</td>
+<td align="center"><a href="linux/screenshots/zoom-region-navigator.png"><img src="linux/screenshots/zoom-region-navigator.png" width="360" alt="JPEGView Linux zoomed image with the zoom-region navigator visible"></a><br>Zoom navigator</td>
+</tr>
+<tr>
+<td align="center"><a href="linux/screenshots/picture-levels.png"><img src="linux/screenshots/picture-levels.png" width="360" alt="JPEGView Linux picture-level controls over the image"></a><br>Picture adjustments</td>
+<td align="center"><a href="linux/screenshots/crop-selection.png"><img src="linux/screenshots/crop-selection.png" width="360" alt="JPEGView Linux with an active crop selection and crop menu"></a><br>Crop selection</td>
+</tr>
+</table>
+
 ## Downloads
 
 Get the current Linux release from [GitHub Releases](https://github.com/qusielle/vibe-jpegview-linux/releases).
