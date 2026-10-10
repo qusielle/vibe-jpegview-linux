@@ -85,7 +85,7 @@ they support.
    title while selected work is pending, accepts navigation to replace it, and rejects completions
    from older source generations. The former image or complete spread stays visible while the selected
    image prepares, avoiding a black frame between neighbors; it is replaced when the new presentation's
-   textures are ready. A failed load leaves the former presentation visible.
+   textures are ready. If loading fails, the viewer follows its normal failure behavior.
    A lower-resolution texture for the same source can also remain visible while
    its replacement prepares. Recents and loaded-image
    history update only after the first renderer-ready frame commits. Fit, fill, no-enlarge,

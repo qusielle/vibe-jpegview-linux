@@ -99,8 +99,9 @@ should normally be added to one of these focused modules and covered by the matc
   textures remain explicitly pinned through protection updates, eviction, and active-working cleanup;
   standalone texture ownership transfers to this renderer-thread fallback. Retention copies no pixels
   and keeps the existing shared reservations. Pending selections and reversals keep the same outgoing
-  presentation; its resources release through the existing texture owner when replacement is ready
-  or during teardown. Slideshow transitions borrow the same outgoing presentation when needed;
+  presentation; its resources release through the existing texture owner when replacement is ready,
+  the selected load fails, or during teardown. Slideshow transitions borrow the same outgoing
+  presentation when needed;
   canceling an owned transition transfers its standalone texture to the retained presentation.
 - `display_preparation_controller`: the display-prefetch planner lifetime, viewport and request-batch
   generations, and a bounded channel of owned `DisplayImageRequest` completions. Worker callbacks

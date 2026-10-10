@@ -1273,6 +1273,7 @@ private:
 		pendingCurrentDecodedSource_.reset();
 		pendingImageIntents_.Cancel();
 		ClearPendingTransitionFrame();
+		ClearRetainedPresentation();
 		CancelPendingAnimationFrameDisplay();
 		pendingMaterializationIntents_.clear();
 		presentedAnimationFrame_.reset();

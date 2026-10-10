@@ -4638,8 +4638,9 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	fi
 	stop_viewer
 
-	# An edited image uses a standalone renderer texture. A failed neighboring
-	# decode must retain that texture safely, and later reversal must still load.
+	# An edited image uses a standalone renderer texture. Keep it visible while
+	# the neighbor loads, then restore the normal failed-load behavior and verify
+	# that reversing navigation still recovers the original source.
 	if [ "$visual_assertions" -eq 1 ]; then
 		retained_failure_directory="$temporary/retained-navigation-failure"
 		retained_failure_config="$temporary/retained-navigation-failure-config"
@@ -4685,10 +4686,16 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		DISPLAY=":$display_number" import -window "$window_id" "$temporary/retained-failure.png"
 		retained_failure_width=$(identify -format '%w' "$temporary/retained-failure.png")
 		retained_failure_height=$(identify -format '%h' "$temporary/retained-failure.png")
-		retained_failure_color=$(convert "$temporary/retained-failure.png" \
-			-format "%[hex:p{$((retained_failure_width / 2)),$((retained_failure_height / 2))}]" info:)
-		if [ "$retained_failure_color" != FF0000 ]; then
-			echo "UI smoke test: failed neighbor discarded the edited outgoing texture ($retained_failure_color)" >&2
+		retained_failure_color='FF0000'
+		for _ in $(seq 1 100); do
+			retained_failure_color=$(convert "$temporary/retained-failure.png" \
+				-format "%[hex:p{$((retained_failure_width / 2)),$((retained_failure_height / 2))}]" info:)
+			if [ "$retained_failure_color" != FF0000 ]; then break; fi
+			sleep 0.025
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/retained-failure.png"
+		done
+		if [ "$retained_failure_color" = FF0000 ]; then
+			echo "UI smoke test: failed neighbor kept showing the committed image ($retained_failure_color)" >&2
 			exit 1
 		fi
 		DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Left
