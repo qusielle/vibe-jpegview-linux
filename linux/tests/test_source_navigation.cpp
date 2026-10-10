@@ -2213,6 +2213,9 @@ void TestPresentationControllerGatesHeldNavigationOnFirstFrame() {
 	Expect(presentation.BeginSpread(3, 4, "anchor", "partner"),
 		"presentation controller did not begin the selected spread");
 	PresentationNavigationState state{3, true, false, true, false, false};
+	Expect(!presentation.CanPresentSelection(state) &&
+		!presentation.CanPresentSelection({3, true, false, true, true, false}),
+		"an incomplete spread released the outgoing presentation");
 	Expect(!presentation.CanRepeatNavigation(state) &&
 		presentation.MarkTextureReady("anchor") &&
 		!presentation.CanRepeatNavigation(state),
@@ -2220,6 +2223,8 @@ void TestPresentationControllerGatesHeldNavigationOnFirstFrame() {
 	Expect(presentation.MarkTextureReady("partner") &&
 		!presentation.CanRepeatNavigation(state),
 		"held navigation advanced before the first complete spread frame was presented");
+	Expect(presentation.CanPresentSelection({3, true, false, true, true, true}),
+		"a complete new spread did not replace the outgoing presentation before acknowledgement");
 	Expect(presentation.AcknowledgeFramePresented(3, true) &&
 		presentation.CanRepeatNavigation({3, true, false, true, true, true}),
 		"held navigation did not resume after the first complete spread frame was presented");
@@ -2231,6 +2236,11 @@ void TestPresentationControllerGatesHeldNavigationOnFirstFrame() {
 	Expect(!presentation.CanRepeatNavigation({5, false, false, false, false, false}) &&
 		!presentation.CanRepeatNavigation({5, true, true, false, false, false}),
 		"pending selection or JPEG header completion allowed repeat navigation");
+	Expect(presentation.CanPresentSelection({5, true, false, false, true, false}) &&
+		!presentation.CanPresentSelection({5, false, false, false, true, false}) &&
+		!presentation.CanPresentSelection({5, true, true, false, true, false}) &&
+		!presentation.CanPresentSelection({5, true, false, false, false, false}),
+		"pending, failed, or texture-less selection released the outgoing single image");
 }
 
 void TestAnimationFramePresentationKeepsCommittedOwnerUntilTargetCommit() {

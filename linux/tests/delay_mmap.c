@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -40,12 +41,20 @@ static void mark_map_complete(const char* pathname) {
 
 static const char* delay_target(int file_descriptor);
 
+static int read_only_open_required(void) {
+	const char* read_only = getenv("JPEGVIEW_TEST_SLOW_MAP_READ_ONLY");
+	return read_only != NULL && strcmp(read_only, "1") == 0;
+}
+
 static void wait_for_matching_open(int file_descriptor) {
 	const char* active = delay_target(file_descriptor);
 	mark_map_complete(active);
 }
 
 static const char* delay_target(int file_descriptor) {
+	const char* background_only = getenv("JPEGVIEW_TEST_SLOW_MAP_BACKGROUND_ONLY");
+	if (background_only != NULL && strcmp(background_only, "1") == 0 &&
+		syscall(SYS_gettid) == getpid()) return NULL;
 	const char* target = getenv("JPEGVIEW_TEST_SLOW_MAP");
 	const char* path_prefix = getenv("JPEGVIEW_TEST_SLOW_MAP_PREFIX");
 	if ((target == NULL || *target == '\0') &&
@@ -122,7 +131,10 @@ int open(const char* pathname, int flags, ...) {
 	} else {
 		file_descriptor = next_open(pathname, flags);
 	}
-	if (file_descriptor >= 0) wait_for_matching_open(file_descriptor);
+	if (file_descriptor >= 0 &&
+		(!read_only_open_required() || (flags & O_ACCMODE) == O_RDONLY)) {
+		wait_for_matching_open(file_descriptor);
+	}
 	return file_descriptor;
 }
 
@@ -140,7 +152,10 @@ int open64(const char* pathname, int flags, ...) {
 	} else {
 		file_descriptor = next_open64(pathname, flags);
 	}
-	if (file_descriptor >= 0) wait_for_matching_open(file_descriptor);
+	if (file_descriptor >= 0 &&
+		(!read_only_open_required() || (flags & O_ACCMODE) == O_RDONLY)) {
+		wait_for_matching_open(file_descriptor);
+	}
 	return file_descriptor;
 }
 
@@ -148,7 +163,10 @@ FILE* fopen(const char* pathname, const char* mode) {
 	static fopen_function next_fopen = NULL;
 	if (next_fopen == NULL) next_fopen = (fopen_function)dlsym(RTLD_NEXT, "fopen");
 	FILE* stream = next_fopen(pathname, mode);
-	if (stream != NULL) wait_for_matching_open(fileno(stream));
+	if (stream != NULL &&
+		(!read_only_open_required() || (mode[0] == 'r' && strchr(mode, '+') == NULL))) {
+		wait_for_matching_open(fileno(stream));
+	}
 	return stream;
 }
 
@@ -156,6 +174,9 @@ FILE* fopen64(const char* pathname, const char* mode) {
 	static fopen_function next_fopen64 = NULL;
 	if (next_fopen64 == NULL) next_fopen64 = (fopen_function)dlsym(RTLD_NEXT, "fopen64");
 	FILE* stream = next_fopen64(pathname, mode);
-	if (stream != NULL) wait_for_matching_open(fileno(stream));
+	if (stream != NULL &&
+		(!read_only_open_required() || (mode[0] == 'r' && strchr(mode, '+') == NULL))) {
+		wait_for_matching_open(fileno(stream));
+	}
 	return stream;
 }

@@ -4328,6 +4328,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 
 	# Clipboard image loading is asynchronous too; its viewport commands must be
 	# queued against the temporary source and replayed after the decode commits.
+	# Hold background source reads after temporary-file output and synchronous
+	# file-list metadata have finished, so commands target the pending clipboard owner.
 	if command -v xclip >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 		clipboard_config="$temporary/clipboard-intents-config"
 		clipboard_data="$temporary/clipboard-intents-data"
@@ -4346,6 +4348,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			VIEWER_TEST_CONFIG_HOME="$clipboard_config" XDG_DATA_DIRS="$clipboard_data" \
 			LD_PRELOAD="$temporary/slow_map.so" \
 			JPEGVIEW_TEST_SLOW_MAP_PREFIX=/tmp/jpegview-paste- \
+			JPEGVIEW_TEST_SLOW_MAP_READ_ONLY=1 \
+			JPEGVIEW_TEST_SLOW_MAP_BACKGROUND_ONLY=1 \
 			JPEGVIEW_TEST_SLOW_MAP_REPEAT=1 \
 			JPEGVIEW_TEST_SLOW_MAP_STARTED="$clipboard_map_started" \
 			JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$clipboard_map_active" \
@@ -4374,15 +4378,18 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		clipboard_pan_rendered=0
 		clipboard_title=''
 		clipboard_center_pixel=''
+		clipboard_stripe_pixel=''
 		for _ in $(seq 1 160); do
 			clipboard_title=$(DISPLAY=":$display_number" window_title_without_position)
 			case "$clipboard_title" in
-				clipboard.png\ *)
+				clipboard.png\ \(1600x400,*)
 					DISPLAY=":$display_number" import -window "$window_id" \
 						"$temporary/clipboard-intents-rendered.png"
 					clipboard_center_pixel=$(convert "$temporary/clipboard-intents-rendered.png" \
 						-format "%[fx:p{640,400}.r<0.15&&p{640,400}.g<0.15&&p{640,400}.b<0.15]" info:)
-					if [ "$clipboard_center_pixel" = 1 ]; then
+					clipboard_stripe_pixel=$(convert "$temporary/clipboard-intents-rendered.png" \
+						-format "%[fx:p{480,400}.r>0.85&&p{480,400}.g>0.85&&p{480,400}.b>0.85]" info:)
+					if [ "$clipboard_center_pixel" = 1 ] && [ "$clipboard_stripe_pixel" = 1 ]; then
 						clipboard_pan_rendered=1
 						break
 					fi
@@ -4392,7 +4399,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			sleep 0.025
 		done
 		if [ "$clipboard_pan_rendered" -ne 1 ]; then
-			echo "UI smoke test: fit, actual-size, and pan intents were lost during clipboard loading ($clipboard_title, center=$clipboard_center_pixel)" >&2
+			echo "UI smoke test: fit, actual-size, and pan intents were lost during clipboard loading ($clipboard_title, center=$clipboard_center_pixel, stripe=$clipboard_stripe_pixel)" >&2
 			cat "$temporary/viewer.log" >&2
 			exit 1
 		fi
@@ -4523,6 +4530,28 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		cat "$temporary/cold-jpeg-owner-return.log" >&2
 		exit 1
 	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		# The header barrier keeps B pending for every capture. A must remain
+		# visible, including repaints caused by unrelated pointer motion.
+		for owner_capture in 1 2 3; do
+			owner_pending_capture="$temporary/cold-jpeg-owner-pending-$owner_capture.png"
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$owner_pending_capture"
+			owner_pending_white_run=$(convert "$owner_pending_capture" \
+				-crop "${owner_capture_width}x1+0+${owner_sample_y}" +repage \
+				-threshold 70% txt:- | awk '
+					NR == 1 { next }
+					/#FFFFFF/ { current++; if (current > maximum) maximum = current; next }
+					{ current = 0 }
+					END { print maximum + 0 }
+				')
+			if [ "$owner_pending_white_run" -ne "$owner_initial_white_run" ]; then
+				echo "UI smoke test: pending neighbor blanked or changed the committed image (white stripe $owner_initial_white_run -> $owner_pending_white_run pixels)" >&2
+				exit 1
+			fi
+		done
+	fi
 	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Left
 	owner_return_ready=0
 	for _ in $(seq 1 160); do
@@ -4578,7 +4607,94 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			exit 1
 		fi
 	fi
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
+	owner_replacement_ready=0
+	for _ in $(seq 1 160); do
+		owner_title=$(owner_window_title)
+		case "$owner_title" in
+			*"02-pending.jpg (160x120,"*) owner_replacement_ready=1; break ;;
+		esac
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_replacement_ready" -ne 1 ]; then
+		echo "UI smoke test: ready neighbor did not replace the retained image ($owner_title)" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		owner_replacement_color=''
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/cold-jpeg-owner-replacement.png"
+			owner_replacement_color=$(convert "$temporary/cold-jpeg-owner-replacement.png" \
+				-format "%[hex:p{$((owner_capture_width / 2)),$owner_sample_y}]" info:)
+			case "$owner_replacement_color" in FFFF00|FFFF01) break ;; esac
+			sleep 0.025
+		done
+		case "$owner_replacement_color" in
+			FFFF00|FFFF01) ;;
+			*) echo "UI smoke test: replacement still showed the outgoing image ($owner_replacement_color)" >&2; exit 1 ;;
+		esac
+	fi
 	stop_viewer
+
+	# An edited image uses a standalone renderer texture. A failed neighboring
+	# decode must retain that texture safely, and later reversal must still load.
+	if [ "$visual_assertions" -eq 1 ]; then
+		retained_failure_directory="$temporary/retained-navigation-failure"
+		retained_failure_config="$temporary/retained-navigation-failure-config"
+		mkdir -p "$retained_failure_directory" "$retained_failure_config/jpegview-linux"
+		write_solid_ppm "$retained_failure_directory/01-good.ppm" 255 0 0
+		printf 'not a JPEG image\000\377' > "$retained_failure_directory/02-failed.jpg"
+		printf 'scale_mode=fit_no_enlarge\ncache_size_mb=0\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+			> "$retained_failure_config/jpegview-linux/settings.conf"
+		VIEWER_TEST_HOME="$temporary/retained-navigation-failure-home" \
+			VIEWER_TEST_CONFIG_HOME="$retained_failure_config" \
+			launch_viewer "$retained_failure_directory/01-good.ppm"
+		assert_title_prefix "01-good.ppm (240x320," "retained-failure fixture did not load"
+		DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Down
+		retained_edit_ready=0
+		for _ in $(seq 1 100); do
+			DISPLAY=":$display_number" import -window "$window_id" "$temporary/retained-edit.png"
+			retained_edit_width=$(identify -format '%w' "$temporary/retained-edit.png")
+			retained_edit_height=$(identify -format '%h' "$temporary/retained-edit.png")
+			retained_edit_color=$(convert "$temporary/retained-edit.png" \
+				-format "%[hex:p{$((retained_edit_width / 2 + 140)),$((retained_edit_height / 2))}]" info:)
+			if [ "$retained_edit_color" = FF0000 ]; then retained_edit_ready=1; break; fi
+			sleep 0.025
+		done
+		if [ "$retained_edit_ready" -ne 1 ]; then
+			echo "UI smoke test: retained-failure fixture did not finish its quarter-turn edit" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
+		retained_decode_failed=0
+		for _ in $(seq 1 100); do
+			if grep -Fq '02-failed.jpg' "$temporary/viewer.log"; then
+				retained_decode_failed=1
+				break
+			fi
+			if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+			sleep 0.025
+		done
+		if [ "$retained_decode_failed" -ne 1 ]; then
+			echo "UI smoke test: neighbor decode did not fail as expected" >&2
+			cat "$temporary/viewer.log" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/retained-failure.png"
+		retained_failure_width=$(identify -format '%w' "$temporary/retained-failure.png")
+		retained_failure_height=$(identify -format '%h' "$temporary/retained-failure.png")
+		retained_failure_color=$(convert "$temporary/retained-failure.png" \
+			-format "%[hex:p{$((retained_failure_width / 2)),$((retained_failure_height / 2))}]" info:)
+		if [ "$retained_failure_color" != FF0000 ]; then
+			echo "UI smoke test: failed neighbor discarded the edited outgoing texture ($retained_failure_color)" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Left
+		assert_title_prefix "01-good.ppm (240x320," "navigation after failed replacement did not recover"
+		stop_viewer
+	fi
 
 	# A failed cold header probe must fall through to decode failure, preserve a
 	# same-folder recent row, and return the nonzero startup status.

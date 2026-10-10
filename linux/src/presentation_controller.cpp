@@ -155,4 +155,12 @@ bool PresentationController::CanRepeatNavigation(
 		state.anchorTextureReady && state.partnerTextureReady;
 }
 
+bool PresentationController::CanPresentSelection(
+	const PresentationNavigationState& state) const {
+	if (!state.selectedImageCommitted || state.currentHeaderPending ||
+		SuppressSinglePage(state.selectedIndex) || !state.anchorTextureReady) return false;
+	return !state.spreadActive ||
+		(SpreadReady(state.selectedIndex) && state.partnerTextureReady);
+}
+
 } // namespace jpegview_linux

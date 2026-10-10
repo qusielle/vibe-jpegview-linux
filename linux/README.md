@@ -83,8 +83,11 @@ they support.
    Fit, fill, actual-size, and manual modes survive navigation appropriately. Selected JPEG header
    and display preparation, plus non-JPEG decoding, run asynchronously. The window keeps a loading
    title while selected work is pending, accepts navigation to replace it, and rejects completions
-   from older source generations. A source change clears the former image; a lower-resolution texture
-   for the same source can remain visible while its replacement prepares. Recents and loaded-image
+   from older source generations. The former image or complete spread stays visible while the selected
+   image prepares, avoiding a black frame between neighbors; it is replaced when the new presentation's
+   textures are ready. A failed load leaves the former presentation visible.
+   A lower-resolution texture for the same source can also remain visible while
+   its replacement prepares. Recents and loaded-image
    history update only after the first renderer-ready frame commits. Fit, fill, no-enlarge,
    actual-size, zoom-step, zoom-preset, pan, rotate, and mirror commands are retained for the pending
    source and applied in accepted order when the required geometry or source pixels are available.

@@ -137,6 +137,7 @@ public:
 		const SpreadRequestSnapshot& snapshot) const;
 	bool AcknowledgeFramePresented(std::size_t selectedIndex,
 		bool spreadTexturesReady);
+	bool CanPresentSelection(const PresentationNavigationState& state) const;
 	bool CanRepeatNavigation(const PresentationNavigationState& state) const;
 };
 

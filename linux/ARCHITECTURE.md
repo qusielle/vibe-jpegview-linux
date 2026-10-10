@@ -94,7 +94,14 @@ should normally be added to one of these focused modules and covered by the matc
   after the matching prepared frame becomes a renderer texture; failure leaves the previous committed
   history owner intact. It returns value effects for clearing the prior presentation, restoring the
   captured viewport, and preparing the selected source; Viewer applies those effects through its SDL
-  and cache adapters.
+  and cache adapters. Viewer retains at most one outgoing presentation (one image or both spread
+  pages), with its prepared screen rectangles, until the replacement is drawable. Borrowed cache
+  textures remain explicitly pinned through protection updates, eviction, and active-working cleanup;
+  standalone texture ownership transfers to this renderer-thread fallback. Retention copies no pixels
+  and keeps the existing shared reservations. Pending selections and reversals keep the same outgoing
+  presentation; its resources release through the existing texture owner when replacement is ready
+  or during teardown. Slideshow transitions borrow the same outgoing presentation when needed;
+  canceling an owned transition transfers its standalone texture to the retained presentation.
 - `display_preparation_controller`: the display-prefetch planner lifetime, viewport and request-batch
   generations, and a bounded channel of owned `DisplayImageRequest` completions. Worker callbacks
   retain the channel and captured generation, never a raw display-cache pointer. Viewer drains the

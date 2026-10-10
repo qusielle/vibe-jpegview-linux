@@ -9,10 +9,13 @@ inline bool IsDisplayTexturePinned(const std::string& key,
 	const std::string& captureKey, const std::string& lastPresentedKey,
 	bool lastPresentedMatchesCurrentSource,
 	const std::string& activeSpreadAnchorKey = {},
-	const std::string& activeSpreadPartnerKey = {}) {
+	const std::string& activeSpreadPartnerKey = {},
+	const std::string& retainedAnchorKey = {},
+	const std::string& retainedPartnerKey = {}) {
 	return !key.empty() && (key == transitionKey || key == pendingTransitionKey ||
 		key == captureKey || key == activeSpreadAnchorKey ||
 		key == activeSpreadPartnerKey ||
+		key == retainedAnchorKey || key == retainedPartnerKey ||
 		(key == lastPresentedKey && lastPresentedMatchesCurrentSource));
 }
 

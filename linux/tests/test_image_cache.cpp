@@ -2306,6 +2306,18 @@ void TestDisplayTexturePinHandoffPreservesBorrowedWorkingTexture() {
 		!jpegview_linux::IsDisplayTexturePinned("unrelated-frame", "", "", "",
 			"", false, spreadAnchorKey, spreadPartnerKey),
 		"active spread textures were not pinned as a pair while awaiting presentation");
+	Expect(jpegview_linux::IsDisplayTexturePinned(spreadAnchorKey, "", "", "",
+		"new-selected-frame", false, "", "", spreadAnchorKey, spreadPartnerKey) &&
+		jpegview_linux::IsDisplayTexturePinned(spreadPartnerKey, "", "", "",
+			"new-selected-frame", false, "", "", spreadAnchorKey, spreadPartnerKey) &&
+		!jpegview_linux::IsDisplayTexturePinned("unrelated-frame", "", "", "",
+			"new-selected-frame", false, "", "", spreadAnchorKey, spreadPartnerKey),
+		"replacing selection unpinned an outgoing spread before its replacement was drawable");
+	Expect(!jpegview_linux::IsDisplayTexturePinned(spreadAnchorKey, "", "", "",
+		"new-selected-frame", true, "", "", "", "") &&
+		!jpegview_linux::IsDisplayTexturePinned(spreadPartnerKey, "", "", "",
+			"new-selected-frame", true, "", "", "", ""),
+		"releasing an outgoing presentation left stale texture pins");
 }
 
 void TestDisplayImageCacheForegroundActiveClassification() {
