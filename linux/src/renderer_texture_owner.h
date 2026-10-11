@@ -44,4 +44,40 @@ private:
 #endif
 };
 
+// A presentation role either owns one standalone texture or borrows a texture
+// whose cache key is pinned by its Viewer owner. Borrowed references do not pin
+// cache entries themselves. Move-only ownership keeps captures, pending
+// transitions, active transitions, and retained fallbacks from duplicating the
+// right to destroy one SDL texture.
+class RendererTextureReference {
+public:
+	RendererTextureReference() noexcept = default;
+	~RendererTextureReference();
+	RendererTextureReference(const RendererTextureReference&) = delete;
+	RendererTextureReference& operator=(const RendererTextureReference&) = delete;
+	RendererTextureReference(RendererTextureReference&& other) noexcept;
+	RendererTextureReference& operator=(RendererTextureReference&& other) noexcept;
+
+	static RendererTextureReference Borrow(SDL_Texture* texture) noexcept;
+	static RendererTextureReference Own(RendererTextureOwner& owner,
+		SDL_Texture* texture) noexcept;
+
+	SDL_Texture* Get() const noexcept { return texture_; }
+	bool OwnsTexture() const noexcept { return owner_ != nullptr && texture_ != nullptr; }
+	explicit operator bool() const noexcept { return texture_ != nullptr; }
+	void Reset() noexcept;
+
+	// A borrower can receive the destruction right only for the exact allocation
+	// it already references. This makes cancellation handoffs explicit and keeps
+	// the SDL pointer stable for any other live borrower.
+	bool TakeOwnershipFrom(RendererTextureReference& owner) noexcept;
+
+private:
+	RendererTextureReference(RendererTextureOwner* owner, SDL_Texture* texture) noexcept
+		: owner_(owner), texture_(texture) {}
+
+	RendererTextureOwner* owner_ = nullptr;
+	SDL_Texture* texture_ = nullptr;
+};
+
 } // namespace jpegview_linux

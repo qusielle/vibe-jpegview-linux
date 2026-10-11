@@ -745,12 +745,11 @@ private:
 	};
 
 	struct TransitionFrame {
-		SDL_Texture* texture = nullptr;
+		jpegview_linux::RendererTextureReference texture;
 		std::string displayKey;
 		int width = 0;
 		int height = 0;
 		bool hasTransparency = false;
-		bool ownsTexture = false;
 	};
 
 	struct RetainedPresentation {
@@ -861,12 +860,10 @@ private:
 			fs::remove(clipboardTempFile_, removeError);
 			if (!clipboardTempDirectory_.empty()) fs::remove(clipboardTempDirectory_, removeError);
 		}
-		if (texture_ != nullptr) {
-			DestroyTextureMeasured(texture_);
-			texture_ = nullptr;
-		}
+		texture_.Reset();
 		ClearDisplayTexture();
 		ClearTransition();
+		ClearPendingTransitionFrame();
 		ClearRetainedPresentation();
 		ClearDisplayTextureCache();
 		displayImageCache_.Shutdown();
@@ -1139,10 +1136,7 @@ private:
 		const jpegview_linux::DecodedFrame& frame =
 			currentDecoded_->frames[target.frameIndex];
 		const jpegview_linux::ViewportSnapshot viewportSnapshot = viewport_.Snapshot();
-		if (texture_ != nullptr) {
-			DestroyTextureMeasured(texture_);
-			texture_ = nullptr;
-		}
+		texture_.Reset();
 		jpegview_linux::RetiredImageBuffers retired = imageDocument_.SetFrame(
 			target.frameIndex, currentDecoded_->animation, frame.width, frame.height,
 			frame.hasTransparency);
@@ -1379,7 +1373,7 @@ private:
 		if (!ImageOperationOwnsAnimationPause()) {
 			SetAnimationImageReadiness(true, SDL_GetTicks());
 		}
-		if (pendingTransitionFrame_.texture != nullptr) {
+		if (pendingTransitionFrame_.texture) {
 			TransitionFrame previous;
 			MoveTransitionFrame(previous, pendingTransitionFrame_);
 			StartTransition(previous);
@@ -1994,7 +1988,7 @@ private:
 
 	SDL_Texture* ActiveDoublePageAnchorTexture() {
 		if (!activeDoublePageRender_.has_value()) return nullptr;
-		if (activeDoublePageRender_->transformedAnchorTexture) return texture_;
+		if (activeDoublePageRender_->transformedAnchorTexture) return texture_.Get();
 		return FindDisplayTexture(presentationController_.AnchorTextureKey());
 	}
 
@@ -2137,7 +2131,7 @@ private:
 			currentDisplayRequest_.reset();
 		}
 		const bool transformedAnchor = (currentPixelsDetachedFromSource_ ||
-			(currentSpreadRotationValid_ && imageModified_)) && texture_ != nullptr;
+			(currentSpreadRotationValid_ && imageModified_)) && texture_.Get() != nullptr;
 		activeDoublePageRender_ = ActiveDoublePageRender{
 			layout, current, next, *spec, transformedAnchor};
 		if (CurrentImagePositionText() != previousPosition) SetTitle();
@@ -2406,13 +2400,14 @@ private:
 		ClearTransition();
 		failedCurrentDisplayKey_.clear();
 
-		if (texture_ != nullptr && retainedPresentation_.anchor.texture == texture_) {
-			retainedPresentation_.anchor.ownsTexture = true;
-			texture_ = nullptr;
+		if (texture_.Get() != nullptr &&
+			retainedPresentation_.anchor.texture.Get() == texture_.Get()) {
+			if (!retainedPresentation_.anchor.texture.TakeOwnershipFrom(texture_)) {
+				std::cerr << "Could not transfer current texture ownership to its retained presentation\n";
+			}
 		}
 		if (sessionStart.effects.clearPreviousPresentation) {
-			if (texture_ != nullptr) DestroyTextureMeasured(texture_);
-			texture_ = nullptr;
+			texture_.Reset();
 			ClearDisplayTexture();
 			ClearDisplayTextureProtections();
 			ClearPendingTextureUploads();
@@ -2432,9 +2427,8 @@ private:
 		} else {
 			const bool discardEditedPresentation = imageModified_ ||
 				currentPixelsDetachedFromSource_;
-			if (discardEditedPresentation && texture_ != nullptr) {
-				DestroyTextureMeasured(texture_);
-				texture_ = nullptr;
+			if (discardEditedPresentation) {
+				texture_.Reset();
 			}
 			currentAnimationFrame_ = 0;
 			currentDisplayRequest_.reset();
@@ -3052,10 +3046,9 @@ private:
 		return imageDocument_.Presentation();
 	}
 
-	void ReplaceCurrentTexture(SDL_Texture* replacement) {
+	void ReplaceCurrentTexture(jpegview_linux::RendererTextureReference replacement) {
 		ClearDisplayTexture();
-		if (texture_ != nullptr) DestroyTextureMeasured(texture_);
-		texture_ = replacement;
+		texture_ = std::move(replacement);
 		if (!lastPresentedDisplayKey_.empty() &&
 			lastPresentedDisplayKey_ != transitionDisplayKey_ &&
 			lastPresentedDisplayKey_ != pendingTransitionFrame_.displayKey) {
@@ -3069,12 +3062,14 @@ private:
 		jpegview_linux::PerfContextScope workContext(
 			jpegview_linux::PerfWorkClass::ActiveImageSpread,
 			jpegview_linux::PerfExecution::EventThread);
-		SDL_Texture* newTexture = CreateTexture(CurrentImage());
-		if (newTexture == nullptr) {
+		jpegview_linux::RendererTextureReference newTexture =
+			jpegview_linux::RendererTextureReference::Own(imageTextureOwner_,
+				CreateTexture(CurrentImage()));
+		if (!newTexture) {
 			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
 			return false;
 		}
-		ReplaceCurrentTexture(newTexture);
+		ReplaceCurrentTexture(std::move(newTexture));
 		return true;
 	}
 
@@ -3477,14 +3472,15 @@ private:
 		}
 
 		if (result->updatesDocument) {
-			SDL_Texture* replacementTexture = nullptr;
+			jpegview_linux::RendererTextureReference replacementTexture;
 			const bool needsTexture = OperationNeedsTexture(pending, *result);
 			if (needsTexture) {
 				jpegview_linux::PerfContextScope workContext(
 					jpegview_linux::PerfWorkClass::ActiveImageSpread,
 					jpegview_linux::PerfExecution::EventThread);
-				replacementTexture = CreateTexture(*result->presentationPixels);
-				if (replacementTexture == nullptr) {
+				replacementTexture = jpegview_linux::RendererTextureReference::Own(
+					imageTextureOwner_, CreateTexture(*result->presentationPixels));
+				if (!replacementTexture) {
 					ReportImageOperationFailure(pending.purpose,
 						"could not upload the completed image");
 					ResumeImageOperationPlayback(pending);
@@ -3498,7 +3494,6 @@ private:
 			}
 			jpegview_linux::RetiredImageBuffers retired;
 			if (!imageDocument_.Apply(*result, retired)) {
-				if (replacementTexture != nullptr) DestroyTextureMeasured(replacementTexture);
 				if (pendingAnimationTargetFrame.has_value()) {
 					(void)SetAnimationFrame(*pendingAnimationTargetFrame);
 				}
@@ -3507,7 +3502,7 @@ private:
 				replayLaterIntents();
 				return;
 			}
-			if (replacementTexture != nullptr) ReplaceCurrentTexture(replacementTexture);
+			if (replacementTexture) ReplaceCurrentTexture(std::move(replacementTexture));
 			imageModified_ = imageDocument_.Modified();
 			currentPixelsDetachedFromSource_ = imageDocument_.Detached();
 			currentImageRotationQuarterTurns_ = imageDocument_.RotationQuarterTurns();
@@ -4617,7 +4612,7 @@ private:
 			SetDisplayTextureProtection(request->key,
 				jpegview_linux::CacheProtectionTier::Active);
 			if (request->key == failedCurrentDisplayKey_) {
-				if (texture_ != nullptr) return texture_;
+				if (texture_.Get() != nullptr) return texture_.Get();
 				if (LastPresentedTextureMatches(request->source.Key())) {
 					return FindDisplayTexture(lastPresentedDisplayKey_);
 				}
@@ -4630,7 +4625,7 @@ private:
 				return cached;
 			}
 			displayImageCache_.Request(*request);
-			if (texture_ == nullptr && lastPresentedDisplayKey_ != request->key &&
+			if (texture_.Get() == nullptr && lastPresentedDisplayKey_ != request->key &&
 				LastPresentedTextureMatches(request->source.Key())) {
 				if (SDL_Texture* previous = FindDisplayTexture(lastPresentedDisplayKey_)) {
 					return previous;
@@ -4638,29 +4633,29 @@ private:
 			}
 			// A same-source prepared texture may remain visible while a replacement
 			// resolution is built. A new source clears it before this path is reached.
-			return texture_;
+			return texture_.Get();
 		}
-		return texture_;
+		return texture_.Get();
 	}
 
 	SDL_Texture* DisplayTextureForRender() const {
 		const jpegview_linux::DisplayImageRequest* request =
 			currentDisplayRequest_.has_value() && currentDisplayRequest_->Valid() ?
 				&*currentDisplayRequest_ : nullptr;
-		if (request == nullptr) return texture_;
+		if (request == nullptr) return texture_.Get();
 		if (request->key == failedCurrentDisplayKey_) {
-			if (texture_ != nullptr) return texture_;
+			if (texture_.Get() != nullptr) return texture_.Get();
 			return LastPresentedTextureMatches(request->source.Key()) ?
 				PeekDisplayTexture(lastPresentedDisplayKey_) : nullptr;
 		}
 		if (SDL_Texture* cached = PeekDisplayTexture(request->key)) return cached;
-		if (texture_ == nullptr && lastPresentedDisplayKey_ != request->key &&
+		if (texture_.Get() == nullptr && lastPresentedDisplayKey_ != request->key &&
 			LastPresentedTextureMatches(request->source.Key())) {
 			if (SDL_Texture* previous = PeekDisplayTexture(lastPresentedDisplayKey_)) {
 				return previous;
 			}
 		}
-		return texture_;
+		return texture_.Get();
 	}
 
 	void UpdateCurrentDisplayTextureRequest() {
@@ -4694,7 +4689,7 @@ private:
 			(void)FindDisplayTexture(presentationController_.PartnerTextureKey());
 		}
 		const bool anchorReady = !spreadActive ? DisplayTextureForRender() != nullptr :
-			(activeDoublePageRender_->transformedAnchorTexture ? texture_ != nullptr :
+			(activeDoublePageRender_->transformedAnchorTexture ? texture_.Get() != nullptr :
 				PeekDisplayTexture(presentationController_.AnchorTextureKey()) != nullptr);
 		const bool partnerReady = spreadActive && PeekDisplayTexture(
 			presentationController_.PartnerTextureKey()) != nullptr;
@@ -4740,22 +4735,21 @@ private:
 	}
 
 	void ClearTransition() {
-		if (transitionTexture_ != nullptr && transitionTextureOwned_) {
-			if (transitionTexture_ == retainedPresentation_.anchor.texture) {
-				retainedPresentation_.anchor.ownsTexture = true;
-			} else {
-				DestroyTextureMeasured(transitionTexture_);
+		if (transitionTexture_.OwnsTexture()) {
+			if (transitionTexture_.Get() == retainedPresentation_.anchor.texture.Get()) {
+				if (!retainedPresentation_.anchor.texture.TakeOwnershipFrom(transitionTexture_)) {
+					std::cerr << "Could not return active transition ownership to its retained presentation\n";
+				}
 			}
 		} else if (!transitionDisplayKey_.empty()) {
-			if (transitionTexture_ != nullptr) {
-				SDL_SetTextureBlendMode(transitionTexture_, transitionOriginalBlendMode_);
-				SDL_SetTextureAlphaMod(transitionTexture_, 255);
+			if (transitionTexture_.Get() != nullptr) {
+				SDL_SetTextureBlendMode(transitionTexture_.Get(), transitionOriginalBlendMode_);
+				SDL_SetTextureAlphaMod(transitionTexture_.Get(), 255);
 			}
 			SetDisplayTextureProtection(transitionDisplayKey_,
 				jpegview_linux::CacheProtectionTier::DistantSpeculation);
 		}
-		transitionTexture_ = nullptr;
-		transitionTextureOwned_ = false;
+		transitionTexture_.Reset();
 		transitionDisplayKey_.clear();
 		transitionOriginalBlendMode_ = SDL_BLENDMODE_NONE;
 		transitionWidth_ = 0;
@@ -4767,8 +4761,8 @@ private:
 	}
 
 	void ClearRetainedPresentation() {
-		if (retainedPresentation_.anchor.texture == nullptr &&
-			retainedPresentation_.partner.texture == nullptr) return;
+		if (!retainedPresentation_.anchor.texture &&
+			!retainedPresentation_.partner.texture) return;
 		RetainedPresentation previous = std::move(retainedPresentation_);
 		retainedPresentation_ = {};
 		ReleaseTransitionFrame(previous.anchor);
@@ -4778,35 +4772,40 @@ private:
 	void RetainCurrentPresentation() {
 		if (currentSelectedLoadPending_ || imageSession_.Stage() !=
 			jpegview_linux::ImageSessionStage::Committed || CurrentImage().width <= 0 ||
-			CurrentImage().height <= 0 || retainedPresentation_.anchor.texture != nullptr) return;
+			CurrentImage().height <= 0 || retainedPresentation_.anchor.texture) return;
 		const SDL_Rect area = ImageAreaRect();
 		RetainedPresentation retained;
 		retained.anchorDestination = CurrentPageScreenRect(area);
 		retained.anchor.hasTransparency = CurrentImage().hasTransparency;
 		if (activeDoublePageRender_.has_value()) {
 			if (!presentationController_.SpreadReady(presentationController_.AnchorIndex())) return;
-			retained.anchor.texture = activeDoublePageRender_->transformedAnchorTexture ?
-				texture_ : PeekDisplayTexture(presentationController_.AnchorTextureKey());
+			retained.anchor.texture = jpegview_linux::RendererTextureReference::Borrow(
+				activeDoublePageRender_->transformedAnchorTexture ? texture_.Get() :
+					PeekDisplayTexture(presentationController_.AnchorTextureKey()));
 			if (!activeDoublePageRender_->transformedAnchorTexture) {
 				retained.anchor.displayKey = presentationController_.AnchorTextureKey();
 			}
 			retained.partner.displayKey = presentationController_.PartnerTextureKey();
-			retained.partner.texture = PeekDisplayTexture(retained.partner.displayKey);
-			if (retained.anchor.texture == nullptr || retained.partner.texture == nullptr) return;
+			retained.partner.texture = jpegview_linux::RendererTextureReference::Borrow(
+				PeekDisplayTexture(retained.partner.displayKey));
+			if (!retained.anchor.texture || !retained.partner.texture) return;
 			retained.partner.hasTransparency =
 				displayTextureCache_.at(retained.partner.displayKey).hasTransparency;
 			retained.partnerDestination = NextPageScreenRect(area);
 		} else {
-			retained.anchor.texture = DisplayTextureForRender();
-			if (retained.anchor.texture == nullptr) return;
-			if (retained.anchor.texture != texture_) {
+			retained.anchor.texture = jpegview_linux::RendererTextureReference::Borrow(
+				DisplayTextureForRender());
+			if (!retained.anchor.texture) return;
+			if (retained.anchor.texture.Get() != texture_.Get()) {
 				retained.anchor.displayKey = currentDisplayRequest_.has_value() &&
-					PeekDisplayTexture(currentDisplayRequest_->key) == retained.anchor.texture ?
+					PeekDisplayTexture(currentDisplayRequest_->key) ==
+						retained.anchor.texture.Get() ?
 					currentDisplayRequest_->key : lastPresentedDisplayKey_;
 			}
 		}
-		// Borrow cache textures under explicit pins; standalone ownership transfers
-		// only when LoadCurrent retires the document. No pixels or textures are copied.
+		// Keep a borrowed view while this remains the current image. LoadCurrent
+		// transfers the unique standalone owner only when it retires that document.
+		// Cache borrowers rely on the explicit display-key pins below.
 		retainedPresentation_ = std::move(retained);
 		SetDisplayTextureProtection(retainedPresentation_.anchor.displayKey,
 			jpegview_linux::CacheProtectionTier::Active);
@@ -4815,13 +4814,15 @@ private:
 	}
 
 	void ReleaseTransitionFrame(TransitionFrame& frame) {
-		if (frame.ownsTexture && frame.texture != nullptr) {
-			if (frame.texture == retainedPresentation_.anchor.texture) {
+		if (frame.texture.OwnsTexture()) {
+			if (frame.texture.Get() == retainedPresentation_.anchor.texture.Get()) {
 				// A pending slideshow transition can be canceled before its replacement
-				// loads. Keep sole ownership with the still-visible outgoing fallback.
-				retainedPresentation_.anchor.ownsTexture = true;
+				// loads. Move sole ownership to the still-visible outgoing fallback.
+				if (!retainedPresentation_.anchor.texture.TakeOwnershipFrom(frame.texture)) {
+					std::cerr << "Could not return pending transition ownership to its retained presentation\n";
+				}
 			} else {
-				DestroyTextureMeasured(frame.texture);
+				frame.texture.Reset();
 			}
 		}
 		if (!frame.displayKey.empty()) SetDisplayTextureProtection(frame.displayKey,
@@ -4832,13 +4833,12 @@ private:
 
 	void MoveTransitionFrame(TransitionFrame& destination, TransitionFrame& source) {
 		ReleaseTransitionFrame(destination);
-		destination.texture = source.texture;
+		destination.texture = std::move(source.texture);
 		destination.displayKey = std::move(source.displayKey);
 		destination.width = source.width;
 		destination.height = source.height;
 		destination.hasTransparency = source.hasTransparency;
-		destination.ownsTexture = source.ownsTexture;
-		source = {};
+		source = TransitionFrame{};
 	}
 
 	void ClearPendingTransitionFrame() {
@@ -4902,10 +4902,8 @@ private:
 		frame.width = CurrentImage().width;
 		frame.height = CurrentImage().height;
 		frame.hasTransparency = CurrentImage().hasTransparency;
-		if (texture_ != nullptr) {
-			frame.texture = texture_;
-			frame.ownsTexture = true;
-			texture_ = nullptr;
+		if (texture_.Get() != nullptr) {
+			frame.texture = std::move(texture_);
 			return frame;
 		}
 		const std::optional<jpegview_linux::ImageSessionSelection>& selection =
@@ -4915,7 +4913,8 @@ private:
 		if (!LastPresentedTextureMatches(source)) return {};
 		const auto found = displayTextureCache_.find(lastPresentedDisplayKey_);
 		if (found == displayTextureCache_.end()) return {};
-		frame.texture = found->second.texture;
+		frame.texture = jpegview_linux::RendererTextureReference::Borrow(
+			found->second.texture);
 		frame.displayKey = lastPresentedDisplayKey_;
 		frame.hasTransparency = found->second.hasTransparency;
 		transitionCaptureDisplayKey_ = frame.displayKey;
@@ -5286,27 +5285,26 @@ private:
 		jpegview_linux::DisplayTexturePinHandoff borrowedTexturePin(
 			transitionCaptureDisplayKey_, previousFrame.displayKey);
 		ClearTransition();
-		if (transitionEffect_ == IDM_EFFECT_NONE || previousFrame.texture == nullptr ||
+		if (transitionEffect_ == IDM_EFFECT_NONE || !previousFrame.texture ||
 			previousFrame.width <= 0 || previousFrame.height <= 0) {
 			ReleaseTransitionFrame(previousFrame);
 			borrowedTexturePin.Restore();
 			ClearActiveWorkingDisplayTextures();
 			return;
 		}
-		transitionTexture_ = previousFrame.texture;
+		transitionTexture_ = std::move(previousFrame.texture);
 		transitionDisplayKey_ = std::move(previousFrame.displayKey);
 		transitionWidth_ = previousFrame.width;
 		transitionHeight_ = previousFrame.height;
 		transitionHasTransparency_ = previousFrame.hasTransparency;
-		transitionTextureOwned_ = previousFrame.ownsTexture;
-		previousFrame = {};
+		previousFrame = TransitionFrame{};
 		borrowedTexturePin.Restore();
-		if (!transitionTextureOwned_) {
-			(void)SDL_GetTextureBlendMode(transitionTexture_, &transitionOriginalBlendMode_);
+		if (!transitionTexture_.OwnsTexture()) {
+			(void)SDL_GetTextureBlendMode(transitionTexture_.Get(), &transitionOriginalBlendMode_);
 		}
 		if (!transitionDisplayKey_.empty()) SetDisplayTextureProtection(
 			transitionDisplayKey_, jpegview_linux::CacheProtectionTier::Active);
-		SDL_SetTextureBlendMode(transitionTexture_, SDL_BLENDMODE_BLEND);
+		SDL_SetTextureBlendMode(transitionTexture_.Get(), SDL_BLENDMODE_BLEND);
 		const SDL_Rect imageArea = ImageAreaRect();
 		const jpegview_linux::ViewportRect destination = viewport_.Destination(
 			CurrentImage().width, CurrentImage().height, imageArea.w, imageArea.h);
@@ -7693,10 +7691,8 @@ private:
 		}
 		const NavigationAttemptResult navigation = NavigateByPageStep(1);
 		if (navigation != NavigationAttemptResult::Moved) {
-			if (previousFrame.ownsTexture && previousFrame.texture != nullptr) {
-				texture_ = previousFrame.texture;
-				previousFrame.texture = nullptr;
-				previousFrame.ownsTexture = false;
+			if (previousFrame.texture.OwnsTexture()) {
+				texture_ = std::move(previousFrame.texture);
 			}
 			if (!currentSelectedLoadPending_) ClearRetainedPresentation();
 			ReleaseTransitionFrame(previousFrame);
@@ -7742,10 +7738,8 @@ private:
 			previousFrame = CaptureTransitionFrame();
 		}
 		if (NavigateByPageStep(-1) != NavigationAttemptResult::Moved) {
-			if (previousFrame.ownsTexture && previousFrame.texture != nullptr) {
-				texture_ = previousFrame.texture;
-				previousFrame.texture = nullptr;
-				previousFrame.ownsTexture = false;
+			if (previousFrame.texture.OwnsTexture()) {
+				texture_ = std::move(previousFrame.texture);
 			}
 			if (!currentSelectedLoadPending_) ClearRetainedPresentation();
 			ReleaseTransitionFrame(previousFrame);
@@ -7873,7 +7867,7 @@ private:
 			playbackDeadline.has_value()) {
 			deadlines.push_back(*playbackDeadline);
 		}
-		if (transitionTexture_ != nullptr) {
+		if (transitionTexture_) {
 			if (now - transitionStartTick_ >= transitionDurationMs_) {
 				deadlines.push_back(now);
 			} else {
@@ -7940,7 +7934,7 @@ private:
 			static_cast<Sint32>(now - thumbnailUploadRetryTick_) >= 0) {
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 		}
-		if (transitionTexture_ == nullptr) return;
+		if (!transitionTexture_) return;
 		if (now - transitionStartTick_ >= transitionDurationMs_) {
 			ClearTransition();
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Transition);
@@ -13083,7 +13077,7 @@ private:
 	bool IsMagnifyingGlassVisibleAt(int screenX, int screenY) const {
 		if (!magnifyingGlass_.Enabled() || CurrentImage().width <= 0 || CurrentImage().height <= 0 ||
 			dragging_ || cropMouseDragging_ ||
-			zoomNavigatorDragging_ || thumbnailPanelResizing_ || transitionTexture_ != nullptr ||
+			zoomNavigatorDragging_ || thumbnailPanelResizing_ || transitionTexture_ ||
 			pictureLevelsPanelOpen_ || unsharpDialogOpen_ || contextMenuOpen_ || fileDialogOpen_ ||
 			confirmationOpen_ || aboutOpen_ || helpOpen_ || resizeDialog_.IsOpen() ||
 			cropSizeDialog_.IsOpen() || batchCopyDialog_.IsOpen()) return false;
@@ -13247,7 +13241,7 @@ private:
 		if (fallbackTexture == displayTexture_) {
 			textureWidth = displayTextureWidth_;
 			textureHeight = displayTextureHeight_;
-		} else if (fallbackTexture != texture_) {
+		} else if (fallbackTexture != texture_.Get()) {
 			for (auto& cached : displayTextureCache_) {
 				if (cached.second.texture == fallbackTexture) {
 					textureWidth = cached.second.width;
@@ -13829,8 +13823,9 @@ private:
 			return {displayTexture_, displayTextureWidth_, displayTextureHeight_,
 				displayImage_.hasTransparency};
 		}
-		if (texture_ != nullptr && CurrentImage().width > 0 && CurrentImage().height > 0) {
-			return {texture_, CurrentImage().width, CurrentImage().height, CurrentImage().hasTransparency};
+		if (texture_.Get() != nullptr && CurrentImage().width > 0 && CurrentImage().height > 0) {
+			return {texture_.Get(), CurrentImage().width, CurrentImage().height,
+				CurrentImage().hasTransparency};
 		}
 		return {};
 	}
@@ -13893,7 +13888,7 @@ private:
 	}
 
 	void RenderImageTransition(const SDL_Rect& destination, const SDL_Rect& imageArea, SDL_Texture* currentTexture) {
-		if (transitionTexture_ == nullptr) {
+		if (!transitionTexture_) {
 			SDL_RenderCopy(renderer_, currentTexture, nullptr, &destination);
 			return;
 		}
@@ -13929,13 +13924,14 @@ private:
 				static_cast<int>(std::round(verticalDistance * progress));
 		}
 
-		SDL_SetTextureAlphaMod(transitionTexture_, 255);
+		SDL_SetTextureAlphaMod(transitionTexture_.Get(), 255);
 		SDL_SetTextureBlendMode(currentTexture, SDL_BLENDMODE_BLEND);
 		SDL_SetTextureAlphaMod(currentTexture, 255);
 		if (effect == IDM_EFFECT_BLEND) {
-			SDL_SetTextureAlphaMod(transitionTexture_, static_cast<Uint8>(std::round(255.0 * (1.0 - progress))));
+			SDL_SetTextureAlphaMod(transitionTexture_.Get(), static_cast<Uint8>(
+				std::round(255.0 * (1.0 - progress))));
 		}
-		SDL_RenderCopy(renderer_, transitionTexture_, nullptr, &oldDestination);
+		SDL_RenderCopy(renderer_, transitionTexture_.Get(), nullptr, &oldDestination);
 		SDL_RenderCopy(renderer_, currentTexture, nullptr, &enteringDestination);
 	}
 
@@ -14533,7 +14529,8 @@ private:
 					previewDestination.y + imageArea.y, previewDestination.width,
 					previewDestination.height};
 			} else {
-				renderTexture = texture_ != nullptr ? texture_ : DisplayTextureForRender();
+				renderTexture = texture_.Get() != nullptr ? texture_.Get() :
+					DisplayTextureForRender();
 				const jpegview_linux::ViewportRect currentDestination = viewport_.Destination(
 					CurrentImage().width, CurrentImage().height, imageArea.w, imageArea.h);
 				destination = {currentDestination.x + imageArea.x,
@@ -14553,7 +14550,8 @@ private:
 					previewDestination.y + imageArea.y, previewDestination.width,
 					previewDestination.height};
 			} else {
-				renderTexture = texture_ != nullptr ? texture_ : DisplayTextureForRender();
+				renderTexture = texture_.Get() != nullptr ? texture_.Get() :
+					DisplayTextureForRender();
 				const jpegview_linux::ViewportRect currentDestination = viewport_.Destination(
 					CurrentImage().width, CurrentImage().height, imageArea.w, imageArea.h);
 				destination = {currentDestination.x + imageArea.x,
@@ -14562,7 +14560,7 @@ private:
 			}
 		} else if (activeDoublePageRender_.has_value() &&
 			presentationReadiness_.spreadPrepared) {
-			renderTexture = activeDoublePageRender_->transformedAnchorTexture ? texture_ :
+			renderTexture = activeDoublePageRender_->transformedAnchorTexture ? texture_.Get() :
 				PeekDisplayTexture(presentationController_.AnchorTextureKey());
 			nextPageTexture = PeekDisplayTexture(presentationController_.PartnerTextureKey());
 		} else if (!activeDoublePageRender_.has_value() &&
@@ -14584,15 +14582,15 @@ private:
 		SDL_RenderFillRect(renderer_, &imageArea);
 		SDL_RenderSetClipRect(renderer_, &imageArea);
 		if ((suppressSingleImage || renderTexture == nullptr) && !spreadTexturesReady &&
-			retainedPresentation_.anchor.texture != nullptr) {
+			retainedPresentation_.anchor.texture) {
 			for (const auto& page : {
 				std::make_pair(&retainedPresentation_.anchor,
 					&retainedPresentation_.anchorDestination),
 				std::make_pair(&retainedPresentation_.partner,
 					&retainedPresentation_.partnerDestination)}) {
-				if (page.first->texture == nullptr) continue;
+				if (!page.first->texture) continue;
 				if (page.first->hasTransparency) RenderTransparencyBackground(*page.second, imageArea);
-				SDL_RenderCopy(renderer_, page.first->texture, nullptr, page.second);
+				SDL_RenderCopy(renderer_, page.first->texture.Get(), nullptr, page.second);
 			}
 		} else if (spreadTexturesReady) {
 			if (CurrentImage().hasTransparency) RenderTransparencyBackground(destination, imageArea);
@@ -14613,7 +14611,7 @@ private:
 			const bool imageHasTransparency = freeRotationPreviewIsDisplayed ?
 				freeRotationPreviewHasTransparency_ : perspectivePreviewIsDisplayed ?
 					perspectiveCorrectionPreviewHasTransparency_ : CurrentImage().hasTransparency;
-			if (imageHasTransparency || (!transformEditorOpen && transitionTexture_ != nullptr &&
+			if (imageHasTransparency || (!transformEditorOpen && transitionTexture_ &&
 				transitionHasTransparency_)) {
 				RenderTransparencyBackground(destination, imageArea);
 			}
@@ -14830,6 +14828,9 @@ private:
 	std::optional<PendingCurrentSourceDimensions> pendingCurrentSourceDimensions_;
 	std::optional<jpegview_linux::SourceDescriptor> pendingCurrentDecodedSource_;
 	jpegview_linux::PendingImageIntents pendingImageIntents_;
+	// Presentation references must be destroyed before their renderer authority.
+	// Keep this owner above every move-only presentation handle in declaration order.
+	jpegview_linux::RendererTextureOwner imageTextureOwner_;
 	TransitionFrame pendingTransitionFrame_;
 	RetainedPresentation retainedPresentation_;
 	std::unordered_set<jpegview_linux::SourceKey,
@@ -14876,9 +14877,8 @@ private:
 	jpegview_linux::ContextMenuRendererAdapter contextMenuRenderer_{chromeRenderer_, textRenderer_};
 	jpegview_linux::FileDialogRendererAdapter fileDialogRenderer_{textRenderer_, chromeRenderer_};
 	jpegview_linux::EditingDialogRendererAdapter editingDialogRenderer_{textRenderer_, chromeRenderer_};
-	jpegview_linux::RendererTextureOwner imageTextureOwner_;
 	Uint32 completionWakeEventType_ = std::numeric_limits<Uint32>::max();
-	SDL_Texture* texture_ = nullptr;
+	jpegview_linux::RendererTextureReference texture_;
 	SDL_Texture* freeRotationPreviewTexture_ = nullptr;
 	jpegview_linux::CacheReservation freeRotationTextureReservation_;
 	int freeRotationPreviewWidth_ = 0;
@@ -14916,11 +14916,10 @@ private:
 	std::optional<std::size_t> presentedAnimationFrame_;
 	std::optional<jpegview_linux::DisplayImageRequest> currentDisplayRequest_;
 	std::optional<jpegview_linux::DisplayImageRequest> pendingAnimationFrameDisplayRequest_;
-	SDL_Texture* transitionTexture_ = nullptr;
+	jpegview_linux::RendererTextureReference transitionTexture_;
 	int transitionOriginalBlendMode_ = SDL_BLENDMODE_NONE;
 	int transitionWidth_ = 0;
 	int transitionHeight_ = 0;
-	bool transitionTextureOwned_ = false;
 	bool transitionHasTransparency_ = false;
 	jpegview_linux::Viewport viewport_;
 	jpegview_linux::CropSelectionModel cropSelection_;

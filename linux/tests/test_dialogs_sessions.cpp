@@ -2272,6 +2272,80 @@ void TestRendererTextureOwnerLifecycle() {
 		"texture creation did not recover after metadata allocation failures");
 	Expect(owner.DestroyAll() == 2 && owner.LiveTextureCount() == 0,
 		"texture shutdown did not release the existing and retried textures");
+
+	SDL_Texture* retainedRaw = owner.CreateEmpty(2, 2);
+	jpegview_linux::RendererTextureReference currentTexture =
+		jpegview_linux::RendererTextureReference::Own(owner, retainedRaw);
+	jpegview_linux::RendererTextureReference retainedBorrow =
+		jpegview_linux::RendererTextureReference::Borrow(currentTexture.Get());
+	const SDL_Texture* retainedIdentity = retainedBorrow.Get();
+	jpegview_linux::RendererTextureReference capture = std::move(currentTexture);
+	jpegview_linux::RendererTextureReference pending = std::move(capture);
+	jpegview_linux::RendererTextureReference active = std::move(pending);
+	Expect(!currentTexture && !capture && !pending && active.Get() == retainedIdentity &&
+		owner.LiveTextureCount() == 1,
+		"current-to-capture-to-pending-to-active handoff lost or duplicated standalone ownership");
+	Expect(retainedBorrow.TakeOwnershipFrom(active) && !active &&
+		retainedBorrow.OwnsTexture() && retainedBorrow.Get() == retainedIdentity &&
+		owner.LiveTextureCount() == 1,
+		"canceled active transition did not return its standalone owner to the matching retained borrower");
+	const auto selfMove = [](jpegview_linux::RendererTextureReference& reference) {
+		// The alias keeps GCC's -Wself-move focused on accidental production code.
+		auto* sameReference = &reference;
+		reference = std::move(*sameReference);
+	};
+	selfMove(retainedBorrow);
+	Expect(retainedBorrow.Get() == retainedIdentity && owner.LiveTextureCount() == 1,
+		"self-move cleared a live presentation texture owner");
+	retainedBorrow.Reset();
+	Expect(owner.LiveTextureCount() == 0,
+		"retained standalone ownership did not destroy its texture exactly once");
+
+	SDL_Texture* cachedRaw = owner.CreateEmpty(2, 2);
+	{
+		jpegview_linux::RendererTextureReference cachedBorrow =
+			jpegview_linux::RendererTextureReference::Borrow(cachedRaw);
+		jpegview_linux::RendererTextureReference movedBorrow = std::move(cachedBorrow);
+		Expect(!cachedBorrow && movedBorrow.Get() == cachedRaw &&
+			!movedBorrow.OwnsTexture(),
+			"moving a cache borrower changed its non-owning role");
+		movedBorrow.Reset();
+	}
+	Expect(owner.LiveTextureCount() == 1 && owner.Destroy(cachedRaw) &&
+		owner.LiveTextureCount() == 0,
+		"releasing a borrowed cache texture destroyed its cache-owned allocation");
+
+	SDL_Texture* boundaryRaw = owner.CreateEmpty(2, 2);
+	jpegview_linux::RendererTextureReference boundaryCurrent =
+		jpegview_linux::RendererTextureReference::Own(owner, boundaryRaw);
+	jpegview_linux::RendererTextureReference boundaryRetained =
+		jpegview_linux::RendererTextureReference::Borrow(boundaryCurrent.Get());
+	jpegview_linux::RendererTextureReference boundaryCapture =
+		std::move(boundaryCurrent);
+	boundaryCurrent = std::move(boundaryCapture);
+	Expect(boundaryCurrent.Get() == boundaryRaw && boundaryRetained.Get() == boundaryRaw &&
+		boundaryCurrent.OwnsTexture() && !boundaryRetained.OwnsTexture() &&
+		owner.LiveTextureCount() == 1,
+		"boundary navigation did not restore the current owner while keeping its retained borrow valid");
+	boundaryRetained.Reset();
+	boundaryCurrent.Reset();
+	Expect(owner.LiveTextureCount() == 0,
+		"boundary-restored standalone texture was not released after its borrow cleared");
+
+	SDL_Texture* failedReplacement = owner.CreateEmpty(0, 2);
+	SDL_Texture* originalRaw = owner.CreateEmpty(2, 2);
+	jpegview_linux::RendererTextureReference original =
+		jpegview_linux::RendererTextureReference::Own(owner, originalRaw);
+	Expect(failedReplacement == nullptr && original.Get() == originalRaw &&
+		owner.LiveTextureCount() == 1,
+		"failed replacement disturbed the currently displayed standalone texture");
+	SDL_Texture* replacementRaw = owner.CreateEmpty(2, 2);
+	original = jpegview_linux::RendererTextureReference::Own(owner, replacementRaw);
+	Expect(original.Get() == replacementRaw && owner.LiveTextureCount() == 1,
+		"successful replacement did not release the predecessor after adopting its successor");
+	original.Reset();
+	Expect(owner.LiveTextureCount() == 0,
+		"replacement texture ownership did not release on clear");
 	owner.SetRenderer(nullptr);
 }
 const TestCase kTests[] = {

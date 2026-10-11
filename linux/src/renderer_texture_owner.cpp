@@ -105,4 +105,54 @@ std::size_t RendererTextureOwner::LiveTextureCount() const {
 	return textures_.size();
 }
 
+RendererTextureReference::~RendererTextureReference() {
+	Reset();
+}
+
+RendererTextureReference::RendererTextureReference(
+	RendererTextureReference&& other) noexcept
+	: owner_(other.owner_), texture_(other.texture_) {
+	other.owner_ = nullptr;
+	other.texture_ = nullptr;
+}
+
+RendererTextureReference& RendererTextureReference::operator=(
+	RendererTextureReference&& other) noexcept {
+	if (this == &other) return *this;
+	Reset();
+	owner_ = other.owner_;
+	texture_ = other.texture_;
+	other.owner_ = nullptr;
+	other.texture_ = nullptr;
+	return *this;
+}
+
+RendererTextureReference RendererTextureReference::Borrow(SDL_Texture* texture) noexcept {
+	return RendererTextureReference(nullptr, texture);
+}
+
+RendererTextureReference RendererTextureReference::Own(
+	RendererTextureOwner& owner, SDL_Texture* texture) noexcept {
+	return texture == nullptr ? RendererTextureReference{} :
+		RendererTextureReference(&owner, texture);
+}
+
+void RendererTextureReference::Reset() noexcept {
+	if (owner_ != nullptr && texture_ != nullptr && !owner_->Destroy(texture_)) {
+		std::cerr << "RendererTextureReference could not release its owned texture\n";
+	}
+	owner_ = nullptr;
+	texture_ = nullptr;
+}
+
+bool RendererTextureReference::TakeOwnershipFrom(
+	RendererTextureReference& owner) noexcept {
+	if (owner_ != nullptr || texture_ == nullptr || texture_ != owner.texture_ ||
+		owner.owner_ == nullptr) return false;
+	owner_ = owner.owner_;
+	owner.owner_ = nullptr;
+	owner.texture_ = nullptr;
+	return true;
+}
+
 } // namespace jpegview_linux

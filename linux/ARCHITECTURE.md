@@ -612,8 +612,14 @@ should normally be added to one of these focused modules and covered by the matc
   partial-upload textures created by Viewer. It performs image texture creation, upload, and
   destruction and provides a final live-handle drain before SDL renderer teardown. Cache maps keep
   their keys, admission reservations, and non-owning texture references; cache policy remains in the
-  existing cache owners. If handle tracking cannot allocate, the owner destroys the newly created
-  texture and returns null, preserving the callers' existing defer-and-retry contract.
+  existing cache owners. `RendererTextureReference` is a move-only current/transition/retained
+  presentation role: standalone textures carry one destruction right, while cache textures are
+  borrowed and remain live through the corresponding cache-key pin. A matching retained borrower
+  may receive the right from a canceled transition; other aliases never duplicate ownership. Viewer
+  clears pending, active, current, and retained roles before the owner's final drain. Borrowed
+  transition blend and alpha state is restored before its cache key is demoted. If handle tracking
+  cannot allocate, the owner destroys the newly created texture and returns null, preserving the
+  callers' existing defer-and-retry contract.
 - `text_renderer`, `chrome_renderer`, `context_menu_renderer`, `file_dialog_renderer`, and
   `editing_dialog_renderer`: SDL drawing adapters that consume prepared paint snapshots and share
   narrow renderer/font services. The editing adapter renders free-rotation controls from a paint
