@@ -80,6 +80,13 @@ bool CanRetainSpeculativeDisplayTexture(std::size_t retainedSpeculativeBytes,
 		retainedSpeculativeBytes <= speculativeBudgetBytes - incomingBytes;
 }
 
+bool CanKeepIncompleteDisplayTextureAsSpeculative(bool usesActiveWorkingReservation,
+	std::size_t retainedSpeculativeBytes, std::size_t incomingBytes,
+	std::size_t speculativeBudgetBytes) {
+	return !usesActiveWorkingReservation && CanRetainSpeculativeDisplayTexture(
+		retainedSpeculativeBytes, incomingBytes, speculativeBudgetBytes);
+}
+
 std::size_t DisplayTextureRetirementsForTick(std::size_t queuedRetirements,
 	bool interactionActive, std::size_t maximumPerTick,
 	std::size_t interactionPressureThreshold) {

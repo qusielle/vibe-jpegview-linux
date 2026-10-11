@@ -35,6 +35,9 @@ bool MergeDisplayUploadPriority(DisplayUploadPriority& existing,
 std::size_t SpeculativeDisplayTextureBudgetBytes(std::size_t sharedBudgetBytes);
 bool CanRetainSpeculativeDisplayTexture(std::size_t retainedSpeculativeBytes,
 	std::size_t incomingBytes, std::size_t speculativeBudgetBytes);
+bool CanKeepIncompleteDisplayTextureAsSpeculative(bool usesActiveWorkingReservation,
+	std::size_t retainedSpeculativeBytes, std::size_t incomingBytes,
+	std::size_t speculativeBudgetBytes);
 
 // During interaction, avoid routine renderer destruction until obsolete
 // textures build up enough to represent meaningful residency pressure.

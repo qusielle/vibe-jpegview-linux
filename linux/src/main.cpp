@@ -4210,6 +4210,19 @@ private:
 		if (pending.incompleteTexture == nullptr) return;
 		const bool speculative = protection !=
 			jpegview_linux::CacheProtectionTier::Active;
+		if (speculative) {
+			const std::size_t incomingBytes = pending.countsTowardSpeculativeLimit ?
+				0 : pending.textureReservation.Bytes();
+			if (!jpegview_linux::CanKeepIncompleteDisplayTextureAsSpeculative(
+					pending.textureActiveWorking, speculativeDisplayTextureBytes_,
+					incomingBytes, jpegview_linux::SpeculativeDisplayTextureBudgetBytes(
+						cacheBudget_->Capacity()))) {
+				// Active-only temporary storage cannot back a neighbor upload. Keep the
+				// prepared pixels queued and retry after ordinary speculative admission.
+				RetireIncompleteDisplayTexture(pending);
+				return;
+			}
+		}
 		if (pending.countsTowardSpeculativeLimit == speculative) return;
 		const std::size_t bytes = pending.textureReservation.Bytes();
 		if (speculative) {

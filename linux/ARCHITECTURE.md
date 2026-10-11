@@ -1211,6 +1211,9 @@ source work suppresses speculative uploads. Speculative image textures use the s
 configured shared cache budget and 256 MiB; this is an internal share of the existing limit, not a
 second cache setting. Over-budget distant results are discarded, while nearer results may retire one
 lower-priority texture and retry after its renderer reservation has returned.
+When navigation demotes an incomplete active upload to speculative work, it rechecks this share.
+Uploads backed by active-only temporary storage or too large for the remaining share are retired on
+the renderer thread; their prepared pixels stay queued for ordinary speculative admission.
 
 Image textures larger than 8 MiB upload through a private incomplete SDL texture in bands of at
 most 4 MiB per maintenance opportunity. The prepared pixels and texture reservation stay owned by

@@ -162,6 +162,13 @@ void TestDisplayTextureBudgetAndBandedUploadRollback() {
 			std::numeric_limits<std::size_t>::max(), 1,
 			std::numeric_limits<std::size_t>::max()),
 		"speculative texture admission failed at its exact boundary or overflowed");
+	Expect(jpegview_linux::CanKeepIncompleteDisplayTextureAsSpeculative(
+			false, 60, 4, 64) &&
+		!jpegview_linux::CanKeepIncompleteDisplayTextureAsSpeculative(
+			false, 61, 4, 64) &&
+		!jpegview_linux::CanKeepIncompleteDisplayTextureAsSpeculative(
+			true, 0, 4, 64),
+		"active upload demotion retained a texture outside the speculative budget or from active-only storage");
 
 	const std::size_t largeImageBytes = 4000u * 2500u * 4u;
 	jpegview_linux::DisplayTextureUploadPlan bands(4000, 2500, largeImageBytes,
