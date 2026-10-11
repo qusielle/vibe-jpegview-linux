@@ -3585,7 +3585,8 @@ void TestDesktopApplicationParsingAndExecExpansion() {
 		"desktop Exec tokenization is incorrect");
 	const std::vector<std::string> arguments = jpegview_linux::DesktopExecArguments(application, image);
 	Expect(arguments.size() == 6 && arguments[0] == "viewer" && arguments[1] == "--name" &&
-		arguments[2] == "a file.jpg" && arguments[3].find("file:///tmp") == 0 &&
+		arguments[2] == "a file.jpg" && arguments[3].find("file://") == 0 &&
+		arguments[3].find("a%20file.jpg") != std::string::npos &&
 		arguments[4] == "%" && arguments[5] == fs::absolute(image.parent_path()).lexically_normal().string(),
 		"desktop Exec field expansion is incorrect");
 
