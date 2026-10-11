@@ -4495,6 +4495,32 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			END { print found + 0 }
 		' "$owner_return_trace" 2>/dev/null || true
 	}
+	owner_capture_center_white_run() {
+		owner_capture_path=$1
+		DISPLAY=":$display_number" import -window "$window_id" "$owner_capture_path"
+		owner_capture_width=$(identify -format '%w' "$owner_capture_path")
+		owner_capture_height=$(identify -format '%h' "$owner_capture_path")
+		owner_sample_y=$((owner_capture_height / 2))
+		owner_white_run_metrics=$(convert "$owner_capture_path" \
+			-crop "${owner_capture_width}x1+0+${owner_sample_y}" +repage \
+			-threshold 70% txt:- | awk '
+				NR == 1 { next }
+				/#FFFFFF/ {
+					split($1, coordinate, ",")
+					if (current == 0) current_start = coordinate[1] + 0
+					current++
+					if (current > maximum) {
+						maximum = current
+						maximum_start = current_start
+					}
+					next
+				}
+				{ current = 0 }
+				END { printf "%d,%d\n", maximum + 0, maximum_start + 0 }
+			')
+		owner_white_run_pixels=${owner_white_run_metrics%,*}
+		owner_white_run_start=${owner_white_run_metrics#*,}
+	}
 	DISPLAY=":$display_number" HOME="$temporary/owner-return-home" \
 		XDG_CONFIG_HOME="$owner_return_config" \
 		XDG_STATE_HOME="$owner_return_state" \
@@ -4550,22 +4576,11 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	if [ "$visual_assertions" -eq 1 ]; then
 		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
 		owner_initial_white_run=0
+		owner_initial_white_start=-1
 		for _ in $(seq 1 100); do
-			DISPLAY=":$display_number" import -window "$window_id" \
-				"$temporary/cold-jpeg-owner-return-before.png"
-			owner_capture_width=$(identify -format '%w' \
-				"$temporary/cold-jpeg-owner-return-before.png")
-			owner_capture_height=$(identify -format '%h' \
-				"$temporary/cold-jpeg-owner-return-before.png")
-			owner_sample_y=$((owner_capture_height / 2))
-			owner_initial_white_run=$(convert "$temporary/cold-jpeg-owner-return-before.png" \
-				-crop "${owner_capture_width}x1+0+${owner_sample_y}" +repage \
-				-threshold 70% txt:- | awk '
-					NR == 1 { next }
-					/#FFFFFF/ { current++; if (current > maximum) maximum = current; next }
-					{ current = 0 }
-					END { print maximum + 0 }
-				')
+			owner_capture_center_white_run "$temporary/cold-jpeg-owner-return-before.png"
+			owner_initial_white_run=$owner_white_run_pixels
+			owner_initial_white_start=$owner_white_run_start
 			if [ "$owner_initial_white_run" -ge 20 ] && [ "$owner_initial_white_run" -le 60 ]; then
 				break
 			fi
@@ -4582,16 +4597,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	if [ "$visual_assertions" -eq 1 ]; then
 		owner_edited_ready=0
 		for _ in $(seq 1 160); do
-			DISPLAY=":$display_number" import -window "$window_id" \
-				"$temporary/cold-jpeg-owner-return-edited.png"
-			owner_edited_white_run=$(convert "$temporary/cold-jpeg-owner-return-edited.png" \
-				-crop "${owner_capture_width}x1+0+${owner_sample_y}" +repage \
-				-threshold 70% txt:- | awk '
-					NR == 1 { next }
-					/#FFFFFF/ { current++; if (current > maximum) maximum = current; next }
-					{ current = 0 }
-					END { print maximum + 0 }
-				')
+			owner_capture_center_white_run "$temporary/cold-jpeg-owner-return-edited.png"
+			owner_edited_white_run=$owner_white_run_pixels
 			if [ "$owner_edited_white_run" -ge 100 ]; then owner_edited_ready=1; break; fi
 			if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
 			sleep 0.025
@@ -4707,22 +4714,20 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	if [ "$visual_assertions" -eq 1 ]; then
 		# Blend intentionally animates the return from the edited standalone
 		# texture to A. Wait for the final Fit frame instead of comparing a
-		# transient animation frame to the startup capture.
+		# transient animation frame to the startup capture. The center stripe's
+		# width and position characterize the visible Fit geometry.
 		owner_return_viewport_restored=0
 		for _ in $(seq 1 80); do
-			DISPLAY=":$display_number" import -window "$window_id" \
-				"$temporary/cold-jpeg-owner-return-after.png"
-			if compare -metric AE "$temporary/cold-jpeg-owner-return-before.png" \
-				"$temporary/cold-jpeg-owner-return-after.png" null: \
-				2>"$temporary/cold-jpeg-owner-return-difference.txt"; then
+			owner_capture_center_white_run "$temporary/cold-jpeg-owner-return-after.png"
+			if [ "$owner_white_run_pixels" = "$owner_initial_white_run" ] &&
+				[ "$owner_white_run_start" = "$owner_initial_white_start" ]; then
 				owner_return_viewport_restored=1
 				break
 			fi
 			sleep 0.025
 		done
 		if [ "$owner_return_viewport_restored" -ne 1 ]; then
-			owner_return_difference=$(cat "$temporary/cold-jpeg-owner-return-difference.txt")
-			echo "UI smoke test: returning to A did not restore its current Fit viewport after the Blend transition ($owner_return_difference differing pixels)" >&2
+			echo "UI smoke test: returning to A did not restore its current Fit viewport after the Blend transition (stripe width $owner_white_run_pixels at x=$owner_white_run_start; expected $owner_initial_white_run at x=$owner_initial_white_start)" >&2
 			exit 1
 		fi
 	fi
