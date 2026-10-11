@@ -2039,10 +2039,14 @@ private:
 					spec.autoContrast, 1, spec.processing,
 					spec.rotationQuarterTurns);
 			const DisplayTextureCacheEntry* best = nullptr;
+			bool hasStaticSourceTexture = false;
 			for (const auto& cached : displayTextureCache_) {
 				const DisplayTextureCacheEntry& entry = cached.second;
 				if (entry.source != source.Key() || !entry.sourceIsStatic ||
-					!jpegview_linux::CanReuseDisplayImageRepresentation(
+					entry.sourceWidth != nextPage.width ||
+					entry.sourceHeight != nextPage.height) continue;
+				hasStaticSourceTexture = true;
+				if (!jpegview_linux::CanReuseDisplayImageRepresentation(
 						request.cacheKey, entry.cacheKey) ||
 					(best != nullptr && entry.bytes >= best->bytes)) continue;
 				best = &entry;
@@ -2051,6 +2055,12 @@ private:
 				request = jpegview_linux::RebuildDisplayImageRequestAtTarget(
 					request, best->cacheKey.targetWidth,
 					best->cacheKey.targetHeight);
+				request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+				return request;
+			}
+			if (hasStaticSourceTexture) {
+				// The retained frame proves this source is static, but it may not have
+				// enough detail for the current spread target. Prepare a replacement.
 				request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
 				return request;
 			}

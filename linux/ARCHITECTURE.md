@@ -392,7 +392,9 @@ should normally be added to one of these focused modules and covered by the matc
   are promoted into the selected path. Generic file-backed raster requests preserve decoded frame-zero
   cache identity and revalidate the static-image proof on their worker if a new target must be prepared;
   JPEGs keep their JPEG-specific decode path. Animated inputs continue through the ordinary
-  decoded-source path. Source pixels stay lazy until an edit or other operation needs them.
+  decoded-source path. A cached static spread partner can be prepared again when its retained frame
+  lacks detail for the current spread slot; known source dimensions no longer suppress that work.
+  Source pixels stay lazy until an edit or other operation needs them.
   The SDL owner applies results only when
   those captured revisions and viewport still match. Pan and replacement cancel obsolete planner work.
   Viewport invalidation retains the publication batch for a still-current active-spread dimensions read,

@@ -1780,13 +1780,13 @@ void TestStaticRasterFileBackedDisplayRequest() {
 	const auto decoded = std::make_shared<const jpegview_linux::DecodedImage>(
 		std::move(decodedValue));
 	const auto fileBacked = jpegview_linux::MakeRasterDisplayImageRequest(
-		source, 2, 2, 2, 2, false);
+		source, 2, 2, 1, 1, false);
 	const auto decodedRequest = jpegview_linux::MakeDisplayImageRequest(
-		source, decoded, 0, 2, 2, false);
-	const auto resizedFileBacked = jpegview_linux::RebuildDisplayImageRequestAtTarget(
-		fileBacked, 1, 1);
-	const auto resizedDecoded = jpegview_linux::MakeDisplayImageRequest(
 		source, decoded, 0, 1, 1, false);
+	const auto resizedFileBacked = jpegview_linux::RebuildDisplayImageRequestAtTarget(
+		fileBacked, 2, 2);
+	const auto resizedDecoded = jpegview_linux::MakeDisplayImageRequest(
+		source, decoded, 0, 2, 2, false);
 	Expect(fileBacked.Valid() &&
 		fileBacked.fileBackedFormat == jpegview_linux::FileBackedDisplayFormat::Raster &&
 		fileBacked.cacheKey == decodedRequest.cacheKey &&
@@ -1808,6 +1808,13 @@ void TestStaticRasterFileBackedDisplayRequest() {
 		completed.front()->source.Metadata().transparencyKnown &&
 		completed.front()->source.Metadata().hasTransparency,
 		"static raster preparation did not retain proven source presentation metadata");
+	cache.Request(resizedFileBacked);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"static raster replacement target did not finish on its worker");
+	const auto resizedCompleted = cache.TakeCompleted(1);
+	Expect(resizedCompleted.size() == 1 && resizedCompleted.front()->sourceIsStatic &&
+		resizedCompleted.front()->width == 2 && resizedCompleted.front()->height == 2,
+		"static raster replacement target was not prepared after its small cached representation");
 
 	const fs::path firstPath = temporary.path() / "animation-first.png";
 	const fs::path secondPath = temporary.path() / "animation-second.png";
