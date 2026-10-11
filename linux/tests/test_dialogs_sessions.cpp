@@ -2301,6 +2301,92 @@ void TestRendererTextureOwnerLifecycle() {
 	Expect(owner.LiveTextureCount() == 0,
 		"retained standalone ownership did not destroy its texture exactly once");
 
+	jpegview_linux::SharedCacheBudget standaloneBudget(0);
+	const auto reserveStandalone = [&] {
+		return standaloneBudget.TrackTemporary(pixels.size(),
+			jpegview_linux::CacheMemoryCategory::ActiveWorkingData);
+	};
+	Expect(standaloneBudget.Used() == 0 && standaloneBudget.Available() == 0,
+		"zero-capacity fixture unexpectedly retained cache bytes");
+	SDL_Texture* workingRaw = owner.CreateStandaloneAndUpload(pixels, 2, 2, true,
+		reserveStandalone());
+	Expect(workingRaw != nullptr && standaloneBudget.Snapshot().activeWorkingBytes == 16 &&
+		owner.GetStandaloneTextureResidency().bytes == 16 &&
+		owner.GetStandaloneTextureResidency().count == 1 &&
+		owner.GetStandaloneTextureResidency().largestWidth == 2 &&
+		owner.GetStandaloneTextureResidency().largestHeight == 2,
+		"standalone texture was not charged once as active working data at zero retained capacity");
+	jpegview_linux::RendererTextureReference workingCurrent =
+		jpegview_linux::RendererTextureReference::Own(owner, workingRaw);
+	jpegview_linux::RendererTextureReference workingRetainedBorrow =
+		jpegview_linux::RendererTextureReference::Borrow(workingCurrent.Get());
+	jpegview_linux::RendererTextureReference workingCapture = std::move(workingCurrent);
+	jpegview_linux::RendererTextureReference workingPending = std::move(workingCapture);
+	jpegview_linux::RendererTextureReference workingActive = std::move(workingPending);
+	Expect(standaloneBudget.Snapshot().activeWorkingBytes == 16 &&
+		owner.GetStandaloneTextureResidency().count == 1,
+		"presentation role transfers or a borrowed alias duplicated the standalone texture charge");
+	Expect(workingRetainedBorrow.TakeOwnershipFrom(workingActive) &&
+		standaloneBudget.Snapshot().activeWorkingBytes == 16,
+		"canceled transition did not keep the allocation charge with returned ownership");
+	workingRetainedBorrow.Reset();
+	Expect(owner.LiveTextureCount() == 0 &&
+		standaloneBudget.Snapshot().activeWorkingBytes == 0 &&
+		owner.GetStandaloneTextureResidency().count == 0,
+		"standalone working charge survived actual renderer destruction");
+
+	owner.FailNextAdoptionForTesting();
+	Expect(owner.CreateStandaloneAndUpload(pixels, 2, 2, true, reserveStandalone()) == nullptr &&
+		owner.LiveTextureCount() == 0 && standaloneBudget.Snapshot().activeWorkingBytes == 0,
+		"standalone adoption failure leaked its texture or working charge");
+	owner.FailNextUploadForTesting();
+	Expect(owner.CreateStandaloneAndUpload(pixels, 2, 2, true, reserveStandalone()) == nullptr &&
+		owner.LiveTextureCount() == 0 && standaloneBudget.Snapshot().activeWorkingBytes == 0,
+		"standalone upload failure leaked its adopted texture or working charge");
+	owner.FailNextBlendModeForTesting();
+	Expect(owner.CreateStandaloneAndUpload(pixels, 2, 2, true, reserveStandalone()) == nullptr &&
+		owner.LiveTextureCount() == 0 && standaloneBudget.Snapshot().activeWorkingBytes == 0,
+		"standalone blend setup failure leaked its texture or working charge");
+	Expect(owner.CreateStandaloneAndUpload({0, 1, 2}, 2, 2, true,
+		reserveStandalone()) == nullptr && owner.LiveTextureCount() == 0 &&
+		standaloneBudget.Snapshot().activeWorkingBytes == 0,
+		"standalone upload validation failure leaked its pre-admitted working charge");
+	Expect(owner.CreateStandaloneAndUpload(pixels, 2, 2, true, {}) == nullptr &&
+		owner.LiveTextureCount() == 0 && standaloneBudget.Snapshot().activeWorkingBytes == 0,
+		"standalone creation accepted an unaccounted texture allocation");
+
+	jpegview_linux::RendererTextureReference originalStandalone =
+		jpegview_linux::RendererTextureReference::Own(owner,
+			owner.CreateStandaloneAndUpload(pixels, 2, 2, true, reserveStandalone()));
+	const SDL_Texture* originalStandaloneIdentity = originalStandalone.Get();
+	owner.FailNextAdoptionForTesting();
+	Expect(owner.CreateStandaloneAndUpload(pixels, 2, 2, true, reserveStandalone()) == nullptr &&
+		originalStandalone.Get() == originalStandaloneIdentity &&
+		standaloneBudget.Snapshot().activeWorkingBytes == 16 &&
+		owner.LiveTextureCount() == 1,
+		"failed standalone replacement disturbed the visible texture or its charge");
+	jpegview_linux::RendererTextureReference replacementStandalone =
+		jpegview_linux::RendererTextureReference::Own(owner,
+			owner.CreateStandaloneAndUpload(pixels, 2, 2, true, reserveStandalone()));
+	Expect(replacementStandalone && standaloneBudget.Snapshot().activeWorkingBytes == 32 &&
+		owner.GetStandaloneTextureResidency().count == 2,
+		"successful standalone replacement was not charged while both textures were live");
+	originalStandalone = std::move(replacementStandalone);
+	Expect(originalStandalone && standaloneBudget.Snapshot().activeWorkingBytes == 16 &&
+		owner.GetStandaloneTextureResidency().count == 1,
+		"replacing a standalone texture failed to release exactly the predecessor charge");
+	originalStandalone.Reset();
+	Expect(standaloneBudget.Snapshot().activeWorkingBytes == 0,
+		"clearing the replacement did not release its standalone charge");
+
+	SDL_Texture* drainedStandalone = owner.CreateStandaloneAndUpload(
+		pixels, 2, 2, true, reserveStandalone());
+	Expect(drainedStandalone != nullptr && standaloneBudget.Snapshot().activeWorkingBytes == 16,
+		"could not create a charged standalone allocation for final drain coverage");
+	Expect(owner.DestroyAll() == 1 && standaloneBudget.Snapshot().activeWorkingBytes == 0 &&
+		owner.GetStandaloneTextureResidency().count == 0,
+		"final renderer-owner drain did not release standalone accounting after destruction");
+
 	SDL_Texture* cachedRaw = owner.CreateEmpty(2, 2);
 	{
 		jpegview_linux::RendererTextureReference cachedBorrow =

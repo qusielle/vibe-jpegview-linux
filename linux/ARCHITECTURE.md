@@ -611,15 +611,15 @@ should normally be added to one of these focused modules and covered by the matc
 - `renderer_texture_owner`: the renderer-thread owner for image, display, thumbnail, preview, and
   partial-upload textures created by Viewer. It performs image texture creation, upload, and
   destruction and provides a final live-handle drain before SDL renderer teardown. Cache maps keep
-  their keys, admission reservations, and non-owning texture references; cache policy remains in the
-  existing cache owners. `RendererTextureReference` is a move-only current/transition/retained
-  presentation role: standalone textures carry one destruction right, while cache textures are
-  borrowed and remain live through the corresponding cache-key pin. A matching retained borrower
-  may receive the right from a canceled transition; other aliases never duplicate ownership. Viewer
-  clears pending, active, current, and retained roles before the owner's final drain. Borrowed
-  transition blend and alpha state is restored before its cache key is demoted. If handle tracking
-  cannot allocate, the owner destroys the newly created texture and returns null, preserving the
-  callers' existing defer-and-retry contract.
+  keys, admission reservations, and non-owning texture references; cache policy remains in the
+  existing cache owners. Each allocation record keeps dimensions and nominal BGRA bytes. A standalone
+  current-image texture also keeps one `ActiveWorkingData` reservation there until
+  `SDL_DestroyTexture` returns; current, transition, and retained roles only move its destruction
+  right, so borrowed aliases do not add charges. A matching retained borrower may receive the right
+  from a canceled transition. Viewer clears pending, active, current, and retained roles before the
+  owner's final drain. Borrowed transition blend and alpha state is restored before its cache key is
+  demoted. If handle tracking cannot allocate, the owner destroys the newly created texture and
+  returns null, preserving the callers' existing defer-and-retry contract.
 - `text_renderer`, `chrome_renderer`, `context_menu_renderer`, `file_dialog_renderer`, and
   `editing_dialog_renderer`: SDL drawing adapters that consume prepared paint snapshots and share
   narrow renderer/font services. The editing adapter renders free-rotation controls from a paint
@@ -1113,9 +1113,12 @@ Display pixels may be prepared on workers, but SDL texture upload and destructio
 renderer thread because SDL renderer objects are not thread-safe. One configured retained large-image
 budget covers decoded pixels, prepared display frames, and retained image textures. It does not cap
 total RSS. Cache-owned active decoded/prepared allocations and CPU upload staging are reported in
-separate categories; materialized `Image::bgra` buffers, processing copies, codec workspaces, external
-renderer allocations, and independent thumbnail storage are outside that accounting boundary. The
-current image stays displayable when the budget is zero or its frame is too large to retain.
+separate categories. Standalone current and outgoing presentation textures have a separate working
+charge and residency row; their nominal four-byte-per-pixel sizes are estimates, not measurements of
+driver overhead or total GPU residency. Materialized `Image::bgra` buffers, processing copies, codec
+workspaces, external renderer allocations, and independent thumbnail storage are outside that
+accounting boundary. The current image stays displayable when the budget is zero or its frame is too
+large to retain.
 
 The selected source's decoded pixels move from retained-cache accounting to active working data while
 the Viewer needs them for current-image or spread preparation. When that source leaves the active set,

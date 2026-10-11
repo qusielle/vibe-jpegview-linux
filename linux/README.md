@@ -635,6 +635,9 @@ observed it. Count rows by class when comparing workloads.
 The trace also records the SDL version, renderer backend and flags, maximum texture dimensions, and
 cache/queue snapshots. The `display_texture_residency` snapshot reports retained speculative image
 texture bytes, their internal limit, bytes awaiting destruction, and live/retiring entry counts.
+The `standalone_texture_residency` snapshot reports nominal BGRA bytes, the count of current or
+outgoing standalone presentation textures, and the largest texture dimensions; it does not estimate
+renderer-driver overhead.
 Renderer cleanup normally removes one obsolete image texture after presentation; during sustained
 interaction, it starts a one-per-tick drain after four obsolete textures queue so GPU residency stays
 bounded without running a destruction on every low-pressure interaction frame.
@@ -833,11 +836,11 @@ thread-confined—and retains the resulting textures under the shared configured
 budget, keyed by source identity, animation frame, correction mode, and target size. The budget covers
 retained decoded pixels, prepared frames, and image textures. Decoded pixels needed by the selected
 image or spread are accounted as active working data, leaving the retained budget available for the
-spread's display textures. Cache-owned active decoded/prepared buffers and CPU upload staging are
-reported separately; materialized editing pixels, codec workspaces,
-and thumbnail storage are outside that accounting boundary, so the setting does not cap total process
-memory. The current image remains displayable when the cache budget is zero or its frame is too large
-to retain. The active image and spread are
+spread's display textures. Cache-owned active decoded/prepared buffers, CPU upload staging, and the
+current or outgoing standalone presentation texture have working-data charges, separate from retained
+cache capacity; materialized editing pixels, codec workspaces, and thumbnail storage remain outside
+that accounting boundary, so the setting does not cap total process memory. The current image remains
+displayable when the cache budget is zero or its frame is too large to retain. The active image and spread are
 protected first, followed by the immediate forward and backward neighbors; more distant prefetch work
 is evicted first when room is needed. Thumbnail storage remains independent. If preparation misses,
 SDL can temporarily scale the source texture while the high-quality result is produced; the expensive

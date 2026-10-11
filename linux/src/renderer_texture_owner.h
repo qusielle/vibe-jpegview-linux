@@ -1,21 +1,30 @@
 #pragma once
 
+#include "cache_budget.h"
 #include "sdl_abi.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <thread>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace jpegview_linux {
 
 // Owns all image, preview, and thumbnail SDL textures created by Viewer. Cache
-// policies keep their keys and reservations in their existing owners; this
-// object centralizes renderer-thread creation, upload, destruction, and final
-// teardown before the renderer/window pair is released.
+// policies keep their keys and cache reservations in their existing owners;
+// standalone presentation textures keep one working reservation in their
+// allocation record. This object centralizes renderer-thread creation, upload,
+// destruction, and final teardown before the renderer/window pair is released.
 class RendererTextureOwner {
 public:
+	struct StandaloneTextureResidency {
+		std::size_t bytes = 0;
+		std::size_t count = 0;
+		int largestWidth = 0;
+		int largestHeight = 0;
+	};
+
 	RendererTextureOwner() noexcept : ownerThread_(std::this_thread::get_id()) {}
 	~RendererTextureOwner();
 	RendererTextureOwner(const RendererTextureOwner&) = delete;
@@ -25,22 +34,42 @@ public:
 	SDL_Texture* CreateEmpty(int width, int height);
 	SDL_Texture* CreateAndUpload(const std::vector<std::uint8_t>& bgra,
 		int width, int height, bool hasTransparency);
+	SDL_Texture* CreateStandaloneAndUpload(const std::vector<std::uint8_t>& bgra,
+		int width, int height, bool hasTransparency,
+		CacheReservation reservation);
 	bool Destroy(SDL_Texture* texture, std::size_t bytes = 0);
 	std::size_t DestroyAll();
 	std::size_t LiveTextureCount() const;
+	StandaloneTextureResidency GetStandaloneTextureResidency() const;
 #ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
 	void FailNextAdoptionForTesting() noexcept { failNextAdoption_ = true; }
+	void FailNextUploadForTesting() noexcept { failNextUpload_ = true; }
+	void FailNextBlendModeForTesting() noexcept { failNextBlendMode_ = true; }
 #endif
 
 private:
+	struct TextureRecord {
+		// Keep source dimensions with the allocation for residency diagnostics.
+		int width = 0;
+		int height = 0;
+		std::size_t bytes = 0;
+		CacheReservation standaloneReservation;
+	};
+
 	void CheckThread() const;
-	bool Adopt(SDL_Texture* texture);
+	bool Adopt(SDL_Texture* texture, int width, int height, std::size_t bytes,
+		CacheReservation standaloneReservation = {});
+	SDL_Texture* CreateAndUploadInternal(const std::vector<std::uint8_t>& bgra,
+		int width, int height, bool hasTransparency,
+		CacheReservation standaloneReservation);
 
 	SDL_Renderer* renderer_ = nullptr;
 	std::thread::id ownerThread_;
-	std::unordered_set<SDL_Texture*> textures_;
+	std::unordered_map<SDL_Texture*, TextureRecord> textures_;
 #ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
 	bool failNextAdoption_ = false;
+	bool failNextUpload_ = false;
+	bool failNextBlendMode_ = false;
 #endif
 };
 

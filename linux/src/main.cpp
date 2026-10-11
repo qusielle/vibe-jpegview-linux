@@ -3058,17 +3058,40 @@ private:
 		}
 	}
 
+	jpegview_linux::RendererTextureReference CreateStandalonePresentationTexture(
+		const Image& source) {
+		if (source.bgra.empty()) return {};
+		jpegview_linux::CacheReservation reservation;
+		try {
+			reservation = cacheBudget_->TrackTemporary(source.bgra.size(),
+				jpegview_linux::CacheMemoryCategory::ActiveWorkingData);
+		} catch (...) {
+			// Accounting must succeed before replacing the visible standalone texture.
+			std::cerr << "Could not account standalone presentation texture memory\n";
+			return {};
+		}
+		if (!reservation) {
+			std::cerr << "Could not reserve standalone presentation texture accounting\n";
+			return {};
+		}
+		SDL_Texture* texture = imageTextureOwner_.CreateStandaloneAndUpload(
+			source.bgra, source.width, source.height, source.hasTransparency,
+			std::move(reservation));
+		if (texture == nullptr) {
+			std::cerr << "Could not upload the standalone presentation texture: "
+				<< SDL_GetError() << '\n';
+		}
+		return jpegview_linux::RendererTextureReference::Own(
+			imageTextureOwner_, texture);
+	}
+
 	bool UpdateTexture() {
 		jpegview_linux::PerfContextScope workContext(
 			jpegview_linux::PerfWorkClass::ActiveImageSpread,
 			jpegview_linux::PerfExecution::EventThread);
 		jpegview_linux::RendererTextureReference newTexture =
-			jpegview_linux::RendererTextureReference::Own(imageTextureOwner_,
-				CreateTexture(CurrentImage()));
-		if (!newTexture) {
-			std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
-			return false;
-		}
+			CreateStandalonePresentationTexture(CurrentImage());
+		if (!newTexture) return false;
 		ReplaceCurrentTexture(std::move(newTexture));
 		return true;
 	}
@@ -3478,11 +3501,11 @@ private:
 				jpegview_linux::PerfContextScope workContext(
 					jpegview_linux::PerfWorkClass::ActiveImageSpread,
 					jpegview_linux::PerfExecution::EventThread);
-				replacementTexture = jpegview_linux::RendererTextureReference::Own(
-					imageTextureOwner_, CreateTexture(*result->presentationPixels));
+				replacementTexture = CreateStandalonePresentationTexture(
+					*result->presentationPixels);
 				if (!replacementTexture) {
 					ReportImageOperationFailure(pending.purpose,
-						"could not upload the completed image");
+						"could not account or upload the completed image");
 					ResumeImageOperationPlayback(pending);
 					imageOperationWorker_.Retire(std::move(*result));
 					replayLaterIntents();
@@ -14697,6 +14720,8 @@ private:
 		const jpegview_linux::ThumbnailPreparationDiagnostics thumbnailStats =
 			thumbnailPreparation_.GetDiagnostics();
 		const jpegview_linux::CacheBudgetSnapshot budgetStats = cacheBudget_->Snapshot();
+		const jpegview_linux::RendererTextureOwner::StandaloneTextureResidency
+			standaloneTextureStats = imageTextureOwner_.GetStandaloneTextureResidency();
 		diagnostics.End(jpegview_linux::PerfMetric::CacheSnapshot, sampleStart,
 			budgetStats.capacityBytes, budgetStats.retainedBytes,
 			budgetStats.decodedPixelBytes, budgetStats.preparedFrameBytes,
@@ -14714,6 +14739,11 @@ private:
 			retiredSpeculativeDisplayTextureBytes_, retiredDisplayTextures_.size(),
 			displayTextureCacheBytes_, displayTextureCache_.size(),
 			"display_texture_residency");
+		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+			standaloneTextureStats.bytes, standaloneTextureStats.count,
+			static_cast<std::uint64_t>(standaloneTextureStats.largestWidth),
+			static_cast<std::uint64_t>(standaloneTextureStats.largestHeight),
+			0, 0, "standalone_texture_residency");
 		diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
 			decodedStats.cachedBytes, decodedStats.cachedImages, decodedStats.retiredBytes,
 			decodedStats.retiredImages, decodedStats.foregroundQueued,
