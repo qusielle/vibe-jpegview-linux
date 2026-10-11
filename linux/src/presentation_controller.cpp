@@ -146,21 +146,27 @@ bool PresentationController::AcknowledgeFramePresented(
 	return spreadTexturesReady && MarkSpreadPresented(selectedIndex);
 }
 
-bool PresentationController::CanRepeatNavigation(
-	const PresentationNavigationState& state) const {
-	if (!state.selectedImageCommitted || state.currentHeaderPending ||
-		SuppressSinglePage(state.selectedIndex)) return false;
-	if (!state.spreadActive) return true;
-	return SpreadReady(state.selectedIndex) && SpreadPresented(state.selectedIndex) &&
-		state.anchorTextureReady && state.partnerTextureReady;
-}
-
-bool PresentationController::CanPresentSelection(
-	const PresentationNavigationState& state) const {
-	if (!state.selectedImageCommitted || state.currentHeaderPending ||
-		SuppressSinglePage(state.selectedIndex) || !state.anchorTextureReady) return false;
-	return !state.spreadActive ||
-		(SpreadReady(state.selectedIndex) && state.partnerTextureReady);
+PresentationReadiness PresentationController::EvaluateReadiness(
+	const PresentationReadinessSnapshot& snapshot) const {
+	const bool suppressSingleImage = SuppressSinglePage(snapshot.selectedIndex);
+	const bool spreadTexturesReady = snapshot.spreadActive && snapshot.spreadPrepared &&
+		snapshot.anchorTextureReady && snapshot.partnerTextureReady;
+	const bool selectedImageDrawable = snapshot.committedImageMatchesSelection &&
+		!suppressSingleImage && snapshot.anchorTextureReady &&
+		(!snapshot.spreadActive ||
+			(snapshot.spreadPrepared && snapshot.partnerTextureReady));
+	const bool canRepeatNavigation = snapshot.committedImageMatchesSelection &&
+		!snapshot.selectedLoadPending && !suppressSingleImage &&
+		(!snapshot.spreadActive ||
+			(snapshot.spreadPrepared && snapshot.spreadPresented &&
+				snapshot.anchorTextureReady && snapshot.partnerTextureReady));
+	return {
+		snapshot.committedImageMatchesSelection,
+		snapshot.spreadPrepared,
+		spreadTexturesReady,
+		selectedImageDrawable,
+		selectedImageDrawable && !snapshot.sourceDimensionsPending,
+		canRepeatNavigation};
 }
 
 } // namespace jpegview_linux

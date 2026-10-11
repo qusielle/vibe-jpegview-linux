@@ -109,13 +109,18 @@ should normally be added to one of these focused modules and covered by the matc
   channel on the event thread and submits requests to `DisplayImageCache`; explicit shutdown closes
   the channel and joins the planner before renderer and cache teardown.
 - `presentation_controller`: presentation and held-navigation readiness layered over
-  `DoublePagePresentationModel`. It accepts selected-load, JPEG-header, spread, texture-readiness, and
-  first-frame acknowledgement values; it also plans single-page fallback, dimension waits, rotated
-  spread geometry, and pair-request admission from value snapshots. Its animation-frame transition
-  model keeps the committed frame identity separate from one provisional target, accepts readiness
-  only for the matching source, owner generation, document revision, target generation, and display
-  request key, and commits or fails that target without owning pixels or SDL resources. The renderer
-  acknowledges the spread only after `SDL_RenderPresent` returns.
+  `DoublePagePresentationModel`. It evaluates one `PresentationReadinessSnapshot` into separate
+  decisions for drawing the committed image, releasing its retained fallback, drawing a complete
+  spread, and repeating navigation. The snapshot keeps same-path committed pixels distinct from a
+  provisional selection, and source-dimension waits distinct from selected-load waits: the former
+  may keep the current image drawable while delaying fallback release, while the latter blocks held
+  navigation. A ready spread may replace the fallback before its first presentation, but held
+  navigation waits for the renderer's acknowledgement after `SDL_RenderPresent` returns. The
+  controller also plans single-page fallback, dimension waits, rotated spread geometry, and
+  pair-request admission from value snapshots. Its animation-frame transition model keeps the
+  committed frame identity separate from one provisional target, accepts readiness only for the
+  matching source, owner generation, document revision, target generation, and display request key,
+  and commits or fails that target without owning pixels or SDL resources.
 - `archive_source` and its internal modules: `archive_source.cpp` owns the public generic
   container/member API, source identity, session-password lifecycle, and bounded temporary-member
   extraction. `archive_source_catalog.cpp` owns catalog-cache/coalescing policy, while

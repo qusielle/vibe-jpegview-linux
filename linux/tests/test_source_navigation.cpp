@@ -2206,41 +2206,75 @@ void TestDoublePagePresentationCommitsSpreadAtomically() {
 		"failed spread texture did not release the single-page fallback");
 }
 
-void TestPresentationControllerGatesHeldNavigationOnFirstFrame() {
+void TestPresentationControllerBuildsReadinessSnapshot() {
 	using jpegview_linux::PresentationController;
-	using jpegview_linux::PresentationNavigationState;
+	using jpegview_linux::PresentationReadinessSnapshot;
 	PresentationController presentation;
 	Expect(presentation.BeginSpread(3, 4, "anchor", "partner"),
 		"presentation controller did not begin the selected spread");
-	PresentationNavigationState state{3, true, false, true, false, false};
-	Expect(!presentation.CanPresentSelection(state) &&
-		!presentation.CanPresentSelection({3, true, false, true, true, false}),
+	PresentationReadinessSnapshot state;
+	state.selectedIndex = 3;
+	state.committedImageMatchesSelection = true;
+	state.spreadActive = true;
+	jpegview_linux::PresentationReadiness readiness =
+		presentation.EvaluateReadiness(state);
+	Expect(!readiness.selectedImageDrawable &&
+		!readiness.canReleaseRetainedPresentation && !readiness.spreadTexturesReady,
 		"an incomplete spread released the outgoing presentation");
-	Expect(!presentation.CanRepeatNavigation(state) &&
-		presentation.MarkTextureReady("anchor") &&
-		!presentation.CanRepeatNavigation(state),
+	Expect(presentation.MarkTextureReady("anchor"),
+		"anchor texture readiness was not accepted");
+	state.anchorTextureReady = true;
+	readiness = presentation.EvaluateReadiness(state);
+	Expect(!readiness.selectedImageDrawable && !readiness.canRepeatNavigation,
 		"held navigation advanced before both pages had renderer textures");
-	Expect(presentation.MarkTextureReady("partner") &&
-		!presentation.CanRepeatNavigation(state),
+	Expect(presentation.MarkTextureReady("partner"),
+		"partner texture readiness was not accepted");
+	state.partnerTextureReady = true;
+	state.spreadPrepared = presentation.SpreadReady(3);
+	state.spreadPresented = presentation.SpreadPresented(3);
+	readiness = presentation.EvaluateReadiness(state);
+	Expect(readiness.spreadTexturesReady && readiness.selectedImageDrawable &&
+		readiness.canReleaseRetainedPresentation && !readiness.canRepeatNavigation,
 		"held navigation advanced before the first complete spread frame was presented");
-	Expect(presentation.CanPresentSelection({3, true, false, true, true, true}),
-		"a complete new spread did not replace the outgoing presentation before acknowledgement");
-	Expect(presentation.AcknowledgeFramePresented(3, true) &&
-		presentation.CanRepeatNavigation({3, true, false, true, true, true}),
+	Expect(presentation.AcknowledgeFramePresented(3, true),
+		"complete spread frame was not acknowledged");
+	state.spreadPresented = presentation.SpreadPresented(3);
+	readiness = presentation.EvaluateReadiness(state);
+	Expect(readiness.canRepeatNavigation,
 		"held navigation did not resume after the first complete spread frame was presented");
 
+	state.sourceDimensionsPending = true;
+	readiness = presentation.EvaluateReadiness(state);
+	Expect(readiness.selectedImageDrawable && !readiness.canReleaseRetainedPresentation &&
+		readiness.canRepeatNavigation,
+		"source-dimension work hid a drawable committed spread or blocked navigation");
+	state.sourceDimensionsPending = false;
+	state.selectedLoadPending = true;
+	readiness = presentation.EvaluateReadiness(state);
+	Expect(readiness.selectedImageDrawable && readiness.canReleaseRetainedPresentation &&
+		!readiness.canRepeatNavigation,
+		"selected-load work did not keep repeat navigation behind the current owner");
+	state.committedImageMatchesSelection = false;
+	readiness = presentation.EvaluateReadiness(state);
+	Expect(!readiness.selectedImageDrawable && !readiness.canReleaseRetainedPresentation &&
+		!readiness.canRepeatNavigation,
+		"a provisional different-source selection borrowed committed readiness");
+
 	Expect(presentation.BeginSpread(5, 6, "failed-anchor", "failed-partner") &&
-		presentation.MarkTextureFailed("failed-partner") &&
-		presentation.CanRepeatNavigation({5, true, false, false, false, false}),
+		presentation.MarkTextureFailed("failed-partner"),
+		"failed spread did not enter its single-page fallback");
+	state.selectedIndex = 5;
+	state.committedImageMatchesSelection = true;
+	state.selectedLoadPending = false;
+	state.spreadActive = false;
+	state.spreadPrepared = false;
+	state.spreadPresented = false;
+	state.anchorTextureReady = true;
+	state.partnerTextureReady = false;
+	readiness = presentation.EvaluateReadiness(state);
+	Expect(readiness.selectedImageDrawable && readiness.canReleaseRetainedPresentation &&
+		readiness.canRepeatNavigation,
 		"a failed spread did not return navigation to its single-page fallback");
-	Expect(!presentation.CanRepeatNavigation({5, false, false, false, false, false}) &&
-		!presentation.CanRepeatNavigation({5, true, true, false, false, false}),
-		"pending selection or JPEG header completion allowed repeat navigation");
-	Expect(presentation.CanPresentSelection({5, true, false, false, true, false}) &&
-		!presentation.CanPresentSelection({5, false, false, false, true, false}) &&
-		!presentation.CanPresentSelection({5, true, true, false, true, false}) &&
-		!presentation.CanPresentSelection({5, true, false, false, false, false}),
-		"pending, failed, or texture-less selection released the outgoing single image");
 }
 
 void TestAnimationFramePresentationKeepsCommittedOwnerUntilTargetCommit() {
@@ -2586,7 +2620,7 @@ const TestCase kTests[] = {
 	{"keyboard-command-mappings", &TestKeyboardCommandMappings},
 	{"double-page-pairing-navigation-and-reading-order", &TestDoublePagePairingNavigationAndReadingOrder},
 	{"double-page-presentation-atomic-commit", &TestDoublePagePresentationCommitsSpreadAtomically},
-	{"presentation-controller-first-frame-navigation-gate", &TestPresentationControllerGatesHeldNavigationOnFirstFrame},
+	{"presentation-controller-readiness-snapshot", &TestPresentationControllerBuildsReadinessSnapshot},
 	{"animation-frame-presentation-keeps-committed-owner", &TestAnimationFramePresentationKeepsCommittedOwnerUntilTargetCommit},
 	{"presentation-controller-plans-spread-preparation-without-renderer", &TestPresentationControllerPlansSpreadPreparationWithoutRenderer},
 	{"presentation-controller-plans-spread-requests-and-fallbacks", &TestPresentationControllerPlansSpreadRequestsAndFallbacks},

@@ -10,13 +10,28 @@
 
 namespace jpegview_linux {
 
-struct PresentationNavigationState {
+// Update-phase facts for one selected image. A committed same-path image can
+// remain drawable during a reload, while source-dimension and selected-load
+// waits gate different actions.
+struct PresentationReadinessSnapshot {
 	std::size_t selectedIndex = 0;
-	bool selectedImageCommitted = false;
-	bool currentHeaderPending = false;
+	bool committedImageMatchesSelection = false;
+	bool selectedLoadPending = false;
+	bool sourceDimensionsPending = false;
 	bool spreadActive = false;
+	bool spreadPrepared = false;
+	bool spreadPresented = false;
 	bool anchorTextureReady = false;
 	bool partnerTextureReady = false;
+};
+
+struct PresentationReadiness {
+	bool committedImageMatchesSelection = false;
+	bool spreadPrepared = false;
+	bool spreadTexturesReady = false;
+	bool selectedImageDrawable = false;
+	bool canReleaseRetainedPresentation = false;
+	bool canRepeatNavigation = false;
 };
 
 struct AnimationFramePresentationIdentity {
@@ -137,8 +152,8 @@ public:
 		const SpreadRequestSnapshot& snapshot) const;
 	bool AcknowledgeFramePresented(std::size_t selectedIndex,
 		bool spreadTexturesReady);
-	bool CanPresentSelection(const PresentationNavigationState& state) const;
-	bool CanRepeatNavigation(const PresentationNavigationState& state) const;
+	PresentationReadiness EvaluateReadiness(
+		const PresentationReadinessSnapshot& snapshot) const;
 };
 
 } // namespace jpegview_linux

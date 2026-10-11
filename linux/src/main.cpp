@@ -4676,6 +4676,42 @@ private:
 		}
 	}
 
+	bool CommittedImageMatchesCurrentSelection() const {
+		return !fileList_.Empty() && (clipboardMode_ || imageSession_.LoadedPath() ==
+			AbsoluteNormalized(fileList_.Current()));
+	}
+
+	void RefreshPresentationReadiness(bool touchSpreadTextureRecency) {
+		const std::size_t index = fileList_.Empty() ? 0 : fileList_.CurrentIndex();
+		const bool spreadActive = activeDoublePageRender_.has_value();
+		// Held navigation historically marks both visible cache pages as recently used.
+		if (touchSpreadTextureRecency && spreadActive) {
+			if (!activeDoublePageRender_->transformedAnchorTexture) {
+				(void)FindDisplayTexture(presentationController_.AnchorTextureKey());
+			}
+			(void)FindDisplayTexture(presentationController_.PartnerTextureKey());
+		}
+		const bool anchorReady = !spreadActive ? DisplayTextureForRender() != nullptr :
+			(activeDoublePageRender_->transformedAnchorTexture ? texture_ != nullptr :
+				PeekDisplayTexture(presentationController_.AnchorTextureKey()) != nullptr);
+		const bool partnerReady = spreadActive && PeekDisplayTexture(
+			presentationController_.PartnerTextureKey()) != nullptr;
+		jpegview_linux::PresentationReadinessSnapshot snapshot;
+		snapshot.selectedIndex = index;
+		snapshot.committedImageMatchesSelection =
+			CommittedImageMatchesCurrentSelection();
+		snapshot.selectedLoadPending = currentSelectedLoadPending_;
+		snapshot.sourceDimensionsPending = currentSourceDimensionsPending_;
+		snapshot.spreadActive = spreadActive;
+		snapshot.spreadPrepared = !fileList_.Empty() &&
+			presentationController_.SpreadReady(index);
+		snapshot.spreadPresented = !fileList_.Empty() &&
+			presentationController_.SpreadPresented(index);
+		snapshot.anchorTextureReady = anchorReady;
+		snapshot.partnerTextureReady = partnerReady;
+		presentationReadiness_ = presentationController_.EvaluateReadiness(snapshot);
+	}
+
 	void UpdatePresentationState() {
 		const SDL_Rect area = ImageAreaRect();
 		imageCenterX_ = area.x + area.w / 2;
@@ -4684,17 +4720,8 @@ private:
 		contextMenuNeedsCleanFrame_ = false;
 		RefreshDoublePageRenderState();
 		UpdateCurrentDisplayTextureRequest();
-		const std::size_t index = fileList_.Empty() ? 0 : fileList_.CurrentIndex();
-		const bool selectedImageLoaded = !fileList_.Empty() && (clipboardMode_ ||
-			imageSession_.LoadedPath() == AbsoluteNormalized(fileList_.Current()));
-		const bool spreadActive = activeDoublePageRender_.has_value();
-		const bool anchorReady = !spreadActive ? DisplayTextureForRender() != nullptr :
-			(activeDoublePageRender_->transformedAnchorTexture ? texture_ != nullptr :
-				PeekDisplayTexture(presentationController_.AnchorTextureKey()) != nullptr);
-		const bool replacementReady = presentationController_.CanPresentSelection({
-			index, selectedImageLoaded, currentSourceDimensionsPending_, spreadActive,
-			anchorReady, PeekDisplayTexture(presentationController_.PartnerTextureKey()) != nullptr});
-		if (replacementReady) ClearRetainedPresentation();
+		RefreshPresentationReadiness(false);
+		if (presentationReadiness_.canReleaseRetainedPresentation) ClearRetainedPresentation();
 		UpdateMagnifyingGlassRequest();
 		UpdateMagnifyingGlassCursor(
 			fileList_.Empty() || presentationController_.SuppressSinglePage(
@@ -8010,17 +8037,9 @@ private:
 		const bool keyIsHeld = keyStates != nullptr && scancode < keyCount && keyStates[scancode] != 0;
 		if (keyIsHeld) interactionWorkPolicy_.NotifyActivity(
 			jpegview_linux::InteractionActivity::HeldNavigation);
-		const std::size_t selectedIndex = fileList_.Empty() ? 0 : fileList_.CurrentIndex();
-		const bool currentImageReady = presentationController_.CanRepeatNavigation({
-			selectedIndex,
-			!fileList_.Empty() && (clipboardMode_ || imageSession_.LoadedPath() ==
-				AbsoluteNormalized(fileList_.Current())),
-			currentSelectedLoadPending_,
-			activeDoublePageRender_.has_value(),
-			!activeDoublePageRender_.has_value() || ActiveDoublePageAnchorTexture() != nullptr,
-			!activeDoublePageRender_.has_value() ||
-				FindDisplayTexture(presentationController_.PartnerTextureKey()) != nullptr});
-		const int direction = heldNavigation_.AfterImageShown(keyIsHeld, currentImageReady);
+		RefreshPresentationReadiness(true);
+		const int direction = heldNavigation_.AfterImageShown(keyIsHeld,
+			presentationReadiness_.canRepeatNavigation);
 		if (direction == 0 || fileList_.Empty()) return;
 
 		const std::size_t previousIndex = fileList_.CurrentIndex();
@@ -14485,10 +14504,6 @@ private:
 		const std::uint64_t frameStart = diagnostics.Begin();
 		const SDL_Rect imageArea = ImageAreaRect();
 		const std::size_t currentIndex = fileList_.Empty() ? 0 : fileList_.CurrentIndex();
-		const bool selectedImageLoaded = !fileList_.Empty() && (clipboardMode_ ||
-			imageSession_.LoadedPath() == AbsoluteNormalized(fileList_.Current()));
-		const bool spreadModelReady = !fileList_.Empty() &&
-			presentationController_.SpreadReady(currentIndex);
 		const bool freeRotationOpen = freeRotationDialog_.IsOpen();
 		const bool perspectiveCorrectionOpen = perspectiveCorrectionDialog_.IsOpen();
 		const bool transformEditorOpen = freeRotationOpen || perspectiveCorrectionOpen;
@@ -14533,20 +14548,20 @@ private:
 					currentDestination.y + imageArea.y,
 					currentDestination.width, currentDestination.height};
 			}
-		} else if (activeDoublePageRender_.has_value() && spreadModelReady) {
+		} else if (activeDoublePageRender_.has_value() &&
+			presentationReadiness_.spreadPrepared) {
 			renderTexture = activeDoublePageRender_->transformedAnchorTexture ? texture_ :
 				PeekDisplayTexture(presentationController_.AnchorTextureKey());
 			nextPageTexture = PeekDisplayTexture(presentationController_.PartnerTextureKey());
-		} else if (!activeDoublePageRender_.has_value() && selectedImageLoaded &&
-			!presentationController_.SuppressSinglePage(currentIndex)) {
+		} else if (!activeDoublePageRender_.has_value() &&
+			presentationReadiness_.selectedImageDrawable) {
 			renderTexture = DisplayTextureForRender();
 		}
-		const bool spreadTexturesReady = !transformEditorOpen && activeDoublePageRender_.has_value() &&
-			spreadModelReady && renderTexture != nullptr && nextPageTexture != nullptr;
+		const bool spreadTexturesReady = !transformEditorOpen &&
+			presentationReadiness_.spreadTexturesReady;
 		const bool suppressSingleImage = transformEditorOpen ?
-			(!selectedImageLoaded || renderTexture == nullptr) :
-			(!selectedImageLoaded || presentationController_.SuppressSinglePage(currentIndex) ||
-				(activeDoublePageRender_.has_value() && !spreadTexturesReady));
+			(!presentationReadiness_.committedImageMatchesSelection || renderTexture == nullptr) :
+			!presentationReadiness_.selectedImageDrawable;
 		const SDL_Rect nextPageDestination = !transformEditorOpen && activeDoublePageRender_.has_value() ?
 			NextPageScreenRect(imageArea) : SDL_Rect{};
 		SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
@@ -14821,6 +14836,7 @@ private:
 	std::uint64_t imageInfoMetadataRevision_ = 0;
 	std::optional<ActiveSpreadSourceRequest> activeSpreadSourceRequest_;
 	jpegview_linux::PresentationController presentationController_;
+	jpegview_linux::PresentationReadiness presentationReadiness_;
 	jpegview_linux::AnimationFramePresentationModel animationFramePresentation_;
 	bool deferredCurrentDisplayPreparation_ = false;
 	double initialSlideshowSeconds_ = 0.0;
