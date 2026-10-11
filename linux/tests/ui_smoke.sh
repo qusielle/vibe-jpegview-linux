@@ -73,6 +73,21 @@ write_ppm() {
 	} > "$filename"
 }
 
+write_solid_p6() {
+	python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+import sys
+
+path, width, height, red, green, blue = sys.argv[1:]
+width = int(width)
+height = int(height)
+row = bytes((int(red), int(green), int(blue))) * width
+with open(path, "wb") as output:
+	output.write(f"P6\n{width} {height}\n255\n".encode())
+	for _ in range(height):
+		output.write(row)
+PY
+}
+
 send_repeated_keypresses() {
 	repeat_count=$1
 	repeated_key=$2
@@ -753,6 +768,122 @@ if command -v convert >/dev/null 2>&1; then
 else
 	echo "UI smoke test: SKIP JPEG first-selection fixture (missing ImageMagick convert)"
 fi
+
+# Reusing a previously opened neighbor in fit-relative zoom mode must size the
+# cache check against the neighbor's fit base, not the prior image's absolute zoom.
+fit_relative_directory="$temporary/fit-relative-neighbors"
+fit_relative_config="$temporary/fit-relative-neighbor-config"
+fit_relative_trace="$temporary/fit-relative-neighbor-trace.csv"
+fit_relative_previous_state=$XDG_STATE_HOME
+XDG_STATE_HOME="$temporary/fit-relative-neighbor-state"
+export XDG_STATE_HOME
+mkdir -p "$fit_relative_directory" "$fit_relative_config/jpegview-linux"
+write_solid_p6 "$fit_relative_directory/01-anchor.ppm" 1400 1000 220 20 30
+write_solid_p6 "$fit_relative_directory/02-cached.ppm" 2800 2000 20 220 40
+printf 'scale_mode=fit\nfit_relative_zoom_mode=1\ncache_size_mb=128\nshow_histogram=0\nthumbnail_panel_visible=0\n' \
+	> "$fit_relative_config/jpegview-linux/settings.conf"
+VIEWER_TEST_HOME="$temporary/fit-relative-neighbor-home" \
+	VIEWER_TEST_CONFIG_HOME="$fit_relative_config" \
+	viewer_perf_trace_override=$fit_relative_trace
+export VIEWER_TEST_HOME VIEWER_TEST_CONFIG_HOME
+launch_viewer "$fit_relative_directory"
+unset viewer_perf_trace_override
+count_fit_relative_events() {
+	awk -F, -v metric="$1" '$2 == metric && $4 == "worker_thread" && \
+		$6 == "active_image_spread" { count++ } END { print count + 0 }' \
+		"$fit_relative_trace" 2>/dev/null || true
+}
+cached_fit_relative_neighbor_ready=0
+for _ in $(seq 1 100); do
+	if awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+		$6 == "nearest_navigation_neighbor" { ready = 1 } END { exit !ready }' \
+		"$fit_relative_trace" 2>/dev/null; then
+		cached_fit_relative_neighbor_ready=1
+		break
+	fi
+	sleep 0.05
+done
+if [ "$cached_fit_relative_neighbor_ready" -ne 1 ]; then
+	echo "UI smoke test: fit-relative neighbor did not reach the renderer texture cache" >&2
+	cat "$temporary/viewer.log" >&2
+	cat "$fit_relative_trace" >&2
+	exit 1
+fi
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "02-cached.ppm" "fit-relative fixture did not open its neighbor"
+before_cached_neighbor_zoom=$(awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+	$6 == "active_image_spread" { count++ } END { print count + 0 }' "$fit_relative_trace")
+DISPLAY=":$display_number" xdotool key ctrl+Up
+zoomed_cached_neighbor_ready=0
+for _ in $(seq 1 100); do
+	current_uploads=$(awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+		$6 == "active_image_spread" { count++ } END { print count + 0 }' \
+		"$fit_relative_trace" 2>/dev/null || true)
+	if [ "$current_uploads" -gt "$before_cached_neighbor_zoom" ]; then
+		zoomed_cached_neighbor_ready=1
+		break
+	fi
+	sleep 0.05
+done
+if [ "$zoomed_cached_neighbor_ready" -ne 1 ]; then
+	echo "UI smoke test: fit-relative zoom did not prepare the cached neighbor at its new size" >&2
+	cat "$temporary/viewer.log" >&2
+	cat "$fit_relative_trace" >&2
+	exit 1
+fi
+before_anchor_return=$(awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+	$6 == "active_image_spread" { count++ } END { print count + 0 }' "$fit_relative_trace")
+DISPLAY=":$display_number" xdotool key Left
+assert_title_prefix "01-anchor.ppm" "fit-relative zoom did not return to the anchor"
+anchor_fit_relative_ready=0
+for _ in $(seq 1 100); do
+	current_uploads=$(awk -F, '$2 == "texture_upload" && $4 == "event_thread" && \
+		$6 == "active_image_spread" { count++ } END { print count + 0 }' \
+		"$fit_relative_trace" 2>/dev/null || true)
+	if [ "$current_uploads" -gt "$before_anchor_return" ]; then
+		anchor_fit_relative_ready=1
+		break
+	fi
+	sleep 0.05
+done
+if [ "$anchor_fit_relative_ready" -ne 1 ]; then
+	echo "UI smoke test: anchor did not finish its fit-relative display update" >&2
+	cat "$temporary/viewer.log" >&2
+	cat "$fit_relative_trace" >&2
+	exit 1
+fi
+before_cached_revisit=$(count_fit_relative_events source_read):$(count_fit_relative_events processing):$(awk -F, \
+	'$2 == "texture_upload" && $4 == "event_thread" && $6 == "active_image_spread" { count++ } \
+	END { print count + 0 }' "$fit_relative_trace")
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "02-cached.ppm" "fit-relative zoom did not revisit the cached neighbor"
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/fit-relative-cached-revisit.png"
+	fit_relative_cached_pixel=$(convert "$temporary/fit-relative-cached-revisit.png" \
+		-format '%[hex:p{640,400}]' info:)
+	case "$fit_relative_cached_pixel" in
+		*14DC28*|*15DC29*) ;;
+		*)
+			echo "UI smoke test: fit-relative cached revisit did not present the neighbor immediately ($fit_relative_cached_pixel)" >&2
+			exit 1
+			;;
+	esac
+fi
+sleep 0.3
+after_cached_revisit=$(count_fit_relative_events source_read):$(count_fit_relative_events processing):$(awk -F, \
+	'$2 == "texture_upload" && $4 == "event_thread" && $6 == "active_image_spread" { count++ } \
+	END { print count + 0 }' "$fit_relative_trace")
+if [ "$after_cached_revisit" != "$before_cached_revisit" ]; then
+	echo "UI smoke test: fit-relative cached revisit repeated source work, processing, or texture upload ($before_cached_revisit -> $after_cached_revisit)" >&2
+	cat "$temporary/viewer.log" >&2
+	cat "$fit_relative_trace" >&2
+	exit 1
+fi
+stop_viewer
+unset VIEWER_TEST_HOME VIEWER_TEST_CONFIG_HOME
+XDG_STATE_HOME=$fit_relative_previous_state
+export XDG_STATE_HOME
 
 # The full Transform image menu opens the free-rotation editor, Escape cancels
 # without changing the selected document, and Apply commits an adjusted angle.

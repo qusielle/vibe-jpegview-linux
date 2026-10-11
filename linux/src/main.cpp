@@ -1020,7 +1020,7 @@ private:
 			if (candidateSource != source.Key() || !candidateIsStatic ||
 				candidateSourceWidth <= 0 || candidateSourceHeight <= 0 ||
 				candidateKey.frameIndex != 0) return;
-			jpegview_linux::Viewport candidateViewport;
+			jpegview_linux::Viewport candidateViewport = viewport_;
 			candidateViewport.Restore(viewportSnapshot, candidateSourceWidth,
 				candidateSourceHeight, imageAreaWidth, imageAreaHeight);
 			const jpegview_linux::ViewportRect destination = candidateViewport.Destination(
