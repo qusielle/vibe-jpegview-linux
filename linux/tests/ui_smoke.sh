@@ -4705,13 +4705,24 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		exit 1
 	fi
 	if [ "$visual_assertions" -eq 1 ]; then
-		DISPLAY=":$display_number" import -window "$window_id" \
-			"$temporary/cold-jpeg-owner-return-after.png"
-		if ! compare -metric AE "$temporary/cold-jpeg-owner-return-before.png" \
-			"$temporary/cold-jpeg-owner-return-after.png" null: \
-			2>"$temporary/cold-jpeg-owner-return-difference.txt"; then
+		# Blend intentionally animates the return from the edited standalone
+		# texture to A. Wait for the final Fit frame instead of comparing a
+		# transient animation frame to the startup capture.
+		owner_return_viewport_restored=0
+		for _ in $(seq 1 80); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/cold-jpeg-owner-return-after.png"
+			if compare -metric AE "$temporary/cold-jpeg-owner-return-before.png" \
+				"$temporary/cold-jpeg-owner-return-after.png" null: \
+				2>"$temporary/cold-jpeg-owner-return-difference.txt"; then
+				owner_return_viewport_restored=1
+				break
+			fi
+			sleep 0.025
+		done
+		if [ "$owner_return_viewport_restored" -ne 1 ]; then
 			owner_return_difference=$(cat "$temporary/cold-jpeg-owner-return-difference.txt")
-			echo "UI smoke test: returning to A changed its current Fit viewport ($owner_return_difference differing pixels)" >&2
+			echo "UI smoke test: returning to A did not restore its current Fit viewport after the Blend transition ($owner_return_difference differing pixels)" >&2
 			exit 1
 		fi
 	fi
