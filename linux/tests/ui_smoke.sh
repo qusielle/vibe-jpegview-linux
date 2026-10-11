@@ -2441,6 +2441,13 @@ if [ -n "$perf_trace_path" ]; then
 	# Continuous held navigation keeps the interaction policy active. Once four
 	# obsolete renderer textures queue, maintenance must destroy one per tick so
 	# active-working textures cannot accumulate for the duration of the hold.
+	count_destroyed_display_images() {
+		awk -F, '$2 == "texture_destroy" && $4 == "event_thread" && \
+			($6 == "active_image_spread" || $6 == "focused_preview" || \
+			 $6 == "visible_thumbnail" || $6 == "nearest_navigation_neighbor" || \
+			 $6 == "distant_speculation") && $7 > 0 { count++ } \
+			END { print count + 0 }' "$1" 2>/dev/null || true
+	}
 	held_navigation_directory="$temporary/held-navigation-images"
 	held_navigation_config="$temporary/held-navigation-config/jpegview-linux"
 	held_navigation_trace="$perf_trace_path.held-navigation"
@@ -2489,9 +2496,7 @@ if [ -n "$perf_trace_path" ]; then
 	DISPLAY=":$display_number" xdotool keydown --window "$window_id" Right
 	held_navigation_destroy_count=0
 	for _ in $(seq 1 120); do
-		held_navigation_destroy_count=$(awk -F, \
-			'$2 == "texture_destroy" && $4 == "event_thread" { count++ } \
-			END { print count + 0 }' "$held_navigation_trace" 2>/dev/null || true)
+		held_navigation_destroy_count=$(count_destroyed_display_images "$held_navigation_trace")
 		if [ "$held_navigation_destroy_count" -ge 3 ]; then break; fi
 		sleep 0.05
 	done
@@ -2508,9 +2513,111 @@ if [ -n "$perf_trace_path" ]; then
 	if [ "$held_navigation_destroy_count" -lt 3 ] || \
 		[ "$held_navigation_queue_samples" -eq 0 ] || \
 		[ "$held_navigation_max_queue" -gt 4 ]; then
-		echo "UI smoke test: held navigation stalled texture retirement or exceeded its queue bound ($held_navigation_destroy_count destroys, maximum queue $held_navigation_max_queue)" >&2
+		echo "UI smoke test: held navigation stalled image-texture retirement or exceeded its queue bound ($held_navigation_destroy_count destroys, maximum queue $held_navigation_max_queue)" >&2
 		cat "$temporary/held-navigation-viewer.log" >&2
 		cat "$held_navigation_trace" >&2
+		exit 1
+	fi
+
+	# Repeat the hold under a small nonzero cache with active two-page spreads,
+	# then reverse direction once the outgoing spread has started retiring.
+	small_spread_directory="$temporary/small-budget-held-spread-images"
+	small_spread_config="$temporary/small-budget-held-spread-config/jpegview-linux"
+	small_spread_trace="$perf_trace_path.small-budget-held-spread"
+	mkdir -p "$small_spread_directory" "$small_spread_config"
+	for index in $(seq 0 19); do
+		filename=$(printf '%02d' "$index")
+		write_solid_ppm "$small_spread_directory/$filename.ppm" \
+			$((index * 11 % 256)) $(((index * 17 + 31) % 256)) \
+			$(((index * 23 + 63) % 256))
+	done
+	printf 'scale_mode=fit\ncache_size_mb=2\ndouble_page_mode_enabled=1\nshow_histogram=0\nthumbnail_panel_visible=0\nfolder_wrap_around=0\n' \
+		> "$small_spread_config/settings.conf"
+	DISPLAY=":$display_number" HOME="$temporary/small-spread-home" \
+		XDG_CONFIG_HOME="$temporary/small-budget-held-spread-config" \
+		XDG_STATE_HOME="$temporary/small-spread-state" \
+		JPEGVIEW_PERF_TRACE="$small_spread_trace" \
+		"$BINARY" "$small_spread_directory" \
+		> "$temporary/small-budget-held-spread-viewer.log" 2>&1 &
+	viewer_pid=$!
+	window_id=''
+	for _ in $(seq 1 50); do
+		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null | head -1 || true)
+		if [ -n "$window_id" ]; then break; fi
+		sleep 0.1
+	done
+	if [ -z "$window_id" ]; then
+		echo "UI smoke test: small-budget spread retirement fixture did not create its window" >&2
+		cat "$temporary/small-budget-held-spread-viewer.log" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
+	assert_title_prefix "00.ppm" "small-budget spread fixture did not start on its cover"
+	DISPLAY=":$display_number" xdotool key Right
+	assert_title_prefix "[2-3/20] " "small-budget spread fixture did not form its first pair"
+	small_spread_first_pair_title=$(window_title_without_position)
+	small_spread_uploads_before=$(awk -F, '$2 == "texture_upload" && \
+		$4 == "event_thread" && $6 == "active_image_spread" { count++ } \
+		END { print count + 0 }' "$small_spread_trace" 2>/dev/null || true)
+	DISPLAY=":$display_number" xdotool keydown --window "$window_id" Right
+	small_spread_destroy_while_held=0
+	for _ in $(seq 1 120); do
+		small_spread_destroy_while_held=$(count_destroyed_display_images "$small_spread_trace")
+		if [ "$small_spread_destroy_while_held" -ge 3 ]; then break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	DISPLAY=":$display_number" xdotool keyup --window "$window_id" Right
+	sleep 0.3
+	small_spread_title_after_hold=$(window_title_without_position)
+	if [ "$small_spread_destroy_while_held" -lt 3 ] || \
+		[ "$small_spread_title_after_hold" = "$small_spread_first_pair_title" ]; then
+		echo "UI smoke test: small-budget held navigation did not progress across and retire a spread ($small_spread_destroy_while_held destroys; $small_spread_title_after_hold)" >&2
+		cat "$temporary/small-budget-held-spread-viewer.log" >&2
+		cat "$small_spread_trace" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key Left
+	small_spread_reversed=0
+	for _ in $(seq 1 100); do
+		small_spread_title_after_reverse=$(window_title_without_position)
+		if [ "$small_spread_title_after_reverse" != "$small_spread_title_after_hold" ]; then
+			small_spread_hold_index=$(printf '%s\n' "$small_spread_title_after_hold" |
+				sed -n 's/^\([0-9][0-9]\)\.ppm.*/\1/p')
+			small_spread_reverse_index=$(printf '%s\n' "$small_spread_title_after_reverse" |
+				sed -n 's/^\([0-9][0-9]\)\.ppm.*/\1/p')
+			case "$small_spread_hold_index:$small_spread_reverse_index" in
+				[0-9][0-9]:[0-9][0-9])
+					if [ "$small_spread_reverse_index" -lt "$small_spread_hold_index" ]; then
+						small_spread_reversed=1
+					fi
+					;;
+			esac
+			break
+		fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.05
+	done
+	DISPLAY=":$display_number" xdotool key q || true
+	wait "$viewer_pid" || true
+	viewer_pid=''
+	small_spread_retirement_stats=$(awk -F, \
+		'$2 == "cache_snapshot" && $13 == "\"display_texture_residency\"" { \
+			if ($10 > maximum) maximum = $10; samples++ \
+		} END { print maximum + 0 ":" samples + 0 }' "$small_spread_trace")
+	small_spread_max_queue=${small_spread_retirement_stats%%:*}
+	small_spread_queue_samples=${small_spread_retirement_stats#*:}
+	small_spread_uploads_after=$(awk -F, '$2 == "texture_upload" && \
+		$4 == "event_thread" && $6 == "active_image_spread" { count++ } \
+		END { print count + 0 }' "$small_spread_trace")
+	if [ "$small_spread_reversed" -ne 1 ] || \
+		[ "$small_spread_queue_samples" -eq 0 ] || \
+		[ "$small_spread_max_queue" -gt 4 ] || \
+		[ "$small_spread_uploads_after" -le "$small_spread_uploads_before" ]; then
+		echo "UI smoke test: small-budget held spread reversal lost presentation progress or exceeded its retirement bound (reversed=$small_spread_reversed; titles=$small_spread_title_after_hold->$small_spread_title_after_reverse; queue=$small_spread_max_queue; uploads=$small_spread_uploads_before/$small_spread_uploads_after)" >&2
+		cat "$temporary/small-budget-held-spread-viewer.log" >&2
+		cat "$small_spread_trace" >&2
 		exit 1
 	fi
 fi
