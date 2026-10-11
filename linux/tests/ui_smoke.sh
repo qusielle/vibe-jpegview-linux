@@ -2448,6 +2448,32 @@ if [ -n "$perf_trace_path" ]; then
 			 $6 == "distant_speculation") && $7 > 0 { count++ } \
 			END { print count + 0 }' "$1" 2>/dev/null || true
 	}
+	count_display_texture_residency_snapshots() {
+		awk -F, '$2 == "cache_snapshot" && \
+			$13 == "\"display_texture_residency\"" { count++ } \
+			END { print count + 0 }' "$1" 2>/dev/null || true
+	}
+	# Compare trace totals against the pre-keydown boundary so startup evictions
+	# cannot make held input appear to retire textures or produce live snapshots.
+	display_retirement_progress_since() {
+		awk -F, -v prior_destroys="$2" -v prior_snapshots="$3" '
+			$2 == "texture_destroy" && $4 == "event_thread" &&
+				($6 == "active_image_spread" || $6 == "focused_preview" ||
+				 $6 == "visible_thumbnail" || $6 == "nearest_navigation_neighbor" ||
+				 $6 == "distant_speculation") && $7 > 0 { destroys++ }
+			$2 == "cache_snapshot" && $13 == "\"display_texture_residency\"" {
+				snapshots++
+				if (snapshots > prior_snapshots) {
+					after_snapshots++
+					if ($10 > max_queue) max_queue = $10
+				}
+			}
+			END {
+				printf "%d:%d:%d\n", destroys - prior_destroys,
+					after_snapshots, max_queue
+			}
+		' "$1" 2>/dev/null || true
+	}
 	held_navigation_directory="$temporary/held-navigation-images"
 	held_navigation_config="$temporary/held-navigation-config/jpegview-linux"
 	held_navigation_trace="$perf_trace_path.held-navigation"
@@ -2493,27 +2519,37 @@ if [ -n "$perf_trace_path" ]; then
 		cat "$held_navigation_trace" >&2
 		exit 1
 	fi
+	held_navigation_destroy_baseline=$(count_destroyed_display_images "$held_navigation_trace")
+	held_navigation_snapshot_baseline=$(count_display_texture_residency_snapshots "$held_navigation_trace")
 	DISPLAY=":$display_number" xdotool keydown --window "$window_id" Right
-	held_navigation_destroy_count=0
+	held_navigation_progress='0:0:0'
 	for _ in $(seq 1 120); do
-		held_navigation_destroy_count=$(count_destroyed_display_images "$held_navigation_trace")
-		if [ "$held_navigation_destroy_count" -ge 3 ]; then break; fi
+		held_navigation_progress=$(display_retirement_progress_since \
+			"$held_navigation_trace" "$held_navigation_destroy_baseline" \
+			"$held_navigation_snapshot_baseline")
+		held_navigation_destroy_delta=${held_navigation_progress%%:*}
+		held_navigation_progress=${held_navigation_progress#*:}
+		held_navigation_snapshot_delta=${held_navigation_progress%%:*}
+		if [ "$held_navigation_destroy_delta" -ge 3 ] && \
+			[ "$held_navigation_snapshot_delta" -gt 0 ]; then break; fi
 		sleep 0.05
 	done
+	held_navigation_progress=$(display_retirement_progress_since \
+		"$held_navigation_trace" "$held_navigation_destroy_baseline" \
+		"$held_navigation_snapshot_baseline")
+	held_navigation_destroy_delta=${held_navigation_progress%%:*}
+	held_navigation_progress=${held_navigation_progress#*:}
+	held_navigation_snapshot_delta=${held_navigation_progress%%:*}
+	held_navigation_progress=${held_navigation_progress#*:}
+	held_navigation_max_queue=$held_navigation_progress
 	DISPLAY=":$display_number" xdotool keyup --window "$window_id" Right
 	DISPLAY=":$display_number" xdotool key q || true
 	wait "$viewer_pid" || true
 	viewer_pid=''
-	held_navigation_max_retirement_queue=$(awk -F, \
-		'$2 == "cache_snapshot" && $13 == "\"display_texture_residency\"" { \
-			if ($10 > maximum) maximum = $10; samples++ \
-		} END { print maximum + 0 ":" samples + 0 }' "$held_navigation_trace")
-	held_navigation_max_queue=${held_navigation_max_retirement_queue%%:*}
-	held_navigation_queue_samples=${held_navigation_max_retirement_queue#*:}
-	if [ "$held_navigation_destroy_count" -lt 3 ] || \
-		[ "$held_navigation_queue_samples" -eq 0 ] || \
+	if [ "$held_navigation_destroy_delta" -lt 3 ] || \
+		[ "$held_navigation_snapshot_delta" -eq 0 ] || \
 		[ "$held_navigation_max_queue" -gt 4 ]; then
-		echo "UI smoke test: held navigation stalled image-texture retirement or exceeded its queue bound ($held_navigation_destroy_count destroys, maximum queue $held_navigation_max_queue)" >&2
+		echo "UI smoke test: held navigation stalled image-texture retirement or lacked an in-hold residency sample ($held_navigation_destroy_delta destroys, $held_navigation_snapshot_delta snapshots, maximum queue $held_navigation_max_queue)" >&2
 		cat "$temporary/held-navigation-viewer.log" >&2
 		cat "$held_navigation_trace" >&2
 		exit 1
@@ -2560,20 +2596,37 @@ if [ -n "$perf_trace_path" ]; then
 	small_spread_uploads_before=$(awk -F, '$2 == "texture_upload" && \
 		$4 == "event_thread" && $6 == "active_image_spread" { count++ } \
 		END { print count + 0 }' "$small_spread_trace" 2>/dev/null || true)
+	small_spread_destroy_baseline=$(count_destroyed_display_images "$small_spread_trace")
+	small_spread_snapshot_baseline=$(count_display_texture_residency_snapshots "$small_spread_trace")
 	DISPLAY=":$display_number" xdotool keydown --window "$window_id" Right
-	small_spread_destroy_while_held=0
+	small_spread_progress='0:0:0'
 	for _ in $(seq 1 120); do
-		small_spread_destroy_while_held=$(count_destroyed_display_images "$small_spread_trace")
-		if [ "$small_spread_destroy_while_held" -ge 3 ]; then break; fi
+		small_spread_progress=$(display_retirement_progress_since \
+			"$small_spread_trace" "$small_spread_destroy_baseline" \
+			"$small_spread_snapshot_baseline")
+		small_spread_destroy_while_held=${small_spread_progress%%:*}
+		small_spread_progress=${small_spread_progress#*:}
+		small_spread_snapshot_delta=${small_spread_progress%%:*}
+		if [ "$small_spread_destroy_while_held" -ge 3 ] && \
+			[ "$small_spread_snapshot_delta" -gt 0 ]; then break; fi
 		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
 		sleep 0.05
 	done
+	small_spread_progress=$(display_retirement_progress_since \
+		"$small_spread_trace" "$small_spread_destroy_baseline" \
+		"$small_spread_snapshot_baseline")
+	small_spread_destroy_while_held=${small_spread_progress%%:*}
+	small_spread_progress=${small_spread_progress#*:}
+	small_spread_snapshot_delta=${small_spread_progress%%:*}
+	small_spread_progress=${small_spread_progress#*:}
+	small_spread_max_queue=$small_spread_progress
 	DISPLAY=":$display_number" xdotool keyup --window "$window_id" Right
 	sleep 0.3
 	small_spread_title_after_hold=$(window_title_without_position)
 	if [ "$small_spread_destroy_while_held" -lt 3 ] || \
+		[ "$small_spread_snapshot_delta" -eq 0 ] || \
 		[ "$small_spread_title_after_hold" = "$small_spread_first_pair_title" ]; then
-		echo "UI smoke test: small-budget held navigation did not progress across and retire a spread ($small_spread_destroy_while_held destroys; $small_spread_title_after_hold)" >&2
+		echo "UI smoke test: small-budget held navigation did not progress across and retire a spread ($small_spread_destroy_while_held destroys, $small_spread_snapshot_delta in-hold snapshots; $small_spread_title_after_hold)" >&2
 		cat "$temporary/small-budget-held-spread-viewer.log" >&2
 		cat "$small_spread_trace" >&2
 		exit 1
@@ -2602,12 +2655,7 @@ if [ -n "$perf_trace_path" ]; then
 	DISPLAY=":$display_number" xdotool key q || true
 	wait "$viewer_pid" || true
 	viewer_pid=''
-	small_spread_retirement_stats=$(awk -F, \
-		'$2 == "cache_snapshot" && $13 == "\"display_texture_residency\"" { \
-			if ($10 > maximum) maximum = $10; samples++ \
-		} END { print maximum + 0 ":" samples + 0 }' "$small_spread_trace")
-	small_spread_max_queue=${small_spread_retirement_stats%%:*}
-	small_spread_queue_samples=${small_spread_retirement_stats#*:}
+	small_spread_queue_samples=$small_spread_snapshot_delta
 	small_spread_uploads_after=$(awk -F, '$2 == "texture_upload" && \
 		$4 == "event_thread" && $6 == "active_image_spread" { count++ } \
 		END { print count + 0 }' "$small_spread_trace")
@@ -4608,25 +4656,18 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		owner_capture_width=$(identify -format '%w' "$owner_capture_path")
 		owner_capture_height=$(identify -format '%h' "$owner_capture_path")
 		owner_sample_y=$((owner_capture_height / 2))
-		owner_white_run_metrics=$(convert "$owner_capture_path" \
+		owner_white_run_pixels=$(convert "$owner_capture_path" \
 			-crop "${owner_capture_width}x1+0+${owner_sample_y}" +repage \
 			-threshold 70% txt:- | awk '
 				NR == 1 { next }
 				/#FFFFFF/ {
-					split($1, coordinate, ",")
-					if (current == 0) current_start = coordinate[1] + 0
 					current++
-					if (current > maximum) {
-						maximum = current
-						maximum_start = current_start
-					}
+					if (current > maximum) maximum = current
 					next
 				}
 				{ current = 0 }
-				END { printf "%d,%d\n", maximum + 0, maximum_start + 0 }
+				END { print maximum + 0 }
 			')
-		owner_white_run_pixels=${owner_white_run_metrics%,*}
-		owner_white_run_start=${owner_white_run_metrics#*,}
 	}
 	DISPLAY=":$display_number" HOME="$temporary/owner-return-home" \
 		XDG_CONFIG_HOME="$owner_return_config" \
@@ -4683,11 +4724,9 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	if [ "$visual_assertions" -eq 1 ]; then
 		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
 		owner_initial_white_run=0
-		owner_initial_white_start=-1
 		for _ in $(seq 1 100); do
 			owner_capture_center_white_run "$temporary/cold-jpeg-owner-return-before.png"
 			owner_initial_white_run=$owner_white_run_pixels
-			owner_initial_white_start=$owner_white_run_start
 			if [ "$owner_initial_white_run" -ge 20 ] && [ "$owner_initial_white_run" -le 60 ]; then
 				break
 			fi
@@ -4820,21 +4859,32 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	fi
 	if [ "$visual_assertions" -eq 1 ]; then
 		# Blend intentionally animates the return from the edited standalone
-		# texture to A. Wait for the final Fit frame instead of comparing a
-		# transient animation frame to the startup capture. The center stripe's
-		# width and position characterize the visible Fit geometry.
+		# texture to A. Compare a central band that spans the fitted image while
+		# excluding unrelated top and bottom window pixels; the stripe alone can
+		# match before the rest of the image has settled.
+		owner_viewport_compare_height=$((owner_capture_height / 2))
+		owner_viewport_compare_top=$((owner_capture_height / 4))
+		convert "$temporary/cold-jpeg-owner-return-before.png" \
+			-crop "${owner_capture_width}x${owner_viewport_compare_height}+0+${owner_viewport_compare_top}" \
+			+repage "$temporary/cold-jpeg-owner-return-before-viewport.png"
 		owner_return_viewport_restored=0
 		for _ in $(seq 1 80); do
-			owner_capture_center_white_run "$temporary/cold-jpeg-owner-return-after.png"
-			if [ "$owner_white_run_pixels" = "$owner_initial_white_run" ] &&
-				[ "$owner_white_run_start" = "$owner_initial_white_start" ]; then
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/cold-jpeg-owner-return-after.png"
+			convert "$temporary/cold-jpeg-owner-return-after.png" \
+				-crop "${owner_capture_width}x${owner_viewport_compare_height}+0+${owner_viewport_compare_top}" \
+				+repage "$temporary/cold-jpeg-owner-return-after-viewport.png"
+			if compare -metric AE "$temporary/cold-jpeg-owner-return-before-viewport.png" \
+				"$temporary/cold-jpeg-owner-return-after-viewport.png" null: \
+				2>"$temporary/cold-jpeg-owner-return-difference.txt"; then
 				owner_return_viewport_restored=1
 				break
 			fi
 			sleep 0.025
 		done
 		if [ "$owner_return_viewport_restored" -ne 1 ]; then
-			echo "UI smoke test: returning to A did not restore its current Fit viewport after the Blend transition (stripe width $owner_white_run_pixels at x=$owner_white_run_start; expected $owner_initial_white_run at x=$owner_initial_white_start)" >&2
+			owner_return_difference=$(cat "$temporary/cold-jpeg-owner-return-difference.txt" 2>/dev/null || true)
+			echo "UI smoke test: returning to A did not restore its settled Fit frame after the Blend transition ($owner_return_difference differing pixels)" >&2
 			exit 1
 		fi
 	fi
