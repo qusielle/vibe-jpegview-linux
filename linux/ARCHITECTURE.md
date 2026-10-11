@@ -1063,6 +1063,9 @@ Viewer still contains substantial workflow orchestration and cache policy; futur
 move a cohesive responsibility with its state and lifecycle, rather than only wrapping an existing
 method or moving SDL calls for their own sake. Each extraction should characterize observable
 behavior first and add model and UI coverage appropriate to the boundary.
+The retained-presentation UI smoke cases hold a selected source read while checking pixel identity
+for an edited standalone image and a rotated transparent spread. The teardown case sends quit before
+releasing the read barrier, so the test covers the renderer owner's worker-join path as well as drawing.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
 The image, viewport, playback, file-dialog, dialog-controller, context-menu, thumbnail cache,

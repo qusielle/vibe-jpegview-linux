@@ -43,6 +43,7 @@ viewer_pid=''
 cleanup() {
 	if [ -n "${viewer_frame_barrier_release:-}" ]; then : > "$viewer_frame_barrier_release"; fi
 	if [ -n "${viewer_operation_barrier_release:-}" ]; then : > "$viewer_operation_barrier_release"; fi
+	if [ -n "${viewer_slow_map_release:-}" ]; then : > "$viewer_slow_map_release"; fi
 	if [ -n "$viewer_pid" ]; then kill "$viewer_pid" 2>/dev/null || true; fi
 	if [ -n "$window_manager_pid" ]; then kill "$window_manager_pid" 2>/dev/null || true; fi
 	if [ -n "$xvfb_pid" ]; then kill "$xvfb_pid" 2>/dev/null || true; fi
@@ -287,6 +288,7 @@ launch_viewer() {
 			JPEGVIEW_TEST_SLOW_MAP_RELEASE="$viewer_slow_map_release" \
 			JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$viewer_slow_map_active" \
 			JPEGVIEW_TEST_SLOW_MAP_ARMED="$viewer_slow_map_armed" \
+			JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS="${viewer_slow_map_max_attempts:-2000}" \
 			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
 	elif [ "$perf_trace_pending" -eq 1 ]; then
 		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
@@ -339,7 +341,17 @@ resize_viewer_window() {
 }
 
 stop_viewer() {
-	DISPLAY=":$display_number" xdotool key q || true
+	# A transition can consume the first close key; retry only while this window exists.
+	for _ in $(seq 1 20); do
+		if [ -z "$window_id" ] || ! DISPLAY=":$display_number" \
+			xdotool getwindowname "$window_id" >/dev/null 2>&1; then
+			break
+		fi
+		DISPLAY=":$display_number" xdotool windowactivate --sync \
+			"$window_id" >/dev/null 2>&1 || true
+		DISPLAY=":$display_number" xdotool key q 2>/dev/null || true
+		sleep 0.05
+	done
 	wait "$viewer_pid" || true
 	viewer_pid=''
 	if [ "$perf_trace_active" -eq 1 ]; then
@@ -4513,32 +4525,15 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			exit 1
 		fi
 	fi
-	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
-	owner_pending_seen=0
-	for _ in $(seq 1 160); do
-		owner_title=$(owner_window_title)
-		case "$owner_title" in
-			*"02-pending.jpg [2/2]"*"Loading image header"*)
-				if [ -f "$owner_header_active" ]; then owner_pending_seen=1; break; fi
-			;;
-		esac
-		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
-		sleep 0.025
-	done
-	if [ "$owner_pending_seen" -ne 1 ]; then
-		echo "UI smoke test: B did not reach the controlled cold-header state ($owner_title)" >&2
-		cat "$temporary/cold-jpeg-owner-return.log" >&2
-		exit 1
-	fi
+	# Rotate A so the retained presentation is the edited document's standalone
+	# texture, rather than a borrowed entry from the display texture cache.
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Down
 	if [ "$visual_assertions" -eq 1 ]; then
-		# The header barrier keeps B pending for every capture. A must remain
-		# visible, including repaints caused by unrelated pointer motion.
-		for owner_capture in 1 2 3; do
-			owner_pending_capture="$temporary/cold-jpeg-owner-pending-$owner_capture.png"
-			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
+		owner_edited_ready=0
+		for _ in $(seq 1 160); do
 			DISPLAY=":$display_number" import -window "$window_id" \
-				"$owner_pending_capture"
-			owner_pending_white_run=$(convert "$owner_pending_capture" \
+				"$temporary/cold-jpeg-owner-return-edited.png"
+			owner_edited_white_run=$(convert "$temporary/cold-jpeg-owner-return-edited.png" \
 				-crop "${owner_capture_width}x1+0+${owner_sample_y}" +repage \
 				-threshold 70% txt:- | awk '
 					NR == 1 { next }
@@ -4546,8 +4541,51 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 					{ current = 0 }
 					END { print maximum + 0 }
 				')
-			if [ "$owner_pending_white_run" -ne "$owner_initial_white_run" ]; then
-				echo "UI smoke test: pending neighbor blanked or changed the committed image (white stripe $owner_initial_white_run -> $owner_pending_white_run pixels)" >&2
+			if [ "$owner_edited_white_run" -ge 100 ]; then owner_edited_ready=1; break; fi
+			if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+			sleep 0.025
+		done
+		if [ "$owner_edited_ready" -ne 1 ]; then
+			echo "UI smoke test: rotate did not produce the expected horizontal stripe in the standalone image ($owner_edited_white_run pixels)" >&2
+			cat "$temporary/cold-jpeg-owner-return.log" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/cold-jpeg-owner-return-edited.png"
+	else
+		echo "UI smoke test: SKIP edited standalone retention pixels (missing visual tools)"
+	fi
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
+	owner_pending_seen=0
+	for _ in $(seq 1 160); do
+		owner_title=$(owner_window_title)
+		case "$owner_title" in
+			*"02-pending.jpg [2/2]"*)
+				if [ -f "$owner_header_active" ]; then owner_pending_seen=1; break; fi
+			;;
+		esac
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_pending_seen" -ne 1 ]; then
+		echo "UI smoke test: B did not reach the controlled source-read barrier ($owner_title)" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		# The header barrier keeps B pending for every capture. The edited,
+		# standalone A texture must remain visible across unrelated repaints.
+		for owner_capture in 1 2 3; do
+			owner_pending_capture="$temporary/cold-jpeg-owner-pending-$owner_capture.png"
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$owner_pending_capture"
+			if ! compare -metric AE "$temporary/cold-jpeg-owner-return-edited.png" \
+				"$owner_pending_capture" null: \
+				2>"$temporary/cold-jpeg-owner-pending-difference.txt"; then
+				owner_pending_difference=$(cat "$temporary/cold-jpeg-owner-pending-difference.txt")
+				echo "UI smoke test: pending neighbor blanked or changed the edited standalone image ($owner_pending_difference differing pixels)" >&2
 				exit 1
 			fi
 		done
@@ -4637,6 +4675,119 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		esac
 	fi
 	stop_viewer
+
+	# Keep a mixed-ownership, rotated spread visible while its next selection
+	# is blocked, and release that blocked source before renderer teardown.
+	retained_spread_directory="$temporary/retained-spread"
+	retained_spread_config="$temporary/retained-spread-config"
+	mkdir -p "$retained_spread_directory" "$retained_spread_config/jpegview-linux"
+	write_solid_ppm "$retained_spread_directory/00-cover.ppm" 35 75 220
+	write_solid_ppm "$retained_spread_directory/01-anchor.ppm" 220 40 30
+	convert -size 240x320 xc:none -fill '#00dc28' \
+		-draw 'rectangle 40,0 199,319' "$retained_spread_directory/02-partner.png"
+	convert -size 160x120 xc:yellow -quality 100 \
+		"$retained_spread_directory/03-pending.jpg"
+	write_solid_ppm "$retained_spread_directory/04-last.ppm" 25 50 225
+	printf 'scale_mode=fit\ncache_size_mb=64\ndouble_page_mode_enabled=1\nthumbnail_panel_visible=0\nshow_histogram=0\n' \
+		> "$retained_spread_config/jpegview-linux/settings.conf"
+	viewer_slow_map_target="$retained_spread_directory/03-pending.jpg"
+	viewer_slow_map_started="$temporary/retained-spread.started"
+	viewer_slow_map_release="$temporary/retained-spread.release"
+	viewer_slow_map_active="$temporary/retained-spread.active"
+	viewer_slow_map_armed=''
+	viewer_slow_map_max_attempts=12000
+	VIEWER_TEST_HOME="$temporary/retained-spread-home" \
+		VIEWER_TEST_CONFIG_HOME="$retained_spread_config" \
+		launch_viewer "$retained_spread_directory"
+	assert_title_prefix "00-cover.ppm" "retained-spread fixture did not start on its cover"
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
+	assert_title_prefix "[2-3/5] " "retained-spread fixture did not form the first pair"
+	if [ "$visual_assertions" -eq 1 ]; then
+		retained_spread_ready=0
+		for _ in $(seq 1 80); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/retained-spread-before-rotate.png"
+			spread_anchor_color=$(convert "$temporary/retained-spread-before-rotate.png" \
+				-format '%[hex:p{320,400}]' info:)
+			spread_partner_color=$(convert "$temporary/retained-spread-before-rotate.png" \
+				-format '%[hex:p{960,400}]' info:)
+			case "$spread_anchor_color:$spread_partner_color" in
+				*DC281E*:*00DC28*) retained_spread_ready=1; break ;;
+			esac
+			sleep 0.025
+		done
+		if [ "$retained_spread_ready" -ne 1 ]; then
+			echo "UI smoke test: retained-spread fixture did not show both opaque and transparent pages ($spread_anchor_color:$spread_partner_color)" >&2
+			exit 1
+		fi
+	fi
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Down
+	if [ "$visual_assertions" -eq 1 ]; then
+		retained_rotated_spread_ready=0
+		for _ in $(seq 1 80); do
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/retained-spread-rotated.png"
+			rotated_anchor_color=$(convert "$temporary/retained-spread-rotated.png" \
+				-format '%[hex:p{640,200}]' info:)
+			rotated_partner_color=$(convert "$temporary/retained-spread-rotated.png" \
+				-format '%[hex:p{640,600}]' info:)
+			case "$rotated_anchor_color:$rotated_partner_color" in
+				*DC281E*:*00DC28*) retained_rotated_spread_ready=1; break ;;
+			esac
+			sleep 0.025
+		done
+		if [ "$retained_rotated_spread_ready" -ne 1 ]; then
+			echo "UI smoke test: retained spread did not rotate as a complete book ($rotated_anchor_color:$rotated_partner_color)" >&2
+			exit 1
+		fi
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/retained-spread-pending-before.png"
+	fi
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
+	retained_spread_pending=0
+	for _ in $(seq 1 160); do
+		owner_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id" 2>/dev/null || true)
+		case "$owner_title" in
+			*"03-pending.jpg"*)
+				if [ -f "$viewer_slow_map_active" ]; then retained_spread_pending=1; break; fi
+			;;
+		esac
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$retained_spread_pending" -ne 1 ]; then
+		echo "UI smoke test: next spread selection did not reach the controlled source-read barrier ($owner_title)" >&2
+		cat "$temporary/viewer.log" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/retained-spread-pending.png"
+		if ! compare -metric AE "$temporary/retained-spread-pending-before.png" \
+			"$temporary/retained-spread-pending.png" null: \
+			2>"$temporary/retained-spread-pending-difference.txt"; then
+			spread_pending_difference=$(cat "$temporary/retained-spread-pending-difference.txt")
+			echo "UI smoke test: pending selection changed or blanked the rotated transparent spread ($spread_pending_difference differing pixels)" >&2
+			exit 1
+		fi
+	fi
+	# Quit while the image worker is still behind the barrier. Releasing it after
+	# the quit event verifies teardown can join without abandoning the fallback.
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" q
+	sleep 0.05
+	: > "$viewer_slow_map_release"
+	if ! wait "$viewer_pid"; then
+		echo "UI smoke test: viewer failed while quitting with a retained spread and blocked source" >&2
+		cat "$temporary/retained-spread-viewer.log" >&2
+		exit 1
+	fi
+	viewer_pid=''
+	viewer_slow_map_target=''
+	viewer_slow_map_started=''
+	viewer_slow_map_release=''
+	viewer_slow_map_active=''
+	viewer_slow_map_armed=''
+	viewer_slow_map_max_attempts=''
 
 	# An edited image uses a standalone renderer texture. Keep it visible while
 	# the neighbor loads, then restore the normal failed-load behavior and verify
