@@ -7739,9 +7739,14 @@ private:
 		SetTitle();
 	}
 
-	NavigationAttemptResult NextImage(bool showPendingNavigation = false,
-		bool playbackDriven = false) {
-		if (!playbackDriven) playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
+	NavigationAttemptResult NavigateImageWithPresentationHandoff(int direction,
+		bool showPendingNavigation, bool playbackDriven) {
+		if (direction != -1 && direction != 1) return NavigationAttemptResult::Blocked;
+		// A Movie tick retains Movie mode; manual steps keep the scheduler's existing
+		// policy, which only leaves Movie mode and does not stop a slideshow.
+		if (direction < 0 || !playbackDriven) {
+			playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
+		}
 		if (clipboardMode_) RestoreClipboardImage();
 		RetainCurrentPresentation();
 		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
@@ -7750,7 +7755,7 @@ private:
 		if (animate && !currentSelectedLoadPending_) {
 			previousFrame = CaptureTransitionFrame();
 		}
-		const NavigationAttemptResult navigation = NavigateByPageStep(1);
+		const NavigationAttemptResult navigation = NavigateByPageStep(direction);
 		if (navigation != NavigationAttemptResult::Moved) {
 			if (previousFrame.texture.OwnsTexture()) {
 				texture_ = std::move(previousFrame.texture);
@@ -7759,9 +7764,6 @@ private:
 			ReleaseTransitionFrame(previousFrame);
 			transitionCaptureDisplayKey_.clear();
 			ClearActiveWorkingDisplayTextures();
-			if (navigation == NavigationAttemptResult::PendingDirectoryScan) RequestFileListScan(
-				jpegview_linux::FileList::ScanOperation::ForwardBoundary,
-				1, FileListScanHandling::Navigation);
 			return navigation;
 		}
 		transitionCaptureDisplayKey_ = previousFrame.displayKey;
@@ -7769,7 +7771,7 @@ private:
 		if (showPendingNavigation) {
 			RenderPendingPresentationWithoutConsumingInvalidation();
 		}
-		const bool loaded = LoadCurrent(1);
+		const bool loaded = LoadCurrent(direction);
 		if (loaded && animate) {
 			if (currentSelectedLoadPending_) {
 				const jpegview_linux::SourceDescriptor source =
@@ -7788,47 +7790,20 @@ private:
 		return NavigationAttemptResult::Moved;
 	}
 
+	NavigationAttemptResult NextImage(bool showPendingNavigation = false,
+		bool playbackDriven = false) {
+		const NavigationAttemptResult navigation = NavigateImageWithPresentationHandoff(
+			1, showPendingNavigation, playbackDriven);
+		// Only forward navigation owns the directory-boundary scan continuation.
+		if (navigation == NavigationAttemptResult::PendingDirectoryScan) {
+			RequestFileListScan(jpegview_linux::FileList::ScanOperation::ForwardBoundary,
+				1, FileListScanHandling::Navigation);
+		}
+		return navigation;
+	}
+
 	void PreviousImage(bool showPendingNavigation = false) {
-		playback_.LeaveMovieForManualNavigation(SDL_GetTicks());
-		if (clipboardMode_) RestoreClipboardImage();
-		RetainCurrentPresentation();
-		const bool animate = !doublePageModeEnabled_ && playback_.SlideshowSeconds() > 0.0 &&
-			transitionEffect_ != IDM_EFFECT_NONE;
-		TransitionFrame previousFrame;
-		if (animate && !currentSelectedLoadPending_) {
-			previousFrame = CaptureTransitionFrame();
-		}
-		if (NavigateByPageStep(-1) != NavigationAttemptResult::Moved) {
-			if (previousFrame.texture.OwnsTexture()) {
-				texture_ = std::move(previousFrame.texture);
-			}
-			if (!currentSelectedLoadPending_) ClearRetainedPresentation();
-			ReleaseTransitionFrame(previousFrame);
-			transitionCaptureDisplayKey_.clear();
-			ClearActiveWorkingDisplayTextures();
-			return;
-		}
-		transitionCaptureDisplayKey_ = previousFrame.displayKey;
-		SetTitle();
-		if (showPendingNavigation) {
-			RenderPendingPresentationWithoutConsumingInvalidation();
-		}
-		const bool loaded = LoadCurrent(-1);
-		if (loaded && animate) {
-			if (currentSelectedLoadPending_) {
-				const jpegview_linux::SourceDescriptor source =
-					SourceDescriptorForPath(fileList_.Current());
-				if (pendingImageIntents_.RequestTransition(source.Key(),
-					imageSession_.Generation())) {
-					MoveTransitionFrame(pendingTransitionFrame_, previousFrame);
-				}
-			} else {
-				StartTransition(previousFrame);
-			}
-		}
-		ReleaseTransitionFrame(previousFrame);
-		transitionCaptureDisplayKey_.clear();
-		ClearActiveWorkingDisplayTextures();
+		(void)NavigateImageWithPresentationHandoff(-1, showPendingNavigation, false);
 	}
 
 	void NavigateToSiblingFolder(int direction) {

@@ -850,6 +850,10 @@ Navigation reports a completed move, a hard boundary, or a pending directory sca
 advance suspends readiness while its forward-boundary scan runs; if the scan finds no target or fails,
 playback stops so its expired deadline cannot drive repeated redraws. Replacing or abandoning that scan
 re-arms playback only when no selected-image load owns readiness.
+`NavigateImageWithPresentationHandoff` owns the common previous/next capture, fallback restoration,
+selected-load, and transition handoff in the SDL Viewer. Its callers keep direction policy explicit:
+Movie-driven forward steps preserve Movie mode, and `NextImage` alone turns a forward-boundary scan
+result into a scan request.
 Neighbor planning receives a bounded captured source and processing snapshot, including valid cached
 JPEG dimensions, then applies only results matching current catalog, descriptor, and viewport revisions.
 Pan invalidates pending neighbor planning without reading source metadata. A changed-source notice
