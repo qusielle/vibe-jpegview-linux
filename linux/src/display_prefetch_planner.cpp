@@ -33,6 +33,7 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 	result.viewport = request.viewport;
 	result.imageAreaWidth = request.imageAreaWidth;
 	result.imageAreaHeight = request.imageAreaHeight;
+	result.includeSpectrum = request.includeSpectrum;
 	const std::size_t count = std::min(request.maximumCount, request.neighbors.size());
 	result.requests.reserve(count);
 	result.protectedTextureKeys.reserve(count);
@@ -103,10 +104,10 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 		DisplayImageRequest displayRequest = svg ?
 			MakeSvgDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
 				resolution.width, resolution.height, candidate.autoContrast,
-				candidate.priority, candidate.processing) :
+				candidate.priority, candidate.processing, 0, request.includeSpectrum) :
 			MakeJpegDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
 				resolution.width, resolution.height, candidate.autoContrast,
-				candidate.priority, candidate.processing);
+				candidate.priority, candidate.processing, 0, request.includeSpectrum);
 		displayRequest.workClass = candidate.priority <= 2 ?
 			PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
 		if (!displayRequest.Valid()) continue;
@@ -195,7 +196,8 @@ bool MatchesDisplayPrefetchSnapshot(const DisplayPrefetchPlannerResult& result,
 	std::uint64_t expectedGeneration, std::uint64_t catalogRevision,
 	std::uint64_t descriptorRevision, std::uint64_t viewportRevision,
 	std::size_t currentIndex, int preferredDirection,
-	const ViewportSnapshot& viewport, int imageAreaWidth, int imageAreaHeight) {
+	const ViewportSnapshot& viewport, int imageAreaWidth, int imageAreaHeight,
+	bool includeSpectrum) {
 	return result.generation == expectedGeneration &&
 		result.catalogRevision == catalogRevision &&
 		result.descriptorRevision == descriptorRevision &&
@@ -204,7 +206,8 @@ bool MatchesDisplayPrefetchSnapshot(const DisplayPrefetchPlannerResult& result,
 		result.preferredDirection == preferredDirection &&
 		SameViewportSnapshot(result.viewport, viewport) &&
 		result.imageAreaWidth == imageAreaWidth &&
-		result.imageAreaHeight == imageAreaHeight;
+		result.imageAreaHeight == imageAreaHeight &&
+		result.includeSpectrum == includeSpectrum;
 }
 
 struct DisplayPrefetchPlannerWorker::Impl {

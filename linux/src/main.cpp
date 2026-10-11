@@ -677,6 +677,7 @@ private:
 		jpegview_linux::ViewportSnapshot viewport;
 		int imageAreaWidth = 0;
 		int imageAreaHeight = 0;
+		bool includeSpectrum = false;
 		std::size_t currentIndex = 0;
 		std::size_t pageCount = 0;
 		jpegview_linux::DoublePageModeState doublePageMode;
@@ -1770,7 +1771,9 @@ private:
 				fileList_.MutationRevision(),
 				fileList_.DescriptorRevision(), displayPreparationController_.ViewportRevision(),
 				fileList_.CurrentIndex(), pendingPrefetchDirection_,
-				viewport_.PrefetchSnapshot(), imageArea.w, imageArea.h) ||
+				viewport_.PrefetchSnapshot(), imageArea.w, imageArea.h,
+				runtimeSettings_.Values().showHistogram &&
+					runtimeSettings_.Values().infoVisible) ||
 				CurrentInteractionWorkPlan().cancelQueuedSpeculation) continue;
 			for (const jpegview_linux::DisplayPrefetchPlannedDimensions& dimensions :
 				result.dimensions) {
@@ -2854,6 +2857,8 @@ private:
 		batch->context.viewport = viewport_.PrefetchSnapshot();
 		batch->context.imageAreaWidth = imageArea.w;
 		batch->context.imageAreaHeight = imageArea.h;
+		batch->context.includeSpectrum = runtimeSettings_.Values().showHistogram &&
+			runtimeSettings_.Values().infoVisible;
 		batch->context.currentIndex = fileList_.CurrentIndex();
 		batch->context.pageCount = fileList_.Size();
 		batch->context.doublePageMode = {doublePageModeEnabled_, mangaReadingOrderEnabled_};
@@ -2868,6 +2873,7 @@ private:
 		plannerRequest.viewport = batch->context.viewport;
 		plannerRequest.imageAreaWidth = imageArea.w;
 		plannerRequest.imageAreaHeight = imageArea.h;
+		plannerRequest.includeSpectrum = batch->context.includeSpectrum;
 		plannerRequest.doublePageMode = batch->context.doublePageMode;
 		plannerRequest.currentPageDimensions = batch->context.currentPageDimensions;
 		for (const auto& retained : displayTextureCache_) {
@@ -3003,7 +3009,8 @@ private:
 				jpegview_linux::DisplayImageRequest request =
 					jpegview_linux::MakeDisplayImageRequest(source->second, decoded, 0,
 						resolution.width, resolution.height, autoContrast->second,
-						priority->second, processing->second);
+						priority->second, processing->second, 0,
+						batch->context.includeSpectrum);
 				request.workClass = priority->second <= 2 ?
 					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor :
 					jpegview_linux::PerfWorkClass::DistantSpeculation;
@@ -9282,11 +9289,19 @@ private:
 				jpegview_linux::FileList::ScanOperation::Reload,
 				0, FileListScanHandling::Reload, true, true);
 			break;
-		case IDM_SHOW_FILEINFO:
+		case IDM_SHOW_FILEINFO: {
+			const bool histogramWasRequested = runtimeSettings_.Values().showHistogram &&
+				runtimeSettings_.Values().infoVisible;
 			runtimeSettings_.Values().infoVisible = !runtimeSettings_.Values().infoVisible;
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+			const bool histogramIsRequested = runtimeSettings_.Values().showHistogram &&
+				runtimeSettings_.Values().infoVisible;
+			if (histogramWasRequested != histogramIsRequested) {
+				PrepareImagePrefetch(pendingPrefetchDirection_);
+			}
 			SaveSettings();
 			break;
+		}
 		case IDM_SHOW_FILENAME:
 			runtimeSettings_.Values().showFilename = !runtimeSettings_.Values().showFilename;
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
@@ -13856,6 +13871,7 @@ private:
 		if (jpegview_linux::Contains(paint.spectrumButton, x, y)) {
 			runtimeSettings_.Values().showHistogram = !runtimeSettings_.Values().showHistogram;
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Overlay);
+			PrepareImagePrefetch(pendingPrefetchDirection_);
 			SaveSettings();
 			return true;
 		}

@@ -1431,6 +1431,7 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 	request.preferredDirection = 1;
 	request.imageAreaWidth = 640;
 	request.imageAreaHeight = 480;
+	request.includeSpectrum = true;
 	request.maximumCount = 2;
 	request.neighbors = {candidates[2], candidates[0], candidates[3]};
 	const std::uint64_t generation = planner.Request(request);
@@ -1451,22 +1452,30 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 	const auto& result = ready.front();
 	Expect(result.requests[1].fileBackedFormat ==
 		jpegview_linux::FileBackedDisplayFormat::Svg &&
-		result.requests[1].cacheKey.renderVectorAtTarget && !result.requests[1].decoded,
+		result.requests[1].cacheKey.renderVectorAtTarget && !result.requests[1].decoded &&
+		result.includeSpectrum && result.requests[0].includeSpectrum &&
+		result.requests[1].includeSpectrum &&
+		result.requests[0].cacheKey.includeSpectrum &&
+		result.requests[1].cacheKey.includeSpectrum,
 		"SVG neighbor planning lost its file-backed vector identity");
 	Expect(jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
 		request.catalogRevision, request.descriptorRevision, request.viewportRevision,
 		request.currentIndex, request.preferredDirection, request.viewport,
-		request.imageAreaWidth, request.imageAreaHeight),
+		request.imageAreaWidth, request.imageAreaHeight, true),
 		"current planner response did not match its captured catalog and viewport");
 	Expect(!jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
 		request.catalogRevision + 1, request.descriptorRevision,
 		request.viewportRevision, request.currentIndex, request.preferredDirection,
-		request.viewport, request.imageAreaWidth, request.imageAreaHeight) &&
+		request.viewport, request.imageAreaWidth, request.imageAreaHeight, true) &&
 		!jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
 		request.catalogRevision, request.descriptorRevision,
 		request.viewportRevision + 1, request.currentIndex, request.preferredDirection,
-		request.viewport, request.imageAreaWidth, request.imageAreaHeight),
-		"stale catalog or viewport planner output remained eligible for application");
+		request.viewport, request.imageAreaWidth, request.imageAreaHeight, true) &&
+		!jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
+		request.catalogRevision, request.descriptorRevision,
+		request.viewportRevision, request.currentIndex, request.preferredDirection,
+		request.viewport, request.imageAreaWidth, request.imageAreaHeight, false),
+		"stale catalog, viewport, or histogram planner output remained eligible for application");
 
 	jpegview_linux::DisplayPrefetchPlannerRequest cachedDimensionsRequest = request;
 	for (jpegview_linux::DisplayPrefetchCandidate& candidate : cachedDimensionsRequest.neighbors) {

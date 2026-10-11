@@ -380,7 +380,11 @@ should normally be added to one of these focused modules and covered by the matc
   and builds requests on a worker. SVG neighbors use file-backed vector requests with the same keys
   as selected display preparation, bypassing intrinsic pixel decoding in generic neighbor prefetch.
   Their fitted targets may exceed intrinsic dimensions and retain the shared prepared-frame budget,
-  nearest-neighbor priority, and backing-source admission. The SDL owner applies results only when
+  nearest-neighbor priority, and backing-source admission. The captured request also carries whether
+  the information overlay's histogram is visible; that flag reaches decoded and file-backed neighbor
+  requests and participates in snapshot validation, so the selected image can reuse the matching
+  source-spectrum representation. Histogram-bearing JPEG preparation uses full-source pixels.
+  The SDL owner applies results only when
   those captured revisions and viewport still match. Pan and replacement cancel obsolete planner work.
   Viewport invalidation retains the publication batch for a still-current active-spread dimensions read,
   while source or mode

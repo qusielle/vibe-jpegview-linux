@@ -89,6 +89,8 @@ they support.
    from older source generations. The former image or complete spread stays visible while the selected
    image prepares, avoiding a black frame between neighbors; it is replaced when the new presentation's
    textures are ready. If loading fails, the viewer follows its normal failure behavior.
+   When the information overlay and histogram are both visible, neighbor requests also prepare the
+   matching source spectrum so selecting a cached neighbor does not need a second display representation.
    A lower-resolution texture for the same source can also remain visible while
    its replacement prepares. Recents and loaded-image
    history update only after the first renderer-ready frame commits. Fit, fill, no-enlarge,

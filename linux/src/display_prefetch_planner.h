@@ -74,6 +74,8 @@ struct DisplayPrefetchPlannerRequest {
 	ViewportSnapshot viewport;
 	int imageAreaWidth = 0;
 	int imageAreaHeight = 0;
+	// Capture the overlay's source-spectrum requirement with the pixel plan.
+	bool includeSpectrum = false;
 	std::size_t maximumPreparedBytes = std::numeric_limits<std::size_t>::max();
 	DoublePageModeState doublePageMode;
 	std::optional<PageDimensions> currentPageDimensions;
@@ -100,6 +102,7 @@ struct DisplayPrefetchPlannerResult {
 	ViewportSnapshot viewport;
 	int imageAreaWidth = 0;
 	int imageAreaHeight = 0;
+	bool includeSpectrum = false;
 	std::vector<DisplayImageRequest> requests;
 	std::vector<std::string> protectedTextureKeys;
 	std::vector<DisplayImageCacheKey> protectedTextureCacheKeys;
@@ -110,7 +113,8 @@ bool MatchesDisplayPrefetchSnapshot(const DisplayPrefetchPlannerResult& result,
 	std::uint64_t expectedGeneration, std::uint64_t catalogRevision,
 	std::uint64_t descriptorRevision, std::uint64_t viewportRevision,
 	std::size_t currentIndex, int preferredDirection,
-	const ViewportSnapshot& viewport, int imageAreaWidth, int imageAreaHeight);
+	const ViewportSnapshot& viewport, int imageAreaWidth, int imageAreaHeight,
+	bool includeSpectrum = false);
 
 // One cancellable worker probes JPEGs and SVG/SVGZ in a bounded, captured neighbor
 // window and turns their dimensions into renderer-ready request descriptors.
