@@ -403,7 +403,16 @@ assert_title_prefix() {
 	failure_message=$2
 	current_title=''
 	for _ in $(seq 1 40); do
-		current_title=$(DISPLAY=":$display_number" command xdotool getwindowname "$window_id")
+		current_title=$(DISPLAY=":$display_number" command xdotool getwindowname \
+			"$window_id" 2>/dev/null || true)
+		if [ -z "$current_title" ]; then
+			echo "UI smoke test: $failure_message (viewer window closed)" >&2
+			cat "$temporary/viewer.log" >&2
+			if [ -n "${cached_neighbor_trace:-}" ] && [ -f "$cached_neighbor_trace" ]; then
+				cat "$cached_neighbor_trace" >&2
+			fi
+			exit 1
+		fi
 		case "$current_title" in
 			"$expected_prefix"*) return 0 ;;
 			\[*/*\]*)
@@ -696,34 +705,50 @@ assert_first_navigation_frame_is_ready() {
 	cached_neighbor_name=$1
 	cached_neighbor_format=$2
 	cached_neighbor_directory="$temporary/$cached_neighbor_name-neighbor-fixtures"
+	cached_neighbor_config="$temporary/$cached_neighbor_name-neighbor-config"
 	cached_neighbor_trace="$temporary/$cached_neighbor_name-neighbor-trace.csv"
 	cached_neighbor_previous_state=$XDG_STATE_HOME
 	XDG_STATE_HOME="$temporary/$cached_neighbor_name-neighbor-state"
 	export XDG_STATE_HOME
-	mkdir -p "$cached_neighbor_directory"
+	mkdir -p "$cached_neighbor_directory" "$cached_neighbor_config/jpegview-linux"
 	if [ "$cached_neighbor_format" = "jpg" ]; then
-		write_solid_ppm "$temporary/$cached_neighbor_name-red-source.ppm" 220 20 30
-		write_solid_ppm "$temporary/$cached_neighbor_name-green-source.ppm" 20 220 40
+		write_solid_p6 "$temporary/$cached_neighbor_name-red-source.ppm" 1400 900 220 20 30
+		write_solid_p6 "$temporary/$cached_neighbor_name-green-source.ppm" 1000 1600 20 220 40
 		convert "$temporary/$cached_neighbor_name-red-source.ppm" -quality 100 \
 			-sampling-factor 4:4:4 "$cached_neighbor_directory/01-red.jpg"
 		convert "$temporary/$cached_neighbor_name-green-source.ppm" -quality 100 \
 			-sampling-factor 4:4:4 "$cached_neighbor_directory/02-green.jpg"
 	else
-		write_solid_ppm "$cached_neighbor_directory/01-red.ppm" 220 20 30
-		write_solid_ppm "$cached_neighbor_directory/02-green.ppm" 20 220 40
+		write_solid_p6 "$cached_neighbor_directory/01-red.ppm" 1400 900 220 20 30
+		write_solid_p6 "$cached_neighbor_directory/02-green.ppm" 1000 1600 20 220 40
 	fi
+	for extra_index in 03 04 05 06 07 08; do
+		if [ "$cached_neighbor_format" = "jpg" ]; then
+			write_solid_p6 "$temporary/$cached_neighbor_name-$extra_index-extra.ppm" \
+				240 320 60 80 100
+			convert "$temporary/$cached_neighbor_name-$extra_index-extra.ppm" \
+				-quality 90 "$cached_neighbor_directory/${extra_index}-extra.jpg"
+		else
+			write_solid_p6 "$cached_neighbor_directory/${extra_index}-extra.ppm" \
+				240 320 60 80 100
+		fi
+	done
+	printf 'scale_mode=fit\ncache_size_mb=128\ndouble_page_mode_enabled=0\nthumbnail_panel_visible=0\ninfo_visible=1\nshow_histogram=1\n' \
+		> "$cached_neighbor_config/jpegview-linux/settings.conf"
 	viewer_perf_trace_override=$cached_neighbor_trace
 	VIEWER_TEST_HOME="$temporary/$cached_neighbor_name-neighbor-home" \
-		VIEWER_TEST_CONFIG_HOME="$temporary/$cached_neighbor_name-neighbor-config" \
+		VIEWER_TEST_CONFIG_HOME="$cached_neighbor_config" \
 		launch_viewer "$cached_neighbor_directory"
 	unset viewer_perf_trace_override
+	unset VIEWER_TEST_CONFIG_HOME
 	assert_title_prefix "01-red.$cached_neighbor_format" \
 		"$cached_neighbor_name neighbor fixture did not start on its first image"
 	cached_neighbor_ready=0
-	for _ in $(seq 1 80); do
-		if [ -f "$cached_neighbor_trace" ] && awk -F, '
-			$2 == "texture_upload" && $4 == "event_thread" &&
-				$6 == "nearest_navigation_neighbor" { ready = 1 }
+	for _ in $(seq 1 200); do
+		if [ -f "$cached_neighbor_trace" ] && awk -F, \
+			-v detail="display_texture_published:02-green.$cached_neighbor_format" '
+			$2 == "cache_snapshot" && $6 == "nearest_navigation_neighbor" &&
+				index($13, detail) > 0 { ready = 1 }
 			END { exit !ready }
 		' "$cached_neighbor_trace"; then
 			cached_neighbor_ready=1
@@ -737,9 +762,20 @@ assert_first_navigation_frame_is_ready() {
 		cat "$cached_neighbor_trace" >&2
 		exit 1
 	fi
+	# Match the reported case: the user leaves the current frame idle before moving.
+	sleep 1
+	count_first_selection_work() {
+		awk -F, '$6 == "active_image_spread" {
+			if ($2 == "source_read" && $4 == "worker_thread") source++
+			if ($2 == "processing" && $4 == "worker_thread") processing++
+			if ($2 == "texture_upload" && $4 == "event_thread") upload++
+		} END { print source + 0 ":" processing + 0 ":" upload + 0 }' \
+			"$cached_neighbor_trace"
+	}
+	before_first_selection=$(count_first_selection_work)
 	DISPLAY=":$display_number" xdotool key Right
 	assert_title_prefix "02-green.$cached_neighbor_format" \
-		"navigation did not select the prefetched $cached_neighbor_name neighbor"
+		"navigation did not select the fully published $cached_neighbor_name neighbor"
 	if [ "$visual_assertions" -eq 1 ]; then
 		DISPLAY=":$display_number" import -window "$window_id" \
 			"$temporary/$cached_neighbor_name-neighbor-first-selection.png"
@@ -754,14 +790,22 @@ assert_first_navigation_frame_is_ready() {
 				;;
 		esac
 	fi
+	sleep 0.5
+	after_first_selection=$(count_first_selection_work)
+	if [ "$after_first_selection" != "$before_first_selection" ]; then
+		echo "UI smoke test: first selection of a fully cached $cached_neighbor_name neighbor repeated source reads, processing, or active texture uploads ($before_first_selection -> $after_first_selection)" >&2
+		cat "$temporary/viewer.log" >&2
+		cat "$cached_neighbor_trace" >&2
+		exit 1
+	fi
 	stop_viewer
-	unset VIEWER_TEST_HOME VIEWER_TEST_CONFIG_HOME
+	unset VIEWER_TEST_HOME
 	XDG_STATE_HOME=$cached_neighbor_previous_state
 	export XDG_STATE_HOME
 }
 
-# Verify first-selection readiness for generic static rasters and JPEGs after
-# their neighbor uploads complete, without returning to an already viewed file.
+# Verify first-selection readiness after complete texture publication and idle
+# time, including mismatched source dimensions, histogram work, and larger folders.
 assert_first_navigation_frame_is_ready raster ppm
 if command -v convert >/dev/null 2>&1; then
 	assert_first_navigation_frame_is_ready jpeg jpg

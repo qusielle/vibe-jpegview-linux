@@ -775,7 +775,10 @@ should normally be added to one of these focused modules and covered by the matc
   use worker-thread focused-preview context; replacement cancellations are attributed to the event
   thread for queued/ready work and to the worker for stale active results, while preview texture upload
   uses the same event-thread class. Thumbnail attribution follows current row visibility through its
-  event-thread and background-resampler paths. Queue urgency counts remain separate.
+  event-thread and background-resampler paths. Per-band `texture_upload` rows do not imply that a
+  renderer texture is ready; `display_texture_published:<filename>` cache-snapshot rows are emitted
+  only after all upload bands, texture setup, and cache insertion succeed. Queue urgency counts remain
+  separate.
   Input-to-presentation latency keeps the oldest dispatch until a frame is presented, so a later
   queued input cannot hide an earlier slow one. Synchronous foreground processing/resampling and
   worker operations time the pixel operation once. Event/frame/presentation timings remain in the

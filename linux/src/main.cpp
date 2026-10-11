@@ -3795,11 +3795,28 @@ private:
 
 	SDL_Texture* CreateIncompleteDisplayTexture(
 		const jpegview_linux::PreparedDisplayImage& prepared) {
-		if (prepared.width <= 0 || prepared.height <= 0 ||
-			prepared.bgra.size() != jpegview_linux::PreparedDisplayImageBytes(prepared)) {
+		const std::size_t width = prepared.width > 0 ?
+			static_cast<std::size_t>(prepared.width) : 0;
+		const std::size_t height = prepared.height > 0 ?
+			static_cast<std::size_t>(prepared.height) : 0;
+		const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+		const bool dimensionsRepresentable = width > 0 && height > 0 &&
+			width <= maximum / 4 && height <= maximum / (width * 4);
+		const std::size_t expectedPixelBytes = dimensionsRepresentable ?
+			width * 4 * height : 0;
+		if (!dimensionsRepresentable || prepared.bgra.size() != expectedPixelBytes) {
+			std::cerr << "Invalid prepared display texture: " << prepared.width << 'x'
+				<< prepared.height << " with " << prepared.bgra.size()
+				<< " BGRA bytes (expected " << expectedPixelBytes << ")\n";
 			return nullptr;
 		}
-		return imageTextureOwner_.CreateEmpty(prepared.width, prepared.height);
+		SDL_Texture* texture = imageTextureOwner_.CreateEmpty(prepared.width,
+			prepared.height);
+		if (texture == nullptr) {
+			std::cerr << "SDL_CreateTexture failed for display frame " << prepared.width
+				<< 'x' << prepared.height << ": " << SDL_GetError() << '\n';
+		}
+		return texture;
 	}
 
 	void QueueRendererTextureRetirement(SDL_Texture* texture, std::size_t bytes,
@@ -4385,8 +4402,10 @@ private:
 					snapshot.releaseRevision, 0, "texture_admission_deferred");
 				return TextureCacheOutcome::Deferred;
 			}
+			// Cache bytes also include the retained histogram; SDL uploads only BGRA.
 			jpegview_linux::DisplayTextureUploadPlan uploadPlan(prepared->width,
-				prepared->height, bytes, kMaximumSynchronousDisplayTextureUploadBytes,
+				prepared->height, prepared->bgra.size(),
+				kMaximumSynchronousDisplayTextureUploadBytes,
 				kDisplayTextureUploadBandBytes);
 			if (!uploadPlan.Valid()) return TextureCacheOutcome::Failed;
 			SDL_Texture* incomplete = CreateIncompleteDisplayTexture(*prepared);
@@ -4489,6 +4508,18 @@ private:
 				auto retiring = entry++;
 				EraseDisplayTexture(retiring);
 			}
+		}
+		auto& diagnostics = jpegview_linux::PerfDiagnostics::Instance();
+		if (diagnostics.Enabled()) {
+			// Band timings precede publication; this row means lookup can draw the texture.
+			const std::string detail = "display_texture_published:" +
+				prepared->source.LogicalPath().filename().string();
+			diagnostics.RecordText(jpegview_linux::PerfMetric::CacheSnapshot,
+				static_cast<std::uint64_t>(prepared->width),
+				static_cast<std::uint64_t>(prepared->height), bytes,
+				static_cast<std::uint64_t>(prepared->cacheKey.targetWidth),
+				static_cast<std::uint64_t>(prepared->cacheKey.targetHeight),
+				static_cast<std::uint64_t>(protection), detail.c_str());
 		}
 		return TextureCacheOutcome::Cached;
 	}
