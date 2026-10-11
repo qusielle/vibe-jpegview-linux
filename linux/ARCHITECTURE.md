@@ -1173,6 +1173,11 @@ queue can then hold aliases without letting a lower-priority prepared frame cons
 while an active texture is admitted; a selected candidate that defers is staged in its admission
 attempt before it enters the queue. Staging remains charged until the final pixel alias retires. Every
 unclaimed completion is handed to the pending queue or worker retirement before the tick returns.
+When navigation changes the selected source, staged uploads are retained only for that source and its
+two closest planned neighbors. A matching pending frame is included in reuse planning, and selecting
+it promotes the same staged pixels, private texture, and completed bands to the current selection
+generation instead of restarting display preparation. Old selection generations are detached while
+the source remains a neighbor, so a direction reversal can reuse the work safely.
 An evicted frame can still have its reservation held by retirement while a completion aliases its
 pixels. Staging may reclassify that single allocation only after every retained cache entry has
 relinquished ownership; a retained entry under another key keeps the shared charge in retained

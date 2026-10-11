@@ -158,6 +158,14 @@ const RetainedDisplayTexture* FindReusableRetainedDisplayTexture(
 	return nullptr;
 }
 
+bool ShouldRetainPendingDisplayUpload(const SourceKey& uploadSource,
+	const SourceKey& selectedSource, const std::vector<SourceKey>& neighborSources) {
+	if (!uploadSource.Valid()) return false;
+	if (uploadSource == selectedSource) return true;
+	return std::find(neighborSources.begin(), neighborSources.end(), uploadSource) !=
+		neighborSources.end();
+}
+
 bool SameViewportSnapshot(const ViewportSnapshot& left,
 	const ViewportSnapshot& right) {
 	return left.fitToWindow == right.fitToWindow &&

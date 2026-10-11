@@ -65,12 +65,15 @@ they support.
    textures. The closest next and previous files take
    preparation and upload priority, and an already prepared static image is presented without first
    copying its full decoded pixels on the UI thread; navigation therefore avoids CPU resizing and
-   normally avoids texture upload as well. Decoded images, prepared frames, thumbnails, and previews
-   share a source identity based on the logical path and backing file's device, inode, size, and
-   nanosecond modification time. After a source refresh, cache lookups use its new identity and miss
-   pixels retained under the old one. Speculative display preparation reserves room for at most two
-   in-flight or unconsumed frames and 64 MiB of pixels; current-image and active-spread
-   preparation stays admissible when those limits are full. Retained speculative image textures use
+   normally avoids texture upload as well. In-progress uploads for the selected image and its two
+   closest neighbors survive navigation; selecting one promotes its existing pixels and upload
+   progress instead of discarding and rebuilding the frame. Decoded images, prepared frames,
+   thumbnails, and previews share a source identity based on the logical path and backing file's
+   device, inode, size, and nanosecond modification time. After a source refresh, cache lookups use
+   its new identity and miss pixels retained under the old one. Speculative display preparation
+   reserves room for at most two in-flight or unconsumed frames and 64 MiB of pixels; current-image
+   and active-spread preparation stays admissible when those limits are full. Retained speculative
+   image textures use
    at most the smaller of half the shared cache budget and 256 MiB; this is an internal limit, not a
    separate setting. Active spreads take priority, and no more than one speculative image upload runs
    in each renderer-maintenance opportunity. Interaction pauses speculative uploads. Image textures

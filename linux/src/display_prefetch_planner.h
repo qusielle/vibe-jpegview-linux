@@ -58,6 +58,12 @@ const RetainedDisplayTexture* FindReusableRetainedDisplayTexture(
 	const DisplayImageCacheKey& requested,
 	const std::vector<RetainedDisplayTexture>& retainedTextures);
 
+// A prepared frame already transferred to renderer upload staging is still a
+// usable neighbor-cache entry. Keep it only while its source remains in the
+// newly selected image's immediate navigation window.
+bool ShouldRetainPendingDisplayUpload(const SourceKey& uploadSource,
+	const SourceKey& selectedSource, const std::vector<SourceKey>& neighborSources);
+
 struct DisplayPrefetchPlannerRequest {
 	std::uint64_t catalogRevision = 0;
 	std::uint64_t descriptorRevision = 0;

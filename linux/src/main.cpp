@@ -1468,6 +1468,7 @@ private:
 			MarkSelectedDisplayFrameReady(generation, source, request->key);
 			return;
 		}
+		if (PromotePendingTextureUploadForSelection(*request)) return;
 		const auto prepared = displayImageCache_.Find(*request);
 		if (!prepared) {
 			displayImageCache_.Request(*request);
@@ -2413,7 +2414,7 @@ private:
 			texture_.Reset();
 			ClearDisplayTexture();
 			ClearDisplayTextureProtections();
-			ClearPendingTextureUploads();
+			RetainPendingTextureUploadsForNavigation(prefetchDirection);
 			ClearActiveWorkingDisplayTextures();
 			currentAnimationFrame_ = 0;
 			currentDisplayRequest_.reset();
@@ -2872,6 +2873,12 @@ private:
 		for (const auto& retained : displayTextureCache_) {
 			batch->retainedTextures.push_back({retained.first,
 				retained.second.cacheKey});
+		}
+		for (const PendingTextureUpload& pending : pendingTextureUploads_) {
+			if (pending.image) {
+				batch->retainedTextures.push_back({pending.image->key,
+					pending.image->cacheKey});
+			}
 		}
 		plannerRequest.retainedTextures = batch->retainedTextures;
 		ClearDisplayTextureProtections();
@@ -3981,6 +3988,90 @@ private:
 		pendingTextureUploads_.clear();
 	}
 
+	void RetainPendingTextureUploadsForNavigation(int preferredDirection) {
+		if (fileList_.Empty()) {
+			ClearPendingTextureUploads();
+			return;
+		}
+		const jpegview_linux::SourceDescriptor* selected =
+			fileList_.DescriptorAt(fileList_.CurrentIndex());
+		if (selected == nullptr) {
+			ClearPendingTextureUploads();
+			return;
+		}
+		const std::vector<std::size_t> neighborIndices =
+			jpegview_linux::ImagePrefetchOrder(fileList_.Size(),
+				fileList_.CurrentIndex(), preferredDirection, 2);
+		std::vector<jpegview_linux::SourceKey> neighborSources;
+		neighborSources.reserve(neighborIndices.size());
+		for (const std::size_t index : neighborIndices) {
+			const jpegview_linux::SourceDescriptor* neighbor = fileList_.DescriptorAt(index);
+			if (neighbor != nullptr) neighborSources.push_back(neighbor->Key());
+		}
+		for (auto pending = pendingTextureUploads_.begin();
+			pending != pendingTextureUploads_.end();) {
+			if (!pending->image || !jpegview_linux::ShouldRetainPendingDisplayUpload(
+				pending->image->source.Key(), selected->Key(), neighborSources)) {
+				DiscardPendingTextureUpload(*pending);
+				pending = pendingTextureUploads_.erase(pending);
+				continue;
+			}
+			// Selection generations belong to a navigation attempt. Detach retained
+			// neighbor uploads so their pixels and band progress survive a reversal.
+			pending->selectionGeneration = 0;
+			if (pending->image->source.Key() == selected->Key()) {
+				pending->priority = {jpegview_linux::PerfWorkClass::ActiveImageSpread, 0};
+				SetPendingTextureProtection(*pending,
+					jpegview_linux::CacheProtectionTier::Active);
+			} else {
+				pending->priority = {
+					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor,
+					static_cast<std::size_t>(std::find(neighborSources.begin(),
+						neighborSources.end(), pending->image->source.Key()) -
+						neighborSources.begin()) + 1};
+				SetPendingTextureProtection(*pending,
+					jpegview_linux::CacheProtectionTier::Neighbor);
+			}
+			++pending;
+		}
+	}
+
+	PendingTextureUpload* FindPendingTextureUpload(
+		const jpegview_linux::DisplayImageRequest& request) {
+		PendingTextureUpload* best = nullptr;
+		std::size_t bestBytes = std::numeric_limits<std::size_t>::max();
+		for (PendingTextureUpload& pending : pendingTextureUploads_) {
+			if (!pending.image ||
+				!jpegview_linux::CanReuseDisplayImageRepresentation(
+					request.cacheKey, pending.image->cacheKey)) continue;
+			const std::size_t bytes = jpegview_linux::PreparedDisplayImageBytes(*pending.image);
+			if (bytes >= bestBytes) continue;
+			best = &pending;
+			bestBytes = bytes;
+		}
+		return best;
+	}
+
+	bool PromotePendingTextureUploadForSelection(
+		const jpegview_linux::DisplayImageRequest& request) {
+		PendingTextureUpload* pending = FindPendingTextureUpload(request);
+		if (pending == nullptr) return false;
+		const bool promoted = pending->selectionGeneration != request.selectionGeneration ||
+			pending->priority.workClass !=
+				jpegview_linux::PerfWorkClass::ActiveImageSpread ||
+			pending->priority.requestPriority != request.priority;
+		pending->selectionGeneration = request.selectionGeneration;
+		pending->priority = {jpegview_linux::PerfWorkClass::ActiveImageSpread,
+			request.priority};
+		if (promoted) {
+			pending->attempted = false;
+			pending->lastAttemptRetainedCapacityRevision = 0;
+		}
+		SetPendingTextureProtection(*pending,
+			jpegview_linux::CacheProtectionTier::Active);
+		return true;
+	}
+
 	void SetPendingTextureProtection(PendingTextureUpload& pending,
 		jpegview_linux::CacheProtectionTier protection) {
 		pending.textureProtection = protection;
@@ -4628,12 +4719,25 @@ private:
 			currentDisplayRequest_ = std::move(requested);
 			std::size_t bestBytes = std::numeric_limits<std::size_t>::max();
 			const DisplayTextureCacheEntry* bestRepresentation = nullptr;
+			const PendingTextureUpload* bestPendingRepresentation = nullptr;
 			for (const auto& cached : displayTextureCache_) {
 				if (!jpegview_linux::CanReuseDisplayImageRepresentation(
 					currentDisplayRequest_->cacheKey, cached.second.cacheKey) ||
 					cached.second.bytes >= bestBytes) continue;
 				bestBytes = cached.second.bytes;
 				bestRepresentation = &cached.second;
+				bestPendingRepresentation = nullptr;
+			}
+			for (const PendingTextureUpload& pending : pendingTextureUploads_) {
+				if (!pending.image ||
+					!jpegview_linux::CanReuseDisplayImageRepresentation(
+						currentDisplayRequest_->cacheKey, pending.image->cacheKey)) continue;
+				const std::size_t bytes =
+					jpegview_linux::PreparedDisplayImageBytes(*pending.image);
+				if (bytes >= bestBytes) continue;
+				bestBytes = bytes;
+				bestRepresentation = nullptr;
+				bestPendingRepresentation = &pending;
 			}
 			if (bestRepresentation != nullptr &&
 				bestRepresentation->cacheKey != currentDisplayRequest_->cacheKey) {
@@ -4641,7 +4745,15 @@ private:
 					jpegview_linux::RebuildDisplayImageRequestAtTarget(
 						*currentDisplayRequest_,
 						bestRepresentation->cacheKey.targetWidth,
-						bestRepresentation->cacheKey.targetHeight);
+					bestRepresentation->cacheKey.targetHeight);
+			} else if (bestPendingRepresentation != nullptr &&
+				bestPendingRepresentation->image->cacheKey !=
+					currentDisplayRequest_->cacheKey) {
+				currentDisplayRequest_ =
+					jpegview_linux::RebuildDisplayImageRequestAtTarget(
+						*currentDisplayRequest_,
+						bestPendingRepresentation->image->cacheKey.targetWidth,
+						bestPendingRepresentation->image->cacheKey.targetHeight);
 			}
 			currentDisplayRequest_->workClass =
 				jpegview_linux::PerfWorkClass::ActiveImageSpread;
@@ -4685,7 +4797,9 @@ private:
 					request->source.Key(), request->key);
 				return cached;
 			}
-			displayImageCache_.Request(*request);
+			if (!PromotePendingTextureUploadForSelection(*request)) {
+				displayImageCache_.Request(*request);
+			}
 			if (texture_.Get() == nullptr && lastPresentedDisplayKey_ != request->key &&
 				LastPresentedTextureMatches(request->source.Key())) {
 				if (SDL_Texture* previous = FindDisplayTexture(lastPresentedDisplayKey_)) {

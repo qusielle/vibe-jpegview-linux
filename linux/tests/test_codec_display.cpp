@@ -1572,6 +1572,30 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 		"planner admission exception escaped its worker or prevented a valid retry");
 }
 
+void TestPendingDisplayUploadNavigationRetention() {
+	TemporaryDirectory temporary;
+	std::vector<jpegview_linux::SourceKey> sources;
+	for (int index = 0; index < 5; ++index) {
+		const fs::path filename = temporary.path() /
+			("pending-upload-" + std::to_string(index) + ".png");
+		WriteText(filename, "stable source identity");
+		sources.push_back(jpegview_linux::DescribeImageSource(filename).Key());
+	}
+	const std::vector<jpegview_linux::SourceKey> neighbors{sources[3], sources[1]};
+	Expect(jpegview_linux::ShouldRetainPendingDisplayUpload(
+			sources[2], sources[2], neighbors) &&
+		jpegview_linux::ShouldRetainPendingDisplayUpload(
+			sources[3], sources[2], neighbors) &&
+		jpegview_linux::ShouldRetainPendingDisplayUpload(
+			sources[1], sources[2], neighbors),
+		"navigation did not retain selected and immediate-neighbor staged images");
+	Expect(!jpegview_linux::ShouldRetainPendingDisplayUpload(
+			sources[0], sources[2], neighbors) &&
+		!jpegview_linux::ShouldRetainPendingDisplayUpload(
+			jpegview_linux::SourceKey{}, sources[2], neighbors),
+		"navigation retained an unrelated or identity-less staged image");
+}
+
 void TestSvgNeighborPrefetchUsesTargetRendering() {
 	TemporaryDirectory temporary;
 	const fs::path large = temporary.path() / "large.svg";
@@ -2911,6 +2935,7 @@ const TestCase kTests[] = {
 	{"perf-context-and-pending-input-diagnostics", &TestPerfContextAndPendingInputDiagnostics},
 	{"decoded-prefetch-work-class-attribution", &TestDecodedPrefetchWorkClassAttribution},
 	{"display-prefetch-planner-worker-snapshots-and-cancellation", &TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation},
+	{"pending-display-upload-navigation-retention", &TestPendingDisplayUploadNavigationRetention},
 	{"svg-neighbor-prefetch-uses-target-rendering", &TestSvgNeighborPrefetchUsesTargetRendering},
 	{"display-resolution-request-canonicalization", &TestDisplayResolutionRequestCanonicalization},
 	{"failed-display-request-resolution-recovery", &TestFailedDisplayRequestResolutionRecovery},
