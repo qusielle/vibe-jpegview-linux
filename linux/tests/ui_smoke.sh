@@ -4448,6 +4448,53 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	owner_header_started="$temporary/owner-header.started"
 	owner_header_release="$temporary/owner-header.release"
 	owner_header_active="$temporary/owner-header.active"
+	# Keep slideshow mode active with a long deadline so manual navigation takes
+	# the same transition ownership path without an automatic advance mid-test.
+	owner_select_blend_transition() {
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 40 40
+		DISPLAY=":$display_number" xdotool keydown Shift_L
+		DISPLAY=":$display_number" xdotool click 3
+		DISPLAY=":$display_number" xdotool keyup Shift_L
+		if [ "$visual_assertions" -eq 1 ]; then
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 1200 780
+			sleep 0.1
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/owner-none-selected-menu.png"
+			convert "$temporary/owner-none-selected-menu.png" \
+				-crop 260x65+571+180 +repage "$temporary/owner-none-selected-crop.png"
+		fi
+		# The advanced menu's slideshow/effect column is third at this fixed test
+		# window size; clicking avoids mnemonics that depend on installed apps.
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 620 220 click 1
+		if [ "$visual_assertions" -eq 1 ]; then
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 40 40
+			DISPLAY=":$display_number" xdotool keydown Shift_L
+			DISPLAY=":$display_number" xdotool click 3
+			DISPLAY=":$display_number" xdotool keyup Shift_L
+			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 1200 780
+			sleep 0.1
+			DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/owner-blend-selected-menu.png"
+			convert "$temporary/owner-blend-selected-menu.png" \
+				-crop 260x65+571+180 +repage "$temporary/owner-blend-selected-crop.png"
+			DISPLAY=":$display_number" xdotool key Escape
+			owner_effect_menu_difference=$(compare -metric AE \
+				"$temporary/owner-none-selected-crop.png" \
+				"$temporary/owner-blend-selected-crop.png" null: 2>&1 || true)
+			if [ "$owner_effect_menu_difference" = 0 ]; then
+				echo "UI smoke test: selecting Blend did not change the transition-effect checkmark" >&2
+				exit 1
+			fi
+		fi
+	}
+	owner_has_standalone_charge_after() {
+		awk -F, -v after="$1" '
+			$1 > after && $2 == "cache_snapshot" &&
+				$13 == "\"standalone_texture_residency\"" &&
+				$7 == 2560000 && $8 == 1 && $9 == 400 && $10 == 1600 { found = 1 }
+			END { print found + 0 }
+		' "$owner_return_trace" 2>/dev/null || true
+	}
 	DISPLAY=":$display_number" HOME="$temporary/owner-return-home" \
 		XDG_CONFIG_HOME="$owner_return_config" \
 		XDG_STATE_HOME="$owner_return_state" \
@@ -4459,7 +4506,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$owner_header_release" \
 		JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=12000 \
 		JPEGVIEW_PERF_TRACE="$owner_return_trace" \
-		"$BINARY" "$owner_return_image" >"$temporary/cold-jpeg-owner-return.log" 2>&1 &
+		"$BINARY" --slideshow 3600 "$owner_return_image" >"$temporary/cold-jpeg-owner-return.log" 2>&1 &
 	viewer_pid=$!
 	window_id=''
 	for _ in $(seq 1 100); do
@@ -4491,6 +4538,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		cat "$temporary/cold-jpeg-owner-return.log" >&2
 		exit 1
 	fi
+	owner_select_blend_transition
 	owner_window_title() {
 		if command -v xprop >/dev/null 2>&1; then
 			DISPLAY=":$display_number" xprop -id "$window_id" WM_NAME 2>/dev/null |
@@ -4500,6 +4548,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		fi
 	}
 	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 10 10
 		owner_initial_white_run=0
 		for _ in $(seq 1 100); do
 			DISPLAY=":$display_number" import -window "$window_id" \
@@ -4575,6 +4624,22 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		cat "$temporary/cold-jpeg-owner-return.log" >&2
 		exit 1
 	fi
+	owner_pending_right_event_us=$(awk -F, \
+		'$2 == "event_handling" && $7 == 768 { timestamp = $1 } \
+		END { print timestamp + 0 }' "$owner_return_trace" 2>/dev/null || true)
+	owner_pending_owner_held=0
+	for _ in $(seq 1 240); do
+		owner_pending_owner_held=$(owner_has_standalone_charge_after \
+			"$owner_pending_right_event_us")
+		if [ "$owner_pending_owner_held" -eq 1 ]; then break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_pending_owner_held" -ne 1 ]; then
+		echo "UI smoke test: the pending slideshow transition did not retain exactly one charged 400x1600 standalone owner" >&2
+		cat "$owner_return_trace" >&2
+		exit 1
+	fi
 	if [ "$visual_assertions" -eq 1 ]; then
 		# The header barrier keeps B pending for every capture. The edited,
 		# standalone A texture must remain visible across unrelated repaints.
@@ -4609,6 +4674,9 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		cat "$temporary/cold-jpeg-owner-return.log" >&2
 		exit 1
 	fi
+	owner_reversal_event_us=$(awk -F, \
+		'$2 == "event_handling" && $7 == 769 { timestamp = $1 } \
+		END { print timestamp + 0 }' "$owner_return_trace" 2>/dev/null || true)
 	: > "$owner_header_release"
 	owner_settled_polls=0
 	owner_stale_drained=0
@@ -4646,6 +4714,28 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			echo "UI smoke test: returning to A changed its current Fit viewport ($owner_return_difference differing pixels)" >&2
 			exit 1
 		fi
+	fi
+	owner_reversal_retirement_trace=''
+	for _ in $(seq 1 240); do
+		owner_reversal_retirement_trace=$(awk -F, -v after="$owner_reversal_event_us" '
+			$1 > after && $2 == "present" && destroy == 0 { presented = 1 }
+			$1 > after && $2 == "texture_destroy" && $7 == 2560000 {
+				if (destroy == 0) destroy = $1
+				destroy_count++
+			}
+			END {
+				if (destroy_count != 1 || !presented) exit 1
+				printf "%d", destroy
+			}
+		' "$owner_return_trace" 2>/dev/null || true)
+		if [ -n "$owner_reversal_retirement_trace" ]; then break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ -z "$owner_reversal_retirement_trace" ]; then
+		echo "UI smoke test: canceled slideshow transition did not present its fallback before exactly one standalone texture destruction" >&2
+		cat "$owner_return_trace" >&2
+		exit 1
 	fi
 	# Re-edit the returned image so the final A-to-B change retires a charged
 	# standalone texture instead of the original cached presentation.
