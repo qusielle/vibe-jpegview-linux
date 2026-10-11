@@ -1,5 +1,6 @@
 #include "test_harness.h"
 #include "test_support.h"
+#include "display_texture_pins.h"
 
 namespace {
 
@@ -2257,67 +2258,119 @@ void TestDecodedCacheProtectionReconcilesActiveReservationsFirst() {
 }
 
 void TestDisplayTexturePinHandoffPreservesBorrowedWorkingTexture() {
+	using jpegview_linux::DisplayTexturePinSnapshot;
 	const std::string borrowedKey = "outgoing-active-working-frame";
-	std::string transitionKey = "older-transition-frame";
+	std::string activeTransitionKey = "older-transition-frame";
 	std::string pendingTransitionKey;
 	std::string captureKey;
+	std::string animationTargetKey;
+	std::string activeSpreadAnchorKey;
+	std::string activeSpreadPartnerKey;
+	std::string retainedSpreadAnchorKey;
+	std::string retainedSpreadPartnerKey;
 	std::string lastPresentedKey;
+	bool lastPresentedMatchesCurrentSource = false;
 	bool activeWorkingTextureDestroyed = false;
-	Expect(!jpegview_linux::IsDisplayTexturePinned(borrowedKey, "", "", "", "", false),
+	const auto currentPins = [&] {
+		DisplayTexturePinSnapshot pins;
+		pins.activeTransition = activeTransitionKey;
+		pins.pendingTransition = pendingTransitionKey;
+		pins.temporaryCapture = captureKey;
+		pins.animationTarget = animationTargetKey;
+		pins.activeSpreadAnchor = activeSpreadAnchorKey;
+		pins.activeSpreadPartner = activeSpreadPartnerKey;
+		pins.retainedSpreadAnchor = retainedSpreadAnchorKey;
+		pins.retainedSpreadPartner = retainedSpreadPartnerKey;
+		pins.lastPresented = lastPresentedKey;
+		pins.lastPresentedMatchesCurrentSource = lastPresentedMatchesCurrentSource;
+		return pins;
+	};
+	Expect(!currentPins().IsPinned(borrowedKey),
 		"transition handoff fixture accidentally starts with another pin protecting its texture");
 	const auto sweepActiveWorkingTexture = [&] {
-		if (!jpegview_linux::IsDisplayTexturePinned(borrowedKey, transitionKey,
-			pendingTransitionKey, captureKey, lastPresentedKey, false)) {
+		if (!currentPins().IsPinned(borrowedKey)) {
 			activeWorkingTextureDestroyed = true;
 		}
 	};
 
 	{
 		jpegview_linux::DisplayTexturePinHandoff handoff(captureKey, borrowedKey);
-		transitionKey.clear();
+		activeTransitionKey.clear();
 		pendingTransitionKey.clear();
 		sweepActiveWorkingTexture();
 		Expect(!activeWorkingTextureDestroyed,
 			"clearing the older transition destroyed the borrowed outgoing texture");
 
-		transitionKey = borrowedKey;
+		activeTransitionKey = borrowedKey;
 		handoff.Restore();
 		sweepActiveWorkingTexture();
 		Expect(!activeWorkingTextureDestroyed,
 			"releasing the temporary pin destroyed a texture already owned by the new transition");
 	}
 	Expect(captureKey.empty(), "transition pin handoff did not restore the prior capture pin");
-	transitionKey.clear();
-	Expect(!jpegview_linux::IsDisplayTexturePinned(borrowedKey, transitionKey,
-		pendingTransitionKey, captureKey, lastPresentedKey, false),
+	activeTransitionKey.clear();
+	Expect(!currentPins().IsPinned(borrowedKey),
 		"completed transition retained a stale borrowed-texture pin");
-	Expect(!jpegview_linux::IsDisplayTexturePinned("", "", "", "", "", true),
+	pendingTransitionKey = borrowedKey;
+	Expect(currentPins().IsPinned(borrowedKey),
+		"pending transition frame was omitted from the pin inventory");
+	pendingTransitionKey.clear();
+	Expect(!currentPins().IsPinned(""),
 		"an empty display key was considered pinned");
-	Expect(jpegview_linux::IsDisplayTexturePinned(borrowedKey, "", "", "",
-		borrowedKey, true) && !jpegview_linux::IsDisplayTexturePinned(borrowedKey,
-		"", "", "", borrowedKey, false),
+	lastPresentedKey = borrowedKey;
+	lastPresentedMatchesCurrentSource = true;
+	Expect(currentPins().IsPinned(borrowedKey),
+		"current-source last-presented texture was not pinned");
+	lastPresentedMatchesCurrentSource = false;
+	Expect(!currentPins().IsPinned(borrowedKey),
 		"last-presented display texture was not pinned only for the current source");
 	const std::string spreadAnchorKey = "active-spread-anchor";
 	const std::string spreadPartnerKey = "active-spread-partner";
-	Expect(jpegview_linux::IsDisplayTexturePinned(spreadAnchorKey, "", "", "",
-		"", false, spreadAnchorKey, spreadPartnerKey) &&
-		jpegview_linux::IsDisplayTexturePinned(spreadPartnerKey, "", "", "",
-			"", false, spreadAnchorKey, spreadPartnerKey) &&
-		!jpegview_linux::IsDisplayTexturePinned("unrelated-frame", "", "", "",
-			"", false, spreadAnchorKey, spreadPartnerKey),
+	activeSpreadAnchorKey = spreadAnchorKey;
+	activeSpreadPartnerKey = spreadPartnerKey;
+	Expect(currentPins().IsPinned(spreadAnchorKey) &&
+		currentPins().IsPinned(spreadPartnerKey) &&
+		!currentPins().IsPinned("unrelated-frame"),
 		"active spread textures were not pinned as a pair while awaiting presentation");
-	Expect(jpegview_linux::IsDisplayTexturePinned(spreadAnchorKey, "", "", "",
-		"new-selected-frame", false, "", "", spreadAnchorKey, spreadPartnerKey) &&
-		jpegview_linux::IsDisplayTexturePinned(spreadPartnerKey, "", "", "",
-			"new-selected-frame", false, "", "", spreadAnchorKey, spreadPartnerKey) &&
-		!jpegview_linux::IsDisplayTexturePinned("unrelated-frame", "", "", "",
-			"new-selected-frame", false, "", "", spreadAnchorKey, spreadPartnerKey),
+	activeSpreadAnchorKey.clear();
+	activeSpreadPartnerKey.clear();
+	lastPresentedKey = "new-selected-frame";
+	retainedSpreadAnchorKey = spreadAnchorKey;
+	retainedSpreadPartnerKey = spreadPartnerKey;
+	Expect(currentPins().IsPinned(spreadAnchorKey) &&
+		currentPins().IsPinned(spreadPartnerKey) &&
+		!currentPins().IsPinned("unrelated-frame"),
 		"replacing selection unpinned an outgoing spread before its replacement was drawable");
-	Expect(!jpegview_linux::IsDisplayTexturePinned(spreadAnchorKey, "", "", "",
-		"new-selected-frame", true, "", "", "", "") &&
-		!jpegview_linux::IsDisplayTexturePinned(spreadPartnerKey, "", "", "",
-			"new-selected-frame", true, "", "", "", ""),
+	activeTransitionKey = spreadAnchorKey;
+	Expect(currentPins().IsPinned(spreadAnchorKey),
+		"overlapping retained and transition roles did not pin their shared key");
+	retainedSpreadAnchorKey.clear();
+	Expect(currentPins().IsPinned(spreadAnchorKey),
+		"removing one spread role cleared an overlapping transition pin");
+	activeTransitionKey.clear();
+	retainedSpreadPartnerKey.clear();
+	Expect(!currentPins().IsPinned(spreadAnchorKey) &&
+		!currentPins().IsPinned(spreadPartnerKey),
 		"releasing an outgoing presentation left stale texture pins");
+	animationTargetKey = "pending-animation-frame";
+	Expect(currentPins().IsPinned(animationTargetKey),
+		"pending animation target was omitted from the pin inventory");
+
+	activeTransitionKey = "active-transition";
+	pendingTransitionKey = "pending-transition";
+	captureKey = "temporary-capture";
+	retainedSpreadAnchorKey = "retained-anchor";
+	retainedSpreadPartnerKey = "retained-partner";
+	lastPresentedKey = "current-last-presented";
+	lastPresentedMatchesCurrentSource = true;
+	std::vector<std::string> activeProtectionRoles;
+	currentPins().ForEachAlwaysActiveRole([&](std::string_view key) {
+		activeProtectionRoles.emplace_back(key);
+	});
+	Expect(activeProtectionRoles == std::vector<std::string>({
+		"active-transition", "pending-transition", "temporary-capture",
+		"retained-anchor", "retained-partner", "current-last-presented"}),
+		"active-tier roles changed or included an ordinary animation-target pin");
 }
 
 void TestDisplayImageCacheForegroundActiveClassification() {

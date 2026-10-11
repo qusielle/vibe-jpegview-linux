@@ -105,6 +105,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1689,6 +1690,10 @@ private:
 			jpegview_linux::CacheProtectionTier tier) {
 			jpegview_linux::AddTextureProtection(snapshot, key, tier);
 		};
+		const auto addTextureView = [&addTexture](std::string_view key,
+			jpegview_linux::CacheProtectionTier tier) {
+			if (!key.empty()) addTexture(std::string(key), tier);
+		};
 		const auto add = [&snapshot](
 			const jpegview_linux::DisplayImageRequest& request) {
 			const jpegview_linux::CacheProtectionTier tier =
@@ -1704,9 +1709,11 @@ private:
 			jpegview_linux::CacheProtectionTier::Active);
 		if (doublePagePartnerRequest_.has_value()) addWithTier(*doublePagePartnerRequest_,
 			jpegview_linux::CacheProtectionTier::Active);
-		addTexture(presentationController_.AnchorTextureKey(),
+		const jpegview_linux::DisplayTexturePinSnapshot texturePins =
+			CurrentDisplayTexturePinSnapshot();
+		addTextureView(texturePins.activeSpreadAnchor,
 			jpegview_linux::CacheProtectionTier::Active);
-		addTexture(presentationController_.PartnerTextureKey(),
+		addTextureView(texturePins.activeSpreadPartner,
 			jpegview_linux::CacheProtectionTier::Active);
 		jpegview_linux::AddMagnifyingGlassProtection(snapshot,
 			CurrentMagnifyingGlassProtectionRequest());
@@ -1720,7 +1727,7 @@ private:
 		for (const auto& candidate : textureCandidates) addTexture(candidate.first, candidate.second);
 		imageCache_.SetProtectionSnapshot(snapshot.decoded);
 		displayImageCache_.SetProtectionSnapshot(snapshot.prepared);
-		ApplyDisplayTextureProtectionSnapshot(snapshot.textures);
+		ApplyDisplayTextureProtectionSnapshot(snapshot.textures, texturePins);
 	}
 
 	void RefreshCacheProtectionSnapshotsForBatch() {
@@ -3822,7 +3829,8 @@ private:
 
 	void ApplyDisplayTextureProtectionSnapshot(
 		const std::vector<std::pair<std::string,
-			jpegview_linux::CacheProtectionTier>>& protections) {
+			jpegview_linux::CacheProtectionTier>>& protections,
+		const jpegview_linux::DisplayTexturePinSnapshot& texturePins) {
 		std::unordered_map<std::string, jpegview_linux::CacheProtectionTier> strongest;
 		for (const auto& protection : protections) {
 			if (protection.first.empty()) continue;
@@ -3832,17 +3840,11 @@ private:
 				inserted.first->second = protection.second;
 			}
 		}
-		const auto preserveActive = [&strongest](const std::string& key) {
-			if (!key.empty()) strongest[key] = jpegview_linux::CacheProtectionTier::Active;
+		const auto preserveActive = [&strongest](std::string_view key) {
+			if (!key.empty()) strongest[std::string(key)] =
+				jpegview_linux::CacheProtectionTier::Active;
 		};
-		preserveActive(transitionDisplayKey_);
-		preserveActive(pendingTransitionFrame_.displayKey);
-		preserveActive(transitionCaptureDisplayKey_);
-		preserveActive(retainedPresentation_.anchor.displayKey);
-		preserveActive(retainedPresentation_.partner.displayKey);
-		if (LastPresentedTextureMatchesCurrentSource()) {
-			preserveActive(lastPresentedDisplayKey_);
-		}
+		texturePins.ForEachAlwaysActiveRole(preserveActive);
 
 		std::vector<std::pair<std::string,
 			jpegview_linux::CacheProtectionTier>> changes;
@@ -3872,7 +3874,7 @@ private:
 	}
 
 	void ClearDisplayTextureProtections() {
-		ApplyDisplayTextureProtectionSnapshot({});
+		ApplyDisplayTextureProtectionSnapshot({}, CurrentDisplayTexturePinSnapshot());
 	}
 
 	bool EvictOldestDisplayTexture(jpegview_linux::CacheProtectionTier maximumTier) {
@@ -4870,16 +4872,26 @@ private:
 		ClearActiveWorkingDisplayTextures();
 	}
 
+	jpegview_linux::DisplayTexturePinSnapshot CurrentDisplayTexturePinSnapshot() const {
+		jpegview_linux::DisplayTexturePinSnapshot snapshot;
+		snapshot.activeTransition = transitionDisplayKey_;
+		snapshot.pendingTransition = pendingTransitionFrame_.displayKey;
+		snapshot.temporaryCapture = transitionCaptureDisplayKey_;
+		if (pendingAnimationFrameDisplayRequest_.has_value()) {
+			snapshot.animationTarget = pendingAnimationFrameDisplayRequest_->key;
+		}
+		snapshot.activeSpreadAnchor = presentationController_.AnchorTextureKey();
+		snapshot.activeSpreadPartner = presentationController_.PartnerTextureKey();
+		snapshot.retainedSpreadAnchor = retainedPresentation_.anchor.displayKey;
+		snapshot.retainedSpreadPartner = retainedPresentation_.partner.displayKey;
+		snapshot.lastPresented = lastPresentedDisplayKey_;
+		snapshot.lastPresentedMatchesCurrentSource =
+			LastPresentedTextureMatchesCurrentSource();
+		return snapshot;
+	}
+
 	bool IsPinnedDisplayTexture(const std::string& key) const {
-		if (pendingAnimationFrameDisplayRequest_.has_value() &&
-			pendingAnimationFrameDisplayRequest_->key == key) return true;
-		return jpegview_linux::IsDisplayTexturePinned(key, transitionDisplayKey_,
-			pendingTransitionFrame_.displayKey, transitionCaptureDisplayKey_,
-			lastPresentedDisplayKey_, LastPresentedTextureMatchesCurrentSource(),
-			presentationController_.AnchorTextureKey(),
-			presentationController_.PartnerTextureKey(),
-			retainedPresentation_.anchor.displayKey,
-			retainedPresentation_.partner.displayKey);
+		return CurrentDisplayTexturePinSnapshot().IsPinned(key);
 	}
 
 	TransitionFrame CaptureTransitionFrame() {

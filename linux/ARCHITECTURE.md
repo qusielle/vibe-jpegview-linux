@@ -599,10 +599,13 @@ should normally be added to one of these focused modules and covered by the matc
   with pending foreground source work.
 - `work_batch_gate`: serializes completion publication with batch deactivation. Once an owner deactivates
   a prefetch batch, callbacks already copied by a worker cannot enqueue new work after cache cancellation.
-- `display_texture_pins`: pure pin selection and scoped borrowed-texture handoff. A borrowed outgoing
-  display texture receives a temporary capture pin before an old transition is cleared, then the new
-  transition takes its pin before that temporary pin is released. All SDL texture operations remain on
-  the renderer thread.
+- `display_texture_pins`: named, fixed-size views of renderer-thread texture owners and scoped
+  borrowed-texture handoff. The same pin roles feed spread protection assembly, active-tier
+  preservation, eviction, and active-working cleanup; pin lifetime remains distinct from ordinary
+  cache priority. A borrowed outgoing display texture receives a temporary capture pin before an old
+  transition is cleared, then the new transition takes its pin before that temporary pin is released.
+  The views are consumed synchronously so eviction checks do not copy keys or allocate. All SDL
+  texture operations remain on the renderer thread.
 - `renderer_thread_resource`: move-only renderer-thread handles for the SDL window and renderer,
   with explicit renderer-before-window reset ordering.
 - `renderer_texture_owner`: the renderer-thread owner for image, display, thumbnail, preview, and
