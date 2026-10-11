@@ -25,6 +25,14 @@ CacheProtectionTier CacheProtectionForWorkClass(PerfWorkClass workClass,
 		CacheProtectionTier::DistantSpeculation;
 }
 
+CacheProtectionTier DecodedPrefetchProtection(std::size_t requestPriority,
+	bool staticDisplayFramePrepared) {
+	// Once the prepared frame owns the pixels needed for display, its full-source
+	// decode must yield cache capacity to the renderer-ready neighbor texture.
+	return requestPriority <= 2 && !staticDisplayFramePrepared ?
+		CacheProtectionTier::Neighbor : CacheProtectionTier::DistantSpeculation;
+}
+
 void AddDecodedProtection(CacheProtectionSnapshot& snapshot, const SourceKey& source,
 	CacheProtectionTier protection) {
 	if (!source.Valid()) return;
@@ -67,13 +75,35 @@ void AddMagnifyingGlassProtection(CacheProtectionSnapshot& snapshot,
 	}
 }
 
+bool CacheAdmissionMayProgressAfterFailure(std::uint64_t attemptedRevision,
+	const CacheBudgetSnapshot& current, bool pendingRetirements) {
+	return current.retainedCapacityRevision != attemptedRevision || pendingRetirements;
+}
+
+bool CacheAdmissionRetryState::MayEvict(std::uint64_t retainedCapacityRevision,
+	std::size_t availableBytes, std::size_t requestedBytes) const {
+	return !attempted_ || retainedCapacityRevision > lastAttemptRetainedCapacityRevision_ ||
+		availableBytes >= requestedBytes;
+}
+
+void CacheAdmissionRetryState::RecordDeferred(std::uint64_t retainedCapacityRevision) {
+	attempted_ = true;
+	lastAttemptRetainedCapacityRevision_ = retainedCapacityRevision;
+}
+
+void CacheAdmissionRetryState::Reset() {
+	attempted_ = false;
+	lastAttemptRetainedCapacityRevision_ = 0;
+}
+
 CacheAdmissionPolicy::CacheAdmissionPolicy(SharedCacheBudget& budget)
 	: budget_(budget) {}
 
 CacheReservation CacheAdmissionPolicy::Reserve(std::size_t bytes,
 	CacheMemoryCategory category, std::shared_ptr<const void> allocationOwner,
 	CacheProtectionTier incomingProtection, const EvictOne& evictOne,
-	bool mayEvict) const {
+	bool mayEvict, bool* evictedVictim) const {
+	if (evictedVictim != nullptr) *evictedVictim = false;
 	const auto reserve = [&]() {
 		CacheReservation result = budget_.TryReserve(bytes, category, allocationOwner);
 		if (result && category == CacheMemoryCategory::RetainedImageTextures) {
@@ -99,6 +129,7 @@ CacheReservation CacheAdmissionPolicy::Reserve(std::size_t bytes,
 		const CacheProtectionTier tier = evictionOrder[index];
 		const std::uint64_t beforeReleaseRevision = budget_.RetainedCapacityRevision();
 		if (evictOne(tier)) {
+			if (evictedVictim != nullptr) *evictedVictim = true;
 			// The removal callback may enqueue CPU pixels for asynchronous retirement.
 			// Retry only when the reservation charge was actually released here.
 			if (budget_.RetainedCapacityRevision() == beforeReleaseRevision) return {};

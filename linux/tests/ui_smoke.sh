@@ -304,6 +304,7 @@ launch_viewer() {
 			JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$viewer_slow_map_active" \
 			JPEGVIEW_TEST_SLOW_MAP_ARMED="$viewer_slow_map_armed" \
 			JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS="${viewer_slow_map_max_attempts:-2000}" \
+			JPEGVIEW_PERF_TRACE="${viewer_perf_trace_override:-}" \
 			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
 	elif [ -n "${viewer_perf_trace_override:-}" ]; then
 		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
@@ -334,6 +335,7 @@ launch_viewer() {
 	done
 	if [ -z "$window_id" ]; then
 		echo "UI smoke test: viewer window did not appear" >&2
+		cat "$temporary/viewer.log" >&2
 		exit 1
 	fi
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
@@ -812,6 +814,109 @@ if command -v convert >/dev/null 2>&1; then
 else
 	echo "UI smoke test: SKIP JPEG first-selection fixture (missing ImageMagick convert)"
 fi
+
+# A retained full-size raster decode must yield cache capacity to its own
+# renderer-ready neighbor texture once display preparation has finished.
+pressure_directory="$temporary/neighbor-cache-pressure"
+pressure_config="$temporary/neighbor-cache-pressure-config"
+pressure_trace="$temporary/neighbor-cache-pressure-trace.csv"
+pressure_previous_state=$XDG_STATE_HOME
+XDG_STATE_HOME="$temporary/neighbor-cache-pressure-state"
+export XDG_STATE_HOME
+mkdir -p "$pressure_directory" "$pressure_config/jpegview-linux"
+write_solid_p6 "$pressure_directory/01-current.ppm" 400 300 220 20 30
+write_solid_p6 "$pressure_directory/02-neighbor.ppm" 1260 1260 20 220 40
+for pressure_index in 03 04 05 06 07 08 09 10; do
+	write_solid_p6 "$pressure_directory/$pressure_index-extra.ppm" \
+		240 320 60 80 100
+done
+printf 'scale_mode=fit_no_enlarge\ncache_size_mb=8\ndouble_page_mode_enabled=0\nthumbnail_panel_visible=0\ninfo_visible=0\nshow_histogram=0\n' \
+	> "$pressure_config/jpegview-linux/settings.conf"
+viewer_perf_trace_override=$pressure_trace
+VIEWER_TEST_HOME="$temporary/neighbor-cache-pressure-home" \
+	VIEWER_TEST_CONFIG_HOME="$pressure_config" launch_viewer "$pressure_directory"
+unset viewer_perf_trace_override VIEWER_TEST_CONFIG_HOME
+assert_title_prefix "01-current.ppm" \
+	"cache-pressure neighbor fixture did not start on its first image"
+pressure_neighbor_ready=0
+for _ in $(seq 1 600); do
+	if [ -f "$pressure_trace" ] && awk -F, \
+		-v detail="display_texture_published:02-neighbor.ppm" '
+		$2 == "cache_snapshot" && $6 == "nearest_navigation_neighbor" &&
+			index($13, detail) > 0 { ready = 1 }
+		END { exit !ready }
+	' "$pressure_trace"; then
+		pressure_neighbor_ready=1
+		break
+	fi
+	sleep 0.05
+done
+if [ "$pressure_neighbor_ready" -ne 1 ]; then
+	echo "UI smoke test: retained neighbor pixels prevented its prepared display texture from being published" >&2
+	cat "$temporary/viewer.log" >&2
+	cat "$pressure_trace" >&2
+	exit 1
+fi
+if awk -F, '$2 == "cache_snapshot" && $6 == "nearest_navigation_neighbor" &&
+	index($13, "decoded_retention_denied") > 0 { denied = 1 }
+	END { exit !denied }' "$pressure_trace"; then
+	echo "UI smoke test: cache-pressure fixture did not retain the neighbor decode before texture admission" >&2
+	cat "$pressure_trace" >&2
+	exit 1
+fi
+sleep 1
+count_pressure_selection_work() {
+	awk -F, '$6 == "active_image_spread" {
+		if ($2 == "source_read" && $4 == "worker_thread") source++
+		if ($2 == "processing" && $4 == "worker_thread") processing++
+		if ($2 == "texture_upload" && $4 == "event_thread") upload++
+	} END { print source + 0 ":" processing + 0 ":" upload + 0 }' \
+		"$pressure_trace"
+}
+pressure_before_selection=$(count_pressure_selection_work)
+pressure_input_marker=$(awk -F, 'END { print $1 + 0 }' "$pressure_trace")
+DISPLAY=":$display_number" xdotool key Right
+assert_title_prefix "02-neighbor.ppm" \
+	"the pressure-tested neighbor was not selected after its renderer texture was ready"
+pressure_input_to_present_us=''
+for _ in $(seq 1 40); do
+	pressure_input_to_present_us=$(awk -F, -v marker="$pressure_input_marker" '
+		$1 > marker && $2 == "input_to_present" { print $3; exit }
+	' "$pressure_trace")
+	if [ -n "$pressure_input_to_present_us" ]; then break; fi
+	sleep 0.025
+done
+if [ -z "$pressure_input_to_present_us" ] || [ "$pressure_input_to_present_us" -gt 50000 ]; then
+	echo "UI smoke test: a ready neighbor took ${pressure_input_to_present_us:-no trace} us to present after navigation (limit 50000 us)" >&2
+	cat "$pressure_trace" >&2
+	exit 1
+fi
+echo "UI smoke test: ready-neighbor first presentation took ${pressure_input_to_present_us} us"
+if [ "$visual_assertions" -eq 1 ]; then
+	DISPLAY=":$display_number" import -window "$window_id" \
+		"$temporary/neighbor-cache-pressure-first-selection.png"
+	pressure_pixel=$(convert "$temporary/neighbor-cache-pressure-first-selection.png" \
+		-format '%[hex:p{640,400}]' info:)
+	case "$pressure_pixel" in
+		*14DC28*|*15DC29*) ;;
+		*)
+			echo "UI smoke test: first selection of the pressure-tested neighbor did not show its pixels immediately ($pressure_pixel)" >&2
+			exit 1
+			;;
+	esac
+fi
+sleep 0.5
+pressure_after_selection=$(count_pressure_selection_work)
+if [ "$pressure_after_selection" != "$pressure_before_selection" ]; then
+	echo "UI smoke test: selecting a pressure-tested ready neighbor repeated active image work ($pressure_before_selection -> $pressure_after_selection)" >&2
+	cat "$temporary/viewer.log" >&2
+	cat "$pressure_trace" >&2
+	exit 1
+fi
+stop_viewer
+unset VIEWER_TEST_HOME
+XDG_STATE_HOME=$pressure_previous_state
+export XDG_STATE_HOME
 
 # Reusing a previously opened neighbor in fit-relative zoom mode must size the
 # cache check against the neighbor's fit base, not the prior image's absolute zoom.
@@ -3128,6 +3233,200 @@ stop_viewer
 
 if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	cc -shared -fPIC "$SCRIPT_DIR/delay_mmap.c" -o "$temporary/slow_map.so" -ldl -pthread
+	# A slow opposite-direction JPEG header must not hold the preferred immediate
+	# neighbor behind a combined planner result.
+	prefetch_phase_directory="$temporary/prefetch-phase-neighbors"
+	prefetch_phase_config="$temporary/prefetch-phase-config"
+	prefetch_phase_trace="$temporary/prefetch-phase-trace.csv"
+	prefetch_phase_started="$temporary/prefetch-phase.started"
+	prefetch_phase_release="$temporary/prefetch-phase.release"
+	prefetch_phase_active="$temporary/prefetch-phase.active"
+	mkdir -p "$prefetch_phase_directory" "$prefetch_phase_config/jpegview-linux"
+	write_solid_p6 "$temporary/prefetch-phase-red.ppm" 1400 900 220 20 30
+	write_solid_p6 "$temporary/prefetch-phase-green.ppm" 1000 1600 20 220 40
+	write_solid_p6 "$temporary/prefetch-phase-blue.ppm" 900 1200 30 40 220
+	convert "$temporary/prefetch-phase-red.ppm" -quality 95 \
+		"$prefetch_phase_directory/01-current.jpg"
+	convert "$temporary/prefetch-phase-green.ppm" -quality 95 \
+		"$prefetch_phase_directory/02-neighbor.jpg"
+	convert "$temporary/prefetch-phase-blue.ppm" -quality 95 \
+		"$prefetch_phase_directory/03-distant.jpg"
+	for phase_index in 04 05 06; do
+		write_solid_p6 "$temporary/prefetch-phase-$phase_index.ppm" 240 320 80 90 100
+		convert "$temporary/prefetch-phase-$phase_index.ppm" -quality 90 \
+			"$prefetch_phase_directory/$phase_index-extra.jpg"
+	done
+	printf 'scale_mode=fit\ncache_size_mb=128\nthumbnail_panel_visible=0\ninfo_visible=0\nshow_histogram=0\ndouble_page_mode_enabled=0\n' \
+		> "$prefetch_phase_config/jpegview-linux/settings.conf"
+	prefetch_phase_previous_state=$XDG_STATE_HOME
+	XDG_STATE_HOME="$temporary/prefetch-phase-state"
+	export XDG_STATE_HOME
+	viewer_perf_trace_override=$prefetch_phase_trace
+	viewer_slow_map_target="$prefetch_phase_directory/06-extra.jpg"
+	viewer_slow_map_started=$prefetch_phase_started
+	viewer_slow_map_release=$prefetch_phase_release
+	viewer_slow_map_active=$prefetch_phase_active
+	viewer_slow_map_armed=''
+	viewer_slow_map_max_attempts=12000
+	VIEWER_TEST_HOME="$temporary/prefetch-phase-home" \
+		VIEWER_TEST_CONFIG_HOME="$prefetch_phase_config" launch_viewer "$prefetch_phase_directory"
+	unset VIEWER_TEST_CONFIG_HOME
+	unset viewer_perf_trace_override viewer_slow_map_target viewer_slow_map_started \
+		viewer_slow_map_release viewer_slow_map_active viewer_slow_map_armed \
+		viewer_slow_map_max_attempts
+	prefetch_phase_ready=0
+	for _ in $(seq 1 160); do
+		if [ -f "$prefetch_phase_started" ] && [ -f "$prefetch_phase_active" ] &&
+			[ -f "$prefetch_phase_trace" ] && awk -F, \
+				-v detail="display_texture_published:02-neighbor.jpg" '
+				$2 == "cache_snapshot" && $6 == "nearest_navigation_neighbor" &&
+					index($13, detail) > 0 { ready = 1 }
+				END { exit !ready }
+			' "$prefetch_phase_trace"; then
+			prefetch_phase_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$prefetch_phase_ready" -ne 1 ]; then
+		: > "$prefetch_phase_release"
+		echo "UI smoke test: a blocked opposite-neighbor JPEG header delayed the preferred neighbor texture" >&2
+		cat "$temporary/viewer.log" >&2
+		cat "$prefetch_phase_trace" >&2
+		exit 1
+	fi
+	count_phase_selection_work() {
+		trace_path=$1
+		awk -F, '$6 == "active_image_spread" {
+			if ($2 == "source_read" && $4 == "worker_thread") source++
+			if ($2 == "processing" && $4 == "worker_thread") processing++
+			if ($2 == "texture_upload" && $4 == "event_thread") upload++
+		} END { print source + 0 ":" processing + 0 ":" upload + 0 }' \
+			"$trace_path"
+	}
+	prefetch_phase_before=$(count_phase_selection_work "$prefetch_phase_trace")
+	DISPLAY=":$display_number" xdotool key Right
+	assert_title_prefix "02-neighbor.jpg" \
+		"the immediate cached neighbor was not selected while its opposite neighbor remained blocked"
+	if [ ! -f "$prefetch_phase_active" ]; then
+		echo "UI smoke test: navigating to the immediate neighbor released or displaced the opposite-neighbor barrier" >&2
+		exit 1
+	fi
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/prefetch-phase-first-selection.png"
+		prefetch_phase_pixel=$(convert "$temporary/prefetch-phase-first-selection.png" \
+			-format '%[hex:p{640,400}]' info:)
+		case "$prefetch_phase_pixel" in
+			*14DC28*|*15DC29*) ;;
+			*)
+				echo "UI smoke test: the preloaded neighbor was not immediately visible during the opposite-neighbor read ($prefetch_phase_pixel)" >&2
+				exit 1
+				;;
+		esac
+	fi
+	sleep 0.5
+	prefetch_phase_after=$(count_phase_selection_work "$prefetch_phase_trace")
+	if [ "$prefetch_phase_after" != "$prefetch_phase_before" ]; then
+		echo "UI smoke test: first navigation to a preloaded neighbor repeated active image work ($prefetch_phase_before -> $prefetch_phase_after)" >&2
+		cat "$temporary/viewer.log" >&2
+		cat "$prefetch_phase_trace" >&2
+		exit 1
+	fi
+	: > "$prefetch_phase_release"
+	for _ in $(seq 1 100); do
+		if [ ! -e "$prefetch_phase_active" ]; then break; fi
+		sleep 0.05
+	done
+	stop_viewer
+	unset VIEWER_TEST_HOME
+	XDG_STATE_HOME=$prefetch_phase_previous_state
+	export XDG_STATE_HOME
+	unset prefetch_phase_previous_state
+
+	# A distant generic raster decode shares source admission with JPEG planning.
+	# It must wait until the preferred JPEG texture has been published.
+	prefetch_raster_directory="$temporary/prefetch-raster-neighbors"
+	prefetch_raster_config="$temporary/prefetch-raster-config"
+	prefetch_raster_trace="$temporary/prefetch-raster-trace.csv"
+	prefetch_raster_started="$temporary/prefetch-raster.started"
+	prefetch_raster_release="$temporary/prefetch-raster.release"
+	prefetch_raster_active="$temporary/prefetch-raster.active"
+	mkdir -p "$prefetch_raster_directory" "$prefetch_raster_config/jpegview-linux"
+	convert "$temporary/prefetch-phase-red.ppm" -quality 95 \
+		"$prefetch_raster_directory/01-current.jpg"
+	convert "$temporary/prefetch-phase-green.ppm" -quality 95 \
+		"$prefetch_raster_directory/02-neighbor.jpg"
+	convert "$temporary/prefetch-phase-blue.ppm" \
+		"$prefetch_raster_directory/03-distant.png"
+	convert -size 240x320 xc:'#505a64' -quality 90 \
+		"$prefetch_raster_directory/04-opposite.jpg"
+	printf 'scale_mode=fit\ncache_size_mb=128\nthumbnail_panel_visible=0\ninfo_visible=0\nshow_histogram=0\ndouble_page_mode_enabled=0\n' \
+		> "$prefetch_raster_config/jpegview-linux/settings.conf"
+	prefetch_phase_previous_state=$XDG_STATE_HOME
+	XDG_STATE_HOME="$temporary/prefetch-raster-state"
+	export XDG_STATE_HOME
+	viewer_perf_trace_override=$prefetch_raster_trace
+	viewer_slow_map_target="$prefetch_raster_directory/03-distant.png"
+	viewer_slow_map_started=$prefetch_raster_started
+	viewer_slow_map_release=$prefetch_raster_release
+	viewer_slow_map_active=$prefetch_raster_active
+	viewer_slow_map_armed=''
+	viewer_slow_map_max_attempts=12000
+	VIEWER_TEST_HOME="$temporary/prefetch-raster-home" \
+		VIEWER_TEST_CONFIG_HOME="$prefetch_raster_config" launch_viewer "$prefetch_raster_directory"
+	unset VIEWER_TEST_CONFIG_HOME
+	unset viewer_perf_trace_override viewer_slow_map_target viewer_slow_map_started \
+		viewer_slow_map_release viewer_slow_map_active viewer_slow_map_armed \
+		viewer_slow_map_max_attempts
+	prefetch_raster_ready=0
+	for _ in $(seq 1 160); do
+		if [ -f "$prefetch_raster_started" ] && [ -f "$prefetch_raster_active" ] &&
+			[ -f "$prefetch_raster_trace" ] && awk -F, \
+				-v detail="display_texture_published:02-neighbor.jpg" '
+			$2 == "cache_snapshot" && $6 == "nearest_navigation_neighbor" &&
+				index($13, detail) > 0 { ready = 1 }
+			END { exit !ready }
+		' "$prefetch_raster_trace"; then
+			prefetch_raster_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$prefetch_raster_ready" -ne 1 ]; then
+		: > "$prefetch_raster_release"
+		echo "UI smoke test: a blocked distant PNG decode delayed the preferred JPEG neighbor texture" >&2
+		cat "$temporary/viewer.log" >&2
+		cat "$prefetch_raster_trace" >&2
+		exit 1
+	fi
+	prefetch_raster_before=$(count_phase_selection_work "$prefetch_raster_trace")
+	DISPLAY=":$display_number" xdotool key Right
+	assert_title_prefix "02-neighbor.jpg" \
+		"the preferred JPEG neighbor was not ready while a distant PNG decode remained blocked"
+	if [ ! -f "$prefetch_raster_active" ]; then
+		echo "UI smoke test: selecting the preferred JPEG released or displaced the distant PNG barrier" >&2
+		exit 1
+	fi
+	sleep 0.5
+	prefetch_raster_after=$(count_phase_selection_work "$prefetch_raster_trace")
+	if [ "$prefetch_raster_after" != "$prefetch_raster_before" ]; then
+		echo "UI smoke test: selection repeated source, processing, or upload work despite the ready neighbor ($prefetch_raster_before -> $prefetch_raster_after)" >&2
+		cat "$temporary/viewer.log" >&2
+		cat "$prefetch_raster_trace" >&2
+		exit 1
+	fi
+	: > "$prefetch_raster_release"
+	for _ in $(seq 1 100); do
+		if [ ! -e "$prefetch_raster_active" ]; then break; fi
+		sleep 0.05
+	done
+	stop_viewer
+	unset VIEWER_TEST_HOME
+	XDG_STATE_HOME=$prefetch_phase_previous_state
+	export XDG_STATE_HOME
+	unset prefetch_phase_previous_state
+
 	# Reloading an unchanged source must reset a locally rotated document while
 	# keeping the asynchronous renderer commit live.
 	same_reload_directory="$temporary/same-source-reload"

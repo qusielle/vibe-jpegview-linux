@@ -113,6 +113,8 @@ public:
 	std::size_t Available() const;
 	std::uint64_t ReleaseRevision() const;
 	std::uint64_t RetainedCapacityRevision() const;
+	// True only while a retired retained allocation may return cache capacity.
+	bool HasPendingRetainedRetirements() const;
 	CacheBudgetSnapshot Snapshot() const;
 #ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
 	void SetTestHookForTesting(detail::CacheBudgetTestHook hook, void* context);

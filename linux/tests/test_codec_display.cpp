@@ -1458,6 +1458,29 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 		result.requests[0].cacheKey.includeSpectrum &&
 		result.requests[1].cacheKey.includeSpectrum,
 		"SVG neighbor planning lost its file-backed vector identity");
+	bool fittedRequestsMatchPlanner = true;
+	for (const jpegview_linux::DisplayImageRequest& planned : result.requests) {
+		const auto candidate = std::find_if(request.neighbors.begin(), request.neighbors.end(),
+			[&planned](const jpegview_linux::DisplayPrefetchCandidate& item) {
+				return item.source.Key() == planned.source.Key();
+			});
+		const auto dimensions = std::find_if(result.dimensions.begin(), result.dimensions.end(),
+			[&planned](const jpegview_linux::DisplayPrefetchPlannedDimensions& item) {
+				return item.source == planned.source.Key();
+			});
+		if (candidate == request.neighbors.end() || dimensions == result.dimensions.end()) {
+			fittedRequestsMatchPlanner = false;
+			break;
+		}
+		const auto rebuilt = jpegview_linux::MakeFittedDisplayPrefetchRequest(*candidate,
+			request, dimensions->width, dimensions->height);
+		if (!rebuilt.has_value() || rebuilt->cacheKey != planned.cacheKey) {
+			fittedRequestsMatchPlanner = false;
+			break;
+		}
+	}
+	Expect(fittedRequestsMatchPlanner,
+		"provisional neighbor protection computed a different fitted request than planning");
 	Expect(jpegview_linux::MatchesDisplayPrefetchSnapshot(result, generation,
 		request.catalogRevision, request.descriptorRevision, request.viewportRevision,
 		request.currentIndex, request.preferredDirection, request.viewport,
@@ -1581,6 +1604,168 @@ void TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation() {
 		"planner admission exception escaped its worker or prevented a valid retry");
 }
 
+void TestDisplayPrefetchPlannerNearestContinuation() {
+	TemporaryDirectory temporary;
+	std::vector<jpegview_linux::DisplayPrefetchCandidate> candidates;
+	for (int index = 1; index <= 4; ++index) {
+		const fs::path filename = temporary.path() /
+			("phase-" + std::to_string(index) + ".jpg");
+		WriteText(filename, "captured source descriptor");
+		const auto source = jpegview_linux::DescribeImageSource(filename)
+			.WithImageProperties(800, 600, false);
+		candidates.push_back({filename, source, static_cast<std::size_t>(index - 1),
+			static_cast<std::size_t>(index), {}, false, true});
+	}
+	jpegview_linux::DisplayPrefetchPlannerRequest fullRequest;
+	fullRequest.catalogRevision = 7;
+	fullRequest.descriptorRevision = 9;
+	fullRequest.viewportRevision = 11;
+	fullRequest.currentIndex = 0;
+	fullRequest.pageCount = candidates.size() + 1;
+	fullRequest.imageAreaWidth = 640;
+	fullRequest.imageAreaHeight = 480;
+	fullRequest.maximumCount = candidates.size();
+	fullRequest.maximumPreparedBytes = 8u * 1024u * 1024u;
+	fullRequest.neighbors = candidates;
+	const auto phases = jpegview_linux::SplitDisplayPrefetchPlannerRequest(fullRequest);
+	Expect(phases.nearest.neighbors.size() == 1 &&
+		phases.nearest.maximumCount == 1 && phases.distant.has_value() &&
+		phases.secondary.neighbors.size() == 1 &&
+		phases.secondary.maximumCount == 1 &&
+		phases.distant->neighbors.size() == 2 &&
+		phases.distant->maximumCount == 2 &&
+		phases.nearest.neighbors[0].priority == 1 &&
+		phases.secondary.neighbors[0].priority == 2 &&
+		phases.distant->neighbors[0].priority == 3 &&
+		phases.distant->neighbors[1].priority == 4 &&
+		phases.distant->catalogRevision == fullRequest.catalogRevision &&
+		phases.distant->viewportRevision == fullRequest.viewportRevision,
+		"neighbor planning did not prioritize the direction-selected immediate file");
+
+	const auto firstRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		candidates[0].source, 800, 600, 640, 480, false, 1, {}, 0, false);
+	const auto secondaryRequest = jpegview_linux::MakeJpegDisplayImageRequest(
+		candidates[1].source, 800, 600, 640, 480, false, 2, {}, 0, false);
+	std::size_t firstRequestBytes = 0;
+	std::size_t secondaryRequestBytes = 0;
+	Expect(jpegview_linux::EstimateDisplayImageBytes(firstRequest, firstRequestBytes),
+		"nearest display request did not produce a bounded byte estimate");
+	Expect(jpegview_linux::EstimateDisplayImageBytes(secondaryRequest, secondaryRequestBytes),
+		"secondary display request did not produce a bounded byte estimate");
+	const std::size_t initialBudget = firstRequestBytes + secondaryRequestBytes + 4096;
+	jpegview_linux::DisplayPrefetchContinuation continuation(
+		{candidates[0].source.Key()}, {candidates[1].source.Key()},
+		phases.secondary, phases.distant,
+		initialBudget, true, true);
+	continuation.TrackNearestRequest(firstRequest);
+	continuation.MarkNearestPlannerFinished();
+	Expect(!continuation.TakeNextPhaseIfReady().has_value(),
+		"secondary planning started before the preferred neighbor was terminal");
+	continuation.ResolveNearestRequest(firstRequest.key, true);
+	const auto secondary = continuation.TakeNextPhaseIfReady();
+	Expect(secondary.has_value() && secondary->priority == 2 &&
+		secondary->plannerRequest.has_value() &&
+		secondary->plannerRequest->maximumPreparedBytes == initialBudget - firstRequestBytes &&
+		secondary->plannerRequest->neighbors.front().priority == 2,
+		"preferred-neighbor readiness did not start the opposite neighbor with remaining budget");
+	continuation.TrackNearestRequest(secondaryRequest);
+	continuation.MarkNearestPlannerFinished();
+	Expect(!continuation.TakeNextPhaseIfReady().has_value(),
+		"farther planning started before the opposite immediate neighbor was terminal");
+	continuation.ResolveNearestRequest(secondaryRequest.key, true);
+	const auto distant = continuation.TakeNextPhaseIfReady();
+	Expect(distant.has_value() && distant->priority == 3 &&
+		distant->plannerRequest.has_value() &&
+		distant->plannerRequest->maximumPreparedBytes == initialBudget -
+			firstRequestBytes - secondaryRequestBytes &&
+		distant->plannerRequest->neighbors.size() == 2 &&
+		distant->plannerRequest->neighbors.front().priority == 3,
+		"opposite-neighbor readiness did not release farther planning with remaining budget");
+
+	const std::size_t duplicateBudget = firstRequestBytes * 2;
+	jpegview_linux::DisplayPrefetchContinuation duplicateContinuation(
+		{candidates[0].source.Key()}, {}, phases.secondary, phases.distant,
+		duplicateBudget, false, true);
+	duplicateContinuation.TrackNearestRequest(firstRequest);
+	const auto whileDuplicateUploadSurvives = duplicateContinuation.TakeNextPhaseIfReady();
+	Expect(!whileDuplicateUploadSurvives.has_value(),
+		"merging duplicate upload payloads released the surviving nearest request early");
+	duplicateContinuation.ResolveNearestRequest(firstRequest.key, true);
+	const auto afterSurvivingUpload = duplicateContinuation.TakeNextPhaseIfReady();
+	Expect(afterSurvivingUpload.has_value() && afterSurvivingUpload->priority == 2 &&
+		afterSurvivingUpload->plannerRequest.has_value() &&
+		afterSurvivingUpload->plannerRequest->maximumPreparedBytes == duplicateBudget - firstRequestBytes,
+		"surviving duplicate upload did not keep its neighbor reservation through publication");
+
+	jpegview_linux::DisplayPrefetchContinuation pendingReuseContinuation(
+		{candidates[0].source.Key()}, {candidates[1].source.Key()},
+		phases.secondary, phases.distant, initialBudget, false, true);
+	pendingReuseContinuation.TrackNearestRequest(firstRequest, "compatible-pending-key");
+	pendingReuseContinuation.MarkNearestPlannerFinished();
+	Expect(!pendingReuseContinuation.TakeNextPhaseIfReady().has_value(),
+		"a reusable but still-uploading nearest texture released the next planner phase");
+	pendingReuseContinuation.ResolveNearestRequest("obsolete-pending-key", true);
+	Expect(!pendingReuseContinuation.TakeNextPhaseIfReady().has_value(),
+		"a stale upload with a different cache key released the nearest planner phase");
+	pendingReuseContinuation.ResolveNearestRequest("compatible-pending-key", true);
+	const auto afterPendingTexturePublished =
+		pendingReuseContinuation.TakeNextPhaseIfReady();
+	Expect(afterPendingTexturePublished.has_value() &&
+		afterPendingTexturePublished->priority == 2 &&
+		afterPendingTexturePublished->plannerRequest.has_value(),
+		"texture publication did not release the phase waiting on a reusable pending upload");
+
+	jpegview_linux::DisplayPrefetchContinuation failedContinuation(
+		{candidates[0].source.Key()}, {candidates[1].source.Key()},
+		phases.secondary, phases.distant, initialBudget, false, true);
+	failedContinuation.TrackNearestRequest(firstRequest);
+	failedContinuation.ResolveNearestRequest(firstRequest.key, false);
+	const auto afterFailure = failedContinuation.TakeNextPhaseIfReady();
+	Expect(afterFailure.has_value() && afterFailure->priority == 2 &&
+		afterFailure->plannerRequest.has_value() &&
+		afterFailure->plannerRequest->maximumPreparedBytes == initialBudget,
+		"failed nearest work kept its unused display budget reserved from secondary planning");
+
+	jpegview_linux::DisplayPrefetchContinuation canceledContinuation(
+		{candidates[0].source.Key()}, {candidates[1].source.Key()},
+		phases.secondary, phases.distant, initialBudget, false, true);
+	canceledContinuation.Cancel();
+	Expect(!canceledContinuation.TakeNextPhaseIfReady().has_value(),
+		"canceled neighbor phase revived its deferred distant plan");
+
+	jpegview_linux::DisplayPrefetchContinuation rasterContinuation(
+		{candidates[0].source.Key()}, {candidates[1].source.Key()},
+		std::nullopt, std::nullopt, initialBudget, false, true);
+	rasterContinuation.ResolveNearestSource(candidates[0].source.Key());
+	const auto rasterSecondary = rasterContinuation.TakeNextPhaseIfReady();
+	Expect(rasterSecondary.has_value() && rasterSecondary->priority == 2 &&
+		!rasterSecondary->plannerRequest.has_value(),
+		"generic raster opposite neighbor did not receive an independent second phase");
+	rasterContinuation.MarkNearestPlannerFinished();
+	Expect(!rasterContinuation.TakeNextPhaseIfReady().has_value(),
+		"farther generic work started before the opposite raster was prepared");
+	rasterContinuation.ResolveNearestSource(candidates[1].source.Key());
+	const auto rasterDistant = rasterContinuation.TakeNextPhaseIfReady();
+	Expect(rasterDistant.has_value() && rasterDistant->priority == 3 &&
+		!rasterDistant->plannerRequest.has_value(),
+		"distant raster prefetch required a JPEG/SVG planner request");
+}
+
+void TestDisplayPrefetchPlanningUsesConfiguredCapacity() {
+	jpegview_linux::CacheBudgetSnapshot budget;
+	budget.capacityBytes = 128u * 1024u * 1024u;
+	budget.retainedBytes = 48u * 1024u * 1024u;
+	budget.activeWorkingBytes = 256u * 1024u * 1024u;
+	budget.uploadStagingBytes = 8u * 1024u * 1024u;
+	budget.retainedBytes = budget.capacityBytes;
+	Expect(jpegview_linux::DisplayPrefetchPlanningBudgetBytes(budget) ==
+		budget.capacityBytes,
+		"a full cache of evictable entries incorrectly suppressed nearest-neighbor planning");
+	budget.capacityBytes = 0;
+	Expect(jpegview_linux::DisplayPrefetchPlanningBudgetBytes(budget) == 0,
+		"zero configured cache capacity admitted speculative planning");
+}
+
 void TestPendingDisplayUploadNavigationRetention() {
 	TemporaryDirectory temporary;
 	std::vector<jpegview_linux::SourceKey> sources;
@@ -1675,8 +1860,9 @@ void TestSvgNeighborPrefetchUsesTargetRendering() {
 		"retained SVG neighbor planning did not finish before its deadline");
 	const auto retained = planner.TakeReady();
 	Expect(retained.size() == 1 && retained.front().requests.empty() &&
+		retained.front().reusableRequests.size() == 2 &&
 		retained.front().protectedTextureKeys.size() == 2,
-		"SVG neighbors were redundantly prepared or lost nearest protection with a full budget");
+		"SVG neighbor residency was not returned for renderer-thread revalidation");
 #else
 	Expect(results.front().requests.empty() && results.front().dimensions.empty(),
 		"neighbor planning admitted SVG sources without the optional decoder");
@@ -1913,6 +2099,7 @@ void TestDisplayPrefetchUsesFittedResolution() {
 		fullBudgetResults.front().generation == fullBudgetGeneration &&
 		fullBudgetResults.front().requests.size() == 1 &&
 		fullBudgetResults.front().requests.front().key == neighbor.key &&
+		fullBudgetResults.front().reusableRequests.size() == 1 &&
 		fullBudgetResults.front().protectedTextureKeys.size() == 2 &&
 		std::find(fullBudgetResults.front().protectedTextureKeys.begin(),
 			fullBudgetResults.front().protectedTextureKeys.end(), secondRetained.key) !=
@@ -1938,6 +2125,7 @@ void TestDisplayPrefetchUsesFittedResolution() {
 		higherResolutionResults.front().generation == higherResolutionGeneration &&
 		higherResolutionResults.front().requests.size() == 1 &&
 		higherResolutionResults.front().requests.front().filename == secondFilename &&
+		higherResolutionResults.front().reusableRequests.size() == 1 &&
 		higherResolutionResults.front().protectedTextureKeys.size() == 2 &&
 		std::find(higherResolutionResults.front().protectedTextureKeys.begin(),
 			higherResolutionResults.front().protectedTextureKeys.end(),
@@ -1957,6 +2145,7 @@ void TestDisplayPrefetchUsesFittedResolution() {
 	Expect(zeroBudgetResults.size() == 1 &&
 		zeroBudgetResults.front().generation == zeroBudgetGeneration &&
 		zeroBudgetResults.front().requests.empty() &&
+		zeroBudgetResults.front().reusableRequests.size() == 1 &&
 		zeroBudgetResults.front().protectedTextureKeys.size() == 1 &&
 		zeroBudgetResults.front().protectedTextureKeys.front() == secondRetained.key,
 		"zero prepared-byte budget skipped protection for a retained nearest texture");
@@ -1971,6 +2160,7 @@ void TestDisplayPrefetchUsesFittedResolution() {
 	Expect(retainedResults.size() == 1 &&
 		retainedResults.front().generation == retainedGeneration &&
 		retainedResults.front().requests.empty() &&
+		retainedResults.front().reusableRequests.size() == 1 &&
 		retainedResults.front().protectedTextureKeys.size() == 1 &&
 		retainedResults.front().protectedTextureKeys.front() == neighbor.key &&
 		retainedResults.front().protectedTextureCacheKeys.size() == 1 &&
@@ -3027,6 +3217,8 @@ const TestCase kTests[] = {
 	{"perf-context-and-pending-input-diagnostics", &TestPerfContextAndPendingInputDiagnostics},
 	{"decoded-prefetch-work-class-attribution", &TestDecodedPrefetchWorkClassAttribution},
 	{"display-prefetch-planner-worker-snapshots-and-cancellation", &TestDisplayPrefetchPlannerWorkerSnapshotsAndCancellation},
+	{"display-prefetch-planner-nearest-continuation", &TestDisplayPrefetchPlannerNearestContinuation},
+	{"display-prefetch-planning-uses-configured-capacity", &TestDisplayPrefetchPlanningUsesConfiguredCapacity},
 	{"pending-display-upload-navigation-retention", &TestPendingDisplayUploadNavigationRetention},
 	{"svg-neighbor-prefetch-uses-target-rendering", &TestSvgNeighborPrefetchUsesTargetRendering},
 	{"display-resolution-request-canonicalization", &TestDisplayResolutionRequestCanonicalization},

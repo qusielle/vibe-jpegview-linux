@@ -20,6 +20,8 @@ struct CacheProtectionSnapshot {
 
 CacheProtectionTier CacheProtectionForWorkClass(PerfWorkClass workClass,
 	bool foreground = false);
+CacheProtectionTier DecodedPrefetchProtection(std::size_t requestPriority,
+	bool staticDisplayFramePrepared);
 void AddDecodedProtection(CacheProtectionSnapshot& snapshot, const SourceKey& source,
 	CacheProtectionTier protection);
 void AddPreparedProtection(CacheProtectionSnapshot& snapshot,
@@ -30,6 +32,21 @@ void AddDisplayRequestProtection(CacheProtectionSnapshot& snapshot,
 	const DisplayImageRequest& request, CacheProtectionTier protection);
 void AddMagnifyingGlassProtection(CacheProtectionSnapshot& snapshot,
 	const std::optional<DisplayImageRequest>& request);
+
+bool CacheAdmissionMayProgressAfterFailure(std::uint64_t attemptedRevision,
+	const CacheBudgetSnapshot& current, bool pendingRetirements);
+
+class CacheAdmissionRetryState {
+public:
+	bool MayEvict(std::uint64_t retainedCapacityRevision,
+		std::size_t availableBytes, std::size_t requestedBytes) const;
+	void RecordDeferred(std::uint64_t retainedCapacityRevision);
+	void Reset();
+
+private:
+	std::uint64_t lastAttemptRetainedCapacityRevision_ = 0;
+	bool attempted_ = false;
+};
 
 // Central retained-cache admission for renderer-thread work. Owners provide
 // one-victim-at-a-time eviction; callbacks run outside the budget mutex.
@@ -42,7 +59,7 @@ public:
 	CacheReservation Reserve(std::size_t bytes, CacheMemoryCategory category,
 		std::shared_ptr<const void> allocationOwner,
 		CacheProtectionTier incomingProtection, const EvictOne& evictOne,
-		bool mayEvict = true) const;
+		bool mayEvict = true, bool* evictedVictim = nullptr) const;
 
 private:
 	SharedCacheBudget& budget_;

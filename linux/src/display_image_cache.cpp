@@ -756,6 +756,7 @@ struct DisplayImageCache::Impl {
 		std::weak_ptr<const void> retiringOwner;
 		std::size_t retiringBytes = 0;
 		bool retiringDisplayImage = false;
+		bool retiringRetainedReservation = false;
 		bool retiring = false;
 		bool stopping = false;
 	};
@@ -1473,15 +1474,24 @@ struct DisplayImageCache::Impl {
 					}
 					QueueRetirement(std::move(image));
 					}
-					if (!stopping && foreground && stillCurrentForeground &&
-						work.epoch == epoch && workerFailure.Failed() &&
-						workerFailure.kind != WorkerFailureKind::Cancelled) {
+					const bool terminalNearestRequest = !stopping && !publish &&
+						effectiveWorkClass == PerfWorkClass::NearestNavigationNeighbor &&
+						work.epoch == epoch && desiredPrefetchKeys.find(
+							work.request.cacheKey) != desiredPrefetchKeys.end();
+					if (terminalNearestRequest || (!stopping && foreground &&
+						stillCurrentForeground && work.epoch == epoch &&
+						workerFailure.Failed() &&
+						workerFailure.kind != WorkerFailureKind::Cancelled)) {
 						failedCompletions.erase(std::remove_if(failedCompletions.begin(),
 							failedCompletions.end(), [&work](
 								const DisplayImageFailureInfo& failure) {
 								return failure.key == work.request.key;
-							}), failedCompletions.end());
+						}), failedCompletions.end());
 						if (failedCompletions.size() >= 8) failedCompletions.pop_front();
+						if (terminalNearestRequest && !workerFailure.Failed()) {
+							workerFailure = {WorkerFailureKind::ProcessingFailed,
+								"nearest display image was not retained"};
+						}
 						failedCompletions.push_back({work.request.cacheKey,
 							work.request.key, workerFailure, completionPriority,
 							effectiveWorkClass, selectionGeneration});
@@ -1552,12 +1562,18 @@ struct DisplayImageCache::Impl {
 					state->retiringOwner = image;
 					state->retiringBytes = image ? PreparedDisplayImageBytes(*image) : 0;
 					state->retiringDisplayImage = true;
+					const CacheMemoryCategory category = reservation.Category();
+					state->retiringRetainedReservation = reservation &&
+						(category == CacheMemoryCategory::RetainedDecodedPixels ||
+						 category == CacheMemoryCategory::RetainedPreparedFrames ||
+						 category == CacheMemoryCategory::RetainedImageTextures);
 				} else {
 					decoded = std::move(*readyDecoded);
 					state->retiredDecoded.erase(readyDecoded);
 					state->retiringOwner = decoded;
 					state->retiringBytes = 0;
 					state->retiringDisplayImage = false;
+					state->retiringRetainedReservation = false;
 				}
 				state->retiring = true;
 			}
@@ -1570,6 +1586,7 @@ struct DisplayImageCache::Impl {
 				state->retiring = false;
 				state->retiringBytes = 0;
 				state->retiringDisplayImage = false;
+				state->retiringRetainedReservation = false;
 			}
 		}
 	}
@@ -1804,16 +1821,17 @@ void DisplayImageCache::Request(const DisplayImageRequest& request) {
 }
 
 void DisplayImageCache::RequestBackground(const DisplayImageRequest& request) {
-	RequestBackgroundBatch({request});
+	(void)RequestBackgroundBatch({request});
 }
 
-void DisplayImageCache::RequestBackgroundBatch(
+std::vector<std::string> DisplayImageCache::RequestBackgroundBatch(
 	const std::vector<DisplayImageRequest>& requests) {
+	std::vector<std::string> rejectedKeys;
 	bool queuedWork = false;
 	bool wakeWorkers = false;
 	{
 		std::lock_guard<std::mutex> lock(impl_->mutex);
-		if (impl_->stopping) return;
+		if (impl_->stopping) return rejectedKeys;
 		const bool startableBefore = impl_->HasStartableWork();
 		const std::size_t reservedImagesBefore = impl_->speculativeReservedImages;
 		const std::size_t reservedBytesBefore = impl_->speculativeReservedBytes;
@@ -1823,7 +1841,10 @@ void DisplayImageCache::RequestBackgroundBatch(
 				request.autoContrast, request.processing, request.rotationQuarterTurns,
 				request.includeSpectrum,
 				request.fileBackedFormat == FileBackedDisplayFormat::Svg && !request.decoded) ||
-				request.key != SerializeCacheKey(request.cacheKey)) continue;
+				request.key != SerializeCacheKey(request.cacheKey)) {
+				if (!request.key.empty()) rejectedKeys.push_back(request.key);
+				continue;
+			}
 			const DisplayImageCacheKey& cacheKey = request.cacheKey;
 			DisplayImageRequest classifiedRequest = request;
 			if (!classifiedRequest.cancellation) {
@@ -1840,6 +1861,7 @@ void DisplayImageCache::RequestBackgroundBatch(
 			if (IsSpeculativeDisplayWork(false, classifiedRequest.workClass) &&
 				(!EstimateDisplayBytes(classifiedRequest, estimatedBytes) ||
 					estimatedBytes > DisplayImageCache::kMaximumSpeculativeCompletionBytes)) {
+				rejectedKeys.push_back(request.key);
 				continue;
 			}
 			impl_->pendingCachedCompletions.erase(cacheKey);
@@ -1932,6 +1954,7 @@ void DisplayImageCache::RequestBackgroundBatch(
 			(!startableBefore && impl_->HasStartableWork());
 	}
 	if (wakeWorkers) impl_->workAvailable.notify_all();
+	return rejectedKeys;
 }
 
 void DisplayImageCache::CancelBackground(const std::string& key) {
@@ -2406,6 +2429,19 @@ std::size_t DisplayImageCache::CachedBytes() const {
 std::size_t DisplayImageCache::CachedImages() const {
 	std::lock_guard<std::mutex> lock(impl_->mutex);
 	return impl_->entries.size();
+}
+
+bool DisplayImageCache::HasPendingRetainedRetirements() const {
+	std::lock_guard<std::mutex> lock(impl_->retirementState->mutex);
+	if (impl_->retirementState->retiringRetainedReservation) return true;
+	return std::any_of(impl_->retirementState->retired.begin(),
+		impl_->retirementState->retired.end(), [](const auto& retired) {
+			if (!retired.reservation) return false;
+			const CacheMemoryCategory category = retired.reservation.Category();
+			return category == CacheMemoryCategory::RetainedDecodedPixels ||
+				category == CacheMemoryCategory::RetainedPreparedFrames ||
+				category == CacheMemoryCategory::RetainedImageTextures;
+		});
 }
 
 DisplayImageCacheDiagnostics DisplayImageCache::GetDiagnostics() const {

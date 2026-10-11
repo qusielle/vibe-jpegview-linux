@@ -105,11 +105,20 @@ should normally be added to one of these focused modules and covered by the matc
   their explicit cleanup paths. Slideshow transitions borrow the same outgoing
   presentation when needed;
   canceling an owned transition transfers its standalone texture to the retained presentation.
-- `display_preparation_controller`: the display-prefetch planner lifetime, viewport and request-batch
-  generations, and a bounded channel of owned `DisplayImageRequest` completions. Worker callbacks
-  retain the channel and captured generation, never a raw display-cache pointer. Viewer drains the
-  channel on the event thread and submits requests to `DisplayImageCache`; explicit shutdown closes
-  the channel and joins the planner before renderer and cache teardown.
+- `display_preparation_controller` and `display_prefetch_planner`: the display-prefetch planner
+  lifetime, viewport and request-batch generations, nearest, secondary, and distant planning phases,
+  and a bounded channel of owned `DisplayImageRequest` completions. The nearest phase submits only the
+  direction-preferred immediate candidate. Its thread-safe continuation waits until that representation
+  is reusable or reaches a terminal failure or skip outcome, including speculative admission rejection,
+  then admits the opposite immediate neighbor, and only then distant JPEG/SVG metadata reads and generic
+  raster decodes. Decoded-cache pressure reports a terminal skip for a canceled immediate neighbor
+  while discarding farther work, and duplicate renderer uploads do not resolve the surviving logical
+  request. Planning uses the configured retained-cache capacity; priority-aware cache admission handles
+  eviction when lower-priority entries occupy that capacity. Cancellation drops saved later phases.
+  Worker callbacks retain the owned batch snapshot and continuation state, never a raw viewer or
+  display-cache pointer. Viewer drains the channel on the event thread and submits requests to
+  `DisplayImageCache`; explicit shutdown closes the channel and joins the planner before renderer and
+  cache teardown.
 - `presentation_controller`: presentation and held-navigation readiness layered over
   `DoublePagePresentationModel`. It evaluates one `PresentationReadinessSnapshot` into separate
   decisions for drawing the committed image, releasing its retained fallback, drawing a complete
@@ -365,8 +374,9 @@ should normally be added to one of these focused modules and covered by the matc
   single-page fallback. Neighbor
   planning uses a separate fitted snapshot, preserving normal fitted frames while the selected image
   is in actual-size, manual, or fit-relative zoom. The planner caps its
-  source-probe window at 512 candidates, sums each fitted request's estimated frame bytes, and stops
-  admission at the shared cache capacity after reserving the current source-resolution image. Window
+  source-probe window at 512 candidates, sums each fitted request's estimated frame bytes, and plans
+  against the configured retained-cache capacity; priority-aware admission evicts lower-priority
+  entries when needed. Window
   and thumbnail-panel resizing update geometry immediately but hold neighbor rebuilding until the
   existing interaction quiet period expires. Active display-work diagnostics use each in-flight request's
   current priority and effective work class, so a promoted neighbor keeps its active-spread upload
@@ -379,8 +389,24 @@ should normally be added to one of these focused modules and covered by the matc
   per-file processing snapshots. `display_prefetch_planner` probes missing JPEG and SVG/SVGZ dimensions
   and builds requests on a worker. SVG neighbors use file-backed vector requests with the same keys
   as selected display preparation, bypassing intrinsic pixel decoding in generic neighbor prefetch.
-  Their fitted targets may exceed intrinsic dimensions and retain the shared prepared-frame budget,
-  nearest-neighbor priority, and backing-source admission. The captured request also carries whether
+  The direction-preferred immediate candidate is planned alone; only after its display texture is
+  ready or its request is terminal does the viewer admit the opposite immediate candidate, followed by
+  distant JPEG/SVG planning and generic-raster decode prefetch. This prevents a slow opposite header or
+  distant raster read from delaying the image the user is most likely to open next. Planner estimates
+  use the configured retained-cache capacity, while priority-aware admission handles eviction of
+  lower-priority retained entries. When a neighbor cannot fit alongside pinned content and no retired
+  allocation can return capacity, the renderer reports a terminal skip so later phases can proceed;
+  it retries while an actual retirement is pending. A static decoded neighbor remains protected until
+  its display frame is prepared; after that, its full-source decode yields to the prepared frame and
+  renderer texture in shared-cache admission. Compatible immediate-neighbor textures and uploads stay
+  protected while the first phase runs, while obsolete geometry or processing variants remain evictable.
+  Planner snapshots of reusable textures
+  are hints only: the renderer thread rechecks live texture and upload residency before resolving a
+  source, and requests preparation again if the captured representation was evicted. A pending upload
+  remains unresolved until final texture publication or a terminal upload outcome. Fitted targets
+  may exceed intrinsic dimensions and retain the shared prepared-frame budget, nearest-neighbor
+  priority, and backing-source admission.
+  The captured request also carries whether
   the information overlay's histogram is visible; that flag reaches decoded and file-backed neighbor
   requests and participates in snapshot validation, so the selected image can reuse the matching
   source-spectrum representation. Histogram-bearing JPEG preparation uses full-source pixels.

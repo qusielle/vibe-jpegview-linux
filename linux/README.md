@@ -55,17 +55,30 @@ they support.
    needs more pixels, its foreground request prepares them after selection. With the optional histogram
    visible, a worker uses full-source pixels once to preserve its values, then retains the result with
    the display frame. Up to four hardware-aware, low-priority workers prepare
-   nearby images concurrently. A bounded planner estimates each fitted frame's bytes and admits the
-   nearest requests within the shared cache budget after reserving the selected source-resolution frame;
-   this avoids sizing every neighbor from the selected image's zoom. SVG/SVGZ neighbors render directly
-   at their fitted sizes without retaining intrinsic source rasters for speculative preparation.
+   nearby images concurrently. A bounded planner estimates each fitted frame's bytes and plans within
+   the configured retained-cache capacity. Priority-aware admission can evict lower-priority entries
+   when the cache is full. This avoids sizing every neighbor from the selected image's zoom. SVG/SVGZ
+   neighbors render directly at their fitted sizes without retaining intrinsic source rasters for
+   speculative preparation.
    Large JPEG input is memory-mapped,
    letting native decoding and repeated neighboring access use the kernel page cache without an extra
    stdio copy layer. Prepared frames are then uploaded incrementally and retained as renderer-ready
    textures. The closest next and previous files take
-   preparation and upload priority, and an already prepared static image is presented without first
-   copying its full decoded pixels on the UI thread; navigation therefore avoids CPU resizing and
-   normally avoids texture upload as well. Selecting a compatible cached texture for a single-frame
+   preparation and upload priority. The direction-preferred immediate neighbor is prepared first;
+   the opposite immediate neighbor gets the next phase, followed by farther work. Compatible ready
+   representations for both immediate neighbors stay protected during this sequence; obsolete size or
+   processing variants remain evictable. Once a static neighbor's
+   display frame is prepared, its full-source decode can yield shared-cache space to the renderer
+   texture. An already prepared static image is presented without first copying its full decoded pixels
+   on the UI thread; navigation therefore avoids CPU resizing and normally avoids texture upload as
+   well. Planner snapshots are checked against current renderer residency before a neighbor is marked
+   ready; a queued or partly uploaded texture remains pending until its final texture is published.
+   Later planning reserves
+   room for representations already admitted in earlier phases. A neighbor that cannot fit alongside
+   pinned textures is skipped when no pending retirement can return room, allowing smaller neighbors
+   to proceed. Failed preparations also release later planning without claiming a texture is ready. A
+   slow opposite or faraway source therefore cannot hold up the first neighbor. Selecting a compatible
+   cached texture for a single-frame
    image, including JPEG, can also skip source decoding after its decoded pixels have been evicted;
    animated images keep their frame-aware loading path. In-progress uploads for the selected image
    and its two closest neighbors survive navigation; selecting one promotes its existing pixels and upload

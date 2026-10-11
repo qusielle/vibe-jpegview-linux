@@ -197,6 +197,58 @@ struct DecodedImageCache::Impl {
 		desiredWork[inserted->key] = *inserted;
 	}
 
+	void NotifyNearestCancellation(const Work& work) {
+		const WorkerFailure cancellation{WorkerFailureKind::Cancelled,
+			"nearest decoded image was skipped after cache retention failed"};
+		bool delivered = false;
+		const auto recordCallbackFailure = [this](const char* message) {
+			std::lock_guard<std::mutex> lock(mutex);
+			lastWorkerFailure = {WorkerFailureKind::Exception, message};
+		};
+		if (work.completion) {
+			try {
+				delivered = true;
+				work.completion(work.filename, {});
+			} catch (const std::exception& error) {
+				recordCallbackFailure(error.what());
+			} catch (...) {
+				recordCallbackFailure("unknown canceled-decode completion failure");
+			}
+		}
+		if (work.detailedCompletion) {
+			try {
+				delivered = true;
+				work.detailedCompletion(work.source, {}, cancellation);
+			} catch (const std::exception& error) {
+				recordCallbackFailure(error.what());
+			} catch (...) {
+				recordCallbackFailure("unknown canceled-decode detailed completion failure");
+			}
+		}
+		for (const DetailedCompletion& observer : work.observerCompletions) {
+			if (!observer) continue;
+			try {
+				delivered = true;
+				observer(work.source, {}, cancellation);
+			} catch (const std::exception& error) {
+				recordCallbackFailure(error.what());
+			} catch (...) {
+				recordCallbackFailure("unknown canceled-decode observer failure");
+			}
+		}
+		if (work.dimensionsCompletion) {
+			try {
+				delivered = true;
+				work.dimensionsCompletion(work.filename, false, 0, 0);
+			} catch (const std::exception& error) {
+				recordCallbackFailure(error.what());
+			} catch (...) {
+				recordCallbackFailure("unknown canceled-dimensions completion failure");
+			}
+		}
+		if (delivered) UiCompletionWakeup().Notify();
+	}
+
 	static std::size_t TierIndex(CacheProtectionTier tier) {
 		return static_cast<std::size_t>(tier);
 	}
@@ -567,6 +619,7 @@ struct DecodedImageCache::Impl {
 			DimensionsCompletion dimensionsCompletion;
 			PerfWorkClass effectiveWorkClass = work.workClass;
 			bool retryQueued = false;
+			std::vector<Work> cancelledNearest;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				if (sourceChanged) {
@@ -632,15 +685,23 @@ struct DecodedImageCache::Impl {
 							}
 							RecordQueuedCancellation(queued->workClass,
 								PerfExecution::WorkerThread);
+							const bool notifyNearest = queued->workClass ==
+								PerfWorkClass::NearestNavigationNeighbor;
 							if (queued->cancellation) queued->cancellation->store(true);
-							queuedKeys.erase(queued->key);
-							const auto desiredQueued = desiredWork.find(queued->key);
+							const DecodedImageWorkKey canceledKey = queued->key;
+							const std::uint64_t canceledGeneration = queued->generation;
+							const SourceKey canceledSource = queued->source.Key();
+							Work canceled;
+							if (notifyNearest) canceled = std::move(*queued);
+							queuedKeys.erase(canceledKey);
+							const auto desiredQueued = desiredWork.find(canceledKey);
 							if (desiredQueued != desiredWork.end() &&
-								desiredQueued->second.generation == queued->generation &&
-								desiredQueued->second.source.Key() == queued->source.Key()) {
+								desiredQueued->second.generation == canceledGeneration &&
+								desiredQueued->second.source.Key() == canceledSource) {
 								desiredWork.erase(desiredQueued);
 							}
 							queued = queue.erase(queued);
+							if (notifyNearest) cancelledNearest.push_back(std::move(canceled));
 						}
 					}
 					completedImage = image;
@@ -659,6 +720,9 @@ struct DecodedImageCache::Impl {
 				idle.notify_all();
 			}
 			if (retryQueued) workAvailable.notify_one();
+			for (const Work& cancelled : cancelledNearest) {
+				NotifyNearestCancellation(cancelled);
+			}
 			bool deliveredCompletion = false;
 			try {
 				if (completion) {

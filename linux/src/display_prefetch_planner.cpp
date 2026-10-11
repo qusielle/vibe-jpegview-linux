@@ -18,6 +18,43 @@
 #include <utility>
 
 namespace jpegview_linux {
+
+std::optional<DisplayImageRequest> MakeFittedDisplayPrefetchRequest(
+	const DisplayPrefetchCandidate& candidate,
+	const DisplayPrefetchPlannerRequest& request,
+	int sourceWidth, int sourceHeight) {
+	if (sourceWidth <= 0 || sourceHeight <= 0 || request.imageAreaWidth <= 0 ||
+		request.imageAreaHeight <= 0) return std::nullopt;
+	ViewportSnapshot fittedViewport = request.viewport;
+	fittedViewport.fitToWindow = true;
+	fittedViewport.zoom = 1.0;
+	fittedViewport.relativeZoom = 1.0;
+	Viewport viewport;
+	viewport.Restore(fittedViewport, sourceWidth, sourceHeight,
+		request.imageAreaWidth, request.imageAreaHeight);
+	const ViewportRect target = viewport.Destination(sourceWidth, sourceHeight,
+		request.imageAreaWidth, request.imageAreaHeight);
+	const bool svg = IsSvgPath(candidate.filename);
+	const DisplayImageTarget resolution = svg ?
+		BoundSvgDisplayTarget(target.width, target.height) :
+		ClampDisplayImageTarget(sourceWidth, sourceHeight,
+			target.width, target.height);
+	DisplayImageRequest displayRequest = candidate.jpeg ?
+		MakeJpegDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
+			resolution.width, resolution.height, candidate.autoContrast,
+			candidate.priority, candidate.processing, 0, request.includeSpectrum) : svg ?
+		MakeSvgDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
+			resolution.width, resolution.height, candidate.autoContrast,
+			candidate.priority, candidate.processing, 0, request.includeSpectrum) :
+		MakeRasterDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
+			resolution.width, resolution.height, candidate.autoContrast,
+			candidate.priority, candidate.processing, 0, request.includeSpectrum);
+	displayRequest.workClass = candidate.priority <= 2 ?
+		PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
+	if (!displayRequest.Valid()) return std::nullopt;
+	return displayRequest;
+}
+
 namespace {
 
 DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
@@ -36,6 +73,7 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 	result.includeSpectrum = request.includeSpectrum;
 	const std::size_t count = std::min(request.maximumCount, request.neighbors.size());
 	result.requests.reserve(count);
+	result.reusableRequests.reserve(count);
 	result.protectedTextureKeys.reserve(count);
 	result.protectedTextureCacheKeys.reserve(count);
 	result.dimensions.reserve(count);
@@ -89,28 +127,10 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 		result.dimensions.push_back({candidate.index, candidate.source.Key(),
 			sourceWidth, sourceHeight});
 
-		Viewport viewport;
-		ViewportSnapshot fittedViewport = request.viewport;
-		fittedViewport.fitToWindow = true;
-		fittedViewport.zoom = 1.0;
-		fittedViewport.relativeZoom = 1.0;
-		viewport.Restore(fittedViewport, sourceWidth, sourceHeight,
-			request.imageAreaWidth, request.imageAreaHeight);
-		const ViewportRect target = viewport.Destination(sourceWidth, sourceHeight,
-			request.imageAreaWidth, request.imageAreaHeight);
-		const DisplayImageTarget resolution = svg ?
-			BoundSvgDisplayTarget(target.width, target.height) :
-			ClampDisplayImageTarget(sourceWidth, sourceHeight, target.width, target.height);
-		DisplayImageRequest displayRequest = svg ?
-			MakeSvgDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
-				resolution.width, resolution.height, candidate.autoContrast,
-				candidate.priority, candidate.processing, 0, request.includeSpectrum) :
-			MakeJpegDisplayImageRequest(candidate.source, sourceWidth, sourceHeight,
-				resolution.width, resolution.height, candidate.autoContrast,
-				candidate.priority, candidate.processing, 0, request.includeSpectrum);
-		displayRequest.workClass = candidate.priority <= 2 ?
-			PerfWorkClass::NearestNavigationNeighbor : PerfWorkClass::DistantSpeculation;
-		if (!displayRequest.Valid()) continue;
+		std::optional<DisplayImageRequest> fittedRequest =
+			MakeFittedDisplayPrefetchRequest(candidate, request, sourceWidth, sourceHeight);
+		if (!fittedRequest.has_value()) continue;
+		DisplayImageRequest displayRequest = std::move(*fittedRequest);
 		const RetainedDisplayTexture* retainedTexture =
 			FindReusableRetainedDisplayTexture(displayRequest.cacheKey,
 				request.retainedTextures);
@@ -119,6 +139,9 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 				result.protectedTextureKeys.push_back(retainedTexture->key);
 				result.protectedTextureCacheKeys.push_back(retainedTexture->cacheKey);
 			}
+			// This renderer-thread snapshot may be stale by the time planning
+			// completes, so ask the owner to verify residency before resolving it.
+			result.reusableRequests.push_back(std::move(displayRequest));
 			continue;
 		}
 		if (!admissionBudgetAvailable) continue;
@@ -147,6 +170,178 @@ DisplayPrefetchPlannerResult Plan(const DisplayPrefetchPlannerRequest& request,
 }
 
 } // namespace
+
+std::size_t DisplayPrefetchPlanningBudgetBytes(const CacheBudgetSnapshot& budget) {
+	// Retained entries can be evicted by priority-aware admission. Planning
+	// against only currently free bytes would prevent the nearest request from
+	// ever reaching that admission path when the cache is full.
+	return budget.capacityBytes;
+}
+
+DisplayPrefetchPlannerPhases SplitDisplayPrefetchPlannerRequest(
+	const DisplayPrefetchPlannerRequest& request, std::size_t nearestCount) {
+	DisplayPrefetchPlannerPhases phases;
+	phases.nearest = request;
+	phases.nearest.neighbors.clear();
+	phases.nearest.maximumCount = 0;
+	phases.secondary = request;
+	phases.secondary.neighbors.clear();
+	phases.secondary.maximumCount = 0;
+	DisplayPrefetchPlannerRequest distant = request;
+	distant.neighbors.clear();
+	distant.maximumCount = 0;
+	for (const DisplayPrefetchCandidate& candidate : request.neighbors) {
+		if (candidate.priority <= nearestCount) {
+			phases.nearest.neighbors.push_back(candidate);
+		} else if (candidate.priority == nearestCount + 1) {
+			phases.secondary.neighbors.push_back(candidate);
+		} else {
+			distant.neighbors.push_back(candidate);
+		}
+	}
+	phases.nearest.maximumCount = phases.nearest.neighbors.size();
+	phases.secondary.maximumCount = phases.secondary.neighbors.size();
+	distant.maximumCount = distant.neighbors.size();
+	if (phases.secondary.neighbors.empty()) phases.secondary.maximumCount = 0;
+	if (!distant.neighbors.empty()) phases.distant = std::move(distant);
+	return phases;
+}
+
+DisplayPrefetchContinuation::DisplayPrefetchContinuation(
+	std::vector<SourceKey> nearestSources,
+	std::vector<SourceKey> secondarySources,
+	std::optional<DisplayPrefetchPlannerRequest> secondaryRequest,
+	std::optional<DisplayPrefetchPlannerRequest> distantRequest,
+	std::size_t maximumPreparedBytes, bool nearestPlannerPending,
+	bool distantWorkPending)
+	: secondarySources_(std::move(secondarySources)),
+	  secondaryRequest_(std::move(secondaryRequest)),
+	  distantRequest_(std::move(distantRequest)),
+	  maximumPreparedBytes_(maximumPreparedBytes),
+	  remainingPreparedBytes_(maximumPreparedBytes),
+	  nearestPlannerPending_(nearestPlannerPending),
+	  distantWorkPending_(distantWorkPending) {
+	for (SourceKey& source : nearestSources) {
+		if (source.Valid()) nearestSources_.insert(std::move(source));
+	}
+	secondarySources_.erase(std::remove_if(secondarySources_.begin(),
+		secondarySources_.end(), [](const SourceKey& source) {
+			return !source.Valid();
+		}), secondarySources_.end());
+}
+
+void DisplayPrefetchContinuation::TrackNearestRequest(
+	const DisplayImageRequest& request) {
+	TrackNearestRequest(request, request.key);
+}
+
+void DisplayPrefetchContinuation::TrackNearestRequest(
+	const DisplayImageRequest& request, const std::string& completionKey) {
+	if (completionKey.empty() || !request.source.Valid()) return;
+	std::size_t preparedBytes = 0;
+	if (!EstimateDisplayImageBytes(request, preparedBytes)) preparedBytes = 0;
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (canceled_ || nearestSources_.find(request.source.Key()) == nearestSources_.end() ||
+		nearestRequests_.find(completionKey) != nearestRequests_.end()) return;
+	const std::size_t reservedBytes = std::min(remainingPreparedBytes_, preparedBytes);
+	remainingPreparedBytes_ -= reservedBytes;
+	nearestRequests_.emplace(completionKey,
+		RequestReservation{request.source.Key(), reservedBytes});
+}
+
+void DisplayPrefetchContinuation::ResolveNearestSource(const SourceKey& source) {
+	bool changed = false;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (canceled_) return;
+		changed = nearestSources_.erase(source) != 0;
+		for (auto request = nearestRequests_.begin(); request != nearestRequests_.end();) {
+			if (request->second.source != source) {
+				++request;
+				continue;
+			}
+			const std::size_t available = maximumPreparedBytes_ -
+				std::min(maximumPreparedBytes_, remainingPreparedBytes_);
+			remainingPreparedBytes_ += std::min(available,
+				request->second.preparedBytes);
+			request = nearestRequests_.erase(request);
+			changed = true;
+		}
+	}
+	if (changed) UiCompletionWakeup().Notify();
+}
+
+void DisplayPrefetchContinuation::ResolveNearestRequest(
+	const std::string& requestKey, bool retained) {
+	bool changed = false;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (canceled_) return;
+		const auto request = nearestRequests_.find(requestKey);
+		if (request == nearestRequests_.end()) return;
+		nearestSources_.erase(request->second.source);
+		if (!retained) {
+			const std::size_t available = maximumPreparedBytes_ -
+				std::min(maximumPreparedBytes_, remainingPreparedBytes_);
+			remainingPreparedBytes_ += std::min(available,
+				request->second.preparedBytes);
+		}
+		nearestRequests_.erase(request);
+		changed = true;
+	}
+	if (changed) UiCompletionWakeup().Notify();
+}
+
+void DisplayPrefetchContinuation::MarkNearestPlannerFinished() {
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (canceled_ || !nearestPlannerPending_) return;
+		nearestPlannerPending_ = false;
+	}
+	UiCompletionWakeup().Notify();
+}
+
+std::optional<DisplayPrefetchContinuationPhase>
+DisplayPrefetchContinuation::TakeNextPhaseIfReady() {
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (canceled_ || nearestPlannerPending_ || !nearestSources_.empty()) {
+		return std::nullopt;
+	}
+	if (!secondaryPhaseStarted_) {
+		secondaryPhaseStarted_ = true;
+		for (const SourceKey& source : secondarySources_) {
+			nearestSources_.insert(source);
+		}
+		secondarySources_.clear();
+		nearestPlannerPending_ = secondaryRequest_.has_value();
+		std::optional<DisplayPrefetchPlannerRequest> request =
+			std::move(secondaryRequest_);
+		secondaryRequest_.reset();
+		if (request.has_value()) request->maximumPreparedBytes = remainingPreparedBytes_;
+		if (!nearestSources_.empty() || nearestPlannerPending_) {
+			return DisplayPrefetchContinuationPhase{2, std::move(request)};
+		}
+	}
+	if (nearestPlannerPending_ || !nearestSources_.empty() || distantPhaseStarted_ ||
+		!distantWorkPending_) return std::nullopt;
+	distantPhaseStarted_ = true;
+	distantWorkPending_ = false;
+	std::optional<DisplayPrefetchPlannerRequest> request = std::move(distantRequest_);
+	distantRequest_.reset();
+	if (request.has_value()) request->maximumPreparedBytes = remainingPreparedBytes_;
+	return DisplayPrefetchContinuationPhase{3, std::move(request)};
+}
+
+void DisplayPrefetchContinuation::Cancel() {
+	std::lock_guard<std::mutex> lock(mutex_);
+	canceled_ = true;
+	secondarySources_.clear();
+	secondaryRequest_.reset();
+	distantRequest_.reset();
+	distantWorkPending_ = false;
+	nearestSources_.clear();
+	nearestRequests_.clear();
+}
 
 const RetainedDisplayTexture* FindReusableRetainedDisplayTexture(
 	const DisplayImageCacheKey& requested,
@@ -258,6 +453,7 @@ struct DisplayPrefetchPlannerWorker::Impl {
 			} catch (const std::exception& error) {
 				result.failure = {WorkerFailureKind::Exception, error.what()};
 				result.requests.clear();
+				result.reusableRequests.clear();
 				result.protectedTextureKeys.clear();
 				result.protectedTextureCacheKeys.clear();
 				result.dimensions.clear();
@@ -270,6 +466,7 @@ struct DisplayPrefetchPlannerWorker::Impl {
 				result.failure = {WorkerFailureKind::Exception,
 					"unknown display prefetch planning failure"};
 				result.requests.clear();
+				result.reusableRequests.clear();
 				result.protectedTextureKeys.clear();
 				result.protectedTextureCacheKeys.clear();
 				result.dimensions.clear();

@@ -11,8 +11,11 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace jpegview_linux {
@@ -84,6 +87,75 @@ struct DisplayPrefetchPlannerRequest {
 	std::vector<RetainedDisplayTexture> retainedTextures;
 };
 
+// Build the exact fitted display request used by planning. The viewer also uses
+// it to protect only existing neighbor representations that can satisfy the plan.
+std::optional<DisplayImageRequest> MakeFittedDisplayPrefetchRequest(
+	const DisplayPrefetchCandidate& candidate,
+	const DisplayPrefetchPlannerRequest& request,
+	int sourceWidth, int sourceHeight);
+
+struct DisplayPrefetchPlannerPhases {
+	DisplayPrefetchPlannerRequest nearest;
+	DisplayPrefetchPlannerRequest secondary;
+	std::optional<DisplayPrefetchPlannerRequest> distant;
+};
+
+// Planning may use the configured retained-cache capacity; actual admission
+// evicts lower-priority entries and is still enforced by the shared budget.
+std::size_t DisplayPrefetchPlanningBudgetBytes(const CacheBudgetSnapshot& budget);
+
+// Plan only the direction-preferred immediate neighbor first. The other
+// immediate neighbor and farther sources wait for separate later phases.
+DisplayPrefetchPlannerPhases SplitDisplayPrefetchPlannerRequest(
+	const DisplayPrefetchPlannerRequest& request, std::size_t nearestCount = 1);
+
+struct DisplayPrefetchContinuationPhase {
+	std::size_t priority = 0;
+	std::optional<DisplayPrefetchPlannerRequest> plannerRequest;
+};
+
+// The viewer acknowledges sources as display requests are published or
+// skipped. A later phase starts only after every source in the current phase
+// reaches a terminal state.
+class DisplayPrefetchContinuation {
+public:
+	DisplayPrefetchContinuation(std::vector<SourceKey> nearestSources,
+		std::vector<SourceKey> secondarySources,
+		std::optional<DisplayPrefetchPlannerRequest> secondaryRequest,
+		std::optional<DisplayPrefetchPlannerRequest> distantRequest,
+		std::size_t maximumPreparedBytes, bool nearestPlannerPending,
+		bool distantWorkPending);
+
+	void TrackNearestRequest(const DisplayImageRequest& request);
+	void TrackNearestRequest(const DisplayImageRequest& request,
+		const std::string& completionKey);
+	void ResolveNearestSource(const SourceKey& source);
+	void ResolveNearestRequest(const std::string& requestKey, bool retained);
+	void MarkNearestPlannerFinished();
+	std::optional<DisplayPrefetchContinuationPhase> TakeNextPhaseIfReady();
+	void Cancel();
+
+private:
+	struct RequestReservation {
+		SourceKey source;
+		std::size_t preparedBytes = 0;
+	};
+
+	std::mutex mutex_;
+	std::unordered_set<SourceKey, SourceKeyHash> nearestSources_;
+	std::unordered_map<std::string, RequestReservation> nearestRequests_;
+	std::vector<SourceKey> secondarySources_;
+	std::optional<DisplayPrefetchPlannerRequest> secondaryRequest_;
+	std::optional<DisplayPrefetchPlannerRequest> distantRequest_;
+	std::size_t maximumPreparedBytes_ = 0;
+	std::size_t remainingPreparedBytes_ = 0;
+	bool nearestPlannerPending_ = false;
+	bool secondaryPhaseStarted_ = false;
+	bool distantPhaseStarted_ = false;
+	bool distantWorkPending_ = false;
+	bool canceled_ = false;
+};
+
 struct DisplayPrefetchPlannedDimensions {
 	std::size_t index = 0;
 	SourceKey source;
@@ -104,6 +176,9 @@ struct DisplayPrefetchPlannerResult {
 	int imageAreaHeight = 0;
 	bool includeSpectrum = false;
 	std::vector<DisplayImageRequest> requests;
+	// A matching texture existed when the worker captured its snapshot. The
+	// renderer thread must revalidate these before deciding that the source is ready.
+	std::vector<DisplayImageRequest> reusableRequests;
 	std::vector<std::string> protectedTextureKeys;
 	std::vector<DisplayImageCacheKey> protectedTextureCacheKeys;
 	std::vector<DisplayPrefetchPlannedDimensions> dimensions;

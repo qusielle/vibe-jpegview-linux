@@ -502,6 +502,7 @@ public:
 			UpdateInteractionWorkPolicy();
 			TickRendererTextureRetirement();
 			TickDisplayTexturePreload();
+			StartNextDisplayPrefetchPhaseIfReady();
 			TickThumbnailPreload(heldNavigation_.Scancode() < 0 &&
 				!displayImageCache_.HasPendingWork());
 			const fs::path selectedBeforeHeldNavigation = fileList_.Current();
@@ -683,6 +684,7 @@ private:
 		int imageAreaHeight = 0;
 		bool includeSpectrum = false;
 		std::size_t currentIndex = 0;
+		int preferredDirection = 0;
 		std::size_t pageCount = 0;
 		jpegview_linux::DoublePageModeState doublePageMode;
 		std::optional<jpegview_linux::PageDimensions> currentPageDimensions;
@@ -691,12 +693,19 @@ private:
 	struct DisplayPrefetchBatch {
 		std::mutex mutex;
 		std::uint64_t generation = 0;
+		std::uint64_t initialPlannerGeneration = 0;
+		std::uint64_t secondaryPlannerGeneration = 0;
+		std::uint64_t distantPlannerGeneration = 0;
 		std::shared_ptr<jpegview_linux::DisplayPreparationRequestChannel> completionChannel;
+		std::shared_ptr<jpegview_linux::DisplayPrefetchContinuation> continuation;
+		jpegview_linux::DecodedImageCache::Completion decodedPrefetchCompletion;
 		jpegview_linux::DisplayPrefetchBatchOwner owner =
 			jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner;
 		jpegview_linux::WorkBatchGate gate;
 		std::unordered_map<std::string, jpegview_linux::PageDimensions> decodedPageDimensions;
 		bool pageDimensionsChanged = false;
+		std::unordered_set<jpegview_linux::SourceKey,
+			jpegview_linux::SourceKeyHash> staticDisplaySourcesPrepared;
 		std::unordered_map<std::string, std::pair<jpegview_linux::SourceKey,
 			jpegview_linux::DecodedImageCache::ImagePtr>> decodedImages;
 		std::unordered_set<std::string> failedDecodeFilenames;
@@ -738,8 +747,7 @@ private:
 	struct PendingTextureUpload {
 		jpegview_linux::DisplayImageCache::ImagePtr image;
 		jpegview_linux::DisplayUploadPriority priority;
-		std::uint64_t lastAttemptRetainedCapacityRevision = 0;
-		bool attempted = false;
+		jpegview_linux::CacheAdmissionRetryState admissionRetry;
 		bool uploadStaged = false;
 		std::uint64_t selectionGeneration = 0;
 		SDL_Texture* incompleteTexture = nullptr;
@@ -750,6 +758,12 @@ private:
 		bool textureActiveWorking = false;
 		bool countsTowardSpeculativeLimit = false;
 		bool thumbnailQueued = false;
+	};
+
+	struct ReusableDisplayRepresentation {
+		jpegview_linux::RetainedDisplayTexture texture;
+		bool sourceIsStatic = false;
+		PendingTextureUpload* pendingUpload = nullptr;
 	};
 
 	struct TransitionFrame {
@@ -1322,8 +1336,6 @@ private:
 		PendingTextureUpload pending;
 		pending.image = prepared;
 		pending.priority = {request.workClass, request.priority};
-		pending.lastAttemptRetainedCapacityRevision =
-			cacheBudget_->RetainedCapacityRevision();
 		pending.selectionGeneration = request.selectionGeneration;
 		QueuePendingTextureUpload(std::move(pending));
 	}
@@ -1549,8 +1561,6 @@ private:
 		PendingTextureUpload pending;
 		pending.image = prepared;
 		pending.priority = {request->workClass, request->priority};
-		pending.lastAttemptRetainedCapacityRevision =
-			cacheBudget_->RetainedCapacityRevision();
 		pending.selectionGeneration = generation;
 		QueuePendingTextureUpload(std::move(pending));
 	}
@@ -1813,9 +1823,10 @@ private:
 			for (const auto& source : batch->sourceByFilename) {
 				const auto priority = batch->priorityByFilename.find(source.first);
 				if (priority == batch->priorityByFilename.end()) continue;
-				decodedCandidates.emplace_back(source.second.Key(), priority->second <= 2 ?
-					jpegview_linux::CacheProtectionTier::Neighbor :
-					jpegview_linux::CacheProtectionTier::DistantSpeculation);
+				decodedCandidates.emplace_back(source.second.Key(),
+					jpegview_linux::DecodedPrefetchProtection(priority->second,
+						batch->staticDisplaySourcesPrepared.find(source.second.Key()) !=
+							batch->staticDisplaySourcesPrepared.end()));
 			}
 			for (const jpegview_linux::DisplayImageCacheKey& key :
 				batch->protectedTextureCacheKeys) {
@@ -1834,7 +1845,34 @@ private:
 	void TickDisplayPrefetchPlanner() {
 		for (jpegview_linux::DisplayPrefetchPlannerResult& result :
 			displayPreparationController_.TakePlanResults()) {
-			if (result.failure.Failed() || fileList_.Empty() || clipboardMode_) continue;
+			const std::shared_ptr<DisplayPrefetchBatch> batch = displayPrefetchBatch_;
+			const bool initialPlan = batch &&
+				result.generation == batch->initialPlannerGeneration;
+			const bool secondaryPlan = batch &&
+				result.generation == batch->secondaryPlannerGeneration;
+			const bool distantPlan = batch &&
+				result.generation == batch->distantPlannerGeneration;
+			const bool currentBatchPlan = initialPlan || secondaryPlan || distantPlan;
+			const std::size_t currentNearestPriority = secondaryPlan ? 2 : 1;
+			if (result.failure.Failed()) {
+				if ((initialPlan || secondaryPlan) && batch->continuation) {
+					for (const auto& source : batch->sourceByFilename) {
+						const auto priority = batch->priorityByFilename.find(source.first);
+						if (priority != batch->priorityByFilename.end() &&
+							priority->second == currentNearestPriority &&
+							(jpegview_linux::IsJpegPath(source.first) ||
+							 jpegview_linux::IsSvgPath(source.first))) {
+							batch->continuation->ResolveNearestSource(source.second.Key());
+						}
+					}
+					batch->continuation->MarkNearestPlannerFinished();
+				}
+				continue;
+			}
+			if (fileList_.Empty() || clipboardMode_) {
+				if (currentBatchPlan && batch->continuation) batch->continuation->Cancel();
+				continue;
+			}
 			const SDL_Rect imageArea = ImageAreaRect();
 			if (!jpegview_linux::MatchesDisplayPrefetchSnapshot(result,
 				displayPreparationController_.ActivePlanGeneration(),
@@ -1844,7 +1882,13 @@ private:
 				viewport_.PrefetchSnapshot(), imageArea.w, imageArea.h,
 				runtimeSettings_.Values().showHistogram &&
 					runtimeSettings_.Values().infoVisible) ||
-				CurrentInteractionWorkPlan().cancelQueuedSpeculation) continue;
+				CurrentInteractionWorkPlan().cancelQueuedSpeculation) {
+				if (currentBatchPlan) {
+					if (batch->continuation) batch->continuation->Cancel();
+					prefetchRefreshNeeded_ = true;
+				}
+				continue;
+			}
 			for (const jpegview_linux::DisplayPrefetchPlannedDimensions& dimensions :
 				result.dimensions) {
 				const jpegview_linux::SourceDescriptor* current =
@@ -1859,7 +1903,6 @@ private:
 						jpegview_linux::FrameInvalidationReason::ImageResource);
 				}
 			}
-			const std::shared_ptr<DisplayPrefetchBatch> batch = displayPrefetchBatch_;
 			if (!batch) continue;
 			bool published = batch->gate.Publish([&] {
 				{
@@ -1874,11 +1917,238 @@ private:
 				// PrepareImagePrefetch already replaced the previous neighbor set.
 				// Append these JPEG requests while the batch is still publishable;
 				// storing their descriptors in the batch would retain decoded aliases.
-				displayImageCache_.RequestBackgroundBatch(result.requests);
+				if (batch->continuation) {
+					std::unordered_set<jpegview_linux::SourceKey,
+						jpegview_linux::SourceKeyHash> requestedSources;
+					for (const jpegview_linux::DisplayImageRequest& request : result.requests) {
+						requestedSources.insert(request.source.Key());
+					}
+					for (const jpegview_linux::DisplayImageRequest& request :
+						result.reusableRequests) {
+						requestedSources.insert(request.source.Key());
+					}
+					if (initialPlan || secondaryPlan) {
+						for (const auto& source : batch->sourceByFilename) {
+							const auto priority = batch->priorityByFilename.find(source.first);
+							if (priority != batch->priorityByFilename.end() &&
+								priority->second == currentNearestPriority &&
+								(jpegview_linux::IsJpegPath(source.first) ||
+								 jpegview_linux::IsSvgPath(source.first)) &&
+								requestedSources.find(source.second.Key()) ==
+									requestedSources.end()) {
+								batch->continuation->ResolveNearestSource(source.second.Key());
+							}
+						}
+						batch->continuation->MarkNearestPlannerFinished();
+					}
+				}
+				std::vector<jpegview_linux::DisplayImageRequest> requestsToValidate =
+					result.requests;
+				requestsToValidate.insert(requestsToValidate.end(),
+					result.reusableRequests.begin(), result.reusableRequests.end());
+				SubmitDisplayPrefetchRequests(requestsToValidate, batch->continuation);
 			});
-			if (!published) continue;
+			if (!published) {
+				if (currentBatchPlan && batch->continuation) batch->continuation->Cancel();
+				continue;
+			}
 			RefreshCacheProtectionSnapshotsForBatch();
 		}
+	}
+
+	void StartNextDisplayPrefetchPhaseIfReady() {
+		const std::shared_ptr<DisplayPrefetchBatch> batch = displayPrefetchBatch_;
+		if (!batch || !batch->continuation || fileList_.Empty() || clipboardMode_ ||
+			batch->owner != jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner ||
+			CurrentInteractionWorkPlan().cancelQueuedSpeculation) return;
+		auto phase = batch->continuation->TakeNextPhaseIfReady();
+		if (!phase.has_value()) return;
+		const SDL_Rect imageArea = ImageAreaRect();
+		const bool staleContext = batch->context.currentIndex != fileList_.CurrentIndex() ||
+			batch->context.preferredDirection != pendingPrefetchDirection_ ||
+			batch->context.pageCount != fileList_.Size() ||
+			!jpegview_linux::SameViewportSnapshot(batch->context.viewport,
+				viewport_.PrefetchSnapshot()) ||
+			batch->context.imageAreaWidth != imageArea.w ||
+			batch->context.imageAreaHeight != imageArea.h ||
+			batch->context.includeSpectrum != (runtimeSettings_.Values().showHistogram &&
+				runtimeSettings_.Values().infoVisible);
+		const bool stalePlan = phase->plannerRequest.has_value() &&
+			(phase->plannerRequest->catalogRevision != fileList_.MutationRevision() ||
+			 phase->plannerRequest->descriptorRevision != fileList_.DescriptorRevision() ||
+			 phase->plannerRequest->viewportRevision != displayPreparationController_.ViewportRevision() ||
+			 phase->plannerRequest->currentIndex != fileList_.CurrentIndex() ||
+			 phase->plannerRequest->preferredDirection != pendingPrefetchDirection_ ||
+			 !jpegview_linux::SameViewportSnapshot(phase->plannerRequest->viewport,
+				 viewport_.PrefetchSnapshot()) ||
+			 phase->plannerRequest->imageAreaWidth != imageArea.w ||
+			 phase->plannerRequest->imageAreaHeight != imageArea.h ||
+			 phase->plannerRequest->includeSpectrum != (runtimeSettings_.Values().showHistogram &&
+				runtimeSettings_.Values().infoVisible));
+		if (staleContext || stalePlan) {
+			batch->continuation->Cancel();
+			prefetchRefreshNeeded_ = true;
+			return;
+		}
+		StartDecodedNeighborPrefetch(batch, phase->priority);
+		if (!phase->plannerRequest.has_value()) {
+			if (phase->priority == 2) batch->continuation->MarkNearestPlannerFinished();
+			return;
+		}
+		const std::uint64_t generation = displayPreparationController_.RequestPlan(
+			std::move(*phase->plannerRequest));
+		if (phase->priority == 2) {
+			batch->secondaryPlannerGeneration = generation;
+			if (generation == 0) {
+				for (const auto& source : batch->sourceByFilename) {
+					const auto priority = batch->priorityByFilename.find(source.first);
+					if (priority != batch->priorityByFilename.end() && priority->second == 2 &&
+						(jpegview_linux::IsJpegPath(source.first) ||
+						 jpegview_linux::IsSvgPath(source.first))) {
+						batch->continuation->ResolveNearestSource(source.second.Key());
+					}
+				}
+				batch->continuation->MarkNearestPlannerFinished();
+			}
+		} else {
+			batch->distantPlannerGeneration = generation;
+		}
+	}
+
+	void SubmitDisplayPrefetchRequests(
+		const std::vector<jpegview_linux::DisplayImageRequest>& requests,
+		const std::shared_ptr<jpegview_linux::DisplayPrefetchContinuation>& continuation) {
+		std::vector<jpegview_linux::DisplayImageRequest> missing;
+		missing.reserve(requests.size());
+		std::vector<jpegview_linux::DisplayImageRequest> reusableRequests;
+		reusableRequests.reserve(requests.size());
+		const std::shared_ptr<DisplayPrefetchBatch> batch = displayPrefetchBatch_;
+		bool changedBatchProtection = false;
+		for (const jpegview_linux::DisplayImageRequest& request : requests) {
+			const std::optional<ReusableDisplayRepresentation> reusable =
+				FindCurrentReusableDisplayRepresentation(request.cacheKey);
+			if (!reusable.has_value()) {
+				if (continuation && request.workClass ==
+					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) {
+					continuation->TrackNearestRequest(request);
+				}
+				missing.push_back(request);
+				continue;
+			}
+
+			const jpegview_linux::CacheProtectionTier protection =
+				jpegview_linux::CacheProtectionForWorkClass(request.workClass,
+					request.selectionGeneration != 0);
+			if (reusable->pendingUpload != nullptr) {
+				PendingTextureUpload& pending = *reusable->pendingUpload;
+				if (pending.selectionGeneration == 0 && pending.priority.workClass !=
+					jpegview_linux::PerfWorkClass::ActiveImageSpread) {
+					pending.priority = {request.workClass, request.priority};
+					SetPendingTextureProtection(pending, protection);
+				}
+			} else if (!IsPinnedDisplayTexture(reusable->texture.key)) {
+				SetDisplayTextureProtection(reusable->texture.key, protection);
+			}
+
+			if (batch && batch->owner ==
+				jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner &&
+				request.workClass ==
+					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) {
+				std::lock_guard<std::mutex> lock(batch->mutex);
+				if (std::find(batch->protectedTextureKeys.begin(),
+					batch->protectedTextureKeys.end(), reusable->texture.key) ==
+					batch->protectedTextureKeys.end()) {
+					batch->protectedTextureKeys.push_back(reusable->texture.key);
+				}
+				if (std::find(batch->protectedTextureCacheKeys.begin(),
+					batch->protectedTextureCacheKeys.end(), reusable->texture.cacheKey) ==
+					batch->protectedTextureCacheKeys.end()) {
+					batch->protectedTextureCacheKeys.push_back(reusable->texture.cacheKey);
+				}
+				changedBatchProtection = true;
+			}
+			reusableRequests.push_back(request);
+		}
+		if (changedBatchProtection) RefreshCacheProtectionSnapshotsForBatch();
+		bool staticSourceProtectionChanged = false;
+		for (const jpegview_linux::DisplayImageRequest& request : reusableRequests) {
+			const std::optional<ReusableDisplayRepresentation> reusable =
+				FindCurrentReusableDisplayRepresentation(request.cacheKey);
+			if (!reusable.has_value()) {
+				if (continuation && request.workClass ==
+					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor) {
+					continuation->TrackNearestRequest(request);
+				}
+				missing.push_back(request);
+				continue;
+			}
+			if (batch && batch->owner ==
+				jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner &&
+				request.workClass ==
+					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor &&
+				reusable->sourceIsStatic) {
+				std::lock_guard<std::mutex> lock(batch->mutex);
+				staticSourceProtectionChanged |=
+					batch->staticDisplaySourcesPrepared.insert(request.source.Key()).second;
+			}
+			if (continuation) {
+				if (reusable->pendingUpload != nullptr && reusable->pendingUpload->image) {
+					// Resolve this request only when the surviving queued representation
+					// reaches a terminal upload outcome; its cache key may be larger than
+					// the fitted request key used by the planner.
+					continuation->TrackNearestRequest(request,
+						reusable->pendingUpload->image->key);
+				} else {
+					continuation->ResolveNearestSource(request.source.Key());
+				}
+			}
+		}
+		if (staticSourceProtectionChanged) RefreshCacheProtectionSnapshotsForBatch();
+		for (const std::string& rejectedKey :
+			displayImageCache_.RequestBackgroundBatch(missing)) {
+			if (continuation) continuation->ResolveNearestRequest(rejectedKey, false);
+		}
+	}
+
+	std::optional<ReusableDisplayRepresentation>
+	FindCurrentReusableDisplayRepresentation(
+		const jpegview_linux::DisplayImageCacheKey& requested) {
+		for (const auto& entry : displayTextureCache_) {
+			if (!jpegview_linux::CanReuseDisplayImageRepresentation(requested,
+				entry.second.cacheKey)) continue;
+			return ReusableDisplayRepresentation{
+				{entry.first, entry.second.cacheKey}, entry.second.sourceIsStatic, nullptr};
+		}
+		for (PendingTextureUpload& pending : pendingTextureUploads_) {
+			if (!pending.image || !jpegview_linux::CanReuseDisplayImageRepresentation(
+				requested, pending.image->cacheKey)) continue;
+			return ReusableDisplayRepresentation{
+				{pending.image->key, pending.image->cacheKey},
+				pending.image->sourceIsStatic, &pending};
+		}
+		return std::nullopt;
+	}
+
+	void StartDecodedNeighborPrefetch(
+		const std::shared_ptr<DisplayPrefetchBatch>& batch, std::size_t phasePriority) {
+		if (!batch || batch != displayPrefetchBatch_ ||
+			batch->owner != jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner ||
+			!batch->decodedPrefetchCompletion) return;
+		// The generic decoder has its own worker but shares source admission with
+		// JPEG/SVG planning. Keep it on the same nearest-first phase boundary.
+		const auto filter = [batch, phasePriority](const fs::path& filename) {
+			if (jpegview_linux::IsJpegPath(filename) || jpegview_linux::IsSvgPath(filename)) {
+				return false;
+			}
+			const auto priority = batch->priorityByFilename.find(filename.string());
+			if (priority == batch->priorityByFilename.end()) return false;
+			return phasePriority <= 2 ? priority->second == phasePriority :
+				priority->second > 2;
+		};
+		imageCache_.Prefetch(fileList_.Files(), batch->context.currentIndex,
+			batch->context.preferredDirection, kDecodedImagePrefetchCount,
+			batch->decodedPrefetchCompletion, filter, 2,
+			[this](std::size_t index) { return fileList_.DescriptorAt(index); });
 	}
 
 	void TickDisplayPreparationRequests() {
@@ -1886,7 +2156,8 @@ private:
 		std::vector<jpegview_linux::DisplayImageRequest> requests =
 			displayPreparationController_.TakeRequestBatch(
 				displayPrefetchBatch_->generation);
-		if (!requests.empty()) displayImageCache_.RequestBackgroundBatch(std::move(requests));
+		if (!requests.empty()) SubmitDisplayPrefetchRequests(requests,
+			displayPrefetchBatch_->continuation);
 	}
 
 	std::optional<jpegview_linux::PageDimensions> PageDimensionsAt(std::size_t index) {
@@ -2738,6 +3009,9 @@ private:
 	void DeactivateDisplayPrefetchBatch() {
 		if (!displayPrefetchBatch_) return;
 		displayPrefetchBatch_->gate.Deactivate();
+		if (displayPrefetchBatch_->continuation) {
+			displayPrefetchBatch_->continuation->Cancel();
+		}
 		displayPreparationController_.CancelRequestBatch(
 			displayPrefetchBatch_->generation);
 	}
@@ -2985,6 +3259,7 @@ private:
 		batch->context.includeSpectrum = runtimeSettings_.Values().showHistogram &&
 			runtimeSettings_.Values().infoVisible;
 		batch->context.currentIndex = fileList_.CurrentIndex();
+		batch->context.preferredDirection = preferredDirection;
 		batch->context.pageCount = fileList_.Size();
 		batch->context.doublePageMode = {doublePageModeEnabled_, mangaReadingOrderEnabled_};
 		batch->context.currentPageDimensions = PageDimensionsAt(fileList_.CurrentIndex());
@@ -3026,25 +3301,8 @@ private:
 				jpegview_linux::CacheProtectionTier::Active);
 		}
 		const std::size_t cacheCapacity = cacheBudget_->Capacity();
-		plannerRequest.maximumPreparedBytes = cacheCapacity;
-		if (CurrentImage().width > 0 && CurrentImage().height > 0) {
-			const std::size_t width = static_cast<std::size_t>(CurrentImage().width);
-			const std::size_t height = static_cast<std::size_t>(CurrentImage().height);
-			const std::size_t maximum = std::numeric_limits<std::size_t>::max();
-			if (width <= maximum / height && width * height <= maximum / 4) {
-				std::size_t currentSourceBytes = width * height * 4;
-				if (runtimeSettings_.Values().showHistogram && runtimeSettings_.Values().infoVisible) {
-					const std::size_t spectrumBytes =
-						sizeof(jpegview_linux::GrayscaleSpectrum);
-					currentSourceBytes = currentSourceBytes <= maximum - spectrumBytes ?
-						currentSourceBytes + spectrumBytes : maximum;
-				}
-				plannerRequest.maximumPreparedBytes = currentSourceBytes >= cacheCapacity ?
-					0 : cacheCapacity - currentSourceBytes;
-			} else {
-				plannerRequest.maximumPreparedBytes = 0;
-			}
-		}
+		plannerRequest.maximumPreparedBytes =
+			jpegview_linux::DisplayPrefetchPlanningBudgetBytes(cacheBudget_->Snapshot());
 		const std::size_t maximumNeighborCount =
 			jpegview_linux::DisplayPrefetchCandidateLimit(
 				cacheCapacity, fileList_.Files().size());
@@ -3089,16 +3347,140 @@ private:
 				fileProcessing, filePreset.autoContrast,
 				jpegview_linux::IsJpegPath(filename)});
 		}
-		displayPreparationController_.RequestPlan(std::move(plannerRequest));
+		// Keep compatible immediate representations resident while the worker plans
+		// the preferred direction. Obsolete viewport or processing variants stay
+		// evictable so they cannot block the frame the next phase needs.
+		for (const jpegview_linux::DisplayPrefetchCandidate& candidate :
+			plannerRequest.neighbors) {
+			if (candidate.priority > 2) continue;
+			std::vector<jpegview_linux::RetainedDisplayTexture> immediateTextures;
+			for (const auto& entry : displayTextureCache_) {
+				if (entry.second.source != candidate.source.Key() ||
+					entry.second.protection == jpegview_linux::CacheProtectionTier::Active ||
+					IsPinnedDisplayTexture(entry.first)) continue;
+				const auto request = jpegview_linux::MakeFittedDisplayPrefetchRequest(
+					candidate, plannerRequest, entry.second.sourceWidth,
+					entry.second.sourceHeight);
+				const bool reusable = request.has_value() &&
+					jpegview_linux::CanReuseDisplayImageRepresentation(request->cacheKey,
+						entry.second.cacheKey);
+				if (reusable) {
+					immediateTextures.push_back({entry.first, entry.second.cacheKey});
+				} else {
+					SetDisplayTextureProtection(entry.first,
+						jpegview_linux::CacheProtectionTier::DistantSpeculation);
+				}
+			}
+			for (const jpegview_linux::RetainedDisplayTexture& retained : immediateTextures) {
+				SetDisplayTextureProtection(retained.key,
+					jpegview_linux::CacheProtectionTier::Neighbor);
+				batch->protectedTextureKeys.push_back(retained.key);
+				batch->protectedTextureCacheKeys.push_back(retained.cacheKey);
+			}
+			for (PendingTextureUpload& pending : pendingTextureUploads_) {
+				if (!pending.image || pending.image->source.Key() != candidate.source.Key() ||
+					pending.selectionGeneration != 0 || pending.priority.workClass ==
+						jpegview_linux::PerfWorkClass::ActiveImageSpread) continue;
+				const jpegview_linux::SourceMetadata& sourceMetadata =
+					pending.image->source.Metadata();
+				std::optional<jpegview_linux::DisplayImageRequest> request;
+				if (sourceMetadata.hasDimensions) {
+					request = jpegview_linux::MakeFittedDisplayPrefetchRequest(candidate,
+						plannerRequest,
+						sourceMetadata.width, sourceMetadata.height);
+				}
+				if (!request.has_value() ||
+					!jpegview_linux::CanReuseDisplayImageRepresentation(request->cacheKey,
+						pending.image->cacheKey)) {
+					pending.priority = {
+						jpegview_linux::PerfWorkClass::DistantSpeculation,
+						candidate.priority};
+					SetPendingTextureProtection(pending,
+						jpegview_linux::CacheProtectionTier::DistantSpeculation);
+					continue;
+				}
+				pending.priority = {
+					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor,
+					candidate.priority};
+				SetPendingTextureProtection(pending,
+					jpegview_linux::CacheProtectionTier::Neighbor);
+				batch->protectedTextureKeys.push_back(pending.image->key);
+				batch->protectedTextureCacheKeys.push_back(pending.image->cacheKey);
+			}
+		}
+		std::vector<jpegview_linux::SourceKey> nearestSources;
+		std::vector<jpegview_linux::SourceKey> secondarySources;
+		for (const jpegview_linux::DisplayPrefetchCandidate& candidate :
+			plannerRequest.neighbors) {
+			if (candidate.priority == 1) {
+				nearestSources.push_back(candidate.source.Key());
+			} else if (candidate.priority == 2) {
+				secondarySources.push_back(candidate.source.Key());
+			}
+		}
+		jpegview_linux::DisplayPrefetchPlannerPhases phases =
+			jpegview_linux::SplitDisplayPrefetchPlannerRequest(plannerRequest);
+		const auto hasMetadataCandidates = [](const auto& phase) {
+			return std::any_of(phase.neighbors.begin(), phase.neighbors.end(),
+				[](const auto& candidate) {
+					return candidate.jpeg || jpegview_linux::IsSvgPath(candidate.filename);
+				});
+		};
+		const bool nearestPlannerPending = std::any_of(phases.nearest.neighbors.begin(),
+			phases.nearest.neighbors.end(), [](const auto& candidate) {
+				return candidate.jpeg || jpegview_linux::IsSvgPath(candidate.filename);
+			});
+		std::optional<jpegview_linux::DisplayPrefetchPlannerRequest> secondaryPlannerRequest;
+		if (hasMetadataCandidates(phases.secondary)) {
+			secondaryPlannerRequest = std::move(phases.secondary);
+		}
+		std::optional<jpegview_linux::DisplayPrefetchPlannerRequest> distantPlannerRequest;
+		if (phases.distant.has_value() && hasMetadataCandidates(*phases.distant)) {
+			distantPlannerRequest = std::move(phases.distant);
+		}
+		const bool distantWorkPending = phases.distant.has_value();
+		batch->continuation = std::make_shared<jpegview_linux::DisplayPrefetchContinuation>(
+			std::move(nearestSources), std::move(secondarySources),
+			std::move(secondaryPlannerRequest), std::move(distantPlannerRequest),
+			plannerRequest.maximumPreparedBytes, nearestPlannerPending,
+			distantWorkPending);
 		displayPrefetchBatch_ = batch;
+		if (nearestPlannerPending) {
+			batch->initialPlannerGeneration = displayPreparationController_.RequestPlan(
+				std::move(phases.nearest));
+			if (batch->initialPlannerGeneration == 0) {
+				for (const auto& source : batch->sourceByFilename) {
+					const auto priority = batch->priorityByFilename.find(source.first);
+					if (priority != batch->priorityByFilename.end() && priority->second == 1 &&
+						(jpegview_linux::IsJpegPath(source.first) ||
+						 jpegview_linux::IsSvgPath(source.first))) {
+						batch->continuation->ResolveNearestSource(source.second.Key());
+					}
+				}
+				batch->continuation->MarkNearestPlannerFinished();
+			}
+		} else {
+			batch->continuation->MarkNearestPlannerFinished();
+		}
 		RefreshCacheProtectionSnapshotsForBatch();
-		imageCache_.Prefetch(fileList_.Files(), fileList_.CurrentIndex(),
-			preferredDirection, kDecodedImagePrefetchCount,
-			[batch](const fs::path& filename,
+		const std::weak_ptr<DisplayPrefetchBatch> weakBatch = batch;
+		batch->decodedPrefetchCompletion = [weakBatch](const fs::path& filename,
 				const jpegview_linux::DecodedImageCache::ImagePtr& decoded) {
+				auto batch = weakBatch.lock();
+				if (!batch) return;
 				if (!decoded || decoded->frames.empty()) {
-					std::lock_guard<std::mutex> lock(batch->mutex);
-					batch->failedDecodeFilenames.insert(filename.string());
+					jpegview_linux::SourceKey sourceKey;
+					{
+						std::lock_guard<std::mutex> lock(batch->mutex);
+						batch->failedDecodeFilenames.insert(filename.string());
+						const auto source = batch->sourceByFilename.find(filename.string());
+						if (source != batch->sourceByFilename.end()) {
+							sourceKey = source->second.Key();
+						}
+					}
+					if (batch->continuation) {
+						batch->continuation->ResolveNearestSource(sourceKey);
+					}
 					return;
 				}
 				const jpegview_linux::DecodedFrame& frame = decoded->frames.front();
@@ -3129,8 +3511,13 @@ private:
 				const auto source = batch->sourceByFilename.find(filename.string());
 				if (priority == batch->priorityByFilename.end() ||
 					processing == batch->processingByFilename.end() ||
-				autoContrast == batch->autoContrastByFilename.end() ||
-					source == batch->sourceByFilename.end()) return;
+					autoContrast == batch->autoContrastByFilename.end() ||
+					source == batch->sourceByFilename.end()) {
+					if (batch->continuation && source != batch->sourceByFilename.end()) {
+						batch->continuation->ResolveNearestSource(source->second.Key());
+					}
+					return;
+				}
 				jpegview_linux::DisplayImageRequest request =
 					jpegview_linux::MakeDisplayImageRequest(source->second, decoded, 0,
 						resolution.width, resolution.height, autoContrast->second,
@@ -3148,40 +3535,38 @@ private:
 							batch->context.pageCount, *batch->context.currentPageDimensions,
 							jpegview_linux::PageDimensions{frame.width, frame.height},
 							batch->context.doublePageMode).has_value()) {
+						if (batch->continuation) {
+							batch->continuation->ResolveNearestSource(source->second.Key());
+						}
 						return;
 					}
 				}
-				if (!request.Valid()) return;
-				const jpegview_linux::RetainedDisplayTexture* retainedTexture =
-					jpegview_linux::FindReusableRetainedDisplayTexture(
-						request.cacheKey, batch->retainedTextures);
+				if (!request.Valid()) {
+					if (batch->continuation) {
+						batch->continuation->ResolveNearestSource(source->second.Key());
+					}
+					return;
+				}
 				batch->gate.Publish([&] {
 					{
 						std::lock_guard<std::mutex> lock(batch->mutex);
 						if (priority->second <= 2) {
-							if (retainedTexture != nullptr) {
-								batch->protectedTextureCacheKeys.push_back(
-									retainedTexture->cacheKey);
-								batch->protectedTextureKeys.push_back(retainedTexture->key);
-							} else {
-								batch->protectedTextureCacheKeys.push_back(request.cacheKey);
-								batch->protectedTextureKeys.push_back(request.key);
-							}
+							batch->protectedTextureCacheKeys.push_back(request.cacheKey);
+							batch->protectedTextureKeys.push_back(request.key);
 						}
 					}
-					if (retainedTexture != nullptr) return;
 					// A late neighbor decode must not replace/cancel the active spread's
 					// foreground pair requests in the display cache.
-					if (batch->completionChannel) {
-						batch->completionChannel->Publish(batch->generation, std::move(request));
+					if (!batch->completionChannel ||
+						!batch->completionChannel->Publish(batch->generation,
+							std::move(request))) {
+						if (batch->continuation) {
+							batch->continuation->ResolveNearestSource(source->second.Key());
+						}
 					}
 				});
-			}, [](const fs::path& filename) {
-				return !jpegview_linux::IsJpegPath(filename) &&
-					!jpegview_linux::IsSvgPath(filename);
-			}, 2, [this](std::size_t index) {
-				return fileList_.DescriptorAt(index);
-			});
+			};
+		StartDecodedNeighborPrefetch(batch, 1);
 	}
 
 	const Image& CurrentImage() const {
@@ -4104,7 +4489,8 @@ private:
 	}
 
 	jpegview_linux::CacheReservation ReserveDisplayTextureBytes(std::size_t bytes,
-		jpegview_linux::CacheProtectionTier incomingProtection, bool mayEvict) {
+		jpegview_linux::CacheProtectionTier incomingProtection, bool mayEvict,
+		bool* evictedVictim = nullptr) {
 		return cacheAdmission_.Reserve(bytes,
 			jpegview_linux::CacheMemoryCategory::RetainedImageTextures, {},
 			incomingProtection,
@@ -4112,7 +4498,7 @@ private:
 				if (imageCache_.EvictLeastRecentlyUsed(tier) != 0) return true;
 				if (displayImageCache_.EvictLeastRecentlyUsed(tier) != 0) return true;
 				return EvictOldestDisplayTexture(tier);
-			}, mayEvict);
+			}, mayEvict, evictedVictim);
 	}
 
 	jpegview_linux::CacheProtectionTier TextureProtectionFor(
@@ -4213,8 +4599,7 @@ private:
 		pending->priority = {jpegview_linux::PerfWorkClass::ActiveImageSpread,
 			request.priority};
 		if (promoted) {
-			pending->attempted = false;
-			pending->lastAttemptRetainedCapacityRevision = 0;
+			pending->admissionRetry.Reset();
 		}
 		SetPendingTextureProtection(*pending,
 			jpegview_linux::CacheProtectionTier::Active);
@@ -4237,6 +4622,9 @@ private:
 				// Active-only temporary storage cannot back a neighbor upload. Keep the
 				// prepared pixels queued and retry after ordinary speculative admission.
 				RetireIncompleteDisplayTexture(pending);
+				// The retired upload reservation may have been temporary, so this fresh
+				// texture allocation must be allowed to try retained-cache eviction again.
+				pending.admissionRetry.Reset();
 				return;
 			}
 		}
@@ -4252,6 +4640,20 @@ private:
 	}
 
 	void DiscardPendingTextureUpload(PendingTextureUpload& pending) {
+		RetireIncompleteDisplayTexture(pending);
+		if (pending.image) {
+			if (displayPrefetchBatch_ && displayPrefetchBatch_->continuation) {
+				displayPrefetchBatch_->continuation->ResolveNearestRequest(
+					pending.image->key, false);
+			}
+			displayImageCache_.Retire(pending.image);
+		}
+		pending.image.reset();
+	}
+
+	void RetireMergedPendingTextureUpload(PendingTextureUpload& pending) {
+		// The queued duplicate still owns this logical request; retire only the
+		// redundant payload and leave continuation readiness to that survivor.
 		RetireIncompleteDisplayTexture(pending);
 		if (pending.image) displayImageCache_.Retire(pending.image);
 		pending.image.reset();
@@ -4296,14 +4698,13 @@ private:
 				pending.countsTowardSpeculativeLimit = false;
 			}
 			if (promoted) {
-				duplicate->attempted = false;
-				duplicate->lastAttemptRetainedCapacityRevision = 0;
+				duplicate->admissionRetry.Reset();
 			}
 			if (duplicate->incompleteTexture != nullptr) {
 				SetPendingTextureProtection(*duplicate,
 					TextureProtectionFor(duplicate->image, duplicate->priority.workClass));
 			}
-			DiscardPendingTextureUpload(pending);
+			RetireMergedPendingTextureUpload(pending);
 			return;
 		}
 		if (pendingTextureUploads_.size() >= kMaximumPendingTextureUploads) {
@@ -4359,8 +4760,9 @@ private:
 			displayImageCache_.ReleaseForActiveUse(prepared);
 			return TextureCacheOutcome::Failed;
 		}
+		std::uint64_t admissionRevision = cacheBudget_->RetainedCapacityRevision();
 		if (retainedRevisionBeforeAdmission != nullptr) {
-			*retainedRevisionBeforeAdmission = cacheBudget_->RetainedCapacityRevision();
+			*retainedRevisionBeforeAdmission = admissionRevision;
 		}
 		if (pending.incompleteTexture == nullptr) {
 			// Keep the prepared allocation charged as staging while retained-cache
@@ -4383,9 +4785,14 @@ private:
 					return TextureCacheOutcome::NotRetained;
 				}
 			}
+			admissionRevision = cacheBudget_->RetainedCapacityRevision();
+			if (retainedRevisionBeforeAdmission != nullptr) {
+				*retainedRevisionBeforeAdmission = admissionRevision;
+			}
+			bool evictedRetainedVictim = false;
 			if (bytes <= cacheBudget_->Capacity()) {
 				pending.textureReservation = ReserveDisplayTextureBytes(
-					bytes, protection, mayEvict);
+					bytes, protection, mayEvict, &evictedRetainedVictim);
 			}
 			if (!pending.textureReservation && pending.priority.workClass ==
 				jpegview_linux::PerfWorkClass::ActiveImageSpread) {
@@ -4400,6 +4807,16 @@ private:
 					jpegview_linux::PerfMetric::CacheSnapshot, bytes, cacheBudget_->Available(),
 					snapshot.retainedBytes, static_cast<std::uint64_t>(protection),
 					snapshot.releaseRevision, 0, "texture_admission_deferred");
+				const bool pendingRetirement =
+					cacheBudget_->HasPendingRetainedRetirements() ||
+					displayImageCache_.HasPendingRetainedRetirements() ||
+					retiredSpeculativeDisplayTextureBytes_ != 0;
+				if (protection != jpegview_linux::CacheProtectionTier::Active &&
+					!evictedRetainedVictim &&
+					!jpegview_linux::CacheAdmissionMayProgressAfterFailure(
+						admissionRevision, snapshot, pendingRetirement)) {
+					return TextureCacheOutcome::NotRetained;
+				}
 				return TextureCacheOutcome::Deferred;
 			}
 			// Cache bytes also include the retained histogram; SDL uploads only BGRA.
@@ -4528,6 +4945,10 @@ private:
 		RefreshCacheProtectionSnapshotsForBatch();
 		for (const jpegview_linux::DisplayImageFailureInfo& failure :
 			displayImageCache_.TakeFailedCompletions()) {
+			if (displayPrefetchBatch_ && displayPrefetchBatch_->continuation) {
+				displayPrefetchBatch_->continuation->ResolveNearestRequest(
+					failure.key, false);
+			}
 			if (failure.cacheKey.includeSpectrum &&
 				currentSourceSpectrumRequestKey_.has_value()) {
 				const std::optional<jpegview_linux::ImageSpectrumKey> currentKey =
@@ -4595,16 +5016,34 @@ private:
 			jpegview_linux::DisplayImageCompletionInfo completion =
 				readyBatch.TakeCompletion(index);
 			if (completion.image) {
+				if (completion.workClass ==
+					jpegview_linux::PerfWorkClass::NearestNavigationNeighbor &&
+					completion.image->sourceIsStatic && displayPrefetchBatch_ &&
+					displayPrefetchBatch_->owner ==
+						jpegview_linux::DisplayPrefetchBatchOwner::NeighborPlanner) {
+					std::lock_guard<std::mutex> lock(displayPrefetchBatch_->mutex);
+					const bool belongsToCurrentBatch = std::find(
+						displayPrefetchBatch_->protectedTextureCacheKeys.begin(),
+						displayPrefetchBatch_->protectedTextureCacheKeys.end(),
+						completion.image->cacheKey) !=
+						displayPrefetchBatch_->protectedTextureCacheKeys.end();
+					if (belongsToCurrentBatch) {
+						displayPrefetchBatch_->staticDisplaySourcesPrepared.insert(
+							completion.image->source.Key());
+					}
+				}
 				CapturePreparedSourceSpectrum(*completion.image);
 				PendingTextureUpload pending;
 				pending.image = std::move(completion.image);
 				pending.priority = {completion.workClass, completion.priority};
-				pending.lastAttemptRetainedCapacityRevision =
-					cacheBudget_->RetainedCapacityRevision();
 				pending.selectionGeneration = completion.selectionGeneration;
 				candidates.push_back({std::move(pending)});
 			}
 		}
+		// A completed static frame no longer needs its decoded source pixels for
+		// display. Demote that allocation before texture admission so the prepared
+		// neighbor can reclaim its own bytes when the shared cache is full.
+		RefreshCacheProtectionSnapshotsForBatch();
 		std::vector<jpegview_linux::DisplayUploadPriority> priorities;
 		priorities.reserve(candidates.size());
 		for (const UploadCandidate& candidate : candidates) {
@@ -4641,19 +5080,21 @@ private:
 				continue;
 			}
 			std::uint64_t retainedRevision = cacheBudget_->RetainedCapacityRevision();
-			const bool mayEvict = !pending.attempted ||
-				retainedRevision > pending.lastAttemptRetainedCapacityRevision ||
-				cacheBudget_->Available() >=
-					jpegview_linux::PreparedDisplayImageBytes(*prepared);
+			const bool mayEvict = pending.admissionRetry.MayEvict(retainedRevision,
+				cacheBudget_->Available(),
+				jpegview_linux::PreparedDisplayImageBytes(*prepared));
 			const TextureCacheOutcome outcome = CacheDisplayTexture(
 				pending, mayEvict,
 				&retainedRevision);
 			if (outcome == TextureCacheOutcome::Deferred) {
-				pending.lastAttemptRetainedCapacityRevision = retainedRevision;
-				pending.attempted = true;
+				pending.admissionRetry.RecordDeferred(retainedRevision);
 				pending.uploadStaged = true;
 				QueuePendingTextureUpload(std::move(pending));
 			} else if (outcome == TextureCacheOutcome::Cached) {
+				if (displayPrefetchBatch_ && displayPrefetchBatch_->continuation) {
+					displayPrefetchBatch_->continuation->ResolveNearestRequest(
+						prepared->key, true);
+				}
 				presentationController_.MarkTextureReady(prepared->key);
 				frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::ImageResource);
 				if (pending.selectionGeneration != 0) {
@@ -4661,8 +5102,16 @@ private:
 						prepared->source.Key(), prepared->key);
 				}
 			} else if (outcome == TextureCacheOutcome::NotRetained) {
+				if (displayPrefetchBatch_ && displayPrefetchBatch_->continuation) {
+					displayPrefetchBatch_->continuation->ResolveNearestRequest(
+						prepared->key, false);
+				}
 				DiscardPendingTextureUpload(pending);
 			} else {
+				if (displayPrefetchBatch_ && displayPrefetchBatch_->continuation) {
+					displayPrefetchBatch_->continuation->ResolveNearestRequest(
+						prepared->key, false);
+				}
 				DiscardPendingTextureUpload(pending);
 				HandleCurrentDisplayFailure(pending.selectionGeneration,
 					prepared->source.Key(), prepared->key,

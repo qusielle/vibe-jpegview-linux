@@ -243,7 +243,10 @@ public:
 	// Enqueues related background requests under one lock before waking workers.
 	// This lets a multi-image presentation start both sides without a sequential
 	// request-publication gap, while preserving ordinary foreground work.
-	void RequestBackgroundBatch(const std::vector<DisplayImageRequest>& requests);
+	// Returns keys rejected before they enter the cache. Callers coordinating
+	// dependent prefetch phases must treat rejection as a terminal outcome.
+	std::vector<std::string> RequestBackgroundBatch(
+		const std::vector<DisplayImageRequest>& requests);
 	// Removes queued/completed background work for a key and retires its active
 	// background classification. In-flight work may finish, but its result is
 	// discarded unless a later explicit request needs it; empty prefetch will not
@@ -279,6 +282,8 @@ public:
 	std::size_t CachedBytes() const;
 	std::size_t CachedImages() const;
 	DisplayImageCacheDiagnostics GetDiagnostics() const;
+	// True while a retired prepared frame still owns retained cache capacity.
+	bool HasPendingRetainedRetirements() const;
 	std::vector<SourceChangeNotice> TakeChangedSources();
 	bool HasPendingWork() const;
 	bool WaitUntilIdle(std::chrono::milliseconds timeout);

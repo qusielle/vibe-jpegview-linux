@@ -67,6 +67,7 @@ struct CacheBudgetState {
 	std::map<AllocationOwner, std::weak_ptr<RetiredAllocation>,
 		std::owner_less<AllocationOwner>> retirementOwners;
 	std::shared_ptr<RetiredAllocation> retiringAllocation;
+	bool retiringRetainedAllocation = false;
 	bool stoppingRetirement = false;
 #ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
 	CacheBudgetTestHook testHook = nullptr;
@@ -154,6 +155,11 @@ void RetireAllocations(const std::shared_ptr<detail::CacheBudgetState>& state) {
 				if (ready != state->retiredAllocations.end()) {
 					retired = std::move(*ready);
 					state->retiredAllocations.erase(ready);
+					state->retiringRetainedAllocation = std::any_of(
+						retired->reservations.begin(), retired->reservations.end(),
+						[](const CacheReservation& reservation) {
+							return reservation && IsRetained(reservation.Category());
+						});
 					state->retiringAllocation = retired;
 					allocation = std::move(retired->allocation);
 					break;
@@ -181,9 +187,13 @@ void RetireAllocations(const std::shared_ptr<detail::CacheBudgetState>& state) {
 					state->retirementOwners.erase(owner);
 				}
 			}
-			state->retiringAllocation.reset();
 		}
 		reservations.clear();
+		{
+			std::lock_guard<std::mutex> lock(state->retirementMutex);
+			state->retiringRetainedAllocation = false;
+			state->retiringAllocation.reset();
+		}
 	}
 }
 
@@ -461,6 +471,19 @@ std::uint64_t SharedCacheBudget::ReleaseRevision() const {
 std::uint64_t SharedCacheBudget::RetainedCapacityRevision() const {
 	std::lock_guard<std::mutex> lock(state_->mutex);
 	return state_->retainedCapacityRevision;
+}
+
+bool SharedCacheBudget::HasPendingRetainedRetirements() const {
+	std::lock_guard<std::mutex> lock(state_->retirementMutex);
+	if (state_->retiringRetainedAllocation) return true;
+	const auto hasRetainedReservation = [](const auto& retired) {
+		return retired && std::any_of(retired->reservations.begin(),
+			retired->reservations.end(), [](const CacheReservation& reservation) {
+				return reservation && IsRetained(reservation.Category());
+			});
+	};
+	return std::any_of(state_->retiredAllocations.begin(),
+		state_->retiredAllocations.end(), hasRetainedReservation);
 }
 
 CacheBudgetSnapshot SharedCacheBudget::Snapshot() const {
