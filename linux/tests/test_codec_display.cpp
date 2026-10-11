@@ -1761,6 +1761,82 @@ void TestDisplayResolutionRequestCanonicalization() {
 		"larger representation reuse ignored required detail, processing, histogram, or orientation");
 }
 
+void TestStaticRasterFileBackedDisplayRequest() {
+	TemporaryDirectory temporary;
+	const fs::path staticPath = temporary.path() / "static-raster.png";
+	const std::vector<std::uint8_t> pixels = {
+		0, 0, 255, 0, 0, 255, 0, 255,
+		255, 0, 0, 255, 20, 40, 60, 255};
+	jpegview_linux::ImageWriteOptions options;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(staticPath, pixels.data(), 2, 2, options, error),
+		"cannot write static raster display fixture: " + error);
+	const jpegview_linux::SourceDescriptor source =
+		jpegview_linux::DescribeImageSource(staticPath);
+	jpegview_linux::DecodedImage decodedValue;
+	Expect(jpegview_linux::DecodeImage(staticPath, decodedValue, error) &&
+		decodedValue.frames.size() == 1 && !decodedValue.animation,
+		"cannot decode static raster display fixture: " + error);
+	const auto decoded = std::make_shared<const jpegview_linux::DecodedImage>(
+		std::move(decodedValue));
+	const auto fileBacked = jpegview_linux::MakeRasterDisplayImageRequest(
+		source, 2, 2, 2, 2, false);
+	const auto decodedRequest = jpegview_linux::MakeDisplayImageRequest(
+		source, decoded, 0, 2, 2, false);
+	const auto resizedFileBacked = jpegview_linux::RebuildDisplayImageRequestAtTarget(
+		fileBacked, 1, 1);
+	const auto resizedDecoded = jpegview_linux::MakeDisplayImageRequest(
+		source, decoded, 0, 1, 1, false);
+	Expect(fileBacked.Valid() &&
+		fileBacked.fileBackedFormat == jpegview_linux::FileBackedDisplayFormat::Raster &&
+		fileBacked.cacheKey == decodedRequest.cacheKey &&
+		fileBacked.key == decodedRequest.key &&
+		resizedFileBacked.fileBackedFormat ==
+			jpegview_linux::FileBackedDisplayFormat::Raster &&
+		resizedFileBacked.key == resizedDecoded.key,
+		"generic file-backed display request changed decoded raster pixel identity");
+
+	jpegview_linux::DisplayImageCache cache(1024 * 1024, 1);
+	cache.Request(fileBacked);
+	Expect(cache.WaitUntilIdle(std::chrono::seconds(2)),
+		"static file-backed raster preparation did not finish on its worker");
+	const auto completed = cache.TakeCompleted(1);
+	Expect(completed.size() == 1 && completed.front()->sourceIsStatic &&
+		completed.front()->source.Metadata().hasDimensions &&
+		completed.front()->source.Metadata().width == 2 &&
+		completed.front()->source.Metadata().height == 2 &&
+		completed.front()->source.Metadata().transparencyKnown &&
+		completed.front()->source.Metadata().hasTransparency,
+		"static raster preparation did not retain proven source presentation metadata");
+
+	const fs::path firstPath = temporary.path() / "animation-first.png";
+	const fs::path secondPath = temporary.path() / "animation-second.png";
+	const std::vector<std::uint8_t> red = {
+		0, 0, 255, 255, 0, 0, 255, 255,
+		0, 0, 255, 255, 0, 0, 255, 255};
+	const std::vector<std::uint8_t> blue = {
+		255, 0, 0, 255, 255, 0, 0, 255,
+		255, 0, 0, 255, 255, 0, 0, 255};
+	Expect(jpegview_linux::WriteImage(firstPath, red.data(), 2, 2, options, error) &&
+		jpegview_linux::WriteImage(secondPath, blue.data(), 2, 2, options, error),
+		"cannot write animated raster safety fixtures: " + error);
+	const fs::path animationPath = temporary.path() / "animated-raster.png";
+	WriteBytes(animationPath, MakeApng(ReadBytes(firstPath), ReadBytes(secondPath)));
+	const jpegview_linux::SourceDescriptor animationSource =
+		jpegview_linux::DescribeImageSource(animationPath);
+	auto animationRequest = jpegview_linux::MakeRasterDisplayImageRequest(
+		animationSource, 2, 2, 2, 2, false);
+	animationRequest.selectionGeneration = 91;
+	jpegview_linux::DisplayImageCache animationCache(1024 * 1024, 1);
+	animationCache.Request(animationRequest);
+	Expect(animationCache.WaitUntilIdle(std::chrono::seconds(2)),
+		"generic raster animation safety check did not finish on its worker");
+	const auto animationFailures = animationCache.TakeFailedCompletions();
+	Expect(animationCache.TakeCompleted(1).empty() && animationFailures.size() == 1 &&
+		animationFailures.front().selectionGeneration == 91,
+		"generic raster request incorrectly published an animated source as a static image");
+}
+
 
 void TestDisplayPrefetchUsesFittedResolution() {
 	TemporaryDirectory temporary;
@@ -2947,6 +3023,7 @@ const TestCase kTests[] = {
 	{"pending-display-upload-navigation-retention", &TestPendingDisplayUploadNavigationRetention},
 	{"svg-neighbor-prefetch-uses-target-rendering", &TestSvgNeighborPrefetchUsesTargetRendering},
 	{"display-resolution-request-canonicalization", &TestDisplayResolutionRequestCanonicalization},
+	{"static-raster-file-backed-display-request", &TestStaticRasterFileBackedDisplayRequest},
 	{"failed-display-request-resolution-recovery", &TestFailedDisplayRequestResolutionRecovery},
 	{"display-prefetch-uses-fitted-resolution", &TestDisplayPrefetchUsesFittedResolution},
 	{"current-display-pan-and-zoom-request-reuse", &TestCurrentDisplayPanAndZoomRequestReuse},

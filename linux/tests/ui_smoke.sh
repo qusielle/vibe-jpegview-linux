@@ -290,6 +290,12 @@ launch_viewer() {
 			JPEGVIEW_TEST_SLOW_MAP_ARMED="$viewer_slow_map_armed" \
 			JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS="${viewer_slow_map_max_attempts:-2000}" \
 			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
+	elif [ -n "${viewer_perf_trace_override:-}" ]; then
+		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
+			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
+			JPEGVIEW_TEST_URL_LOG="$temporary/opened-url" \
+			JPEGVIEW_PERF_TRACE="$viewer_perf_trace_override" \
+			"$BINARY" "$viewer_input" >"$temporary/viewer.log" 2>&1 &
 	elif [ "$perf_trace_pending" -eq 1 ]; then
 		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
 			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
@@ -670,6 +676,83 @@ DISPLAY=":$display_number" xdotool key --window "$window_id" Return
 DISPLAY=":$display_number" xdotool key --window "$window_id" Escape
 assert_title_prefix "03-blue.ppm" "invalid go-to input changed the selected image"
 stop_viewer
+
+assert_first_navigation_frame_is_ready() {
+	cached_neighbor_name=$1
+	cached_neighbor_format=$2
+	cached_neighbor_directory="$temporary/$cached_neighbor_name-neighbor-fixtures"
+	cached_neighbor_trace="$temporary/$cached_neighbor_name-neighbor-trace.csv"
+	cached_neighbor_previous_state=$XDG_STATE_HOME
+	XDG_STATE_HOME="$temporary/$cached_neighbor_name-neighbor-state"
+	export XDG_STATE_HOME
+	mkdir -p "$cached_neighbor_directory"
+	if [ "$cached_neighbor_format" = "jpg" ]; then
+		write_solid_ppm "$temporary/$cached_neighbor_name-red-source.ppm" 220 20 30
+		write_solid_ppm "$temporary/$cached_neighbor_name-green-source.ppm" 20 220 40
+		convert "$temporary/$cached_neighbor_name-red-source.ppm" -quality 100 \
+			-sampling-factor 4:4:4 "$cached_neighbor_directory/01-red.jpg"
+		convert "$temporary/$cached_neighbor_name-green-source.ppm" -quality 100 \
+			-sampling-factor 4:4:4 "$cached_neighbor_directory/02-green.jpg"
+	else
+		write_solid_ppm "$cached_neighbor_directory/01-red.ppm" 220 20 30
+		write_solid_ppm "$cached_neighbor_directory/02-green.ppm" 20 220 40
+	fi
+	viewer_perf_trace_override=$cached_neighbor_trace
+	VIEWER_TEST_HOME="$temporary/$cached_neighbor_name-neighbor-home" \
+		VIEWER_TEST_CONFIG_HOME="$temporary/$cached_neighbor_name-neighbor-config" \
+		launch_viewer "$cached_neighbor_directory"
+	unset viewer_perf_trace_override
+	assert_title_prefix "01-red.$cached_neighbor_format" \
+		"$cached_neighbor_name neighbor fixture did not start on its first image"
+	cached_neighbor_ready=0
+	for _ in $(seq 1 80); do
+		if [ -f "$cached_neighbor_trace" ] && awk -F, '
+			$2 == "texture_upload" && $4 == "event_thread" &&
+				$6 == "nearest_navigation_neighbor" { ready = 1 }
+			END { exit !ready }
+		' "$cached_neighbor_trace"; then
+			cached_neighbor_ready=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$cached_neighbor_ready" -ne 1 ]; then
+		echo "UI smoke test: $cached_neighbor_name neighbor did not reach its renderer texture cache before selection" >&2
+		cat "$temporary/viewer.log" >&2
+		cat "$cached_neighbor_trace" >&2
+		exit 1
+	fi
+	DISPLAY=":$display_number" xdotool key Right
+	assert_title_prefix "02-green.$cached_neighbor_format" \
+		"navigation did not select the prefetched $cached_neighbor_name neighbor"
+	if [ "$visual_assertions" -eq 1 ]; then
+		DISPLAY=":$display_number" import -window "$window_id" \
+			"$temporary/$cached_neighbor_name-neighbor-first-selection.png"
+		cached_neighbor_pixel=$(convert \
+			"$temporary/$cached_neighbor_name-neighbor-first-selection.png" \
+			-format '%[hex:p{640,400}]' info:)
+		case "$cached_neighbor_pixel" in
+			*14DC28*|*15DC29*) ;;
+			*)
+				echo "UI smoke test: first selection of an uploaded $cached_neighbor_name neighbor did not show its pixels immediately ($cached_neighbor_pixel)" >&2
+				exit 1
+				;;
+		esac
+	fi
+	stop_viewer
+	unset VIEWER_TEST_HOME VIEWER_TEST_CONFIG_HOME
+	XDG_STATE_HOME=$cached_neighbor_previous_state
+	export XDG_STATE_HOME
+}
+
+# Verify first-selection readiness for generic static rasters and JPEGs after
+# their neighbor uploads complete, without returning to an already viewed file.
+assert_first_navigation_frame_is_ready raster ppm
+if command -v convert >/dev/null 2>&1; then
+	assert_first_navigation_frame_is_ready jpeg jpg
+else
+	echo "UI smoke test: SKIP JPEG first-selection fixture (missing ImageMagick convert)"
+fi
 
 # The full Transform image menu opens the free-rotation editor, Escape cancels
 # without changing the selected document, and Apply commits an adjusted angle.

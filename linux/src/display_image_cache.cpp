@@ -240,6 +240,8 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	const DecodedFrame* decodedFrame = nullptr;
 	const bool fileBackedSvg = !request.decoded &&
 		request.fileBackedFormat == FileBackedDisplayFormat::Svg;
+	const bool fileBackedRaster = !request.decoded &&
+		request.fileBackedFormat == FileBackedDisplayFormat::Raster;
 	if (request.decoded) {
 		decodedFrame = &request.decoded->frames[request.frameIndex];
 	} else {
@@ -275,6 +277,20 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 			if (decoded && svgSpectrumDecoded.frames.empty()) {
 				errorMessage = "SVG decoder returned no source pixels for its histogram";
 				decoded = false;
+			}
+		} else if (fileBackedRaster) {
+			// A generic raster request starts from a retained prepared frame that
+			// proved this source is static. Recheck before publishing a new-size one.
+			decoded = DecodeImage(request.filename, displayDecoded,
+				errorMessage, workContext);
+			if (decoded && (displayDecoded.isSvg || displayDecoded.animation ||
+				displayDecoded.frames.size() != 1)) {
+				errorMessage = "file-backed raster display source is not a static image";
+				decoded = false;
+			}
+			if (decoded) {
+				sourceWidth = displayDecoded.frames.front().width;
+				sourceHeight = displayDecoded.frames.front().height;
 			}
 		} else if (request.includeSpectrum) {
 			// Preserve the full-source histogram while keeping its decode and scan off
@@ -413,6 +429,10 @@ DisplayImageCache::ImagePtr PrepareDisplayImage(const DisplayImageRequest& reque
 	prepared->height = image.height;
 	prepared->hasTransparency = image.hasTransparency;
 	prepared->bgra = std::move(image.bgra);
+	prepared->sourceIsStatic = request.decoded ?
+		(!request.decoded->animation && request.decoded->frames.size() == 1) :
+		(fileBackedRaster ? !displayDecoded.animation &&
+			displayDecoded.frames.size() == 1 && !displayDecoded.isSvg : true);
 	if (request.includeSpectrum) {
 		prepared->spectrum = std::make_shared<const GrayscaleSpectrum>(spectrum);
 	}
@@ -489,8 +509,10 @@ bool DisplayImageRequest::Valid() const {
 		targetWidth <= 0 || targetHeight <= 0 ||
 		rotationQuarterTurns < 0 || rotationQuarterTurns > 3) return false;
 	if (!decoded) {
-		const bool recognizedFileFormat = fileBackedFormat == FileBackedDisplayFormat::Svg ?
-			true : IsJpegPath(filename);
+		const bool recognizedFileFormat =
+			fileBackedFormat == FileBackedDisplayFormat::Svg ? true :
+			fileBackedFormat == FileBackedDisplayFormat::Raster ?
+				!IsJpegPath(filename) && !IsSvgPath(filename) : IsJpegPath(filename);
 		return sourceWidth > 0 && sourceHeight > 0 && recognizedFileFormat;
 	}
 	if (frameIndex >= decoded->frames.size()) return false;
@@ -613,6 +635,40 @@ DisplayImageRequest MakeSvgDisplayImageRequest(const SourceDescriptor& source,
 	return request;
 }
 
+DisplayImageRequest MakeRasterDisplayImageRequest(const fs::path& filename,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing,
+	int rotationQuarterTurns, bool includeSpectrum) {
+	return MakeRasterDisplayImageRequest(DescribeImageSource(filename), sourceWidth,
+		sourceHeight, targetWidth, targetHeight, autoContrast, priority, processing,
+		rotationQuarterTurns, includeSpectrum);
+}
+
+DisplayImageRequest MakeRasterDisplayImageRequest(const SourceDescriptor& source,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority, const ImageProcessingParams& processing,
+	int rotationQuarterTurns, bool includeSpectrum) {
+	DisplayImageRequest request;
+	request.source = source;
+	request.filename = source.LogicalPath();
+	request.fileBackedFormat = FileBackedDisplayFormat::Raster;
+	request.sourceWidth = sourceWidth;
+	request.sourceHeight = sourceHeight;
+	request.rotationQuarterTurns = NormalizeQuarterTurns(rotationQuarterTurns);
+	request.targetWidth = targetWidth;
+	request.targetHeight = targetHeight;
+	request.autoContrast = autoContrast;
+	request.includeSpectrum = includeSpectrum;
+	request.processing = processing;
+	request.priority = priority;
+	if (sourceWidth <= 0 || sourceHeight <= 0 || targetWidth <= 0 || targetHeight <= 0 ||
+		IsJpegPath(request.filename) || IsSvgPath(request.filename)) return request;
+	request.cacheKey = MakeCacheKey(source, 0, targetWidth, targetHeight,
+		autoContrast, processing, request.rotationQuarterTurns, includeSpectrum);
+	request.key = SerializeCacheKey(request.cacheKey);
+	return request;
+}
+
 DisplayImageRequest RebuildDisplayImageRequestAtTarget(
 	const DisplayImageRequest& source, int targetWidth, int targetHeight) {
 	DisplayImageRequest request;
@@ -623,6 +679,11 @@ DisplayImageRequest RebuildDisplayImageRequestAtTarget(
 			source.includeSpectrum);
 	} else if (source.fileBackedFormat == FileBackedDisplayFormat::Svg) {
 		request = MakeSvgDisplayImageRequest(source.source, source.sourceWidth,
+			source.sourceHeight, targetWidth, targetHeight, source.autoContrast,
+			source.priority, source.processing, source.rotationQuarterTurns,
+			source.includeSpectrum);
+	} else if (source.fileBackedFormat == FileBackedDisplayFormat::Raster) {
+		request = MakeRasterDisplayImageRequest(source.source, source.sourceWidth,
 			source.sourceHeight, targetWidth, targetHeight, source.autoContrast,
 			source.priority, source.processing, source.rotationQuarterTurns,
 			source.includeSpectrum);

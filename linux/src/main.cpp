@@ -626,6 +626,10 @@ private:
 		jpegview_linux::DisplayImageCacheKey cacheKey;
 		int width = 0;
 		int height = 0;
+		int sourceWidth = 0;
+		int sourceHeight = 0;
+		bool sourceHasTransparency = false;
+		bool sourceIsStatic = false;
 		bool hasTransparency = false;
 		std::shared_ptr<const jpegview_linux::GrayscaleSpectrum> spectrum;
 		bool activeWorking = false;
@@ -994,6 +998,72 @@ private:
 			return true;
 		}
 		return false;
+	}
+
+	bool FindCachedStaticFileDimensions(
+		const jpegview_linux::SourceDescriptor& source,
+		const jpegview_linux::ViewportSnapshot& viewportSnapshot,
+		int imageAreaWidth, int imageAreaHeight,
+		int& sourceWidth, int& sourceHeight, bool& hasTransparency) {
+		const bool jpegSource = jpegview_linux::IsJpegPath(source.LogicalPath());
+		if (!source.Valid() || jpegview_linux::IsSvgPath(source.LogicalPath()) ||
+			imageAreaWidth <= 0 || imageAreaHeight <= 0) return false;
+		const bool includeSpectrum = runtimeSettings_.Values().showHistogram &&
+			runtimeSettings_.Values().infoVisible;
+		bool found = false;
+		std::size_t bestBytes = std::numeric_limits<std::size_t>::max();
+		const auto consider = [&](const jpegview_linux::SourceKey& candidateSource,
+			const jpegview_linux::DisplayImageCacheKey& candidateKey,
+			std::size_t candidateBytes, int candidateSourceWidth,
+			int candidateSourceHeight, bool candidateHasTransparency,
+			bool candidateIsStatic) {
+			if (candidateSource != source.Key() || !candidateIsStatic ||
+				candidateSourceWidth <= 0 || candidateSourceHeight <= 0 ||
+				candidateKey.frameIndex != 0) return;
+			jpegview_linux::Viewport candidateViewport;
+			candidateViewport.Restore(viewportSnapshot, candidateSourceWidth,
+				candidateSourceHeight, imageAreaWidth, imageAreaHeight);
+			const jpegview_linux::ViewportRect destination = candidateViewport.Destination(
+				candidateSourceWidth, candidateSourceHeight,
+				imageAreaWidth, imageAreaHeight);
+			const jpegview_linux::DisplayImageTarget resolution =
+				jpegview_linux::ClampDisplayImageTarget(candidateSourceWidth,
+					candidateSourceHeight, destination.width, destination.height);
+			const jpegview_linux::DisplayImageRequest requested = jpegSource ?
+				jpegview_linux::MakeJpegDisplayImageRequest(source,
+					candidateSourceWidth, candidateSourceHeight, resolution.width,
+					resolution.height, autoContrastEnabled_, 0, imageProcessing_, 0,
+					includeSpectrum) :
+				jpegview_linux::MakeRasterDisplayImageRequest(source,
+					candidateSourceWidth, candidateSourceHeight, resolution.width,
+					resolution.height, autoContrastEnabled_, 0, imageProcessing_, 0,
+					includeSpectrum);
+			if (!jpegview_linux::CanReuseDisplayImageRepresentation(
+				requested.cacheKey, candidateKey) || candidateBytes >= bestBytes) return;
+			found = true;
+			bestBytes = candidateBytes;
+			sourceWidth = candidateSourceWidth;
+			sourceHeight = candidateSourceHeight;
+			hasTransparency = candidateHasTransparency;
+		};
+		for (const auto& cached : displayTextureCache_) {
+			const DisplayTextureCacheEntry& entry = cached.second;
+			consider(entry.source, entry.cacheKey, entry.bytes, entry.sourceWidth,
+				entry.sourceHeight, entry.sourceHasTransparency, entry.sourceIsStatic);
+		}
+		for (const PendingTextureUpload& pending : pendingTextureUploads_) {
+			if (!pending.image) continue;
+			const jpegview_linux::SourceMetadata& metadata =
+				pending.image->source.Metadata();
+			consider(pending.image->source.Key(), pending.image->cacheKey,
+				jpegview_linux::PreparedDisplayImageBytes(*pending.image),
+				metadata.hasDimensions ? metadata.width : 0,
+				metadata.hasDimensions ? metadata.height : 0,
+				metadata.transparencyKnown ? metadata.hasTransparency :
+					pending.image->hasTransparency,
+				pending.image->sourceIsStatic);
+		}
+		return found;
 	}
 
 	void CancelPendingCurrentSourceDimensions() {
@@ -1847,6 +1917,14 @@ private:
 				return prefetched->second;
 			}
 		}
+		for (const auto& cached : displayTextureCache_) {
+			const DisplayTextureCacheEntry& entry = cached.second;
+			if (entry.source == source.Key() && entry.sourceIsStatic &&
+				entry.sourceWidth > 0 && entry.sourceHeight > 0) {
+				return jpegview_linux::PageDimensions{
+					entry.sourceWidth, entry.sourceHeight};
+			}
+		}
 		const auto cached = sourceDimensionCache_.find(source.Key());
 		if (cached != sourceDimensionCache_.end()) {
 			return jpegview_linux::PageDimensions{cached->second.width, cached->second.height};
@@ -1953,6 +2031,29 @@ private:
 					spec.rotationQuarterTurns);
 			request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
 			return request;
+		}
+		if (!decoded) {
+			jpegview_linux::DisplayImageRequest request =
+				jpegview_linux::MakeRasterDisplayImageRequest(source, nextPage.width,
+					nextPage.height, resolution.width, resolution.height,
+					spec.autoContrast, 1, spec.processing,
+					spec.rotationQuarterTurns);
+			const DisplayTextureCacheEntry* best = nullptr;
+			for (const auto& cached : displayTextureCache_) {
+				const DisplayTextureCacheEntry& entry = cached.second;
+				if (entry.source != source.Key() || !entry.sourceIsStatic ||
+					!jpegview_linux::CanReuseDisplayImageRepresentation(
+						request.cacheKey, entry.cacheKey) ||
+					(best != nullptr && entry.bytes >= best->bytes)) continue;
+				best = &entry;
+			}
+			if (best != nullptr) {
+				request = jpegview_linux::RebuildDisplayImageRequestAtTarget(
+					request, best->cacheKey.targetWidth,
+					best->cacheKey.targetHeight);
+				request.workClass = jpegview_linux::PerfWorkClass::ActiveImageSpread;
+				return request;
+			}
 		}
 		// Once the partner texture is ready, its decoded alias is deliberately
 		// released. Reuse the stored display identity while that texture remains
@@ -2365,6 +2466,7 @@ private:
 		CancelPendingAnimationFrameDisplay();
 		const jpegview_linux::SourceDescriptor source =
 			SourceDescriptorForPath(fileList_.Current());
+		currentStaticRasterSource_ = {};
 		ClearCropSelection();
 		SelectPictureLevelsForCurrentFile(resumePendingLoad.has_value());
 		const jpegview_linux::ImageSessionStart sessionStart = imageSession_.BeginSelection(
@@ -2474,6 +2576,16 @@ private:
 		const bool sourceSupportsDimensionsProbe =
 			jpegview_linux::IsJpegPath(fileList_.Current()) ||
 			jpegview_linux::IsSvgPath(fileList_.Current());
+		const bool jpegSource = jpegview_linux::IsJpegPath(fileList_.Current());
+		bool cachedStaticFileHasTransparency = false;
+		const SDL_Rect selectedImageArea = ImageAreaRect();
+		const bool cachedStaticFileReady =
+			sessionStart.effects.requestSelectedSourcePreparation &&
+			!jpegview_linux::IsSvgPath(fileList_.Current()) &&
+			FindCachedStaticFileDimensions(source, viewportSnapshot,
+				selectedImageArea.w, selectedImageArea.h, sourceWidth, sourceHeight,
+				cachedStaticFileHasTransparency);
+		if (cachedStaticFileReady && !jpegSource) currentStaticRasterSource_ = source.Key();
 		const bool cachedSourceDimensions = sessionStart.effects.requestSelectedSourcePreparation &&
 			displayCacheEnabled && sourceSupportsDimensionsProbe &&
 			CachedSourceDimensions(source, sourceWidth, sourceHeight);
@@ -2483,13 +2595,16 @@ private:
 				sourceSupportsDimensionsProbe, displayCacheEnabled, cachedSourceDimensions, source.Valid(),
 				source.Valid() && failedSourceDimensionKeys_.find(source.Key()) !=
 					failedSourceDimensionKeys_.end()});
-		if (sourcePreparationAction ==
+		if (cachedStaticFileReady || sourcePreparationAction ==
 			jpegview_linux::SelectedSourcePreparationAction::UseCachedSourceDimensions) {
 			currentSourcePageDimensions_ =
 				jpegview_linux::PageDimensions{sourceWidth, sourceHeight};
-			imageDocument_.SetDimensions(sourceWidth, sourceHeight, false);
+			imageDocument_.SetDimensions(sourceWidth, sourceHeight,
+				cachedStaticFileReady ? cachedStaticFileHasTransparency : false);
 			if (sessionStart.effects.restoreViewport) RestoreScaleMode(viewportSnapshot);
 			deferredCurrentDisplayPreparation_ = false;
+			// A resident texture plus positively decoded static-source metadata is
+			// enough to commit display readiness; source pixels stay lazy for edits.
 			RequestCurrentDisplayFrame();
 		} else if (sourcePreparationAction ==
 			jpegview_linux::SelectedSourcePreparationAction::RequestSourceDimensions) {
@@ -2503,7 +2618,7 @@ private:
 				prefetchDirection, startupLoad);
 		}
 
-		if (sourcePreparationAction ==
+		if (!cachedStaticFileReady && sourcePreparationAction ==
 			jpegview_linux::SelectedSourcePreparationAction::DecodeSelectedSource) {
 			TransferActiveSpreadPartnerRequestToCurrentImage(source, false);
 			const jpegview_linux::DecodedImageCache::ImagePtr decoded = imageCache_.Find(source);
@@ -4302,11 +4417,25 @@ private:
 			list.push_back(prepared->key);
 			lruPosition = std::prev(list.end());
 			lruInserted = true;
-			DisplayTextureCacheEntry entry{pending.incompleteTexture, bytes,
-				prepared->source.Key(), prepared->cacheKey, prepared->width,
-				prepared->height, prepared->hasTransparency, prepared->spectrum,
-				pending.textureActiveWorking, protection,
-				pending.textureReservation.ShareAlias(), lruPosition};
+			DisplayTextureCacheEntry entry;
+			entry.texture = pending.incompleteTexture;
+			entry.bytes = bytes;
+			entry.source = prepared->source.Key();
+			entry.cacheKey = prepared->cacheKey;
+			entry.width = prepared->width;
+			entry.height = prepared->height;
+			const jpegview_linux::SourceMetadata& metadata = prepared->source.Metadata();
+			entry.sourceWidth = metadata.hasDimensions ? metadata.width : 0;
+			entry.sourceHeight = metadata.hasDimensions ? metadata.height : 0;
+			entry.sourceHasTransparency = metadata.transparencyKnown ?
+				metadata.hasTransparency : prepared->hasTransparency;
+			entry.sourceIsStatic = prepared->sourceIsStatic;
+			entry.hasTransparency = prepared->hasTransparency;
+			entry.spectrum = prepared->spectrum;
+			entry.activeWorking = pending.textureActiveWorking;
+			entry.protection = protection;
+			entry.reservation = pending.textureReservation.ShareAlias();
+			entry.lru = lruPosition;
 			const auto inserted = displayTextureCache_.emplace(prepared->key,
 				std::move(entry));
 			if (!inserted.second) {
@@ -4715,6 +4844,11 @@ private:
 					source, currentDecoded_, currentAnimationFrame_,
 					resolution.width, resolution.height,
 					autoContrastEnabled_, 0, imageProcessing_, 0,
+					includeSpectrum);
+			} else if (currentStaticRasterSource_ == source.Key()) {
+				requested = jpegview_linux::MakeRasterDisplayImageRequest(
+					source, sourceWidth, sourceHeight, resolution.width,
+					resolution.height, autoContrastEnabled_, 0, imageProcessing_, 0,
 					includeSpectrum);
 			} else {
 				requested = jpegview_linux::MakeJpegDisplayImageRequest(
@@ -15039,6 +15173,7 @@ private:
 	bool startFullscreen_ = false;
 	jpegview_linux::ImageSpectrumWorker imageSpectrumWorker_;
 	std::optional<jpegview_linux::PageDimensions> currentSourcePageDimensions_;
+	jpegview_linux::SourceKey currentStaticRasterSource_;
 	int currentImageRotationQuarterTurns_ = 0;
 	bool currentSpreadRotationValid_ = false;
 	jpegview_linux::ImageProcessingParams imageProcessing_;

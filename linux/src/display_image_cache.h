@@ -25,6 +25,7 @@ namespace jpegview_linux {
 enum class FileBackedDisplayFormat {
 	Jpeg,
 	Svg,
+	Raster,
 };
 
 // Exact identity for a renderer-ready bitmap. Optional processing values are
@@ -105,6 +106,7 @@ struct PreparedDisplayImage {
 	bool hasTransparency = false;
 	std::vector<std::uint8_t> bgra;
 	std::shared_ptr<const GrayscaleSpectrum> spectrum;
+	bool sourceIsStatic = false;
 	std::size_t priority = 0;
 	PerfWorkClass workClass = PerfWorkClass::Unspecified;
 	int rotationQuarterTurns = 0;
@@ -158,6 +160,16 @@ DisplayImageRequest MakeSvgDisplayImageRequest(const std::filesystem::path& file
 	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
 	bool includeSpectrum = false);
 DisplayImageRequest MakeSvgDisplayImageRequest(const SourceDescriptor& source,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority = 0,
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
+	bool includeSpectrum = false);
+DisplayImageRequest MakeRasterDisplayImageRequest(const std::filesystem::path& filename,
+	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
+	bool autoContrast, std::size_t priority = 0,
+	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
+	bool includeSpectrum = false);
+DisplayImageRequest MakeRasterDisplayImageRequest(const SourceDescriptor& source,
 	int sourceWidth, int sourceHeight, int targetWidth, int targetHeight,
 	bool autoContrast, std::size_t priority = 0,
 	const ImageProcessingParams& processing = {}, int rotationQuarterTurns = 0,
