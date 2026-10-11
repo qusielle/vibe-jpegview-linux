@@ -4772,10 +4772,45 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		fi
 	fi
 	# Quit while the image worker is still behind the barrier. Releasing it after
-	# the quit event verifies teardown can join without abandoning the fallback.
+	# the window hides verifies teardown reaches its worker join without
+	# abandoning the fallback. Waiting for the observable hide avoids a timing
+	# race where a fixed sleep releases the worker before teardown begins.
 	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" q
-	sleep 0.05
+	retained_shutdown_started=0
+	for _ in $(seq 1 120); do
+		if [ ! -f "$viewer_slow_map_active" ]; then break; fi
+		visible_windows=$(DISPLAY=":$display_number" xdotool search --onlyvisible \
+			--class jpegview-linux 2>/dev/null || true)
+		if ! printf '%s\n' "$visible_windows" | grep -Fxq "$window_id"; then
+			viewer_state=$(ps -o stat= -p "$viewer_pid" 2>/dev/null | tr -d ' ' || true)
+			case "$viewer_state" in ''|Z*) break ;; esac
+			if [ -f "$viewer_slow_map_active" ]; then
+				retained_shutdown_started=1
+			fi
+			break
+		fi
+		viewer_state=$(ps -o stat= -p "$viewer_pid" 2>/dev/null | tr -d ' ' || true)
+		case "$viewer_state" in ''|Z*) break ;; esac
+		sleep 0.025
+	done
+	if [ "$retained_shutdown_started" -ne 1 ]; then
+		echo "UI smoke test: viewer did not begin teardown while the retained spread source remained blocked" >&2
+		cat "$temporary/retained-spread-viewer.log" >&2
+		exit 1
+	fi
 	: > "$viewer_slow_map_release"
+	retained_viewer_exited=0
+	for _ in $(seq 1 200); do
+		viewer_state=$(ps -o stat= -p "$viewer_pid" 2>/dev/null | tr -d ' ' || true)
+		case "$viewer_state" in ''|Z*) retained_viewer_exited=1; break ;; esac
+		sleep 0.025
+	done
+	if [ "$retained_viewer_exited" -ne 1 ]; then
+		echo "UI smoke test: viewer did not exit within 5 seconds after releasing the retained spread source" >&2
+		cat "$temporary/retained-spread-viewer.log" >&2
+		kill -KILL "$viewer_pid" 2>/dev/null || true
+		exit 1
+	fi
 	if ! wait "$viewer_pid"; then
 		echo "UI smoke test: viewer failed while quitting with a retained spread and blocked source" >&2
 		cat "$temporary/retained-spread-viewer.log" >&2

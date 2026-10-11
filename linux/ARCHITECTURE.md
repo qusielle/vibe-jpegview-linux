@@ -1072,8 +1072,10 @@ move a cohesive responsibility with its state and lifecycle, rather than only wr
 method or moving SDL calls for their own sake. Each extraction should characterize observable
 behavior first and add model and UI coverage appropriate to the boundary.
 The retained-presentation UI smoke cases hold a selected source read while checking pixel identity
-for an edited standalone image and a rotated transparent spread. The teardown case sends quit before
-releasing the read barrier, so the test covers the renderer owner's worker-join path as well as drawing.
+for an edited standalone image and a rotated transparent spread. The teardown case sends quit and
+waits for the window to hide while the read barrier remains active, then releases the worker and
+requires process exit within a bounded deadline. This exercises the renderer owner's worker-join path
+without a fixed-delay race or an unbounded test wait.
    Rendering should remain last because pixel-level X11 smoke tests are its best safety net.
 
 The image, viewport, playback, file-dialog, dialog-controller, context-menu, thumbnail cache,
