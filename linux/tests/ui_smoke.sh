@@ -4433,6 +4433,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	owner_return_hex=$(printf '%s' "$owner_return_image" | od -An -tx1 | tr -d ' \n')
 	owner_pending_hex=$(printf '%s' "$owner_pending_image" | od -An -tx1 | tr -d ' \n')
 	owner_return_state="$temporary/cold-jpeg-owner-return-state"
+	owner_return_trace=${JPEGVIEW_TEST_OWNER_RETURN_TRACE:-"$temporary/cold-jpeg-owner-return.csv"}
 	mkdir -p "$owner_return_state/jpegview-linux"
 	owner_return_config="$temporary/owner-return-config"
 	mkdir -p "$owner_return_config/jpegview-linux"
@@ -4457,6 +4458,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		JPEGVIEW_TEST_SLOW_MAP_ACTIVE="$owner_header_active" \
 		JPEGVIEW_TEST_SLOW_MAP_RELEASE="$owner_header_release" \
 		JPEGVIEW_TEST_SLOW_MAP_MAX_ATTEMPTS=12000 \
+		JPEGVIEW_PERF_TRACE="$owner_return_trace" \
 		"$BINARY" "$owner_return_image" >"$temporary/cold-jpeg-owner-return.log" 2>&1 &
 	viewer_pid=$!
 	window_id=''
@@ -4645,6 +4647,43 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			exit 1
 		fi
 	fi
+	# Re-edit the returned image so the final A-to-B change retires a charged
+	# standalone texture instead of the original cached presentation.
+	sleep 0.1
+	owner_second_rotation_marker_us=$(awk -F, 'END { print $1 + 0 }' \
+		"$owner_return_trace" 2>/dev/null || true)
+	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Down
+	owner_standalone_snapshot_us=0
+	for _ in $(seq 1 240); do
+		owner_standalone_snapshot_us=$(awk -F, '
+			$1 > marker && $2 == "cache_snapshot" &&
+				$13 == "\"standalone_texture_residency\"" &&
+				$7 == 2560000 && $8 == 1 && $9 == 400 && $10 == 1600 { timestamp = $1 }
+			END { print timestamp + 0 }
+		' marker="$owner_second_rotation_marker_us" "$owner_return_trace" 2>/dev/null || true)
+		if [ "$owner_standalone_snapshot_us" -gt 0 ]; then break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_standalone_snapshot_us" -eq 0 ]; then
+		echo "UI smoke test: re-editing A did not produce its expected 400x1600 standalone texture residency sample" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		cat "$owner_return_trace" >&2
+		exit 1
+	fi
+	owner_warm_neighbor_ready=$(awk -F, -v before="$owner_standalone_snapshot_us" '
+		$1 < before && $2 == "texture_upload" && $6 == "nearest_navigation_neighbor" &&
+			$7 == 76800 { ready = 1 }
+		END { print ready + 0 }
+	' "$owner_return_trace" 2>/dev/null || true)
+	if [ "$owner_warm_neighbor_ready" -ne 1 ]; then
+		echo "UI smoke test: the 160x120 neighbor texture was not ready before the edited standalone replacement" >&2
+		cat "$owner_return_trace" >&2
+		exit 1
+	fi
+	# Trace rows are flushed by a separate writer, so leave time for this positive
+	# residency sample to reach the file before using its timestamp as a boundary.
+	sleep 0.1
 	DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
 	owner_replacement_ready=0
 	for _ in $(seq 1 160); do
@@ -4674,7 +4713,51 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			*) echo "UI smoke test: replacement still showed the outgoing image ($owner_replacement_color)" >&2; exit 1 ;;
 		esac
 	fi
+	owner_standalone_released=0
+	for _ in $(seq 1 240); do
+		owner_standalone_released=$(awk -F, -v after="$owner_standalone_snapshot_us" '
+			$1 > after && $2 == "cache_snapshot" &&
+				$13 == "\"standalone_texture_residency\"" && $7 == 0 && $8 == 0 {
+				released = 1
+			}
+			END { print released + 0 }
+		' "$owner_return_trace" 2>/dev/null || true)
+		if [ "$owner_standalone_released" -eq 1 ]; then break; fi
+		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+		sleep 0.025
+	done
+	if [ "$owner_standalone_released" -ne 1 ]; then
+		echo "UI smoke test: outgoing standalone residency did not clear after B replaced A" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		cat "$owner_return_trace" >&2
+		exit 1
+	fi
 	stop_viewer
+	# The key-up may repaint after retirement, so compare the outgoing destroy
+	# with the last presentation recorded before that exact destruction.
+	owner_retirement_trace=$(awk -F, -v after="$owner_standalone_snapshot_us" '
+		$1 > after && $2 == "event_handling" && $7 == 768 && keydown == 0 {
+			keydown = $1
+		}
+		$1 > after && $2 == "present" && keydown > 0 && destroy == 0 && $1 > keydown {
+			present_before_destroy = $1
+		}
+		$1 > after && $2 == "texture_destroy" && $7 == 2560000 {
+			if (destroy == 0) destroy = $1
+			destroy_count++
+		}
+		END {
+			if (keydown == 0 || present_before_destroy == 0 || destroy == 0 ||
+				destroy_count != 1 || destroy <= present_before_destroy) exit 1
+			printf "%d %d %d", keydown, present_before_destroy, destroy
+		}
+	' "$owner_return_trace" 2>/dev/null || true)
+	if [ -z "$owner_retirement_trace" ]; then
+		echo "UI smoke test: outgoing standalone texture was not destroyed after B's replacement frame was presented" >&2
+		cat "$temporary/cold-jpeg-owner-return.log" >&2
+		cat "$owner_return_trace" >&2
+		exit 1
+	fi
 
 	# Keep a mixed-ownership, rotated spread visible while its next selection
 	# is blocked, and release that blocked source before renderer teardown.

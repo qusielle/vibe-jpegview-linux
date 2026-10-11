@@ -637,6 +637,9 @@ private:
 
 	struct RetiredDisplayTexture {
 		SDL_Texture* texture = nullptr;
+		// Standalone owners keep their allocation charge here until the queued
+		// renderer-thread destruction. Cache textures use the reservation below.
+		jpegview_linux::RendererTextureReference standaloneOwner;
 		std::size_t bytes = 0;
 		jpegview_linux::PerfWorkClass workClass =
 			jpegview_linux::PerfWorkClass::Unspecified;
@@ -3048,7 +3051,9 @@ private:
 
 	void ReplaceCurrentTexture(jpegview_linux::RendererTextureReference replacement) {
 		ClearDisplayTexture();
+		jpegview_linux::RendererTextureReference outgoing = std::move(texture_);
 		texture_ = std::move(replacement);
+		RetireStandalonePresentationTexture(std::move(outgoing));
 		if (!lastPresentedDisplayKey_.empty() &&
 			lastPresentedDisplayKey_ != transitionDisplayKey_ &&
 			lastPresentedDisplayKey_ != pendingTransitionFrame_.displayKey) {
@@ -3684,6 +3689,35 @@ private:
 		}
 	}
 
+	void QueueRendererTextureRetirement(
+		jpegview_linux::RendererTextureReference texture,
+		jpegview_linux::PerfWorkClass workClass) {
+		if (!texture.OwnsTexture()) return;
+		RetiredDisplayTexture retired;
+		retired.texture = texture.Get();
+		retired.workClass = workClass;
+		retired.standaloneOwner = std::move(texture);
+		try {
+			retiredDisplayTextures_.push_back(std::move(retired));
+		} catch (...) {
+			jpegview_linux::PerfContextScope workContext(workClass,
+				jpegview_linux::PerfExecution::EventThread);
+			retired.standaloneOwner.Reset();
+		}
+	}
+
+	void RetireStandalonePresentationTexture(
+		jpegview_linux::RendererTextureReference texture) {
+		if (!texture.OwnsTexture()) return;
+		if (texture.Get() == retainedPresentation_.anchor.texture.Get() &&
+			!retainedPresentation_.anchor.texture.OwnsTexture()) {
+			if (retainedPresentation_.anchor.texture.TakeOwnershipFrom(texture)) return;
+			std::cerr << "Could not transfer outgoing texture ownership to its retained presentation\n";
+		}
+		QueueRendererTextureRetirement(std::move(texture),
+			jpegview_linux::PerfWorkClass::ActiveImageSpread);
+	}
+
 	void RetireIncompleteDisplayTexture(PendingTextureUpload& pending) {
 		if (pending.incompleteTexture == nullptr) return;
 		const std::size_t bytes = pending.textureReservation.Bytes();
@@ -3700,7 +3734,11 @@ private:
 		if (retired.texture != nullptr) {
 			jpegview_linux::PerfContextScope workContext(retired.workClass,
 				jpegview_linux::PerfExecution::EventThread);
-			DestroyTextureMeasured(retired.texture, retired.bytes);
+			if (retired.standaloneOwner.OwnsTexture()) {
+				retired.standaloneOwner.Reset();
+			} else {
+				DestroyTextureMeasured(retired.texture, retired.bytes);
+			}
 			retired.texture = nullptr;
 		}
 		if (retired.countsTowardSpeculativeLimit) {
@@ -4845,7 +4883,7 @@ private:
 					std::cerr << "Could not return pending transition ownership to its retained presentation\n";
 				}
 			} else {
-				frame.texture.Reset();
+				RetireStandalonePresentationTexture(std::move(frame.texture));
 			}
 		}
 		if (!frame.displayKey.empty()) SetDisplayTextureProtection(frame.displayKey,

@@ -637,7 +637,8 @@ cache/queue snapshots. The `display_texture_residency` snapshot reports retained
 texture bytes, their internal limit, bytes awaiting destruction, and live/retiring entry counts.
 The `standalone_texture_residency` snapshot reports nominal BGRA bytes, the count of current or
 outgoing standalone presentation textures, and the largest texture dimensions; it does not estimate
-renderer-driver overhead.
+renderer-driver overhead. During a successful replacement, an outgoing standalone remains charged in
+this snapshot until the renderer destroys it after presenting the replacement.
 Renderer cleanup normally removes one obsolete image texture after presentation; during sustained
 interaction, it starts a one-per-tick drain after four obsolete textures queue so GPU residency stays
 bounded without running a destruction on every low-pressure interaction frame.

@@ -99,8 +99,10 @@ should normally be added to one of these focused modules and covered by the matc
   textures remain explicitly pinned through protection updates, eviction, and active-working cleanup;
   standalone texture ownership transfers to this renderer-thread fallback. Retention copies no pixels
   and keeps the existing shared reservations. Pending selections and reversals keep the same outgoing
-  presentation; its resources release through the existing texture owner when replacement is ready,
-  the selected load fails, or during teardown. Slideshow transitions borrow the same outgoing
+  presentation; when a replacement is ready, standalone ownership moves into the existing bounded
+  renderer-retirement queue and is destroyed after the replacement frame is presented. Its working
+  reservation stays charged until SDL destruction returns. Selected-load failure and teardown keep
+  their explicit cleanup paths. Slideshow transitions borrow the same outgoing
   presentation when needed;
   canceling an owned transition transfers its standalone texture to the retained presentation.
 - `display_preparation_controller`: the display-prefetch planner lifetime, viewport and request-batch
@@ -616,10 +618,20 @@ should normally be added to one of these focused modules and covered by the matc
   current-image texture also keeps one `ActiveWorkingData` reservation there until
   `SDL_DestroyTexture` returns; current, transition, and retained roles only move its destruction
   right, so borrowed aliases do not add charges. A matching retained borrower may receive the right
-  from a canceled transition. Viewer clears pending, active, current, and retained roles before the
-  owner's final drain. Borrowed transition blend and alpha state is restored before its cache key is
-  demoted. If handle tracking cannot allocate, the owner destroys the newly created texture and
-  returns null, preserving the callers' existing defer-and-retry contract.
+  from a canceled transition. When the retained fallback is replaced, its standalone destruction
+  right moves to the same bounded renderer-retirement queue used by obsolete display textures. The
+  replacement is presented before ordinary queue maintenance destroys it; its allocation record
+  keeps the working charge through actual SDL destruction. Viewer clears pending, active, current,
+  and retained roles and drains queued owners before the owner's final drain. Borrowed transition
+  blend and alpha state is restored before its cache key is demoted. If handle tracking cannot
+  allocate, the owner destroys the newly created texture and returns null, preserving the callers'
+  existing defer-and-retry contract.
+  A single Xvfb/OpenGL trace of a 400x1600 edited standalone with its 160x120 neighbor already
+  uploaded measured 3.97 ms input-to-present before this change and 3.99 ms after it. The old texture
+  was destroyed 0.08 ms after keydown and before presentation in the baseline; after the change it
+  stayed charged for about 251 ms after the first replacement presentation and was destroyed when
+  the existing interaction-aware drain resumed. These single-run timings show the ordering change,
+  not a repeatable latency improvement or accelerated-driver memory cost.
 - `text_renderer`, `chrome_renderer`, `context_menu_renderer`, `file_dialog_renderer`, and
   `editing_dialog_renderer`: SDL drawing adapters that consume prepared paint snapshots and share
   narrow renderer/font services. The editing adapter renders free-rotation controls from a paint

@@ -2371,10 +2371,20 @@ void TestRendererTextureOwnerLifecycle() {
 	Expect(replacementStandalone && standaloneBudget.Snapshot().activeWorkingBytes == 32 &&
 		owner.GetStandaloneTextureResidency().count == 2,
 		"successful standalone replacement was not charged while both textures were live");
+	// Match the Viewer retirement queue: install the replacement first, present
+	// it, then destroy the outgoing owner and release its allocation charge.
+	jpegview_linux::RendererTextureReference queuedStandalone =
+		std::move(originalStandalone);
 	originalStandalone = std::move(replacementStandalone);
+	Expect(originalStandalone && queuedStandalone &&
+		standaloneBudget.Snapshot().activeWorkingBytes == 32 &&
+		owner.GetStandaloneTextureResidency().count == 2,
+		"queued outgoing texture lost its working charge before replacement presentation");
+	SDL_RenderPresent(resources.renderer);
+	queuedStandalone.Reset();
 	Expect(originalStandalone && standaloneBudget.Snapshot().activeWorkingBytes == 16 &&
 		owner.GetStandaloneTextureResidency().count == 1,
-		"replacing a standalone texture failed to release exactly the predecessor charge");
+		"post-present standalone retirement did not release exactly the predecessor charge");
 	originalStandalone.Reset();
 	Expect(standaloneBudget.Snapshot().activeWorkingBytes == 0,
 		"clearing the replacement did not release its standalone charge");
