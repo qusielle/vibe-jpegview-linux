@@ -132,6 +132,7 @@ CORE_CPP_SOURCES := \
 	src/image_decoder.cpp $(IMAGE_DECODER_SOURCES) \
 	src/cache_budget.cpp src/image_cache.cpp src/display_image_cache.cpp \
 	src/image.cpp src/image_processing.cpp src/image_processing_store.cpp \
+	src/processing_recipe.cpp \
 	src/recent_files.cpp src/clipboard.cpp src/settings.cpp \
 	src/transparency_pattern.cpp src/sort_mode.cpp \
 	src/desktop_applications.cpp src/desktop_association.cpp \

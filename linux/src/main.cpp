@@ -21,6 +21,7 @@
 #include "image.h"
 #include "image_processing.h"
 #include "image_processing_store.h"
+#include "processing_recipe.h"
 #include "image_session_controller.h"
 #include "settings.h"
 #include "advanced_configuration_model.h"
@@ -808,8 +809,17 @@ private:
 		return fileDialogTab_ == FileDialogTab::Recents ? recentFileDialogModel_ : fileDialogModel_;
 	}
 
+	bool FileDialogIsParameterImport() const {
+		return fileDialogParameterRestore_ || fileDialogProcessingRecipeImport_;
+	}
+
+	bool FileDialogIncludesNonImageFiles() const {
+		return fileDialogParameterBackup_ || FileDialogIsParameterImport() ||
+			fileDialogProcessingRecipeExport_;
+	}
+
 	bool FileDialogHasTabs() const {
-		return fileDialogOpen_ && !fileDialogSave_ && !fileDialogParameterRestore_;
+		return fileDialogOpen_ && !fileDialogSave_ && !FileDialogIsParameterImport();
 	}
 
 	void Cleanup() {
@@ -6449,6 +6459,8 @@ private:
 		fileDialogSave_ = false;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = false;
+		fileDialogProcessingRecipeExport_ = false;
+		fileDialogProcessingRecipeImport_ = false;
 		fileDialogLosslessCrop_ = false;
 		fileDialogLosslessCropRect_ = {};
 		fileDialogFilename_.clear();
@@ -6547,6 +6559,40 @@ private:
 		if (!fileDialogSave_ || fileDialogFilename_.empty()) return;
 		if (fileDialogLosslessCrop_) {
 			SaveLosslessCropFromDialog();
+			return;
+		}
+		if (fileDialogProcessingRecipeExport_) {
+			fs::path filename(fileDialogFilename_);
+			if (filename.extension().empty()) filename += ".json";
+			if (Lower(filename.extension().string()) != ".json") {
+				fileDialogMessage_ = "Processing recipes must use a .json extension";
+				return;
+			}
+			const fs::path output = AbsoluteNormalized(fileDialogDirectory_ / filename);
+			std::error_code statusError;
+			const fs::file_status outputStatus = fs::symlink_status(output, statusError);
+			const bool outputExists = !statusError && outputStatus.type() != fs::file_type::not_found;
+			if (statusError && statusError != std::errc::no_such_file_or_directory) {
+				fileDialogMessage_ = "Cannot inspect recipe output: " + statusError.message();
+				return;
+			}
+			if (outputExists && !fileDialogOverwriteConfirmed_) {
+				fileDialogOverwriteConfirmed_ = true;
+				fileDialogMessage_ = "File exists; press ENTER to overwrite or ESC to cancel";
+				return;
+			}
+			jpegview_linux::ProcessingRecipe recipe;
+			recipe.name = output.stem().string();
+			recipe.preset = {imageProcessing_, autoContrastEnabled_};
+			std::string errorMessage;
+			if (!jpegview_linux::WriteProcessingRecipeJson(output, recipe,
+				fileDialogOverwriteConfirmed_, errorMessage)) {
+				fileDialogMessage_ = "Recipe export failed: " + errorMessage;
+				return;
+			}
+			const std::string savedName = output.filename().string();
+			CloseFileDialog();
+			SetTitle("Exported processing recipe: " + savedName);
 			return;
 		}
 		if (fileDialogParameterBackup_) {
@@ -6931,6 +6977,21 @@ private:
 		RequestConfirmation(kConfirmRestoreParameterDb,
 			"Replace the active database with " + std::to_string(entryCount) +
 			" saved picture-level entr" + (entryCount == 1 ? "y?" : "ies?"));
+	}
+
+	void ApplyProcessingRecipeFromDialog(const fs::path& source) {
+		jpegview_linux::ProcessingRecipe recipe;
+		std::string errorMessage;
+		if (!jpegview_linux::ReadProcessingRecipeJson(source, recipe, errorMessage)) {
+			fileDialogMessage_ = "Recipe import failed: " + errorMessage;
+			return;
+		}
+		imageProcessing_ = recipe.preset.processing;
+		autoContrastEnabled_ = recipe.preset.autoContrast;
+		const std::string recipeName = recipe.name;
+		CloseFileDialog();
+		RefreshPictureLevels();
+		SetTitle("Applied processing recipe: " + recipeName);
 	}
 
 	void RestorePendingParameterDb() {
@@ -9827,6 +9888,14 @@ private:
 		case jpegview_linux::kCommandEditPictureLevels:
 			OpenPictureLevelsPanel();
 			break;
+		case jpegview_linux::kCommandApplyProcessingRecipe:
+			if (!fileList_.Empty() && !clipboardMode_ && CurrentImage().width > 0 &&
+				!currentSelectedLoadPending_ && !pendingImageOperation_.has_value() &&
+				pendingMaterializationIntents_.empty()) OpenProcessingRecipeDialog(false);
+			break;
+		case jpegview_linux::kCommandExportProcessingRecipe:
+			OpenProcessingRecipeDialog(true);
+			break;
 		case IDM_FIRST:
 			FirstImage();
 			break;
@@ -10325,6 +10394,9 @@ private:
 		state.userCropAspectHeight = runtimeSettings_.Values().userCropAspectHeight;
 		state.autoCorrectionEnabled = autoContrastEnabled_;
 		state.pictureLevelsAvailable = !clipboardMode_ && !fileList_.Empty() && CurrentImage().width > 0;
+		state.processingRecipeAvailable = state.pictureLevelsAvailable &&
+			!currentSelectedLoadPending_ && !pendingImageOperation_.has_value() &&
+			pendingMaterializationIntents_.empty();
 		state.localDensityEnabled = imageProcessing_.localDensityEnabled;
 		state.keepPictureLevels = runtimeSettings_.Values().keepPictureLevels;
 		state.pictureLevelsSaved = !fileList_.Empty() && imageProcessingStore_.find(
@@ -12100,11 +12172,11 @@ private:
 	}
 
 	bool FileDialogHasPreviewColumn() const {
-		return !fileDialogSave_ && !fileDialogParameterRestore_ && FileDialogRect().w >= 560;
+		return !fileDialogSave_ && !FileDialogIsParameterImport() && FileDialogRect().w >= 560;
 	}
 
 	bool FileDialogCanSort() const {
-		return !fileDialogSave_ && !fileDialogParameterRestore_ &&
+		return !fileDialogSave_ && !FileDialogIsParameterImport() &&
 			fileDialogTab_ == FileDialogTab::Browse;
 	}
 
@@ -12451,7 +12523,7 @@ private:
 		++fileDialogSummaryGeneration_;
 		fileDialogDirectorySummaries_.clear();
 		std::vector<fs::path> directories;
-		if (!fileDialogSave_ && !fileDialogParameterRestore_) {
+		if (!fileDialogSave_ && !FileDialogIsParameterImport()) {
 			for (const FileDialogEntry& entry : fileDialogModel_.AllEntries()) {
 				if (entry.directory && !entry.parent && !entry.encrypted) {
 					directories.push_back(entry.path);
@@ -12463,7 +12535,7 @@ private:
 
 	void TickFileDialogDirectorySummaries() {
 		for (jpegview_linux::DirectorySummaryResult& result : fileDialogSummaryLoader_.TakeReady()) {
-			if (!fileDialogOpen_ || fileDialogSave_ || fileDialogParameterRestore_ ||
+			if (!fileDialogOpen_ || fileDialogSave_ || FileDialogIsParameterImport() ||
 				result.generation != fileDialogSummaryGeneration_) continue;
 			fileDialogDirectorySummaries_[result.directory.string()] = result.summary;
 			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
@@ -12495,7 +12567,7 @@ private:
 			}
 			for (const FileDialogEntry& entry : model.AllEntries()) appendUnknownEntry(entry);
 		};
-		if (!fileDialogSave_ && !fileDialogParameterBackup_ && !fileDialogParameterRestore_) {
+		if (!fileDialogSave_ && !FileDialogIncludesNonImageFiles()) {
 			appendUnknownFiles(ActiveFileDialogModel());
 			appendUnknownFiles(fileDialogTab_ == FileDialogTab::Browse ?
 				recentFileDialogModel_ : fileDialogModel_);
@@ -12525,8 +12597,7 @@ private:
 	void TickFileDialogDirectoryListing() {
 		for (jpegview_linux::FileDialogDirectoryResult& result :
 			fileDialogDirectoryLoader_.TakeReady()) {
-			const bool includeNonImageFiles = fileDialogParameterBackup_ ||
-				fileDialogParameterRestore_;
+			const bool includeNonImageFiles = FileDialogIncludesNonImageFiles();
 			const bool includeArchives = !fileDialogSave_ && !includeNonImageFiles;
 			if (!fileDialogOpen_ || result.generation != fileDialogDirectoryGeneration_ ||
 				result.directory != fileDialogDirectory_ || result.directory.empty() ||
@@ -12610,7 +12681,7 @@ private:
 	void TickFileDialogArchiveDirectory() {
 		for (jpegview_linux::ArchiveDirectoryResult& result :
 			fileDialogArchiveLoader_.TakeReady()) {
-			if (!fileDialogOpen_ || fileDialogSave_ || fileDialogParameterRestore_ ||
+			if (!fileDialogOpen_ || fileDialogSave_ || FileDialogIsParameterImport() ||
 				result.generation != fileDialogArchiveGeneration_ ||
 				(result.passwordValidation ?
 					result.directory != archivePasswordDialogTarget_ :
@@ -12777,8 +12848,7 @@ private:
 		fileDialogFileSizeLoader_.Clear(++fileDialogFileSizeGeneration_);
 		jpegview_linux::FileDialogListingPolicy policy;
 		policy.saveDialog = fileDialogSave_;
-		policy.includeNonImageFiles = fileDialogParameterBackup_ ||
-			fileDialogParameterRestore_;
+		policy.includeNonImageFiles = FileDialogIncludesNonImageFiles();
 		policy.includeArchives = !policy.saveDialog && !policy.includeNonImageFiles;
 		policy.encryptedArchivePaths = encryptedArchivePaths_;
 		fileDialogDirectoryLoader_.Request(fileDialogDirectory_,
@@ -12806,6 +12876,8 @@ private:
 		fileDialogSave_ = false;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = false;
+		fileDialogProcessingRecipeExport_ = false;
+		fileDialogProcessingRecipeImport_ = false;
 		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogSaveFullSize_ = true;
 		PositionFileDialogGeometry();
@@ -12893,6 +12965,8 @@ private:
 		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = false;
+		fileDialogProcessingRecipeExport_ = false;
+		fileDialogProcessingRecipeImport_ = false;
 		fileDialogLosslessCrop_ = false;
 		fileDialogLosslessCropRect_ = {};
 		fileDialogSaveFullSize_ = fullSize;
@@ -12923,6 +12997,8 @@ private:
 		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogParameterBackup_ = true;
 		fileDialogParameterRestore_ = false;
+		fileDialogProcessingRecipeExport_ = false;
+		fileDialogProcessingRecipeImport_ = false;
 		fileDialogSaveFullSize_ = true;
 		PositionFileDialogGeometry();
 		fileDialogFilename_ = database.stem().string() + "-backup" + database.extension().string();
@@ -12951,10 +13027,48 @@ private:
 		fileDialogTab_ = FileDialogTab::Browse;
 		fileDialogParameterBackup_ = false;
 		fileDialogParameterRestore_ = true;
+		fileDialogProcessingRecipeExport_ = false;
+		fileDialogProcessingRecipeImport_ = false;
 		fileDialogSaveFullSize_ = true;
 		PositionFileDialogGeometry();
 		fileDialogFilename_.clear();
 		fileDialogModel_.Begin(false);
+		fileDialogMessage_.clear();
+		fileDialogOverwriteConfirmed_ = false;
+		fileDialogOpen_ = true;
+		fileDialogActivateAfterListing_ = false;
+		fileDialogOpenDirectoryAfterListing_ = false;
+		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
+		UpdateFileDialogCursor(lastMouseX_, lastMouseY_);
+		contextMenuOpen_ = false;
+		RefreshFileDialog();
+		fileDialogModel_.ClearSelection();
+		SDL_StartTextInput();
+	}
+
+	void OpenProcessingRecipeDialog(bool exportRecipe) {
+		if (exportRecipe && (fileList_.Empty() || clipboardMode_ || CurrentImage().width <= 0 ||
+			currentSelectedLoadPending_ || pendingImageOperation_.has_value() ||
+			!pendingMaterializationIntents_.empty())) return;
+		std::error_code error;
+		const fs::path currentSource = fileList_.Empty() ? fs::path{} : fileList_.Current();
+		fs::path directory = fileList_.Empty() ? fs::current_path(error) :
+			(jpegview_linux::IsArchiveMemberLocation(currentSource) ?
+				jpegview_linux::ArchiveBackingFile(currentSource).parent_path() :
+				currentSource.parent_path());
+		if (error || directory.empty()) directory = fs::path(".");
+		fileDialogDirectory_ = AbsoluteNormalized(directory);
+		fileDialogSave_ = exportRecipe;
+		fileDialogTab_ = FileDialogTab::Browse;
+		fileDialogParameterBackup_ = false;
+		fileDialogParameterRestore_ = false;
+		fileDialogProcessingRecipeExport_ = exportRecipe;
+		fileDialogProcessingRecipeImport_ = !exportRecipe;
+		fileDialogSaveFullSize_ = true;
+		PositionFileDialogGeometry();
+		fileDialogFilename_ = exportRecipe ?
+			fileList_.Current().stem().string() + "-recipe.json" : std::string();
+		fileDialogModel_.Begin(exportRecipe);
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
 		fileDialogOpen_ = true;
@@ -13021,13 +13135,13 @@ private:
 			CloseFileDialog(false);
 			return;
 		}
-		if (!fileDialogSave_ && !fileDialogParameterRestore_ && entry.encrypted &&
+		if (!fileDialogSave_ && !FileDialogIsParameterImport() && entry.encrypted &&
 			!jpegview_linux::HasSessionArchivePassword(entry.path)) {
 			BeginArchivePasswordDialog(entry.path);
 			return;
 		}
 		if (entry.directory) {
-			if (openDirectoryImmediately && !fileDialogSave_ && !fileDialogParameterRestore_) {
+			if (openDirectoryImmediately && !fileDialogSave_ && !FileDialogIsParameterImport()) {
 				OpenDroppedFiles({entry.path.string()});
 			} else {
 				NavigateFileDialogDirectory(entry.path, entry.parent);
@@ -13040,6 +13154,8 @@ private:
 			SaveImageFromDialog();
 		} else if (fileDialogParameterRestore_) {
 			BeginParameterDbRestore(entry.path);
+		} else if (fileDialogProcessingRecipeImport_) {
+			ApplyProcessingRecipeFromDialog(entry.path);
 		} else {
 			OpenDroppedFiles({entry.path.string()});
 			CloseFileDialog(false);
@@ -13226,11 +13342,14 @@ private:
 		snapshot.location = snapshot.recentTab ? "One recent image per folder" :
 			fileDialogLocationDisplayName_;
 		snapshot.title = fileDialogLosslessCrop_ ? "Save lossless JPEG crop" :
+			(fileDialogProcessingRecipeExport_ ? "Export processing recipe" :
+			(fileDialogProcessingRecipeImport_ ? "Apply processing recipe" :
 			(fileDialogParameterBackup_ ? "Back up picture-level database" :
 			(fileDialogParameterRestore_ ? "Restore picture-level database" :
-			(fileDialogSave_ ? "Save processed image" : "Open image")));
+			(fileDialogSave_ ? "Save processed image" : "Open image")))));
 		snapshot.fieldTitle = fileDialogSave_ ? "File name" :
-			(fileDialogParameterRestore_ ? "Backup filter" : "Filter");
+			(fileDialogParameterRestore_ ? "Backup filter" :
+			(fileDialogProcessingRecipeImport_ ? "Recipe filter" : "Filter"));
 		const jpegview_linux::FileDialogModel& model = ActiveFileDialogModel();
 		const std::string& inputText = fileDialogSave_ ? fileDialogFilename_ : model.Filter();
 		snapshot.inputText = ClipInputText(inputText, snapshot.input.w - 20);
@@ -13240,6 +13359,9 @@ private:
 		} else if (fileDialogParameterRestore_) {
 			snapshot.shortcutHint =
 				"Type: Filter   Enter: Restore backup   Backspace: Parent   Esc: Cancel";
+		} else if (fileDialogProcessingRecipeImport_) {
+			snapshot.shortcutHint =
+				"Type: Filter   Enter: Apply recipe   Backspace: Parent   Esc: Cancel";
 		} else if (snapshot.recentTab) {
 			snapshot.shortcutHint =
 				"Type: Filter   Ctrl+Tab: Tabs   Up/Down: Move   PgUp/Dn: Page   Del: Remove   Ctrl+Z: Undo   Enter: Open   Backspace: Filter   Esc: Cancel";
@@ -15912,6 +16034,8 @@ private:
 	bool fileDialogSave_ = false;
 	bool fileDialogParameterBackup_ = false;
 	bool fileDialogParameterRestore_ = false;
+	bool fileDialogProcessingRecipeExport_ = false;
+	bool fileDialogProcessingRecipeImport_ = false;
 	int fileDialogX_ = 0;
 	int fileDialogY_ = 0;
 	FileDialogDragMode fileDialogDragMode_ = FileDialogDragMode::None;

@@ -21,6 +21,8 @@ constexpr int kCommandOpenGpsLocation = -16;
 constexpr int kCommandTogglePixelColorSampler = -17;
 constexpr int kCommandStartCustomSlideshow = -24;
 constexpr int kCommandStartCustomMovie = -25;
+constexpr int kCommandApplyProcessingRecipe = -26;
+constexpr int kCommandExportProcessingRecipe = -27;
 
 struct MenuItem {
 	std::string label;
@@ -94,6 +96,7 @@ struct ContextMenuState {
 	int userCropAspectHeight = 1;
 	bool autoCorrectionEnabled = false;
 	bool pictureLevelsAvailable = false;
+	bool processingRecipeAvailable = false;
 	bool localDensityEnabled = false;
 	bool keepPictureLevels = false;
 	bool pictureLevelsSaved = false;

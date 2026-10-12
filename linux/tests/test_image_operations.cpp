@@ -5,6 +5,7 @@
 #include "image_metadata_reader.h"
 #include "image_transform_geometry.h"
 #include "image_transform_pixels.h"
+#include "processing_recipe.h"
 #include "tiff_metadata_reader.h"
 
 #include <array>
@@ -1487,6 +1488,72 @@ void TestPictureLevelsStoreRoundTrip() {
 	Expect(!jpegview_linux::LoadImageProcessingStore(database, loaded) && loaded.size() == 1 &&
 		std::abs(loaded.begin()->second.processing.contrast - 0.36) < 1e-12,
 		"out-of-range picture-level database was accepted or replaced the current store");
+}
+
+void TestPortableProcessingRecipeJsonRoundTripAndValidation() {
+	TemporaryDirectory temporary;
+	jpegview_linux::ProcessingRecipe expected;
+	expected.name = "Warm \"portrait\" \\ Café";
+	expected.preset.autoContrast = true;
+	jpegview_linux::ImageProcessingParams& params = expected.preset.processing;
+	params.contrast = 0.17;
+	params.gamma = 1.37;
+	params.saturation = 1.42;
+	params.cyanRed = -0.28;
+	params.magentaGreen = 0.31;
+	params.yellowBlue = -0.44;
+	params.lightenShadows = 0.62;
+	params.darkenHighlights = 0.24;
+	params.deepShadows = 0.13;
+	params.colorCorrection = -0.22;
+	params.contrastCorrection = 0.73;
+	params.sharpen = 0.32;
+	params.unsharpRadius = 3.25;
+	params.unsharpAmount = 5.5;
+	params.unsharpThreshold = 12.0;
+	params.localDensityEnabled = true;
+	std::string json;
+	std::string errorMessage;
+	Expect(jpegview_linux::SerializeProcessingRecipeJson(expected, json, errorMessage),
+		"valid processing recipe could not be serialized: " + errorMessage);
+	jpegview_linux::ProcessingRecipe parsed;
+	Expect(jpegview_linux::ParseProcessingRecipeJson(json, parsed, errorMessage),
+		"serialized processing recipe could not be parsed: " + errorMessage);
+	Expect(parsed.name == expected.name && parsed.preset.autoContrast &&
+		jpegview_linux::EqualImageProcessing(parsed.preset.processing, expected.preset.processing),
+		"processing recipe JSON changed its name, flags, or parameter values");
+
+	const fs::path recipeFile = temporary.path() / "warm-portrait.json";
+	Expect(jpegview_linux::WriteProcessingRecipeJson(recipeFile, expected, false, errorMessage),
+		"processing recipe could not be written atomically: " + errorMessage);
+	jpegview_linux::ProcessingRecipe loaded;
+	Expect(jpegview_linux::ReadProcessingRecipeJson(recipeFile, loaded, errorMessage) &&
+		loaded.name == expected.name && loaded.preset.autoContrast &&
+		jpegview_linux::EqualImageProcessing(loaded.preset.processing, expected.preset.processing),
+		"portable recipe file did not restore every processing value: " + errorMessage);
+	Expect(!jpegview_linux::WriteProcessingRecipeJson(recipeFile, expected, false, errorMessage),
+		"processing recipe replaced an existing file without overwrite confirmation");
+	Expect(jpegview_linux::ReadProcessingRecipeJson(recipeFile, loaded, errorMessage) &&
+		loaded.name == expected.name,
+		"refused recipe overwrite damaged the existing file");
+	expected.name = "Cool landscape";
+	params.contrast = -0.12;
+	Expect(jpegview_linux::WriteProcessingRecipeJson(recipeFile, expected, true, errorMessage) &&
+		jpegview_linux::ReadProcessingRecipeJson(recipeFile, loaded, errorMessage) &&
+		loaded.name == expected.name &&
+		jpegview_linux::EqualImageProcessing(loaded.preset.processing, expected.preset.processing),
+		"confirmed recipe replacement did not publish the new recipe");
+
+	const std::array<std::string, 4> invalidJson = {{
+		"{\"format\":\"wrong\"}",
+		json.substr(0, json.size() - 2) + ",\"contrast\": 0.1}\n",
+		"{\"format\":\"jpegview-linux-processing-recipe\",\"version\":1,\"name\":\"bad\",\"auto_contrast\":false,\"local_density_enabled\":false,\"contrast\":0.8,\"gamma\":1,\"saturation\":1,\"cyan_red\":0,\"magenta_green\":0,\"yellow_blue\":0,\"lighten_shadows\":0,\"darken_highlights\":0,\"deep_shadows\":0,\"color_correction\":0,\"contrast_correction\":0,\"sharpen\":0,\"unsharp_radius\":1,\"unsharp_amount\":0,\"unsharp_threshold\":4}\n",
+		"{\"format\":\"jpegview-linux-processing-recipe\",\"version\":1,\"name\":\"bad\",\"auto_contrast\":false,\"local_density_enabled\":false,\"contrast\":NaN,\"gamma\":1,\"saturation\":1,\"cyan_red\":0,\"magenta_green\":0,\"yellow_blue\":0,\"lighten_shadows\":0,\"darken_highlights\":0,\"deep_shadows\":0,\"color_correction\":0,\"contrast_correction\":0,\"sharpen\":0,\"unsharp_radius\":1,\"unsharp_amount\":0,\"unsharp_threshold\":4}\n",
+	}};
+	for (const std::string& invalid : invalidJson) {
+		Expect(!jpegview_linux::ParseProcessingRecipeJson(invalid, loaded, errorMessage),
+			"malformed, unsupported, or out-of-range processing recipe was accepted");
+	}
 }
 
 void TestSettingsRoundTripAndMalformedValues() {
@@ -4521,6 +4588,7 @@ const TestCase kTests[] = {
 	{"in-place-save-materializes-lazy-document-and-rebinds-source", &TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource},
 	{"image-operation-worker-supersedes-and-survives-failures", &TestImageOperationWorkerSupersedesAndSurvivesFailures},
 	{"picture-levels-store-round-trip", &TestPictureLevelsStoreRoundTrip},
+	{"portable-processing-recipe-json-round-trip-and-validation", &TestPortableProcessingRecipeJsonRoundTripAndValidation},
 	{"settings-round-trip-and-malformed-values", &TestSettingsRoundTripAndMalformedValues},
 	{"runtime-settings-owner-commit-semantics", &TestRuntimeSettingsOwnerCommitSemantics},
 	{"advanced-configuration-model-categories-and-round-trips", &TestAdvancedConfigurationModelCategoriesAndRoundTrips},

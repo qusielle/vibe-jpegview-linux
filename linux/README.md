@@ -1295,6 +1295,12 @@ database, and writes an atomic Linux-native copy that can be moved to another in
 the selected database before asking for confirmation, then atomically replaces the live database.
 Invalid files leave the active database untouched. Windows binary parameter databases are not
 compatible with this Linux text format.
+`Apply processing recipe...` loads one versioned JSON recipe and applies its named picture-level
+values to the current image for preview. `Export current processing recipe...` writes the current
+values to one portable JSON file; its filename supplies the recipe name. Recipes include the
+picture-level sliders, auto-correction and local-density flags, and unsharp-mask values. Applying a
+recipe does not change the defaults or per-image database; use the existing save action if you want
+to retain it for that image. Crop, rotation, and other destructive edits are not part of a recipe.
 The `Open image with` submenu is populated from matching freedesktop `.desktop` applications and
 launches them with the current image, including standard `%f`/`%F` and URI placeholders. Applications
 are discovered from the user and system application directories at menu-open time.

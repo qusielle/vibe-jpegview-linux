@@ -275,7 +275,9 @@ should normally be added to one of these focused modules and covered by the matc
   event-thread update phase; the renderer consumes its prepared paint plan without changing sampler
   state. It does not read back the renderer or retain another display-sized buffer.
 - `image_processing` and `image_processing_store`: bounded adjustment ranges, parameter identity,
-  pixel processing, the atomic native per-image levels database, and its portable backup/restore.
+  pixel processing, the atomic native per-image levels database, and its backup/restore. The focused
+  `processing_recipe` module serializes one named adjustment preset per versioned JSON file; recipes
+  are validated before application and remain separate from per-image path keys and database restore.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
   `image_formats` owns both the extension policy used by listings and bounded content-signature
   detection used by decoding. The decoder selects a recognized content format before falling back to

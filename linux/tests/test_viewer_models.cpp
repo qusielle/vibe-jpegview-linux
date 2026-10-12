@@ -1125,6 +1125,17 @@ void TestContextMenuCatalogAndState() {
 	state.customSlideshowIntervalSeconds = 6.5;
 	state.customMovieFramesPerSecond = 37.5;
 	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
+	const std::vector<MenuItem> recipeActionsUnavailable =
+		jpegview_linux::BuildContextMenu(state, true);
+	Expect(findCommand(recipeActionsUnavailable,
+		jpegview_linux::kCommandApplyProcessingRecipe) != nullptr &&
+		!findCommand(recipeActionsUnavailable,
+			jpegview_linux::kCommandApplyProcessingRecipe)->enabled &&
+		findCommand(recipeActionsUnavailable,
+			jpegview_linux::kCommandExportProcessingRecipe) != nullptr &&
+		!findCommand(recipeActionsUnavailable,
+			jpegview_linux::kCommandExportProcessingRecipe)->enabled,
+		"processing recipe actions were enabled without a stable image owner");
 	Expect(findCommand(compact, jpegview_linux::kCommandAnimationPreviousFrame) == nullptr &&
 		findCommand(compact, jpegview_linux::kCommandAnimationNextFrame) == nullptr,
 		"compact context menu exposed advanced animation frame controls");
@@ -1261,6 +1272,7 @@ void TestContextMenuCatalogAndState() {
 	state.spacebarNavigatesImages = true;
 	state.autoCorrectionEnabled = true;
 	state.pictureLevelsAvailable = true;
+	state.processingRecipeAvailable = true;
 	state.selectionModeEnabled = true;
 	state.localDensityEnabled = true;
 	state.keepPictureLevels = true;
@@ -1278,11 +1290,18 @@ void TestContextMenuCatalogAndState() {
 		jpegview_linux::kCommandStartCustomSlideshow);
 	const MenuItem* customMovie = findCommand(advanced,
 		jpegview_linux::kCommandStartCustomMovie);
+	const MenuItem* applyRecipe = findCommand(advanced,
+		jpegview_linux::kCommandApplyProcessingRecipe);
+	const MenuItem* exportRecipe = findCommand(advanced,
+		jpegview_linux::kCommandExportProcessingRecipe);
 	Expect(customSlideshow != nullptr && customSlideshow->enabled &&
 		customSlideshow->label == "  Custom waiting time (6.5 sec)" &&
 		customMovie != nullptr && customMovie->enabled &&
 		customMovie->label == "  Custom playback speed (37.5 fps)",
 		"advanced playback menu did not expose the configured custom timing actions");
+	Expect(applyRecipe != nullptr && applyRecipe->enabled &&
+		exportRecipe != nullptr && exportRecipe->enabled,
+		"advanced processing menu did not expose recipe import and export actions");
 	const MenuItem* animationPrevious = findCommand(advanced,
 		jpegview_linux::kCommandAnimationPreviousFrame);
 	const MenuItem* animationToggle = findCommand(advanced,

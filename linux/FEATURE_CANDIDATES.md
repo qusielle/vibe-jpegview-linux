@@ -150,10 +150,6 @@ describe the following ideas:
 - **Smart crop suggestion:** detect likely uniform borders and propose a crop rectangle, leaving
   confirmation and final adjustment to the user so legitimate borders are not silently removed.
   See the fork's [smart-crop commit](https://github.com/famomatic/jpegview/commit/9cb44210ee8fa876e9de2cd19ef9a6974fb6ebf0).
-- **Portable processing recipes:** import/export named picture-processing parameter sets as JSON
-  for backup or transfer, separately from Linux's per-image parameter database and its whole-DB
-  backup/restore. See the fork's
-  [recipe commit](https://github.com/famomatic/jpegview/commit/5d3c7a8b8932ad4d2212a7190eaaf9db5958e86a).
 - **Animated-frame extraction:** export every frame of a supported animated image as individual
   still files, with an explicit format and naming pattern. Linux can play the listed animations but
   currently saves a still image rather than offering a frame-export workflow. See the fork's
