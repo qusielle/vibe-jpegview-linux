@@ -282,6 +282,9 @@ should normally be added to one of these focused modules and covered by the matc
   pixel processing, the atomic native per-image levels database, and its backup/restore. The focused
   `processing_recipe` module serializes one named adjustment preset per versioned JSON file; recipes
   are validated before application and remain separate from per-image path keys and database restore.
+  Recipe file reads and writes run through `FileOperationService`; completions carry recipe values to
+  the event thread. Recipe dialogs pause playback, export their captured preset, and bind imports to
+  the selected path, source key, and image-session generation that opened the dialog.
 - `image_decoder`, `image_writer`, and `image_formats`: codec boundaries and format policy.
   `image_formats` owns both the extension policy used by listings and bounded content-signature
   detection used by decoding. The decoder selects a recognized content format before falling back to

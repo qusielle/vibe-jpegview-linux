@@ -1411,6 +1411,39 @@ FileOperationResult Execute(const RegisterDefaultViewerOperation& operation,
 	return result;
 }
 
+FileOperationResult Execute(const ImportProcessingRecipeOperation& operation,
+	std::uint64_t ownerGeneration, const std::function<bool()>& shouldContinue) {
+	FileOperationResult result = NewResult(FileOperationKind::ImportProcessingRecipe,
+		ownerGeneration);
+	ProcessingRecipe recipe;
+	if (operation.source.empty() || !ReadProcessingRecipeJson(operation.source,
+		recipe, result.message, shouldContinue)) {
+		if (result.message.empty()) result.message = "processing recipe input path is empty";
+		Fail(result, result.message, shouldContinue);
+		return result;
+	}
+	result.path = operation.source;
+	result.processingRecipe = std::move(recipe);
+	result.success = true;
+	return result;
+}
+
+FileOperationResult Execute(const ExportProcessingRecipeOperation& operation,
+	std::uint64_t ownerGeneration, const std::function<bool()>& shouldContinue) {
+	FileOperationResult result = NewResult(FileOperationKind::ExportProcessingRecipe,
+		ownerGeneration);
+	if (operation.output.empty() || !WriteProcessingRecipeJson(operation.output,
+		operation.recipe, operation.overwriteConfirmed, result.message, shouldContinue,
+		&result.overwriteRequired)) {
+		if (result.message.empty()) result.message = "processing recipe output path is empty";
+		Fail(result, result.message, shouldContinue);
+		return result;
+	}
+	result.path = operation.output;
+	result.success = true;
+	return result;
+}
+
 FileOperationResult Execute(const RemoveTemporaryFilesOperation& operation,
 	std::uint64_t ownerGeneration, const std::function<bool()>&) {
 	FileOperationResult result = NewResult(FileOperationKind::RemoveTemporaryFiles,
@@ -1467,6 +1500,8 @@ FileOperationKind KindOf(const FileOperationPayload& payload) {
 	return std::visit([](const auto& operation) -> FileOperationKind {
 		using Type = std::decay_t<decltype(operation)>;
 		if constexpr (std::is_same_v<Type, SaveImageOperation>) return FileOperationKind::SaveImage;
+		else if constexpr (std::is_same_v<Type, ImportProcessingRecipeOperation>) return FileOperationKind::ImportProcessingRecipe;
+		else if constexpr (std::is_same_v<Type, ExportProcessingRecipeOperation>) return FileOperationKind::ExportProcessingRecipe;
 		else if constexpr (std::is_same_v<Type, CopyImageOperation>) return FileOperationKind::CopyImage;
 		else if constexpr (std::is_same_v<Type, PasteImageOperation>) return FileOperationKind::PasteImage;
 		else if constexpr (std::is_same_v<Type, LosslessTransformOperation>) return FileOperationKind::LosslessTransform;

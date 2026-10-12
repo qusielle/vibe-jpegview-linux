@@ -1556,6 +1556,67 @@ void TestPortableProcessingRecipeJsonRoundTripAndValidation() {
 	}
 }
 
+void TestProcessingRecipeFileOperationsUseWorkerResults() {
+	TemporaryDirectory temporary;
+	const fs::path recipePath = temporary.path() / "worker-recipe.json";
+	jpegview_linux::ProcessingRecipe expected;
+	expected.name = "Worker recipe";
+	expected.preset.processing.contrast = 0.23;
+	expected.preset.processing.gamma = 1.4;
+	expected.preset.autoContrast = true;
+
+	jpegview_linux::FileOperationService service;
+	const std::uint64_t exportId = service.Request(
+		jpegview_linux::ExportProcessingRecipeOperation{recipePath, expected, false}, 81);
+	const bool exportIdle = exportId != 0 && service.WaitUntilIdle(std::chrono::seconds(3));
+	const std::optional<jpegview_linux::FileOperationResult> exported = service.TakeReady();
+	Expect(exportIdle && exported.has_value() && exported->id == exportId &&
+		exported->ownerGeneration == 81 && exported->kind ==
+			jpegview_linux::FileOperationKind::ExportProcessingRecipe && exported->success &&
+		exported->path == recipePath,
+		"recipe export did not complete as a worker-owned file operation");
+
+	const std::uint64_t importId = service.Request(
+		jpegview_linux::ImportProcessingRecipeOperation{recipePath}, 82);
+	const bool importIdle = importId != 0 && service.WaitUntilIdle(std::chrono::seconds(3));
+	const std::optional<jpegview_linux::FileOperationResult> imported = service.TakeReady();
+	Expect(importIdle && imported.has_value() && imported->id == importId &&
+		imported->ownerGeneration == 82 && imported->kind ==
+			jpegview_linux::FileOperationKind::ImportProcessingRecipe && imported->success &&
+		imported->processingRecipe.has_value() &&
+		imported->processingRecipe->name == expected.name &&
+		imported->processingRecipe->preset.autoContrast &&
+		jpegview_linux::EqualImageProcessing(
+			imported->processingRecipe->preset.processing, expected.preset.processing),
+		"recipe import did not publish its validated recipe through the worker result");
+
+	const fs::path occupiedPath = temporary.path() / "occupied-recipe.json";
+	const std::vector<std::uint8_t> originalBytes = {'e', 'x', 'i', 's', 't', 'i', 'n', 'g'};
+	WriteBytes(occupiedPath, originalBytes);
+	const auto overwritePrompt = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::ExportProcessingRecipeOperation{occupiedPath, expected, false}, 84,
+		[] { return true; });
+	Expect(!overwritePrompt.success && overwritePrompt.overwriteRequired &&
+		ReadBytes(occupiedPath) == originalBytes,
+		"recipe export did not defer overwrite confirmation to its worker result");
+	const auto overwritten = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::ExportProcessingRecipeOperation{occupiedPath, expected, true}, 85,
+		[] { return true; });
+	jpegview_linux::ProcessingRecipe replaced;
+	std::string errorMessage;
+	Expect(overwritten.success && !overwritten.overwriteRequired &&
+		jpegview_linux::ReadProcessingRecipeJson(occupiedPath, replaced, errorMessage) &&
+		replaced.name == expected.name,
+		"confirmed recipe overwrite did not publish through the operation worker");
+
+	const auto canceled = jpegview_linux::ExecuteFileOperation(
+		jpegview_linux::ImportProcessingRecipeOperation{recipePath}, 83,
+		[] { return false; });
+	Expect(!canceled.success && canceled.cancelled &&
+		canceled.kind == jpegview_linux::FileOperationKind::ImportProcessingRecipe,
+		"canceled recipe read was not reported as canceled work");
+}
+
 void TestSettingsRoundTripAndMalformedValues() {
 	TemporaryDirectory temporary;
 	const fs::path settingsPath = temporary.path() / "config" / "settings.conf";
@@ -4604,6 +4665,7 @@ const TestCase kTests[] = {
 	{"image-operation-worker-supersedes-and-survives-failures", &TestImageOperationWorkerSupersedesAndSurvivesFailures},
 	{"picture-levels-store-round-trip", &TestPictureLevelsStoreRoundTrip},
 	{"portable-processing-recipe-json-round-trip-and-validation", &TestPortableProcessingRecipeJsonRoundTripAndValidation},
+	{"processing-recipe-file-operations-use-worker-results", &TestProcessingRecipeFileOperationsUseWorkerResults},
 	{"settings-round-trip-and-malformed-values", &TestSettingsRoundTripAndMalformedValues},
 	{"runtime-settings-owner-commit-semantics", &TestRuntimeSettingsOwnerCommitSemantics},
 	{"advanced-configuration-model-categories-and-round-trips", &TestAdvancedConfigurationModelCategoriesAndRoundTrips},

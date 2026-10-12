@@ -6,6 +6,7 @@
 #include "external_commands.h"
 #include "image.h"
 #include "image_writer.h"
+#include "processing_recipe.h"
 #include "work_context.h"
 
 #include <atomic>
@@ -58,6 +59,16 @@ struct SaveImageOperation {
 	std::shared_ptr<const Image> image;
 	CacheReservation imageReservation;
 	ImageWriteOptions options;
+	bool overwriteConfirmed = false;
+};
+
+struct ImportProcessingRecipeOperation {
+	std::filesystem::path source;
+};
+
+struct ExportProcessingRecipeOperation {
+	std::filesystem::path output;
+	ProcessingRecipe recipe;
 	bool overwriteConfirmed = false;
 };
 
@@ -135,7 +146,8 @@ struct RemoveTemporaryFilesOperation {
 	std::filesystem::path directory;
 };
 
-using FileOperationPayload = std::variant<SaveImageOperation, CopyImageOperation,
+using FileOperationPayload = std::variant<SaveImageOperation,
+	ImportProcessingRecipeOperation, ExportProcessingRecipeOperation, CopyImageOperation,
 	PasteImageOperation, LosslessTransformOperation, LosslessCropOperation,
 	BatchCopyOperation, SetModificationTimeOperation, TouchFolderExifDatesOperation,
 	PrintImageOperation, WallpaperImageOperation, WallpaperFileOperation,
@@ -144,6 +156,8 @@ using FileOperationPayload = std::variant<SaveImageOperation, CopyImageOperation
 
 enum class FileOperationKind {
 	SaveImage,
+	ImportProcessingRecipe,
+	ExportProcessingRecipe,
 	CopyImage,
 	PasteImage,
 	LosslessTransform,
@@ -176,10 +190,12 @@ struct FileOperationResult {
 	FileOperationKind kind = FileOperationKind::SaveImage;
 	bool success = false;
 	bool cancelled = false;
+	bool overwriteRequired = false;
 	bool replacedSelectedSource = false;
 	bool irreversibleCommandFinished = false;
 	std::string message;
 	std::filesystem::path path;
+	std::optional<ProcessingRecipe> processingRecipe;
 	std::filesystem::path temporaryFile;
 	std::filesystem::path temporaryDirectory;
 	std::size_t updatedFiles = 0;

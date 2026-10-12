@@ -588,6 +588,7 @@ private:
 		std::uint64_t ownerGeneration = 0;
 		jpegview_linux::FileOperationKind kind =
 			jpegview_linux::FileOperationKind::SaveImage;
+		jpegview_linux::SourceKey ownerSourceKey;
 		fs::path ownerPath;
 		fs::path sourcePath;
 		fs::path outputPath;
@@ -595,6 +596,7 @@ private:
 		std::string successTitle;
 		std::string failurePrefix;
 		bool selectionSensitive = true;
+		bool validateOwnerSourceKey = false;
 		bool cropDialogSave = false;
 		bool batchDialog = false;
 		bool inPlaceSave = false;
@@ -832,6 +834,10 @@ private:
 
 	void Cleanup() {
 		jpegview_linux::UiCompletionWakeup().SetPostFunction({});
+		if (fileDialogPausesPlayback_) {
+			playback_.SetTemporarilyPaused(false, SDL_GetTicks());
+			fileDialogPausesPlayback_ = false;
+		}
 		if (freeRotationDialog_.IsOpen()) CloseFreeRotationDialog(false);
 		else DestroyFreeRotationPreview();
 		if (perspectiveCorrectionDialog_.IsOpen()) ClosePerspectiveCorrectionDialog(false);
@@ -6436,7 +6442,9 @@ private:
 		}
 		if (pendingFileOperation_.has_value() &&
 			(pendingFileOperation_->kind == jpegview_linux::FileOperationKind::SaveImage ||
-			 pendingFileOperation_->kind == jpegview_linux::FileOperationKind::LosslessCrop)) {
+			 pendingFileOperation_->kind == jpegview_linux::FileOperationKind::LosslessCrop ||
+			 pendingFileOperation_->kind == jpegview_linux::FileOperationKind::ImportProcessingRecipe ||
+			 pendingFileOperation_->kind == jpegview_linux::FileOperationKind::ExportProcessingRecipe)) {
 			fileOperationService_.Cancel(pendingFileOperation_->id);
 		}
 		if (cancelPendingDrop &&
@@ -6452,6 +6460,10 @@ private:
 		archivePasswordPendingValue_.clear();
 		if (fileDialogDragMode_ != FileDialogDragMode::None) SDL_CaptureMouse(SDL_FALSE);
 		fileDialogDragMode_ = FileDialogDragMode::None;
+		if (fileDialogPausesPlayback_) {
+			playback_.SetTemporarilyPaused(false, SDL_GetTicks());
+			fileDialogPausesPlayback_ = false;
+		}
 		SDL_SetCursor(SDL_GetDefaultCursor());
 		ClearFileDialogPreview();
 		fileDialogDirectoryLoader_.Clear(++fileDialogDirectoryGeneration_);
@@ -6469,6 +6481,9 @@ private:
 		fileDialogParameterRestore_ = false;
 		fileDialogProcessingRecipeExport_ = false;
 		fileDialogProcessingRecipeImport_ = false;
+		fileDialogRecipeOwnerGeneration_ = 0;
+		fileDialogRecipeOwnerPath_.clear();
+		fileDialogRecipeOwnerSourceKey_ = {};
 		fileDialogLosslessCrop_ = false;
 		fileDialogLosslessCropRect_ = {};
 		fileDialogFilename_.clear();
@@ -6570,6 +6585,8 @@ private:
 			return;
 		}
 		if (fileDialogProcessingRecipeExport_) {
+			if (pendingFileOperation_.has_value() && pendingFileOperation_->kind ==
+				jpegview_linux::FileOperationKind::ExportProcessingRecipe) return;
 			fs::path filename(fileDialogFilename_);
 			if (filename.extension().empty()) filename += ".json";
 			if (Lower(filename.extension().string()) != ".json") {
@@ -6577,30 +6594,18 @@ private:
 				return;
 			}
 			const fs::path output = AbsoluteNormalized(fileDialogDirectory_ / filename);
-			std::error_code statusError;
-			const fs::file_status outputStatus = fs::symlink_status(output, statusError);
-			const bool outputExists = !statusError && outputStatus.type() != fs::file_type::not_found;
-			if (statusError && statusError != std::errc::no_such_file_or_directory) {
-				fileDialogMessage_ = "Cannot inspect recipe output: " + statusError.message();
+			jpegview_linux::ExportProcessingRecipeOperation operation;
+			operation.output = output;
+			operation.recipe.name = output.stem().string();
+			operation.recipe.preset = fileDialogRecipeExportPreset_;
+			operation.overwriteConfirmed = fileDialogOverwriteConfirmed_;
+			PendingFileOperationUi pending;
+			pending.selectionSensitive = false;
+			if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+				fileDialogMessage_ = "Recipe export failed: another file operation is still in progress";
 				return;
 			}
-			if (outputExists && !fileDialogOverwriteConfirmed_) {
-				fileDialogOverwriteConfirmed_ = true;
-				fileDialogMessage_ = "File exists; press ENTER to overwrite or ESC to cancel";
-				return;
-			}
-			jpegview_linux::ProcessingRecipe recipe;
-			recipe.name = output.stem().string();
-			recipe.preset = {imageProcessing_, autoContrastEnabled_};
-			std::string errorMessage;
-			if (!jpegview_linux::WriteProcessingRecipeJson(output, recipe,
-				fileDialogOverwriteConfirmed_, errorMessage)) {
-				fileDialogMessage_ = "Recipe export failed: " + errorMessage;
-				return;
-			}
-			const std::string savedName = output.filename().string();
-			CloseFileDialog();
-			SetTitle("Exported processing recipe: " + savedName);
+			fileDialogMessage_ = "Writing processing recipe…";
 			return;
 		}
 		if (fileDialogParameterBackup_) {
@@ -6678,7 +6683,9 @@ private:
 		if (!pending.selectionSensitive) return true;
 		if (pending.ownerGeneration != imageSession_.Generation()) return false;
 		if (pending.ownerPath.empty()) return fileList_.Empty();
-		return !fileList_.Empty() && fileList_.Current() == pending.ownerPath;
+		if (fileList_.Empty() || fileList_.Current() != pending.ownerPath) return false;
+		return !pending.validateOwnerSourceKey ||
+			SourceDescriptorForPath(pending.ownerPath).Key() == pending.ownerSourceKey;
 	}
 
 	void QueueTemporaryCleanup(fs::path file, fs::path directory) {
@@ -6753,6 +6760,39 @@ private:
 				!(result->success && result->replacedSelectedSource &&
 					pending.flattenAnimationOnSuccess)) {
 				SetAnimationImageReadiness(true, SDL_GetTicks());
+			}
+			break;
+		case jpegview_linux::FileOperationKind::ExportProcessingRecipe:
+			if (result->success && fileDialogOpen_ && fileDialogProcessingRecipeExport_) {
+				const std::string savedName = result->path.filename().string();
+				CloseFileDialog();
+				SetTitle("Exported processing recipe: " + savedName);
+			} else if (result->overwriteRequired && fileDialogOpen_ &&
+				fileDialogProcessingRecipeExport_) {
+				fileDialogOverwriteConfirmed_ = true;
+				fileDialogMessage_ = "File exists; press ENTER to overwrite or ESC to cancel";
+			} else if (!result->success && fileDialogOpen_ &&
+				fileDialogProcessingRecipeExport_) {
+				fileDialogMessage_ = "Recipe export failed: " +
+					(result->message.empty() ? "output could not be written" : result->message);
+			}
+			break;
+		case jpegview_linux::FileOperationKind::ImportProcessingRecipe:
+			if (fileDialogOpen_ && fileDialogProcessingRecipeImport_) {
+				if (result->success && result->processingRecipe.has_value() && ownerCurrent) {
+					imageProcessing_ = result->processingRecipe->preset.processing;
+					autoContrastEnabled_ = result->processingRecipe->preset.autoContrast;
+					const std::string recipeName = result->processingRecipe->name;
+					CloseFileDialog();
+					RefreshPictureLevels();
+					SetTitle("Applied processing recipe: " + recipeName);
+				} else if (!ownerCurrent) {
+					fileDialogMessage_ =
+						"Selected image changed; reopen the recipe dialog for this image";
+				} else {
+					fileDialogMessage_ = "Recipe import failed: " +
+						(result->message.empty() ? "recipe could not be read" : result->message);
+				}
 			}
 			break;
 		case jpegview_linux::FileOperationKind::CopyImage:
@@ -6988,18 +7028,28 @@ private:
 	}
 
 	void ApplyProcessingRecipeFromDialog(const fs::path& source) {
-		jpegview_linux::ProcessingRecipe recipe;
-		std::string errorMessage;
-		if (!jpegview_linux::ReadProcessingRecipeJson(source, recipe, errorMessage)) {
-			fileDialogMessage_ = "Recipe import failed: " + errorMessage;
+		if (!ProcessingRecipeDialogOwnerStillCurrent()) {
+			fileDialogMessage_ = "Selected image changed; reopen the recipe dialog for this image";
 			return;
 		}
-		imageProcessing_ = recipe.preset.processing;
-		autoContrastEnabled_ = recipe.preset.autoContrast;
-		const std::string recipeName = recipe.name;
-		CloseFileDialog();
-		RefreshPictureLevels();
-		SetTitle("Applied processing recipe: " + recipeName);
+		PendingFileOperationUi pending;
+		pending.validateOwnerSourceKey = true;
+		pending.ownerSourceKey = fileDialogRecipeOwnerSourceKey_;
+		jpegview_linux::ImportProcessingRecipeOperation operation{source};
+		if (!SubmitFileOperation(std::move(operation), std::move(pending))) {
+			fileDialogMessage_ = "Recipe import failed: another file operation is still in progress";
+			return;
+		}
+		fileDialogMessage_ = "Reading processing recipe…";
+	}
+
+	bool ProcessingRecipeDialogOwnerStillCurrent() const {
+		return !fileDialogRecipeOwnerPath_.empty() && !fileList_.Empty() &&
+			!currentSelectedLoadPending_ &&
+			fileDialogRecipeOwnerGeneration_ == imageSession_.Generation() &&
+			fileList_.Current() == fileDialogRecipeOwnerPath_ &&
+			SourceDescriptorForPath(fileDialogRecipeOwnerPath_).Key() ==
+				fileDialogRecipeOwnerSourceKey_;
 	}
 
 	void RestorePendingParameterDb() {
@@ -13055,16 +13105,15 @@ private:
 	}
 
 	void OpenProcessingRecipeDialog(bool exportRecipe) {
-		if (exportRecipe && (fileList_.Empty() || clipboardMode_ || CurrentImage().width <= 0 ||
+		if (fileList_.Empty() || clipboardMode_ || CurrentImage().width <= 0 ||
 			currentSelectedLoadPending_ || pendingImageOperation_.has_value() ||
-			!pendingMaterializationIntents_.empty())) return;
-		std::error_code error;
-		const fs::path currentSource = fileList_.Empty() ? fs::path{} : fileList_.Current();
-		fs::path directory = fileList_.Empty() ? fs::current_path(error) :
-			(jpegview_linux::IsArchiveMemberLocation(currentSource) ?
-				jpegview_linux::ArchiveBackingFile(currentSource).parent_path() :
-				currentSource.parent_path());
-		if (error || directory.empty()) directory = fs::path(".");
+			!pendingMaterializationIntents_.empty() || pendingFileOperation_.has_value() ||
+			fileOperationService_.Busy()) return;
+		const fs::path currentSource = fileList_.Current();
+		fs::path directory = jpegview_linux::IsArchiveMemberLocation(currentSource) ?
+			jpegview_linux::ArchiveBackingFile(currentSource).parent_path() :
+			currentSource.parent_path();
+		if (directory.empty()) directory = fs::path(".");
 		fileDialogDirectory_ = AbsoluteNormalized(directory);
 		fileDialogSave_ = exportRecipe;
 		fileDialogTab_ = FileDialogTab::Browse;
@@ -13072,6 +13121,10 @@ private:
 		fileDialogParameterRestore_ = false;
 		fileDialogProcessingRecipeExport_ = exportRecipe;
 		fileDialogProcessingRecipeImport_ = !exportRecipe;
+		fileDialogRecipeOwnerGeneration_ = imageSession_.Generation();
+		fileDialogRecipeOwnerPath_ = currentSource;
+		fileDialogRecipeOwnerSourceKey_ = SourceDescriptorForPath(currentSource).Key();
+		fileDialogRecipeExportPreset_ = {imageProcessing_, autoContrastEnabled_};
 		fileDialogSaveFullSize_ = true;
 		PositionFileDialogGeometry();
 		fileDialogFilename_ = exportRecipe ?
@@ -13080,6 +13133,8 @@ private:
 		fileDialogMessage_.clear();
 		fileDialogOverwriteConfirmed_ = false;
 		fileDialogOpen_ = true;
+		playback_.SetTemporarilyPaused(true, SDL_GetTicks());
+		fileDialogPausesPlayback_ = true;
 		fileDialogActivateAfterListing_ = false;
 		fileDialogOpenDirectoryAfterListing_ = false;
 		SDL_GetMouseState(&lastMouseX_, &lastMouseY_);
@@ -16044,6 +16099,11 @@ private:
 	bool fileDialogParameterRestore_ = false;
 	bool fileDialogProcessingRecipeExport_ = false;
 	bool fileDialogProcessingRecipeImport_ = false;
+	bool fileDialogPausesPlayback_ = false;
+	std::uint64_t fileDialogRecipeOwnerGeneration_ = 0;
+	fs::path fileDialogRecipeOwnerPath_;
+	jpegview_linux::SourceKey fileDialogRecipeOwnerSourceKey_;
+	jpegview_linux::ImageProcessingPreset fileDialogRecipeExportPreset_;
 	int fileDialogX_ = 0;
 	int fileDialogY_ = 0;
 	FileDialogDragMode fileDialogDragMode_ = FileDialogDragMode::None;

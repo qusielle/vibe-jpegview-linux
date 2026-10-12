@@ -31,6 +31,15 @@ namespace {
 constexpr std::size_t kMaximumRecipeBytes = 64u * 1024u;
 constexpr std::size_t kMaximumRecipeNameBytes = 256;
 
+bool Continue(const std::function<bool()>& shouldContinue) {
+	if (!shouldContinue) return true;
+	try {
+		return shouldContinue();
+	} catch (...) {
+		return false;
+	}
+}
+
 struct NumberField {
 	const char* key;
 	double ImageProcessingParams::*member;
@@ -316,9 +325,14 @@ bool RequireField(const std::map<std::string, JsonScalar>& fields,
 	return true;
 }
 
-bool WriteAll(int descriptor, const std::string& contents, std::string& errorMessage) {
+bool WriteAll(int descriptor, const std::string& contents, std::string& errorMessage,
+	const std::function<bool()>& shouldContinue) {
 	std::size_t offset = 0;
 	while (offset < contents.size()) {
+		if (!Continue(shouldContinue)) {
+			errorMessage = "processing recipe write was cancelled";
+			return false;
+		}
 		const ssize_t written = ::write(descriptor, contents.data() + offset,
 			contents.size() - offset);
 		if (written < 0 && errno == EINTR) continue;
@@ -333,12 +347,13 @@ bool WriteAll(int descriptor, const std::string& contents, std::string& errorMes
 }
 
 bool PublishNoReplace(const fs::path& temporary, const fs::path& output,
-	std::string& errorMessage) {
+	std::string& errorMessage, bool& outputAppeared) {
 #if defined(__linux__) && defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
 	if (::syscall(SYS_renameat2, AT_FDCWD, temporary.c_str(), AT_FDCWD,
 		output.c_str(), RENAME_NOREPLACE) == 0) return true;
 	const int renameError = errno;
 	if (renameError == EEXIST) {
+		outputAppeared = true;
 		errorMessage = "output appeared before recipe publication";
 		return false;
 	}
@@ -350,6 +365,7 @@ bool PublishNoReplace(const fs::path& temporary, const fs::path& output,
 #endif
 	if (::link(temporary.c_str(), output.c_str()) != 0) {
 		const int linkError = errno;
+		if (linkError == EEXIST) outputAppeared = true;
 		errorMessage = linkError == EEXIST ? "output appeared before recipe publication" :
 			"cannot publish recipe without replacing output: " +
 			std::string(std::strerror(linkError));
@@ -442,7 +458,12 @@ bool ParseProcessingRecipeJson(const std::string& json,
 }
 
 bool ReadProcessingRecipeJson(const fs::path& filename,
-	ProcessingRecipe& recipe, std::string& errorMessage) {
+	ProcessingRecipe& recipe, std::string& errorMessage,
+	const std::function<bool()>& shouldContinue) {
+	if (!Continue(shouldContinue)) {
+		errorMessage = "processing recipe read was cancelled";
+		return false;
+	}
 	std::ifstream input(filename, std::ios::binary);
 	if (!input) {
 		errorMessage = "cannot open processing recipe";
@@ -451,6 +472,10 @@ bool ReadProcessingRecipeJson(const fs::path& filename,
 	std::string json;
 	char buffer[4096];
 	while (input) {
+		if (!Continue(shouldContinue)) {
+			errorMessage = "processing recipe read was cancelled";
+			return false;
+		}
 		input.read(buffer, sizeof(buffer));
 		const std::streamsize count = input.gcount();
 		if (count > 0) {
@@ -461,6 +486,10 @@ bool ReadProcessingRecipeJson(const fs::path& filename,
 			json.append(buffer, static_cast<std::size_t>(count));
 		}
 	}
+	if (!Continue(shouldContinue)) {
+		errorMessage = "processing recipe read was cancelled";
+		return false;
+	}
 	if (!input.eof()) {
 		errorMessage = "cannot read processing recipe";
 		return false;
@@ -470,7 +499,13 @@ bool ReadProcessingRecipeJson(const fs::path& filename,
 
 bool WriteProcessingRecipeJson(const fs::path& filename,
 	const ProcessingRecipe& recipe, bool overwriteConfirmed,
-	std::string& errorMessage) {
+	std::string& errorMessage,
+	const std::function<bool()>& shouldContinue, bool* overwriteRequired) {
+	if (overwriteRequired != nullptr) *overwriteRequired = false;
+	if (!Continue(shouldContinue)) {
+		errorMessage = "processing recipe write was cancelled";
+		return false;
+	}
 	if (filename.empty()) {
 		errorMessage = "processing recipe output path is empty";
 		return false;
@@ -512,13 +547,25 @@ bool WriteProcessingRecipeJson(const fs::path& filename,
 		(void)::unlink(temporary.c_str());
 		return false;
 	}
-	bool success = WriteAll(descriptor, contents, errorMessage);
+	bool success = WriteAll(descriptor, contents, errorMessage, shouldContinue);
+	if (success && !Continue(shouldContinue)) {
+		errorMessage = "processing recipe write was cancelled";
+		success = false;
+	}
 	if (success && ::fsync(descriptor) != 0) {
 		errorMessage = "cannot flush processing recipe: " + std::string(std::strerror(errno));
 		success = false;
 	}
+	if (success && !Continue(shouldContinue)) {
+		errorMessage = "processing recipe write was cancelled";
+		success = false;
+	}
 	if (success && ::fchmod(descriptor, outputMode) != 0) {
 		errorMessage = "cannot set recipe permissions: " + std::string(std::strerror(errno));
+		success = false;
+	}
+	if (success && !Continue(shouldContinue)) {
+		errorMessage = "processing recipe write was cancelled";
 		success = false;
 	}
 	if (success && ::fsync(descriptor) != 0) {
@@ -529,9 +576,15 @@ bool WriteProcessingRecipeJson(const fs::path& filename,
 		errorMessage = "cannot close processing recipe: " + std::string(std::strerror(errno));
 		success = false;
 	}
+	if (success && !Continue(shouldContinue)) {
+		errorMessage = "processing recipe write was cancelled";
+		success = false;
+	}
 	if (success) {
+		bool outputAppeared = false;
 		success = overwriteConfirmed ? (::rename(temporary.c_str(), filename.c_str()) == 0) :
-			PublishNoReplace(temporary, filename, errorMessage);
+			PublishNoReplace(temporary, filename, errorMessage, outputAppeared);
+		if (!success && overwriteRequired != nullptr) *overwriteRequired = outputAppeared;
 		if (!success && errorMessage.empty()) {
 			errorMessage = "cannot publish processing recipe: " +
 				std::string(std::strerror(errno));
