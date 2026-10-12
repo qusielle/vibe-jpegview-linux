@@ -847,8 +847,10 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 	}
 	moveActiveEntries();
 	if (operation == ScanOperation::Reload) {
-		nextFolders_.clear();
-		if (scanOptionsChanged) previousFolders_.clear();
+		scan.retiredNextFolders = std::move(nextFolders_);
+		if (scanOptionsChanged) {
+			scan.retiredPreviousFolders = std::move(previousFolders_);
+		}
 	} else if (operation == ScanOperation::PrepareDirectoryScope) {
 		rootDirectory_ = currentDirectory_;
 		previousFolders_.clear();

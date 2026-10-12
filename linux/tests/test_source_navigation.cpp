@@ -670,6 +670,39 @@ void TestMinimumImageSizeFiltersFilesystemAndArchiveLists() {
 		"opening a small archive member directly did not preserve its selection");
 }
 
+void TestFilterReloadRetiresFolderHistoryOffEventThread() {
+	TemporaryDirectory temporary;
+	const fs::path root = temporary.path() / "root";
+	const fs::path first = root / "first";
+	const fs::path second = root / "second";
+	fs::create_directories(first);
+	fs::create_directories(second);
+	const fs::path rootImage = root / "root.png";
+	const fs::path firstImage = first / "first.png";
+	const fs::path secondImage = second / "second.png";
+	WriteTinyImage(rootImage);
+	WriteTinyImage(firstImage);
+	WriteTinyImage(secondImage);
+
+	FileList files({root.string()}, FileList::SortMode::FileName, true, false);
+	files.SetNavigationMode(FileList::NavigationMode::LoopSubDirectories);
+	FileListPreparedScan intoFirst = FileList::PrepareScan(
+		files.MakeScanRequest(FileList::ScanOperation::ForwardBoundary, 1),
+		[] { return true; });
+	Expect(intoFirst.completed && intoFirst.targetFound &&
+		files.ApplyPreparedScan(std::move(intoFirst)) && files.Current() == firstImage,
+		"folder-history filter fixture did not enter its first nested directory");
+
+	files.SetScanOptions({false, 1024});
+	FileListPreparedScan filteredReload = FileList::PrepareScan(
+		files.MakeScanRequest(FileList::ScanOperation::Reload), [] { return true; });
+	Expect(filteredReload.completed &&
+		files.ApplyPreparedScan(std::move(filteredReload), firstImage) &&
+		files.Current() == firstImage &&
+		filteredReload.retiredPreviousFolders.size() == 1,
+		"filter reload did not transfer obsolete folder history into its retired result");
+}
+
 void TestExplicitWrongSuffixImageIsIncludedWithoutFolderSniffing() {
 	TemporaryDirectory temporary;
 	const fs::path directory = temporary.path() / "images";
@@ -2799,6 +2832,8 @@ const TestCase kTests[] = {
 	{"skip-hidden-images-in-filesystem-and-archive-lists", &TestSkipHiddenImagesInFilesystemAndArchiveLists},
 	{"minimum-image-size-filters-filesystem-and-archive-lists",
 		&TestMinimumImageSizeFiltersFilesystemAndArchiveLists},
+	{"filter-reload-retires-folder-history-off-event-thread",
+		&TestFilterReloadRetiresFolderHistoryOffEventThread},
 	{"explicit-wrong-suffix-image-is-included-without-folder-sniffing", &TestExplicitWrongSuffixImageIsIncludedWithoutFolderSniffing},
 	{"ordinary-source-metadata-uses-one-statx-request", &TestOrdinarySourceMetadataUsesOneStatxRequest},
 	{"source-descriptor-identity-and-unusual-paths", &TestSourceDescriptorIdentityAndUnusualPaths},

@@ -340,6 +340,8 @@ struct FileListPreparedScan {
 	std::shared_ptr<std::vector<FileList::Entry>> retiredEntries;
 	std::shared_ptr<std::vector<std::filesystem::path>> retiredPaths;
 	std::shared_ptr<std::vector<std::size_t>> retiredPathIndices;
+	std::vector<FileList::FolderState> retiredPreviousFolders;
+	std::vector<FileList::FolderState> retiredNextFolders;
 	bool completed = false;
 	bool targetFound = false;
 };
