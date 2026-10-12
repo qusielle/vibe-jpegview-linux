@@ -6844,9 +6844,10 @@ sleep 0.2
 # can leave a standalone image or an endpoint selected.
 title_before_hold=$(DISPLAY=":$display_number" window_title_without_position)
 DISPLAY=":$display_number" xdotool keydown Right
-# Xvfb's default initial keyboard-repeat delay is near 0.7 seconds. Leave a
-# wider margin so the assertion observes repeat events under load.
-sleep 1.3
+# Xvfb's default initial keyboard-repeat delay is near 0.7 seconds. Observe
+# shortly after that first repeat so a fast repeat rate cannot wrap the list
+# back to the starting image before the assertion samples it.
+sleep 0.85
 DISPLAY=":$display_number" xdotool keyup Right
 sleep 0.2
 title_after_hold=$(DISPLAY=":$display_number" window_title_without_position)
