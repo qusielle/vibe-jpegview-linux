@@ -121,6 +121,14 @@ using jpegview_linux::PlaybackMode;
 
 namespace {
 
+jpegview_linux::FileListScanOptions MakeFileListScanOptions(
+	const jpegview_linux::ViewerSettings& settings) {
+	const int minimumSizeKiB = std::clamp(settings.minimumImageSizeKiB, 0,
+		jpegview_linux::kMaximumMinimumImageSizeKiB);
+	return {settings.skipHiddenImages,
+		static_cast<std::uintmax_t>(minimumSizeKiB) * 1024u};
+}
+
 constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 800;
 constexpr int kUiTextScale = 1;
@@ -962,7 +970,7 @@ private:
 			fileList_.SetSorting(sortMode, settings.sortAscending);
 		}
 		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
-		fileList_.SetScanOptions({settings.skipHiddenImages});
+		fileList_.SetScanOptions(MakeFileListScanOptions(settings));
 
 		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
 		doublePageModeEnabled_ = settings.doublePageModeEnabled;
@@ -6413,7 +6421,7 @@ private:
 			jpegview_linux::FileList::InitialScanRequest(droppedFiles,
 				fileList_.GetSorting(), fileList_.IsSortedAscending(),
 				fileList_.WrapAroundFolder(), fileList_.GetNavigationMode(),
-				jpegview_linux::FileListScanOptions{runtimeSettings_.Values().skipHiddenImages});
+				MakeFileListScanOptions(runtimeSettings_.Values()));
 		request.expectedRevision = fileList_.MutationRevision();
 		request.expectedDescriptorRevision = fileList_.DescriptorRevision();
 		SubmitFileListScan(std::move(request), FileListScanHandling::DroppedInputs,
@@ -7865,8 +7873,8 @@ private:
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
 		const jpegview_linux::ViewerSettings& draft = advancedConfiguration_.Draft();
 		const int previousThumbnailWidth = runtimeSettings_.Values().thumbnailPanelWidth;
-		const bool scanOptionsChanged =
-			runtimeSettings_.Values().skipHiddenImages != draft.skipHiddenImages;
+		const bool scanOptionsChanged = MakeFileListScanOptions(runtimeSettings_.Values()) !=
+			MakeFileListScanOptions(draft);
 		const bool magnifierChanged = magnifyingGlass_.Width() != draft.magnifyingGlassWidth ||
 			magnifyingGlass_.Height() != draft.magnifyingGlassHeight ||
 			std::abs(magnifyingGlass_.ZoomLevel() - draft.magnifyingGlassZoomLevel) > 1e-9;
@@ -7879,10 +7887,10 @@ private:
 		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
 		RefreshFitRelativeZoomBase();
 		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
-		fileList_.SetScanOptions({settings.skipHiddenImages});
+		fileList_.SetScanOptions(MakeFileListScanOptions(settings));
 		if (fileListBeforeClipboard_) {
 			fileListBeforeClipboard_->SetWrapAroundFolder(settings.folderWrapAround);
-			fileListBeforeClipboard_->SetScanOptions({settings.skipHiddenImages});
+			fileListBeforeClipboard_->SetScanOptions(MakeFileListScanOptions(settings));
 		}
 
 		if (magnifierChanged) {

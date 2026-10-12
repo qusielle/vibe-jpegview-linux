@@ -175,10 +175,6 @@ The repository's main branch was pushed on 2026-08-21; I also inspected its non-
   treating it as a folder image or comic archive. Keep rendering optional if the required PDF
   library is unavailable. See the
   [PDF support commit](https://github.com/sdneon/jpegview/commit/5d79cad3cc98d502576a8c357bffaea540ac67d6).
-- **Minimum-file-size filter:** optionally skip tiny images such as embedded contact sheets or
-  comic-folder cover thumbnails during navigation. Define the threshold and make it easy to disable
-  for a directly opened image. See the fork's
-  [file-filter documentation](https://github.com/sdneon/jpegview/blob/master/README.md).
 - **Same-stem duplicate filtering:** optionally show only one file when multiple supported
   extensions share a basename, such as `photo.jpg` and `photo.png`. Keep this separate from
   perceptual duplicate detection, and leave it off by default because those files may be different

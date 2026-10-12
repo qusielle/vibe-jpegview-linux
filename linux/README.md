@@ -232,6 +232,10 @@ they support.
    configuration → Behavior, or set `skip_hidden_images=1` in `settings.conf`, to omit images whose
    filename starts with `.` from folder and archive navigation. An image opened directly remains
    selected even when its filename is hidden; `.hidden` directory metadata does not affect scanning.
+   The optional **Minimum image size** setting in the same Behavior category filters out folder and
+   archive entries smaller than its threshold. Set `minimum_image_size_kib` in `settings.conf`;
+   values use 1024-byte KiB, and `0` (the default) disables the filter. An image opened directly
+   remains selected even when it is smaller than the threshold.
    Viewer file-list discovery now runs on a lazy, low-priority worker for startup, refresh, sibling
    folder jumps, recursive folder boundaries, dropped inputs, cross-folder marked-image toggles,
    and changes from multiple inputs to folder navigation. Enumeration, per-file metadata, sorting,

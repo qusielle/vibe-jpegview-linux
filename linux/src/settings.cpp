@@ -151,6 +151,10 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		} else if (key == "skip_hidden_images") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.skipHiddenImages = parsed;
+		} else if (key == "minimum_image_size_kib") {
+			int parsed = 0;
+			if (ParseInt(value, parsed) && parsed >= 0 &&
+				parsed <= kMaximumMinimumImageSizeKiB) loaded.minimumImageSizeKiB = parsed;
 		} else if (key == "fit_relative_zoom_mode") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.fitRelativeZoomMode = parsed;
@@ -362,6 +366,9 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "folder_wrap_around=" << (settings.folderWrapAround ? 1 : 0) << '\n'
 		       << "# Omit dot-prefixed image filenames during folder and archive scans. Disabled by default.\n"
 		       << "skip_hidden_images=" << (settings.skipHiddenImages ? 1 : 0) << '\n'
+		       << "# Omit smaller images during navigation; 0 disables the filter. Units are 1024-byte KiB.\n"
+		       << "minimum_image_size_kib=" << std::clamp(
+			settings.minimumImageSizeKiB, 0, kMaximumMinimumImageSizeKiB) << '\n'
 		       << "# Define fit-to-window as 100% zoom instead of source-pixel scale.\n"
 		       << "fit_relative_zoom_mode=" << (settings.fitRelativeZoomMode ? 1 : 0) << '\n'
 		       << "custom_slideshow_interval_seconds=" << std::clamp(

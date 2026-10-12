@@ -6085,6 +6085,10 @@ sleep 0.15
 DISPLAY=":$display_number" xdotool key Down Down Return
 DISPLAY=":$display_number" xdotool key Down Return
 DISPLAY=":$display_number" xdotool key Down Return
+DISPLAY=":$display_number" xdotool key ctrl+a
+DISPLAY=":$display_number" xdotool type --delay 30 '0'
+DISPLAY=":$display_number" xdotool key Return
+DISPLAY=":$display_number" xdotool key Down Return
 DISPLAY=":$display_number" xdotool key Tab
 DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool key Down Down Return
@@ -6101,6 +6105,7 @@ grep -q '^transparency_pattern=white$' "$advanced_config_settings"
 grep -q '^thumbnail_panel_width=128$' "$advanced_config_settings"
 grep -q '^folder_wrap_around=0$' "$advanced_config_settings"
 grep -q '^skip_hidden_images=1$' "$advanced_config_settings"
+grep -q '^minimum_image_size_kib=0$' "$advanced_config_settings"
 grep -q '^fit_relative_zoom_mode=1$' "$advanced_config_settings"
 grep -Fqx 'window_title_pattern=%f - [%p] - %a' "$advanced_config_settings"
 assert_title_prefix "01-red.ppm" "applying advanced configuration did not return to the viewer"

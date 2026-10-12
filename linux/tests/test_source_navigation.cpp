@@ -532,6 +532,93 @@ void TestSkipHiddenImagesInFilesystemAndArchiveLists() {
 		"opening a hidden archive image directly did not preserve its selection");
 }
 
+void TestMinimumImageSizeFiltersFilesystemAndArchiveLists() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "images";
+	fs::create_directories(directory);
+	const fs::path tiny = directory / "tiny.png";
+	const fs::path boundary = directory / "boundary.png";
+	const fs::path large = directory / "large.png";
+	WriteTinyImage(tiny);
+	WriteTinyImage(boundary);
+	WriteTinyImage(large);
+	fs::resize_file(tiny, 10);
+	fs::resize_file(boundary, 100);
+	fs::resize_file(large, 200);
+
+	FileList legacyList({directory.string()}, FileList::SortMode::FileName, true, false);
+	Expect(legacyList.Size() == 3,
+		"minimum-size filtering changed the legacy default folder contents");
+	const jpegview_linux::FileListScanOptions options{false, 100};
+	FileList filteredList({directory.string()}, FileList::SortMode::FileName,
+		true, false, options);
+	Expect(filteredList.Size() == 2 && filteredList.Current() == boundary &&
+		filteredList.Next() && filteredList.Current() == large,
+		"filesystem minimum-size filtering did not include the equal-size boundary");
+	const FileList::ScanRequest initialRequest = FileList::InitialScanRequest(
+		{directory.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory, options);
+	const FileListPreparedScan initialScan = FileList::PrepareScan(
+		initialRequest, [] { return true; });
+	Expect(initialScan.completed && initialScan.replacement.Size() == 2 &&
+		initialScan.replacement.Current() == boundary,
+		"initial background scan did not carry the minimum-size option");
+
+	FileList explicitlyOpenedSmall({tiny.string()}, FileList::SortMode::FileName,
+		true, false, options);
+	Expect(explicitlyOpenedSmall.Size() == 3 && explicitlyOpenedSmall.Current() == tiny &&
+		explicitlyOpenedSmall.ContainsPath(tiny),
+		"opening a small image directly did not keep it selected alongside eligible siblings");
+
+	FileList changedInPlace({directory.string()}, FileList::SortMode::FileName,
+		true, false);
+	Expect(changedInPlace.Select(*changedInPlace.IndexOf(large)),
+		"minimum-size fixture could not select its retained image");
+	changedInPlace.SetScanOptions(options);
+	FileListPreparedScan prepared = FileList::PrepareScan(
+		changedInPlace.MakeScanRequest(FileList::ScanOperation::Reload), [] { return true; });
+	Expect(prepared.completed && prepared.replacement.Size() == 2 &&
+		prepared.replacement.Current() == large &&
+		changedInPlace.ApplyPreparedScan(std::move(prepared), large) &&
+		changedInPlace.Size() == 2 && changedInPlace.Current() == large,
+		"asynchronous minimum-size reload did not preserve the selected eligible image");
+
+	FileList selectedSmallBeforeReload({tiny.string()}, FileList::SortMode::FileName,
+		true, false, options);
+	FileListPreparedScan smallReload = FileList::PrepareScan(
+		selectedSmallBeforeReload.MakeScanRequest(FileList::ScanOperation::Reload),
+		[] { return true; });
+	Expect(smallReload.completed && smallReload.replacement.Size() == 3 &&
+		smallReload.replacement.Current() == tiny,
+		"reload did not preserve the directly selected image below the configured threshold");
+
+	const fs::path tinyPayload = temporary.path() / "tiny-payload.png";
+	const fs::path boundaryPayload = temporary.path() / "boundary-payload.png";
+	const fs::path largePayload = temporary.path() / "large-payload.png";
+	WriteTinyImage(tinyPayload);
+	WriteTinyImage(boundaryPayload);
+	WriteTinyImage(largePayload);
+	fs::resize_file(tinyPayload, 10);
+	fs::resize_file(boundaryPayload, 100);
+	fs::resize_file(largePayload, 200);
+	const fs::path archive = temporary.path() / "images.zip";
+	WriteZipArchive(archive, {{"tiny.png", tinyPayload},
+		{"boundary.png", boundaryPayload}, {"large.png", largePayload}});
+	const fs::path tinyMember = archive / "tiny.png";
+	const fs::path boundaryMember = archive / "boundary.png";
+	const fs::path largeMember = archive / "large.png";
+	FileList filteredArchive({archive.string()}, FileList::SortMode::FileName,
+		true, false, options);
+	Expect(filteredArchive.Size() == 2 && filteredArchive.Current() == boundaryMember &&
+		filteredArchive.Next() && filteredArchive.Current() == largeMember,
+		"archive minimum-size filtering did not use uncompressed member sizes");
+	FileList explicitlyOpenedSmallMember({tinyMember.string()}, FileList::SortMode::FileName,
+		true, false, options);
+	Expect(explicitlyOpenedSmallMember.Size() == 3 &&
+		explicitlyOpenedSmallMember.Current() == tinyMember,
+		"opening a small archive member directly did not preserve its selection");
+}
+
 void TestExplicitWrongSuffixImageIsIncludedWithoutFolderSniffing() {
 	TemporaryDirectory temporary;
 	const fs::path directory = temporary.path() / "images";
@@ -2659,6 +2746,8 @@ void TestHeldNavigationWaitsForCurrentImageContinuation() {
 const TestCase kTests[] = {
 	{"file-list-filtering-and-logical-sorting", &TestFileListFilteringAndLogicalSorting},
 	{"skip-hidden-images-in-filesystem-and-archive-lists", &TestSkipHiddenImagesInFilesystemAndArchiveLists},
+	{"minimum-image-size-filters-filesystem-and-archive-lists",
+		&TestMinimumImageSizeFiltersFilesystemAndArchiveLists},
 	{"explicit-wrong-suffix-image-is-included-without-folder-sniffing", &TestExplicitWrongSuffixImageIsIncludedWithoutFolderSniffing},
 	{"ordinary-source-metadata-uses-one-statx-request", &TestOrdinarySourceMetadataUsesOneStatxRequest},
 	{"source-descriptor-identity-and-unusual-paths", &TestSourceDescriptorIdentityAndUnusualPaths},

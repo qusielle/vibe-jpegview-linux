@@ -22,6 +22,7 @@ inline constexpr int kDefaultFileDialogHeight = 650;
 inline constexpr int kMinimumFileDialogWidth = 320;
 inline constexpr int kMinimumFileDialogHeight = 260;
 inline constexpr int kMaximumFileDialogDimension = 16384;
+inline constexpr int kMaximumMinimumImageSizeKiB = 1048576;
 inline constexpr int kDefaultFixedCropWidth = 320;
 inline constexpr int kDefaultFixedCropHeight = 200;
 inline constexpr int kMinimumFixedCropDimension = 1;
@@ -49,6 +50,7 @@ struct ViewerSettings {
 	bool spacebarNavigatesImages = false;
 	bool folderWrapAround = true;
 	bool skipHiddenImages = false;
+	int minimumImageSizeKiB = 0;
 	bool fitRelativeZoomMode = false;
 	// Defaults match the existing slideshow and Movie start commands.
 	double customSlideshowIntervalSeconds = 3.0;

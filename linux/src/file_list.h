@@ -21,8 +21,10 @@ struct FileListPreparedSort;
 
 struct FileListScanOptions {
 	bool skipHiddenImages = false;
+	std::uintmax_t minimumFileSizeBytes = 0;
 	bool operator==(const FileListScanOptions& other) const {
-		return skipHiddenImages == other.skipHiddenImages;
+		return skipHiddenImages == other.skipHiddenImages &&
+			minimumFileSizeBytes == other.minimumFileSizeBytes;
 	}
 	bool operator!=(const FileListScanOptions& other) const { return !(*this == other); }
 };

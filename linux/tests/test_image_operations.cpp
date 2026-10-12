@@ -1565,6 +1565,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"fit-relative zoom was enabled in the built-in settings defaults");
 	Expect(!jpegview_linux::ViewerSettings{}.skipHiddenImages,
 		"hidden-image filtering changed the built-in navigation default");
+	Expect(jpegview_linux::ViewerSettings{}.minimumImageSizeKiB == 0,
+		"minimum-image-size filtering changed the built-in navigation default");
 	Expect(jpegview_linux::ViewerSettings{}.customSlideshowIntervalSeconds == 3.0 &&
 		jpegview_linux::ViewerSettings{}.customMovieFramesPerSecond == 25.0,
 		"custom playback settings changed the existing start-command defaults");
@@ -1590,6 +1592,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.spacebarNavigatesImages = true;
 	expected.folderWrapAround = false;
 	expected.skipHiddenImages = true;
+	expected.minimumImageSizeKiB = 25;
 	expected.fitRelativeZoomMode = true;
 	expected.customSlideshowIntervalSeconds = 7.25;
 	expected.customMovieFramesPerSecond = 48.5;
@@ -1655,6 +1658,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"saved config omitted the enabled pixel color sampler preference");
 	Expect(settingsContents.find("skip_hidden_images=1\n") != std::string::npos,
 		"saved config omitted enabled hidden-image filtering");
+	Expect(settingsContents.find("minimum_image_size_kib=25\n") != std::string::npos,
+		"saved config omitted the minimum-image-size threshold");
 	const std::size_t titleSettingPosition = settingsContents.find("window_title_pattern=");
 	const std::size_t titleCommentPosition = settingsContents.rfind("# Window title codes:", titleSettingPosition);
 	const std::string titleCommentText = titleSettingPosition == std::string::npos ||
@@ -1687,6 +1692,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.spacebarNavigatesImages == expected.spacebarNavigatesImages &&
 		loaded.folderWrapAround == expected.folderWrapAround &&
 		loaded.skipHiddenImages == expected.skipHiddenImages &&
+		loaded.minimumImageSizeKiB == expected.minimumImageSizeKiB &&
 		loaded.fitRelativeZoomMode == expected.fitRelativeZoomMode &&
 		loaded.customSlideshowIntervalSeconds == expected.customSlideshowIntervalSeconds &&
 		loaded.customMovieFramesPerSecond == expected.customMovieFramesPerSecond,
@@ -1756,6 +1762,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"show_zoom_navigator=maybe\npixel_color_sampler_enabled=maybe\n"
 		"manga_mode_inverts_left_right=maybe\n"
 		"spacebar_navigates_images=maybe\nfolder_wrap_around=maybe\nskip_hidden_images=maybe\n"
+		"minimum_image_size_kib=1048577\n"
 		"fit_relative_zoom_mode=maybe\n"
 		"custom_slideshow_interval_seconds=nan\ncustom_movie_frames_per_second=broken\n"
 		"transparency_pattern=diagonal\n"
@@ -1788,6 +1795,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"missing or malformed folder-wrap setting did not preserve the wrapping default");
 	Expect(!loaded.skipHiddenImages,
 		"missing or malformed hidden-image setting did not preserve the original navigation behavior");
+	Expect(loaded.minimumImageSizeKiB == 0,
+		"out-of-range minimum-image-size setting did not preserve its disabled default");
 	Expect(!loaded.fitRelativeZoomMode,
 		"missing or malformed fit-relative zoom setting did not preserve its disabled default");
 	Expect(loaded.customSlideshowIntervalSeconds == 3.0 &&
@@ -1912,6 +1921,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	source.spacebarNavigatesImages = true;
 	source.folderWrapAround = false;
 	source.skipHiddenImages = true;
+	source.minimumImageSizeKiB = 25;
 	source.fitRelativeZoomMode = true;
 	source.customSlideshowIntervalSeconds = 4.3;
 	source.customMovieFramesPerSecond = 33.5;
@@ -1948,7 +1958,8 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 
 	const std::array<std::vector<std::string>, 7> expectedKeys = {{
 		{"manga_mode_inverts_left_right", "spacebar_navigates_images", "folder_wrap_around",
-			"skip_hidden_images", "fit_relative_zoom_mode", "custom_slideshow_interval_seconds",
+			"skip_hidden_images", "minimum_image_size_kib", "fit_relative_zoom_mode",
+			"custom_slideshow_interval_seconds",
 			"custom_movie_frames_per_second"},
 		{"transparency_pattern", "show_histogram", "window_title_pattern"},
 		{"thumbnail_panel_width", "file_dialog_width", "file_dialog_height",
@@ -1994,11 +2005,11 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 			++fieldTotal;
 		}
 	}
-	Expect(fieldTotal == 38, "advanced configuration did not expose every requested setting");
+	Expect(fieldTotal == 39, "advanced configuration did not expose every requested setting");
 	Expect(model.SelectCategory(static_cast<int>(Category::Behavior)) &&
 		model.FieldValue(2) == "Off" && model.FieldValue(3) == "On" &&
-		model.FieldValue(4) == "On" && model.FieldValue(5) == "4.3 sec" &&
-		model.FieldValue(6) == "33.5 fps",
+		model.FieldValue(4) == "25" && model.FieldValue(5) == "On" &&
+		model.FieldValue(6) == "4.3 sec" && model.FieldValue(7) == "33.5 fps",
 		"behavior settings did not display their draft values");
 	Expect(model.SelectCategory(static_cast<int>(Category::Appearance)) &&
 		model.FieldValue(0) == "White" && model.FieldValue(1) == "On" &&
@@ -2019,6 +2030,7 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 		model.Draft().fileDialogPreviewRatio == source.fileDialogPreviewRatio &&
 		model.Draft().windowTitlePattern == source.windowTitlePattern &&
 		model.Draft().fitRelativeZoomMode == source.fitRelativeZoomMode &&
+		model.Draft().minimumImageSizeKiB == source.minimumImageSizeKiB &&
 		model.Draft().customSlideshowIntervalSeconds == source.customSlideshowIntervalSeconds &&
 		model.Draft().customMovieFramesPerSecond == source.customMovieFramesPerSecond,
 		"opening and visiting categories changed the persisted settings draft");
@@ -2050,25 +2062,28 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	Expect(model.ActivateSelected() && model.Draft().folderWrapAround &&
 		model.AdjustSelected(-1) && !model.Draft().folderWrapAround,
 		"folder-wrap setting did not toggle in both advanced-configuration controls");
-	model.SelectRow(5);
+	model.SelectRow(6);
 	Expect(model.AdjustSelected(1) &&
 		std::abs(model.Draft().customSlideshowIntervalSeconds - 4.4) < 1e-9,
 		"custom slideshow interval did not adjust by its configured tenth-second step");
-	model.SelectRow(6);
+	model.SelectRow(7);
 	Expect(model.AdjustSelected(-1) &&
 		std::abs(model.Draft().customMovieFramesPerSecond - 33.0) < 1e-9,
 		"custom Movie frame rate did not adjust by its configured half-FPS step");
-	edit(5, "0.01");
+	edit(6, "0.01");
 	Expect(std::abs(model.Draft().customSlideshowIntervalSeconds - 0.1) < 1e-9,
 		"custom slideshow interval was not clamped at its minimum");
-	edit(6, "101");
+	edit(7, "101");
 	Expect(std::abs(model.Draft().customMovieFramesPerSecond - 100.0) < 1e-9,
 		"custom Movie frame rate was not clamped at its maximum");
 	model.SelectRow(3);
 	Expect(model.ActivateSelected() && !model.Draft().skipHiddenImages &&
 		model.AdjustSelected(1) && model.Draft().skipHiddenImages,
 		"hidden-image filtering did not toggle through both advanced-configuration controls");
-	model.SelectRow(4);
+	edit(4, "12");
+	Expect(model.Draft().minimumImageSizeKiB == 12,
+		"minimum-image-size filter did not accept its integer KiB setting");
+	model.SelectRow(5);
 	Expect(model.ActivateSelected() && !model.Draft().fitRelativeZoomMode &&
 		model.AdjustSelected(1) && model.Draft().fitRelativeZoomMode,
 		"fit-relative zoom setting did not toggle in both advanced-configuration controls");

@@ -274,7 +274,9 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 		for (const ArchiveEntryInfo& archiveEntry : archiveEntries) {
 			if (!ContinueScan(shouldContinue)) return {};
 			if (!archiveEntry.directory && IsSupportedImagePath(archiveEntry.path) &&
-				(!options.skipHiddenImages || !IsHiddenImageName(archiveEntry.path))) {
+				(!options.skipHiddenImages || !IsHiddenImageName(archiveEntry.path)) &&
+				(options.minimumFileSizeBytes == 0 ||
+					archiveEntry.size >= options.minimumFileSizeBytes)) {
 				Entry entry;
 				entry.source = DescribeArchiveMember(archiveEntry.path,
 					archiveEntry.backingIdentity, archiveEntry.size,
@@ -325,8 +327,12 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 		if (interruptedForForeground || !ContinueScan(shouldContinue)) return {};
 		for (const fs::path& imagePath : imagePaths) {
 			if (!ContinueScan(shouldContinue)) return {};
-			result.push_back(DescribeFile(imagePath, shouldContinue));
+			Entry described = DescribeFile(imagePath, shouldContinue);
 			if (!ContinueScan(shouldContinue)) return {};
+			const SourceMetadata& metadata = described.source.Metadata();
+			if (options.minimumFileSizeBytes != 0 && metadata.hasFileSize &&
+				metadata.fileSize < options.minimumFileSizeBytes) continue;
+			result.push_back(std::move(described));
 		}
 	}
 	return result;

@@ -50,6 +50,8 @@ const std::vector<AdvancedConfigurationField>& FieldsFor(int category) {
 		BooleanField("spacebar_navigates_images", "Space navigates images"),
 		BooleanField("folder_wrap_around", "Wrap around folder ends"),
 		BooleanField("skip_hidden_images", "Skip hidden images"),
+		IntegerField("minimum_image_size_kib", "Minimum image size (KiB)",
+			0.0, kMaximumMinimumImageSizeKiB, 1.0),
 		BooleanField("fit_relative_zoom_mode", "Fit-relative zoom mode"),
 		DecimalField("custom_slideshow_interval_seconds", "Custom slideshow interval",
 			0.1, 3600.0, 0.1, 1, "sec"),
@@ -192,6 +194,7 @@ double GetNumericValue(const ViewerSettings& settings, const AdvancedConfigurati
 	if (IsKey(field, "thumbnail_panel_width")) return settings.thumbnailPanelWidth;
 	if (IsKey(field, "file_dialog_width")) return settings.fileDialogWidth;
 	if (IsKey(field, "file_dialog_height")) return settings.fileDialogHeight;
+	if (IsKey(field, "minimum_image_size_kib")) return settings.minimumImageSizeKiB;
 	if (IsKey(field, "file_dialog_preview_ratio")) return settings.fileDialogPreviewRatio;
 	if (IsKey(field, "magnifying_glass_width")) return settings.magnifyingGlassWidth;
 	if (IsKey(field, "magnifying_glass_height")) return settings.magnifyingGlassHeight;
@@ -221,6 +224,9 @@ void SetNumericValue(ViewerSettings& settings, const AdvancedConfigurationField&
 	if (IsKey(field, "thumbnail_panel_width")) settings.thumbnailPanelWidth = static_cast<int>(std::llround(value));
 	else if (IsKey(field, "file_dialog_width")) settings.fileDialogWidth = static_cast<int>(std::llround(value));
 	else if (IsKey(field, "file_dialog_height")) settings.fileDialogHeight = static_cast<int>(std::llround(value));
+	else if (IsKey(field, "minimum_image_size_kib")) {
+		settings.minimumImageSizeKiB = static_cast<int>(std::llround(value));
+	}
 	else if (IsKey(field, "file_dialog_preview_ratio")) settings.fileDialogPreviewRatio = value;
 	else if (IsKey(field, "magnifying_glass_width")) settings.magnifyingGlassWidth = static_cast<int>(std::llround(value));
 	else if (IsKey(field, "magnifying_glass_height")) settings.magnifyingGlassHeight = static_cast<int>(std::llround(value));
