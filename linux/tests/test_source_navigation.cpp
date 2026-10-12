@@ -592,6 +592,57 @@ void TestMinimumImageSizeFiltersFilesystemAndArchiveLists() {
 		smallReload.replacement.Current() == tiny,
 		"reload did not preserve the directly selected image below the configured threshold");
 
+	const fs::path secondDirectory = temporary.path() / "second-images";
+	fs::create_directories(secondDirectory);
+	const fs::path secondTiny = secondDirectory / "second-tiny.png";
+	const fs::path secondLarge = secondDirectory / "second-large.png";
+	WriteTinyImage(secondTiny);
+	WriteTinyImage(secondLarge);
+	fs::resize_file(secondTiny, 10);
+	fs::resize_file(secondLarge, 200);
+	FileList multipleInputs({directory.string(), secondDirectory.string()},
+		FileList::SortMode::FileName, true, false);
+	Expect(multipleInputs.Select(*multipleInputs.IndexOf(tiny)),
+		"multiple-input filter fixture could not select its below-threshold image");
+	multipleInputs.SetScanOptions(options);
+	FileListPreparedScan multipleInputScan = FileList::PrepareScan(
+		multipleInputs.MakeScanRequest(FileList::ScanOperation::Reload), [] { return true; });
+	Expect(multipleInputScan.completed && multipleInputScan.replacement.ContainsPath(tiny) &&
+		multipleInputs.ApplyPreparedScan(std::move(multipleInputScan), tiny) &&
+		multipleInputs.Current() == tiny,
+		"multiple-input filter reload dropped the selected image below the threshold");
+
+	FileList staleSelection({directory.string(), secondDirectory.string()},
+		FileList::SortMode::FileName, true, false);
+	Expect(staleSelection.Select(*staleSelection.IndexOf(large)),
+		"stale-selection filter fixture could not select its scan owner");
+	staleSelection.SetScanOptions(options);
+	FileListPreparedScan stalePrepared = FileList::PrepareScan(
+		staleSelection.MakeScanRequest(FileList::ScanOperation::Reload), [] { return true; });
+	Expect(stalePrepared.completed && stalePrepared.replacement.ContainsPath(large) &&
+		staleSelection.Select(*staleSelection.IndexOf(secondTiny)) &&
+		!staleSelection.ApplyPreparedScan(std::move(stalePrepared), secondTiny) &&
+		staleSelection.Current() == secondTiny,
+		"a filter scan replaced a newly selected image that was excluded by its older snapshot");
+	FileListPreparedScan retriedPrepared = FileList::PrepareScan(
+		staleSelection.MakeScanRequest(FileList::ScanOperation::Reload), [] { return true; });
+	Expect(retriedPrepared.completed && retriedPrepared.replacement.ContainsPath(secondTiny) &&
+		staleSelection.ApplyPreparedScan(std::move(retriedPrepared), secondTiny) &&
+		staleSelection.Current() == secondTiny,
+		"filter scan retry did not preserve the latest selected image");
+
+	FileList emptyFiltered({directory.string()}, FileList::SortMode::FileName,
+		true, false, jpegview_linux::FileListScanOptions{false, 1024});
+	Expect(emptyFiltered.Empty() && emptyFiltered.HasScanScope(),
+		"an all-filtered directory lost the scope needed to reload it");
+	emptyFiltered.SetScanOptions({});
+	FileListPreparedScan repopulated = FileList::PrepareScan(
+		emptyFiltered.MakeScanRequest(FileList::ScanOperation::Reload), [] { return true; });
+	Expect(repopulated.completed && repopulated.replacement.Size() == 3 &&
+		emptyFiltered.ApplyPreparedScan(std::move(repopulated)) &&
+		emptyFiltered.Size() == 3 && emptyFiltered.Current() == boundary,
+		"disabling the minimum-size filter did not repopulate its empty directory list");
+
 	const fs::path tinyPayload = temporary.path() / "tiny-payload.png";
 	const fs::path boundaryPayload = temporary.path() / "boundary-payload.png";
 	const fs::path largePayload = temporary.path() / "large-payload.png";

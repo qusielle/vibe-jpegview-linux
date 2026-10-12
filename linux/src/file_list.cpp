@@ -354,6 +354,18 @@ bool FileList::IncludeExplicitImageFile(std::vector<Entry>& entries,
 	return true;
 }
 
+bool FileList::IncludeExplicitImageFile(EntryStorage& entries,
+	const fs::path& path, const std::function<bool()>& shouldContinue) {
+	const fs::path normalized = Normalize(path);
+	const EntryStorage& existingEntries = entries;
+	if (std::any_of(existingEntries.begin(), existingEntries.end(),
+		[&normalized](const Entry& entry) { return entry.path == normalized; })) return true;
+	std::vector<Entry> explicitEntry;
+	if (!IncludeExplicitImageFile(explicitEntry, path, shouldContinue)) return false;
+	if (!explicitEntry.empty()) entries.push_back(std::move(explicitEntry.front()));
+	return true;
+}
+
 std::vector<fs::path> FileList::ChildDirectories(const fs::path& directory,
 	const std::function<bool()>& shouldContinue) {
 	std::vector<fs::path> result;
@@ -630,6 +642,17 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 			replacement.Initialize(request.inputs ? *request.inputs : std::vector<std::string>(),
 				shouldContinue);
 			if (!ContinueScan(shouldContinue)) return result;
+			(void)IncludeExplicitImageFile(replacement.entries_, request.selectedPath,
+				shouldContinue);
+			if (!ContinueScan(shouldContinue)) return result;
+			replacement.SortEntries();
+			if (!request.selectedPath.empty()) {
+				const std::size_t selectedIndex = replacement.FindEntry(request.selectedPath);
+				if (selectedIndex < replacement.entries_.size()) {
+					replacement.currentIndex_ = selectedIndex;
+				}
+			}
+			replacement.RebuildPaths();
 			replacement.navigationMode_ = request.navigationMode;
 			result.targetFound = true;
 		} else {
@@ -753,6 +776,9 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 	if (operation == ScanOperation::PrepareDirectoryScope &&
 		!preferredPathAtApply.empty() &&
 		preferredPathAtApply.parent_path() != scan.replacement.currentDirectory_) return false;
+	if (operation == ScanOperation::Reload && !preferredPathAtApply.empty() &&
+		preferredPathAtApply != scan.sourceSelectedPath &&
+		!scan.replacement.ContainsPath(preferredPathAtApply)) return false;
 	if (operation != ScanOperation::Initialize && operation != ScanOperation::Reload &&
 		!scan.targetFound) return true;
 	FileList& replacement = scan.replacement;

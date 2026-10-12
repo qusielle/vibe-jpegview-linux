@@ -60,6 +60,9 @@ public:
 		FileListScanOptions scanOptions = {});
 
 	bool Empty() const { return entries_.empty(); }
+	bool HasScanScope() const {
+		return !currentDirectory_.empty() || (inputs_ && !inputs_->empty());
+	}
 	std::size_t Size() const { return entries_.size(); }
 	std::size_t CurrentIndex() const { return currentIndex_; }
 	const std::filesystem::path& Current() const;
@@ -240,6 +243,9 @@ private:
 		const FileListScanOptions& options,
 		const std::function<bool()>& shouldContinue = {});
 	static bool IncludeExplicitImageFile(std::vector<Entry>& entries,
+		const std::filesystem::path& path,
+		const std::function<bool()>& shouldContinue = {});
+	static bool IncludeExplicitImageFile(EntryStorage& entries,
 		const std::filesystem::path& path,
 		const std::function<bool()>& shouldContinue = {});
 	static std::vector<std::filesystem::path> ChildDirectories(

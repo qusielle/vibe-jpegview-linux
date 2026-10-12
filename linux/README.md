@@ -235,7 +235,8 @@ they support.
    The optional **Minimum image size** setting in the same Behavior category filters out folder and
    archive entries smaller than its threshold. Set `minimum_image_size_kib` in `settings.conf`;
    values use 1024-byte KiB, and `0` (the default) disables the filter. An image opened directly
-   remains selected even when it is smaller than the threshold.
+   remains selected even when it is smaller than the threshold. Changing either filter reloads an
+   empty as well as a populated list, and keeps the latest selected image in place.
    Viewer file-list discovery now runs on a lazy, low-priority worker for startup, refresh, sibling
    folder jumps, recursive folder boundaries, dropped inputs, cross-folder marked-image toggles,
    and changes from multiple inputs to folder navigation. Enumeration, per-file metadata, sorting,

@@ -28,9 +28,11 @@ should normally be added to one of these focused modules and covered by the matc
   also applies the captured file-list scan options: hidden filtering checks a dot-prefixed image
   basename for both filesystem files and archive members, and the optional minimum size filters
   filesystem files by their captured metadata and archive members by uncompressed size. The explicitly
-  selected image is retained after filtering. Changing either option schedules a revision-checked
-  reload and drops folder history prepared under the previous filter policy. Linux `.hidden` metadata
-  is not consulted.
+  selected image is retained after filtering, including in multiple-input lists. If selection moves
+  while a filter reload is in flight and the new image is absent from that scan, the viewer retries
+  against the current selection. Changing either option schedules a revision-checked reload even for
+  an empty list with a retained scan scope and drops folder history prepared under the previous filter
+  policy. Linux `.hidden` metadata is not consulted.
   checks a generation cancellation predicate while traversing and publishes only the newest complete
   result. The SDL thread applies it only after checking generation, membership/order revision,
   descriptor revision, and navigation source. A source refresh invalidates in-flight prepared scans even when

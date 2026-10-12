@@ -7400,7 +7400,7 @@ private:
 			}
 			return;
 		}
-		if (!fileList_.Empty()) {
+		if (fileList_.HasScanScope()) {
 			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
 				0, FileListScanHandling::Reload, true, false, {},
 				ImageLoadStatePolicy::PreserveCurrent);
