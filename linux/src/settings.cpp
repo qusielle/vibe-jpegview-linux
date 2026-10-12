@@ -151,6 +151,21 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		} else if (key == "fit_relative_zoom_mode") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.fitRelativeZoomMode = parsed;
+		} else if (key == "custom_slideshow_interval_seconds" ||
+			key == "custom_movie_frames_per_second") {
+			try {
+				std::size_t parsedCharacters = 0;
+				const double parsed = std::stod(value, &parsedCharacters);
+				if (parsedCharacters == value.size() && std::isfinite(parsed)) {
+					if (key == "custom_slideshow_interval_seconds") {
+						loaded.customSlideshowIntervalSeconds = std::clamp(parsed, 0.1, 3600.0);
+					} else {
+						loaded.customMovieFramesPerSecond = std::clamp(parsed, 1.0, 100.0);
+					}
+				}
+			} catch (const std::exception&) {
+				// Ignore invalid numbers and retain the existing start defaults.
+			}
 		} else if (key == "transparency_pattern") {
 			(void)ParseTransparencyPattern(value, loaded.transparencyPattern);
 		} else if (key == "thumbnail_panel_width") {
@@ -344,6 +359,10 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "folder_wrap_around=" << (settings.folderWrapAround ? 1 : 0) << '\n'
 		       << "# Define fit-to-window as 100% zoom instead of source-pixel scale.\n"
 		       << "fit_relative_zoom_mode=" << (settings.fitRelativeZoomMode ? 1 : 0) << '\n'
+		       << "custom_slideshow_interval_seconds=" << std::clamp(
+			settings.customSlideshowIntervalSeconds, 0.1, 3600.0) << '\n'
+		       << "custom_movie_frames_per_second=" << std::clamp(
+			settings.customMovieFramesPerSecond, 1.0, 100.0) << '\n'
 		       << "transparency_pattern=" << TransparencyPatternSettingName(settings.transparencyPattern) << '\n'
 		       << "thumbnail_panel_width=" << settings.thumbnailPanelWidth << '\n'
 		       << "file_dialog_width=" << std::clamp(settings.fileDialogWidth,

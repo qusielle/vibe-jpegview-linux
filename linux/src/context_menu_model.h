@@ -19,6 +19,8 @@ constexpr int kCommandToggleZoomNavigator = -9;
 constexpr int kCommandAdvancedConfiguration = -14;
 constexpr int kCommandOpenGpsLocation = -16;
 constexpr int kCommandTogglePixelColorSampler = -17;
+constexpr int kCommandStartCustomSlideshow = -24;
+constexpr int kCommandStartCustomMovie = -25;
 
 struct MenuItem {
 	std::string label;
@@ -57,6 +59,8 @@ struct ContextMenuState {
 	int animationDelayMs = 100;
 	int animationDelayMaximumMs = kMaximumAdjustableFrameDelayMs;
 	double movieFramesPerSecond = 25.0;
+	double customSlideshowIntervalSeconds = 3.0;
+	double customMovieFramesPerSecond = 25.0;
 	bool infoVisible = false;
 	bool gpsLocationAvailable = false;
 	bool gpsMapProviderValid = false;

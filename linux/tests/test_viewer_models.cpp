@@ -1122,6 +1122,8 @@ void TestContextMenuCatalogAndState() {
 	};
 
 	ContextMenuState state;
+	state.customSlideshowIntervalSeconds = 6.5;
+	state.customMovieFramesPerSecond = 37.5;
 	const std::vector<MenuItem> compact = jpegview_linux::BuildContextMenu(state, false);
 	Expect(findCommand(compact, jpegview_linux::kCommandAnimationPreviousFrame) == nullptr &&
 		findCommand(compact, jpegview_linux::kCommandAnimationNextFrame) == nullptr,
@@ -1272,6 +1274,15 @@ void TestContextMenuCatalogAndState() {
 	state.transitionDurationMs = 1000;
 	state.openWithApplicationNames = {"Photo Editor", u8"写真工具"};
 	const std::vector<MenuItem> advanced = jpegview_linux::BuildContextMenu(state, true);
+	const MenuItem* customSlideshow = findCommand(advanced,
+		jpegview_linux::kCommandStartCustomSlideshow);
+	const MenuItem* customMovie = findCommand(advanced,
+		jpegview_linux::kCommandStartCustomMovie);
+	Expect(customSlideshow != nullptr && customSlideshow->enabled &&
+		customSlideshow->label == "  Custom waiting time (6.5 sec)" &&
+		customMovie != nullptr && customMovie->enabled &&
+		customMovie->label == "  Custom playback speed (37.5 fps)",
+		"advanced playback menu did not expose the configured custom timing actions");
 	const MenuItem* animationPrevious = findCommand(advanced,
 		jpegview_linux::kCommandAnimationPreviousFrame);
 	const MenuItem* animationToggle = findCommand(advanced,

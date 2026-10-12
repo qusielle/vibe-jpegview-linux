@@ -1496,6 +1496,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"copy-selection-on-release was enabled by default");
 	Expect(!jpegview_linux::ViewerSettings{}.fitRelativeZoomMode,
 		"fit-relative zoom was enabled in the built-in settings defaults");
+	Expect(jpegview_linux::ViewerSettings{}.customSlideshowIntervalSeconds == 3.0 &&
+		jpegview_linux::ViewerSettings{}.customMovieFramesPerSecond == 25.0,
+		"custom playback settings changed the existing start-command defaults");
 	Expect(!jpegview_linux::ViewerSettings{}.pixelColorSamplerEnabled,
 		"pixel color sampler was enabled in the built-in settings defaults");
 	Expect(jpegview_linux::ViewerSettings{}.gpsMapProviderUrl ==
@@ -1518,6 +1521,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 	expected.spacebarNavigatesImages = true;
 	expected.folderWrapAround = false;
 	expected.fitRelativeZoomMode = true;
+	expected.customSlideshowIntervalSeconds = 7.25;
+	expected.customMovieFramesPerSecond = 48.5;
 	expected.transparencyPattern = jpegview_linux::TransparencyPattern::Checkerboard;
 	expected.thumbnailPanelWidth = 287;
 	expected.fileDialogWidth = 1040;
@@ -1609,7 +1614,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.mangaModeInvertsLeftRight == expected.mangaModeInvertsLeftRight &&
 		loaded.spacebarNavigatesImages == expected.spacebarNavigatesImages &&
 		loaded.folderWrapAround == expected.folderWrapAround &&
-		loaded.fitRelativeZoomMode == expected.fitRelativeZoomMode,
+		loaded.fitRelativeZoomMode == expected.fitRelativeZoomMode &&
+		loaded.customSlideshowIntervalSeconds == expected.customSlideshowIntervalSeconds &&
+		loaded.customMovieFramesPerSecond == expected.customMovieFramesPerSecond,
 		"navigation and display-mode settings did not round-trip");
 	Expect(settingsContents.find("# Define fit-to-window as 100% zoom instead of source-pixel scale.\n"
 		"fit_relative_zoom_mode=1\n") != std::string::npos,
@@ -1677,6 +1684,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"manga_mode_inverts_left_right=maybe\n"
 		"spacebar_navigates_images=maybe\nfolder_wrap_around=maybe\n"
 		"fit_relative_zoom_mode=maybe\n"
+		"custom_slideshow_interval_seconds=nan\ncustom_movie_frames_per_second=broken\n"
 		"transparency_pattern=diagonal\n"
 		"cache_size_mb=not-a-number\nunknown_key=value\n";
 	malformedOutput.close();
@@ -1707,6 +1715,9 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"missing or malformed folder-wrap setting did not preserve the wrapping default");
 	Expect(!loaded.fitRelativeZoomMode,
 		"missing or malformed fit-relative zoom setting did not preserve its disabled default");
+	Expect(loaded.customSlideshowIntervalSeconds == 3.0 &&
+		loaded.customMovieFramesPerSecond == 25.0,
+		"malformed custom playback settings did not preserve their legacy-equivalent defaults");
 	Expect(loaded.transparencyPattern == jpegview_linux::TransparencyPattern::Black,
 		"malformed transparency pattern did not retain the default black background");
 	Expect(loaded.thumbnailPanelWidth == jpegview_linux::kDefaultThumbnailPanelWidth,
@@ -1738,6 +1749,7 @@ void TestSettingsRoundTripAndMalformedValues() {
 		"transparency_pattern=white\n"
 		"fixed_crop_width=999999\nfixed_crop_height=-10\n"
 		"user_crop_aspect_width=999999\nuser_crop_aspect_height=5\n"
+		"custom_slideshow_interval_seconds=0\ncustom_movie_frames_per_second=200\n"
 		"cache_size_mb=999999999\n");
 	loaded = {};
 	Expect(jpegview_linux::LoadViewerSettings(clamped, loaded) && loaded.manualZoomSet &&
@@ -1755,6 +1767,8 @@ void TestSettingsRoundTripAndMalformedValues() {
 		loaded.fixedCropHeight == jpegview_linux::kMinimumFixedCropDimension &&
 		loaded.userCropAspectWidth == jpegview_linux::kMaximumFixedCropDimension &&
 		loaded.userCropAspectHeight == 5 &&
+		loaded.customSlideshowIntervalSeconds == 0.1 &&
+		loaded.customMovieFramesPerSecond == 100.0 &&
 		loaded.cacheSizeMiB == jpegview_linux::kMaximumCacheSizeMiB,
 		"out-of-range settings were not clamped to their public limits");
 
@@ -1823,6 +1837,8 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	source.spacebarNavigatesImages = true;
 	source.folderWrapAround = false;
 	source.fitRelativeZoomMode = true;
+	source.customSlideshowIntervalSeconds = 4.3;
+	source.customMovieFramesPerSecond = 33.5;
 	source.transparencyPattern = jpegview_linux::TransparencyPattern::White;
 	source.showHistogram = true;
 	source.thumbnailPanelWidth = 287;
@@ -1856,7 +1872,8 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 
 	const std::array<std::vector<std::string>, 7> expectedKeys = {{
 		{"manga_mode_inverts_left_right", "spacebar_navigates_images", "folder_wrap_around",
-			"fit_relative_zoom_mode"},
+			"fit_relative_zoom_mode", "custom_slideshow_interval_seconds",
+			"custom_movie_frames_per_second"},
 		{"transparency_pattern", "show_histogram", "window_title_pattern"},
 		{"thumbnail_panel_width", "file_dialog_width", "file_dialog_height",
 			"file_dialog_preview_ratio"},
@@ -1901,9 +1918,10 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 			++fieldTotal;
 		}
 	}
-	Expect(fieldTotal == 35, "advanced configuration did not expose every requested setting");
+	Expect(fieldTotal == 37, "advanced configuration did not expose every requested setting");
 	Expect(model.SelectCategory(static_cast<int>(Category::Behavior)) &&
-		model.FieldValue(2) == "Off" && model.FieldValue(3) == "On",
+		model.FieldValue(2) == "Off" && model.FieldValue(3) == "On" &&
+		model.FieldValue(4) == "4.3 sec" && model.FieldValue(5) == "33.5 fps",
 		"behavior settings did not display their draft values");
 	Expect(model.SelectCategory(static_cast<int>(Category::Appearance)) &&
 		model.FieldValue(0) == "White" && model.FieldValue(1) == "On" &&
@@ -1923,7 +1941,9 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 		model.Draft().magnifyingGlassWidth == source.magnifyingGlassWidth &&
 		model.Draft().fileDialogPreviewRatio == source.fileDialogPreviewRatio &&
 		model.Draft().windowTitlePattern == source.windowTitlePattern &&
-		model.Draft().fitRelativeZoomMode == source.fitRelativeZoomMode,
+		model.Draft().fitRelativeZoomMode == source.fitRelativeZoomMode &&
+		model.Draft().customSlideshowIntervalSeconds == source.customSlideshowIntervalSeconds &&
+		model.Draft().customMovieFramesPerSecond == source.customMovieFramesPerSecond,
 		"opening and visiting categories changed the persisted settings draft");
 	Expect(model.Draft().scaleMode == source.scaleMode && model.Draft().maximized == source.maximized &&
 		model.Draft().selectionModeEnabled == source.selectionModeEnabled &&
@@ -1953,6 +1973,20 @@ void TestAdvancedConfigurationModelCategoriesAndRoundTrips() {
 	Expect(model.ActivateSelected() && model.Draft().folderWrapAround &&
 		model.AdjustSelected(-1) && !model.Draft().folderWrapAround,
 		"folder-wrap setting did not toggle in both advanced-configuration controls");
+	model.SelectRow(4);
+	Expect(model.AdjustSelected(1) &&
+		std::abs(model.Draft().customSlideshowIntervalSeconds - 4.4) < 1e-9,
+		"custom slideshow interval did not adjust by its configured tenth-second step");
+	model.SelectRow(5);
+	Expect(model.AdjustSelected(-1) &&
+		std::abs(model.Draft().customMovieFramesPerSecond - 33.0) < 1e-9,
+		"custom Movie frame rate did not adjust by its configured half-FPS step");
+	edit(4, "0.01");
+	Expect(std::abs(model.Draft().customSlideshowIntervalSeconds - 0.1) < 1e-9,
+		"custom slideshow interval was not clamped at its minimum");
+	edit(5, "101");
+	Expect(std::abs(model.Draft().customMovieFramesPerSecond - 100.0) < 1e-9,
+		"custom Movie frame rate was not clamped at its maximum");
 	model.SelectRow(3);
 	Expect(model.ActivateSelected() && !model.Draft().fitRelativeZoomMode &&
 		model.AdjustSelected(1) && model.Draft().fitRelativeZoomMode,

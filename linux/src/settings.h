@@ -49,6 +49,9 @@ struct ViewerSettings {
 	bool spacebarNavigatesImages = false;
 	bool folderWrapAround = true;
 	bool fitRelativeZoomMode = false;
+	// Defaults match the existing slideshow and Movie start commands.
+	double customSlideshowIntervalSeconds = 3.0;
+	double customMovieFramesPerSecond = 25.0;
 	TransparencyPattern transparencyPattern = TransparencyPattern::Black;
 	int thumbnailPanelWidth = kDefaultThumbnailPanelWidth;
 	int fileDialogWidth = kDefaultFileDialogWidth;

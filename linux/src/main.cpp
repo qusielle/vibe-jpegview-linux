@@ -10079,6 +10079,9 @@ private:
 		case IDM_SLIDESHOW_START:
 			StartSlideshow(3.0);
 			break;
+		case jpegview_linux::kCommandStartCustomSlideshow:
+			StartSlideshow(runtimeSettings_.Values().customSlideshowIntervalSeconds);
+			break;
 		case IDM_SLIDESHOW_1:
 		case IDM_SLIDESHOW_2:
 		case IDM_SLIDESHOW_3:
@@ -10151,6 +10154,9 @@ private:
 			break;
 		case IDM_MOVIE_START_FPS:
 			StartMovie(25.0);
+			break;
+		case jpegview_linux::kCommandStartCustomMovie:
+			StartMovie(runtimeSettings_.Values().customMovieFramesPerSecond);
 			break;
 		case IDM_MOVIE_5_FPS:
 		case IDM_MOVIE_10_FPS:
@@ -10229,6 +10235,8 @@ private:
 		state.animationDelayMs = playback_.FrameDelayMs();
 		state.animationDelayMaximumMs = playback_.MaximumFrameDelayMs();
 		state.movieFramesPerSecond = playback_.MovieFramesPerSecond();
+		state.customSlideshowIntervalSeconds = runtimeSettings_.Values().customSlideshowIntervalSeconds;
+		state.customMovieFramesPerSecond = runtimeSettings_.Values().customMovieFramesPerSecond;
 		state.infoVisible = runtimeSettings_.Values().infoVisible;
 		state.gpsLocationAvailable = CurrentGpsCoordinatesAvailable();
 		state.gpsMapProviderValid = CurrentGpsMapActionAvailable();

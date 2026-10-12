@@ -49,13 +49,6 @@ feature is absent from Linux.
   transition duration. Do not fade frames within an animated image; cap or skip fades that would
   consume most of a movie frame interval. Preserve the existing directional slideshow effects. See
   the branch's [playback handoff](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/MainDlg.cpp).
-- **Custom slideshow interval:** supplement the current fixed waiting-time choices with a bounded,
-  persisted numeric interval entry. Reuse the branch's
-  [numeric value dialog](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/SetValueDlg.cpp)
-  as a reference.
-- **Custom movie frame rate:** supplement the current fixed playback-rate choices with a bounded,
-  persisted numeric FPS entry; the branch uses the same
-  [numeric value dialog](https://github.com/andrewvladved/jpegview/blob/annotations/src/JPEGView/SetValueDlg.cpp).
 - **Transparent title-bar presentation:** investigate a Linux-native equivalent to the branch's
   transparent title-bar panel. The Windows implementation uses DWM frame integration, so this is
   not a direct API port; Linux already supports hiding the window title bar.

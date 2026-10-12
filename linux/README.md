@@ -439,8 +439,10 @@ they support.
     Pan, zoom, and pointer movement reuse the current histogram and cached overlay layout. Window
     resizing keeps the histogram and recalculates layout only when its geometry changes. Animated GIF,
     APNG, WebP, AVIF, and JPEG XL honor frame delays and loop counts. GIF delays default to 100 ms
-    when missing or zero and are clamped to at least 20 ms. Movie mode supports fixed frame rates and
-    folder advancement; its selected rate overrides source delays for GIFs and other animations.
+    when missing or zero and are clamped to at least 20 ms. Movie mode supports fixed frame rates,
+    a configurable custom rate, and folder advancement; its selected rate overrides source delays for
+    GIFs and other animations. The advanced playback menu also offers a configurable custom slideshow
+    interval alongside the existing fixed choices.
     Slideshow transitions are rendered natively after cold images are presented, and slideshow/movie
     timers resume from each successful display commit. Timed playback
     stops cleanly when it reaches a non-wrapping folder boundary. Alt+R resumes, and Escape stops active
@@ -1373,9 +1375,15 @@ are also needed for image copy/paste in a local non-AppImage build.
 Animated GIF, APNG, WebP, AVIF, and JPEG XL images start playing automatically at their embedded frame
 delays. GIF delays are converted from hundredths of a second to milliseconds; a missing or zero delay
 defaults to 100 ms, and a nonzero delay shorter than 20 ms is raised to 20 ms. The `Movie` menu plays
-animated or multi-page images at a selected fixed rate (5, 10, 25, 30, 50, or 100 fps), overriding
+animated or multi-page images at a selected fixed rate (5, 10, 25, 30, 50, or 100 fps) or a custom
+rate configured under Advanced configuration → Behavior, overriding
 their embedded per-frame timing while Movie mode is active, and advances a folder of still images
 when the current image has no frames.
+The Movie custom rate is bounded to 1–100 fps and defaults to 25 fps. The slideshow custom waiting
+time is bounded to 0.1–3600 seconds and defaults to 3 seconds; both values are persisted in
+`settings.conf` as `custom_movie_frames_per_second` and `custom_slideshow_interval_seconds`. Choose
+the corresponding **Custom playback speed** or **Custom waiting time** command in the expanded
+context menu to use them. Existing fixed rates and slideshow choices remain available.
 Starting Movie after a finite animation has finished restarts it from its first frame.
 The original frame loop count is honored when a format provides one. GIFs without a looping
 extension play once; an explicit zero repeat count loops forever, and a positive repeat count adds

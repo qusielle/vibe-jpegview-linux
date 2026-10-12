@@ -50,6 +50,10 @@ const std::vector<AdvancedConfigurationField>& FieldsFor(int category) {
 		BooleanField("spacebar_navigates_images", "Space navigates images"),
 		BooleanField("folder_wrap_around", "Wrap around folder ends"),
 		BooleanField("fit_relative_zoom_mode", "Fit-relative zoom mode"),
+		DecimalField("custom_slideshow_interval_seconds", "Custom slideshow interval",
+			0.1, 3600.0, 0.1, 1, "sec"),
+		DecimalField("custom_movie_frames_per_second", "Custom Movie frame rate",
+			1.0, 100.0, 0.5, 1, "fps"),
 	};
 	static const std::vector<AdvancedConfigurationField> appearance = {
 		ChoiceField("transparency_pattern", "Transparent image background",
@@ -195,6 +199,12 @@ double GetNumericValue(const ViewerSettings& settings, const AdvancedConfigurati
 	if (IsKey(field, "unsharp_mask_amount")) return settings.unsharpMaskAmount;
 	if (IsKey(field, "unsharp_mask_threshold")) return settings.unsharpMaskThreshold;
 	if (IsKey(field, "cache_size_mb")) return static_cast<double>(settings.cacheSizeMiB);
+	if (IsKey(field, "custom_slideshow_interval_seconds")) {
+		return settings.customSlideshowIntervalSeconds;
+	}
+	if (IsKey(field, "custom_movie_frames_per_second")) {
+		return settings.customMovieFramesPerSecond;
+	}
 	for (const LevelSettingKey& item : kLevelSettingKeys) {
 		if (IsKey(field, item.key)) return GetLevelControlValue(settings.defaultImageProcessing, item.control);
 	}
@@ -217,6 +227,11 @@ void SetNumericValue(ViewerSettings& settings, const AdvancedConfigurationField&
 	else if (IsKey(field, "unsharp_mask_radius")) settings.unsharpMaskRadius = value;
 	else if (IsKey(field, "unsharp_mask_amount")) settings.unsharpMaskAmount = value;
 	else if (IsKey(field, "unsharp_mask_threshold")) settings.unsharpMaskThreshold = value;
+	else if (IsKey(field, "custom_slideshow_interval_seconds")) {
+		settings.customSlideshowIntervalSeconds = value;
+	} else if (IsKey(field, "custom_movie_frames_per_second")) {
+		settings.customMovieFramesPerSecond = value;
+	}
 	else if (IsKey(field, "cache_size_mb")) {
 		settings.cacheSizeMiB = static_cast<std::size_t>(std::llround(value));
 	} else {
@@ -655,6 +670,10 @@ void AdvancedConfigurationModel::NormalizeDraft() {
 	draft_.magnifyingGlassZoomLevel = clampFinite(draft_.magnifyingGlassZoomLevel,
 		MagnifyingGlassModel::kDefaultZoomLevel, MagnifyingGlassModel::kMinimumZoomLevel,
 		MagnifyingGlassModel::kMaximumZoomLevel);
+	draft_.customSlideshowIntervalSeconds = clampFinite(
+		draft_.customSlideshowIntervalSeconds, 3.0, 0.1, 3600.0);
+	draft_.customMovieFramesPerSecond = clampFinite(
+		draft_.customMovieFramesPerSecond, 25.0, 1.0, 100.0);
 	draft_.userCropAspectWidth = std::clamp(draft_.userCropAspectWidth,
 		kMinimumFixedCropDimension, kMaximumFixedCropDimension);
 	draft_.userCropAspectHeight = std::clamp(draft_.userCropAspectHeight,

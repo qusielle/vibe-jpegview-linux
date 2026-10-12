@@ -467,12 +467,13 @@ should normally be added to one of these focused modules and covered by the matc
   pattern, global double-page/manga-mode
   defaults, the default-enabled `manga_mode_inverts_left_right` preference, the default-disabled
   `spacebar_navigates_images` preference, the default-enabled `folder_wrap_around` preference, and
-  the default-disabled `fit_relative_zoom_mode` preference),
+  the default-disabled `fit_relative_zoom_mode` preference, and configurable custom playback values
+  whose defaults match the existing 3-second slideshow and 25-fps Movie start actions),
   plus stable sort-mode values. Applying prepared list scans preserves the live folder-wrap value,
   so editing the setting does not require canceling or repeating a directory scan.
 - `advanced_configuration_model`: category and row metadata for persisted settings that lack a normal
-  context-menu command, including the Behavior category's fit-relative zoom option, with a transient
-  `ViewerSettings` draft, value bounds, text editing, and
+  context-menu command, including the Behavior category's fit-relative zoom and custom playback
+  values, with a transient `ViewerSettings` draft, value bounds, text editing, and
   selection/scroll transitions. It performs no file I/O; Apply is routed through the existing settings
   serializer by the SDL adapter, while Cancel drops the draft.
 - `recent_files`: normalized absolute MRU image rows with one image per parent folder, a separately
@@ -559,7 +560,9 @@ should normally be added to one of these focused modules and covered by the matc
   are restored. The GIF information overlay reports the effective rate from the current frame delay,
   or the selected Movie rate while Movie mode overrides source timing. Temporary modal suppression
   still preserves the separate user play/freeze intent and starts a fresh interval when the modal
-  closes.
+  closes. The custom slideshow interval (0.1–3600 seconds) and custom Movie rate (1–100 fps) are
+  settings supplied by Viewer when its playback menu is built and when the matching start action is
+  dispatched; the scheduler remains independent of settings storage.
 - `file_dialog_model`: filename filtering in Browse and full-path filtering in Recents, name/date
   sorting, UTF-8 editing, selection, paging, independently
   clamped viewport scrolling, proportional scrollbar thumb geometry and row-offset mapping, focus

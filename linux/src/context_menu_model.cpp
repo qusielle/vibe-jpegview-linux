@@ -9,7 +9,9 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 
 namespace jpegview_linux {
 
@@ -168,6 +170,12 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		(movieMode ? "  Resume Movie" : "  Resume animation") :
 		(state.animationPlaying ? "  Freeze animation" :
 			(movieMode ? "  Pause Movie" : "  Resume animation"));
+	std::ostringstream customSlideshowLabel;
+	customSlideshowLabel << "  Custom waiting time (" << std::fixed << std::setprecision(1)
+		<< std::clamp(state.customSlideshowIntervalSeconds, 0.1, 3600.0) << " sec)";
+	std::ostringstream customMovieLabel;
+	customMovieLabel << "  Custom playback speed (" << std::fixed << std::setprecision(1)
+		<< std::clamp(state.customMovieFramesPerSecond, 1.0, 100.0) << " fps)";
 	const char* nextPageShortcut = state.mangaReadingOrderEnabled ? "Left/PgDn" : "Right/PgDn";
 	const char* previousPageShortcut = state.mangaReadingOrderEnabled ? "Right/PgUp" : "Left/PgUp";
 	std::vector<MenuItem> items = {
@@ -316,6 +324,8 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 		{"  Waiting time 7 sec", IDM_SLIDESHOW_7, false, false, true, "7", true},
 		{"  Waiting time 10 sec", IDM_SLIDESHOW_10, false, false, true, nullptr, true},
 		{"  Waiting time 20 sec", IDM_SLIDESHOW_20, false, false, true, nullptr, true},
+		{customSlideshowLabel.str().c_str(), kCommandStartCustomSlideshow,
+			false, false, true, nullptr, true},
 		{"  Transition effect", 0, false, false, true, nullptr, true},
 		{"    None", IDM_EFFECT_NONE, false, state.transitionEffect == IDM_EFFECT_NONE, true, nullptr, true},
 		{"    Blend", IDM_EFFECT_BLEND, false, state.transitionEffect == IDM_EFFECT_BLEND, true, nullptr, true},
@@ -371,6 +381,10 @@ std::vector<MenuItem> BuildContextMenu(const ContextMenuState& state,
 			std::abs(state.movieFramesPerSecond - 50.0) < 0.01, true, "50", true},
 		{"  Playback speed 100 fps", IDM_MOVIE_100_FPS, false, state.playbackMode == PlaybackMode::Movie &&
 			std::abs(state.movieFramesPerSecond - 100.0) < 0.01, true, "100", true},
+		{customMovieLabel.str().c_str(), kCommandStartCustomMovie, false,
+			state.playbackMode == PlaybackMode::Movie &&
+			std::abs(state.movieFramesPerSecond - state.customMovieFramesPerSecond) < 0.01,
+			true, nullptr, true},
 		{nullptr, 0, true},
 		{"Settings Admin", 0, false, false, true, nullptr, true},
 		{"  Edit global settings...", IDM_EDIT_GLOBAL_CONFIG, false, false, false, nullptr, true},
