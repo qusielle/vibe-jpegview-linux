@@ -5176,8 +5176,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 				-crop 260x65+571+180 +repage "$temporary/owner-none-selected-crop.png"
 		fi
 		# The advanced menu's slideshow/effect column is third at this fixed test
-		# window size; clicking avoids mnemonics that depend on installed apps.
-		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 620 220 click 1
+		# window size. The custom slideshow row places Blend one row lower.
+		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 620 240 click 1
 		if [ "$visual_assertions" -eq 1 ]; then
 			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 40 40
 			DISPLAY=":$display_number" xdotool keydown Shift_L
