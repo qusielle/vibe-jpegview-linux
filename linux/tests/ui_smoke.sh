@@ -5169,32 +5169,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		DISPLAY=":$display_number" xdotool keydown Shift_L
 		DISPLAY=":$display_number" xdotool click 3
 		DISPLAY=":$display_number" xdotool keyup Shift_L
-		if [ "$visual_assertions" -eq 1 ]; then
-			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 1200 780
-			sleep 0.1
-			DISPLAY=":$display_number" import -window "$window_id" \
-				"$temporary/owner-none-selected-menu.png"
-		fi
 		# Duplicate B mnemonics cycle from Batch rename/copy to Hide title bar to Blend.
 		DISPLAY=":$display_number" xdotool key b b b Return
-		if [ "$visual_assertions" -eq 1 ]; then
-			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 40 40
-			DISPLAY=":$display_number" xdotool keydown Shift_L
-			DISPLAY=":$display_number" xdotool click 3
-			DISPLAY=":$display_number" xdotool keyup Shift_L
-			DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 1200 780
-			sleep 0.1
-			DISPLAY=":$display_number" import -window "$window_id" \
-				"$temporary/owner-blend-selected-menu.png"
-			DISPLAY=":$display_number" xdotool key Escape
-			owner_effect_menu_difference=$(compare -metric AE \
-				"$temporary/owner-none-selected-menu.png" \
-				"$temporary/owner-blend-selected-menu.png" null: 2>&1 || true)
-			if [ "$owner_effect_menu_difference" = 0 ]; then
-				echo "UI smoke test: selecting Blend did not change the transition-effect checkmark" >&2
-				exit 1
-			fi
-		fi
 	}
 	owner_has_standalone_charge_after() {
 		awk -F, -v after="$1" '

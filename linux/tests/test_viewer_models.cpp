@@ -1286,6 +1286,11 @@ void TestContextMenuCatalogAndState() {
 	state.transitionDurationMs = 1000;
 	state.openWithApplicationNames = {"Photo Editor", u8"写真工具"};
 	const std::vector<MenuItem> advanced = jpegview_linux::BuildContextMenu(state, true);
+	const MenuItem* blendEffect = findCommand(advanced, IDM_EFFECT_BLEND);
+	const MenuItem* noTransition = findCommand(advanced, IDM_EFFECT_NONE);
+	Expect(blendEffect != nullptr && blendEffect->checked && noTransition != nullptr &&
+		!noTransition->checked,
+		"transition menu did not check the selected Blend effect specifically");
 	const MenuItem* customSlideshow = findCommand(advanced,
 		jpegview_linux::kCommandStartCustomSlideshow);
 	const MenuItem* customMovie = findCommand(advanced,
