@@ -1855,7 +1855,9 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 	DISPLAY=":$display_number" xdotool key p
 	sleep 0.15
 	capture_animation_status_mask "$temporary/animation-playback-playing.png"
-	for _ in $(seq 1 30); do
+	# Keep this mask comparison inside one 3-second GIF frame; changing pixels
+	# behind the translucent panel can otherwise alter antialiased text edges.
+	for _ in $(seq 1 8); do
 		capture_animation_status_mask "$animation_status_mask"
 		if ! compare -metric AE "$temporary/animation-playback-playing.png" \
 			"$animation_status_mask" null: >/dev/null 2>&1; then
