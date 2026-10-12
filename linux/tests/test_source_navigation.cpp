@@ -471,6 +471,67 @@ void TestFileListFilteringAndLogicalSorting() {
 		"file-list exact path lookup did not follow the active sort order");
 }
 
+void TestSkipHiddenImagesInFilesystemAndArchiveLists() {
+	TemporaryDirectory temporary;
+	const fs::path directory = temporary.path() / "images";
+	fs::create_directories(directory);
+	const fs::path hidden = directory / ".cover.png";
+	const fs::path visible = directory / "visible.png";
+	WriteTinyImage(hidden);
+	WriteTinyImage(visible);
+
+	FileList legacyList({directory.string()}, FileList::SortMode::FileName, true, false);
+	Expect(legacyList.Size() == 2,
+		"hidden-image filtering changed the legacy default folder contents");
+	const jpegview_linux::FileListScanOptions options{true};
+	FileList filteredList({directory.string()}, FileList::SortMode::FileName, true, false, options);
+	Expect(filteredList.Size() == 1 && filteredList.Current() == visible,
+		"dot-prefixed filesystem image was not omitted from folder navigation");
+	const FileList::ScanRequest initialRequest = FileList::InitialScanRequest(
+		{directory.string()}, FileList::SortMode::FileName, true, false,
+		FileList::NavigationMode::LoopDirectory, options);
+	const FileListPreparedScan initialScan = FileList::PrepareScan(
+		initialRequest, [] { return true; });
+	Expect(initialScan.completed && initialScan.replacement.Size() == 1 &&
+		initialScan.replacement.Current() == visible,
+		"initial background scan did not carry the hidden-image filter option");
+
+	FileList explicitlyOpenedHidden({hidden.string()}, FileList::SortMode::FileName,
+		true, false, options);
+	Expect(explicitlyOpenedHidden.Size() == 2 &&
+		explicitlyOpenedHidden.Current() == hidden &&
+		explicitlyOpenedHidden.ContainsPath(hidden),
+		"opening a hidden image directly did not keep it selected alongside visible siblings");
+
+	FileList changedInPlace({directory.string()}, FileList::SortMode::FileName, true, false);
+	Expect(changedInPlace.Select(*changedInPlace.IndexOf(visible)),
+		"hidden-image filter fixture could not select its visible image");
+	changedInPlace.SetScanOptions(options);
+	FileListPreparedScan prepared = FileList::PrepareScan(
+		changedInPlace.MakeScanRequest(FileList::ScanOperation::Reload), [] { return true; });
+	Expect(prepared.completed && prepared.replacement.Size() == 1 &&
+		prepared.replacement.Current() == visible &&
+		changedInPlace.ApplyPreparedScan(std::move(prepared), visible) &&
+		changedInPlace.Size() == 1 && changedInPlace.Current() == visible,
+		"asynchronous filter reload did not preserve the selected visible image");
+
+	const fs::path payload = temporary.path() / "payload.png";
+	const fs::path archive = temporary.path() / "images.zip";
+	WriteTinyImage(payload);
+	WriteZipArchive(archive, {{".cover.png", payload}, {"visible.png", payload}});
+	const fs::path hiddenMember = archive / ".cover.png";
+	const fs::path visibleMember = archive / "visible.png";
+	FileList filteredArchive({archive.string()}, FileList::SortMode::FileName,
+		true, false, options);
+	Expect(filteredArchive.Size() == 1 && filteredArchive.Current() == visibleMember,
+		"dot-prefixed archive image was not omitted from archive navigation");
+	FileList explicitlyOpenedMember({hiddenMember.string()}, FileList::SortMode::FileName,
+		true, false, options);
+	Expect(explicitlyOpenedMember.Size() == 2 &&
+		explicitlyOpenedMember.Current() == hiddenMember,
+		"opening a hidden archive image directly did not preserve its selection");
+}
+
 void TestExplicitWrongSuffixImageIsIncludedWithoutFolderSniffing() {
 	TemporaryDirectory temporary;
 	const fs::path directory = temporary.path() / "images";
@@ -2597,6 +2658,7 @@ void TestHeldNavigationWaitsForCurrentImageContinuation() {
 }
 const TestCase kTests[] = {
 	{"file-list-filtering-and-logical-sorting", &TestFileListFilteringAndLogicalSorting},
+	{"skip-hidden-images-in-filesystem-and-archive-lists", &TestSkipHiddenImagesInFilesystemAndArchiveLists},
 	{"explicit-wrong-suffix-image-is-included-without-folder-sniffing", &TestExplicitWrongSuffixImageIsIncludedWithoutFolderSniffing},
 	{"ordinary-source-metadata-uses-one-statx-request", &TestOrdinarySourceMetadataUsesOneStatxRequest},
 	{"source-descriptor-identity-and-unusual-paths", &TestSourceDescriptorIdentityAndUnusualPaths},

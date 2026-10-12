@@ -48,6 +48,7 @@ struct ViewerSettings {
 	bool mangaModeInvertsLeftRight = true;
 	bool spacebarNavigatesImages = false;
 	bool folderWrapAround = true;
+	bool skipHiddenImages = false;
 	bool fitRelativeZoomMode = false;
 	// Defaults match the existing slideshow and Movie start commands.
 	double customSlideshowIntervalSeconds = 3.0;

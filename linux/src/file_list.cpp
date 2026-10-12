@@ -26,6 +26,11 @@ bool ContinueScan(const std::function<bool()>& shouldContinue) {
 	return !shouldContinue || shouldContinue();
 }
 
+bool IsHiddenImageName(const fs::path& path) {
+	const std::string filename = path.filename().string();
+	return !filename.empty() && filename.front() == '.';
+}
+
 bool SameSourceMetadata(const SourceMetadata& left, const SourceMetadata& right) {
 	return left.fileSize == right.fileSize &&
 		left.modificationTimeNanoseconds == right.modificationTimeNanoseconds &&
@@ -154,10 +159,12 @@ bool ClassifyInputPath(const fs::path& path,
 } // namespace
 
 FileList::FileList(const std::vector<std::string>& inputs, SortMode sortMode, bool sortAscending,
-	bool wrapAroundFolder)
+	bool wrapAroundFolder, FileListScanOptions scanOptions)
 	: inputs_(std::make_shared<const std::vector<std::string>>(inputs)), sortMode_(sortMode),
-	  sortAscending_(sortAscending), wrapAroundFolder_(wrapAroundFolder) {
+	  sortAscending_(sortAscending), wrapAroundFolder_(wrapAroundFolder),
+	  scanOptions_(scanOptions) {
 	Initialize(inputs);
+	appliedScanOptions_ = scanOptions_;
 }
 
 const fs::path& FileList::Current() const {
@@ -252,7 +259,7 @@ FileList::Entry FileList::DescribeFile(const fs::path& path,
 }
 
 std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
-	const std::function<bool()>& shouldContinue) {
+	const FileListScanOptions& options, const std::function<bool()>& shouldContinue) {
 	std::vector<Entry> result;
 	if (!ContinueScan(shouldContinue)) return result;
 	bool interruptedForForeground = false;
@@ -266,7 +273,8 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 			[&shouldContinue] { return ContinueScan(shouldContinue); }, errorMessage)) return result;
 		for (const ArchiveEntryInfo& archiveEntry : archiveEntries) {
 			if (!ContinueScan(shouldContinue)) return {};
-			if (!archiveEntry.directory && IsSupportedImagePath(archiveEntry.path)) {
+			if (!archiveEntry.directory && IsSupportedImagePath(archiveEntry.path) &&
+				(!options.skipHiddenImages || !IsHiddenImageName(archiveEntry.path))) {
 				Entry entry;
 				entry.source = DescribeArchiveMember(archiveEntry.path,
 					archiveEntry.backingIdentity, archiveEntry.size,
@@ -305,7 +313,8 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 				const fs::directory_entry entry = *iterator;
 				std::error_code statusError;
 				if (entry.is_regular_file(statusError) && !statusError &&
-					IsSupportedImagePath(entry.path())) {
+					IsSupportedImagePath(entry.path()) &&
+					(!options.skipHiddenImages || !IsHiddenImageName(entry.path()))) {
 					imagePaths.push_back(entry.path());
 				}
 				iterator.increment(error);
@@ -323,16 +332,18 @@ std::vector<FileList::Entry> FileList::ScanDirectory(const fs::path& directory,
 	return result;
 }
 
-bool FileList::IncludeExplicitContentFile(std::vector<Entry>& entries,
+bool FileList::IncludeExplicitImageFile(std::vector<Entry>& entries,
 	const fs::path& path, const std::function<bool()>& shouldContinue) {
-	if (path.empty() || IsSupportedImagePath(path) || IsArchiveMemberLocation(path)) return false;
+	if (path.empty()) return false;
 	const fs::path normalized = Normalize(path);
 	if (std::any_of(entries.begin(), entries.end(), [&normalized](const Entry& entry) {
 		return entry.path == normalized;
 	})) return true;
 	InputPathKind inputKind = InputPathKind::Unsupported;
-	if (!ClassifyInputPath(normalized, shouldContinue, inputKind) ||
-		inputKind != InputPathKind::ImageFileByContent) return false;
+	if (!ClassifyInputPath(normalized, shouldContinue, inputKind)) return false;
+	if (inputKind != InputPathKind::ImageFileByExtension &&
+		inputKind != InputPathKind::ImageFileByContent &&
+		!(inputKind == InputPathKind::ArchiveMember && IsSupportedImagePath(normalized))) return false;
 	entries.push_back(DescribeFile(normalized, shouldContinue));
 	return true;
 }
@@ -421,6 +432,7 @@ void FileList::CollectDescendantDirectories(const fs::path& directory,
 
 void FileList::Initialize(const std::vector<std::string>& inputs,
 	const std::function<bool()>& shouldContinue) {
+	appliedScanOptions_ = scanOptions_;
 	entries_.clear();
 	paths_.clear();
 	pathIndices_.clear();
@@ -436,7 +448,7 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 		const fs::path directory = Normalize(fs::current_path(error));
 		rootDirectory_ = directory;
 		currentDirectory_ = directory;
-		entries_ = ScanDirectory(directory, shouldContinue);
+		entries_ = ScanDirectory(directory, scanOptions_, shouldContinue);
 		SortEntries();
 		currentIndex_ = 0;
 		RebuildPaths();
@@ -451,7 +463,7 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 			rootDirectory_ = input;
 			currentDirectory_ = input;
 			browseLocationOnEmpty_ = input;
-			entries_ = ScanDirectory(input, shouldContinue);
+			entries_ = ScanDirectory(input, scanOptions_, shouldContinue);
 			SortEntries();
 			currentIndex_ = 0;
 			RebuildPaths();
@@ -460,7 +472,10 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 		if (inputKind == InputPathKind::ArchiveMember && IsSupportedImagePath(input)) {
 			rootDirectory_ = input.parent_path();
 			currentDirectory_ = input.parent_path();
-			entries_ = ScanDirectory(currentDirectory_, shouldContinue);
+			entries_ = ScanDirectory(currentDirectory_, scanOptions_, shouldContinue);
+			if (std::none_of(entries_.begin(), entries_.end(), [&input](const Entry& entry) {
+				return entry.path == input;
+			})) entries_.push_back(DescribeFile(input, shouldContinue));
 			SortEntries();
 			currentIndex_ = FindEntry(input);
 			RebuildPaths();
@@ -470,7 +485,7 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 			rootDirectory_ = input;
 			currentDirectory_ = input;
 			browseLocationOnEmpty_ = input;
-			entries_ = ScanDirectory(input, shouldContinue);
+			entries_ = ScanDirectory(input, scanOptions_, shouldContinue);
 			SortEntries();
 			currentIndex_ = 0;
 			RebuildPaths();
@@ -480,13 +495,10 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 			inputKind == InputPathKind::ImageFileByContent) {
 			rootDirectory_ = input.parent_path();
 			currentDirectory_ = input.parent_path();
-			entries_ = ScanDirectory(currentDirectory_, shouldContinue);
-			if (inputKind == InputPathKind::ImageFileByContent &&
-				std::none_of(entries_.begin(), entries_.end(), [&input](const Entry& entry) {
-					return entry.path == input;
-				})) {
-				entries_.push_back(DescribeFile(input, shouldContinue));
-			}
+			entries_ = ScanDirectory(currentDirectory_, scanOptions_, shouldContinue);
+			if (std::none_of(entries_.begin(), entries_.end(), [&input](const Entry& entry) {
+				return entry.path == input;
+			})) entries_.push_back(DescribeFile(input, shouldContinue));
 			SortEntries();
 			currentIndex_ = FindEntry(input);
 			RebuildPaths();
@@ -505,13 +517,13 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 		InputPathKind inputKind = InputPathKind::Unsupported;
 		if (!ClassifyInputPath(input, shouldContinue, inputKind)) return;
 		if (inputKind == InputPathKind::ArchiveContainer) {
-			const std::vector<Entry> archiveEntries = ScanDirectory(input, shouldContinue);
+			const std::vector<Entry> archiveEntries = ScanDirectory(input, scanOptions_, shouldContinue);
 			entries_.insert(entries_.end(), archiveEntries.begin(), archiveEntries.end());
 		} else if (inputKind == InputPathKind::ArchiveMember &&
 			IsSupportedImagePath(input)) {
 			entries_.push_back(DescribeFile(input, shouldContinue));
 		} else if (inputKind == InputPathKind::Directory) {
-			const std::vector<Entry> directoryEntries = ScanDirectory(input, shouldContinue);
+			const std::vector<Entry> directoryEntries = ScanDirectory(input, scanOptions_, shouldContinue);
 			entries_.insert(entries_.end(), directoryEntries.begin(), directoryEntries.end());
 		} else if (inputKind == InputPathKind::ImageFileByExtension ||
 			inputKind == InputPathKind::ImageFileByContent) {
@@ -534,7 +546,8 @@ void FileList::Initialize(const std::vector<std::string>& inputs,
 }
 
 FileList::ScanRequest FileList::InitialScanRequest(const std::vector<std::string>& inputs,
-	SortMode sortMode, bool sortAscending, bool wrapAroundFolder, NavigationMode navigationMode) {
+	SortMode sortMode, bool sortAscending, bool wrapAroundFolder, NavigationMode navigationMode,
+	FileListScanOptions scanOptions) {
 	ScanRequest request;
 	request.operation = ScanOperation::Initialize;
 	request.inputs = std::make_shared<const std::vector<std::string>>(inputs);
@@ -542,6 +555,7 @@ FileList::ScanRequest FileList::InitialScanRequest(const std::vector<std::string
 	request.sortAscending = sortAscending;
 	request.wrapAroundFolder = wrapAroundFolder;
 	request.navigationMode = navigationMode;
+	request.scanOptions = scanOptions;
 	return request;
 }
 
@@ -554,6 +568,7 @@ FileList::ScanRequest FileList::MakeScanRequest(ScanOperation operation, int dir
 	request.selectedPath = Current();
 	request.sortMode = sortMode_;
 	request.navigationMode = navigationMode_;
+	request.scanOptions = scanOptions_;
 	request.expectedRevision = mutationRevision_;
 	request.expectedDescriptorRevision = descriptorRevision_;
 	request.sortAscending = sortAscending_;
@@ -577,6 +592,8 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 	replacement.sortAscending_ = request.sortAscending;
 	replacement.wrapAroundFolder_ = request.wrapAroundFolder;
 	replacement.navigationMode_ = request.navigationMode;
+	replacement.scanOptions_ = request.scanOptions;
+	replacement.appliedScanOptions_ = request.scanOptions;
 	replacement.mutationRevision_ = request.expectedRevision;
 
 	const auto setDirectoryEntries = [&replacement](const fs::path& directory,
@@ -611,9 +628,9 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 			result.targetFound = true;
 		} else {
 			const fs::path directory = request.currentDirectory;
-			std::vector<Entry> entries = ScanDirectory(directory, shouldContinue);
+			std::vector<Entry> entries = ScanDirectory(directory, replacement.scanOptions_, shouldContinue);
 			if (!ContinueScan(shouldContinue)) return result;
-			(void)IncludeExplicitContentFile(entries, request.selectedPath, shouldContinue);
+			(void)IncludeExplicitImageFile(entries, request.selectedPath, shouldContinue);
 			if (!ContinueScan(shouldContinue)) return result;
 			setDirectoryEntries(directory, std::move(entries), request.selectedPath);
 			result.targetFound = true;
@@ -625,9 +642,9 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 		const fs::path selected = request.selectedPath;
 		const fs::path directory = selected.parent_path();
 		if (directory.empty()) return result;
-		std::vector<Entry> entries = ScanDirectory(directory, shouldContinue);
+		std::vector<Entry> entries = ScanDirectory(directory, replacement.scanOptions_, shouldContinue);
 		if (!ContinueScan(shouldContinue)) return result;
-		(void)IncludeExplicitContentFile(entries, selected, shouldContinue);
+		(void)IncludeExplicitImageFile(entries, selected, shouldContinue);
 		if (!ContinueScan(shouldContinue)) return result;
 		setDirectoryEntries(directory, std::move(entries), selected);
 		result.completed = true;
@@ -638,9 +655,9 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 		const fs::path target = request.selectedPath;
 		if (target.empty()) return result;
 		const fs::path directory = target.parent_path();
-		std::vector<Entry> entries = ScanDirectory(directory, shouldContinue);
+		std::vector<Entry> entries = ScanDirectory(directory, replacement.scanOptions_, shouldContinue);
 		if (!ContinueScan(shouldContinue)) return result;
-		(void)IncludeExplicitContentFile(entries, target, shouldContinue);
+		(void)IncludeExplicitImageFile(entries, target, shouldContinue);
 		if (!ContinueScan(shouldContinue)) return result;
 		setDirectoryEntries(directory, std::move(entries), target);
 		result.completed = true;
@@ -668,7 +685,7 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 			index >= 0 && index < static_cast<std::ptrdiff_t>(siblings.size()); index += request.direction) {
 			if (!ContinueScan(shouldContinue)) return result;
 			const fs::path& candidate = siblings[static_cast<std::size_t>(index)];
-			std::vector<Entry> entries = ScanDirectory(candidate, shouldContinue);
+			std::vector<Entry> entries = ScanDirectory(candidate, replacement.scanOptions_, shouldContinue);
 			if (!ContinueScan(shouldContinue)) return result;
 			if (entries.empty()) continue;
 			setDirectoryEntries(candidate, std::move(entries), {});
@@ -705,7 +722,7 @@ FileListPreparedScan FileList::PrepareScan(const ScanRequest& request,
 		}
 		for (const fs::path& directory : directories) {
 			if (!ContinueScan(shouldContinue)) return result;
-			std::vector<Entry> entries = ScanDirectory(directory, shouldContinue);
+			std::vector<Entry> entries = ScanDirectory(directory, replacement.scanOptions_, shouldContinue);
 			if (!ContinueScan(shouldContinue)) return result;
 			if (entries.empty()) continue;
 			setDirectoryEntries(directory, std::move(entries), {});
@@ -733,6 +750,7 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 	if (operation != ScanOperation::Initialize && operation != ScanOperation::Reload &&
 		!scan.targetFound) return true;
 	FileList& replacement = scan.replacement;
+	const bool scanOptionsChanged = appliedScanOptions_ != replacement.appliedScanOptions_;
 	const bool keepPreparedSelection = operation == ScanOperation::ForwardBoundary ||
 		operation == ScanOperation::PreviousSibling || operation == ScanOperation::NextSibling ||
 		operation == ScanOperation::MarkedToggleTarget;
@@ -765,6 +783,8 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 		paths_ = std::move(replacement.paths_);
 		pathIndices_ = std::move(replacement.pathIndices_);
 		currentDirectory_ = std::move(replacement.currentDirectory_);
+		scanOptions_ = replacement.scanOptions_;
+		appliedScanOptions_ = replacement.appliedScanOptions_;
 		currentIndex_ = selected.empty() ? replacement.currentIndex_ : FindEntry(selected);
 		if (currentIndex_ >= entries_.size()) currentIndex_ = entries_.empty() ? 0 : entries_.size() - 1;
 		UpdateMarkedIndex();
@@ -796,6 +816,7 @@ bool FileList::ApplyPreparedScan(FileListPreparedScan&& scan,
 	moveActiveEntries();
 	if (operation == ScanOperation::Reload) {
 		nextFolders_.clear();
+		if (scanOptionsChanged) previousFolders_.clear();
 	} else if (operation == ScanOperation::PrepareDirectoryScope) {
 		rootDirectory_ = currentDirectory_;
 		previousFolders_.clear();
@@ -1045,7 +1066,8 @@ bool FileList::SelectPath(const fs::path& path) {
 	if (!IsSupportedImagePath(normalized)) return false;
 
 	const fs::path directory = normalized.parent_path();
-	std::vector<Entry> replacement = ScanDirectory(directory);
+	std::vector<Entry> replacement = ScanDirectory(directory, scanOptions_);
+	(void)IncludeExplicitImageFile(replacement, normalized);
 	const auto selected = std::find_if(replacement.begin(), replacement.end(), [&normalized](const Entry& entry) {
 		return entry.path == normalized;
 	});
@@ -1054,6 +1076,7 @@ bool FileList::SelectPath(const fs::path& path) {
 		std::distance(replacement.begin(), selected));
 
 	entries_ = std::move(replacement);
+	appliedScanOptions_ = scanOptions_;
 	currentDirectory_ = directory;
 	rootDirectory_ = directory;
 	currentIndex_ = selectedIndex;
@@ -1069,9 +1092,10 @@ bool FileList::SelectPath(const fs::path& path) {
 
 void FileList::LoadDirectory(const fs::path& directory, const fs::path& selected) {
 	currentDirectory_ = Normalize(directory);
-	std::vector<Entry> entries = ScanDirectory(currentDirectory_);
-	(void)IncludeExplicitContentFile(entries, selected);
+	std::vector<Entry> entries = ScanDirectory(currentDirectory_, scanOptions_);
+	(void)IncludeExplicitImageFile(entries, selected);
 	entries_ = std::move(entries);
+	appliedScanOptions_ = scanOptions_;
 	currentIndex_ = 0;
 	SortEntries();
 	if (!selected.empty()) currentIndex_ = FindEntry(selected);
@@ -1079,7 +1103,7 @@ void FileList::LoadDirectory(const fs::path& directory, const fs::path& selected
 }
 
 bool FileList::EnterDirectory(const fs::path& directory, bool rememberCurrentFolder) {
-	std::vector<Entry> nextEntries = ScanDirectory(directory);
+	std::vector<Entry> nextEntries = ScanDirectory(directory, scanOptions_);
 	if (nextEntries.empty()) return false;
 	if (rememberCurrentFolder) {
 		previousFolders_.push_back(FolderState{currentDirectory_, std::move(entries_),
@@ -1088,6 +1112,7 @@ bool FileList::EnterDirectory(const fs::path& directory, bool rememberCurrentFol
 		previousFolders_.clear();
 	}
 	entries_ = std::move(nextEntries);
+	appliedScanOptions_ = scanOptions_;
 	currentDirectory_ = Normalize(directory);
 	currentIndex_ = 0;
 	SortEntries();
@@ -1112,7 +1137,7 @@ bool FileList::NavigateSiblingDirectory(int direction) {
 	for (std::ptrdiff_t index = currentIndex + direction;
 		index >= 0 && index < static_cast<std::ptrdiff_t>(siblings.size()); index += direction) {
 		const fs::path& candidate = siblings[static_cast<std::size_t>(index)];
-		if (ScanDirectory(candidate).empty()) continue;
+		if (ScanDirectory(candidate, scanOptions_).empty()) continue;
 		if (!EnterDirectory(candidate, false)) continue;
 		rootDirectory_ = parent;
 		return true;
@@ -1164,7 +1189,7 @@ fs::path FileList::FindNextFolder() const {
 				foundCurrent = true;
 				continue;
 			}
-			if (foundCurrent && !ScanDirectory(sibling).empty()) return sibling;
+			if (foundCurrent && !ScanDirectory(sibling, scanOptions_).empty()) return sibling;
 		}
 		return emptyPath_;
 	}
@@ -1178,7 +1203,7 @@ fs::path FileList::FindNextFolder() const {
 		start = static_cast<std::size_t>(std::distance(descendants.begin(), current)) + 1;
 	}
 	for (std::size_t index = start; index < descendants.size(); ++index) {
-		if (!ScanDirectory(descendants[index]).empty()) return descendants[index];
+		if (!ScanDirectory(descendants[index], scanOptions_).empty()) return descendants[index];
 	}
 	return emptyPath_;
 }

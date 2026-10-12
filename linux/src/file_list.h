@@ -19,6 +19,14 @@ struct FileListPreparedScan;
 struct FileListSortRequest;
 struct FileListPreparedSort;
 
+struct FileListScanOptions {
+	bool skipHiddenImages = false;
+	bool operator==(const FileListScanOptions& other) const {
+		return skipHiddenImages == other.skipHiddenImages;
+	}
+	bool operator!=(const FileListScanOptions& other) const { return !(*this == other); }
+};
+
 // Linux counterpart of the Windows CFileList.  The viewer keeps image data
 // separate from this class, just as the Windows file list is separate from
 // CJPEGImage/CJPEGProvider.
@@ -46,7 +54,8 @@ public:
 	FileList(const std::vector<std::string>& inputs,
 		SortMode sortMode = SortMode::LastModificationTime,
 		bool sortAscending = true,
-		bool wrapAroundFolder = true);
+		bool wrapAroundFolder = true,
+		FileListScanOptions scanOptions = {});
 
 	bool Empty() const { return entries_.empty(); }
 	std::size_t Size() const { return entries_.size(); }
@@ -102,6 +111,7 @@ public:
 		std::filesystem::path selectedPath;
 		SortMode sortMode = SortMode::LastModificationTime;
 		NavigationMode navigationMode = NavigationMode::LoopDirectory;
+		FileListScanOptions scanOptions;
 		std::uint64_t expectedRevision = 0;
 		std::uint64_t expectedDescriptorRevision = 0;
 		bool sortAscending = true;
@@ -112,7 +122,7 @@ public:
 
 	static ScanRequest InitialScanRequest(const std::vector<std::string>& inputs,
 		SortMode sortMode, bool sortAscending, bool wrapAroundFolder,
-		NavigationMode navigationMode);
+		NavigationMode navigationMode, FileListScanOptions scanOptions = {});
 	ScanRequest MakeScanRequest(ScanOperation operation, int direction = 0) const;
 	static FileListPreparedScan PrepareScan(const ScanRequest& request,
 		const std::function<bool()>& shouldContinue);
@@ -142,6 +152,8 @@ public:
 	bool IsSortedAscending() const { return sortAscending_; }
 	bool WrapAroundFolder() const { return wrapAroundFolder_; }
 	void SetWrapAroundFolder(bool enabled) { wrapAroundFolder_ = enabled; }
+	void SetScanOptions(FileListScanOptions options) { scanOptions_ = options; }
+	const FileListScanOptions& ScanOptions() const { return scanOptions_; }
 
 	// Returns true when a multiple-input list needs an off-thread directory scan
 	// before it can take on the selected image's folder scope.
@@ -223,8 +235,9 @@ private:
 	static Entry DescribeFile(const std::filesystem::path& path,
 		const std::function<bool()>& shouldContinue = {});
 	static std::vector<Entry> ScanDirectory(const std::filesystem::path& directory,
+		const FileListScanOptions& options,
 		const std::function<bool()>& shouldContinue = {});
-	static bool IncludeExplicitContentFile(std::vector<Entry>& entries,
+	static bool IncludeExplicitImageFile(std::vector<Entry>& entries,
 		const std::filesystem::path& path,
 		const std::function<bool()>& shouldContinue = {});
 	static std::vector<std::filesystem::path> ChildDirectories(
@@ -273,6 +286,8 @@ private:
 	bool sortAscending_ = true;
 	bool wrapAroundFolder_ = true;
 	NavigationMode navigationMode_ = NavigationMode::LoopDirectory;
+	FileListScanOptions scanOptions_;
+	FileListScanOptions appliedScanOptions_;
 	bool multipleInputMode_ = false;
 	std::uint64_t mutationRevision_ = 0;
 	std::uint64_t descriptorRevision_ = 0;

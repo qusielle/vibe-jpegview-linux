@@ -952,6 +952,7 @@ private:
 			fileList_.SetSorting(sortMode, settings.sortAscending);
 		}
 		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
+		fileList_.SetScanOptions({settings.skipHiddenImages});
 
 		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
 		doublePageModeEnabled_ = settings.doublePageModeEnabled;
@@ -6401,7 +6402,8 @@ private:
 		jpegview_linux::FileList::ScanRequest request =
 			jpegview_linux::FileList::InitialScanRequest(droppedFiles,
 				fileList_.GetSorting(), fileList_.IsSortedAscending(),
-				fileList_.WrapAroundFolder(), fileList_.GetNavigationMode());
+				fileList_.WrapAroundFolder(), fileList_.GetNavigationMode(),
+				jpegview_linux::FileListScanOptions{runtimeSettings_.Values().skipHiddenImages});
 		request.expectedRevision = fileList_.MutationRevision();
 		request.expectedDescriptorRevision = fileList_.DescriptorRevision();
 		SubmitFileListScan(std::move(request), FileListScanHandling::DroppedInputs,
@@ -7297,6 +7299,45 @@ private:
 			markedToggleReturnPath, std::move(completionTitle));
 	}
 
+	void RescanFileListAfterScanOptionsChange() {
+		if (clipboardMode_) {
+			fileListScanOptionsChangedWhileClipboard_ = true;
+			return;
+		}
+		if (pendingFileListScanOperation_.has_value()) {
+			const bool pendingScanCanBeReused =
+				*pendingFileListScanOperation_ == jpegview_linux::FileList::ScanOperation::Initialize ||
+				*pendingFileListScanOperation_ == jpegview_linux::FileList::ScanOperation::Reload ||
+				pendingFileListScanHandling_ == FileListScanHandling::DroppedInputs;
+			if (!pendingScanCanBeReused) {
+				RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
+					0, FileListScanHandling::Reload, true, false, {},
+					ImageLoadStatePolicy::PreserveCurrent);
+				return;
+			}
+			if (pendingFileListScanHandling_ == FileListScanHandling::DroppedInputs &&
+				pendingDroppedScanRequest_.has_value()) {
+				jpegview_linux::FileList::ScanRequest request = *pendingDroppedScanRequest_;
+				request.scanOptions = fileList_.ScanOptions();
+				SubmitFileListScan(std::move(request), FileListScanHandling::DroppedInputs,
+					true, pendingFileListScanForceImageReload_, pendingFileListScanDirection_,
+					pendingFileListScanPreferredPath_, pendingFileListScanLoadStatePolicy_,
+					pendingMarkedToggleReturnPath_, pendingFileListScanCompletionTitle_);
+			} else {
+				RequestFileListScan(*pendingFileListScanOperation_, pendingFileListScanDirection_,
+					pendingFileListScanHandling_, true, pendingFileListScanForceImageReload_,
+					pendingFileListScanPreferredPath_, pendingFileListScanLoadStatePolicy_,
+					pendingMarkedToggleReturnPath_, pendingFileListScanCompletionTitle_);
+			}
+			return;
+		}
+		if (!fileList_.Empty()) {
+			RequestFileListScan(jpegview_linux::FileList::ScanOperation::Reload,
+				0, FileListScanHandling::Reload, true, false, {},
+				ImageLoadStatePolicy::PreserveCurrent);
+		}
+	}
+
 	void ClearPendingFileListScan() {
 		SettlePendingPlaybackBoundaryScan();
 		pendingFileListScanOperation_.reset();
@@ -7763,6 +7804,8 @@ private:
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
 		const jpegview_linux::ViewerSettings& draft = advancedConfiguration_.Draft();
 		const int previousThumbnailWidth = runtimeSettings_.Values().thumbnailPanelWidth;
+		const bool scanOptionsChanged =
+			runtimeSettings_.Values().skipHiddenImages != draft.skipHiddenImages;
 		const bool magnifierChanged = magnifyingGlass_.Width() != draft.magnifyingGlassWidth ||
 			magnifyingGlass_.Height() != draft.magnifyingGlassHeight ||
 			std::abs(magnifyingGlass_.ZoomLevel() - draft.magnifyingGlassZoomLevel) > 1e-9;
@@ -7775,8 +7818,10 @@ private:
 		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
 		RefreshFitRelativeZoomBase();
 		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
+		fileList_.SetScanOptions({settings.skipHiddenImages});
 		if (fileListBeforeClipboard_) {
 			fileListBeforeClipboard_->SetWrapAroundFolder(settings.folderWrapAround);
+			fileListBeforeClipboard_->SetScanOptions({settings.skipHiddenImages});
 		}
 
 		if (magnifierChanged) {
@@ -7796,6 +7841,7 @@ private:
 				}
 			}
 		}
+		if (scanOptionsChanged) RescanFileListAfterScanOptionsChange();
 		advancedConfiguration_.Close();
 		SDL_StopTextInput();
 		SetTitle();
@@ -8127,6 +8173,10 @@ private:
 		clipboardMode_ = false;
 		clipboardTempFile_.clear();
 		clipboardTempDirectory_.clear();
+		if (fileListScanOptionsChangedWhileClipboard_) {
+			fileListScanOptionsChangedWhileClipboard_ = false;
+			RescanFileListAfterScanOptionsChange();
+		}
 		QueueTemporaryCleanup(temporaryFile, temporaryDirectory);
 	}
 
@@ -15592,6 +15642,7 @@ private:
 	std::uint64_t fileListScanGeneration_ = 0;
 	std::uint64_t fileListSortGeneration_ = 0;
 	std::uint64_t playbackBoundaryScanGeneration_ = 0;
+	bool fileListScanOptionsChangedWhileClipboard_ = false;
 	fs::path pendingFileListScanSourcePath_;
 	std::optional<jpegview_linux::FileList::ScanOperation> pendingFileListScanOperation_;
 	std::optional<jpegview_linux::FileList::ScanRequest> pendingDroppedScanRequest_;

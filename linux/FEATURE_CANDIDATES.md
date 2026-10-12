@@ -258,10 +258,6 @@ repeated as new candidates below.
   profiles, but does not identify the profile in its information overlay. Add a concise profile
   description when available; pixel dimensions are already shown, so a megapixel count from
   [issue #363](https://github.com/sylikc/jpegview/issues/363) is optional rather than essential.
-- **Skip hidden images:** add an optional setting to omit hidden image files from navigation. On
-  Linux, define this in terms of dotfiles (and decide explicitly whether `.hidden` directory
-  metadata should also count), rather than copying Windows hidden-attribute behavior. See
-  [issue #114](https://github.com/sylikc/jpegview/issues/114).
 - **Quick rename of the current image:** add a one-file rename command and shortcut, initially
   selecting the basename but not the extension, with collision-safe behavior. This complements the
   existing batch rename/copy dialog; see [issue #280](https://github.com/sylikc/jpegview/issues/280).

@@ -49,6 +49,7 @@ const std::vector<AdvancedConfigurationField>& FieldsFor(int category) {
 		BooleanField("manga_mode_inverts_left_right", "Manga mode reverses Left/Right"),
 		BooleanField("spacebar_navigates_images", "Space navigates images"),
 		BooleanField("folder_wrap_around", "Wrap around folder ends"),
+		BooleanField("skip_hidden_images", "Skip hidden images"),
 		BooleanField("fit_relative_zoom_mode", "Fit-relative zoom mode"),
 		DecimalField("custom_slideshow_interval_seconds", "Custom slideshow interval",
 			0.1, 3600.0, 0.1, 1, "sec"),
@@ -164,6 +165,7 @@ bool GetBooleanValue(const ViewerSettings& settings, const char* key) {
 	if (std::string(key) == "manga_mode_inverts_left_right") return settings.mangaModeInvertsLeftRight;
 	if (std::string(key) == "spacebar_navigates_images") return settings.spacebarNavigatesImages;
 	if (std::string(key) == "folder_wrap_around") return settings.folderWrapAround;
+	if (std::string(key) == "skip_hidden_images") return settings.skipHiddenImages;
 	if (std::string(key) == "fit_relative_zoom_mode") return settings.fitRelativeZoomMode;
 	if (std::string(key) == "show_histogram") return settings.showHistogram;
 	if (std::string(key) == "copy_selection_on_release") return settings.copySelectionOnRelease;
@@ -177,6 +179,7 @@ void SetBooleanValue(ViewerSettings& settings, const char* key, bool value) {
 	if (std::string(key) == "manga_mode_inverts_left_right") settings.mangaModeInvertsLeftRight = value;
 	else if (std::string(key) == "spacebar_navigates_images") settings.spacebarNavigatesImages = value;
 	else if (std::string(key) == "folder_wrap_around") settings.folderWrapAround = value;
+	else if (std::string(key) == "skip_hidden_images") settings.skipHiddenImages = value;
 	else if (std::string(key) == "fit_relative_zoom_mode") settings.fitRelativeZoomMode = value;
 	else if (std::string(key) == "show_histogram") settings.showHistogram = value;
 	else if (std::string(key) == "copy_selection_on_release") settings.copySelectionOnRelease = value;

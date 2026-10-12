@@ -228,6 +228,10 @@ they support.
    physical Left/Right navigation; `manga_mode_inverts_left_right=0` disables that inversion while
    navigation-panel and context-menu actions remain logical previous/next. Folder navigation wraps
    at the ends by default; set `folder_wrap_around=0` to stop at the current list's boundary.
+   Hidden images remain included by default. Enable **Skip hidden images** under Advanced
+   configuration → Behavior, or set `skip_hidden_images=1` in `settings.conf`, to omit images whose
+   filename starts with `.` from folder and archive navigation. An image opened directly remains
+   selected even when its filename is hidden; `.hidden` directory metadata does not affect scanning.
    Viewer file-list discovery now runs on a lazy, low-priority worker for startup, refresh, sibling
    folder jumps, recursive folder boundaries, dropped inputs, cross-folder marked-image toggles,
    and changes from multiple inputs to folder navigation. Enumeration, per-file metadata, sorting,
@@ -1550,8 +1554,9 @@ Apply. Click the image to view it at full resolution:
 
 <p><a href="screenshots/advanced-configuration.png"><img src="screenshots/advanced-configuration.png" width="720" alt="JPEGView Linux Advanced configuration window showing its seven tabs and image-default adjustment controls"></a></p>
 
-The Behavior tab contains settings for manga left/right inversion, Spacebar navigation, and folder
-wrap; these edits also remain staged until Apply:
+The Behavior tab contains settings for manga left/right inversion, Spacebar navigation, folder wrap,
+hidden-image filtering, fit-relative zoom, and custom playback rates; these edits remain staged until
+Apply:
 
 <p><a href="screenshots/advanced-configuration-behavior.png"><img src="screenshots/advanced-configuration-behavior.png" width="720" alt="JPEGView Linux Advanced configuration Behavior tab with manga direction, Spacebar navigation, and folder-wrap settings"></a></p>
 

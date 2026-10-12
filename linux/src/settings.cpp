@@ -148,6 +148,9 @@ bool LoadViewerSettings(const fs::path& filename, ViewerSettings& settings) {
 		} else if (key == "folder_wrap_around") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.folderWrapAround = parsed;
+		} else if (key == "skip_hidden_images") {
+			bool parsed = false;
+			if (ParseBoolStrict(value, parsed)) loaded.skipHiddenImages = parsed;
 		} else if (key == "fit_relative_zoom_mode") {
 			bool parsed = false;
 			if (ParseBoolStrict(value, parsed)) loaded.fitRelativeZoomMode = parsed;
@@ -357,6 +360,8 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		       << "manga_mode_inverts_left_right=" << (settings.mangaModeInvertsLeftRight ? 1 : 0) << '\n'
 		       << "spacebar_navigates_images=" << (settings.spacebarNavigatesImages ? 1 : 0) << '\n'
 		       << "folder_wrap_around=" << (settings.folderWrapAround ? 1 : 0) << '\n'
+		       << "# Omit dot-prefixed image filenames during folder and archive scans. Disabled by default.\n"
+		       << "skip_hidden_images=" << (settings.skipHiddenImages ? 1 : 0) << '\n'
 		       << "# Define fit-to-window as 100% zoom instead of source-pixel scale.\n"
 		       << "fit_relative_zoom_mode=" << (settings.fitRelativeZoomMode ? 1 : 0) << '\n'
 		       << "custom_slideshow_interval_seconds=" << std::clamp(
