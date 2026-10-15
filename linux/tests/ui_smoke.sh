@@ -23,12 +23,37 @@ for command in Xvfb xdotool openbox wmctrl; do
 	fi
 done
 
+IMPORT_BINARY=$(command -v import 2>/dev/null || true)
 visual_assertions=1
 for command in import compare convert identify xprop; do
 	if ! command -v "$command" >/dev/null 2>&1; then
 		visual_assertions=0
 	fi
 done
+
+# X11 can briefly reject a window capture while SDL is presenting a frame.
+# Retry those transient ImageMagick failures, but keep persistent capture errors
+# visible to the smoke test.
+import() {
+	import_capture_attempt=1
+	while [ "$import_capture_attempt" -le 4 ]; do
+		if timeout --foreground 5s "$IMPORT_BINARY" "$@" \
+			2>"$temporary/import-error.log"; then
+			return 0
+		else
+			import_capture_status=$?
+		fi
+		if [ "$import_capture_attempt" -ge 4 ]; then
+			if [ "$import_capture_status" -eq 124 ]; then
+				echo "UI smoke test: ImageMagick capture timed out: $*" >&2
+			fi
+			cat "$temporary/import-error.log" >&2
+			return "$import_capture_status"
+		fi
+		sleep 0.05
+		import_capture_attempt=$((import_capture_attempt + 1))
+	done
+}
 
 temporary=$(mktemp -d)
 XDG_STATE_HOME="$temporary/state"
@@ -47,7 +72,11 @@ cleanup() {
 	if [ -n "$viewer_pid" ]; then kill "$viewer_pid" 2>/dev/null || true; fi
 	if [ -n "$window_manager_pid" ]; then kill "$window_manager_pid" 2>/dev/null || true; fi
 	if [ -n "$xvfb_pid" ]; then kill "$xvfb_pid" 2>/dev/null || true; fi
-	rm -rf -- "$temporary"
+	if [ "${JPEGVIEW_TEST_KEEP_UI_TMP:-0}" = 1 ]; then
+		echo "UI smoke test: preserved temporary directory $temporary" >&2
+	else
+		rm -rf -- "$temporary"
+	fi
 }
 trap cleanup EXIT INT TERM
 
@@ -281,6 +310,8 @@ launch_viewer() {
 	viewer_input=${1:-$temporary/images}
 	viewer_home=${VIEWER_TEST_HOME:-$temporary/home}
 	viewer_config=${VIEWER_TEST_CONFIG_HOME:-$temporary/config}
+	# A viewer that is exiting on q can lose focus before the synthetic key-up.
+	DISPLAY=":$display_number" xdotool keyup q 2>/dev/null || true
 	if [ -n "${viewer_frame_barrier_armed:-}" ]; then
 		DISPLAY=":$display_number" HOME="$viewer_home" XDG_CONFIG_HOME="$viewer_config" \
 			XDG_STATE_HOME="$XDG_STATE_HOME" PATH="$temporary/bin:$PATH" \
@@ -328,18 +359,36 @@ launch_viewer() {
 	fi
 	viewer_pid=$!
 	window_id=''
-	for _ in $(seq 1 50); do
+	for _ in $(seq 1 100); do
 		window_id=$(DISPLAY=":$display_number" xdotool search --onlyvisible --class jpegview-linux 2>/dev/null | head -1 || true)
 		if [ -n "$window_id" ]; then break; fi
+		if ! viewer_process_running; then break; fi
 		sleep 0.1
 	done
 	if [ -z "$window_id" ]; then
-		echo "UI smoke test: viewer window did not appear" >&2
+		viewer_exit_detail='viewer process was still running after 10 seconds'
+		if ! viewer_process_running; then
+			if wait "$viewer_pid"; then viewer_exit_status=0; else viewer_exit_status=$?; fi
+			viewer_pid=''
+			viewer_exit_detail="viewer process exited with status $viewer_exit_status"
+		fi
+		echo "UI smoke test: viewer window for $viewer_input did not appear ($viewer_exit_detail)" >&2
 		cat "$temporary/viewer.log" >&2
 		exit 1
 	fi
 	DISPLAY=":$display_number" xdotool windowactivate "$window_id"
 	sleep 0.3
+}
+
+viewer_process_running() {
+	if [ -z "$viewer_pid" ] || ! kill -0 "$viewer_pid" 2>/dev/null; then
+		return 1
+	fi
+	viewer_process_state=$(ps -o stat= -p "$viewer_pid" 2>/dev/null || true)
+	case "$viewer_process_state" in
+		''|Z*) return 1 ;;
+	esac
+	return 0
 }
 
 resize_viewer_window() {
@@ -428,6 +477,47 @@ assert_title_prefix() {
 	done
 	echo "UI smoke test: $failure_message ($current_title)" >&2
 	exit 1
+}
+
+wait_for_setting_lines() {
+	wait_setting_path=$1
+	shift
+	for _ in $(seq 1 100); do
+		if [ -f "$wait_setting_path" ]; then
+			wait_setting_match=1
+			for wait_setting_line in "$@"; do
+				if ! grep -Fqx -- "$wait_setting_line" "$wait_setting_path"; then
+					wait_setting_match=0
+					break
+				fi
+			done
+			if [ "$wait_setting_match" -eq 1 ]; then return 0; fi
+		fi
+		sleep 0.05
+	done
+	echo "UI smoke test: timed out waiting for persisted settings in $wait_setting_path ($*)" >&2
+	if [ -f "$wait_setting_path" ]; then cat "$wait_setting_path" >&2; fi
+	return 1
+}
+
+wait_for_numeric_setting_range() {
+	wait_numeric_path=$1
+	wait_numeric_key=$2
+	wait_numeric_min=$3
+	wait_numeric_max=$4
+	for _ in $(seq 1 100); do
+		if [ -f "$wait_numeric_path" ] && awk -F= \
+			-v key="$wait_numeric_key" -v minimum="$wait_numeric_min" \
+			-v maximum="$wait_numeric_max" \
+			'$1 == key && $2 > minimum && $2 < maximum { found = 1 } END { exit !found }' \
+			"$wait_numeric_path"; then
+			return 0
+		fi
+		sleep 0.05
+	done
+	echo "UI smoke test: timed out waiting for $wait_numeric_key in $wait_numeric_path" >&2
+	if [ -f "$wait_numeric_path" ]; then cat "$wait_numeric_path" >&2; fi
+	return 1
 }
 
 window_title_without_position() {
@@ -1759,7 +1849,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		rotation_refresh_blocked=0
 		for _ in $(seq 1 100); do
 			if [ -f "$viewer_slow_map_started" ]; then rotation_refresh_blocked=1; break; fi
-			if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
+			if ! viewer_process_running; then break; fi
 			sleep 0.05
 		done
 		if [ "$rotation_refresh_blocked" -ne 1 ]; then
@@ -1838,7 +1928,9 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 	capture_animation_status_mask() {
 		mask_path=$1
 		DISPLAY=":$display_number" import -window "$window_id" "$animation_status_capture"
-		convert "$animation_status_capture" -crop 320x22+0+68 +repage \
+		# The status text ends within 200 pixels; the panel beyond it exposes
+		# bright animation frames and would make the threshold mask frame-dependent.
+		convert "$animation_status_capture" -crop 200x22+0+68 +repage \
 			-colorspace Gray -threshold 70% "$mask_path"
 	}
 	# The status row is the fourth line in the top-left information panel. Thresholding
@@ -4116,6 +4208,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			echo "UI smoke test: copied animation frame did not match its visible frame ($first_animation_color/$copied_animation_color)" >&2
 			exit 1
 		fi
+		assert_title_prefix "Copied original-size image to clipboard" \
+			"first animation-frame copy did not finish"
 		second_animation_color=''
 		for _ in $(seq 1 100); do
 			DISPLAY=":$display_number" import -window "$window_id" "$temporary/animation-frame.png"
@@ -4146,6 +4240,8 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			echo "UI smoke test: second copied animation frame reused stale pixels ($second_animation_color/$copied_animation_color)" >&2
 			exit 1
 		fi
+		assert_title_prefix "Copied original-size image to clipboard" \
+			"second animation-frame copy did not finish"
 		stop_viewer
 
 		# Saving the selected animated source replaces it with the captured frame.
@@ -4875,6 +4971,7 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		printf 'R %s\n' "$cold_intent_path_hex"
 		printf 'V %s 1 0 1 1 1\n' "$cold_intent_path_hex"
 	} > "$cold_intent_state/jpegview-linux/recent-files.db"
+	DISPLAY=":$display_number" xdotool keyup q 2>/dev/null || true
 	cold_header_started="$temporary/cold-header.started"
 	cold_header_release="$temporary/cold-header.release"
 	cold_header_active="$temporary/cold-header.active"
@@ -4998,7 +5095,12 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 	for _ in $(seq 1 200); do
 		cold_intent_title=$(DISPLAY=":$display_number" xdotool getwindowname "$window_id" 2>/dev/null || true)
 		case "$cold_intent_title" in
-			*"01-intents.jpg (1600x400,"*) cold_intent_completed=1; break ;;
+			*"01-intents.jpg (1600x400,"*|"Copied original-size image to clipboard")
+				# The clipboard worker can publish its success title after later
+				# queued image edits have restored the normal image title.
+				cold_intent_completed=1
+				break
+			;;
 		esac
 		if ! kill -0 "$viewer_pid" 2>/dev/null; then break; fi
 		sleep 0.025
@@ -5717,8 +5819,28 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 		assert_title_prefix "01-good.ppm (240x320," "retained-failure fixture did not load"
 		DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Down
 		retained_edit_ready=0
+		retained_edit_window_lost=0
 		for _ in $(seq 1 100); do
-			DISPLAY=":$display_number" import -window "$window_id" "$temporary/retained-edit.png"
+			if ! viewer_process_running; then break; fi
+			if ! DISPLAY=":$display_number" xdotool getwindowname "$window_id" \
+				>/dev/null 2>&1; then
+				retained_edit_window_lost=1
+				break
+			fi
+			if ! DISPLAY=":$display_number" import -window "$window_id" \
+				"$temporary/retained-edit.png"; then
+				retained_viewer_state=$(ps -o stat= -p "$viewer_pid" 2>/dev/null || true)
+				retained_window_title=$(DISPLAY=":$display_number" \
+					xdotool getwindowname "$window_id" 2>/dev/null || true)
+				retained_viewer_exit_status='running'
+				if ! viewer_process_running; then
+					if wait "$viewer_pid"; then retained_viewer_exit_status=0; else retained_viewer_exit_status=$?; fi
+					viewer_pid=''
+				fi
+				echo "UI smoke test: retained-edit capture failed (viewer state: ${retained_viewer_state:-exited}; exit status: $retained_viewer_exit_status; window title: ${retained_window_title:-missing})" >&2
+				cat "$temporary/viewer.log" >&2
+				exit 1
+			fi
 			retained_edit_width=$(identify -format '%w' "$temporary/retained-edit.png")
 			retained_edit_height=$(identify -format '%h' "$temporary/retained-edit.png")
 			retained_edit_color=$(convert "$temporary/retained-edit.png" \
@@ -5727,7 +5849,13 @@ if command -v cc >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 			sleep 0.025
 		done
 		if [ "$retained_edit_ready" -ne 1 ]; then
-			echo "UI smoke test: retained-failure fixture did not finish its quarter-turn edit" >&2
+			if [ "$retained_edit_window_lost" -eq 1 ]; then
+				retained_viewer_state=$(ps -o stat= -p "$viewer_pid" 2>/dev/null || true)
+				echo "UI smoke test: retained-edit window disappeared (viewer state: ${retained_viewer_state:-exited})" >&2
+			else
+				echo "UI smoke test: retained-failure fixture did not finish its quarter-turn edit" >&2
+			fi
+			cat "$temporary/viewer.log" >&2
 			exit 1
 		fi
 		DISPLAY=":$display_number" xdotool key --clearmodifiers --window "$window_id" Right
@@ -6053,6 +6181,20 @@ XDG_STATE_HOME="$temporary/advanced-config-state"
 VIEWER_TEST_CONFIG_HOME="$temporary/advanced-config-config"
 export XDG_STATE_HOME VIEWER_TEST_CONFIG_HOME
 launch_viewer "$temporary/images/01-red.ppm"
+assert_title_prefix "01-red.ppm" "advanced configuration fixture image did not load"
+advanced_center_x=0
+advanced_center_y=0
+advanced_center_before=''
+if [ "$visual_assertions" -eq 1 ]; then
+	advanced_geometry=$(DISPLAY=":$display_number" xdotool getwindowgeometry --shell "$window_id")
+	advanced_width=$(printf '%s\n' "$advanced_geometry" | sed -n 's/^WIDTH=//p')
+	advanced_height=$(printf '%s\n' "$advanced_geometry" | sed -n 's/^HEIGHT=//p')
+	advanced_center_x=$((advanced_width / 2))
+	advanced_center_y=$((advanced_height / 2))
+	DISPLAY=":$display_number" import -window "$window_id" "$temporary/advanced-before.png"
+	advanced_center_before=$(convert "$temporary/advanced-before.png" -format \
+		"%[hex:p{$advanced_center_x,$advanced_center_y}]" info:)
+fi
 DISPLAY=":$display_number" xdotool mousemove --window "$window_id" 640 400 click 3
 DISPLAY=":$display_number" xdotool key End
 DISPLAY=":$display_number" xdotool key Up Up Up
@@ -6075,18 +6217,29 @@ DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool type --delay 30 '128'
 DISPLAY=":$display_number" xdotool key Tab
 DISPLAY=":$display_number" xdotool key ctrl+Return
-sleep 0.2
 advanced_config_settings="$VIEWER_TEST_CONFIG_HOME/jpegview-linux/settings.conf"
-grep -q '^transparency_pattern=white$' "$advanced_config_settings"
-grep -q '^thumbnail_panel_width=128$' "$advanced_config_settings"
-grep -q '^folder_wrap_around=0$' "$advanced_config_settings"
-grep -q '^skip_hidden_images=1$' "$advanced_config_settings"
-grep -q '^minimum_image_size_kib=0$' "$advanced_config_settings"
-grep -q '^fit_relative_zoom_mode=1$' "$advanced_config_settings"
-grep -Fqx 'window_title_pattern=%f - [%p] - %a' "$advanced_config_settings"
+wait_for_setting_lines "$advanced_config_settings" \
+	transparency_pattern=white thumbnail_panel_width=128 folder_wrap_around=0 \
+	skip_hidden_images=1 minimum_image_size_kib=0 fit_relative_zoom_mode=1 \
+	'window_title_pattern=%f - [%p] - %a'
 assert_title_prefix "01-red.ppm" "applying advanced configuration did not return to the viewer"
 assert_title_prefix "01-red.ppm - [1/" "advanced configuration did not apply the reordered title pattern"
 if [ "$visual_assertions" -eq 1 ]; then
+	advanced_dialog_closed=0
+	for _ in $(seq 1 40); do
+		DISPLAY=":$display_number" import -window "$window_id" "$temporary/advanced-after.png"
+		advanced_center_after=$(convert "$temporary/advanced-after.png" -format \
+			"%[hex:p{$advanced_center_x,$advanced_center_y}]" info:)
+		if [ "$advanced_center_after" = "$advanced_center_before" ]; then
+			advanced_dialog_closed=1
+			break
+		fi
+		sleep 0.05
+	done
+	if [ "$advanced_dialog_closed" -ne 1 ]; then
+		echo "UI smoke test: completed Advanced Apply did not repaint the viewer image ($advanced_center_before/$advanced_center_after)" >&2
+		exit 1
+	fi
 	DISPLAY=":$display_number" import -window "$window_id" "$temporary/fit-relative-before.png"
 	zoom_capture_width=$(identify -format '%w' "$temporary/fit-relative-before.png")
 	zoom_capture_height=$(identify -format '%h' "$temporary/fit-relative-before.png")
@@ -6141,9 +6294,8 @@ DISPLAY=":$display_number" xdotool key Tab
 DISPLAY=":$display_number" xdotool key Return
 DISPLAY=":$display_number" xdotool key Escape
 sleep 0.1
-grep -q '^transparency_pattern=white$' "$advanced_config_settings"
-grep -q '^folder_wrap_around=0$' "$advanced_config_settings"
-grep -q '^fit_relative_zoom_mode=1$' "$advanced_config_settings"
+wait_for_setting_lines "$advanced_config_settings" transparency_pattern=white \
+	folder_wrap_around=0 fit_relative_zoom_mode=1
 stop_viewer
 unset VIEWER_TEST_CONFIG_HOME
 XDG_STATE_HOME="$temporary/state"
@@ -7081,18 +7233,11 @@ sleep 0.2
 stop_viewer
 
 settings="$temporary/config/jpegview-linux/settings.conf"
-grep -q '^scale_mode=fit_no_enlarge$' "$settings"
-grep -q '^manual_zoom=1$' "$settings"
-grep -q '^sort_mode=file_name$' "$settings"
-grep -q '^sort_ascending=1$' "$settings"
-grep -q '^show_filename=1$' "$settings"
-grep -q '^info_visible=1$' "$settings"
-grep -q '^thumbnail_panel_visible=1$' "$settings"
-grep -q '^thumbnail_panel_width=240$' "$settings"
-grep -q '^file_dialog_width=960$' "$settings"
-grep -q '^file_dialog_height=685$' "$settings"
-awk -F= '$1 == "file_dialog_preview_ratio" && $2 > 0.34 && $2 < 0.35 { found = 1 } END { exit !found }' "$settings"
-grep -q '^maximized=1$' "$settings"
+wait_for_setting_lines "$settings" scale_mode=fit_no_enlarge manual_zoom=1 \
+	sort_mode=file_name sort_ascending=1 show_filename=1 info_visible=1 \
+	thumbnail_panel_visible=1 thumbnail_panel_width=240 file_dialog_width=960 \
+	file_dialog_height=685 maximized=1
+wait_for_numeric_setting_range "$settings" file_dialog_preview_ratio 0.34 0.35
 
 launch_viewer
 if [ "$visual_assertions" -eq 1 ]; then
@@ -7542,10 +7687,10 @@ if command -v convert >/dev/null 2>&1; then
 	assert_title_prefix "02-next.png" "wheel did not resume normal navigation after disabling the magnifier"
 	stop_viewer
 	magnifier_settings="$temporary/magnifier-config/jpegview-linux/settings.conf"
-	grep -q '^magnifying_glass_width=380$' "$magnifier_settings"
-	grep -q '^magnifying_glass_height=190$' "$magnifier_settings"
-	awk -F= '$1 == "magnifying_glass_zoom_level" && $2 > 0.5249 && $2 < 0.5251 { found = 1 } END { exit !found }' \
-		"$magnifier_settings"
+	wait_for_setting_lines "$magnifier_settings" magnifying_glass_width=380 \
+		magnifying_glass_height=190
+	wait_for_numeric_setting_range "$magnifier_settings" \
+		magnifying_glass_zoom_level 0.5249 0.5251
 
 	# On the next run, one wheel-up step should return the restored lens to its defaults.
 	launch_magnifier_viewer
@@ -7559,10 +7704,10 @@ if command -v convert >/dev/null 2>&1; then
 		"$magnifier_center_x" "$magnifier_center_y" key z
 	DISPLAY=":$display_number" xdotool click 4
 	DISPLAY=":$display_number" xdotool keydown shift click 4 keyup shift
-	grep -q '^magnifying_glass_width=350$' "$magnifier_settings"
-	grep -q '^magnifying_glass_height=175$' "$magnifier_settings"
-	awk -F= '$1 == "magnifying_glass_zoom_level" && $2 > 0.4999 && $2 < 0.5001 { found = 1 } END { exit !found }' \
-		"$magnifier_settings"
+	wait_for_setting_lines "$magnifier_settings" magnifying_glass_width=350 \
+		magnifying_glass_height=175
+	wait_for_numeric_setting_range "$magnifier_settings" \
+		magnifying_glass_zoom_level 0.4999 0.5001
 	stop_viewer
 
 	mkdir -p "$temporary/crop-images" "$temporary/crop-config"
@@ -7645,7 +7790,7 @@ if command -v convert >/dev/null 2>&1; then
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 		"$selection_button_x" "$selection_button_y" click 1
 	sleep 0.2
-	grep -q '^selection_mode_enabled=1$' "$crop_settings"
+wait_for_setting_lines "$crop_settings" selection_mode_enabled=1
 	# A normal drag now opens the crop menu. Its first actionable item toggles the mode off.
 	DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 		$((crop_image_left + 32)) $((crop_image_top + 32)) mousedown 1
@@ -7655,11 +7800,11 @@ if command -v convert >/dev/null 2>&1; then
 	sleep 0.2
 	DISPLAY=":$display_number" xdotool key Down Return
 	sleep 0.2
-	grep -q '^selection_mode_enabled=0$' "$crop_settings"
+wait_for_setting_lines "$crop_settings" selection_mode_enabled=0
 	# Ctrl+E is the direct toggle; restore the mode for the rest of the crop regression.
 	DISPLAY=":$display_number" xdotool key ctrl+e
 	sleep 0.2
-	grep -q '^selection_mode_enabled=1$' "$crop_settings"
+wait_for_setting_lines "$crop_settings" selection_mode_enabled=1
 	DISPLAY=":$display_number" xdotool key Escape
 	# Shift-drag selects the source rectangle, zooms into it, and clears the overlay.
 	DISPLAY=":$display_number" xdotool keydown Shift_L
@@ -7707,9 +7852,8 @@ if command -v convert >/dev/null 2>&1; then
 	DISPLAY=":$display_number" xdotool type --delay 30 '48'
 	DISPLAY=":$display_number" xdotool key Return
 	sleep 0.2
-	grep -q '^fixed_crop_width=64$' "$crop_settings"
-	grep -q '^fixed_crop_height=48$' "$crop_settings"
-	grep -q '^fixed_crop_screen_pixels=1$' "$crop_settings"
+	wait_for_setting_lines "$crop_settings" fixed_crop_width=64 \
+		fixed_crop_height=48 fixed_crop_screen_pixels=1
 	if [ "$visual_assertions" -eq 1 ]; then
 		DISPLAY=":$display_number" import -window "$window_id" "$temporary/crop-fixed-resized.png"
 		fixed_top_left=$(convert "$temporary/crop-fixed-resized.png" -format \
@@ -7890,8 +8034,9 @@ if command -v convert >/dev/null 2>&1; then
 		lossless_top=$((lossless_height / 2 - 64))
 		DISPLAY=":$display_number" xdotool key ctrl+e
 		sleep 0.2
-		grep -q '^selection_mode_enabled=1$' \
-			"$temporary/lossless-crop-config/jpegview-linux/settings.conf"
+		wait_for_setting_lines \
+			"$temporary/lossless-crop-config/jpegview-linux/settings.conf" \
+			selection_mode_enabled=1
 		DISPLAY=":$display_number" xdotool mousemove --window "$window_id" \
 			$((lossless_left + 29)) $((lossless_top + 29)) mousedown 1
 		sleep 0.1
@@ -7979,8 +8124,8 @@ if [ "$visual_assertions" -eq 1 ]; then
 		exit 1
 	fi
 	stop_viewer
-	grep -q '^transparency_pattern=white$' \
-		"$transparency_config/jpegview-linux/settings.conf"
+	wait_for_setting_lines "$transparency_config/jpegview-linux/settings.conf" \
+		transparency_pattern=white
 fi
 
 "$SCRIPT_DIR/thumbnail_panning_smoke.sh" "$BINARY"
