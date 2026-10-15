@@ -1973,7 +1973,6 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 		FF0000|0000FF|00FF00|FFFF00) ;;
 		*) echo "UI smoke test: animation fixture did not show a solid starting frame ($rotation_animation_before_color)" >&2; exit 1 ;;
 	esac
-	rotation_animation_original_color=$rotation_animation_before_color
 	DISPLAY=":$display_number" xdotool key p
 	sleep 0.45
 	DISPLAY=":$display_number" import -window "$window_id" \
@@ -2016,13 +2015,14 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 		rotation_animation_reversed_color=$(convert \
 			"$temporary/free-rotation-animation-previous-frame.png" \
 			-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
-		if [ "$rotation_animation_reversed_color" = "$rotation_animation_original_color" ]; then
+		# Playback may advance between the baseline capture and the pause key.
+		if [ "$rotation_animation_reversed_color" = "$rotation_animation_frozen_after" ]; then
 			break
 		fi
 		sleep 0.05
 	done
-	if [ "$rotation_animation_reversed_color" != "$rotation_animation_original_color" ]; then
-		echo "UI smoke test: [ did not reverse to the previous animation frame" >&2
+	if [ "$rotation_animation_reversed_color" != "$rotation_animation_frozen_after" ]; then
+		echo "UI smoke test: [ did not return to the frozen animation frame" >&2
 		exit 1
 	fi
 	assert_title_prefix "01-animation.gif" "frame stepping changed the selected file"
@@ -2034,12 +2034,12 @@ if command -v convert >/dev/null 2>&1 && [ "$visual_assertions" -eq 1 ]; then
 		rotation_animation_resumed_color=$(convert \
 			"$temporary/free-rotation-animation-control-resume.png" \
 			-format "%[hex:p{$rotation_animation_sample_x,$rotation_animation_sample_y}]" info:)
-		if [ "$rotation_animation_resumed_color" != "$rotation_animation_original_color" ]; then
+		if [ "$rotation_animation_resumed_color" != "$rotation_animation_frozen_after" ]; then
 			break
 		fi
 		sleep 0.05
 	done
-	if [ "$rotation_animation_resumed_color" = "$rotation_animation_original_color" ]; then
+	if [ "$rotation_animation_resumed_color" = "$rotation_animation_frozen_after" ]; then
 		echo "UI smoke test: P did not resume animation after manual frame stepping" >&2
 		exit 1
 	fi
