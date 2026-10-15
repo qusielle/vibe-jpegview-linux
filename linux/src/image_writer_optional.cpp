@@ -80,6 +80,7 @@ bool WriteWebP(const std::filesystem::path& filename, const std::uint8_t* bgra,
 	}
 	std::ofstream output(filename, std::ios::binary);
 	if (output) output.write(reinterpret_cast<const char*>(encoded), static_cast<std::streamsize>(outputSize));
+	output.close();
 	const bool success = static_cast<bool>(output);
 	if (!success) errorMessage = "error writing output file";
 	return success;
@@ -166,6 +167,7 @@ bool WriteTiff(const std::filesystem::path& filename, const std::uint8_t* bgra,
 		}
 		success = TIFFWriteScanline(tiff, row.data(), static_cast<uint32_t>(y), 0) >= 0;
 	}
+	if (success) success = TIFFFlush(tiff) != 0;
 	if (!success) errorMessage = "TIFF encoder failed";
 	return success;
 }
@@ -285,6 +287,7 @@ bool WriteAvif(const std::filesystem::path& filename, const std::uint8_t* bgra,
 		std::ofstream file(filename, std::ios::binary);
 		if (file) file.write(reinterpret_cast<const char*>(output.data),
 			static_cast<std::streamsize>(output.size));
+		file.close();
 		if (!file) result = AVIF_RESULT_IO_ERROR;
 	}
 	if (result != AVIF_RESULT_OK) {
@@ -322,14 +325,14 @@ bool WriteJxl(const std::filesystem::path& filename, const std::uint8_t* bgra,
 		errorMessage = "JPEG XL encoder unavailable";
 		return false;
 	}
+	// The file operation already holds one shared CPU permit; leave the runner in
+	// caller-thread mode instead of creating an unadmitted per-image worker pool.
 	const auto cleanup = [&]() { resources.Reset(); };
 	if (JxlEncoderSetParallelRunner(encoder, JxlResizableParallelRunner, runner) != JXL_ENC_SUCCESS) {
 		cleanup();
 		errorMessage = "JPEG XL encoder initialization failed";
 		return false;
 	}
-	JxlResizableParallelRunnerSetThreads(runner,
-		JxlResizableParallelRunnerSuggestThreads(static_cast<uint64_t>(width), static_cast<uint64_t>(height)));
 	JxlBasicInfo basicInfo{};
 	JxlEncoderInitBasicInfo(&basicInfo);
 	basicInfo.xsize = static_cast<uint32_t>(width);
@@ -376,6 +379,7 @@ bool WriteJxl(const std::filesystem::path& filename, const std::uint8_t* bgra,
 		std::ofstream output(filename, std::ios::binary);
 		if (output) output.write(reinterpret_cast<const char*>(encoded.data()),
 			static_cast<std::streamsize>(encoded.size()));
+		output.close();
 		if (!output) status = JXL_ENC_ERROR;
 	}
 	cleanup();

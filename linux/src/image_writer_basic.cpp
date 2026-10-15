@@ -51,6 +51,7 @@ bool WriteBmp(const std::filesystem::path& filename, const std::uint8_t* bgra,
 		output.write(reinterpret_cast<const char*>(bgra + static_cast<std::size_t>(y) * width * 4),
 			static_cast<std::streamsize>(width) * 4);
 	}
+	output.close();
 	if (!output) errorMessage = "error writing output file";
 	return static_cast<bool>(output);
 }
@@ -73,6 +74,7 @@ bool WriteTga(const std::filesystem::path& filename, const std::uint8_t* bgra,
 		32, 0x28};
 	output.write(reinterpret_cast<const char*>(header), sizeof(header));
 	output.write(reinterpret_cast<const char*>(bgra), static_cast<std::streamsize>(width) * height * 4);
+	output.close();
 	if (!output) errorMessage = "error writing output file";
 	return static_cast<bool>(output);
 }
@@ -134,6 +136,7 @@ bool WritePnm(const std::filesystem::path& filename, const std::uint8_t* bgra,
 			}
 		}
 	}
+	output.close();
 	if (!output) errorMessage = "error writing output file";
 	return static_cast<bool>(output);
 }
@@ -215,6 +218,7 @@ bool WriteQoi(const std::filesystem::path& filename, const std::uint8_t* bgra,
 	flushRun();
 	const char endMarker[] = {0, 0, 0, 0, 0, 0, 0, 1};
 	output.write(endMarker, sizeof(endMarker));
+	output.close();
 	if (!output) errorMessage = "error writing QOI file";
 	return static_cast<bool>(output);
 }
@@ -262,6 +266,7 @@ bool WritePsd(const std::filesystem::path& filename, const std::uint8_t* bgra,
 			for (int x = 0; x < width; ++x) output.put(static_cast<char>(row[x * 4 + channel]));
 		}
 	}
+	output.close();
 	if (!output) errorMessage = "error writing output file";
 	return static_cast<bool>(output);
 }

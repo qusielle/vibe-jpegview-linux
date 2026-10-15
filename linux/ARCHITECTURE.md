@@ -255,8 +255,8 @@ should normally be added to one of these focused modules and covered by the matc
   the event thread.
 - `crop_selection_model`: source-image crop bounds, free/aspect/fixed-size selection geometry,
   move/resize hit testing, image/view coordinate conversion, crop-mode drag eligibility, new
-  selection release-action planning, and JPEG MCU-boundary alignment; pixel-buffer cropping remains
-  in `image`.
+  selection release-action planning, and EXIF-aware mapping from displayed crop rectangles to raw
+  JPEG coordinates before MCU-boundary alignment; pixel-buffer cropping remains in `image`.
 - `crop_size_dialog_model`: fixed-crop dimension text, focus/unit transitions, and validation.
 - `go_to_image_number_model`: one-based input validation for selecting an entry in the active
   ordered file list; it leaves list ownership and the subsequent image load to the Viewer.
@@ -298,16 +298,31 @@ should normally be added to one of these focused modules and covered by the matc
   `image_decoder.cpp` owns validation, append/conversion helpers, source admission, and codec dispatch;
   `image_decoder_stb.cpp`, `image_decoder_jpeg.cpp`, `image_decoder_apng.cpp`,
   `image_decoder_builtin.cpp`, `image_decoder_optional.cpp`, and `image_decoder_svg.cpp` isolate the corresponding reader
-  families behind the shared internal interface. `exif_orientation` owns the validated BGRA pixel
+  families behind the shared internal interface. The PSD reader validates complete planar payloads
+  before allocating pixels, decodes channel rows directly into the final BGRA buffer rather than
+  keeping a full image plane per channel, and checks cancellation during file reads and row work.
+  Every codec passes its request `WorkContext` through the required BGRA/RGBA append arguments, so
+  output-channel conversion and alpha inspection can stop with the owning request.
+  Each decoder keeps an `AnimationFrameBudget` while appending frames, charging bytes only after
+  successful publication rather than rescanning the preceding frames. Shared append paths enforce
+  the 512 MiB pixel budget and 16,384-frame ceiling; APNG rejects excessive declared or actual frame
+  controls during chunk parsing before retaining their frame metadata.
+  `exif_orientation` owns the validated BGRA pixel
   transform for EXIF orientations 1-8. JPEG decoding reads orientation from saved APP1 markers and
-  reports oriented dimensions in header and reduced-DCT paths; PNG/APNG and WebP apply the same
+  reports oriented dimensions in header and reduced-DCT paths and exposes stored dimensions,
+  orientation, and raw MCU geometry for lossless crops; PNG/APNG and WebP apply the same
   transform after decoding, while TIFF resets libtiff to stored raster order before applying it.
-  This keeps source geometry and displayed pixels aligned, including the four axis-swapping cases.
+  TIFF's RGBA conversion also unpremultiplies its raster into the viewer's straight-alpha BGRA
+  convention. This keeps source geometry and displayed pixels aligned, including the four
+  axis-swapping cases.
   `image_writer.cpp` owns validation and dispatch;
   `image_writer_jpeg_png.cpp`, `image_writer_basic.cpp`, and `image_writer_optional.cpp` hold codec
-  implementations. Decoder-owned pixel buffers move into `DecodedImage` when the decoder has finished
-  using them. Mapped JPEG inputs and non-longjmp codec handles use scope ownership; libjpeg/libpng
-  retain explicit cleanup at their `setjmp` recovery points because those C APIs report failures with
+  implementations. Writers using C++ output streams explicitly close them and check the resulting
+  stream state before returning success, so a buffered write failure cannot permit save publication.
+  Decoder-owned pixel buffers move into `DecodedImage` when the decoder has finished
+  using them. JPEG uses a scoped stdio source so external in-place truncation returns a libjpeg input
+  error rather than faulting a file mapping with SIGBUS. Non-longjmp codec handles use scope
+  ownership; libjpeg/libpng retain explicit cleanup at their `setjmp` recovery points because those C APIs report failures with
   `longjmp`; creation flags read after recovery are volatile so an encoder failure still releases
   its native handle. Image decoders resolve archive-member paths through `archive_source` before
   invoking the existing codec path, retaining ordinary-file and reduced-DCT JPEG behavior. Krita
@@ -333,11 +348,22 @@ should normally be added to one of these focused modules and covered by the matc
   gzip content from other gzip files; folder scans still include only recognized image suffixes.
   JPEG cancellation is checked before opening, after header parsing, between 16-row scanline batches,
   before color conversion/resampling,
-  and before publication; opaque codec calls are checked before and after their supported boundaries.
+  and before publication. APNG parsing/composition, QOI expansion, and PNM conversion check bounded
+  chunk, row, or pixel batches. WebP checks frame and row boundaries; HEIF/AVIF source callbacks
+  observe cancellation during reads, and their row conversion does too. HEIF checks image-handle
+  dimensions before decoding pixels; AVIF applies its pixel limit before parsing and checks parsed
+  dimensions before frame decode. JPEG XL checks around decoder input events and during pixel
+  conversion. STB observes cancellation in its reader callbacks and output conversion, RAW registers
+  LibRaw's progress callback, and JPEG XR performs one opaque full-frame codec copy followed by
+  cancellable pixel conversion because the supported jxrlib build rejects non-origin rectangles.
+  A codec operation already in progress may finish before its next supported cancellation checkpoint.
   callback exception boundaries remain in place, and callbacks are never thrown across C codec frames.
   Decoded frames carry alpha-presence metadata so opaque-image textures can keep blending
   disabled. The giflib decoder preserves each GIF frame's encoded centisecond delay and marks the
-  decoded image so playback can keep those delays source-locked. If giflib is unavailable, the
+  decoded image so playback can keep those delays source-locked. It validates the logical screen
+  before frame work and consumes rows sequentially with cancellation checks rather than retaining
+  every complete giflib raster; the reader caps GIFs at 16,384 frames and the shared 512 MiB
+  decoded-frame limit. If giflib is unavailable, the
   built-in `stb_image` path still returns a GIF's first frame; animation delays and compositing
   require the giflib decoder.
 - `image.cpp` keeps the scalar resize algorithm as the pixel oracle while caching complete resampling

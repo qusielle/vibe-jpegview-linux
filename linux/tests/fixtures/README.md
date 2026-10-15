@@ -12,3 +12,14 @@ On a system with a libzip version that can write this method, regenerate it with
 ```sh
 make -C linux regen-encrypted-zip-fixture
 ```
+
+`jxr-row-height.jxr` is a 3×3 lossless JPEG XR image with a different color pattern on each
+row. It exercises the decoder's one-row rectangle conversion. Its source is `jxr-row-height.ppm`;
+the checked-in `.jxr` was encoded with jxrlib 1.2's `JxrEncApp` using the 24-bit BGR input format
+and lossless quality. Regenerate it from the repository root with:
+
+```sh
+convert linux/tests/fixtures/jxr-row-height.ppm BMP3:out/tmp/jxr-row-height.bmp
+JxrEncApp -i out/tmp/jxr-row-height.bmp \
+  -o linux/tests/fixtures/jxr-row-height.jxr -c 0 -q 1
+```

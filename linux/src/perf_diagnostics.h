@@ -62,7 +62,7 @@ enum class PerfMetric : std::uint8_t {
 	InputToPresent,
 	Metadata,
 	SourceRead,
-	SourceMap,
+	SourceOpen,
 	Decode,
 	Processing,
 	Resampling,

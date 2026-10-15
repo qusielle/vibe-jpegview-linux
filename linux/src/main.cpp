@@ -6667,8 +6667,7 @@ private:
 			SetTitle("Lossless crop is unavailable for archive images");
 			return;
 		}
-		int mcuWidth = 0;
-		int mcuHeight = 0;
+		jpegview_linux::JpegCropMetadata cropMetadata;
 		std::string errorMessage;
 		const jpegview_linux::SourceDescriptor* cropSource =
 			fileList_.DescriptorAt(fileList_.CurrentIndex());
@@ -6677,13 +6676,15 @@ private:
 				jpegview_linux::SourceWorkPriority::Foreground) :
 			jpegview_linux::MakePathWorkContext(fileList_.Current(),
 				jpegview_linux::SourceWorkPriority::Foreground);
-		if (!jpegview_linux::ReadJpegMcuSize(fileList_.Current(), mcuWidth, mcuHeight,
+		if (!jpegview_linux::ReadJpegCropMetadata(fileList_.Current(), cropMetadata,
 			errorMessage, cropMetadataWork)) {
-			SetTitle("Cannot read JPEG crop block size: " + errorMessage);
+			SetTitle("Cannot read JPEG crop geometry: " + errorMessage);
 			return;
 		}
-		const jpegview_linux::SelectionRect aligned = jpegview_linux::CropSelectionModel::AlignToMcu(
-			cropSelection_.Rect(), CurrentImage().width, CurrentImage().height, mcuWidth, mcuHeight);
+		const jpegview_linux::SelectionRect aligned =
+			jpegview_linux::CropSelectionModel::ToRawJpegMcuRect(
+				cropSelection_.Rect(), cropMetadata.storedWidth, cropMetadata.storedHeight,
+				cropMetadata.exifOrientation, cropMetadata.mcuWidth, cropMetadata.mcuHeight);
 		if (!aligned.Valid()) {
 			SetTitle("Lossless crop is too small after JPEG block alignment");
 			return;
@@ -6693,8 +6694,11 @@ private:
 		fileDialogLosslessCrop_ = true;
 		fileDialogLosslessCropRect_ = aligned;
 		fileDialogFilename_ = fileList_.Current().stem().string() + "_crop.jpg";
-		fileDialogMessage_ = "Lossless JPEG crop: " + std::to_string(aligned.Width()) + " x " +
-			std::to_string(aligned.Height()) + " pixels (MCU-aligned)";
+		const bool orientationSwapsAxes = cropMetadata.exifOrientation >= 5;
+		const int displayedCropWidth = orientationSwapsAxes ? aligned.Height() : aligned.Width();
+		const int displayedCropHeight = orientationSwapsAxes ? aligned.Width() : aligned.Height();
+		fileDialogMessage_ = "Lossless JPEG crop: " + std::to_string(displayedCropWidth) + " x " +
+			std::to_string(displayedCropHeight) + " pixels (MCU-aligned)";
 	}
 
 	void SaveLosslessCropFromDialog() {

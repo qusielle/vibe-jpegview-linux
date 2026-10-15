@@ -190,7 +190,9 @@ bool MimeTypeMatches(const std::string& mimeTypes, const std::string& currentMim
 			(mime == "image/x-ms-bmp" && currentMime == "image/bmp") ||
 			(mime == "image/bmp" && currentMime == "image/x-ms-bmp") ||
 			(mime == "image/targa" && currentMime == "image/x-tga") ||
-			(mime == "image/x-tga" && currentMime == "image/targa");
+			(mime == "image/x-tga" && currentMime == "image/targa") ||
+			(mime == "image/heic" && currentMime == "image/heif") ||
+			(mime == "image/heif" && currentMime == "image/heic");
 		if (mime == currentMime || compatibleAlias || mime == "*/*" ||
 			(mime.size() > 2 && mime.back() == '*' && mime[mime.size() - 2] == '/' &&
 			currentMime.compare(0, mime.size() - 1, mime, 0, mime.size() - 1) == 0)) {
@@ -205,15 +207,44 @@ bool MimeTypeMatches(const std::string& mimeTypes, const std::string& currentMim
 std::string MimeTypeForExtension(const std::string& extension) {
 	if (extension == ".jpg" || extension == ".jpeg" || extension == ".jpe") return "image/jpeg";
 	if (extension == ".png") return "image/png";
+	if (extension == ".apng") return "image/apng";
 	if (extension == ".gif") return "image/gif";
 	if (extension == ".bmp") return "image/bmp";
 	if (extension == ".tga") return "image/x-tga";
 	if (extension == ".psd") return "image/vnd.adobe.photoshop";
 	if (extension == ".ppm") return "image/x-portable-pixmap";
 	if (extension == ".pgm") return "image/x-portable-graymap";
+	if (extension == ".pbm") return "image/x-portable-bitmap";
+	if (extension == ".pam") return "image/x-portable-arbitrarymap";
 	if (extension == ".pnm") return "image/x-portable-anymap";
+	if (extension == ".qoi") return "image/qoi";
 	if (extension == ".webp") return "image/webp";
+	if (extension == ".tif" || extension == ".tiff") return "image/tiff";
+	if (extension == ".heic" || extension == ".heif" || extension == ".hif") return "image/heif";
+	if (extension == ".avif" || extension == ".avifs") return "image/avif";
+	if (extension == ".jxl") return "image/jxl";
+	if (extension == ".jxr" || extension == ".wdp" || extension == ".hdp" ||
+		extension == ".mdp") return "image/jxr";
+	if (extension == ".kra") return "application/x-krita";
 	if (extension == ".svg" || extension == ".svgz") return "image/svg+xml";
+	static const std::pair<const char*, const char*> rawTypes[] = {
+		{".pef", "image/x-pentax-pef"}, {".dng", "image/x-adobe-dng"},
+		{".crw", "image/x-canon-crw"}, {".nef", "image/x-nikon-nef"},
+		{".cr2", "image/x-canon-cr2"}, {".mrw", "image/x-minolta-mrw"},
+		{".rw2", "image/x-panasonic-rw2"}, {".orf", "image/x-olympus-orf"},
+		{".x3f", "image/x-sigma-x3f"}, {".arw", "image/x-sony-arw"},
+		{".kdc", "image/x-kodak-kdc"}, {".nrw", "image/x-nikon-nrw"},
+		{".dcr", "image/x-kodak-dcr"}, {".sr2", "image/x-sony-sr2"},
+		{".raf", "image/x-fuji-raf"}, {".cr3", "image/x-canon-cr3"},
+		{".raw", "image/x-panasonic-rw"},
+		{".kc2", "image/x-dcraw"}, {".erf", "image/x-dcraw"},
+		{".3fr", "image/x-dcraw"}, {".mef", "image/x-dcraw"},
+		{".mos", "image/x-dcraw"}, {".mdc", "image/x-dcraw"},
+		{".iiq", "image/x-dcraw"}, {".rwl", "image/x-dcraw"},
+	};
+	for (const auto& rawType : rawTypes) {
+		if (extension == rawType.first) return rawType.second;
+	}
 	return {};
 }
 

@@ -25,3 +25,4 @@ const TestSuite& GetViewerModelsSuite();
 const TestSuite& GetDialogsSessionsSuite();
 
 int RunImageCacheSpecialMode(const std::string& mode);
+int RunJpegTruncationSpecialMode(const std::string& filename);

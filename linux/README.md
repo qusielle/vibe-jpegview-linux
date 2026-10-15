@@ -31,10 +31,12 @@ they support.
    gzip-compressed TAR, 7z/CB7, and RAR containers can also be browsed and viewed. CBZ comic ZIP
    archives reuse ZIP browsing, and CB7 comic 7z archives reuse 7z browsing. The save dialog writes
    JPEG, PNG, BMP, TGA,
-   WebP, GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images. Codec detection and fixtures
+   WebP, GIF, TIFF, PSD, PNM, QOI, HEIF/HEIC, AVIF, and JPEG XL still images. Buffered output errors
+   are checked before a processed-image save publishes its completed file. Codec detection and fixtures
    were made portable across Ubuntu 20.04 and newer distributions, including giflib installations
-   without pkg-config metadata and HEIF encoders with different supported profiles. Transparent PNG
-   and other alpha-bearing images display over a configurable black, white, or checkerboard
+   without pkg-config metadata and HEIF encoders with different supported profiles. Transparent
+   TIFF, PNG, and other alpha-bearing images retain their intended color and display over a
+   configurable black, white, or checkerboard
    background without flattening or changing their source pixels. JPEG, PNG/APNG, WebP, and TIFF
    decoding applies all eight EXIF orientations to the displayed pixels; JPEG dimension probes also
    use oriented dimensions so portrait/landscape classification matches the image on screen.
@@ -60,10 +62,9 @@ they support.
    when the cache is full. This avoids sizing every neighbor from the selected image's zoom. SVG/SVGZ
    neighbors render directly at their fitted sizes without retaining intrinsic source rasters for
    speculative preparation.
-   Large JPEG input is memory-mapped,
-   letting native decoding and repeated neighboring access use the kernel page cache without an extra
-   stdio copy layer. Prepared frames are then uploaded incrementally and retained as renderer-ready
-   textures. The closest next and previous files take
+   Large JPEG input is streamed through libjpeg's stdio source manager, avoiding a mapping that could
+   become invalid if the source is truncated while decoding. Prepared frames are then uploaded
+   incrementally and retained as renderer-ready textures. The closest next and previous files take
    preparation and upload priority. The direction-preferred immediate neighbor is prepared first;
    the opposite immediate neighbor gets the next phase, followed by farther work. Compatible ready
    representations for both immediate neighbors stay protected during this sequence; obsolete size or
@@ -648,7 +649,7 @@ JPEGVIEW_PERF_TRACE="$PWD/out/perf-run.csv" \
 
 The trace records per-event handling time, frame construction time before SDL presentation,
 `SDL_RenderPresent` time, dispatch-to-presentation latency after keyboard/mouse input, metadata and
-source-read/map/decode timing, image processing, resampling, `SDL_UpdateTexture` time, and renderer
+source-read/open/decode timing, image processing, resampling, `SDL_UpdateTexture` time, and renderer
 texture destruction time. Large image updates appear as separate `texture_upload` rows for each band;
 `texture_destroy` rows measure `SDL_DestroyTexture` independently. Each row
 includes execution (`event_thread` or `worker_thread`) and an opaque numeric thread identifier.
@@ -696,9 +697,9 @@ durations can overlap `decode` time. LibRaw totals exclude compressed-DNG JPEG h
 similarly emit `libraw_jasper_handoff_unmeasured`, since the JasPer stream reads outside the callbacks.
 JPEG XR still uses the JXR decoder's owned filename stream, which exposes no stable Ubuntu 20
 read-callback seam. After a successful JXR decoder open, `jxr_unmeasured_read` marks the direct read
-path with zero duration and byte count; its file I/O remains combined with `decode`. `source_map`
-measures opening and mapping inputs. JPEG data page faults can happen later
-during decoding, so the `decode` duration may include storage wait for mapped JPEGs. The first input
+path with zero duration and byte count; its file I/O remains combined with `decode`. `source_open`
+measures opening and checking JPEG inputs. JPEG stdio reads happen during libjpeg decoding and are
+included in the `decode` duration. The first input
 dispatch still waiting for presentation supplies `input_to_present`; later queued inputs do not reset
 that timestamp. Synchronous foreground pixel processing and resampling are timed alongside their
 worker equivalents, with each timer placed around the operation it measures. The workload template
@@ -859,7 +860,10 @@ JPEG XL still images; RAW and JPEG XR are decode-only, and animated input is vie
 JPEG uses the linked libjpeg implementation (libjpeg-turbo in the supported builds), common
 single-frame formats use the vendored public-domain/MIT `stb_image` single-header library, and the
 additional formats use their native codec libraries. Builds without giflib retain GIF still-image
-decoding through stb_image's first-frame fallback; animated GIF playback requires giflib.
+decoding through stb_image's first-frame fallback; animated GIF playback requires giflib. With
+giflib, frames are decoded sequentially with cancellation checks. Multi-frame image input is limited
+to 16,384 frames and the shared 512 MiB decoded-frame budget. APNG rejects excessive frame counts
+before retaining frame metadata.
 
 Display resizing follows JPEGView's high-quality path: downsampling uses its integrated
 best-quality filter with the default sharpening value, and enlargement uses endpoint-preserving
@@ -1376,8 +1380,9 @@ ratio, or applying a fixed-size crop also enables crop selection mode. Drag the 
 to move it and its border handles to resize it; right-click reopens the menu and Escape clears the
 selection. The menu can crop the processed image in memory, copy the selection at source resolution,
 or zoom to it. A lossless JPEG crop opens the save
-browser and aligns the requested rectangle to the JPEG's actual MCU grid; the displayed dimensions are
-the aligned dimensions and the source is not replaced unless explicitly chosen. If **Save processed**
+browser, maps the displayed selection back through the JPEG's EXIF orientation, and aligns it to the
+stored image's MCU grid. The dialog reports the resulting displayed dimensions, and the source is not
+replaced unless explicitly chosen. If **Save processed**
 overwrites the selected source, the viewer keeps its already materialized pixels detached from the
 refreshed file; source-coordinate lossless JPEG crop stays unavailable for that picture until it is
 reloaded. Crop recalculates active picture-level/automatic corrections on the cropped source pixels.

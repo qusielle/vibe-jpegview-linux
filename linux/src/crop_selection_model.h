@@ -103,6 +103,9 @@ public:
 		int tolerance = 12);
 	static SelectionRect AlignToMcu(const SelectionRect& selection, int imageWidth,
 		int imageHeight, int mcuWidth, int mcuHeight);
+	static SelectionRect ToRawJpegMcuRect(const SelectionRect& displayedSelection,
+		int storedWidth, int storedHeight, int exifOrientation,
+		int mcuWidth, int mcuHeight);
 
 private:
 	SelectionRect BuildNewSelection(int imageX, int imageY, double zoom) const;

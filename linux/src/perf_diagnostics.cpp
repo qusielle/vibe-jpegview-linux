@@ -36,7 +36,7 @@ const char* MetricName(PerfMetric metric) {
 	case PerfMetric::InputToPresent: return "input_to_present";
 	case PerfMetric::Metadata: return "metadata";
 	case PerfMetric::SourceRead: return "source_read";
-	case PerfMetric::SourceMap: return "source_map";
+	case PerfMetric::SourceOpen: return "source_open";
 	case PerfMetric::Decode: return "decode";
 	case PerfMetric::Processing: return "processing";
 	case PerfMetric::Resampling: return "resampling";

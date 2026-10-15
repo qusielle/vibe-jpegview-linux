@@ -161,6 +161,7 @@ TEST_CPP_SOURCES := $(TEST_SUITE_CPP_SOURCES) $(CORE_CPP_SOURCES) \
 	$(SDL_ADAPTER_CPP_SOURCES) $(BACKEND_CPP_SOURCES)
 TEST_FIXTURE_FILES := \
 	tests/fixtures/data-encrypted.7z tests/fixtures/header-encrypted.7z \
+	tests/fixtures/jxr-row-height.ppm tests/fixtures/jxr-row-height.jxr \
 	tests/fixtures/encrypted_rar/private.png \
 	tests/fixtures/encrypted_rar/rar4-data-encrypted.rar \
 	tests/fixtures/encrypted_rar/rar4-header-encrypted.rar \

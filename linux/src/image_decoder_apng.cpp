@@ -25,7 +25,7 @@ bool IsChunk(const PngChunk& chunk, std::string_view type) {
 }
 
 bool ParsePngChunks(const std::vector<std::uint8_t>& data, std::vector<PngChunk>& chunks,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& context) {
 	static constexpr std::array<std::uint8_t, 8> signature = {
 		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
 	if (data.size() < signature.size() || !std::equal(signature.begin(), signature.end(), data.begin())) {
@@ -33,7 +33,9 @@ bool ParsePngChunks(const std::vector<std::uint8_t>& data, std::vector<PngChunk>
 		return false;
 	}
 	std::size_t position = signature.size();
+	std::size_t frameControls = 0;
 	while (position + 12 <= data.size()) {
+		if (!CheckDecoderCancellation(context, errorMessage)) return false;
 		const std::uint32_t length = ReadBE32(data.data() + position);
 		position += 4;
 		if (length > data.size() - position - 8) {
@@ -43,6 +45,12 @@ bool ParsePngChunks(const std::vector<std::uint8_t>& data, std::vector<PngChunk>
 		PngChunk chunk;
 		std::copy_n(data.data() + position, 4, chunk.type.begin());
 		position += 4;
+		if ((IsChunk(chunk, "acTL") && length == 8 &&
+			ReadBE32(data.data() + position) > kMaxAnimationFrames) ||
+			(IsChunk(chunk, "fcTL") && ++frameControls > kMaxAnimationFrames)) {
+			errorMessage = "APNG has too many frames";
+			return false;
+		}
 		chunk.data.assign(data.begin() + static_cast<std::ptrdiff_t>(position),
 			data.begin() + static_cast<std::ptrdiff_t>(position + length));
 		position += length + 4; // Skip the chunk CRC; libpng validates the reconstructed chunks.
@@ -70,7 +78,9 @@ void AppendPngChunk(std::vector<std::uint8_t>& output, const std::array<char, 4>
 }
 
 bool DecodePngMemory(const std::vector<std::uint8_t>& data, int expectedWidth, int expectedHeight,
-	std::vector<std::uint8_t>& rgba, std::string& errorMessage) {
+	std::vector<std::uint8_t>& rgba, std::string& errorMessage,
+	const WorkContext& context) {
+	if (!CheckDecoderCancellation(context, errorMessage)) return false;
 	png_image pngImage{};
 	pngImage.version = PNG_IMAGE_VERSION;
 	if (png_image_begin_read_from_memory(&pngImage, data.data(), data.size()) == 0) {
@@ -97,6 +107,10 @@ bool DecodePngMemory(const std::vector<std::uint8_t>& data, int expectedWidth, i
 		return false;
 	}
 	png_image_free(&pngImage);
+	if (!CheckDecoderCancellation(context, errorMessage)) {
+		rgba.clear();
+		return false;
+	}
 	return true;
 }
 
@@ -117,11 +131,18 @@ struct ApngFrameData {
 };
 
 bool DecodeApng(const std::filesystem::path& filename, DecodedImage& image,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& supplied) {
+	const WorkContext context = ResolveWorkContext(filename,
+		SourceWorkPriority::Foreground, supplied);
+	const auto cancelled = [&] {
+		if (CheckDecoderCancellation(context, errorMessage)) return false;
+		image = {};
+		return true;
+	};
 	std::vector<std::uint8_t> fileData;
-	if (!ReadFile(filename, fileData, errorMessage)) return false;
+	if (!ReadFile(filename, fileData, errorMessage, context)) return false;
 	std::vector<PngChunk> chunks;
-	if (!ParsePngChunks(fileData, chunks, errorMessage)) return false;
+	if (!ParsePngChunks(fileData, chunks, errorMessage, context)) return false;
 	if (chunks.empty() || !IsChunk(chunks.front(), "IHDR") || chunks.front().data.size() != 13) {
 		errorMessage = "invalid PNG header";
 		return false;
@@ -134,6 +155,7 @@ bool DecodeApng(const std::filesystem::path& filename, DecodedImage& image,
 	std::uint32_t loopCount = 0;
 	bool hasAnimationControl = false;
 	for (const PngChunk& chunk : chunks) {
+		if (cancelled()) return false;
 		if (IsChunk(chunk, "acTL") && chunk.data.size() == 8) {
 			frameCount = ReadBE32(chunk.data.data());
 			loopCount = ReadBE32(chunk.data.data() + 4);
@@ -141,10 +163,17 @@ bool DecodeApng(const std::filesystem::path& filename, DecodedImage& image,
 			break;
 		}
 	}
-	if (!hasAnimationControl) return DecodeStb(filename, image, errorMessage);
+	if (!hasAnimationControl) {
+		if (cancelled()) return false;
+		const bool decoded = DecodeStb(filename, image, errorMessage, context);
+		if (cancelled()) return false;
+		return decoded;
+	}
 
 	std::vector<ApngFrameData> frames;
+	std::vector<const PngChunk*> sharedPngChunks;
 	for (const PngChunk& chunk : chunks) {
+		if (cancelled()) return false;
 		if (IsChunk(chunk, "fcTL")) {
 			if (chunk.data.size() != 26) {
 				errorMessage = "invalid APNG frame control";
@@ -182,6 +211,11 @@ bool DecodeApng(const std::filesystem::path& filename, DecodedImage& image,
 				return false;
 			}
 			frames.back().compressed.emplace_back(chunk.data.begin() + 4, chunk.data.end());
+			continue;
+		}
+		if (!IsChunk(chunk, "IHDR") && !IsChunk(chunk, "IEND") &&
+			!IsChunk(chunk, "acTL") && !IsChunk(chunk, "fcTL")) {
+			sharedPngChunks.push_back(&chunk);
 		}
 	}
 	if (frames.empty() || frames.size() != frameCount) {
@@ -192,7 +226,9 @@ bool DecodeApng(const std::filesystem::path& filename, DecodedImage& image,
 	std::vector<std::uint8_t> pngSignature = {
 		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
 	std::vector<std::uint8_t> canvas(static_cast<std::size_t>(canvasWidth) * canvasHeight * 4, 0);
+	AnimationFrameBudget frameBudget(image);
 	for (const ApngFrameData& frame : frames) {
+		if (cancelled()) return false;
 		if (frame.compressed.empty()) {
 			errorMessage = "APNG frame has no image data";
 			return false;
@@ -208,21 +244,26 @@ bool DecodeApng(const std::filesystem::path& filename, DecodedImage& image,
 		ihdr[7] = static_cast<std::uint8_t>(frame.control.height & 0xff);
 		std::vector<std::uint8_t> framePng = pngSignature;
 		AppendPngChunk(framePng, chunks.front().type, ihdr);
-		for (const PngChunk& chunk : chunks) {
-			if (IsChunk(chunk, "IHDR") || IsChunk(chunk, "IEND") || IsChunk(chunk, "acTL") ||
-				IsChunk(chunk, "fcTL") || IsChunk(chunk, "IDAT") || IsChunk(chunk, "fdAT")) continue;
-			AppendPngChunk(framePng, chunk.type, chunk.data);
+		for (const PngChunk* chunk : sharedPngChunks) {
+			if (cancelled()) return false;
+			AppendPngChunk(framePng, chunk->type, chunk->data);
 		}
 		for (const std::vector<std::uint8_t>& compressed : frame.compressed) {
+			if (cancelled()) return false;
 			AppendPngChunk(framePng, std::array<char, 4>{'I', 'D', 'A', 'T'}, compressed);
 		}
 		AppendPngChunk(framePng, std::array<char, 4>{'I', 'E', 'N', 'D'}, {});
 		std::vector<std::uint8_t> rgba;
-		if (!DecodePngMemory(framePng, frame.control.width, frame.control.height, rgba, errorMessage)) return false;
+		if (!DecodePngMemory(framePng, frame.control.width, frame.control.height,
+			rgba, errorMessage, context)) {
+			if (errorMessage == "source work was cancelled") image = {};
+			return false;
+		}
 
 		std::vector<std::uint8_t> previous;
 		if (frame.control.dispose == 2) previous = canvas;
 		for (int y = 0; y < frame.control.height; ++y) {
+			if (cancelled()) return false;
 			for (int x = 0; x < frame.control.width; ++x) {
 				const std::size_t sourceIndex = (static_cast<std::size_t>(y) * frame.control.width + x) * 4;
 				const std::size_t targetIndex = (static_cast<std::size_t>(frame.control.y + y) * canvasWidth +
@@ -249,7 +290,11 @@ bool DecodeApng(const std::filesystem::path& filename, DecodedImage& image,
 		const int delay = frame.control.delayNumerator == 0 ? 10 : std::max(10,
 			static_cast<int>((1000ull * frame.control.delayNumerator + frame.control.delayDenominator / 2) /
 				frame.control.delayDenominator));
-		if (!AppendRGBA(image, canvasWidth, canvasHeight, canvas.data(), delay, errorMessage)) return false;
+		if (!AppendRGBA(image, canvasWidth, canvasHeight, canvas.data(), delay,
+			errorMessage, true, context, frameBudget)) {
+			if (errorMessage == "source work was cancelled") image = {};
+			return false;
+		}
 		if (frame.control.dispose == 1) {
 			for (int y = 0; y < frame.control.height; ++y) {
 				std::fill_n(canvas.data() + (static_cast<std::size_t>(frame.control.y + y) * canvasWidth + frame.control.x) * 4,
@@ -259,6 +304,7 @@ bool DecodeApng(const std::filesystem::path& filename, DecodedImage& image,
 			canvas = std::move(previous);
 		}
 	}
+	if (cancelled()) return false;
 	image.animation = image.frames.size() > 1;
 	image.loopCount = static_cast<int>(std::min<std::uint32_t>(loopCount, std::numeric_limits<int>::max()));
 	return !image.frames.empty();

@@ -10,10 +10,24 @@
 
 namespace jpegview_linux::decoder_detail {
 
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+namespace {
+PsdOutputAllocationTestHook psdOutputAllocationTestHook = nullptr;
+void* psdOutputAllocationTestContext = nullptr;
+}
+
+void SetPsdOutputAllocationTestHookForTesting(PsdOutputAllocationTestHook hook, void* context) {
+	psdOutputAllocationTestHook = hook;
+	psdOutputAllocationTestContext = context;
+}
+#endif
+
 bool DecodeQoi(const std::filesystem::path& filename, DecodedImage& image,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& supplied) {
+	const WorkContext context = ResolveWorkContext(filename,
+		SourceWorkPriority::Foreground, supplied);
 	std::vector<std::uint8_t> data;
-	if (!ReadFile(filename, data, errorMessage)) return false;
+	if (!ReadFile(filename, data, errorMessage, context)) return false;
 	if (data.size() < 14 || std::memcmp(data.data(), "qoif", 4) != 0) {
 		errorMessage = "invalid QOI header";
 		return false;
@@ -37,6 +51,8 @@ bool DecodeQoi(const std::filesystem::path& filename, DecodedImage& image,
 		return static_cast<std::size_t>((value[0] * 3 + value[1] * 5 + value[2] * 7 + value[3] * 11) % 64);
 	};
 	while (outputPixel < pixelCount) {
+		if ((outputPixel & 0xfffu) == 0 &&
+			!CheckDecoderCancellation(context, errorMessage)) return false;
 		if (run > 0) {
 			--run;
 		} else {
@@ -78,7 +94,10 @@ bool DecodeQoi(const std::filesystem::path& filename, DecodedImage& image,
 		errorMessage = "QOI end marker is missing";
 		return false;
 	}
-	return AppendRGBA(image, static_cast<int>(widthValue), static_cast<int>(heightValue), std::move(rgba), 0, errorMessage);
+	if (!CheckDecoderCancellation(context, errorMessage)) return false;
+	AnimationFrameBudget frameBudget(image);
+	return AppendRGBA(image, static_cast<int>(widthValue), static_cast<int>(heightValue),
+		std::move(rgba), 0, errorMessage, true, context, frameBudget);
 }
 
 bool DecodePackBitsRow(const std::vector<std::uint8_t>& data, std::size_t& position,
@@ -117,9 +136,17 @@ bool DecodePackBitsRow(const std::vector<std::uint8_t>& data, std::size_t& posit
 }
 
 bool DecodePsd(const std::filesystem::path& filename, DecodedImage& image,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& supplied) {
+	const WorkContext context = ResolveWorkContext(filename,
+		SourceWorkPriority::Foreground, supplied);
+	const auto continueWork = [&] {
+		if (context.Continue()) return true;
+		errorMessage = "source work was cancelled";
+		return false;
+	};
+	if (!continueWork()) return false;
 	std::vector<std::uint8_t> data;
-	if (!ReadFile(filename, data, errorMessage)) return false;
+	if (!ReadFile(filename, data, errorMessage, context)) return false;
 	if (data.size() < 26 || std::memcmp(data.data(), "8BPS", 4) != 0 || ReadBE16(data.data() + 4) != 1) {
 		errorMessage = "invalid PSD header";
 		return false;
@@ -136,6 +163,16 @@ bool DecodePsd(const std::filesystem::path& filename, DecodedImage& image,
 	const int height = static_cast<int>(heightValue);
 	if (!((depth == 1 && colorMode == 0) || depth == 8 || depth == 16)) {
 		errorMessage = "unsupported PSD bit depth or color mode";
+		return false;
+	}
+	if (colorMode != 0 && colorMode != 1 && colorMode != 2 &&
+		colorMode != 3 && colorMode != 4) {
+		errorMessage = "unsupported PSD color mode";
+		return false;
+	}
+	if ((colorMode == 1 && channels < 1) || (colorMode == 2 && channels < 1) ||
+		(colorMode == 3 && channels < 3) || (colorMode == 4 && channels < 4)) {
+		errorMessage = "PSD color channels are missing";
 		return false;
 	}
 	std::size_t position = 26;
@@ -171,117 +208,155 @@ bool DecodePsd(const std::filesystem::path& filename, DecodedImage& image,
 		return false;
 	}
 	const std::size_t planeBytes = rowBytes * static_cast<std::size_t>(height);
-	std::vector<std::vector<std::uint8_t>> planes(channels);
-	try {
-		for (std::vector<std::uint8_t>& plane : planes) plane.resize(planeBytes);
-	} catch (const std::exception&) {
-		errorMessage = "out of memory";
-		return false;
-	}
-	if (compression == 0) {
-		for (std::vector<std::uint8_t>& plane : planes) {
-			if (planeBytes > data.size() - position) {
-				errorMessage = "truncated PSD image data";
-				return false;
-			}
-			std::copy_n(data.data() + position, planeBytes, plane.data());
-			position += planeBytes;
-		}
-	} else {
-		const std::size_t rowCount = static_cast<std::size_t>(channels) * height;
-		if (rowCount > (data.size() - position) / 2) {
-			errorMessage = "truncated PSD PackBits row table";
-			return false;
-		}
-		std::vector<std::uint16_t> rowLengths(rowCount);
-		for (std::uint16_t& length : rowLengths) {
-			length = ReadBE16(data.data() + position);
-			position += 2;
-		}
-		for (std::size_t channel = 0; channel < channels; ++channel) {
-			for (int y = 0; y < height; ++y) {
-				const std::size_t rowIndex = channel * static_cast<std::size_t>(height) + y;
-				const std::size_t compressedSize = rowLengths[rowIndex];
-				if (compressedSize > data.size() - position) {
-					errorMessage = "truncated PSD PackBits row";
-					return false;
-				}
-				const std::size_t rowEnd = position + compressedSize;
-				if (!DecodePackBitsRow(data, position, rowEnd,
-					planes[channel].data() + static_cast<std::size_t>(y) * rowBytes, rowBytes,
-					colorMode == 2 && depth == 8, errorMessage) || position > rowEnd) return false;
-				position = rowEnd;
-			}
-		}
-	}
 	if (colorMode == 2 && colorModeData.size() < 768) {
 		errorMessage = "PSD indexed palette is missing";
 		return false;
 	}
-	if (colorMode == 3 && channels < 3) {
-		errorMessage = "PSD RGB channels are missing";
-		return false;
-	}
-	if (colorMode == 1 && channels < 1) {
-		errorMessage = "PSD grayscale channel is missing";
-		return false;
-	}
-	if (colorMode == 4 && channels < 4) {
-		errorMessage = "PSD CMYK channels are missing";
-		return false;
-	}
-	if (colorMode != 0 && colorMode != 1 && colorMode != 2 && colorMode != 3 && colorMode != 4) {
-		errorMessage = "unsupported PSD color mode";
-		return false;
-	}
-	const std::size_t pixelCount = static_cast<std::size_t>(width) * height;
-	std::vector<std::uint8_t> bgra(pixelCount * 4, 255);
-	const auto sample = [&](const std::vector<std::uint8_t>& plane, std::size_t index) {
-		return depth == 16 ? plane[index * 2] : plane[index];
-	};
-	for (int y = 0; y < height; ++y) {
-		for (int x = 0; x < width; ++x) {
-			const std::size_t pixelIndex = static_cast<std::size_t>(y) * width + x;
-			std::uint8_t red = 0;
-			std::uint8_t green = 0;
-			std::uint8_t blue = 0;
-			std::uint8_t alpha = 255;
-			if (colorMode == 0) {
-				const bool black = (planes[0][static_cast<std::size_t>(y) * rowBytes + x / 8] & (0x80u >> (x % 8))) != 0;
-				red = green = blue = black ? 0 : 255;
-			} else if (colorMode == 1) {
-				red = green = blue = sample(planes[0], pixelIndex);
-				if (channels > 1) alpha = sample(planes[1], pixelIndex);
-			} else if (colorMode == 2) {
-				const std::size_t paletteIndex = static_cast<std::size_t>(sample(planes[0], pixelIndex));
-				red = colorModeData[paletteIndex];
-				green = colorModeData[256 + paletteIndex];
-				blue = colorModeData[512 + paletteIndex];
-				if (channels > 1) alpha = sample(planes[1], pixelIndex);
-			} else if (colorMode == 3) {
-				red = sample(planes[0], pixelIndex);
-				green = sample(planes[1], pixelIndex);
-				blue = sample(planes[2], pixelIndex);
-				if (channels > 3) alpha = sample(planes[3], pixelIndex);
-			} else {
-				const int cyan = sample(planes[0], pixelIndex);
-				const int magenta = sample(planes[1], pixelIndex);
-				const int yellow = sample(planes[2], pixelIndex);
-				const int black = sample(planes[3], pixelIndex);
-				red = static_cast<std::uint8_t>((255 - cyan) * (255 - black) / 255);
-				green = static_cast<std::uint8_t>((255 - magenta) * (255 - black) / 255);
-				blue = static_cast<std::uint8_t>((255 - yellow) * (255 - black) / 255);
-				if (channels > 4) alpha = sample(planes[4], pixelIndex);
+	const std::size_t remaining = data.size() - position;
+	std::vector<std::uint16_t> rowLengths;
+	if (compression == 0) {
+		if (planeBytes > remaining / channels) {
+			errorMessage = "truncated PSD image data";
+			return false;
+		}
+	} else {
+		if (static_cast<std::size_t>(height) >
+			std::numeric_limits<std::size_t>::max() / channels) {
+			errorMessage = "PSD image is too large";
+			return false;
+		}
+		const std::size_t rowCount = static_cast<std::size_t>(channels) * height;
+		if (rowCount > remaining / 2) {
+			errorMessage = "truncated PSD PackBits row table";
+			return false;
+		}
+		try {
+			rowLengths.resize(rowCount);
+		} catch (const std::exception&) {
+			errorMessage = "out of memory";
+			return false;
+		}
+		for (std::uint16_t& length : rowLengths) {
+			length = ReadBE16(data.data() + position);
+			position += 2;
+		}
+		std::size_t compressedBytes = 0;
+		for (const std::uint16_t length : rowLengths) {
+			if (length > data.size() - position - compressedBytes) {
+				errorMessage = "truncated PSD PackBits row";
+				return false;
 			}
-			bgra[pixelIndex * 4] = blue;
-			bgra[pixelIndex * 4 + 1] = green;
-			bgra[pixelIndex * 4 + 2] = red;
-			bgra[pixelIndex * 4 + 3] = alpha;
+			compressedBytes += length;
 		}
 	}
+
+	const std::size_t pixelCount = static_cast<std::size_t>(width) * height;
+	std::vector<std::uint8_t> bgra;
+	std::vector<std::uint8_t> row;
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	if (psdOutputAllocationTestHook != nullptr &&
+		!psdOutputAllocationTestHook(pixelCount * 4, psdOutputAllocationTestContext)) {
+		errorMessage = "PSD output allocation rejected by test hook";
+		return false;
+	}
+#endif
+	try {
+		bgra.resize(pixelCount * 4, 255);
+		row.resize(rowBytes);
+	} catch (const std::exception&) {
+		errorMessage = "out of memory";
+		return false;
+	}
+	const auto applyRow = [&](std::size_t channel, int y, const std::uint8_t* samples) {
+		const std::size_t usedChannels = colorMode == 0 ? 1 :
+			(colorMode == 1 || colorMode == 2) ? 2 :
+			colorMode == 3 ? 4 : 5;
+		if (channel >= usedChannels) return;
+		for (int x = 0; x < width; ++x) {
+			const std::size_t pixelOffset =
+				(static_cast<std::size_t>(y) * width + x) * 4;
+			const std::uint8_t value = colorMode == 0 ? 0 : depth == 16 ?
+				samples[static_cast<std::size_t>(x) * 2] : samples[x];
+			if (colorMode == 0) {
+				const bool black = (samples[x / 8] & (0x80u >> (x % 8))) != 0;
+				bgra[pixelOffset] = bgra[pixelOffset + 1] = bgra[pixelOffset + 2] =
+					black ? 0 : 255;
+			} else if (colorMode == 1) {
+				if (channel == 0) {
+					bgra[pixelOffset] = bgra[pixelOffset + 1] =
+						bgra[pixelOffset + 2] = value;
+				} else if (channel == 1) bgra[pixelOffset + 3] = value;
+			} else if (colorMode == 2) {
+				if (channel == 0) {
+					const std::size_t palette = value;
+					bgra[pixelOffset] = colorModeData[512 + palette];
+					bgra[pixelOffset + 1] = colorModeData[256 + palette];
+					bgra[pixelOffset + 2] = colorModeData[palette];
+				} else if (channel == 1) bgra[pixelOffset + 3] = value;
+			} else if (colorMode == 3) {
+				if (channel == 0) bgra[pixelOffset + 2] = value;
+				else if (channel == 1) bgra[pixelOffset + 1] = value;
+				else if (channel == 2) bgra[pixelOffset] = value;
+				else if (channel == 3) bgra[pixelOffset + 3] = value;
+			} else if (colorMode == 4 && channel < 4) {
+				bgra[pixelOffset + channel] = value;
+			} else if (colorMode == 4 && channel == 4) {
+				bgra[pixelOffset + 3] = value;
+			}
+		}
+	};
+	const auto finishCmyk = [&] {
+		for (int y = 0; y < height; ++y) {
+			if (!continueWork()) return false;
+			for (int x = 0; x < width; ++x) {
+				const std::size_t offset =
+					(static_cast<std::size_t>(y) * width + x) * 4;
+				const int cyan = bgra[offset];
+				const int magenta = bgra[offset + 1];
+				const int yellow = bgra[offset + 2];
+				const int black = bgra[offset + 3];
+				// PSD stores inverted CMYK samples: multiply stored C/M/Y by stored K.
+				bgra[offset] = static_cast<std::uint8_t>((yellow * black + 127) / 255);
+				bgra[offset + 1] = static_cast<std::uint8_t>((magenta * black + 127) / 255);
+				bgra[offset + 2] = static_cast<std::uint8_t>((cyan * black + 127) / 255);
+				bgra[offset + 3] = 255;
+			}
+		}
+		return true;
+	};
+	if (compression == 0) {
+		const std::size_t payloadStart = position;
+		for (std::size_t channel = 0; channel < channels; ++channel) {
+			if (!continueWork()) return false;
+			const std::uint8_t* channelData = data.data() + payloadStart + channel * planeBytes;
+			for (int y = 0; y < height; ++y) {
+				if (!continueWork()) return false;
+				applyRow(channel, y, channelData + static_cast<std::size_t>(y) * rowBytes);
+			}
+			if (colorMode == 4 && channel == 3 && !finishCmyk()) return false;
+		}
+	} else {
+		for (std::size_t channel = 0; channel < channels; ++channel) {
+			if (!continueWork()) return false;
+			for (int y = 0; y < height; ++y) {
+				if (!continueWork()) return false;
+				const std::size_t rowIndex = channel * static_cast<std::size_t>(height) + y;
+				const std::size_t compressedSize = rowLengths[rowIndex];
+				const std::size_t rowEnd = position + compressedSize;
+				if (!DecodePackBitsRow(data, position, rowEnd, row.data(), rowBytes,
+					colorMode == 2 && depth == 8, errorMessage) || position > rowEnd) return false;
+				position = rowEnd;
+				applyRow(channel, y, row.data());
+			}
+			if (colorMode == 4 && channel == 3 && !finishCmyk()) return false;
+		}
+	}
+	if (!continueWork()) return false;
 	const bool hasAlphaChannel = (colorMode == 1 || colorMode == 2) ? channels > 1 :
 		colorMode == 3 ? channels > 3 : colorMode == 4 && channels > 4;
-	return AppendBGRA(image, width, height, std::move(bgra), 0, errorMessage, hasAlphaChannel);
+	AnimationFrameBudget frameBudget(image);
+	return AppendBGRA(image, width, height, std::move(bgra), 0,
+		errorMessage, hasAlphaChannel, context, frameBudget);
 }
 
 bool ReadPnmToken(const std::vector<std::uint8_t>& data, std::size_t& position, std::string& token) {
@@ -328,9 +403,11 @@ bool ParseNonNegativeInteger(const std::string& text, int& value) {
 }
 
 bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& supplied) {
+	const WorkContext context = ResolveWorkContext(filename,
+		SourceWorkPriority::Foreground, supplied);
 	std::vector<std::uint8_t> data;
-	if (!ReadFile(filename, data, errorMessage)) return false;
+	if (!ReadFile(filename, data, errorMessage, context)) return false;
 	std::size_t position = 0;
 	std::string magic;
 	if (!ReadPnmToken(data, position, magic) || magic.size() != 2 || magic[0] != 'P' ||
@@ -346,6 +423,7 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 	if (magic == "P7") {
 		bool ended = false;
 		while (position < data.size()) {
+			if (!CheckDecoderCancellation(context, errorMessage)) return false;
 			const std::size_t lineBegin = position;
 			while (position < data.size() && data[position] != '\n') ++position;
 			const std::string line(reinterpret_cast<const char*>(data.data() + lineBegin), position - lineBegin);
@@ -363,7 +441,7 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 			else if (key == "DEPTH") ParsePositiveInteger(value, depth);
 			else if (key == "MAXVAL") ParsePositiveInteger(value, maxValue);
 		}
-		if (!ended || width <= 0 || height <= 0 || depth <= 0 || maxValue <= 0) {
+		if (!ended || width <= 0 || height <= 0 || depth <= 0 || depth > 4 || maxValue <= 0) {
 			errorMessage = "invalid PAM header";
 			return false;
 		}
@@ -402,6 +480,8 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 			return false;
 		}
 		for (std::size_t sampleIndex = 0; sampleIndex < requiredSamples; ++sampleIndex) {
+			if ((sampleIndex & 0xfffu) == 0 &&
+				!CheckDecoderCancellation(context, errorMessage)) return false;
 			std::string sampleText;
 			int value = 0;
 			if (!ReadPnmToken(data, position, sampleText) ||
@@ -415,6 +495,8 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 			return static_cast<std::uint8_t>((value * 255 + maxValue / 2) / maxValue);
 		};
 		for (std::size_t pixelIndex = 0; pixelIndex < pixelCount; ++pixelIndex) {
+			if ((pixelIndex & 0xfffu) == 0 &&
+				!CheckDecoderCancellation(context, errorMessage)) return false;
 			std::uint8_t* pixel = bgra.data() + pixelIndex * 4;
 			if (magic == "P1") {
 				const std::uint8_t value = samples[pixelIndex] == 0 ? 255 : 0;
@@ -435,6 +517,7 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 			return false;
 		}
 		for (int y = 0; y < height; ++y) {
+			if (!CheckDecoderCancellation(context, errorMessage)) return false;
 			for (int x = 0; x < width; ++x) {
 				const bool black = (data[position + static_cast<std::size_t>(y) * rowBytes + x / 8] & (0x80u >> (x % 8))) != 0;
 				const std::uint8_t value = black ? 0 : 255;
@@ -456,6 +539,8 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 		};
 		std::size_t offset = 0;
 		for (std::size_t pixelIndex = 0; pixelIndex < pixelCount; ++pixelIndex) {
+			if ((pixelIndex & 0xfffu) == 0 &&
+				!CheckDecoderCancellation(context, errorMessage)) return false;
 			std::uint8_t* pixel = bgra.data() + pixelIndex * 4;
 			if (depth == 1) {
 				pixel[0] = pixel[1] = pixel[2] = readSample(offset);
@@ -471,8 +556,11 @@ bool DecodePnm(const std::filesystem::path& filename, DecodedImage& image,
 			}
 		}
 	}
+	if (!CheckDecoderCancellation(context, errorMessage)) return false;
 	const bool hasAlphaChannel = depth == 2 || depth >= 4;
-	return AppendBGRA(image, width, height, std::move(bgra), 0, errorMessage, hasAlphaChannel);
+	AnimationFrameBudget frameBudget(image);
+	return AppendBGRA(image, width, height, std::move(bgra), 0,
+		errorMessage, hasAlphaChannel, context, frameBudget);
 }
 
 } // namespace jpegview_linux::decoder_detail

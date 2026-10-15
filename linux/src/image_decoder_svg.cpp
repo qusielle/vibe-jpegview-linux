@@ -756,7 +756,9 @@ bool DecodeSvg(const std::filesystem::path& filename, DecodedImage& image,
 	if (!LoadSvgHandle(filename, handle, width, height, errorMessage, context)) return false;
 	std::vector<std::uint8_t> pixels;
 	if (!RenderSvg(handle.get(), width, height, pixels, errorMessage, context)) return false;
-	return AppendBGRA(image, width, height, std::move(pixels), 0, errorMessage, true);
+	AnimationFrameBudget frameBudget(image);
+	return AppendBGRA(image, width, height, std::move(pixels), 0,
+		errorMessage, true, context, frameBudget);
 #else
 	(void)filename;
 	(void)context;
@@ -792,8 +794,9 @@ bool DecodeSvgForDisplay(const std::filesystem::path& filename, int targetWidth,
 		sourceWidth = sourceHeight = 0;
 		return false;
 	}
+	AnimationFrameBudget frameBudget(image);
 	if (!AppendBGRA(image, outputWidth, outputHeight, std::move(pixels), 0,
-		errorMessage, true)) return false;
+		errorMessage, true, context, frameBudget)) return false;
 	image.isSvg = true;
 	return true;
 #else

@@ -24,8 +24,6 @@
 namespace jpegview_linux {
 namespace decoder_detail {
 
-constexpr std::uint64_t kMaxImagePixels = 100ull * 1024ull * 1024ull;
-
 std::string Lower(std::string value) {
 	std::transform(value.begin(), value.end(), value.begin(),
 		[](unsigned char character) { return static_cast<char>(std::tolower(character)); });
@@ -33,7 +31,8 @@ std::string Lower(std::string value) {
 }
 
 bool ValidDimensions(int width, int height, std::string& errorMessage) {
-	if (width <= 0 || height <= 0 || width > 65535 || height > 65535) {
+	if (width <= 0 || height <= 0 || width > static_cast<int>(kMaxImageDimension) ||
+		height > static_cast<int>(kMaxImageDimension)) {
 		errorMessage = "image dimensions are not supported";
 		return false;
 	}
@@ -45,15 +44,11 @@ bool ValidDimensions(int width, int height, std::string& errorMessage) {
 }
 
 bool AppendBGRA(DecodedImage& image, int width, int height, const std::uint8_t* pixels,
-	int delayMs, std::string& errorMessage, bool hasAlphaChannel) {
+	int delayMs, std::string& errorMessage, bool hasAlphaChannel,
+	const WorkContext& context, AnimationFrameBudget& budget) {
 	if (!ValidDimensions(width, height, errorMessage) || pixels == nullptr) return false;
 	const std::size_t byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4;
-	std::uint64_t currentBytes = 0;
-	for (const DecodedFrame& frame : image.frames) currentBytes += frame.bgra.size();
-	if (byteCount > kMaxAnimationBytes || currentBytes > kMaxAnimationBytes - byteCount) {
-		errorMessage = "animation is too large";
-		return false;
-	}
+	if (!budget.CanAppend(byteCount, errorMessage)) return false;
 	try {
 		DecodedFrame frame;
 		frame.width = width;
@@ -62,13 +57,22 @@ bool AppendBGRA(DecodedImage& image, int width, int height, const std::uint8_t* 
 		frame.bgra.assign(pixels, pixels + byteCount);
 		if (hasAlphaChannel) {
 			for (std::size_t offset = 3; offset < byteCount; offset += 4) {
+				if ((offset & 0xffffu) == 3u && !context.Continue()) {
+					errorMessage = "source work was cancelled";
+					return false;
+				}
 				if (frame.bgra[offset] != 255) {
 					frame.hasTransparency = true;
 					break;
 				}
 			}
 		}
+		if (!context.Continue()) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
 		image.frames.push_back(std::move(frame));
+		budget.RecordAppend(byteCount);
 	} catch (const std::exception&) {
 		errorMessage = "out of memory";
 		return false;
@@ -78,7 +82,7 @@ bool AppendBGRA(DecodedImage& image, int width, int height, const std::uint8_t* 
 
 bool AppendBGRA(DecodedImage& image, int width, int height,
 	std::vector<std::uint8_t>&& pixels, int delayMs, std::string& errorMessage,
-	bool hasAlphaChannel) {
+	bool hasAlphaChannel, const WorkContext& context, AnimationFrameBudget& budget) {
 	if (!ValidDimensions(width, height, errorMessage)) return false;
 	const std::size_t byteCount = static_cast<std::size_t>(width) *
 		static_cast<std::size_t>(height) * 4;
@@ -86,12 +90,7 @@ bool AppendBGRA(DecodedImage& image, int width, int height,
 		errorMessage = "invalid decoded pixel buffer";
 		return false;
 	}
-	std::uint64_t currentBytes = 0;
-	for (const DecodedFrame& existing : image.frames) currentBytes += existing.bgra.size();
-	if (byteCount > kMaxAnimationBytes || currentBytes > kMaxAnimationBytes - byteCount) {
-		errorMessage = "animation is too large";
-		return false;
-	}
+	if (!budget.CanAppend(byteCount, errorMessage)) return false;
 	try {
 		DecodedFrame frame;
 		frame.width = width;
@@ -100,13 +99,22 @@ bool AppendBGRA(DecodedImage& image, int width, int height,
 		frame.bgra = std::move(pixels);
 		if (hasAlphaChannel) {
 			for (std::size_t offset = 3; offset < byteCount; offset += 4) {
+				if ((offset & 0xffffu) == 3u && !context.Continue()) {
+					errorMessage = "source work was cancelled";
+					return false;
+				}
 				if (frame.bgra[offset] != 255) {
 					frame.hasTransparency = true;
 					break;
 				}
 			}
 		}
+		if (!context.Continue()) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
 		image.frames.push_back(std::move(frame));
+		budget.RecordAppend(byteCount);
 	} catch (const std::exception&) {
 		errorMessage = "out of memory";
 		return false;
@@ -115,9 +123,11 @@ bool AppendBGRA(DecodedImage& image, int width, int height,
 }
 
 bool AppendRGBA(DecodedImage& image, int width, int height, const std::uint8_t* pixels,
-	int delayMs, std::string& errorMessage, bool hasAlphaChannel) {
+	int delayMs, std::string& errorMessage, bool hasAlphaChannel,
+	const WorkContext& context, AnimationFrameBudget& budget) {
 	if (!ValidDimensions(width, height, errorMessage) || pixels == nullptr) return false;
 	const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+	if (!budget.CanAppend(pixelCount * 4, errorMessage)) return false;
 	std::vector<std::uint8_t> bgra;
 	try {
 		bgra.resize(pixelCount * 4);
@@ -127,11 +137,19 @@ bool AppendRGBA(DecodedImage& image, int width, int height, const std::uint8_t* 
 	}
 	bool hasTransparency = false;
 	for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+		if ((pixel & 0x3fffu) == 0 && !context.Continue()) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
 		bgra[pixel * 4] = pixels[pixel * 4 + 2];
 		bgra[pixel * 4 + 1] = pixels[pixel * 4 + 1];
 		bgra[pixel * 4 + 2] = pixels[pixel * 4];
 		bgra[pixel * 4 + 3] = pixels[pixel * 4 + 3];
 		if (hasAlphaChannel && pixels[pixel * 4 + 3] != 255) hasTransparency = true;
+	}
+	if (!context.Continue()) {
+		errorMessage = "source work was cancelled";
+		return false;
 	}
 	try {
 		DecodedFrame frame;
@@ -140,13 +158,8 @@ bool AppendRGBA(DecodedImage& image, int width, int height, const std::uint8_t* 
 		frame.delayMs = std::max(0, delayMs);
 		frame.bgra = std::move(bgra);
 		frame.hasTransparency = hasTransparency;
-		std::uint64_t currentBytes = 0;
-		for (const DecodedFrame& existing : image.frames) currentBytes += existing.bgra.size();
-		if (frame.bgra.size() > kMaxAnimationBytes || currentBytes > kMaxAnimationBytes - frame.bgra.size()) {
-			errorMessage = "animation is too large";
-			return false;
-		}
 		image.frames.push_back(std::move(frame));
+		budget.RecordAppend(pixelCount * 4);
 	} catch (const std::exception&) {
 		errorMessage = "out of memory";
 		return false;
@@ -156,7 +169,7 @@ bool AppendRGBA(DecodedImage& image, int width, int height, const std::uint8_t* 
 
 bool AppendRGBA(DecodedImage& image, int width, int height,
 	std::vector<std::uint8_t>&& pixels, int delayMs, std::string& errorMessage,
-	bool hasAlphaChannel) {
+	bool hasAlphaChannel, const WorkContext& context, AnimationFrameBudget& budget) {
 	if (!ValidDimensions(width, height, errorMessage)) return false;
 	const std::size_t byteCount = static_cast<std::size_t>(width) *
 		static_cast<std::size_t>(height) * 4;
@@ -164,11 +177,16 @@ bool AppendRGBA(DecodedImage& image, int width, int height,
 		errorMessage = "invalid decoded pixel buffer";
 		return false;
 	}
+	if (!budget.CanAppend(byteCount, errorMessage)) return false;
 	for (std::size_t offset = 0; offset < byteCount; offset += 4) {
+		if ((offset & 0xffffu) == 0 && !context.Continue()) {
+			errorMessage = "source work was cancelled";
+			return false;
+		}
 		std::swap(pixels[offset], pixels[offset + 2]);
 	}
 	return AppendBGRA(image, width, height, std::move(pixels), delayMs,
-		errorMessage, hasAlphaChannel);
+		errorMessage, hasAlphaChannel, context, budget);
 }
 
 [[maybe_unused]] bool ApplyIccProfile(std::vector<std::uint8_t>& bgra, const std::vector<std::uint8_t>& profile) {
@@ -207,8 +225,14 @@ bool AppendRGBA(DecodedImage& image, int width, int height,
 }
 
 bool ReadFile(const std::filesystem::path& filename, std::vector<std::uint8_t>& data,
-	std::string& errorMessage) {
+	std::string& errorMessage, const WorkContext& supplied) {
 	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::SourceRead);
+	const WorkContext context = ResolveWorkContext(filename,
+		SourceWorkPriority::Foreground, supplied);
+	if (!context.Continue()) {
+		errorMessage = "source work was cancelled";
+		return false;
+	}
 	std::ifstream input(filename, std::ios::binary);
 	if (!input) {
 		errorMessage = "cannot open file";
@@ -227,10 +251,23 @@ bool ReadFile(const std::filesystem::path& filename, std::vector<std::uint8_t>& 
 		errorMessage = "out of memory";
 		return false;
 	}
-	input.read(reinterpret_cast<char*>(data.data()), size);
-	if (!input) {
-		errorMessage = "cannot read file";
-		return false;
+	constexpr std::size_t readChunkBytes = 1024 * 1024;
+	std::size_t offset = 0;
+	while (offset < data.size()) {
+		if (!context.Continue()) {
+			data.clear();
+			errorMessage = "source work was cancelled";
+			return false;
+		}
+		const std::size_t amount = std::min(readChunkBytes, data.size() - offset);
+		input.read(reinterpret_cast<char*>(data.data() + offset),
+			static_cast<std::streamsize>(amount));
+		if (input.gcount() != static_cast<std::streamsize>(amount)) {
+			data.clear();
+			errorMessage = "cannot read file";
+			return false;
+		}
+		offset += amount;
 	}
 	return true;
 }
@@ -348,23 +385,23 @@ bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 		return decoder_detail::DecodeJpeg(filename, image, errorMessage, 0, 0,
 			nullptr, nullptr, context);
 	case ImageContentFormat::Png:
-		return decoder_detail::DecodeStb(filename, image, errorMessage) &&
+		return decoder_detail::DecodeStb(filename, image, errorMessage, context) &&
 			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 	case ImageContentFormat::Apng:
-		return decoder_detail::DecodeApng(filename, image, errorMessage) &&
+		return decoder_detail::DecodeApng(filename, image, errorMessage, context) &&
 			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 	case ImageContentFormat::Gif:
 #if JPEGVIEW_HAVE_GIF
-		return decoder_detail::DecodeGif(filename, image, errorMessage);
+		return decoder_detail::DecodeGif(filename, image, errorMessage, context);
 #else
-		return decoder_detail::DecodeStb(filename, image, errorMessage);
+		return decoder_detail::DecodeStb(filename, image, errorMessage, context);
 #endif
 	case ImageContentFormat::Bmp:
 	case ImageContentFormat::Tga:
-		return decoder_detail::DecodeStb(filename, image, errorMessage);
+		return decoder_detail::DecodeStb(filename, image, errorMessage, context);
 	case ImageContentFormat::WebP:
 #if JPEGVIEW_HAVE_WEBP
-		return decoder_detail::DecodeWebP(filename, image, errorMessage) &&
+		return decoder_detail::DecodeWebP(filename, image, errorMessage, context) &&
 			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 #else
 		errorMessage = "WebP content detected, but WebP support is not available in this build";
@@ -376,12 +413,12 @@ bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 		const std::string tiffError = errorMessage;
 #if JPEGVIEW_HAVE_RAW
 		image = {};
-		if (decoder_detail::DecodeRaw(filename, image, errorMessage)) return true;
+		if (decoder_detail::DecodeRaw(filename, image, errorMessage, context)) return true;
 #endif
 		errorMessage = tiffError;
 		return false;
 #elif JPEGVIEW_HAVE_RAW
-		if (decoder_detail::DecodeRaw(filename, image, errorMessage)) return true;
+		if (decoder_detail::DecodeRaw(filename, image, errorMessage, context)) return true;
 		errorMessage = "TIFF support is not available in this build";
 		return false;
 #else
@@ -391,40 +428,40 @@ bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 	}
 	case ImageContentFormat::Heif:
 #if JPEGVIEW_HAVE_HEIF
-		return decoder_detail::DecodeHeif(filename, image, errorMessage);
+		return decoder_detail::DecodeHeif(filename, image, errorMessage, context);
 #else
 		errorMessage = "HEIF content detected, but HEIF support is not available in this build";
 		return false;
 #endif
 	case ImageContentFormat::Avif:
 #if JPEGVIEW_HAVE_AVIF
-		return decoder_detail::DecodeAvif(filename, image, errorMessage);
+		return decoder_detail::DecodeAvif(filename, image, errorMessage, context);
 #elif JPEGVIEW_HAVE_HEIF
-		return decoder_detail::DecodeHeif(filename, image, errorMessage);
+		return decoder_detail::DecodeHeif(filename, image, errorMessage, context);
 #else
 		errorMessage = "AVIF content detected, but AVIF support is not available in this build";
 		return false;
 #endif
 	case ImageContentFormat::JpegXl:
 #if JPEGVIEW_HAVE_JXL
-		return decoder_detail::DecodeJxl(filename, image, errorMessage);
+		return decoder_detail::DecodeJxl(filename, image, errorMessage, context);
 #else
 		errorMessage = "JPEG XL content detected, but JPEG XL support is not available in this build";
 		return false;
 #endif
 	case ImageContentFormat::JpegXr:
 #if JPEGVIEW_HAVE_JXR
-		return decoder_detail::DecodeJxr(filename, image, errorMessage);
+		return decoder_detail::DecodeJxr(filename, image, errorMessage, context);
 #else
 		errorMessage = "JPEG XR content detected, but JPEG XR support is not available in this build";
 		return false;
 #endif
 	case ImageContentFormat::Psd:
-		return decoder_detail::DecodePsd(filename, image, errorMessage);
+		return decoder_detail::DecodePsd(filename, image, errorMessage, context);
 	case ImageContentFormat::Pnm:
-		return decoder_detail::DecodePnm(filename, image, errorMessage);
+		return decoder_detail::DecodePnm(filename, image, errorMessage, context);
 	case ImageContentFormat::Qoi:
-		return decoder_detail::DecodeQoi(filename, image, errorMessage);
+		return decoder_detail::DecodeQoi(filename, image, errorMessage, context);
 	case ImageContentFormat::Svg:
 	case ImageContentFormat::Svgz:
 		if (!decoder_detail::DecodeSvg(filename, image, errorMessage, context)) return false;
@@ -432,7 +469,7 @@ bool DecodeDetectedImageContent(const std::filesystem::path& filename,
 		return true;
 	case ImageContentFormat::Raw:
 #if JPEGVIEW_HAVE_RAW
-		return decoder_detail::DecodeRaw(filename, image, errorMessage);
+		return decoder_detail::DecodeRaw(filename, image, errorMessage, context);
 #else
 		errorMessage = "RAW content detected, but RAW support is not available in this build";
 		return false;
@@ -598,18 +635,28 @@ bool DecodeSvgForDisplay(const std::filesystem::path& filename, int targetWidth,
 
 bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage, const WorkContext& supplied) {
+	JpegCropMetadata metadata;
+	const bool success = ReadJpegCropMetadata(filename, metadata, errorMessage, supplied);
+	width = success ? metadata.mcuWidth : 0;
+	height = success ? metadata.mcuHeight : 0;
+	return success;
+}
+
+bool ReadJpegCropMetadata(const std::filesystem::path& filename,
+	JpegCropMetadata& metadata, std::string& errorMessage,
+	const WorkContext& supplied) {
 	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::Metadata);
-	width = 0;
-	height = 0;
+	metadata = {};
 	errorMessage.clear();
 	return RunWithSourceAndCpuAdmission(filename, SourceWorkPriority::Metadata,
-		supplied, errorMessage, [&filename, &width, &height, &errorMessage](
+		supplied, errorMessage, [&filename, &metadata, &errorMessage](
 			const WorkContext& context) {
 			if (!IsJpegPath(filename)) {
 				errorMessage = "invalid JPEG header";
 				return false;
 			}
-			return decoder_detail::ReadJpegMcuSizeCore(filename, width, height, errorMessage, context);
+			return decoder_detail::ReadJpegCropMetadataCore(filename, metadata,
+				errorMessage, context);
 		});
 }
 
@@ -693,21 +740,21 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	}
 	if (extension == ".gif") {
 #if JPEGVIEW_HAVE_GIF
-		return decoder_detail::DecodeGif(filename, image, errorMessage);
+		return decoder_detail::DecodeGif(filename, image, errorMessage, context);
 #else
-		return decoder_detail::DecodeStb(filename, image, errorMessage);
+		return decoder_detail::DecodeStb(filename, image, errorMessage, context);
 #endif
 	}
 	if (extension == ".apng") {
-		return decoder_detail::DecodeApng(filename, image, errorMessage) &&
+		return decoder_detail::DecodeApng(filename, image, errorMessage, context) &&
 			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 	}
 	if (extension == ".webp") {
 #if JPEGVIEW_HAVE_WEBP
-		return decoder_detail::DecodeWebP(filename, image, errorMessage) &&
+		return decoder_detail::DecodeWebP(filename, image, errorMessage, context) &&
 			ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 #else
-		return decoder_detail::DecodeStb(filename, image, errorMessage);
+		return decoder_detail::DecodeStb(filename, image, errorMessage, context);
 #endif
 	}
 	if (extension == ".tif" || extension == ".tiff") {
@@ -720,7 +767,7 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	}
 	if (extension == ".heic" || extension == ".heif" || extension == ".hif") {
 #if JPEGVIEW_HAVE_HEIF
-		return decoder_detail::DecodeHeif(filename, image, errorMessage);
+		return decoder_detail::DecodeHeif(filename, image, errorMessage, context);
 #else
 		errorMessage = "HEIF support is not available in this build";
 		return false;
@@ -728,9 +775,9 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	}
 	if (extension == ".avif" || extension == ".avifs") {
 #if JPEGVIEW_HAVE_AVIF
-		return decoder_detail::DecodeAvif(filename, image, errorMessage);
+		return decoder_detail::DecodeAvif(filename, image, errorMessage, context);
 #elif JPEGVIEW_HAVE_HEIF
-		return decoder_detail::DecodeHeif(filename, image, errorMessage);
+		return decoder_detail::DecodeHeif(filename, image, errorMessage, context);
 #else
 		errorMessage = "AVIF support is not available in this build";
 		return false;
@@ -738,7 +785,7 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	}
 	if (extension == ".jxl") {
 #if JPEGVIEW_HAVE_JXL
-		return decoder_detail::DecodeJxl(filename, image, errorMessage);
+		return decoder_detail::DecodeJxl(filename, image, errorMessage, context);
 #else
 		errorMessage = "JPEG XL support is not available in this build";
 		return false;
@@ -746,16 +793,18 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	}
 	if (extension == ".jxr" || extension == ".wdp" || extension == ".hdp" || extension == ".mdp") {
 #if JPEGVIEW_HAVE_JXR
-		return decoder_detail::DecodeJxr(filename, image, errorMessage);
+		return decoder_detail::DecodeJxr(filename, image, errorMessage, context);
 #else
 		errorMessage = "JPEG XR support is not available in this build";
 		return false;
 #endif
 	}
-	if (extension == ".psd") return decoder_detail::DecodePsd(filename, image, errorMessage);
+	if (extension == ".psd") {
+		return decoder_detail::DecodePsd(filename, image, errorMessage, context);
+	}
 	if (IsRawPath(filename)) {
 #if JPEGVIEW_HAVE_RAW
-		return decoder_detail::DecodeRaw(filename, image, errorMessage);
+		return decoder_detail::DecodeRaw(filename, image, errorMessage, context);
 #else
 		errorMessage = "RAW support is not available in this build";
 		return false;
@@ -763,10 +812,10 @@ bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	}
 	if (extension == ".pnm" || extension == ".pbm" || extension == ".pgm" ||
 		 extension == ".ppm" || extension == ".pam") {
-		return decoder_detail::DecodePnm(filename, image, errorMessage);
+		return decoder_detail::DecodePnm(filename, image, errorMessage, context);
 	}
-	if (extension == ".qoi") return decoder_detail::DecodeQoi(filename, image, errorMessage);
-	return decoder_detail::DecodeStb(filename, image, errorMessage) &&
+	if (extension == ".qoi") return decoder_detail::DecodeQoi(filename, image, errorMessage, context);
+	return decoder_detail::DecodeStb(filename, image, errorMessage, context) &&
 		ApplyEmbeddedExifOrientation(filename, image, errorMessage, context);
 		});
 }

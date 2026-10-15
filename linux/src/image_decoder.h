@@ -29,6 +29,14 @@ struct DecodedImage {
 	bool isSvg = false;
 };
 
+struct JpegCropMetadata {
+	int storedWidth = 0;
+	int storedHeight = 0;
+	int mcuWidth = 0;
+	int mcuHeight = 0;
+	int exifOrientation = 1;
+};
+
 bool DecodeImage(const std::filesystem::path& filename, DecodedImage& image,
 	std::string& errorMessage, const WorkContext& context = {});
 
@@ -59,6 +67,12 @@ bool DecodeSvgForDisplay(const std::filesystem::path& filename,
 // sampling factors. Lossless crop origins and interior boundaries use these.
 bool ReadJpegMcuSize(const std::filesystem::path& filename, int& width, int& height,
 	std::string& errorMessage, const WorkContext& context = {});
+
+// Reads the JPEG's stored pixel geometry, EXIF orientation, and raw MCU size
+// for mapping a displayed crop selection to the coordinates used by jpegtran.
+bool ReadJpegCropMetadata(const std::filesystem::path& filename,
+	JpegCropMetadata& metadata, std::string& errorMessage,
+	const WorkContext& context = {});
 
 // Uses libjpeg's native DCT scaling to decode the smallest available image
 // that is still at least the requested size. sourceWidth/sourceHeight always

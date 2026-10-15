@@ -239,6 +239,58 @@ SelectionRect CropSelectionModel::AlignToMcu(const SelectionRect& selection,
 	return aligned;
 }
 
+SelectionRect CropSelectionModel::ToRawJpegMcuRect(
+	const SelectionRect& displayedSelection, int storedWidth, int storedHeight,
+	int exifOrientation, int mcuWidth, int mcuHeight) {
+	if (storedWidth <= 0 || storedHeight <= 0 || exifOrientation < 1 ||
+		exifOrientation > 8 || !displayedSelection.Valid()) return {};
+	const bool swapsAxes = exifOrientation >= 5;
+	const int displayedWidth = swapsAxes ? storedHeight : storedWidth;
+	const int displayedHeight = swapsAxes ? storedWidth : storedHeight;
+	if (displayedSelection.right > displayedWidth ||
+		displayedSelection.bottom > displayedHeight) return {};
+
+	SelectionRect raw;
+	switch (exifOrientation) {
+	case 2:
+		raw = {storedWidth - displayedSelection.right, displayedSelection.top,
+			storedWidth - displayedSelection.left, displayedSelection.bottom};
+		break;
+	case 3:
+		raw = {storedWidth - displayedSelection.right,
+			storedHeight - displayedSelection.bottom,
+			storedWidth - displayedSelection.left,
+			storedHeight - displayedSelection.top};
+		break;
+	case 4:
+		raw = {displayedSelection.left, storedHeight - displayedSelection.bottom,
+			displayedSelection.right, storedHeight - displayedSelection.top};
+		break;
+	case 5:
+		raw = {displayedSelection.top, displayedSelection.left,
+			displayedSelection.bottom, displayedSelection.right};
+		break;
+	case 6:
+		raw = {displayedSelection.top, storedHeight - displayedSelection.right,
+			displayedSelection.bottom, storedHeight - displayedSelection.left};
+		break;
+	case 7:
+		raw = {storedWidth - displayedSelection.bottom,
+			storedHeight - displayedSelection.right,
+			storedWidth - displayedSelection.top,
+			storedHeight - displayedSelection.left};
+		break;
+	case 8:
+		raw = {storedWidth - displayedSelection.bottom, displayedSelection.left,
+			storedWidth - displayedSelection.top, displayedSelection.right};
+		break;
+	default:
+		raw = displayedSelection;
+		break;
+	}
+	return AlignToMcu(raw, storedWidth, storedHeight, mcuWidth, mcuHeight);
+}
+
 SelectionRect CropSelectionModel::BuildNewSelection(int imageX, int imageY, double zoom) const {
 	if (mode_ == CropSelectionMode::FixedSize) {
 		const double safeZoom = std::isfinite(zoom) && zoom > 0.0 ? zoom : 1.0;

@@ -11,9 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <limits>
-#include <sys/mman.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -21,57 +20,76 @@ extern "C" {
 #include <jpeglib.h>
 }
 
+// JCS_EXT_BGRA is an enum value, so detect it through libjpeg's alpha
+// extension macro instead of testing the color-space name with #ifdef.
+#if defined(JCS_ALPHA_EXTENSIONS)
+#define JPEGVIEW_LIBJPEG_HAS_BGRA 1
+#else
+#define JPEGVIEW_LIBJPEG_HAS_BGRA 0
+#endif
+
 namespace jpegview_linux::decoder_detail {
 
-struct MappedInput {
-	void* data = MAP_FAILED;
-	std::size_t size = 0;
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+namespace {
+JpegInputOpenedTestHook jpegInputOpenedTestHook = nullptr;
+void* jpegInputOpenedTestContext = nullptr;
+}
 
-	MappedInput() = default;
-	MappedInput(const MappedInput&) = delete;
-	MappedInput& operator=(const MappedInput&) = delete;
-	~MappedInput() { Reset(); }
+void SetJpegInputOpenedTestHookForTesting(JpegInputOpenedTestHook hook, void* context) {
+	jpegInputOpenedTestHook = hook;
+	jpegInputOpenedTestContext = context;
+}
+#endif
+
+struct FileInput {
+	std::FILE* file = nullptr;
+
+	FileInput() = default;
+	FileInput(const FileInput&) = delete;
+	FileInput& operator=(const FileInput&) = delete;
+	~FileInput() { Reset(); }
 
 	void Reset() noexcept {
-		if (data != MAP_FAILED) (void)::munmap(data, size);
-		data = MAP_FAILED;
-		size = 0;
+		if (file != nullptr) (void)std::fclose(file);
+		file = nullptr;
 	}
 };
 
-bool MapInput(const std::filesystem::path& filename, MappedInput& input,
-	bool sequentialRead, std::string& errorMessage) {
-	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::SourceMap);
-	PerfDiagnostics::Instance().Record(PerfMetric::SourceRead);
+bool OpenInput(const std::filesystem::path& filename, FileInput& input,
+	std::string& errorMessage) {
+	PerfScopedTimer timer(PerfDiagnostics::Instance(), PerfMetric::SourceOpen);
 	const int descriptor = ::open(filename.c_str(), O_RDONLY | O_CLOEXEC);
 	if (descriptor < 0) {
 		errorMessage = "cannot open file";
 		return false;
 	}
 	struct stat status{};
-	if (::fstat(descriptor, &status) != 0 || status.st_size <= 0 ||
-		static_cast<std::uintmax_t>(status.st_size) >
-			static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
+	if (::fstat(descriptor, &status) != 0) {
 		::close(descriptor);
-		errorMessage = status.st_size == 0 ? "empty file" : "cannot read file";
+		errorMessage = "cannot read file";
 		return false;
 	}
-	input.size = static_cast<std::size_t>(status.st_size);
-	input.data = ::mmap(nullptr, input.size, PROT_READ, MAP_PRIVATE, descriptor, 0);
-	::close(descriptor);
-	if (input.data == MAP_FAILED) {
-		input.size = 0;
-		errorMessage = "cannot map file";
+	if (status.st_size <= 0) {
+		::close(descriptor);
+		errorMessage = "empty file";
 		return false;
 	}
-	// A full entropy decode consumes the compressed stream from start to end, while
-	// a dimension probe stops near the header. Avoid pulling the bodies of many
-	// large neighboring files into the page cache during prefetch planning.
-	(void)::madvise(input.data, input.size, sequentialRead ? MADV_SEQUENTIAL : MADV_RANDOM);
+	input.file = ::fdopen(descriptor, "rb");
+	if (input.file == nullptr) {
+		::close(descriptor);
+		errorMessage = "cannot open file stream";
+		return false;
+	}
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	if (jpegInputOpenedTestHook != nullptr) {
+		jpegInputOpenedTestHook(filename, jpegInputOpenedTestContext);
+	}
+#endif
 	return true;
 }
 
-void UnmapInput(MappedInput& input) {
+void CloseInput(FileInput& input) {
 	input.Reset();
 }
 
@@ -88,6 +106,22 @@ void JpegErrorExit(j_common_ptr common) {
 }
 
 void SuppressJpegMessage(j_common_ptr) {}
+
+void ConvertCmykSampleToBgra(std::uint8_t* sample, bool adobeInverted) {
+	const unsigned cyan = sample[0];
+	const unsigned magenta = sample[1];
+	const unsigned yellow = sample[2];
+	const unsigned black = sample[3];
+	const auto combine = [adobeInverted, black](unsigned colorant) {
+		const unsigned ink = adobeInverted ? colorant : 255u - colorant;
+		const unsigned blackInk = adobeInverted ? black : 255u - black;
+		return static_cast<std::uint8_t>((ink * blackInk + 127u) / 255u);
+	};
+	sample[0] = combine(yellow);
+	sample[1] = combine(magenta);
+	sample[2] = combine(cyan);
+	sample[3] = 255;
+}
 
 int ReadJpegExifOrientation(const jpeg_decompress_struct& decoder,
 	const WorkContext& context) {
@@ -116,8 +150,8 @@ bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height
 		errorMessage = "JPEG metadata read was cancelled";
 		return false;
 	}
-	MappedInput input;
-	if (!MapInput(filename, input, false, errorMessage)) return false;
+	FileInput input;
+	if (!OpenInput(filename, input, errorMessage)) return false;
 	JpegErrorManager error{};
 	jpeg_decompress_struct decoder{};
 	volatile bool created = false;
@@ -127,19 +161,19 @@ bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height
 	// libjpeg reports failures through longjmp, so this branch must explicitly release its C resources.
 	if (setjmp(error.jump) != 0) {
 		if (created) jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = error.message[0] == '\0' ? "invalid JPEG header" : error.message;
 		return false;
 	}
 	jpeg_create_decompress(&decoder);
 	created = true;
-	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
+	jpeg_stdio_src(&decoder, input.file);
 	jpeg_save_markers(&decoder, JPEG_APP0 + 1, 0xFFFFu);
 	const bool headerValid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK;
 	const int orientation = headerValid ? ReadJpegExifOrientation(decoder, context) : 1;
 	if (!context.Continue()) {
 		jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = "JPEG metadata read was cancelled";
 		return false;
 	}
@@ -153,7 +187,7 @@ bool ReadJpegSize(const std::filesystem::path& filename, int& width, int& height
 		height = ExifOrientationSwapsAxes(orientation) ? storedWidth : storedHeight;
 	}
 	jpeg_destroy_decompress(&decoder);
-	UnmapInput(input);
+	CloseInput(input);
 	if (!valid && errorMessage.empty()) errorMessage = "invalid JPEG header";
 	return valid;
 }
@@ -165,12 +199,12 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		errorMessage = "JPEG decode was cancelled";
 		return false;
 	}
-	MappedInput input;
-	if (!MapInput(filename, input, true, errorMessage)) return false;
+	FileInput input;
+	if (!OpenInput(filename, input, errorMessage)) return false;
 	JpegErrorManager error{};
 	jpeg_decompress_struct decoder{};
 	volatile bool created = false;
-#ifdef JCS_EXT_BGRA
+#if JPEGVIEW_LIBJPEG_HAS_BGRA
 	DecodedFrame* volatile directFrame = nullptr;
 #else
 	volatile std::uint8_t* pixels = nullptr;
@@ -181,25 +215,25 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	// Keep libjpeg-owned state and the volatile pixel owner explicit across its longjmp error path.
 	if (setjmp(error.jump) != 0) {
 		if (created) jpeg_destroy_decompress(&decoder);
-#ifdef JCS_EXT_BGRA
+#if JPEGVIEW_LIBJPEG_HAS_BGRA
 		delete const_cast<DecodedFrame*>(directFrame);
 #else
 		std::free(const_cast<std::uint8_t*>(pixels));
 #endif
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = error.message[0] == '\0' ? "JPEG decoder failed" : error.message;
 		return false;
 	}
 
 	jpeg_create_decompress(&decoder);
 	created = true;
-	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
+	jpeg_stdio_src(&decoder, input.file);
 	jpeg_save_markers(&decoder, JPEG_APP0 + 1, 0xFFFFu);
 	const bool headerValid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK;
 	const int orientation = headerValid ? ReadJpegExifOrientation(decoder, context) : 1;
 	if (!context.Continue()) {
 		jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = "JPEG decode was cancelled";
 		return false;
 	}
@@ -207,12 +241,15 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		!ValidDimensions(static_cast<int>(decoder.image_width),
 			static_cast<int>(decoder.image_height), errorMessage)) {
 		jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		if (errorMessage.empty()) errorMessage = "invalid JPEG header";
 		return false;
 	}
 	const int storedWidth = static_cast<int>(decoder.image_width);
 	const int storedHeight = static_cast<int>(decoder.image_height);
+	const bool cmykSource = decoder.jpeg_color_space == JCS_CMYK ||
+		decoder.jpeg_color_space == JCS_YCCK;
+	const bool adobeInvertedCmyk = decoder.saw_Adobe_marker != FALSE;
 	if (sourceWidth != nullptr) {
 		*sourceWidth = ExifOrientationSwapsAxes(orientation) ? storedHeight : storedWidth;
 	}
@@ -237,17 +274,17 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		}
 	}
 
-#ifdef JCS_EXT_BGRA
-	decoder.out_color_space = JCS_EXT_BGRA;
-	constexpr int outputComponents = 4;
+#if JPEGVIEW_LIBJPEG_HAS_BGRA
+	decoder.out_color_space = cmykSource ? JCS_CMYK : JCS_EXT_BGRA;
+	const int outputComponents = 4;
 #else
-	decoder.out_color_space = JCS_RGB;
-	constexpr int outputComponents = 3;
+	decoder.out_color_space = cmykSource ? JCS_CMYK : JCS_RGB;
+	const int outputComponents = cmykSource ? 4 : 3;
 #endif
 	jpeg_start_decompress(&decoder);
 	if (!context.Continue()) {
 		jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = "JPEG decode was cancelled";
 		return false;
 	}
@@ -255,7 +292,7 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	const int height = static_cast<int>(decoder.output_height);
 	const std::size_t rowBytes = static_cast<std::size_t>(width) * outputComponents;
 	const std::size_t byteCount = rowBytes * static_cast<std::size_t>(height);
-#ifdef JCS_EXT_BGRA
+#if JPEGVIEW_LIBJPEG_HAS_BGRA
 	try {
 		directFrame = new DecodedFrame();
 		DecodedFrame* frame = const_cast<DecodedFrame*>(directFrame);
@@ -266,7 +303,7 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		delete const_cast<DecodedFrame*>(directFrame);
 		directFrame = nullptr;
 		jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = "out of memory";
 		return false;
 	}
@@ -274,7 +311,7 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	pixels = static_cast<std::uint8_t*>(std::malloc(byteCount));
 	if (pixels == nullptr) {
 		jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = "out of memory";
 		return false;
 	}
@@ -283,16 +320,16 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		if ((decoder.output_scanline & 15u) == 0 && !context.Continue()) {
 			jpeg_destroy_decompress(&decoder);
 			created = false;
-#ifdef JCS_EXT_BGRA
+#if JPEGVIEW_LIBJPEG_HAS_BGRA
 			delete const_cast<DecodedFrame*>(directFrame);
 #else
 			std::free(const_cast<std::uint8_t*>(pixels));
 #endif
-			UnmapInput(input);
+			CloseInput(input);
 			errorMessage = "JPEG decode was cancelled";
 			return false;
 		}
-#ifdef JCS_EXT_BGRA
+#if JPEGVIEW_LIBJPEG_HAS_BGRA
 		DecodedFrame* frame = const_cast<DecodedFrame*>(directFrame);
 		JSAMPROW row = frame->bgra.data() +
 			static_cast<std::size_t>(decoder.output_scanline) * rowBytes;
@@ -306,22 +343,38 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 	if (!context.Continue()) {
 		jpeg_destroy_decompress(&decoder);
 		created = false;
-#ifdef JCS_EXT_BGRA
+#if JPEGVIEW_LIBJPEG_HAS_BGRA
 		delete const_cast<DecodedFrame*>(directFrame);
 #else
 		std::free(const_cast<std::uint8_t*>(pixels));
 #endif
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = "JPEG decode was cancelled";
 		return false;
 	}
 	jpeg_destroy_decompress(&decoder);
 	created = false;
-	UnmapInput(input);
+	CloseInput(input);
 
-#ifdef JCS_EXT_BGRA
+#if JPEGVIEW_LIBJPEG_HAS_BGRA
 	try {
 		DecodedFrame* frame = const_cast<DecodedFrame*>(directFrame);
+		if (cmykSource) {
+			for (int y = 0; y < frame->height; ++y) {
+				if ((y & 15) == 0 && !context.Continue()) {
+					delete frame;
+				directFrame = nullptr;
+					errorMessage = "JPEG decode was cancelled";
+					return false;
+				}
+				std::uint8_t* row = frame->bgra.data() +
+					static_cast<std::size_t>(y) * frame->width * 4;
+				for (int x = 0; x < frame->width; ++x) {
+					ConvertCmykSampleToBgra(row + static_cast<std::size_t>(x) * 4,
+						adobeInvertedCmyk);
+				}
+			}
+		}
 		if (!context.Continue()) {
 			delete frame;
 			directFrame = nullptr;
@@ -365,10 +418,16 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 		}
 		for (int x = 0; x < width; ++x) {
 			const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
-			bgra[pixel * 4] = pixels[pixel * 3 + 2];
-			bgra[pixel * 4 + 1] = pixels[pixel * 3 + 1];
-			bgra[pixel * 4 + 2] = pixels[pixel * 3];
-			bgra[pixel * 4 + 3] = 255;
+			if (cmykSource) {
+				std::copy_n(const_cast<const std::uint8_t*>(pixels) + pixel * 4,
+					4, bgra.data() + pixel * 4);
+				ConvertCmykSampleToBgra(bgra.data() + pixel * 4, adobeInvertedCmyk);
+			} else {
+				bgra[pixel * 4] = pixels[pixel * 3 + 2];
+				bgra[pixel * 4 + 1] = pixels[pixel * 3 + 1];
+				bgra[pixel * 4 + 2] = pixels[pixel * 3];
+				bgra[pixel * 4 + 3] = 255;
+			}
 		}
 	}
 	if (!context.Continue()) {
@@ -398,8 +457,8 @@ bool DecodeJpeg(const std::filesystem::path& filename, DecodedImage& image,
 }
 
 
-bool ReadJpegMcuSizeCore(const std::filesystem::path& filename,
-	int& width, int& height, std::string& errorMessage,
+bool ReadJpegCropMetadataCore(const std::filesystem::path& filename,
+	JpegCropMetadata& metadata, std::string& errorMessage,
 	const WorkContext& context) {
 	if (!context.Continue()) {
 		errorMessage = "JPEG metadata read was cancelled";
@@ -407,46 +466,60 @@ bool ReadJpegMcuSizeCore(const std::filesystem::path& filename,
 	}
 	if (IsArchiveMemberLocation(filename)) {
 		return WithArchiveMemberFile(filename,
-			[&width, &height, context](const std::filesystem::path& temporary,
+			[&metadata, context](const std::filesystem::path& temporary,
 				std::string& decodeError) {
-				return ReadJpegMcuSizeCore(temporary, width, height,
+				return ReadJpegCropMetadataCore(temporary, metadata,
 					decodeError, context);
 			}, errorMessage, nullptr, [&context] { return context.Continue(); });
 	}
-	MappedInput input;
-	if (!MapInput(filename, input, false, errorMessage)) return false;
+	FileInput input;
+	if (!OpenInput(filename, input, errorMessage)) return false;
 	JpegErrorManager error{};
 	jpeg_decompress_struct decoder{};
 	volatile bool created = false;
 	decoder.err = jpeg_std_error(&error.base);
 	error.base.error_exit = JpegErrorExit;
 	error.base.output_message = SuppressJpegMessage;
-	// libjpeg reports malformed headers by longjmp; clean up the decoder and mapping on that path.
+	// libjpeg reports malformed headers by longjmp; clean up the decoder and stream on that path.
 	if (setjmp(error.jump) != 0) {
 		if (created) jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = error.message[0] == '\0' ? "invalid JPEG header" : error.message;
 		return false;
 	}
 	jpeg_create_decompress(&decoder);
 	created = true;
-	jpeg_mem_src(&decoder, static_cast<const unsigned char*>(input.data), input.size);
+	jpeg_save_markers(&decoder, JPEG_APP0 + 1, 0xFFFFu);
+	jpeg_stdio_src(&decoder, input.file);
 	const bool headerValid = jpeg_read_header(&decoder, TRUE) == JPEG_HEADER_OK;
 	if (!context.Continue()) {
 		jpeg_destroy_decompress(&decoder);
-		UnmapInput(input);
+		CloseInput(input);
 		errorMessage = "JPEG metadata read was cancelled";
 		return false;
 	}
 	const bool valid = headerValid && decoder.max_h_samp_factor > 0 &&
-		decoder.max_v_samp_factor > 0;
+		decoder.max_v_samp_factor > 0 && decoder.image_width > 0 &&
+		decoder.image_height > 0 &&
+		decoder.image_width <= static_cast<JDIMENSION>(std::numeric_limits<int>::max()) &&
+		decoder.image_height <= static_cast<JDIMENSION>(std::numeric_limits<int>::max());
 	if (valid) {
-		width = decoder.max_h_samp_factor * DCTSIZE;
-		height = decoder.max_v_samp_factor * DCTSIZE;
+		metadata.storedWidth = static_cast<int>(decoder.image_width);
+		metadata.storedHeight = static_cast<int>(decoder.image_height);
+		metadata.mcuWidth = decoder.max_h_samp_factor * DCTSIZE;
+		metadata.mcuHeight = decoder.max_v_samp_factor * DCTSIZE;
+		metadata.exifOrientation = ReadJpegExifOrientation(decoder, context);
+	}
+	if (!context.Continue()) {
+		jpeg_destroy_decompress(&decoder);
+		CloseInput(input);
+		metadata = {};
+		errorMessage = "JPEG metadata read was cancelled";
+		return false;
 	}
 	jpeg_destroy_decompress(&decoder);
-	UnmapInput(input);
-	if (!valid) errorMessage = "invalid JPEG sampling factors";
+	CloseInput(input);
+	if (!valid) errorMessage = "invalid JPEG crop metadata";
 	return valid;
 }
 

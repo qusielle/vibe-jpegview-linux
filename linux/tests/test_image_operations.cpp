@@ -432,6 +432,34 @@ void TestCropSelectionViewMappingAndHitTesting() {
 		"lossless crop did not trim a partial right-edge MCU like the Windows implementation");
 	Expect(!CropSelectionModel::AlignToMcu(SelectionRect{96, 0, 100, 8},
 		100, 80, 16, 8).Valid(), "lossless crop accepted a rectangle trimmed to zero width");
+
+	struct OrientedCropCase {
+		int orientation;
+		SelectionRect displayed;
+	};
+	const std::vector<OrientedCropCase> orientedCropCases = {
+		{1, {20, 19, 45, 30}},
+		{2, {51, 19, 76, 30}},
+		{3, {51, 34, 76, 45}},
+		{4, {20, 34, 45, 45}},
+		{5, {19, 20, 30, 45}},
+		{6, {34, 20, 45, 45}},
+		{7, {34, 51, 45, 76}},
+		{8, {19, 51, 30, 76}},
+	};
+	for (const OrientedCropCase& cropCase : orientedCropCases) {
+		const SelectionRect raw = CropSelectionModel::ToRawJpegMcuRect(
+			cropCase.displayed, 96, 64, cropCase.orientation, 16, 16);
+		Expect(raw.left == 16 && raw.top == 16 && raw.right == 48 && raw.bottom == 32,
+			"EXIF orientation " + std::to_string(cropCase.orientation) +
+				" did not map a displayed crop to its raw MCU bounds");
+	}
+	Expect(!CropSelectionModel::ToRawJpegMcuRect(
+		SelectionRect{0, 0, 10, 10}, 96, 64, 0, 16, 16).Valid(),
+		"lossless crop accepted an invalid EXIF orientation");
+	Expect(!CropSelectionModel::ToRawJpegMcuRect(
+		SelectionRect{60, 0, 65, 8}, 96, 64, 6, 16, 16).Valid(),
+		"lossless crop accepted displayed bounds outside a swapped-axis image");
 }
 
 void TestImageResizeFiltersAndLimits() {

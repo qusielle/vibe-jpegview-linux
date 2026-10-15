@@ -247,6 +247,8 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 
 	std::mutex reprioritizeMutex;
 	std::condition_variable reprioritizeChanged;
+	std::mutex reprioritizeCallbackMutex;
+	std::condition_variable reprioritizeCallbackChanged;
 	bool firstDecodeStarted = false;
 	bool releaseFirstDecode = false;
 	std::atomic<int> firstCallbacks{0};
@@ -266,7 +268,11 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 		});
 	reprioritized.Prefetch(files, 2, 1, 1,
 		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
-			++firstCallbacks;
+			{
+				std::lock_guard<std::mutex> lock(reprioritizeCallbackMutex);
+				++firstCallbacks;
+			}
+			reprioritizeCallbackChanged.notify_all();
 		});
 	{
 		std::unique_lock<std::mutex> lock(reprioritizeMutex);
@@ -278,7 +284,11 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	// Its in-flight decode must be retained and delivered to the newest batch.
 	reprioritized.Prefetch(files, 4, -1, 1,
 		[&](const fs::path&, const jpegview_linux::DecodedImageCache::ImagePtr&) {
-			++latestCallbacks;
+			{
+				std::lock_guard<std::mutex> lock(reprioritizeCallbackMutex);
+				++latestCallbacks;
+			}
+			reprioritizeCallbackChanged.notify_all();
 		});
 	{
 		std::lock_guard<std::mutex> lock(reprioritizeMutex);
@@ -287,6 +297,12 @@ void TestDecodedImageCacheAndBackgroundPrefetch() {
 	reprioritizeChanged.notify_all();
 	Expect(reprioritized.WaitUntilIdle(std::chrono::seconds(2)),
 		"reprioritized decoded prefetch did not finish");
+	{
+		std::unique_lock<std::mutex> lock(reprioritizeCallbackMutex);
+		Expect(reprioritizeCallbackChanged.wait_for(lock, std::chrono::seconds(2), [&] {
+			return firstCallbacks.load() != 0 || latestCallbacks.load() != 0;
+		}), "reprioritized decode returned idle before delivering its owner callback");
+	}
 	Expect(retainedDecodeCount == 1 && firstCallbacks == 0 && latestCallbacks == 1 &&
 		reprioritized.Find(files[3]) != nullptr,
 		"direction change discarded, duplicated, or misdelivered a useful in-flight decode");

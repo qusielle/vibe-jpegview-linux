@@ -1,9 +1,24 @@
 #include "test_harness.h"
 #include "test_support.h"
 #include "image_metadata_reader.h"
+#include "image_decoder_internal.h"
+#include "external_commands.h"
+#include "external_process.h"
+#include "crop_selection_model.h"
 
 #include <array>
+#include <cerrno>
+#include <csignal>
+#include <cstring>
+#include <cstdio>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <thread>
 #include <zlib.h>
+
+extern "C" {
+#include <jpeglib.h>
+}
 
 #if JPEGVIEW_HAVE_TIFF
 extern "C" {
@@ -12,6 +27,54 @@ extern "C" {
 #endif
 
 namespace {
+
+void TestOpenWithMimeMappingsForSupportedFormats() {
+	const std::vector<std::pair<std::string, std::string>> formats = {
+		{".jpe", "image/jpeg"}, {".apng", "image/apng"},
+		{".pbm", "image/x-portable-bitmap"}, {".pam", "image/x-portable-arbitrarymap"},
+		{".qoi", "image/qoi"}, {".tif", "image/tiff"}, {".tiff", "image/tiff"},
+		{".heic", "image/heif"}, {".heif", "image/heif"}, {".hif", "image/heif"},
+		{".avif", "image/avif"}, {".avifs", "image/avif"}, {".jxl", "image/jxl"},
+		{".jxr", "image/jxr"}, {".wdp", "image/jxr"}, {".hdp", "image/jxr"},
+		{".mdp", "image/jxr"}, {".kra", "application/x-krita"},
+		{".pef", "image/x-pentax-pef"}, {".dng", "image/x-adobe-dng"},
+		{".crw", "image/x-canon-crw"}, {".nef", "image/x-nikon-nef"},
+		{".cr2", "image/x-canon-cr2"}, {".mrw", "image/x-minolta-mrw"},
+		{".rw2", "image/x-panasonic-rw2"}, {".orf", "image/x-olympus-orf"},
+		{".x3f", "image/x-sigma-x3f"}, {".arw", "image/x-sony-arw"},
+		{".kdc", "image/x-kodak-kdc"}, {".nrw", "image/x-nikon-nrw"},
+		{".dcr", "image/x-kodak-dcr"}, {".sr2", "image/x-sony-sr2"},
+		{".raf", "image/x-fuji-raf"}, {".cr3", "image/x-canon-cr3"},
+		{".raw", "image/x-panasonic-rw"},
+		{".kc2", "image/x-dcraw"}, {".erf", "image/x-dcraw"},
+		{".3fr", "image/x-dcraw"}, {".mef", "image/x-dcraw"},
+		{".mos", "image/x-dcraw"}, {".mdc", "image/x-dcraw"},
+		{".iiq", "image/x-dcraw"}, {".rwl", "image/x-dcraw"},
+	};
+	TemporaryDirectory temporary;
+	const fs::path dataHome = temporary.path() / "data";
+	fs::create_directories(dataHome / "applications");
+	fs::create_directories(temporary.path() / "system");
+	ScopedEnvironment dataHomeEnvironment("XDG_DATA_HOME", dataHome.string());
+	ScopedEnvironment dataDirsEnvironment("XDG_DATA_DIRS", (temporary.path() / "system").string());
+	WriteText(dataHome / "applications" / "all-images.desktop",
+		"[Desktop Entry]\nType=Application\nName=Image Viewer\nExec=test-viewer %f\nMimeType=*/*;\n");
+	for (const auto& format : formats) {
+		Expect(jpegview_linux::IsSupportedImagePath("image" + format.first) &&
+			jpegview_linux::MimeTypeForExtension(format.first) == format.second,
+			"supported format has no correct Open-with MIME mapping: " + format.first);
+		const auto applications = jpegview_linux::DiscoverOpenWithApplications(format.first);
+		Expect(applications.size() == 1 && applications.front().name == "Image Viewer",
+			"matching desktop application was not discovered for " + format.first);
+	}
+	Expect(jpegview_linux::MimeTypeForExtension(".unknown").empty() &&
+		jpegview_linux::MimeTypeForExtension("").empty() &&
+		jpegview_linux::DiscoverOpenWithApplications(".unknown").empty(),
+		"unknown image suffix acquired an Open-with MIME mapping");
+	Expect(jpegview_linux::MimeTypeMatches("image/heic;", "image/heif") &&
+		jpegview_linux::MimeTypeMatches("image/heif;", "image/heic"),
+		"HEIC and HEIF MIME aliases did not match desktop applications");
+}
 
 std::vector<std::uint8_t> MakeSvgz(const std::string& document) {
 	z_stream stream{};
@@ -506,6 +569,39 @@ void TestImageWriterDecoderRoundTrips() {
 		Expect(decoded.frames.size() == 1 && decoded.frames.front().width == format.dimension &&
 			decoded.frames.front().height == format.dimension,
 			"optional format returned incorrect decoded dimensions");
+		const auto expectCancelled = [&](auto decoder, int cancelAt, const char* codec) {
+			int checks = 0;
+			const jpegview_linux::WorkContext context = jpegview_linux::MakePathWorkContext(
+				filename, jpegview_linux::SourceWorkPriority::Foreground, [&] {
+					return ++checks < cancelAt;
+				});
+			DecodedImage partial;
+			std::string cancellationError;
+			Expect(!decoder(filename, partial, cancellationError, context) &&
+				cancellationError == "source work was cancelled" && checks == cancelAt &&
+				partial.frames.empty(),
+				std::string(codec) + " decoder did not stop cleanly at its cancellation checkpoint");
+		};
+#if JPEGVIEW_HAVE_WEBP
+		if (std::string(format.extension) == ".webp") {
+			expectCancelled(jpegview_linux::decoder_detail::DecodeWebP, 6, "WebP");
+		}
+#endif
+#if JPEGVIEW_HAVE_HEIF
+		if (std::string(format.extension) == ".heic") {
+			expectCancelled(jpegview_linux::decoder_detail::DecodeHeif, 2, "HEIF");
+		}
+#endif
+#if JPEGVIEW_HAVE_AVIF
+		if (std::string(format.extension) == ".avif") {
+			expectCancelled(jpegview_linux::decoder_detail::DecodeAvif, 2, "AVIF");
+		}
+#endif
+#if JPEGVIEW_HAVE_JXL
+		if (std::string(format.extension) == ".jxl") {
+			expectCancelled(jpegview_linux::decoder_detail::DecodeJxl, 4, "JPEG XL");
+		}
+#endif
 	}
 
 	const fs::path unknown = temporary.path() / "image.unknown";
@@ -518,6 +614,62 @@ void TestImageWriterDecoderRoundTrips() {
 	Expect(!jpegview_linux::WriteImage(temporary.path() / "invalid.png", pixels.data(), 0, 2, options, error),
 		"invalid dimensions were accepted by the writer");
 	Expect(!error.empty(), "invalid dimensions did not produce an error message");
+}
+
+void TestStbRejectsOversizedHeadersBeforePixelDecode() {
+	TemporaryDirectory temporary;
+	for (const auto& dimensions : {std::make_pair(65536u, 1u),
+		std::make_pair(16384u, 16384u)}) {
+		std::vector<std::uint8_t> png = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+		std::vector<std::uint8_t> header;
+		for (const std::uint32_t value : {dimensions.first, dimensions.second}) {
+			header.insert(header.end(), {static_cast<std::uint8_t>(value >> 24),
+				static_cast<std::uint8_t>(value >> 16),
+				static_cast<std::uint8_t>(value >> 8), static_cast<std::uint8_t>(value)});
+		}
+		header.insert(header.end(), {8, 2, 0, 0, 0});
+		AppendPngChunk(png, "IHDR", header);
+		AppendPngChunk(png, "IEND", {});
+		const fs::path filename = temporary.path() / "oversized.png";
+		WriteBytes(filename, png);
+		DecodedImage decoded;
+		std::string error;
+		Expect(!jpegview_linux::decoder_detail::DecodeStb(filename, decoded, error) &&
+			decoded.frames.empty() && error == (dimensions.first > 65535 ?
+				"image dimensions are not supported" : "image is too large"),
+			"stb decoded the pixel payload before applying the viewer's dimension limits: " + error);
+	}
+}
+
+void TestStbDecodeStopsWhenItsSourceIsCancelled() {
+	TemporaryDirectory temporary;
+	constexpr int width = 512;
+	constexpr int height = 512;
+	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+	for (std::size_t pixel = 0; pixel < pixels.size() / 4; ++pixel) {
+		pixels[pixel * 4] = static_cast<std::uint8_t>(pixel * 37u);
+		pixels[pixel * 4 + 1] = static_cast<std::uint8_t>(pixel * 71u);
+		pixels[pixel * 4 + 2] = static_cast<std::uint8_t>(pixel * 109u);
+		pixels[pixel * 4 + 3] = 255;
+	}
+	const fs::path filename = temporary.path() / "cancel-stb.png";
+	ImageWriteOptions options;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(filename, pixels.data(), width, height,
+		options, error), "cannot create STB cancellation fixture: " + error);
+	constexpr int cancelAt = 12;
+	int checks = 0;
+	const jpegview_linux::WorkContext context = jpegview_linux::MakePathWorkContext(
+		filename, jpegview_linux::SourceWorkPriority::Foreground, [&] {
+			return ++checks < cancelAt;
+		});
+	DecodedImage partial;
+	const bool decoded = jpegview_linux::decoder_detail::DecodeStb(filename,
+		partial, error, context);
+	Expect(!decoded && error == "source work was cancelled" && checks == cancelAt &&
+		partial.frames.empty(), std::string("STB decoding or RGBA conversion ignored source cancellation: ") +
+		"decoded=" + std::to_string(decoded) + ", error=" + error + ", checks=" +
+		std::to_string(checks) + ", frames=" + std::to_string(partial.frames.size()));
 }
 
 void TestContentDispatchPreservesContainerPolicy() {
@@ -664,6 +816,18 @@ void TestPhotoSizedLossyVp8WebPDecode() {
 		decoded.frames.front().bgra.size() == pixels.size() &&
 		!decoded.frames.front().hasTransparency && !decoded.animation,
 		"photo-sized lossy VP8 WebP decoded with the wrong frame geometry or alpha state");
+	int webpCancellationChecks = 0;
+	const jpegview_linux::WorkContext webpCancellationContext =
+		jpegview_linux::MakePathWorkContext(mislabeledFilename,
+			jpegview_linux::SourceWorkPriority::Foreground, [&] {
+				return ++webpCancellationChecks < 16;
+			});
+	DecodedImage cancelledWebp;
+	Expect(!jpegview_linux::decoder_detail::DecodeWebP(mislabeledFilename,
+		cancelledWebp, error, webpCancellationContext) &&
+		error == "source work was cancelled" && webpCancellationChecks == 16 &&
+		cancelledWebp.frames.empty(),
+		"WebP row conversion ignored cancellation or published a partial frame");
 	DecodedImage unknownSuffixDecoded;
 	error.clear();
 	Expect(jpegview_linux::DecodeImage(unknownSuffixFilename, unknownSuffixDecoded, error),
@@ -762,6 +926,57 @@ void TestJpegWriterErrorRecovery() {
 		"JPEG written after output exhaustion was not a valid image: " + error);
 }
 
+void TestImageWritersRejectBufferedWriteFailure() {
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	const ImageWriteOptions options;
+	const std::vector<std::string> formats = {
+		".bmp", ".tga", ".ppm", ".pgm", ".pbm", ".pam", ".qoi", ".psd",
+#if JPEGVIEW_HAVE_WEBP
+		".webp",
+#endif
+#if JPEGVIEW_HAVE_AVIF
+		".avif",
+#endif
+#if JPEGVIEW_HAVE_JXL
+		".jxl",
+#endif
+	};
+	for (const std::string& format : formats) {
+		std::string error;
+		Expect(!jpegview_linux::WriteImageWithFormat("/dev/full", format,
+			pixels.data(), 2, 2, options, error) && !error.empty(),
+			"buffered " + format + " writer reported success after output exhaustion");
+	}
+}
+
+#if JPEGVIEW_HAVE_TIFF
+void TestTiffWriterRejectsFinalizationFailure() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "limited-output.tiff";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	const pid_t child = ::fork();
+	Expect(child >= 0, "cannot start isolated TIFF output-limit test");
+	if (child == 0) {
+		std::signal(SIGXFSZ, SIG_IGN);
+		const rlimit limit{8, 8};
+		if (::setrlimit(RLIMIT_FSIZE, &limit) != 0) ::_exit(2);
+		std::string error;
+		const bool success = jpegview_linux::WriteImage(filename, pixels.data(),
+			2, 2, {}, error);
+		::_exit(success ? 3 : error.empty() ? 4 : 0);
+	}
+	int status = 0;
+	pid_t waited = -1;
+	do {
+		waited = ::waitpid(child, &status, 0);
+	} while (waited < 0 && errno == EINTR);
+	Expect(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		"TIFF writer reported success or no error after its final strip/directory write failed");
+	Expect(fs::file_size(filename) == 8,
+		"TIFF finalization fixture did not permit just its initial eight-byte header");
+}
+#endif
+
 void ExpectStaticFrame(const fs::path& filename, int width, int height,
 	const std::vector<std::uint8_t>& expectedPixels) {
 	DecodedImage decoded;
@@ -781,6 +996,7 @@ void ExpectStaticFrame(const fs::path& filename, int width, int height,
 
 void TestPnmVariants() {
 	TemporaryDirectory temporary;
+	std::string error;
 	WriteText(temporary.path() / "ascii.pgm", "P2\n# grayscale comment\n2 1\n255\n0 255\n");
 	ExpectStaticFrame(temporary.path() / "ascii.pgm", 2, 1,
 		{0, 0, 0, 255, 255, 255, 255, 255});
@@ -814,6 +1030,59 @@ void TestPnmVariants() {
 	alpha.close();
 	ExpectStaticFrame(temporary.path() / "alpha.pam", 2, 1,
 		{0, 0, 255, 255, 0, 255, 0, 128});
+	const fs::path excessiveDepthPam = temporary.path() / "excessive-depth.pam";
+	WriteText(excessiveDepthPam,
+		"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2147483647\nMAXVAL 255\nENDHDR\n");
+	DecodedImage invalidPam;
+	Expect(!jpegview_linux::DecodeImage(excessiveDepthPam, invalidPam, error) &&
+		error == "invalid PAM header" && invalidPam.frames.empty(),
+		"PAM depth beyond the decoder's supported channel count was not rejected before sample sizing");
+
+	constexpr std::size_t cancellationPixels = 8192;
+	std::vector<std::uint8_t> largePgm = {
+		'P', '5', '\n', '8', '1', '9', '2', ' ', '1', '\n', '2', '5', '5', '\n'};
+	largePgm.resize(largePgm.size() + cancellationPixels, 0);
+	const fs::path cancellablePgm = temporary.path() / "cancellable.pgm";
+	WriteBytes(cancellablePgm, largePgm);
+	int pgmChecks = 0;
+	const jpegview_linux::WorkContext pgmContext = jpegview_linux::MakePathWorkContext(
+		cancellablePgm, jpegview_linux::SourceWorkPriority::Foreground, [&] {
+			return ++pgmChecks < 4;
+		});
+	DecodedImage cancelledPnm;
+	Expect(!jpegview_linux::decoder_detail::DecodePnm(cancellablePgm,
+		cancelledPnm, error, pgmContext) && error == "source work was cancelled" &&
+		pgmChecks == 4 && cancelledPnm.frames.empty(),
+		"PNM pixel conversion did not stop after cancellation at a bounded pixel batch");
+
+	std::vector<std::uint8_t> largeQoi = {
+		'q', 'o', 'i', 'f', 0, 0, 0x20, 0, 0, 0, 0, 1, 4, 0};
+	largeQoi.insert(largeQoi.end(), 132, 0xfd); // 132 runs of 62 pixels.
+	largeQoi.push_back(0xc7); // The final eight pixels.
+	largeQoi.insert(largeQoi.end(), {0, 0, 0, 0, 0, 0, 0, 1});
+	const fs::path cancellableQoi = temporary.path() / "cancellable.qoi";
+	WriteBytes(cancellableQoi, largeQoi);
+	int qoiChecks = 0;
+	const jpegview_linux::WorkContext qoiContext = jpegview_linux::MakePathWorkContext(
+		cancellableQoi, jpegview_linux::SourceWorkPriority::Foreground, [&] {
+			return ++qoiChecks < 4;
+		});
+	DecodedImage cancelledQoi;
+	Expect(!jpegview_linux::decoder_detail::DecodeQoi(cancellableQoi,
+		cancelledQoi, error, qoiContext) && error == "source work was cancelled" &&
+		qoiChecks == 4 && cancelledQoi.frames.empty(),
+		"QOI pixel expansion did not stop after cancellation at a bounded pixel batch");
+
+	int appendChecks = 0;
+	jpegview_linux::WorkContext appendContext;
+	appendContext.shouldContinue = [&] { return ++appendChecks < 2; };
+	DecodedImage cancelledAppend;
+	jpegview_linux::decoder_detail::AnimationFrameBudget appendBudget(cancelledAppend);
+	const std::uint8_t rgba[] = {0, 0, 0, 255, 255, 255, 255, 255};
+	Expect(!jpegview_linux::decoder_detail::AppendRGBA(cancelledAppend, 2, 1,
+		rgba, 0, error, true, appendContext, appendBudget) &&
+		error == "source work was cancelled" && cancelledAppend.frames.empty(),
+		"RGBA append conversion did not stop when its owner was cancelled");
 }
 
 void TestDirectCodecSourceReadAttribution() {
@@ -841,8 +1110,120 @@ void TestDirectCodecSourceReadAttribution() {
 	Expect(decodedSuccessfully && decoded.frames.size() == 1 &&
 		decoded.frames.front().width == 2 && decoded.frames.front().height == 2,
 		"cannot decode direct-reader BMP fixture: " + error);
-	Expect(HasCodecSourceReadTrace("stb", bitmapSize),
+	// stb's header probe and decode can each refill their initial 128-byte
+	// callback buffer. Keep the bound tight enough to rule out whole-file copies.
+	Expect(HasCodecSourceReadTrace("stb", bitmapSize + 128),
 		"stb direct-read trace did not report timed bytes under the focused-preview worker class");
+}
+
+#if JPEGVIEW_HAVE_JXR
+void TestJxrFrameConversionPreservesDistinctRows() {
+	const fs::path fixture = fs::path(__FILE__).parent_path() / "fixtures" /
+		"jxr-row-height.jxr";
+	DecodedImage decoded;
+	std::string error;
+	Expect(jpegview_linux::DecodeImage(fixture, decoded, error),
+		"cannot decode JPEG XR row-geometry fixture: " + error);
+	const std::vector<std::uint8_t> expected = {
+		0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255,
+		0, 255, 255, 255, 255, 255, 0, 255, 255, 0, 255, 255,
+		0, 0, 0, 255, 255, 255, 255, 255, 128, 128, 128, 255};
+	Expect(decoded.frames.size() == 1 && decoded.frames.front().width == 3 &&
+		decoded.frames.front().height == 3 && decoded.frames.front().bgra == expected,
+		"JPEG XR frame conversion did not preserve distinct source rows");
+}
+#endif
+
+void TestAnimationFrameBudgetBoundsSharedAppendPaths() {
+	using namespace jpegview_linux::decoder_detail;
+	const std::uint8_t pixel[] = {10, 20, 30, 255};
+	const jpegview_linux::WorkContext context;
+	const auto append = [&](int kind, DecodedImage& image, AnimationFrameBudget& budget,
+		const jpegview_linux::WorkContext& work, std::string& error) {
+		if (kind == 0) return AppendBGRA(image, 1, 1, pixel, 0, error, true, work, budget);
+		if (kind == 1) return AppendRGBA(image, 1, 1, pixel, 0, error, true, work, budget);
+		std::vector<std::uint8_t> pixels(std::begin(pixel), std::end(pixel));
+		if (kind == 2) return AppendBGRA(image, 1, 1, std::move(pixels), 0,
+			error, true, work, budget);
+		return AppendRGBA(image, 1, 1, std::move(pixels), 0, error, true, work, budget);
+	};
+	for (int kind = 0; kind < 4; ++kind) {
+		DecodedImage decoded;
+		AnimationFrameBudget budget(decoded);
+		std::string error;
+		// Exercise the exact byte boundary without allocating a half-gigabyte fixture.
+		Expect(budget.CanAppend(kMaxAnimationBytes - 8, error),
+			"animation budget rejected an in-range initial charge");
+		budget.RecordAppend(kMaxAnimationBytes - 8);
+		Expect(append(kind, decoded, budget, context, error),
+			"shared append rejected a frame inside the animation byte budget");
+		jpegview_linux::WorkContext cancelled;
+		cancelled.shouldContinue = [] { return false; };
+		Expect(!append(kind, decoded, budget, cancelled, error) &&
+			error == "source work was cancelled" && decoded.frames.size() == 1,
+			"cancelled frame was published or lost its cancellation error");
+		Expect(append(kind, decoded, budget, context, error) && decoded.frames.size() == 2,
+			"cancelled append consumed byte budget or the exact byte limit was rejected");
+		Expect(!append(kind, decoded, budget, context, error) &&
+			error == "animation is too large" && decoded.frames.size() == 2,
+			"shared append exceeded the animation byte limit");
+	}
+
+	DecodedImage manyFrames;
+	AnimationFrameBudget budget(manyFrames);
+	std::string error;
+	for (std::size_t frame = 0; frame < kMaxAnimationFrames; ++frame) {
+		Expect(append(static_cast<int>(frame % 4), manyFrames, budget, context, error),
+			"shared animation frame budget rejected a supported tiny frame");
+	}
+	Expect(!append(0, manyFrames, budget, context, error) &&
+		error == "animation has too many frames" && manyFrames.frames.size() == kMaxAnimationFrames,
+		"tiny frames bypassed the animation frame-count limit");
+	AnimationFrameBudget existingBudget(manyFrames);
+	Expect(!existingBudget.CanAppend(4, error),
+		"constructing a budget for existing frames reset its frame-count limit");
+	DecodedImage existing;
+	existing.frames.push_back({1, 1, std::vector<std::uint8_t>(4, 255)});
+	AnimationFrameBudget existingBytes(existing);
+	Expect(existingBytes.CanAppend(kMaxAnimationBytes - 4, error) &&
+		!existingBytes.CanAppend(kMaxAnimationBytes - 3, error),
+		"animation budget ignored pixels already present at decode entry");
+}
+
+void TestApngFrameCountIsRejectedBeforeFrameMetadata() {
+	using namespace jpegview_linux::decoder_detail;
+	TemporaryDirectory temporary;
+	std::vector<std::uint8_t> png = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+	AppendPngChunk(png, "IHDR", {0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0});
+	const auto appendControl = [&](std::uint32_t frames) {
+		AppendPngChunk(png, "acTL", {static_cast<std::uint8_t>(frames >> 24),
+			static_cast<std::uint8_t>(frames >> 16), static_cast<std::uint8_t>(frames >> 8),
+			static_cast<std::uint8_t>(frames), 0, 0, 0, 0});
+	};
+	appendControl(static_cast<std::uint32_t>(kMaxAnimationFrames + 1));
+	// An early count rejection must win over parsing this malformed later frame chunk.
+	png.insert(png.end(), {0, 0, 0, 26, 'f', 'c', 'T', 'L', 0, 0, 0, 0});
+	const fs::path filename = temporary.path() / "excessive-frames.apng";
+	WriteBytes(filename, png);
+	DecodedImage decoded;
+	std::string error;
+	Expect(!DecodeApng(filename, decoded, error) && decoded.frames.empty() &&
+		error == "APNG has too many frames",
+		"APNG parsed frame metadata before rejecting an excessive acTL frame count");
+
+	png.resize(8 + 12 + 13);
+	appendControl(1); // A false declaration must not bypass the actual metadata bound.
+	const std::vector<std::uint8_t> frameControl = {
+		0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 1, 0, 10, 0, 0};
+	for (std::size_t frame = 0; frame <= kMaxAnimationFrames; ++frame) {
+		AppendPngChunk(png, "fcTL", frameControl);
+	}
+	AppendPngChunk(png, "IEND", {});
+	WriteBytes(filename, png);
+	Expect(!DecodeApng(filename, decoded, error) && decoded.frames.empty() &&
+		error == "APNG has too many frames",
+		"APNG accepted excessive frame metadata with a small declared frame count");
 }
 
 void TestAnimatedImageDecoders() {
@@ -870,6 +1251,29 @@ void TestAnimatedImageDecoders() {
 	Expect(decoded.frames[0].delayMs == 70 && decoded.frames[1].delayMs == 70,
 		"APNG frame delay is incorrect");
 	Expect(decoded.frames[0].bgra != decoded.frames[1].bgra, "APNG frames were not composited independently");
+	int completeApngChecks = 0;
+	const jpegview_linux::WorkContext completeApngContext =
+		jpegview_linux::MakePathWorkContext(apng,
+			jpegview_linux::SourceWorkPriority::Foreground, [&] {
+				++completeApngChecks;
+				return true;
+			});
+	DecodedImage checkpointedApng;
+	Expect(jpegview_linux::decoder_detail::DecodeApng(apng, checkpointedApng,
+		error, completeApngContext) && completeApngChecks > 20,
+		"APNG decoder did not exercise frame and row cancellation checkpoints: " + error);
+	const int cancelApngAt = completeApngChecks - 2;
+	int cancelledApngChecks = 0;
+	const jpegview_linux::WorkContext cancelledApngContext =
+		jpegview_linux::MakePathWorkContext(apng,
+			jpegview_linux::SourceWorkPriority::Foreground, [&] {
+				return ++cancelledApngChecks < cancelApngAt;
+			});
+	DecodedImage cancelledApng;
+	Expect(!jpegview_linux::decoder_detail::DecodeApng(apng, cancelledApng,
+		error, cancelledApngContext) && error == "source work was cancelled" &&
+		cancelledApngChecks == cancelApngAt && cancelledApng.frames.empty(),
+		"APNG cancellation published partial frames or ignored its request");
 
 	std::vector<std::uint8_t> delayedApng = apngBytes;
 	const std::size_t afterIhdr = 8 + 12 + 13;
@@ -922,6 +1326,28 @@ void TestAnimatedImageDecoders() {
 		"GIF animation metadata is incorrect");
 	Expect(decoded.frames[0].delayMs == 70 && decoded.frames[1].delayMs == 20,
 		"GIF frame delays did not preserve their encoded centisecond values");
+	int completeChecks = 0;
+	const jpegview_linux::WorkContext completeContext = jpegview_linux::MakePathWorkContext(
+		gifFile, jpegview_linux::SourceWorkPriority::Foreground, [&] {
+			++completeChecks;
+			return true;
+		});
+	DecodedImage sequentialGif;
+	Expect(jpegview_linux::decoder_detail::DecodeGif(gifFile, sequentialGif, error,
+		completeContext) && completeChecks > 8,
+		"GIF sequential decoder did not exercise its cancellation checkpoints: " + error);
+	const int cancelAt = std::max(1, completeChecks - 5);
+	int cancelledChecks = 0;
+	const jpegview_linux::WorkContext cancelledContext = jpegview_linux::MakePathWorkContext(
+		gifFile, jpegview_linux::SourceWorkPriority::Foreground, [&] {
+			return ++cancelledChecks < cancelAt;
+		});
+	DecodedImage cancelledGif;
+	Expect(!jpegview_linux::decoder_detail::DecodeGif(gifFile, cancelledGif, error,
+		cancelledContext) && error == "source work was cancelled" &&
+		cancelledGif.frames.empty() && cancelledChecks >= cancelAt &&
+		cancelledChecks <= cancelAt + 2,
+		"GIF cancellation did not stop sequential decode before publishing its partial frames");
 	const std::vector<std::uint8_t> loopExtension = {
 		0x21, 0xff, 0x0b, 'N', 'E', 'T', 'S', 'C', 'A', 'P', 'E', '2', '.', '0',
 		0x03, 0x01, 0x01, 0x00, 0x00};
@@ -1017,6 +1443,43 @@ void TestAnimatedImageDecoders() {
 #endif
 }
 
+#if JPEGVIEW_HAVE_GIF
+void TestGifOversizedCanvasIsRejectedBeforeFrameDecode() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "oversized-screen.gif";
+	const std::vector<std::uint8_t> header = {
+		'G', 'I', 'F', '8', '9', 'a', 0xff, 0xff, 0xff, 0xff, 0xf0, 0, 0,
+		0, 0, 0, 255, 255, 255};
+	WriteBytes(filename, header);
+	DecodedImage decoded;
+	std::string error;
+	Expect(!jpegview_linux::DecodeImage(filename, decoded, error) &&
+		error == "image is too large" && decoded.frames.empty(),
+		"GIF decoder read frame data before rejecting an oversized logical screen");
+}
+
+void TestGifFrameCountLimitBoundsRetainedMetadata() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "too-many-frames.gif";
+	std::vector<std::uint8_t> gif = {
+		'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0xf0, 0, 0,
+		0, 0, 0, 255, 255, 255};
+	const std::vector<std::uint8_t> onePixelFrame = {
+		0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0,
+		0x02, 0x02, 0x44, 0x01, 0x00};
+	for (std::size_t frame = 0; frame < 16385; ++frame) {
+		gif.insert(gif.end(), onePixelFrame.begin(), onePixelFrame.end());
+	}
+	gif.push_back(0x3b);
+	WriteBytes(filename, gif);
+	DecodedImage decoded;
+	std::string error;
+	Expect(!jpegview_linux::DecodeImage(filename, decoded, error) &&
+		error == "GIF has too many frames" && decoded.frames.empty(),
+		"GIF decoder exceeded its frame metadata cap or published a partial animation");
+}
+#endif
+
 void TestDecoderFailures() {
 	TemporaryDirectory temporary;
 	const fs::path invalid = temporary.path() / "invalid.png";
@@ -1041,6 +1504,174 @@ void TestDecoderFailures() {
 		"truncated native JPEG decode did not fail cleanly");
 }
 
+bool RejectPsdOutputAllocationForTesting(std::size_t, void* context) {
+	++*static_cast<int*>(context);
+	return false;
+}
+
+void TestPsdTruncatedHighChannelCountDoesNotAllocatePlanes() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "truncated-many-channel.psd";
+	std::vector<std::uint8_t> psd(40, 0);
+	std::copy_n(reinterpret_cast<const std::uint8_t*>("8BPS"), 4, psd.begin());
+	const auto put16 = [&psd](std::size_t offset, std::uint16_t value) {
+		psd[offset] = static_cast<std::uint8_t>(value >> 8);
+		psd[offset + 1] = static_cast<std::uint8_t>(value);
+	};
+	const auto put32 = [&psd](std::size_t offset, std::uint32_t value) {
+		psd[offset] = static_cast<std::uint8_t>(value >> 24);
+		psd[offset + 1] = static_cast<std::uint8_t>(value >> 16);
+		psd[offset + 2] = static_cast<std::uint8_t>(value >> 8);
+		psd[offset + 3] = static_cast<std::uint8_t>(value);
+	};
+	put16(4, 1);
+	put16(12, 56);
+	put32(14, 10240);
+	put32(18, 10240);
+	put16(22, 16);
+	put16(24, 3);
+	WriteBytes(filename, psd);
+	int outputAllocationAttempts = 0;
+	jpegview_linux::decoder_detail::SetPsdOutputAllocationTestHookForTesting(
+		RejectPsdOutputAllocationForTesting, &outputAllocationAttempts);
+	DecodedImage decoded;
+	std::string error;
+	const bool success = jpegview_linux::decoder_detail::DecodePsd(filename, decoded, error);
+	jpegview_linux::decoder_detail::SetPsdOutputAllocationTestHookForTesting(nullptr, nullptr);
+	Expect(!success && error == "truncated PSD image data" && outputAllocationAttempts == 0,
+		"PSD allocated output before rejecting a truncated high-channel image");
+}
+
+void TestPsdCmykChannelsConvertToCorrectDisplayColors() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "cmyk-colors.psd";
+	std::vector<std::uint8_t> psd = {'8', 'B', 'P', 'S', 0, 1};
+	psd.insert(psd.end(), 6, 0);
+	const auto append16 = [&psd](std::uint16_t value) {
+		psd.push_back(static_cast<std::uint8_t>(value >> 8));
+		psd.push_back(static_cast<std::uint8_t>(value));
+	};
+	const auto append32 = [&psd](std::uint32_t value) {
+		psd.push_back(static_cast<std::uint8_t>(value >> 24));
+		psd.push_back(static_cast<std::uint8_t>(value >> 16));
+		psd.push_back(static_cast<std::uint8_t>(value >> 8));
+		psd.push_back(static_cast<std::uint8_t>(value));
+	};
+	append16(4);
+	append32(1);
+	append32(3);
+	append16(8);
+	append16(4);
+	append32(0); // Color mode data
+	append32(0); // Image resources
+	append32(0); // Layer and mask information
+	append16(0); // Raw planar channel data
+	psd.insert(psd.end(), {255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255});
+	WriteBytes(filename, psd);
+	DecodedImage decoded;
+	std::string error;
+	Expect(jpegview_linux::DecodeImage(filename, decoded, error),
+		"CMYK PSD fixture could not be decoded: " + error);
+	Expect(decoded.frames.size() == 1 && decoded.frames.front().bgra == std::vector<std::uint8_t>({
+		0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255}),
+		"inverted PSD CMYK samples did not produce the expected red, green, and blue pixels");
+}
+
+void WriteCmykJpeg(const fs::path& filename, bool ycck, bool adobeMarker) {
+	std::FILE* file = std::fopen(filename.c_str(), "wb");
+	Expect(file != nullptr, "cannot create CMYK JPEG fixture");
+	jpeg_compress_struct encoder{};
+	jpeg_error_mgr error{};
+	encoder.err = jpeg_std_error(&error);
+	jpeg_create_compress(&encoder);
+	jpeg_stdio_dest(&encoder, file);
+	encoder.image_width = 8;
+	encoder.image_height = 8;
+	encoder.input_components = 4;
+	encoder.in_color_space = JCS_CMYK;
+	jpeg_set_defaults(&encoder);
+	if (ycck) jpeg_set_colorspace(&encoder, JCS_YCCK);
+	encoder.write_Adobe_marker = adobeMarker ? TRUE : FALSE;
+	jpeg_set_quality(&encoder, 100, TRUE);
+	jpeg_start_compress(&encoder, TRUE);
+	const std::array<JSAMPLE, 4> red = adobeMarker ?
+		std::array<JSAMPLE, 4>{255, 0, 0, 255} :
+		std::array<JSAMPLE, 4>{0, 255, 255, 0};
+	std::array<JSAMPLE, 8 * 4> row{};
+	for (std::size_t pixel = 0; pixel < row.size() / 4; ++pixel) {
+		std::copy(red.begin(), red.end(), row.begin() + static_cast<std::ptrdiff_t>(pixel * 4));
+	}
+	while (encoder.next_scanline < encoder.image_height) {
+		JSAMPROW rows[] = {row.data()};
+		Expect(jpeg_write_scanlines(&encoder, rows, 1) == 1,
+			"cannot write CMYK JPEG fixture row");
+	}
+	jpeg_finish_compress(&encoder);
+	jpeg_destroy_compress(&encoder);
+	Expect(std::fclose(file) == 0, "cannot close CMYK JPEG fixture");
+}
+
+void TestCmykAndYcckJpegDecodeToRgb() {
+	TemporaryDirectory temporary;
+	const std::array<std::pair<bool, bool>, 3> cases = {{{false, false},
+		{false, true}, {true, true}}};
+	for (std::size_t index = 0; index < cases.size(); ++index) {
+		const fs::path filename = temporary.path() /
+			("cmyk-" + std::to_string(index) + ".jpg");
+		WriteCmykJpeg(filename, cases[index].first, cases[index].second);
+		DecodedImage decoded;
+		std::string error;
+		Expect(jpegview_linux::DecodeImage(filename, decoded, error),
+			"CMYK/YCCK JPEG could not be decoded: " + error);
+		Expect(decoded.frames.size() == 1 && decoded.frames.front().width == 8 &&
+			decoded.frames.front().height == 8,
+			"CMYK/YCCK JPEG returned incorrect frame geometry");
+		const std::uint8_t* center = decoded.frames.front().bgra.data() + (4 * 8 + 4) * 4;
+		Expect(center[2] > 230 && center[1] < 25 && center[0] < 25 && center[3] == 255,
+			"CMYK/YCCK JPEG polarity produced incorrect red pixels");
+	}
+}
+
+void TestPsdDecodeStopsOnRowCancellation() {
+	TemporaryDirectory temporary;
+	constexpr std::uint16_t width = 8;
+	constexpr std::uint32_t height = 4;
+	const fs::path filename = temporary.path() / "cancelled.psd";
+	std::vector<std::uint8_t> psd(40 + 3 * width * height, 0);
+	std::copy_n(reinterpret_cast<const std::uint8_t*>("8BPS"), 4, psd.begin());
+	const auto put16 = [&psd](std::size_t offset, std::uint16_t value) {
+		psd[offset] = static_cast<std::uint8_t>(value >> 8);
+		psd[offset + 1] = static_cast<std::uint8_t>(value);
+	};
+	const auto put32 = [&psd](std::size_t offset, std::uint32_t value) {
+		psd[offset] = static_cast<std::uint8_t>(value >> 24);
+		psd[offset + 1] = static_cast<std::uint8_t>(value >> 16);
+		psd[offset + 2] = static_cast<std::uint8_t>(value >> 8);
+		psd[offset + 3] = static_cast<std::uint8_t>(value);
+	};
+	put16(4, 1);
+	put16(12, 3);
+	put32(14, height);
+	put32(18, width);
+	put16(22, 8);
+	put16(24, 3);
+	for (std::size_t index = 40; index < psd.size(); ++index) {
+		psd[index] = static_cast<std::uint8_t>(index);
+	}
+	WriteBytes(filename, psd);
+	int continuationChecks = 0;
+	const jpegview_linux::WorkContext context = jpegview_linux::MakePathWorkContext(
+		filename, jpegview_linux::SourceWorkPriority::Foreground, [&] {
+			return ++continuationChecks < 7;
+		});
+	DecodedImage decoded;
+	std::string error;
+	Expect(!jpegview_linux::decoder_detail::DecodePsd(filename, decoded, error, context) &&
+		error == "source work was cancelled" && decoded.frames.empty() &&
+		continuationChecks == 7,
+		"PSD decoding did not stop between bounded row operations when cancelled");
+}
+
 std::vector<std::uint8_t> AddJpegExifOrientation(
 	const std::vector<std::uint8_t>& jpeg, int orientation) {
 	const std::vector<std::uint8_t> payload = {
@@ -1062,6 +1693,94 @@ std::vector<std::uint8_t> AddJpegExifOrientation(
 	output.insert(output.end(), payload.begin(), payload.end());
 	output.insert(output.end(), jpeg.begin() + 2, jpeg.end());
 	return output;
+}
+
+void TestLosslessJpegCropUsesDisplayedSelectionForAllExifOrientations() {
+	using namespace jpegview_linux;
+	TemporaryDirectory temporary;
+	constexpr int width = 96;
+	constexpr int height = 64;
+	std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+	for (int y = 0; y < height; ++y) {
+		for (int x = 0; x < width; ++x) {
+			const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * 4;
+			pixels[offset] = static_cast<std::uint8_t>((x * 7 + y * 3) & 255);
+			pixels[offset + 1] = static_cast<std::uint8_t>((x * 2 + y * 11) & 255);
+			pixels[offset + 2] = static_cast<std::uint8_t>((x * 5 + y * 13) & 255);
+			pixels[offset + 3] = 255;
+		}
+	}
+	const fs::path source = temporary.path() / "oriented-source.jpg";
+	ImageWriteOptions options;
+	options.jpegQuality = 100;
+	std::string error;
+	Expect(jpegview_linux::WriteImage(source, pixels.data(), width, height, options, error),
+		"cannot write EXIF lossless-crop fixture: " + error);
+	const std::vector<std::uint8_t> jpeg = ReadBytes(source);
+	struct CropCase {
+		int orientation;
+		SelectionRect displayed;
+	};
+	const std::vector<CropCase> cases = {
+		{1, {16, 16, 48, 32}}, {2, {48, 16, 80, 32}},
+		{3, {48, 32, 80, 48}}, {4, {16, 32, 48, 48}},
+		{5, {16, 16, 32, 48}}, {6, {32, 16, 48, 48}},
+		{7, {32, 48, 48, 80}}, {8, {16, 48, 32, 80}},
+	};
+	for (const CropCase& cropCase : cases) {
+		const fs::path orientedPath = temporary.path() /
+			("orientation-" + std::to_string(cropCase.orientation) + ".jpg");
+		WriteBytes(orientedPath, AddJpegExifOrientation(jpeg, cropCase.orientation));
+		JpegCropMetadata metadata;
+		Expect(jpegview_linux::ReadJpegCropMetadata(orientedPath, metadata, error) &&
+			metadata.storedWidth == width && metadata.storedHeight == height &&
+			metadata.exifOrientation == cropCase.orientation &&
+			metadata.mcuWidth == 16 && metadata.mcuHeight == 16,
+			"lossless crop did not read the raw geometry for EXIF orientation " +
+			std::to_string(cropCase.orientation) + ": " + error);
+		const SelectionRect raw = CropSelectionModel::ToRawJpegMcuRect(
+			cropCase.displayed, metadata.storedWidth, metadata.storedHeight,
+			metadata.exifOrientation, metadata.mcuWidth, metadata.mcuHeight);
+		Expect(raw.left == 16 && raw.top == 16 && raw.right == 48 && raw.bottom == 32,
+			"displayed selection mapped to the wrong raw JPEG rectangle");
+
+		const fs::path croppedPath = temporary.path() /
+			("crop-" + std::to_string(cropCase.orientation) + ".jpg");
+		Expect(jpegview_linux::RunExternalCommand(
+			jpegview_linux::LosslessJpegCropCommand(orientedPath, croppedPath,
+				raw.left, raw.top, raw.Width(), raw.Height()), error),
+			"jpegtran failed for EXIF-oriented crop: " + error);
+		DecodedImage original;
+		DecodedImage cropped;
+		Expect(jpegview_linux::DecodeImage(orientedPath, original, error) &&
+			original.frames.size() == 1,
+			"cannot decode the selected EXIF-oriented image: " + error);
+		Expect(jpegview_linux::DecodeImage(croppedPath, cropped, error) &&
+			cropped.frames.size() == 1,
+			"cannot decode the lossless EXIF-oriented crop: " + error);
+		Expect(cropped.frames.front().width == cropCase.displayed.Width() &&
+			cropped.frames.front().height == cropCase.displayed.Height(),
+			"lossless crop output dimensions do not match the displayed selection");
+		// Chroma upsampling can differ at the cropped outer edge because the
+		// neighboring MCU is no longer available to the decoder.
+		for (int y = 2; y < cropCase.displayed.Height() - 2; ++y) {
+			for (int x = 2; x < cropCase.displayed.Width() - 2; ++x) {
+				const std::size_t sourceOffset =
+					(static_cast<std::size_t>(cropCase.displayed.top + y) *
+						original.frames.front().width + cropCase.displayed.left + x) * 4;
+				const std::size_t cropOffset =
+					(static_cast<std::size_t>(y) * cropped.frames.front().width + x) * 4;
+				Expect(std::equal(original.frames.front().bgra.begin() +
+						static_cast<std::ptrdiff_t>(sourceOffset),
+						original.frames.front().bgra.begin() +
+						static_cast<std::ptrdiff_t>(sourceOffset + 4),
+						cropped.frames.front().bgra.begin() +
+						static_cast<std::ptrdiff_t>(cropOffset)),
+					"lossless crop selected different interior pixels at EXIF orientation " +
+						std::to_string(cropCase.orientation));
+			}
+		}
+	}
 }
 
 void TestJpegDisplayDecodeScaling() {
@@ -1104,6 +1823,12 @@ void TestJpegDisplayDecodeScaling() {
 		const fs::path orientedPath = temporary.path() /
 			("orientation-" + std::to_string(orientation) + ".jpg");
 		WriteBytes(orientedPath, AddJpegExifOrientation(encodedJpeg, orientation));
+		jpegview_linux::JpegCropMetadata cropMetadata;
+		Expect(jpegview_linux::ReadJpegCropMetadata(orientedPath, cropMetadata, error) &&
+			cropMetadata.storedWidth == width && cropMetadata.storedHeight == height &&
+			cropMetadata.exifOrientation == orientation &&
+			cropMetadata.mcuWidth > 0 && cropMetadata.mcuHeight > 0,
+			"JPEG lossless-crop metadata lost stored dimensions, MCU size, or EXIF orientation");
 		int orientedSourceWidth = 0;
 		int orientedSourceHeight = 0;
 		Expect(jpegview_linux::ReadJpegDimensions(orientedPath, orientedSourceWidth,
@@ -1249,6 +1974,52 @@ void TestJpegDisplayDecodeScaling() {
 		"reduced-DCT JPEG preparation did not rotate before producing the final slot size");
 }
 
+void TruncateJpegAfterInputOpen(const fs::path& filename, void*) {
+	if (::truncate(filename.c_str(), 0) != 0) std::_Exit(10);
+}
+
+bool RunJpegTruncationProbe(const std::string& executable, const fs::path& filename) {
+	std::string executableArgument = executable;
+	std::string modeArgument = "--jpeg-truncation-after-input-open";
+	std::string filenameArgument = filename.string();
+	char* arguments[] = {executableArgument.data(), modeArgument.data(),
+		filenameArgument.data(), nullptr};
+	std::vector<char*> childEnvironment;
+	constexpr char traceEnvironment[] = "JPEGVIEW_PERF_TRACE=";
+	for (char** entry = ::environ; entry != nullptr && *entry != nullptr; ++entry) {
+		// The probe is a separate test process; opening the parent's trace path in
+		// "w" mode would truncate the file while its writer still holds it open.
+		if (std::strncmp(*entry, traceEnvironment, sizeof(traceEnvironment) - 1) == 0) continue;
+		childEnvironment.push_back(*entry);
+	}
+	childEnvironment.push_back(nullptr);
+	pid_t child = 0;
+	if (::posix_spawnp(&child, executableArgument.c_str(), nullptr, nullptr,
+		arguments, childEnvironment.data()) != 0) return false;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	int status = 0;
+	while (std::chrono::steady_clock::now() < deadline) {
+		const pid_t waited = ::waitpid(child, &status, WNOHANG);
+		if (waited == child) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+		if (waited < 0 && errno != EINTR) return false;
+		std::this_thread::yield();
+	}
+	(void)::kill(child, SIGKILL);
+	while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+	return false;
+}
+
+void TestJpegDecodeSurvivesInPlaceSourceTruncation() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "source.jpg";
+	const std::vector<std::uint8_t> pixels = TestPixels();
+	std::string error;
+	Expect(jpegview_linux::WriteImage(filename, pixels.data(), 2, 2,
+		ImageWriteOptions(), error), "cannot create JPEG truncation fixture: " + error);
+	Expect(RunJpegTruncationProbe(gTestExecutablePath, filename),
+		"JPEG source truncation crashed the decoder or was not reported as a decode failure");
+}
+
 #if JPEGVIEW_HAVE_TIFF
 void TestTiffExifOrientation() {
 	TemporaryDirectory temporary;
@@ -1296,6 +2067,44 @@ void TestTiffExifOrientation() {
 	Expect(jpegview_linux::ReadImageMetadata(filename, metadata, error) &&
 		metadata.imageOrientation == 6,
 		"TIFF metadata reader did not expose the IFD0 orientation tag");
+}
+
+void TestTiffAlphaDecodesToStraightBgra() {
+	TemporaryDirectory temporary;
+	const fs::path filename = temporary.path() / "transparent.tif";
+	TIFF* tiff = TIFFOpen(filename.string().c_str(), "w");
+	Expect(tiff != nullptr, "cannot create transparent TIFF fixture");
+	std::uint16_t extraSample = EXTRASAMPLE_UNASSALPHA;
+	const bool tagsSet =
+		TIFFSetField(tiff, TIFFTAG_IMAGEWIDTH, 2u) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, 1u) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, 4) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, 8) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_EXTRASAMPLES, 1, &extraSample) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_NONE) == 1 &&
+		TIFFSetField(tiff, TIFFTAG_ROWSPERSTRIP, 1u) == 1;
+	std::array<std::uint8_t, 8> row = {200, 150, 100, 128, 255, 80, 20, 0};
+	const bool rowWritten = tagsSet && TIFFWriteScanline(tiff, row.data(), 0, 0) >= 0;
+	TIFFClose(tiff);
+	Expect(tagsSet && rowWritten, "cannot write transparent TIFF fixture pixels");
+
+	jpegview_linux::DecodedImage decoded;
+	std::string error;
+	Expect(jpegview_linux::DecodeImage(filename, decoded, error) &&
+		decoded.frames.size() == 1 && decoded.frames.front().width == 2 &&
+		decoded.frames.front().height == 1,
+		"transparent TIFF could not be decoded: " + error);
+	const std::vector<std::uint8_t>& pixels = decoded.frames.front().bgra;
+	const auto near = [](std::uint8_t actual, int expected) {
+		return std::abs(static_cast<int>(actual) - expected) <= 1;
+	};
+	Expect(near(pixels[0], 100) && near(pixels[1], 150) && near(pixels[2], 200) &&
+		pixels[3] == 128,
+		"TIFF alpha conversion left its RGB channels premultiplied");
+	Expect(pixels[4] == 0 && pixels[5] == 0 && pixels[6] == 0 && pixels[7] == 0,
+		"fully transparent TIFF pixels retained hidden premultiplied color");
 }
 #endif
 
@@ -3196,9 +4005,12 @@ void TestExifMetadataWorkerPublishesCurrentExceptions() {
 		failure.str());
 }
 const TestCase kTests[] = {
+	{"open-with-mime-mappings-supported-formats", &TestOpenWithMimeMappingsForSupportedFormats},
 	{"image-content-format-detection", &TestImageContentFormatDetection},
 	{"svg-and-svgz-decoding", &TestSvgAndSvgzDecoding},
 	{"image-writer-decoder-round-trips", &TestImageWriterDecoderRoundTrips},
+	{"stb-rejects-oversized-headers-before-pixel-decode", &TestStbRejectsOversizedHeadersBeforePixelDecode},
+	{"stb-decode-stops-when-source-is-cancelled", &TestStbDecodeStopsWhenItsSourceIsCancelled},
 	{"content-dispatch-preserves-container-policy", &TestContentDispatchPreservesContainerPolicy},
 #if JPEGVIEW_HAVE_WEBP
 	{"photo-sized-lossy-vp8-webp-decode", &TestPhotoSizedLossyVp8WebPDecode},
@@ -3206,13 +4018,33 @@ const TestCase kTests[] = {
 	{"jpeg-named-webp-reports-unavailable-codec", &TestJpegNamedWebPReportsUnavailableCodec},
 #endif
 	{"jpeg-writer-error-recovery", &TestJpegWriterErrorRecovery},
+	{"image-writers-buffered-write-failure", &TestImageWritersRejectBufferedWriteFailure},
+#if JPEGVIEW_HAVE_TIFF
+	{"tiff-writer-finalization-failure", &TestTiffWriterRejectsFinalizationFailure},
+#endif
 	{"pnm-variants", &TestPnmVariants},
 	{"animated-image-decoders", &TestAnimatedImageDecoders},
+	{"animation-frame-budget-bounds-shared-append-paths", &TestAnimationFrameBudgetBoundsSharedAppendPaths},
+	{"apng-frame-count-is-rejected-before-frame-metadata", &TestApngFrameCountIsRejectedBeforeFrameMetadata},
+#if JPEGVIEW_HAVE_GIF
+	{"gif-oversized-canvas-is-rejected-before-frame-decode", &TestGifOversizedCanvasIsRejectedBeforeFrameDecode},
+	{"gif-frame-count-limit-bounds-retained-metadata", &TestGifFrameCountLimitBoundsRetainedMetadata},
+#endif
 	{"direct-codec-source-read-attribution", &TestDirectCodecSourceReadAttribution},
+#if JPEGVIEW_HAVE_JXR
+	{"jxr-frame-conversion-preserves-distinct-rows", &TestJxrFrameConversionPreservesDistinctRows},
+#endif
 	{"decoder-failures", &TestDecoderFailures},
+	{"psd-truncated-high-channel-count-does-not-allocate-planes", &TestPsdTruncatedHighChannelCountDoesNotAllocatePlanes},
+	{"psd-cmyk-channels-convert-to-correct-display-colors", &TestPsdCmykChannelsConvertToCorrectDisplayColors},
+	{"cmyk-and-ycck-jpeg-decode-to-rgb", &TestCmykAndYcckJpegDecodeToRgb},
+	{"psd-decode-stops-on-row-cancellation", &TestPsdDecodeStopsOnRowCancellation},
 	{"jpeg-display-decode-scaling", &TestJpegDisplayDecodeScaling},
+	{"lossless-jpeg-crop-exif-orientations", &TestLosslessJpegCropUsesDisplayedSelectionForAllExifOrientations},
+	{"jpeg-decode-survives-in-place-source-truncation", &TestJpegDecodeSurvivesInPlaceSourceTruncation},
 #if JPEGVIEW_HAVE_TIFF
 	{"tiff-exif-orientation", &TestTiffExifOrientation},
+	{"tiff-alpha-decodes-to-straight-bgra", &TestTiffAlphaDecodesToStraightBgra},
 #endif
 	{"perf-context-and-pending-input-diagnostics", &TestPerfContextAndPendingInputDiagnostics},
 	{"decoded-prefetch-work-class-attribution", &TestDecodedPrefetchWorkClassAttribution},
@@ -3242,4 +4074,20 @@ const TestCase kTests[] = {
 const TestSuite& GetCodecDisplaySuite() {
 	static const TestSuite suite{"codec_display", kTests, sizeof(kTests) / sizeof(kTests[0])};
 	return suite;
+}
+
+int RunJpegTruncationSpecialMode(const std::string& filename) {
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	const struct rlimit noCoreDump = {0, 0};
+	(void)::setrlimit(RLIMIT_CORE, &noCoreDump);
+	jpegview_linux::decoder_detail::SetJpegInputOpenedTestHookForTesting(
+		TruncateJpegAfterInputOpen, nullptr);
+#endif
+	DecodedImage decoded;
+	std::string error;
+	const bool success = jpegview_linux::DecodeImage(filename, decoded, error);
+#ifdef JPEGVIEW_CACHE_BUDGET_TEST_HOOKS
+	jpegview_linux::decoder_detail::SetJpegInputOpenedTestHookForTesting(nullptr, nullptr);
+#endif
+	return !success && !error.empty() ? 0 : 1;
 }

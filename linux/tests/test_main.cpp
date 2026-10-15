@@ -48,6 +48,9 @@ int main(int argc, char** argv) {
 		"--cache-budget-reservation-rejection-race") {
 		return RunImageCacheSpecialMode(argv[2]);
 	}
+	if (argc == 3 && std::string(argv[1]) == "--jpeg-truncation-after-input-open") {
+		return RunJpegTruncationSpecialMode(argv[2]);
+	}
 #endif
 	gTestExecutablePath = argv[0];
 	std::string selectedSuite;
