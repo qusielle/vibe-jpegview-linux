@@ -1051,7 +1051,8 @@ building only `Format7zF` with `DISABLE_RAR=1`; they also install Rust 1.89.0 us
 rustup-init and fetch the exact RAR source revision. AppImage and Ubuntu 24/26 `.deb` packages carry
 both plugins, their license notices, wrapper source, and upstream source archives. Binary release
 bundles use the same `lib/jpegview-linux/` layout next to the executable and include those notices
-and sources. Ordinary local builds select explicit unavailable-backend fallbacks unless
+and sources. When binary packaging creates a fallback 7-Zip source archive inside that documentation
+directory, it reuses the resulting file without copying it onto itself. Ordinary local builds select explicit unavailable-backend fallbacks unless
 `SEVENZIP_SOURCE_ROOT` and/or `RAR_BACKEND_ROOT` are set.
 
 Dockerfiles copy the small source-fetch helper set before downloading pinned 7-Zip, Rust, and RAR
@@ -1070,9 +1071,10 @@ Ubuntu 20's AOM/AVIF stage fetches libaom 3.2.0 from AOMedia's release bucket an
 from the Ubuntu archive mirror, avoiding the frequently failing Gitiles and GitHub archive endpoints.
 Both archives are pinned by SHA-256 before extraction.
 
-The Ubuntu 20 and 22 `highway-jxl` stages fetch the pinned `skcms` snapshot from the MacPorts distfiles
-mirror instead of the frequently failing Gitiles archive endpoint. Its SHA-256 is checked before
-extraction so the alternate mirror does not weaken source integrity.
+The Ubuntu 20 and 22 `highway-jxl` stages pin and verify the Highway, libjxl, and `skcms` archives
+before extraction. The Ubuntu 20/22/24/26 AppImage stages pin and verify both `appimagetool` 1.9.1
+and the type 2 runtime release 20251108. They set `APPIMAGETOOL_RUNTIME_FILE` to the verified local
+runtime because appimagetool otherwise fetches the latest runtime while creating an artifact.
 
 The Open dialog routes filesystem and generic archive directory listings through
 `FileDialogDirectoryLoader`; archive password validation remains on `ArchiveDirectoryLoader`.

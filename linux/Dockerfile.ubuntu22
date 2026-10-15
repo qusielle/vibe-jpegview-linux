@@ -20,13 +20,16 @@ RUN apt-get update \
 FROM base AS highway-jxl
 
 ARG HIGHWAY_VERSION=1.0.7
+ARG HIGHWAY_SHA256=5434488108186c170a5e2fca5e3c9b6ef59a1caa4d520b008a9b8be6b8abe6c5
 ARG LIBJXL_VERSION=0.7.0
+ARG LIBJXL_SHA256=3114bba1fabb36f6f4adc2632717209aa6f84077bc4e93b420e0d63fa0455c5e
 ARG LIBJXL_SKCMS_VERSION=64374756e03700d649f897dbd98c95e78c30c7da
 ARG LIBJXL_SKCMS_URL=https://distfiles.macports.org/libjxl/skcms-${LIBJXL_SKCMS_VERSION}.tar.gz
 ARG LIBJXL_SKCMS_SHA256=aabd4bae8b741c9bdc8b31bec95df3a3344b77c7d17bf9d25befb401f4971d18
 RUN mkdir -p /tmp/jpegview-codecs \
  && curl --fail --location --retry 3 "https://github.com/google/highway/archive/refs/tags/${HIGHWAY_VERSION}.tar.gz" \
     --output /tmp/jpegview-codecs/highway.tar.gz \
+ && printf '%s  %s\n' "$HIGHWAY_SHA256" /tmp/jpegview-codecs/highway.tar.gz | sha256sum --check \
  && tar -xzf /tmp/jpegview-codecs/highway.tar.gz -C /tmp/jpegview-codecs \
  && cmake -S "/tmp/jpegview-codecs/highway-${HIGHWAY_VERSION}" -B /tmp/jpegview-codecs/highway-build -GNinja \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DHWY_ENABLE_TESTS=OFF -DHWY_ENABLE_CONTRIB=OFF \
@@ -35,6 +38,7 @@ RUN mkdir -p /tmp/jpegview-codecs \
 
 RUN curl --fail --location --retry 3 "https://github.com/libjxl/libjxl/archive/refs/tags/v${LIBJXL_VERSION}.tar.gz" \
     --output /tmp/jpegview-codecs/libjxl.tar.gz \
+ && printf '%s  %s\n' "$LIBJXL_SHA256" /tmp/jpegview-codecs/libjxl.tar.gz | sha256sum --check \
  && tar -xzf /tmp/jpegview-codecs/libjxl.tar.gz -C /tmp/jpegview-codecs \
  && mkdir -p "/tmp/jpegview-codecs/libjxl-${LIBJXL_VERSION}/third_party/skcms" \
  && curl --fail --location --retry 8 --retry-max-time 90 \
@@ -72,11 +76,21 @@ ENV RUSTUP_HOME=/opt/jpegview/rust-1.89/rustup \
 	RAR_SOURCE_ARCHIVE=/opt/jpegview/rars-afc60e4-source.tar.gz \
 	RAR_LICENSE_FILE=/opt/jpegview/rars-afc60e4-COPYING
 
-ARG APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-ARG APPIMAGETOOL_SHA256=
+ARG APPIMAGETOOL_VERSION=1.9.1
+ARG APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage
+ARG APPIMAGETOOL_SHA256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+ARG APPIMAGETOOL_RUNTIME_VERSION=20251108
+ARG APPIMAGETOOL_RUNTIME_URL=https://github.com/AppImage/type2-runtime/releases/download/${APPIMAGETOOL_RUNTIME_VERSION}/runtime-x86_64
+ARG APPIMAGETOOL_RUNTIME_SHA256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
 RUN curl --fail --location --retry 3 "$APPIMAGETOOL_URL" --output /usr/local/bin/appimagetool \
+ && printf '%s  %s\n' "$APPIMAGETOOL_SHA256" /usr/local/bin/appimagetool | sha256sum --check \
  && chmod 755 /usr/local/bin/appimagetool \
- && if [ -n "$APPIMAGETOOL_SHA256" ]; then echo "$APPIMAGETOOL_SHA256  /usr/local/bin/appimagetool" | sha256sum --check; fi
+ && mkdir -p /usr/local/lib/appimagetool \
+ && curl --fail --location --retry 3 "$APPIMAGETOOL_RUNTIME_URL" \
+    --output /usr/local/lib/appimagetool/runtime-x86_64 \
+ && printf '%s  %s\n' "$APPIMAGETOOL_RUNTIME_SHA256" /usr/local/lib/appimagetool/runtime-x86_64 | sha256sum --check \
+ && chmod 755 /usr/local/lib/appimagetool/runtime-x86_64
+ENV APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimagetool/runtime-x86_64
 
 WORKDIR /src
 COPY . /src

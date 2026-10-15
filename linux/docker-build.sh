@@ -37,6 +37,8 @@ case "$MODE" in
 				sevenzip_source_archive="$sevenzip_docs/7zip-24.09-source.tar.gz"
 				tar -czf "$sevenzip_source_archive" -C "$(dirname -- "$SEVENZIP_SOURCE_ROOT")" \
 					"$(basename -- "$SEVENZIP_SOURCE_ROOT")"
+			elif [ "$sevenzip_source_archive" != "$sevenzip_docs/7zip-24.09-source.tar.gz" ]; then
+				cp "$sevenzip_source_archive" "$sevenzip_docs/7zip-24.09-source.tar.gz"
 			fi
 			cp "$SOURCE_DIR/linux/7zip-24.09-notice.txt" \
 				"$sevenzip_docs/7zip-24.09-notice.txt"
@@ -44,7 +46,6 @@ case "$MODE" in
 				"$sevenzip_docs/7zip-24.09-License.txt"
 			cp "$SEVENZIP_SOURCE_ROOT/DOC/copying.txt" \
 				"$sevenzip_docs/7zip-24.09-LGPL-2.1.txt"
-			cp "$sevenzip_source_archive" "$sevenzip_docs/7zip-24.09-source.tar.gz"
 		else
 			echo "warning: building binary without SEVENZIP_SOURCE_ROOT; encrypted 7z support is unavailable" >&2
 		fi

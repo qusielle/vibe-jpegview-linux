@@ -27,6 +27,15 @@ assert_before() {
 	fi
 }
 
+assert_contains() {
+	file=$1
+	pattern=$2
+	if ! grep -Fq -- "$pattern" "$file"; then
+		echo "$file: missing required Dockerfile content: $pattern" >&2
+		exit 1
+	fi
+}
+
 for dockerfile in \
 	Dockerfile.ubuntu20 \
 	Dockerfile.ubuntu22 \
@@ -54,6 +63,29 @@ for dockerfile in \
 			assert_before "$file" 'RUN sh /tmp/jpegview-build-scripts/install-rust-toolchain.sh' \
 				"$appimagetool_download"
 			assert_before "$file" "$appimagetool_download" 'COPY . /src'
+			;;
+	 esac
+
+	case "$dockerfile" in
+		Dockerfile.ubuntu20|Dockerfile.ubuntu22|Dockerfile.ubuntu24|Dockerfile.ubuntu26)
+			assert_contains "$file" 'ARG APPIMAGETOOL_VERSION=1.9.1'
+			assert_contains "$file" 'ARG APPIMAGETOOL_SHA256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0'
+			assert_contains "$file" 'ARG APPIMAGETOOL_RUNTIME_VERSION=20251108'
+			assert_contains "$file" 'ARG APPIMAGETOOL_RUNTIME_SHA256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d'
+			assert_before "$file" "\"\$APPIMAGETOOL_SHA256\" /usr/local/bin/appimagetool | sha256sum --check" \
+				"\"\$APPIMAGETOOL_RUNTIME_SHA256\" /usr/local/lib/appimagetool/runtime-x86_64 | sha256sum --check"
+			assert_before "$file" 'APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimagetool/runtime-x86_64' 'COPY . /src'
+			;;
+	esac
+
+	case "$dockerfile" in
+		Dockerfile.ubuntu20|Dockerfile.ubuntu22)
+			assert_contains "$file" 'ARG HIGHWAY_SHA256=5434488108186c170a5e2fca5e3c9b6ef59a1caa4d520b008a9b8be6b8abe6c5'
+			assert_contains "$file" 'ARG LIBJXL_SHA256=3114bba1fabb36f6f4adc2632717209aa6f84077bc4e93b420e0d63fa0455c5e'
+			assert_before "$file" '--output /tmp/jpegview-codecs/highway.tar.gz' \
+				"\"\$HIGHWAY_SHA256\" /tmp/jpegview-codecs/highway.tar.gz | sha256sum --check"
+			assert_before "$file" '--output /tmp/jpegview-codecs/libjxl.tar.gz' \
+				"\"\$LIBJXL_SHA256\" /tmp/jpegview-codecs/libjxl.tar.gz | sha256sum --check"
 			;;
 	esac
 done

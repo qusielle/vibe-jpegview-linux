@@ -44,7 +44,8 @@ run_binary_and_expect_version "$REPO_DIR" argument-version environment-version a
 SOURCE_SNAPSHOT="$TEMP_DIR/source-snapshot"
 mkdir -p "$SOURCE_SNAPSHOT/linux"
 cp "$REPO_DIR/linux/version.sh" "$SOURCE_SNAPSHOT/linux/version.sh"
-run_binary_and_expect_version "$SOURCE_SNAPSHOT" 0.0.0+unknown ''
+GIT_CEILING_DIRECTORIES="$TEMP_DIR" \
+	run_binary_and_expect_version "$SOURCE_SNAPSHOT" 0.0.0+unknown ''
 
 CONFIG_SNAPSHOT="$TEMP_DIR/config-snapshot"
 mkdir -p "$CONFIG_SNAPSHOT/linux" "$CONFIG_SNAPSHOT/.git"
@@ -79,6 +80,27 @@ if [ "$(id -u)" -eq 0 ] && command -v chown >/dev/null 2>&1; then
 		exit 1
 	fi
 	run_binary_and_expect_version "$FOREIGN_SOURCE" 1.2.3 ''
+fi
+
+SEVENZIP_SOURCE="$TEMP_DIR/sevenzip-source"
+SEVENZIP_OUTPUT="$TEMP_DIR/sevenzip-output"
+mkdir -p "$SEVENZIP_SOURCE/DOC" "$SEVENZIP_OUTPUT/lib/jpegview-linux"
+printf '%s\n' 'test source license' > "$SEVENZIP_SOURCE/DOC/License.txt"
+printf '%s\n' 'test LGPL text' > "$SEVENZIP_SOURCE/DOC/copying.txt"
+printf '%s\n' 'test plugin' > "$SEVENZIP_OUTPUT/lib/jpegview-linux/7z.so"
+JPEGVIEW_SOURCE_DIR="$REPO_DIR" \
+OUTPUT_DIR="$SEVENZIP_OUTPUT" \
+SEVENZIP_SOURCE_ROOT="$SEVENZIP_SOURCE" \
+SEVENZIP_SOURCE_ARCHIVE="$TEMP_DIR/missing-sevenzip-source.tar.gz" \
+RAR_BACKEND_ROOT='' \
+DOCKER_BUILD_TEST_MAKE_LOG="$MAKE_LOG" \
+PATH="$MOCK_BIN:$PATH" \
+	sh "$REPO_DIR/linux/docker-build.sh" binary archive-test >/dev/null
+generated_archive="$SEVENZIP_OUTPUT/share/doc/jpegview-linux/7zip-24.09-source.tar.gz"
+tar -tzf "$generated_archive" > "$TEMP_DIR/sevenzip-source-members"
+if ! grep -Fqx 'sevenzip-source/DOC/License.txt' "$TEMP_DIR/sevenzip-source-members"; then
+	echo 'Docker binary build did not package its fallback 7-Zip source archive' >&2
+	exit 1
 fi
 
 echo 'Docker build version tests passed.'

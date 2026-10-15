@@ -760,13 +760,16 @@ is `out/jpegview-linux`. Docker's `binary` mode also copies both plugins under t
 `lib/jpegview-linux/` directory and their source/license notices into `out/`. CI and release
 automation upload a clearly named `*-with-archive-plugins.tar.gz` containing the executable, both
 plugins, and their notices/source; extract the bundle without separating its paths to keep encrypted
-7z and RAR available. Substitute the
+7z and RAR available. If the supplied 7-Zip source tree has no matching source archive, binary mode
+creates the archive in its documentation directory. Substitute the
 Ubuntu 22.04, 24.04, or 26.04 image tag to use another build
 environment. Passing the version resolved on the host is the simplest option; the read-only `.git`
 mount above is an alternative. The Ubuntu 20.04 Dockerfile builds its Highway/JPEG XL and AOM/AVIF
 dependency chains in parallel with BuildKit. Ubuntu 22.04 builds Highway/JPEG XL; Ubuntu 24.04 and
-26.04 need no codec source builds. An optional `--build-arg APPIMAGETOOL_SHA256=...` pins the downloaded
-AppImage tool. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
+26.04 need no codec source builds. The AppImage Dockerfiles pin `appimagetool` 1.9.1 and its type 2
+runtime release 20251108 with required SHA-256 checks. The runtime is supplied explicitly so
+`appimagetool` does not fetch a moving runtime during packaging. Changing a download URL or version
+with build arguments also requires its matching SHA-256 argument. Build the release artifact with the oldest supported base (Ubuntu 20.04) when it
 must also run on later Ubuntu releases; newer-base artifacts can require newer system glibc.
 
 The Debian package Dockerfiles use standard Ubuntu 24.04 or 26.04 repositories for compiler/runtime

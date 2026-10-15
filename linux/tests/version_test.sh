@@ -72,7 +72,8 @@ if [ "$unversioned_version" != "0.0.0+dev.g${unversioned_hash}" ]; then
 fi
 
 mkdir -p "$TEMP_DIR/no-repository"
-fallback=$(cd "$TEMP_DIR/no-repository" && sh "$VERSION_SCRIPT")
+fallback=$(cd "$TEMP_DIR/no-repository" && \
+	GIT_CEILING_DIRECTORIES="$TEMP_DIR" sh "$VERSION_SCRIPT")
 if [ "$fallback" != '0.0.0+unknown' ]; then
 	echo "Expected no-repository fallback 0.0.0+unknown, got '$fallback'" >&2
 	exit 1
