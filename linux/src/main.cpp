@@ -21,6 +21,7 @@
 #include "image.h"
 #include "image_processing.h"
 #include "image_processing_store.h"
+#include "persistence_worker.h"
 #include "processing_recipe.h"
 #include "image_session_controller.h"
 #include "settings.h"
@@ -472,6 +473,7 @@ public:
 			if (jpegview_linux::UiCompletionWakeup().Pending()) {
 				jpegview_linux::UiCompletionWakeup().Consume();
 			}
+			DrainPersistenceResults();
 			TickPlayback();
 			UpdateInteractionWorkPolicy();
 			TickFileListScan();
@@ -603,6 +605,12 @@ private:
 		bool flattenAnimationOnSuccess = false;
 		bool resumeAnimationOnCompletion = false;
 		bool holdsAnimationFramePublication = false;
+	};
+
+	struct PendingAdvancedConfigurationApply {
+		std::uint64_t generation = 0;
+		jpegview_linux::ViewerSettings previousSettings;
+		jpegview_linux::ViewerSettings draft;
 	};
 
 	struct TemporaryCleanupRequest {
@@ -879,7 +887,16 @@ private:
 				temporaryCleanupError);
 		}
 		pendingTemporaryCleanups_.clear();
-		SaveSettings();
+		if (pendingAdvancedConfigurationApply_.has_value()) {
+			// The accepted dialog draft is the newest user intent; do not replace it with
+			// the still-old runtime snapshot while the queued apply is finishing.
+			const jpegview_linux::ViewerSettings draft =
+				pendingAdvancedConfigurationApply_->draft;
+			pendingAdvancedConfigurationApply_.reset();
+			QueueViewerSettingsSave(draft);
+		} else {
+			SaveSettings();
+		}
 		if (magnifyingGlassCursorActive_) {
 			SDL_ShowCursor(magnifyingGlassPreviousCursorVisibility_);
 			magnifyingGlassCursorActive_ = false;
@@ -892,11 +909,10 @@ private:
 				recentFiles_.RememberDoublePageMode(imageSession_.LoadedPath(),
 					{doublePageModeEnabled_, mangaReadingOrderEnabled_});
 			}
-			if (!recentFilesPath_.empty() &&
-				!jpegview_linux::SaveRecentFiles(recentFilesPath_, recentFiles_)) {
-				std::cerr << "Could not save recent-file history to " << recentFilesPath_ << '\n';
-			}
+			QueueRecentFilesSave();
 		}
+		persistenceWorker_.Stop();
+		DrainPersistenceResults(false);
 		fileListSortWorker_.Retire(
 			std::make_shared<jpegview_linux::FileList>(std::move(fileList_)));
 		fileListSortWorker_.Stop();
@@ -1009,10 +1025,155 @@ private:
 		return settings;
 	}
 
-	bool SaveSettings() {
+	std::uint64_t EnqueuePersistence(const fs::path& destination, std::string label,
+		jpegview_linux::PersistenceWorker::Operation operation,
+		std::string successMessage = {}) {
+		const std::uint64_t generation = persistenceWorker_.Enqueue(destination,
+			std::move(label), std::move(operation), std::move(successMessage));
+		if (generation != 0 && persistenceStatusOwner_.InvalidateForNewRequest(
+			destination, generation)) {
+			SetTitle();
+		}
+		return generation;
+	}
+
+	std::uint64_t QueueViewerSettingsSave(
+		const jpegview_linux::ViewerSettings& candidate,
+		std::string successMessage = {}) {
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
-		if (settingsPath.empty()) return false;
-		return runtimeSettings_.SaveAndAdopt(settingsPath, CurrentViewerSettings());
+		if (settingsPath.empty()) return 0;
+		return EnqueuePersistence(settingsPath, "viewer settings",
+			[settingsPath, candidate](std::string& error) {
+				if (jpegview_linux::SaveViewerSettings(settingsPath, candidate)) return true;
+				error = "could not write viewer settings";
+				return false;
+			}, std::move(successMessage));
+	}
+
+	std::uint64_t SaveSettings(std::string successMessage = {}) {
+		const jpegview_linux::ViewerSettings candidate = CurrentViewerSettings();
+		runtimeSettings_.Values() = candidate;
+		return QueueViewerSettingsSave(candidate, std::move(successMessage));
+	}
+
+	bool QueueRecentFilesSave() {
+		if (recentFilesPath_.empty()) return false;
+		const fs::path destination = recentFilesPath_;
+		const jpegview_linux::RecentFiles snapshot = recentFiles_;
+		return EnqueuePersistence(destination, "recent-file history",
+			[destination, snapshot](std::string& error) {
+				if (jpegview_linux::SaveRecentFiles(destination, snapshot)) return true;
+				error = "could not write recent-file history";
+				return false;
+			}) != 0;
+	}
+
+	std::uint64_t QueueProcessingStoreSave(const fs::path& destination,
+		std::string label, jpegview_linux::ImageProcessingStore snapshot,
+		bool replaceExisting = true, std::string successMessage = {}) {
+		return EnqueuePersistence(destination, std::move(label),
+			[destination, snapshot = std::move(snapshot), replaceExisting](std::string& error) {
+				if (jpegview_linux::SaveImageProcessingStore(
+					destination, snapshot, replaceExisting)) return true;
+				error = "could not write picture-level parameter database";
+				return false;
+			}, std::move(successMessage));
+	}
+
+	std::uint64_t QueueProcessingStoreBackup(const fs::path& destination,
+		const fs::path& liveDatabase, bool replaceExisting, std::string successMessage) {
+	return EnqueuePersistence(destination, "picture-level parameter backup",
+		[destination, liveDatabase, replaceExisting](std::string& error) {
+			return jpegview_linux::BackupImageProcessingStore(
+				liveDatabase, destination, replaceExisting, error);
+		}, std::move(successMessage));
+	}
+
+	void SetPersistenceStatusTitle(std::uint64_t generation,
+		const fs::path& destination, const std::string& title,
+		bool boundToImage = false) {
+		if (generation == 0) return;
+		SetTitle(title);
+		persistenceStatusOwner_.Begin(generation, destination, boundToImage,
+			imageSession_.Generation());
+	}
+
+	void DrainPersistenceResults(bool updateTitle = true) {
+		for (const jpegview_linux::PersistenceWorker::Result& result :
+			persistenceWorker_.TakeResults()) {
+			if (!result.success) {
+				std::cerr << "Could not save " << result.label << " to " <<
+					result.destination << ": " << result.error << '\n';
+			}
+			if (CompleteAdvancedConfigurationApply(result, updateTitle)) continue;
+			const bool ownsVisibleStatus = updateTitle &&
+				persistenceStatusOwner_.ConsumeIfCurrent(result.generation,
+					imageSession_.Generation());
+			if (result.success) {
+				if (ownsVisibleStatus && !result.successMessage.empty()) {
+					SetTitle(result.successMessage);
+				}
+				continue;
+			}
+			if (ownsVisibleStatus) SetTitle("Could not save " + result.label);
+		}
+	}
+
+	bool CompleteAdvancedConfigurationApply(
+		const jpegview_linux::PersistenceWorker::Result& result, bool updateUi) {
+		if (!pendingAdvancedConfigurationApply_.has_value() ||
+			pendingAdvancedConfigurationApply_->generation != result.generation) return false;
+		auto pending = std::move(*pendingAdvancedConfigurationApply_);
+		pendingAdvancedConfigurationApply_.reset();
+		if (updateUi) {
+			frameInvalidator_.Mark(jpegview_linux::FrameInvalidationReason::Dialog);
+		}
+		if (!result.success) {
+			advancedConfiguration_.SetMessage(
+				"Could not save settings.conf; changes were not applied");
+			return true;
+		}
+
+		const jpegview_linux::ViewerSettings& settings = pending.draft;
+		const int previousThumbnailWidth = pending.previousSettings.thumbnailPanelWidth;
+		const bool scanOptionsChanged = MakeFileListScanOptions(pending.previousSettings) !=
+			MakeFileListScanOptions(settings);
+		const bool magnifierChanged = magnifyingGlass_.Width() != settings.magnifyingGlassWidth ||
+			magnifyingGlass_.Height() != settings.magnifyingGlassHeight ||
+			std::abs(magnifyingGlass_.ZoomLevel() - settings.magnifyingGlassZoomLevel) > 1e-9;
+		runtimeSettings_.Values() = settings;
+		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
+		RefreshFitRelativeZoomBase();
+		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
+		fileList_.SetScanOptions(MakeFileListScanOptions(settings));
+		if (fileListBeforeClipboard_) {
+			fileListBeforeClipboard_->SetWrapAroundFolder(settings.folderWrapAround);
+			fileListBeforeClipboard_->SetScanOptions(MakeFileListScanOptions(settings));
+		}
+
+		if (magnifierChanged) {
+			ClearMagnifyingGlassRequest();
+			const SDL_Rect imageArea = ImageAreaRect();
+			magnifyingGlass_.SetParameters(settings.magnifyingGlassWidth,
+				settings.magnifyingGlassHeight, settings.magnifyingGlassZoomLevel,
+				imageArea.w, imageArea.h);
+		}
+		if (settings.thumbnailPanelWidth != previousThumbnailWidth &&
+			settings.thumbnailPanelVisible) {
+			PrepareThumbnailPreload();
+			if (viewport_.IsFitToWindow()) {
+				FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
+			} else {
+				RefreshFitRelativeZoomBase();
+			}
+		}
+		if (scanOptionsChanged) RescanFileListAfterScanOptionsChange();
+		if (updateUi) {
+			advancedConfiguration_.Close();
+			SDL_StopTextInput();
+			SetTitle();
+		}
+		return true;
 	}
 
 	jpegview_linux::SourceDescriptor SourceDescriptorForPath(const fs::path& filename) const {
@@ -6343,6 +6504,7 @@ private:
 	}
 
 	void SetTitle(const std::string& title) {
+		persistenceStatusOwner_.Clear();
 		if (appliedWindowTitle_.Update(title)) {
 			SDL_SetWindowTitle(window_, appliedWindowTitle_.Current().c_str());
 		}
@@ -6615,28 +6777,24 @@ private:
 				fileDialogMessage_ = "Choose another name; this is the live parameter database";
 				return;
 			}
-			const fs::path liveDatabase = jpegview_linux::ImageProcessingStorePath();
-			std::error_code databaseStatusError;
-			const bool liveDatabaseExists = fs::exists(liveDatabase, databaseStatusError);
-			jpegview_linux::ImageProcessingStore backupContents;
-			if (databaseStatusError || (liveDatabaseExists &&
-				!jpegview_linux::LoadImageProcessingStore(liveDatabase, backupContents))) {
-				fileDialogMessage_ = "Backup failed: the live parameter database is unreadable";
-				return;
-			}
 			std::error_code existsError;
 			if (fs::exists(output, existsError) && !existsError && !fileDialogOverwriteConfirmed_) {
 				fileDialogOverwriteConfirmed_ = true;
 				fileDialogMessage_ = "File exists; press ENTER to overwrite or ESC to cancel";
 				return;
 			}
-			if (!jpegview_linux::SaveImageProcessingStore(output, backupContents)) {
-				fileDialogMessage_ = "Backup failed: could not write the parameter database";
+			const std::string savedName = output.filename().string();
+			const std::uint64_t request = QueueProcessingStoreBackup(output,
+				jpegview_linux::ImageProcessingStorePath(),
+				fileDialogOverwriteConfirmed_,
+				"Backed up picture-level parameters: " + savedName);
+			if (request == 0) {
+				fileDialogMessage_ = "Backup failed: the persistence worker is stopping";
 				return;
 			}
-			const std::string savedName = output.filename().string();
 			CloseFileDialog();
-			SetTitle("Backed up picture-level parameters: " + savedName);
+			SetPersistenceStatusTitle(request,
+				output, "Writing picture-level parameter backup: " + savedName);
 			return;
 		}
 		fs::path filename(fileDialogFilename_);
@@ -7054,19 +7212,24 @@ private:
 
 	void RestorePendingParameterDb() {
 		if (pendingParameterDbRestoreSource_.empty()) return;
-		if (!jpegview_linux::SaveImageProcessingStore(
-			jpegview_linux::ImageProcessingStorePath(), pendingParameterDbRestore_)) {
+		const fs::path databasePath = jpegview_linux::ImageProcessingStorePath();
+		const jpegview_linux::ImageProcessingStore restored = pendingParameterDbRestore_;
+		const std::uint64_t request = QueueProcessingStoreSave(databasePath,
+			"restored picture-level database", pendingParameterDbRestore_, true,
+			"Picture-level database restored");
+		if (request == 0) {
 			pendingParameterDbRestore_.clear();
 			pendingParameterDbRestoreSource_.clear();
 			SetTitle("Could not restore the picture-level database");
 			return;
 		}
-		imageProcessingStore_ = std::move(pendingParameterDbRestore_);
+		imageProcessingStore_ = restored;
 		pendingParameterDbRestore_.clear();
 		pendingParameterDbRestoreSource_.clear();
 		if (!fileList_.Empty() && !runtimeSettings_.Values().keepPictureLevels) SelectPictureLevelsForCurrentFile();
 		RefreshPictureLevels();
-		SetTitle("Restored picture-level database");
+		SetPersistenceStatusTitle(request, databasePath,
+			"Restoring picture-level database…");
 	}
 
 	void CopyCurrentImage(bool fullSize) {
@@ -7919,51 +8082,29 @@ private:
 
 	bool ApplyAdvancedConfigurationDialog() {
 		if (!advancedConfiguration_.IsOpen()) return false;
+		if (pendingAdvancedConfigurationApply_.has_value()) return false;
 		if (advancedConfiguration_.IsEditing() && !advancedConfiguration_.CommitEdit()) return false;
 		const fs::path settingsPath = jpegview_linux::ViewerSettingsPath();
-		const jpegview_linux::ViewerSettings& draft = advancedConfiguration_.Draft();
-		const int previousThumbnailWidth = runtimeSettings_.Values().thumbnailPanelWidth;
-		const bool scanOptionsChanged = MakeFileListScanOptions(runtimeSettings_.Values()) !=
-			MakeFileListScanOptions(draft);
-		const bool magnifierChanged = magnifyingGlass_.Width() != draft.magnifyingGlassWidth ||
-			magnifyingGlass_.Height() != draft.magnifyingGlassHeight ||
-			std::abs(magnifyingGlass_.ZoomLevel() - draft.magnifyingGlassZoomLevel) > 1e-9;
-		if (settingsPath.empty() || !runtimeSettings_.SaveAndAdopt(settingsPath, draft)) {
+		if (settingsPath.empty()) {
 			advancedConfiguration_.SetMessage("Could not save settings.conf; changes were not applied");
 			return false;
 		}
-
-		const jpegview_linux::ViewerSettings& settings = runtimeSettings_.Values();
-		viewport_.SetFitRelativeZoomMode(settings.fitRelativeZoomMode);
-		RefreshFitRelativeZoomBase();
-		fileList_.SetWrapAroundFolder(settings.folderWrapAround);
-		fileList_.SetScanOptions(MakeFileListScanOptions(settings));
-		if (fileListBeforeClipboard_) {
-			fileListBeforeClipboard_->SetWrapAroundFolder(settings.folderWrapAround);
-			fileListBeforeClipboard_->SetScanOptions(MakeFileListScanOptions(settings));
+		const jpegview_linux::ViewerSettings draft = advancedConfiguration_.Draft();
+		const jpegview_linux::ViewerSettings previousSettings = runtimeSettings_.Values();
+		const std::uint64_t generation = EnqueuePersistence(settingsPath,
+			"advanced configuration",
+			[settingsPath, draft](std::string& error) {
+				if (jpegview_linux::SaveViewerSettings(settingsPath, draft)) return true;
+				error = "could not write viewer settings";
+				return false;
+			});
+		if (generation == 0) {
+			advancedConfiguration_.SetMessage("Could not save settings.conf; changes were not applied");
+			return false;
 		}
-
-		if (magnifierChanged) {
-			ClearMagnifyingGlassRequest();
-			const SDL_Rect imageArea = ImageAreaRect();
-			magnifyingGlass_.SetParameters(settings.magnifyingGlassWidth,
-				settings.magnifyingGlassHeight, settings.magnifyingGlassZoomLevel,
-				imageArea.w, imageArea.h);
-		}
-		if (runtimeSettings_.Values().thumbnailPanelWidth != previousThumbnailWidth) {
-			if (runtimeSettings_.Values().thumbnailPanelVisible) {
-				PrepareThumbnailPreload();
-				if (viewport_.IsFitToWindow()) {
-					FitToWindow(viewport_.FillWithCrop(), viewport_.NoEnlarge());
-				} else {
-					RefreshFitRelativeZoomBase();
-				}
-			}
-		}
-		if (scanOptionsChanged) RescanFileListAfterScanOptionsChange();
-		advancedConfiguration_.Close();
-		SDL_StopTextInput();
-		SetTitle();
+		pendingAdvancedConfigurationApply_ = PendingAdvancedConfigurationApply{
+			generation, previousSettings, draft};
+		advancedConfiguration_.SetMessage("Saving settings; changes will apply when the write succeeds");
 		return true;
 	}
 
@@ -8025,6 +8166,7 @@ private:
 			running = false;
 			return;
 		}
+		if (pendingAdvancedConfigurationApply_.has_value()) return;
 		if (event.type == SDL_TEXTINPUT) {
 			advancedConfiguration_.AppendText(event.text.text);
 			return;
@@ -9707,13 +9849,18 @@ private:
 		auto updatedStore = imageProcessingStore_;
 		updatedStore[AbsoluteNormalized(fileList_.Current()).string()] =
 			jpegview_linux::ImageProcessingPreset{imageProcessing_, autoContrastEnabled_};
-		if (!jpegview_linux::SaveImageProcessingStore(
-			jpegview_linux::ImageProcessingStorePath(), updatedStore)) {
+		const std::uint64_t request = QueueProcessingStoreSave(
+			jpegview_linux::ImageProcessingStorePath(),
+			"picture-level parameters", updatedStore, true,
+			"Picture-level parameters saved for this image");
+		if (request == 0) {
 			SetTitle("Could not save picture-level parameters");
 			return;
 		}
 		imageProcessingStore_ = std::move(updatedStore);
-		SetTitle("Picture-level parameters saved for this image");
+		SetPersistenceStatusTitle(request,
+			jpegview_linux::ImageProcessingStorePath(),
+			"Saving picture-level parameters for this image…", true);
 	}
 
 	void SaveCurrentPictureLevelsAsDefault() {
@@ -9725,16 +9872,20 @@ private:
 		runtimeSettings_.Values().defaultImageProcessing.unsharpRadius = 1.0;
 		runtimeSettings_.Values().defaultImageProcessing.unsharpAmount = 0.0;
 		runtimeSettings_.Values().defaultImageProcessing.unsharpThreshold = 4.0;
-		if (!SaveSettings()) {
+		const std::string successMessage =
+			jpegview_linux::IsDefaultImageProcessing(runtimeSettings_.Values().defaultImageProcessing) ?
+			"Default picture levels restored to neutral" :
+			"Current picture levels saved as defaults for other images";
+		const std::uint64_t request = SaveSettings(successMessage);
+		if (request == 0) {
 			runtimeSettings_.Values().defaultImageProcessing = previousProcessing;
 			runtimeSettings_.Values().autoContrast = previousAutoContrast;
 			SetTitle("Could not save default picture levels");
 			return;
 		}
 		PrepareImagePrefetch();
-		SetTitle(jpegview_linux::IsDefaultImageProcessing(runtimeSettings_.Values().defaultImageProcessing) ?
-			"Default picture levels restored to neutral" :
-			"Current picture levels saved as defaults for other images");
+		SetPersistenceStatusTitle(request, jpegview_linux::ViewerSettingsPath(),
+			"Saving default picture levels…", true);
 	}
 
 	void ClearCurrentPictureLevels() {
@@ -9743,8 +9894,11 @@ private:
 		const bool hadSavedValues = updatedStore.erase(
 			AbsoluteNormalized(fileList_.Current()).string()) != 0;
 		if (!hadSavedValues) return;
-		if (!jpegview_linux::SaveImageProcessingStore(
-			jpegview_linux::ImageProcessingStorePath(), updatedStore)) {
+		const std::uint64_t request = QueueProcessingStoreSave(
+			jpegview_linux::ImageProcessingStorePath(),
+			"picture-level parameter database", updatedStore, true,
+			"Picture-level parameter changes saved");
+		if (request == 0) {
 			SetTitle("Could not update picture-level parameter database");
 			return;
 		}
@@ -9754,8 +9908,10 @@ private:
 		imageProcessing_.unsharpRadius = runtimeSettings_.Values().unsharpMaskRadius;
 		imageProcessing_.unsharpAmount = 0.0;
 		imageProcessing_.unsharpThreshold = runtimeSettings_.Values().unsharpMaskThreshold;
-		SetTitle("Saved picture-level parameters removed");
 		RefreshPictureLevels();
+		SetPersistenceStatusTitle(request,
+			jpegview_linux::ImageProcessingStorePath(),
+			"Saving picture-level parameter changes…", true);
 	}
 
 	void HandlePictureLevelsAction(int action) {
@@ -15859,6 +16015,9 @@ private:
 	jpegview_linux::ImageDocument imageDocument_;
 	jpegview_linux::ImageOperationWorker imageOperationWorker_{cacheBudget_};
 	jpegview_linux::FileOperationService fileOperationService_;
+	jpegview_linux::PersistenceStatusOwner persistenceStatusOwner_;
+	jpegview_linux::PersistenceWorker persistenceWorker_;
+	std::optional<PendingAdvancedConfigurationApply> pendingAdvancedConfigurationApply_;
 	std::optional<PendingFileOperationUi> pendingFileOperation_;
 	std::deque<TemporaryCleanupRequest> pendingTemporaryCleanups_;
 	std::shared_ptr<DisplayPrefetchBatch> displayPrefetchBatch_;

@@ -416,7 +416,11 @@ they support.
    The recent-file
    list and view snapshots are stored separately from settings at
    `${XDG_STATE_HOME:-$HOME/.local/state}/jpegview-linux/recent-files.db` and are written on
-   normal shutdown. The browser also provides move-to-trash confirmation with the selected filename
+   normal shutdown. Interactive settings and per-image-level saves run off the event thread; pending
+   writes to the same file coalesce to the latest snapshot. Shutdown drains accepted writes. Settings,
+   Recents, and per-image levels replace their saved files only after a complete write succeeds, so a
+   failed save preserves the previous copy. The browser also provides
+   move-to-trash confirmation with the selected filename
    and a small image preview from an existing thumbnail or current renderer texture. If neither is
    ready, it shows a placeholder instead of decoding synchronously. Other actions include
    original-size image copy on Ctrl+C, path copy, PNG paste, printing through `lp`,
@@ -1296,6 +1300,9 @@ images without a saved entry. Removing an entry restores those defaults. The Lin
 the processed image is saved.
 `Backup parameter DB...` opens the save browser, defaults to `picture-levels-backup.db` beside the live
 database, and writes an atomic Linux-native copy that can be moved to another installation.
+The live database is read and validated by the persistence worker before it writes the backup; an
+unreadable live database leaves the destination untouched. An existing backup requires overwrite
+confirmation, and a file created after the prompt is never silently replaced.
 `Restore parameter DB...` lists backup files in that directory (or a browsed subdirectory), validates
 the selected database before asking for confirmation, then atomically replaces the live database.
 Invalid files leave the active database untouched. Windows binary parameter databases are not

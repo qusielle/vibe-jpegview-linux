@@ -1,11 +1,12 @@
 #include "desktop_association.h"
 
+#include "atomic_file.h"
+
 #include <algorithm>
 #include <fstream>
 #include <set>
 #include <sstream>
 #include <system_error>
-#include <unistd.h>
 #include <utility>
 
 namespace fs = std::filesystem;
@@ -82,40 +83,6 @@ std::string UpdateMimeApps(const std::string& current) {
 		}
 	}
 	return output.str();
-}
-
-bool WriteFileAtomically(const fs::path& filename, const std::string& contents,
-	std::string& errorMessage) {
-	std::error_code error;
-	fs::create_directories(filename.parent_path(), error);
-	if (error) {
-		errorMessage = "cannot create " + filename.parent_path().string() + ": " + error.message();
-		return false;
-	}
-	fs::path temporary = filename;
-	temporary += ".tmp." + std::to_string(static_cast<long long>(getpid()));
-	{
-		std::ofstream output(temporary, std::ios::trunc);
-		if (!output) {
-			errorMessage = "cannot write " + temporary.string();
-			return false;
-		}
-		output << contents;
-		if (!output) {
-			output.close();
-			fs::remove(temporary, error);
-			errorMessage = "cannot write " + temporary.string();
-			return false;
-		}
-	}
-	error.clear();
-	fs::rename(temporary, filename, error);
-	if (error) {
-		fs::remove(temporary, error);
-		errorMessage = "cannot replace " + filename.string();
-		return false;
-	}
-	return true;
 }
 
 bool ReadMimeApps(const fs::path& filename, std::string& contents, std::string& errorMessage) {

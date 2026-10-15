@@ -1,5 +1,6 @@
 #include "image_processing_store.h"
 
+#include "atomic_file.h"
 #include "settings.h"
 
 #include <cmath>
@@ -57,18 +58,13 @@ bool LoadImageProcessingStore(const fs::path& filename, ImageProcessingStore& st
 	return true;
 }
 
-bool SaveImageProcessingStore(const fs::path& filename, const ImageProcessingStore& store) {
+bool SaveImageProcessingStore(const fs::path& filename, const ImageProcessingStore& store,
+	bool replaceExisting) {
 	if (filename.empty()) return false;
-	std::error_code error;
-	if (!filename.parent_path().empty()) {
-		fs::create_directories(filename.parent_path(), error);
-		if (error) return false;
-	}
-	fs::path temporary = filename;
-	temporary += ".tmp";
+	AtomicFileWriter atomicOutput(filename);
+	if (!atomicOutput) return false;
 	{
-		std::ofstream output(temporary, std::ios::trunc);
-		if (!output) return false;
+		std::ostream& output = atomicOutput.Stream();
 		output << "# JPEGView Linux per-image picture levels, version 2\n";
 		output << std::setprecision(17);
 		for (const auto& entry : store) {
@@ -82,16 +78,30 @@ bool SaveImageProcessingStore(const fs::path& filename, const ImageProcessingSto
 				<< params.deepShadows << ' ' << params.colorCorrection << ' '
 				<< params.contrastCorrection << ' ' << params.sharpen << '\n';
 		}
-		if (!output) {
-			output.close();
-			fs::remove(temporary, error);
-			return false;
-		}
 	}
-	error.clear();
-	fs::rename(temporary, filename, error);
-	if (error) {
-		fs::remove(temporary, error);
+	return atomicOutput.Commit(replaceExisting);
+}
+
+bool BackupImageProcessingStore(const fs::path& liveDatabase, const fs::path& backupPath,
+	bool replaceExisting, std::string& errorMessage) {
+	errorMessage.clear();
+	if (backupPath.empty()) {
+		errorMessage = "backup destination is empty";
+		return false;
+	}
+	std::error_code statusError;
+	const bool sourceExists = fs::exists(liveDatabase, statusError);
+	if (statusError) {
+		errorMessage = "could not inspect the live parameter database";
+		return false;
+	}
+	ImageProcessingStore backupContents;
+	if (sourceExists && !LoadImageProcessingStore(liveDatabase, backupContents)) {
+		errorMessage = "the live parameter database is unreadable";
+		return false;
+	}
+	if (!SaveImageProcessingStore(backupPath, backupContents, replaceExisting)) {
+		errorMessage = "could not write the parameter database backup";
 		return false;
 	}
 	return true;

@@ -97,8 +97,10 @@ void TestRecentFilesMruUniquenessPersistenceAndViewportSnapshots() {
 	const fs::path database = temporary.path() / "state" / "recent-files.db";
 	Expect(jpegview_linux::SaveRecentFiles(database, recent),
 		"recent-file database could not be saved atomically");
-	Expect(!fs::exists(database.string() + ".tmp." + std::to_string(static_cast<long long>(::getpid()))),
-		"recent-file database left its temporary file behind");
+	for (const fs::directory_entry& entry : fs::directory_iterator(database.parent_path())) {
+		Expect(entry.path().filename().string().rfind("recent-files.db.tmp.", 0) != 0,
+			"recent-file database left its temporary file behind");
+	}
 	jpegview_linux::RecentFiles loaded;
 	Expect(jpegview_linux::LoadRecentFiles(database, loaded),
 		"recent-file database could not be loaded");

@@ -1,5 +1,7 @@
 #include "test_harness.h"
 #include "test_support.h"
+#include "atomic_file.h"
+#include "persistence_worker.h"
 #include "gps_map_action.h"
 #include "exif_orientation.h"
 #include "image_metadata_reader.h"
@@ -9,10 +11,56 @@
 #include "tiff_metadata_reader.h"
 
 #include <array>
+#include <cerrno>
+#include <csignal>
+#include <condition_variable>
 #include <cstring>
+#include <iostream>
 #include <limits>
+#include <mutex>
+#include <spawn.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 
 namespace {
+
+class ScopedWriteFailure {
+public:
+	ScopedWriteFailure() {
+		if (::getrlimit(RLIMIT_FSIZE, &oldLimit_) != 0) {
+			throw TestFailure("cannot read file-size resource limit");
+		}
+		struct sigaction ignored{};
+		ignored.sa_handler = SIG_IGN;
+		::sigemptyset(&ignored.sa_mask);
+		if (::sigaction(SIGXFSZ, &ignored, &oldSignal_) != 0) {
+			throw TestFailure("cannot ignore file-size limit signal");
+		}
+		signalChanged_ = true;
+		struct rlimit limited = oldLimit_;
+		limited.rlim_cur = 0;
+		if (::setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+			(void)::sigaction(SIGXFSZ, &oldSignal_, nullptr);
+			signalChanged_ = false;
+			throw TestFailure("cannot set file-size resource limit");
+		}
+		limitChanged_ = true;
+	}
+
+	~ScopedWriteFailure() {
+		if (limitChanged_) (void)::setrlimit(RLIMIT_FSIZE, &oldLimit_);
+		if (signalChanged_) (void)::sigaction(SIGXFSZ, &oldSignal_, nullptr);
+	}
+
+	ScopedWriteFailure(const ScopedWriteFailure&) = delete;
+	ScopedWriteFailure& operator=(const ScopedWriteFailure&) = delete;
+
+private:
+	struct rlimit oldLimit_{};
+	struct sigaction oldSignal_{};
+	bool signalChanged_ = false;
+	bool limitChanged_ = false;
+};
 
 void TestImageStorageTransformsAndValidation() {
 	jpegview_linux::Image empty;
@@ -1448,6 +1496,7 @@ void TestImageOperationWorkerSupersedesAndSurvivesFailures() {
 void TestPictureLevelsStoreRoundTrip() {
 	TemporaryDirectory temporary;
 	const fs::path database = temporary.path() / "picture-levels.db";
+	const fs::path backup = temporary.path() / "picture-levels-backup.db";
 	jpegview_linux::ImageProcessingStore expected;
 	jpegview_linux::ImageProcessingPreset preset;
 	preset.processing.contrast = 0.23;
@@ -1466,6 +1515,15 @@ void TestPictureLevelsStoreRoundTrip() {
 		"picture-level store did not round-trip parameters and correction state");
 	Expect(loaded.begin()->first == expected.begin()->first,
 		"picture-level store did not preserve quoted path characters");
+	std::string backupError;
+	Expect(jpegview_linux::BackupImageProcessingStore(database, backup, false,
+		backupError), "valid picture-level database could not be backed up: " + backupError);
+	jpegview_linux::ImageProcessingStore backedUp;
+	Expect(jpegview_linux::LoadImageProcessingStore(backup, backedUp) &&
+		backedUp.size() == expected.size() &&
+		jpegview_linux::EqualImageProcessing(backedUp.begin()->second.processing,
+			expected.begin()->second.processing),
+		"picture-level backup did not preserve its source store");
 	preset.processing.contrast = 0.36;
 	preset.autoContrast = false;
 	expected.begin()->second = preset;
@@ -1482,12 +1540,269 @@ void TestPictureLevelsStoreRoundTrip() {
 	Expect(!jpegview_linux::LoadImageProcessingStore(database, loaded) && loaded.size() == 1 &&
 		std::abs(loaded.begin()->second.processing.contrast - 0.36) < 1e-12,
 		"malformed picture-level database was accepted or replaced the current store");
+	Expect(!jpegview_linux::BackupImageProcessingStore(database, backup, true,
+		backupError) && !backupError.empty() &&
+		jpegview_linux::LoadImageProcessingStore(backup, backedUp) && backedUp.size() == 1 &&
+		std::abs(backedUp.begin()->second.processing.contrast - 0.23) < 1e-12,
+		"malformed live picture-level data replaced a valid backup with an empty store");
+	const fs::path missingDatabase = temporary.path() / "missing-picture-levels.db";
+	const fs::path emptyBackup = temporary.path() / "empty-picture-levels-backup.db";
+	Expect(jpegview_linux::BackupImageProcessingStore(missingDatabase, emptyBackup,
+		false, backupError) && jpegview_linux::LoadImageProcessingStore(emptyBackup, backedUp) &&
+		backedUp.empty(),
+		"backup of a missing picture-level database did not preserve the empty-store behavior");
 	std::ofstream outOfRange(database, std::ios::trunc);
 	outOfRange << "\"/invalid\" 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 0\n";
 	outOfRange.close();
 	Expect(!jpegview_linux::LoadImageProcessingStore(database, loaded) && loaded.size() == 1 &&
 		std::abs(loaded.begin()->second.processing.contrast - 0.36) < 1e-12,
 		"out-of-range picture-level database was accepted or replaced the current store");
+}
+
+void VerifyPersistencePreservesFilesWhenBufferedWriteFails() {
+	TemporaryDirectory temporary;
+	const fs::path settingsPath = temporary.path() / "settings.conf";
+	const fs::path levelsPath = temporary.path() / "picture-levels.db";
+	const fs::path recentsPath = temporary.path() / "recent-files.db";
+	const fs::path dataHome = temporary.path() / "data";
+	const fs::path configHome = temporary.path() / "config";
+	const fs::path desktopPath = dataHome / "applications" / "jpegview-linux-user.desktop";
+	const fs::path mimeAppsPath = configHome / "mimeapps.list";
+	fs::create_directories(desktopPath.parent_path());
+	fs::create_directories(configHome);
+	WriteText(settingsPath, "existing settings\n");
+	WriteText(levelsPath, "existing levels\n");
+	WriteText(recentsPath, "existing recents\n");
+	WriteText(desktopPath, "existing desktop entry\n");
+	WriteText(mimeAppsPath, "existing MIME associations\n");
+	const std::vector<std::uint8_t> settingsBefore = ReadBytes(settingsPath);
+	const std::vector<std::uint8_t> levelsBefore = ReadBytes(levelsPath);
+	const std::vector<std::uint8_t> recentsBefore = ReadBytes(recentsPath);
+	const std::vector<std::uint8_t> desktopBefore = ReadBytes(desktopPath);
+	const std::vector<std::uint8_t> mimeAppsBefore = ReadBytes(mimeAppsPath);
+
+	ScopedWriteFailure writeFailure;
+	Expect(!jpegview_linux::SaveViewerSettings(settingsPath, jpegview_linux::ViewerSettings()) &&
+		ReadBytes(settingsPath) == settingsBefore,
+		"settings write failure replaced the existing settings file");
+	Expect(!jpegview_linux::SaveImageProcessingStore(levelsPath,
+		jpegview_linux::ImageProcessingStore()) && ReadBytes(levelsPath) == levelsBefore,
+		"picture-level write failure replaced the existing database");
+	Expect(!jpegview_linux::SaveRecentFiles(recentsPath, jpegview_linux::RecentFiles()) &&
+		ReadBytes(recentsPath) == recentsBefore,
+		"recent-file write failure replaced the existing database");
+	std::string errorMessage;
+	Expect(!jpegview_linux::RegisterDefaultViewer(temporary.path() / "viewer.AppImage",
+		dataHome, configHome, errorMessage) && !errorMessage.empty() &&
+		ReadBytes(desktopPath) == desktopBefore && ReadBytes(mimeAppsPath) == mimeAppsBefore,
+		"desktop association write failure replaced an existing registration file");
+	for (const fs::path& destination : {settingsPath, levelsPath, recentsPath, desktopPath}) {
+		const std::string prefix = destination.filename().string() + ".tmp.";
+		for (const fs::directory_entry& entry : fs::directory_iterator(destination.parent_path())) {
+			Expect(entry.path().filename().string().rfind(prefix, 0) != 0,
+				"failed persistence write left a temporary sibling behind");
+		}
+	}
+}
+
+void TestPersistencePreservesFilesWhenBufferedWriteFails() {
+	VerifyPersistencePreservesFilesWhenBufferedWriteFails();
+}
+
+void TestPersistenceWorkerCoalescesPendingWritesAndDrainsOnStop() {
+	TemporaryDirectory temporary;
+	const fs::path destination = temporary.path() / "settings.ini";
+	jpegview_linux::PersistenceWorker worker;
+	std::mutex mutex;
+	std::condition_variable condition;
+	bool firstStarted = false;
+	bool releaseFirst = false;
+	std::vector<std::string> executed;
+	const auto operation = [&](const std::string& value, bool block) {
+		return [&, value, block](std::string& error) {
+			if (block) {
+				std::unique_lock<std::mutex> lock(mutex);
+				firstStarted = true;
+				condition.notify_all();
+				if (!condition.wait_for(lock, std::chrono::seconds(2), [&] {
+					return releaseFirst;
+				})) {
+					error = "test operation timed out";
+					return false;
+				}
+			}
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				executed.push_back(value);
+			}
+			if (!jpegview_linux::WriteFileAtomically(destination, value, error)) return false;
+			return true;
+		};
+	};
+	const std::uint64_t first = worker.Enqueue(destination, "settings",
+		operation("active", true));
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(condition.wait_for(lock, std::chrono::seconds(2), [&] {
+			return firstStarted;
+		}), "persistence worker did not start its first write");
+	}
+	const std::uint64_t replaced = worker.Enqueue(destination, "settings",
+		operation("superseded", false));
+	const std::uint64_t latest = worker.Enqueue(destination, "settings",
+		operation("latest", false), "latest settings saved");
+	Expect(first != 0 && replaced > first && latest > replaced,
+		"persistence worker did not assign increasing request generations");
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		releaseFirst = true;
+	}
+	condition.notify_all();
+	worker.Stop();
+	const std::vector<jpegview_linux::PersistenceWorker::Result> results = worker.TakeResults();
+	Expect(executed == std::vector<std::string>({"active", "latest"}),
+		"pending same-path writes were not coalesced to the newest snapshot");
+	Expect(results.size() == 1 && results.front().success &&
+		results.front().generation == latest && results.front().destination == destination &&
+		results.front().successMessage == "latest settings saved",
+		"worker stop did not drain and publish the latest persistence result");
+	std::ifstream persistedSettings(destination, std::ios::binary);
+	const std::string persistedText((std::istreambuf_iterator<char>(persistedSettings)),
+		std::istreambuf_iterator<char>());
+	Expect(persistedSettings.is_open() && persistedText == "latest",
+		"a newer queued settings snapshot did not remain the final disk contents");
+
+	jpegview_linux::PersistenceWorker newerRequest;
+	bool failedRequestFinished = false;
+	const std::uint64_t failed = newerRequest.Enqueue(destination, "old save",
+		[&](std::string& error) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				failedRequestFinished = true;
+			}
+			condition.notify_all();
+			error = "obsolete write failed";
+			return false;
+		});
+	{
+		std::unique_lock<std::mutex> lock(mutex);
+		Expect(condition.wait_for(lock, std::chrono::seconds(2), [&] {
+			return failedRequestFinished;
+		}), "older persistence request did not finish before replacement");
+	}
+	const std::uint64_t replacement = newerRequest.Enqueue(destination, "new save",
+		operation("replacement", false), "replacement saved");
+	newerRequest.Stop();
+	const auto replacementResults = newerRequest.TakeResults();
+	Expect(failed != 0 && replacement > failed &&
+		executed.back() == "replacement" && replacementResults.size() == 1 &&
+		replacementResults.front().generation == replacement &&
+		replacementResults.front().success &&
+		replacementResults.front().successMessage == "replacement saved",
+		"a published failure survived a newer request for the same destination");
+}
+
+void TestPersistenceStatusOwnershipRejectsStaleAndMovedImageCompletion() {
+	jpegview_linux::PersistenceStatusOwner status;
+	const fs::path database = fs::path("state") / "jpegview-levels.db";
+	const fs::path backup = fs::path("state") / "jpegview-levels-backup.db";
+	status.Begin(11, database, true, 4);
+	Expect(!status.ConsumeIfCurrent(11, 5),
+		"an image-bound save status survived navigation to another image");
+
+	status.Begin(12, backup, false, 5);
+	Expect(status.ConsumeIfCurrent(12, 6),
+		"a global backup status was incorrectly tied to the selected image");
+
+	status.Begin(13, database, true, 6);
+	status.Begin(14, backup, false, 6);
+	Expect(!status.ConsumeIfCurrent(13, 6) && status.ConsumeIfCurrent(14, 7),
+		"an older persistence completion replaced a newer action's status");
+
+	status.Begin(15, database, true, 7);
+	status.Clear();
+	Expect(!status.ConsumeIfCurrent(15, 7),
+		"a cleared status owner accepted a late persistence completion");
+
+	status.Begin(16, backup, false, 7);
+	Expect(!status.InvalidateForNewRequest(database, 17) &&
+		status.ConsumeIfCurrent(16, 7),
+		"a save to another destination invalidated the visible backup status");
+	status.Begin(18, database, false, 7);
+	Expect(status.InvalidateForNewRequest(database, 19) &&
+		!status.ConsumeIfCurrent(18, 7),
+		"a coalescing write left a superseded persistence status active");
+}
+
+void TestAtomicWriterPreservesCollidingTemporaryFiles() {
+	TemporaryDirectory temporary;
+	const fs::path destination = temporary.path() / "state.db";
+	const std::string prefix = destination.filename().string() + ".tmp." +
+		std::to_string(static_cast<long long>(::getpid())) + ".";
+	fs::path createdTemporary;
+	{
+		jpegview_linux::AtomicFileWriter seed(destination);
+		Expect(static_cast<bool>(seed), "atomic writer could not create its seed temporary file");
+		for (const fs::directory_entry& entry : fs::directory_iterator(temporary.path())) {
+			if (entry.path().filename().string().rfind(prefix, 0) == 0) {
+				createdTemporary = entry.path();
+				break;
+			}
+		}
+	}
+	Expect(!createdTemporary.empty(), "atomic writer temporary name was not observable");
+	const std::string suffix = createdTemporary.filename().string().substr(prefix.size());
+	const unsigned long long seedId = std::stoull(suffix);
+	std::vector<fs::path> collisions;
+	const std::string preserved = "pre-existing temporary\n";
+	const std::vector<std::uint8_t> preservedBytes(preserved.begin(), preserved.end());
+	for (unsigned long long offset = 1; offset <= 32; ++offset) {
+		const fs::path collision = temporary.path() /
+			(prefix + std::to_string(seedId + offset));
+		WriteText(collision, preserved);
+		collisions.push_back(collision);
+	}
+	{
+		jpegview_linux::AtomicFileWriter exhausted(destination);
+		Expect(!static_cast<bool>(exhausted) && !exhausted.ErrorMessage().empty(),
+			"atomic writer did not report exhausted temporary-name collisions");
+	}
+	for (const fs::path& collision : collisions) {
+		Expect(ReadBytes(collision) == preservedBytes,
+			"failed atomic writer removed a temporary file it did not create");
+	}
+}
+
+void TestAtomicWriterNoReplaceProtectsLateDestination() {
+	TemporaryDirectory temporary;
+	const fs::path destination = temporary.path() / "unconfirmed-backup.db";
+	WriteText(destination, "created by another process\n");
+	const std::vector<std::uint8_t> original = ReadBytes(destination);
+	{
+		jpegview_linux::AtomicFileWriter writer(destination);
+		Expect(static_cast<bool>(writer), "atomic writer could not create its temporary file");
+		writer.Stream() << "replacement contents\n";
+		Expect(!writer.Commit(false),
+			"no-replace publication overwrote a destination created after the initial check");
+	}
+	Expect(ReadBytes(destination) == original,
+		"no-replace publication changed a late-created destination");
+	for (const fs::directory_entry& entry : fs::directory_iterator(temporary.path())) {
+		Expect(entry.path() == destination,
+			"failed no-replace publication left its temporary sibling behind");
+	}
+
+	fs::remove(destination);
+	{
+		jpegview_linux::AtomicFileWriter writer(destination);
+		Expect(static_cast<bool>(writer), "atomic writer could not create a new destination temporary");
+		writer.Stream() << "new backup contents\n";
+		Expect(writer.Commit(false),
+			"no-replace publication refused a destination that was still absent");
+	}
+	const std::string published = "new backup contents\n";
+	Expect(ReadBytes(destination) == std::vector<std::uint8_t>(published.begin(), published.end()),
+		"no-replace publication did not publish the complete new backup");
 }
 
 void TestPortableProcessingRecipeJsonRoundTripAndValidation() {
@@ -4664,6 +4979,11 @@ const TestCase kTests[] = {
 	{"in-place-save-materializes-lazy-document-and-rebinds-source", &TestInPlaceSaveMaterializesLazyDocumentAndRebindsSource},
 	{"image-operation-worker-supersedes-and-survives-failures", &TestImageOperationWorkerSupersedesAndSurvivesFailures},
 	{"picture-levels-store-round-trip", &TestPictureLevelsStoreRoundTrip},
+	{"persistence-preserves-files-on-buffered-write-failure", &TestPersistencePreservesFilesWhenBufferedWriteFails},
+	{"persistence-worker-coalesces-pending-writes-and-drains-on-stop", &TestPersistenceWorkerCoalescesPendingWritesAndDrainsOnStop},
+	{"persistence-status-ownership-rejects-stale-and-moved-image-completion", &TestPersistenceStatusOwnershipRejectsStaleAndMovedImageCompletion},
+	{"atomic-writer-preserves-colliding-temporary-files", &TestAtomicWriterPreservesCollidingTemporaryFiles},
+	{"atomic-writer-no-replace-protects-late-destination", &TestAtomicWriterNoReplaceProtectsLateDestination},
 	{"portable-processing-recipe-json-round-trip-and-validation", &TestPortableProcessingRecipeJsonRoundTripAndValidation},
 	{"processing-recipe-file-operations-use-worker-results", &TestProcessingRecipeFileOperationsUseWorkerResults},
 	{"settings-round-trip-and-malformed-values", &TestSettingsRoundTripAndMalformedValues},

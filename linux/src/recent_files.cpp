@@ -1,5 +1,6 @@
 #include "recent_files.h"
 
+#include "atomic_file.h"
 #include "settings.h"
 
 #include <algorithm>
@@ -11,7 +12,6 @@
 #include <stdexcept>
 #include <system_error>
 #include <utility>
-#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -386,16 +386,10 @@ bool LoadRecentFiles(const fs::path& filename, RecentFiles& recentFiles) {
 
 bool SaveRecentFiles(const fs::path& filename, const RecentFiles& recentFiles) {
 	if (filename.empty()) return false;
-	std::error_code error;
-	if (!filename.parent_path().empty()) {
-		fs::create_directories(filename.parent_path(), error);
-		if (error) return false;
-	}
-	fs::path temporary = filename;
-	temporary += ".tmp." + std::to_string(static_cast<long long>(getpid()));
+	AtomicFileWriter atomicOutput(filename);
+	if (!atomicOutput) return false;
 	{
-		std::ofstream output(temporary, std::ios::trunc);
-		if (!output) return false;
+		std::ostream& output = atomicOutput.Stream();
 		output << "# JPEGView Linux recent files, version 3\n";
 		for (const fs::path& path : recentFiles.files_) {
 			output << "R " << EncodePath(path) << '\n';
@@ -419,19 +413,8 @@ bool SaveRecentFiles(const fs::path& filename, const RecentFiles& recentFiles) {
 				<< (modes.enabled ? 1 : 0) << ' '
 				<< (modes.mangaReadingOrder ? 1 : 0) << '\n';
 		}
-		if (!output) {
-			output.close();
-			fs::remove(temporary, error);
-			return false;
-		}
 	}
-	error.clear();
-	fs::rename(temporary, filename, error);
-	if (error) {
-		fs::remove(temporary, error);
-		return false;
-	}
-	return true;
+	return atomicOutput.Commit();
 }
 
 } // namespace jpegview_linux

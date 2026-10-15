@@ -14,6 +14,9 @@ std::filesystem::path ImageProcessingStorePath();
 bool LoadImageProcessingStore(const std::filesystem::path& filename,
 	ImageProcessingStore& store);
 bool SaveImageProcessingStore(const std::filesystem::path& filename,
-	const ImageProcessingStore& store);
+	const ImageProcessingStore& store, bool replaceExisting = true);
+bool BackupImageProcessingStore(const std::filesystem::path& liveDatabase,
+	const std::filesystem::path& backupPath, bool replaceExisting,
+	std::string& errorMessage);
 
 } // namespace jpegview_linux

@@ -104,7 +104,7 @@ IMAGE_DECODER_SOURCES := src/image_decoder_stb.cpp src/image_decoder_jpeg.cpp \
 	src/image_decoder_optional.cpp src/image_decoder_svg.cpp
 ARCHIVE_SOURCE_SOURCES := src/archive_source_catalog.cpp src/archive_source_readers.cpp
 CORE_CPP_SOURCES := \
-	src/perf_diagnostics.cpp src/source_work_coordinator.cpp \
+	src/atomic_file.cpp src/persistence_worker.cpp src/perf_diagnostics.cpp src/source_work_coordinator.cpp \
 	src/interaction_work_policy.cpp src/file_list.cpp \
 	src/file_list_scan_worker.cpp src/file_list_sort_worker.cpp \
 	src/double_page_model.cpp src/presentation_controller.cpp \

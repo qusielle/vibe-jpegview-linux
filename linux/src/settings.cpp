@@ -1,5 +1,7 @@
 #include "settings.h"
 
+#include "atomic_file.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -336,17 +338,10 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 		std::clamp(settings.magnifyingGlassZoomLevel, MagnifyingGlassModel::kMinimumZoomLevel,
 			MagnifyingGlassModel::kMaximumZoomLevel) : MagnifyingGlassModel::kDefaultZoomLevel;
 
-	std::error_code error;
-	if (!filename.parent_path().empty()) {
-		fs::create_directories(filename.parent_path(), error);
-		if (error) return false;
-	}
-
-	fs::path temporary = filename;
-	temporary += ".tmp";
+	AtomicFileWriter atomicOutput(filename);
+	if (!atomicOutput) return false;
 	{
-		std::ofstream output(temporary, std::ios::trunc);
-		if (!output) return false;
+		std::ostream& output = atomicOutput.Stream();
 		output << "# JPEGView Linux display, dialog, magnifier, and batch-operation settings\n"
 		       << "scale_mode=" << settings.scaleMode << '\n'
 		       << "sort_mode=" << settings.sortMode << '\n'
@@ -423,20 +418,8 @@ bool SaveViewerSettings(const fs::path& filename, const ViewerSettings& settings
 			output << setting.key << '=' << GetLevelControlValue(settings.defaultImageProcessing,
 				setting.control) << '\n';
 		}
-		if (!output) {
-			output.close();
-			fs::remove(temporary, error);
-			return false;
-		}
 	}
-
-	error.clear();
-	fs::rename(temporary, filename, error);
-	if (error) {
-		fs::remove(temporary, error);
-		return false;
-	}
-	return true;
+	return atomicOutput.Commit();
 }
 
 } // namespace jpegview_linux

@@ -473,6 +473,19 @@ should normally be added to one of these focused modules and covered by the matc
 - `input_commands`: SDL key chords to shared JPEGView command IDs, the configurable Space/Shift+Space
   image-navigation direction, and held-navigation repeat state (including when Shift is permitted).
 - `desktop_association`: user-local desktop entry generation and atomic XDG MIME default updates.
+- `atomic_file`: unique same-directory temporary files for settings, Recents, per-image levels, and
+  desktop association writes. It checks buffered output, sync, close, and rename before publishing,
+  preserving the previous file when a write fails and avoiding collisions between concurrent saves.
+  Callers can also request atomic no-replace publication for destinations whose overwrite was not
+  confirmed.
+- `persistence_worker`: one serialized writer for interactive settings, Recents, and per-image-level
+  snapshots. Requests own their destination and value snapshot, pending writes to one destination
+  coalesce to the latest snapshot, and completion wakes the SDL event loop without exposing its file
+  handles or settings state. A newer generation removes any older undrained result for its
+  destination; explicit actions can carry a success message for their terminal UI status. The
+  Viewer updates that shared title only while the matching action still owns it, and image-bound
+  statuses expire when selection changes. `Stop()` drains accepted writes during shutdown; atomic
+  flush and sync work therefore does not block interactive event handling.
 - `transparency_pattern`: accepted background setting values and checkerboard tile colors.
 - `settings` and `sort_mode`: persisted configuration (including the transparent-image background
   choice, default picture-level values,
